@@ -45,6 +45,23 @@ class TestActedOnStamp:
         assert out["created"] is True
         assert out["acted_on"] == {"name": "Bracket", "document_id": "urn:lineage:abc"}
 
+    def test_handler_supplied_acted_on_survives_unchanged(self):
+        # FILL-IF-ABSENT: a write that targets a NON-active document (doc_close closing an inactive
+        # doc) publishes its own acted_on and is authoritative - the guard's post-call active read
+        # names a document that was never written, so it must not overwrite this one.
+        _set_active("StillOpen", "urn:still-open")
+        h = wg.wrap(lambda **kw: _ok({"closed": ["Scratch"],
+                                      "acted_on": {"name": "Scratch", "document_id": "urn:scratch"}}))
+        out = _decode(h())
+        assert out["acted_on"] == {"name": "Scratch", "document_id": "urn:scratch"}
+
+    def test_handler_without_acted_on_is_still_stamped(self):
+        # The other half of fill-if-absent: absent the handler's own claim, the active identity stands.
+        _set_active("Bracket", "urn:lineage:abc")
+        h = wg.wrap(lambda **kw: _ok({"closed": ["Bracket"]}))
+        out = _decode(h())
+        assert out["acted_on"] == {"name": "Bracket", "document_id": "urn:lineage:abc"}
+
     def test_error_result_is_not_stamped(self):
         _set_active("Bracket", "urn:abc")
         h = wg.wrap(lambda **kw: {"content": [{"type": "text", "text": "boom"}],
@@ -214,6 +231,28 @@ class TestNameCollisionRefusal:
         h = wg.wrap(lambda **kw: called.update(n=1) or _ok({"edited": True}))
         out = _decode(h(expect_document="P6-Vise"))
         assert called["n"] == 1 and out["edited"] is True
+
+    def test_two_unsaved_twins_are_not_one_document(self):
+        # Two unsaved docs have no URN at all - two Nones prove identity of NOTHING. The all(ids)
+        # clause is what answers here: without it, [None, None] collapses to one set entry and the
+        # predicate would call two unsaved 'Untitled' twins one document.
+        assert wg.one_open_document([None, None]) is False
+        assert wg.one_open_document([None]) is False
+
+    def test_two_unsaved_same_name_docs_refuse_the_bare_name(self, monkeypatch):
+        # The session state Fusion mints by default: several unsaved docs all named 'Untitled',
+        # none carrying a URN. A bare-name write cannot prove which one the agent read - the
+        # guard must refuse, not land on whichever twin is active.
+        _set_active("Untitled", None)
+        self._docs(monkeypatch, [
+            {"name": "Untitled", "document_id": None, "open_index": 0, "is_active": True},
+            {"name": "Untitled", "document_id": None, "open_index": 1, "is_active": False},
+        ])
+        called = {"n": 0}
+        res = wg.wrap(lambda **kw: called.update(n=1) or _ok({}))(expect_document="Untitled")
+        assert called["n"] == 0                              # REFUSED - no handler call
+        assert res["isError"] is True
+        assert _decode(res)["blocked_by"] == ["ambiguous_document_name"]
 
     def test_mixed_urn_candidates_still_refuse_with_deduped_rows(self, monkeypatch):
         # Genuinely different documents sharing a name still refuse - and a candidate URN

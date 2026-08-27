@@ -76,6 +76,20 @@ def _find_captured(snaps, want):
     return hits
 
 
+def _positionable_occurrences(design):
+    """{fullPathName: occurrence} for every occurrence in the design - the parts whose pose a capture
+    is supposed to LEAVE ALONE. Keyed by fullPathName (the unique key; a nested child's leaf .name is
+    shared by every instance of its component), falling back to .name only when the path will not
+    read. The same wrappers are held across the mutation and re-read after it, the way the constraint
+    path holds its targets, so the before/after pair describes one occurrence and not two lookups."""
+    out = {}
+    for occ in _common.all_occurrences(design):
+        label = safe(lambda occ=occ: occ.fullPathName) or safe(lambda occ=occ: occ.name)
+        if label:
+            out[label] = occ
+    return out
+
+
 def capture_position_handler(action: str = "status", marker: str = "") -> dict:
     """See _CAPTURE_DESC."""
     act, aerr = _CAPTURE_ACTION.resolve(action)
@@ -114,6 +128,14 @@ def capture_position_handler(action: str = "status", marker: str = "") -> dict:
         if not pending:
             return error("Nothing to capture - there is no pending position change. Move a jointed "
     "component first (its pose is transient until captured).")
+        # The pose the capture is supposed to RECORD, sampled before the add. Measured: a capture can
+        # REVERT the pending move instead of baking it - snapshots.add() answers with a snapshot
+        # object AND an advanced count while every moved part snaps back to where it stood before the
+        # move, so the marker holds the PRE-move pose. Neither the object nor the count is evidence
+        # about the POSITION; only the parts' own transforms are. Sampled through the same reader
+        # (_occ_origin / _move_delta, one solver-noise tolerance) the constraint path reports with.
+        targets = _positionable_occurrences(design)
+        before_pos = _constraint_positions(targets)
         try:
             snap = snaps.add()
         except Exception as e:
@@ -126,13 +148,37 @@ def capture_position_handler(action: str = "status", marker: str = "") -> dict:
         if count_after is not None and count_after <= count:
             return error(f"Capture reported success but the snapshot count did not advance "
                          f"({count} before, {count_after} after) - the position was not captured.")
+        # A capture must record the pending pose, not undo it. Any part that MOVED across the add
+        # moved back off the pose being captured, so the marker records a position nobody asked for.
+        snap_name = safe(lambda: snap.name)
+        moved, measured = _constraint_moves(before_pos, targets)
+        if moved:
+            shown = "; ".join(f"{m['occurrence']} by {m['distance_mm']} mm" for m in moved[:6])
+            more = f" (+{len(moved) - 6} more)" if len(moved) > 6 else ""
+            return error(
+                f"Capture reported success (Fusion named the marker '{snap_name}') but taking it "
+                f"MOVED {len(moved)} occurrence(s): {shown}{more}. The pending pose was REVERTED "
+                "rather than recorded, so the marker holds the PRE-move position - it is NOT the "
+                "pose you captured. The marker REMAINS: remove it with "
+                f"assembly_capture_position(action='delete', marker='{snap_name}'), then re-apply "
+                "the move. Read the positions back with assembly_get or model_inspect before and "
+                "after any retry - this call cannot tell you whether a retry will stick.")
         note = "Current position captured into the timeline."
         if count_after is None:
             note += (" 'snapshot_count' is null - the snapshot count could not be re-read after the "
                      f"capture, so the advance could not be confirmed; {count} marker(s) were "
                      "counted before it.")
-        return ok({"captured": True, "snapshot": safe(lambda: snap.name),
-        "snapshot_count": count_after, "note": note})
+        # 'pose_held' answers "did the parts stay where they were when I captured them" - True only
+        # where a transform was actually sampled on BOTH sides. No occurrence sampled means no
+        # verdict (null), never a confident yes.
+        if targets and not measured:
+            note += (" 'pose_held' is null - no occurrence's transform could be read on both sides "
+                     "of the capture, so whether the marker holds the pose that was pending is "
+                     "UNKNOWN here (it is not a 'yes'). Read the positions with assembly_get.")
+        return ok({"captured": True, "snapshot": snap_name,
+        "snapshot_count": count_after,
+        "pose_held": True if measured else None,
+        "note": note})
 
     if act == "discard_pending":
         # Live-verified: with nothing pending revertPendingSnapshot() RAISES "3 : Has no pending

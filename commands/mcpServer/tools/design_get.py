@@ -123,7 +123,10 @@ def _walk_occurrence(occ, depth, max_depth, counter, with_bodies=False):
         "handle": safe(lambda: occ.entityToken),
         "full_path": safe(lambda: occ.fullPathName),
         "component": safe(lambda: occ.component.name),
-        "is_reference": safe(lambda: occ.isReferencedComponent, False),
+        # read_flag, not safe(..., False): an unreadable flag is None here (the same honesty
+        # _body_rows holds for is_solid/visible), and the freshness gate below treats None as
+        # "try it" rather than as "local".
+        "is_reference": _common.read_flag(lambda: occ.isReferencedComponent),
         "body_count": safe(lambda: occ.bRepBodies.count, 0),
         "child_count": safe(lambda: occ.childOccurrences.count, 0),
     }
@@ -133,7 +136,10 @@ def _walk_occurrence(occ, depth, max_depth, counter, with_bodies=False):
             node["bodies"] = rows
             if truncated:
                 node["bodies_truncated"] = True
-    if node["is_reference"]:
+    # None (the flag did not read) takes the SAME branch as True: a local occurrence simply has no
+    # documentReference, so attempting the read costs one safe() read and publishes real freshness
+    # for an xref whose own flag is unreadable - where the False branch would silently drop it.
+    if node["is_reference"] is not False:
         try:
             dr = occ.documentReference
             if dr:
@@ -253,9 +259,13 @@ def _object_summary(obj):
         "index": safe(lambda: obj.index),
         "name": safe(lambda: obj.name),
         "type": _entity_type(obj),
-        "is_group": bool(safe(lambda: obj.isGroup)),
-        "is_suppressed": bool(safe(lambda: obj.isSuppressed)),
-        "is_rolled_back": bool(safe(lambda: obj.isRolledBack)),
+        # read_flag: an unreadable row flag publishes null, and null does NOT equal the False in
+        # _TIMELINE_NOISE, so terse KEEPS it - the row stands out as unknown instead of being
+        # dropped as routine. The include_suppressed filter below keys on True only, so a row whose
+        # is_suppressed did not read is always listed rather than hidden by a flag nobody read.
+        "is_group": _common.read_flag(lambda: obj.isGroup),
+        "is_suppressed": _common.read_flag(lambda: obj.isSuppressed),
+        "is_rolled_back": _common.read_flag(lambda: obj.isRolledBack),
         "parent_group": safe(lambda: obj.parentGroup.name if obj.parentGroup else None),
         "health": _HEALTH_LABELS.get(health, health),
     }
@@ -372,7 +382,7 @@ def _slice_timeline(design, include_suppressed, group, with_params=False):
             # exception = a feature that FAILED (error/warning health) - not just suppressed (intentional).
             if health in ("error", "warning"):
                 exceptions.append({"name": summ.get("name"), "index": summ.get("index"), "health": health})
-            if not include_suppressed and summ["is_suppressed"]:
+            if not include_suppressed and summ["is_suppressed"] is True:
                 continue
             if want_group and (summ["parent_group"] or "") != want_group:
                 continue

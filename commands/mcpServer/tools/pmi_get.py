@@ -309,7 +309,8 @@ def handler(include=None, geometry=None, kind="", component="", max_results=None
     records = []
     total = 0
     truncated = False
-    for comp, ann in _pmi.walk_annotations(d):
+    walk_holes = {}
+    for comp, ann in _pmi.walk_annotations(d, walk_holes):
         cname = safe(lambda: comp.name)
         if comp_want and (cname or "").lower() != comp_want:
             continue
@@ -333,6 +334,26 @@ def handler(include=None, geometry=None, kind="", component="", max_results=None
     out = {"total": total, "by_kind": by_kind, "annotations": records, "units": units}
     if truncated:
         out["truncated"] = True
+    # 'total'/'by_kind' count what the walk could READ. A component whose collection or count did
+    # not read, and an annotation that did not read, are holes in the search space - published
+    # beside the tallies so a partial design is never handed over as the whole one. 'truncated'
+    # covers only the row cap, which is a different fact.
+    comps_bad = walk_holes.get("components_unreadable", 0)
+    items_bad = walk_holes.get("items_unreadable", 0)
+    if comps_bad or items_bad:
+        out["components_unreadable"] = comps_bad
+        out["items_unreadable"] = items_bad
+        out["incomplete_note"] = (
+            f"{comps_bad} component(s) and {items_bad} annotation(s) could not be read, so 'total' "
+            "and 'by_kind' count only what was reachable - the design may hold more PMI than this.")
+    if only is not None:
+        # The geometry= intersection is keyed by (component, name) - see the resolution above - so
+        # two annotations SHARING a name in one component both pass when either one matched.
+        out["filter_identity"] = "component+name"
+        out["filter_note"] = (
+            "geometry= matched by (component, name), not by object identity. If one component "
+            "holds two annotations with the same name, a match on either publishes both - compare "
+            "the rows before acting on one.")
     # Every SUPPRESSED timeline feature, listed by name: a suppressed PMI is expected to be absent
     # from the collections above with only its timeline name surviving, so listing them is what
     # keeps one from vanishing silently. That behaviour is UNMEASURED on 2705 (see _pmi's

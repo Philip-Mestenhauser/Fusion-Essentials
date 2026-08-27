@@ -409,8 +409,19 @@ def mesh_reduce_handler(mesh: str = "", target: str = "proportion", value: float
         return error("'value' must be a number.")
     if tgt == "proportion" and not (0 < v <= 100):
         return error("For target=proportion, 'value' is a percent in (0, 100].")
-    if tgt == "face_count" and v <= 0:
-        return error("For target=face_count, 'value' must be a positive integer face count.")
+    face_target = None
+    if tgt == "face_count":
+        if v <= 0:
+            return error("For target=face_count, 'value' must be a positive integer face count - "
+                         f"got {v}.")
+        # A fractional face count has no truncation that is safe to pick FOR the caller: 0.5 truncates
+        # to a ZERO-face target (which the after<before check reads as a successful reduce) and 10.9
+        # to 10 with nothing on the wire saying so. Refuse it naming the value instead.
+        if not v.is_integer():
+            return error(f"For target=face_count, 'value' must be a WHOLE face count - {v} is not an "
+                         "integer. Truncating it here would silently decimate to a different (or "
+                         "zero) target, so pass the exact integer you mean.")
+        face_target = int(v)
     if tgt == "max_deviation" and v <= 0:
         return error("For target=max_deviation, 'value' must be a positive length (in 'units').")
 
@@ -445,7 +456,7 @@ def mesh_reduce_handler(mesh: str = "", target: str = "proportion", value: float
             elif tgt == "face_count":
                 inp.meshReduceTargetType = safe(lambda: tt.FaceCountMeshReduceTargetType)
                 # all-lowercase 'facecount' spelling (confirmed live)
-                inp.facecount = adsk.core.ValueInput.createByReal(float(int(v)))   # target face COUNT
+                inp.facecount = adsk.core.ValueInput.createByReal(float(face_target))  # face COUNT
             else:
                 inp.meshReduceTargetType = safe(lambda: tt.MaximumDeviationMeshReduceTargetType)
                 inp.maximumDeviation = adsk.core.ValueInput.createByReal(v * sf)   # length, scaled to cm
@@ -497,6 +508,8 @@ def mesh_reduce_handler(mesh: str = "", target: str = "proportion", value: float
     "base_feature": bf_name,
     "target": tgt,
     }
+    if face_target is not None:
+        out["face_count_target"] = face_target      # the integer that reached the feature input
     if before_tri and after_tri is not None and before_tri > 0:
         out["reduced_pct"] = round((1 - after_tri / before_tri) * 100, 2)
     notes = [_common.null_feature_note(design, feat, bf_name, "reduce") if feat is None else None,

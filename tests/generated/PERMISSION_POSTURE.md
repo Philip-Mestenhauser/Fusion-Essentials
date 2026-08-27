@@ -19,6 +19,22 @@ Every tool declares a write= kind (read / write / destructive); the MCP readOnly
 
 `sys_execute_script` executes operator-supplied Fusion API scripts - it can do anything any other tool can, and more. No posture in this file ever places it in an allow list; it is denied in every preset below. Enable it only for a trusted, supervised session.
 
+## Writes that leave the document (the modeling posture asks for these)
+
+A write= kind says the model changes; it does not say WHERE the change lands. These write-kind tools put bytes outside the active document - on the filesystem, into a shared library other documents read, or into the add-in itself - so the modeling posture, which promises to auto-allow local model work an operator can see and undo, asks before each one. Cloud/document-lifecycle families (`data`, `doc`) ask for the same reason.
+
+| Tool | Where the effect lands |
+|---|---|
+| `mcp__fusion-essentials__cam_create_machine` | writes the shared machine library, which every other document reads |
+| `mcp__fusion-essentials__cam_edit_tools` | writes the shared CAM tool library, which every other document reads |
+| `mcp__fusion-essentials__cam_generate_setup_sheet` | writes a setup-sheet document (HTML/Excel) to disk |
+| `mcp__fusion-essentials__cam_post` | writes an NC program to disk - the file a machine then runs |
+| `mcp__fusion-essentials__cam_save_template` | writes a toolpath template into the shared CAM template library |
+| `mcp__fusion-essentials__design_export` | writes a design file (f3d/step/...) to disk |
+| `mcp__fusion-essentials__drawing_export` | writes a drawing file (pdf/dwg/...) to disk |
+| `mcp__fusion-essentials__mesh_export` | writes a mesh file (stl/obj/3mf) to disk |
+| `mcp__fusion-essentials__sys_reload_addin` | restarts the add-in - it tears down and reloads the running server |
+
 ## Every tool by bucket
 
 ### read - safe to auto-allow (28)
@@ -420,7 +436,7 @@ Auto-allow reads only. Every write asks; destructive writes and the arbitrary-co
 
 ### Preset: modeling
 
-Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). Cloud/document writes and every destructive write ask; the script hatch is denied.
+Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). Cloud/document writes, writes whose effect LEAVES the document (see 'Writes that leave the document' above), and every destructive write ask; the script hatch is denied.
 
 ```json
 {
@@ -462,25 +478,19 @@ Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). Cloud/doc
       "mcp__fusion-essentials__assembly_rigid_group",
       "mcp__fusion-essentials__cam_activate_setup",
       "mcp__fusion-essentials__cam_apply_template",
-      "mcp__fusion-essentials__cam_create_machine",
       "mcp__fusion-essentials__cam_create_operation",
       "mcp__fusion-essentials__cam_create_setup",
       "mcp__fusion-essentials__cam_edit_folders",
       "mcp__fusion-essentials__cam_edit_operation",
       "mcp__fusion-essentials__cam_edit_setup",
-      "mcp__fusion-essentials__cam_edit_tools",
       "mcp__fusion-essentials__cam_generate",
-      "mcp__fusion-essentials__cam_generate_setup_sheet",
-      "mcp__fusion-essentials__cam_post",
       "mcp__fusion-essentials__cam_reorder",
-      "mcp__fusion-essentials__cam_save_template",
       "mcp__fusion-essentials__cam_select_geometry",
       "mcp__fusion-essentials__cam_set_nc_comment",
       "mcp__fusion-essentials__cam_show_toolpath",
       "mcp__fusion-essentials__design_activate_component",
       "mcp__fusion-essentials__design_add_instance",
       "mcp__fusion-essentials__design_configure",
-      "mcp__fusion-essentials__design_export",
       "mcp__fusion-essentials__design_move_occurrence",
       "mcp__fusion-essentials__design_recompute",
       "mcp__fusion-essentials__design_remove_feature",
@@ -488,7 +498,6 @@ Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). Cloud/doc
       "mcp__fusion-essentials__drawing_add_sketch",
       "mcp__fusion-essentials__drawing_create",
       "mcp__fusion-essentials__drawing_dimension",
-      "mcp__fusion-essentials__drawing_export",
       "mcp__fusion-essentials__drawing_insert_image",
       "mcp__fusion-essentials__drawing_update",
       "mcp__fusion-essentials__joint_at_geometry",
@@ -499,7 +508,6 @@ Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). Cloud/doc
       "mcp__fusion-essentials__joint_edit",
       "mcp__fusion-essentials__joint_motion_link",
       "mcp__fusion-essentials__mesh_combine",
-      "mcp__fusion-essentials__mesh_export",
       "mcp__fusion-essentials__mesh_generate_face_groups",
       "mcp__fusion-essentials__mesh_insert",
       "mcp__fusion-essentials__mesh_plane_cut",
@@ -569,7 +577,6 @@ Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). Cloud/doc
       "mcp__fusion-essentials__surface_thicken",
       "mcp__fusion-essentials__surface_trim",
       "mcp__fusion-essentials__surface_untrim",
-      "mcp__fusion-essentials__sys_reload_addin",
       "mcp__fusion-essentials__sys_request_selection",
       "mcp__fusion-essentials__view_screenshot",
       "mcp__fusion-essentials__view_section",
@@ -579,7 +586,12 @@ Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). Cloud/doc
     "ask": [
       "mcp__fusion-essentials__assembly_edit_contacts",
       "mcp__fusion-essentials__assembly_edit_relations",
+      "mcp__fusion-essentials__cam_create_machine",
       "mcp__fusion-essentials__cam_delete",
+      "mcp__fusion-essentials__cam_edit_tools",
+      "mcp__fusion-essentials__cam_generate_setup_sheet",
+      "mcp__fusion-essentials__cam_post",
+      "mcp__fusion-essentials__cam_save_template",
       "mcp__fusion-essentials__data_create_folder",
       "mcp__fusion-essentials__data_create_project",
       "mcp__fusion-essentials__data_delete_file",
@@ -591,6 +603,7 @@ Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). Cloud/doc
       "mcp__fusion-essentials__design_delete_feature",
       "mcp__fusion-essentials__design_delete_occurrence",
       "mcp__fusion-essentials__design_edit_timeline",
+      "mcp__fusion-essentials__design_export",
       "mcp__fusion-essentials__design_set_mode",
       "mcp__fusion-essentials__doc_activate",
       "mcp__fusion-essentials__doc_close",
@@ -606,10 +619,13 @@ Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). Cloud/doc
       "mcp__fusion-essentials__doc_save_milestone",
       "mcp__fusion-essentials__doc_update_xref",
       "mcp__fusion-essentials__drawing_edit_sheet",
+      "mcp__fusion-essentials__drawing_export",
       "mcp__fusion-essentials__mesh_delete",
+      "mcp__fusion-essentials__mesh_export",
       "mcp__fusion-essentials__param_delete",
       "mcp__fusion-essentials__pmi_delete",
       "mcp__fusion-essentials__sketch_delete_entity",
+      "mcp__fusion-essentials__sys_reload_addin",
       "mcp__fusion-essentials__sys_set_preferences"
     ],
     "deny": [

@@ -13,7 +13,7 @@ import adsk.core
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe, terse, design, all_components
+from ._common import ok, error, safe, terse, counted, design, all_components
 from . import _data_read
 from . import _outputs
 
@@ -214,11 +214,16 @@ def _slice_versions(versions_max=_VERSIONS_CAP):
     seen = {}
 
     def add(v):
+        """True when this version is accounted for (added, or already seen); False when it could
+        not be read at all - the caller counts those, since a version silently dropped here is a
+        hole in a history the payload would otherwise present as complete."""
         if v is None:
-            return
+            return False
         n = safe(lambda v=v: v.versionNumber)
-        if n is None or n in seen:
-            return
+        if n is None:
+            return False
+        if n in seen:
+            return True
         epoch = safe(lambda v=v: v.dateCreated)
         # After doc_save_milestone a version's own isMilestone flag reads FALSE (not null) for a
         # while, and neither this flag nor the Milestones collection is known to lead the other. The
@@ -241,19 +246,33 @@ def _slice_versions(versions_max=_VERSIONS_CAP):
         if in_collection and flag is not True:
             row["flag_lagging"] = True
         seen[n] = row
+        return True
 
     add(df)
     coll = safe(lambda: df.versions)
-    total = safe(lambda: coll.count, 0) if coll is not None else 0
-    for i in range(total):
-        add(safe(lambda i=i: coll.item(i)))
+    # counted, never safe(..., 0): df.versions is a cloud read, and an enumeration that fails is not
+    # a lineage holding one version. Published as 0 it would hand back version_count=1 with
+    # truncated=false - a history that looks COMPLETE - so the walk's readability is a marker,
+    # exactly as the xref_tree and used_in slices gate on their own complete walk.
+    total = counted(lambda: coll.count) if coll is not None else None
+    unreadable = 0
+    for i in range(total or 0):
+        if not add(safe(lambda i=i: coll.item(i))):
+            unreadable += 1
     rows = sorted(seen.values(), key=lambda r: r["version_number"], reverse=True) # newest-first
     truncated = len(rows) > cap
+    history_readable = total is not None
     return {
         "available": True,
         "latest_version_number": latest,
         "open_version_number": open_vnum,
         "version_count": len(rows),
+        # the readable/complete pair: history_complete is True ONLY when the versions collection
+        # enumerated, every version in it read, and the published list was not capped - so a short
+        # list is never mistaken for the whole lineage.
+        "history_readable": history_readable,
+        "history_complete": history_readable and unreadable == 0 and not truncated,
+        "unreadable_count": unreadable,
         # counted over every KNOWN version row (the same set version_count reports), not just the
         # ones the cap published; rows whose flag is unreadable are counted separately, never as false.
         "milestone_count": sum(1 for r in rows if r["is_milestone"] is True),
@@ -269,7 +288,10 @@ def _slice_versions(versions_max=_VERSIONS_CAP):
                  "Milestones collection lists while its flag still reads false is published "
                  "is_milestone=true with flag_lagging=true. is_milestone null, "
                  "milestone_names_readable=false and milestone_walk_truncated=true each mean the "
-                 "answer is UNKNOWN - none is evidence a version is not a milestone."),
+                 "answer is UNKNOWN - none is evidence a version is not a milestone. "
+                 "history_readable=false (df.versions would not enumerate) or unreadable_count>0 "
+                 "means versions are MISSING from this list: only history_complete=true says the "
+                 "rows are the whole lineage."),
     }
 
 

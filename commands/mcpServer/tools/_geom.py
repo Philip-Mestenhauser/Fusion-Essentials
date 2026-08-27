@@ -84,9 +84,12 @@ def occ_world_frame(occ, inv_k):
     m = safe(lambda: occ.transform2)
     t = safe(lambda: m.translation) if m is not None else None
     if t is not None:
-        out["origin"] = [round(safe(lambda: t.x, 0.0) * inv_k, 3),
-                         round(safe(lambda: t.y, 0.0) * inv_k, 3),
-                         round(safe(lambda: t.z, 0.0) * inv_k, 3)]
+        # All three components or none: a 0.0 stand-in for the one that failed places the part at
+        # the world origin as a measured position, which is the same fabrication axis_vec refuses
+        # for a direction.
+        tx = safe(lambda: t.x); ty = safe(lambda: t.y); tz = safe(lambda: t.z)
+        if all(isinstance(c, (int, float)) and not isinstance(c, bool) for c in (tx, ty, tz)):
+            out["origin"] = [round(tx * inv_k, 3), round(ty * inv_k, 3), round(tz * inv_k, 3)]
     if m is not None:
         # getAsCoordinateSystem returns (origin, xAxis, yAxis, zAxis) in Python.
         cs = safe(lambda: m.getAsCoordinateSystem())

@@ -52,7 +52,8 @@ def two_notes(monkeypatch):
                  quantity=2, isThrough=True, isThreaded=False,
                  diameter=SimpleNamespace(hasValue=True, value=0.6))]
     monkeypatch.setattr(pg._common, "design", lambda: object())
-    monkeypatch.setattr(pg._pmi, "walk_annotations", lambda d: iter((comp, a) for a in anns))
+    monkeypatch.setattr(pg._pmi, "walk_annotations",
+                        lambda d, stats=None: iter((comp, a) for a in anns))
     return comp, anns
 
 
@@ -79,7 +80,8 @@ class TestDefaultSlice:
         comp = SimpleNamespace(name="Root")
         bad = _ann("Note9", out_of_date=True, warning="reference lost")
         monkeypatch.setattr(pg._common, "design", lambda: object())
-        monkeypatch.setattr(pg._pmi, "walk_annotations", lambda d: iter([(comp, bad)]))
+        monkeypatch.setattr(pg._pmi, "walk_annotations",
+                            lambda d, stats=None: iter([(comp, bad)]))
         rec = _payload(pg.handler())["annotations"][0]
         assert rec["out_of_date"] is True and rec["warning"] == "reference lost"
 
@@ -105,7 +107,7 @@ class TestSlices:
         c2 = SimpleNamespace(name="B")
         monkeypatch.setattr(pg._common, "design", lambda: object())
         monkeypatch.setattr(pg._pmi, "walk_annotations",
-                            lambda d: iter([(c1, _ann("N1")), (c2, _ann("N2"))]))
+                            lambda d, stats=None: iter([(c1, _ann("N1")), (c2, _ann("N2"))]))
         out = _payload(pg.handler(component="B"))
         assert [r["name"] for r in out["annotations"]] == ["N2"]
 
@@ -126,7 +128,8 @@ class TestHoleValueUnits:
                    countersinkAngle=_gv(math.radians(90), _tol(math.radians(1))),
                    diameter=_gv(0.6, _tol(0.05)))
         monkeypatch.setattr(pg._common, "design", lambda: object())
-        monkeypatch.setattr(pg._pmi, "walk_annotations", lambda d: iter([(comp, ann)]))
+        monkeypatch.setattr(pg._pmi, "walk_annotations",
+                            lambda d, stats=None: iter([(comp, ann)]))
         return ann
 
     def _hole(self, units):
@@ -322,7 +325,8 @@ class TestHoleFlagReads:
         comp = SimpleNamespace(name="Root")
         ann = _ann("Hole Note1", suffix="PMIHoleThreadNote")
         monkeypatch.setattr(pg._common, "design", lambda: object())
-        monkeypatch.setattr(pg._pmi, "walk_annotations", lambda d: iter([(comp, ann)]))
+        monkeypatch.setattr(pg._pmi, "walk_annotations",
+                            lambda d, stats=None: iter([(comp, ann)]))
         rec = _payload(pg.handler(include=["detail"]))["annotations"][0]
         assert "is_hole" not in rec
 
@@ -330,7 +334,8 @@ class TestHoleFlagReads:
         comp = SimpleNamespace(name="Root")
         ann = _ann("Hole Note1", suffix="PMIHoleThreadNote", isHoleAnnotation=False)
         monkeypatch.setattr(pg._common, "design", lambda: object())
-        monkeypatch.setattr(pg._pmi, "walk_annotations", lambda d: iter([(comp, ann)]))
+        monkeypatch.setattr(pg._pmi, "walk_annotations",
+                            lambda d, stats=None: iter([(comp, ann)]))
         rec = _payload(pg.handler(include=["detail"]))["annotations"][0]
         assert rec["is_hole"] is False
 
@@ -361,7 +366,8 @@ class TestRowCap:
         comp = SimpleNamespace(name="Root")
         anns = [_ann(f"N{i}") for i in range(3)]
         monkeypatch.setattr(pg._common, "design", lambda: object())
-        monkeypatch.setattr(pg._pmi, "walk_annotations", lambda d: iter((comp, a) for a in anns))
+        monkeypatch.setattr(pg._pmi, "walk_annotations",
+                            lambda d, stats=None: iter((comp, a) for a in anns))
         out = _payload(pg.handler(max_results=99999))          # an error() here would raise
         assert out["total"] == 3 and len(out["annotations"]) == 3
 
@@ -371,7 +377,8 @@ class TestBoundsAndGuards:
         comp = SimpleNamespace(name="Root")
         anns = [_ann(f"N{i}") for i in range(5)]
         monkeypatch.setattr(pg._common, "design", lambda: object())
-        monkeypatch.setattr(pg._pmi, "walk_annotations", lambda d: iter((comp, a) for a in anns))
+        monkeypatch.setattr(pg._pmi, "walk_annotations",
+                            lambda d, stats=None: iter((comp, a) for a in anns))
         out = _payload(pg.handler(max_results=2))
         assert out["total"] == 5 and len(out["annotations"]) == 2 and out["truncated"] is True
 
@@ -413,10 +420,89 @@ class TestBoundsAndGuards:
         monkeypatch.setattr(pg._common, "design", lambda: object())
         monkeypatch.setattr(pg._common, "all_components", lambda d: [comp])
         monkeypatch.setattr(pg._pmi, "walk_annotations",
-                            lambda d: iter([(comp, keep), (comp, drop)]))
+                            lambda d, stats=None: iter([(comp, keep), (comp, drop)]))
         monkeypatch.setattr(pg._GEOMETRY, "resolve", lambda raw: ([object()], None))
         out = _payload(pg.handler(geometry=["h1"]))
         assert [r["name"] for r in out["annotations"]] == ["Kept"] and out["total"] == 1
+
+
+class TestGeometryFilterIdentity:
+    """geometry= intersects by (component, name), never by object identity - so the payload SAYS
+    so, rather than leaving a caller to assume the match named one annotation."""
+
+    def _rig(self, monkeypatch, walk, matched):
+        coll = SimpleNamespace(itemsByEntities=lambda ents: matched)
+        comp = SimpleNamespace(name="Root", pmiAnnotations=coll)
+        monkeypatch.setattr(pg._common, "design", lambda: object())
+        monkeypatch.setattr(pg._common, "all_components", lambda d: [comp])
+        monkeypatch.setattr(pg._pmi, "walk_annotations",
+                            lambda d, stats=None: iter((comp, a) for a in walk))
+        monkeypatch.setattr(pg._GEOMETRY, "resolve", lambda raw: ([object()], None))
+        return comp
+
+    def test_the_name_keyed_identity_is_disclosed_when_geometry_filters(self, monkeypatch):
+        keep = _ann("Kept")
+        self._rig(monkeypatch, [keep], [keep])
+        out = _payload(pg.handler(geometry=["h1"]))
+        assert out["filter_identity"] == "component+name"
+        assert "identity" in out["filter_note"] and "same name" in out["filter_note"]
+
+    def test_a_twin_name_in_one_component_rides_along_and_the_payload_says_why(self, monkeypatch):
+        # the behaviour the disclosure exists for: only ONE of the two matched the geometry, and
+        # both are published because the key is the name
+        matched, twin = _ann("Twin"), _ann("Twin")
+        self._rig(monkeypatch, [matched, twin], [matched])
+        out = _payload(pg.handler(geometry=["h1"]))
+        assert out["total"] == 2 and [r["name"] for r in out["annotations"]] == ["Twin", "Twin"]
+        assert out["filter_identity"] == "component+name"
+
+    def test_an_unfiltered_read_makes_no_identity_claim(self, monkeypatch):
+        # the boundary: no geometry= means no name-keyed intersection ran, so neither key appears
+        self._rig(monkeypatch, [_ann("Kept")], [])
+        out = _payload(pg.handler())
+        assert "filter_identity" not in out and "filter_note" not in out
+
+
+class TestWalkHolesArePublished:
+    """total/by_kind count what the walk could READ - a component or item it could not read is
+    published beside them, so a partial design is never handed over as the whole one."""
+
+    def _rig(self, monkeypatch, holes):
+        comp = SimpleNamespace(name="Root")
+        anns = [_ann("N1"), _ann("N2")]
+
+        def walk(d, stats=None):
+            if stats is not None:
+                stats["components_unreadable"] = holes[0]
+                stats["items_unreadable"] = holes[1]
+            return iter((comp, a) for a in anns)
+        monkeypatch.setattr(pg._common, "design", lambda: object())
+        monkeypatch.setattr(pg._pmi, "walk_annotations", walk)
+
+    def test_unreadable_components_and_items_ride_beside_the_tallies(self, monkeypatch):
+        self._rig(monkeypatch, (2, 3))
+        out = _payload(pg.handler())
+        assert out["total"] == 2
+        assert out["components_unreadable"] == 2 and out["items_unreadable"] == 3
+        assert "may hold more PMI" in out["incomplete_note"]
+
+    def test_a_single_unreadable_item_is_enough_to_disclose(self, monkeypatch):
+        # the exact boundary against the clean walk below: one hole, not zero
+        self._rig(monkeypatch, (0, 1))
+        out = _payload(pg.handler())
+        assert out["components_unreadable"] == 0 and out["items_unreadable"] == 1
+
+    def test_a_clean_walk_publishes_no_incompleteness_keys(self, monkeypatch):
+        self._rig(monkeypatch, (0, 0))
+        out = _payload(pg.handler())
+        assert "components_unreadable" not in out and "incomplete_note" not in out
+
+    def test_the_hole_keys_are_not_the_row_cap_truncation(self, monkeypatch):
+        # 'truncated' is the cap biting; the hole keys are reads that failed. A payload that
+        # conflated them would let a capped page read as an unreadable design.
+        self._rig(monkeypatch, (0, 0))
+        out = _payload(pg.handler(max_results=1))
+        assert out["truncated"] is True and "components_unreadable" not in out
 
 
 # ── the shared _pmi substrate (codec + resolver), reached through this module's import ────────────

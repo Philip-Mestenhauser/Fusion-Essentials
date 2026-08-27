@@ -166,27 +166,47 @@ def segments_markup(ann):
     return "".join(parts)
 
 
-def walk_annotations(d):
+def walk_annotations(d, stats=None):
     """Yield (component, annotation) across every component (root + subs) - the ONE design-wide
-    PMI walk. allComponents lists each component once, so no per-occurrence duplicates."""
+    PMI walk. allComponents lists each component once, so no per-occurrence duplicates.
+
+    `stats`, when a dict is passed, is filled once the walk RUNS OUT with the holes it left behind:
+    'components_unreadable' (a component whose pmiAnnotations or whose count did not read) and
+    'items_unreadable' (an item(i) that did not read). A hole is not an absence - a caller
+    publishing tallies over this walk publishes these beside them, or it reports a partial design
+    as the whole one. A count of 0 IS an answer and is never a hole."""
+    comps_unreadable = 0
+    items_unreadable = 0
     for comp in _common.all_components(d):
         coll = safe(lambda c=comp: c.pmiAnnotations)
-        n = int(safe(lambda: coll.count, 0) or 0) if coll else 0
+        # counted(), not safe(read, 0): a count that raises is unknown, and scoring it 0 turns a
+        # component whose PMI could not be reached into a component holding no PMI.
+        n = _common.counted(lambda: coll.count) if coll is not None else None
+        if n is None:
+            comps_unreadable += 1
+            continue
         for i in range(n):
             a = safe(lambda i=i: coll.item(i))
-            if a is not None:
-                yield comp, a
+            if a is None:
+                items_unreadable += 1
+                continue
+            yield comp, a
+    if stats is not None:
+        stats["components_unreadable"] = comps_unreadable
+        stats["items_unreadable"] = items_unreadable
 
 
-def annotation_hits(d, name, component=""):
+def annotation_hits(d, name, component="", stats=None):
     """([(annotation, component)], available_names): every case-insensitive EXACT name match across
     the design (or only 'component' when given), with the names that exist in that scope. The raw
     resolution find_annotation refuses on - a caller that needs to tell a MISS from an AMBIGUITY
-    (pmi_edit's suppressed-PMI re-check does) reads the hit count instead of the error text."""
+    (pmi_edit's suppressed-PMI re-check does) reads the hit count instead of the error text.
+    `stats` is walk_annotations' hole record, for a caller whose verdict rests on the walk being
+    COMPLETE: zero hits over an incomplete walk is not proof the name is absent."""
     want = (name or "").strip()
     comp_want = (component or "").strip()
     hits, available = [], []
-    for comp, a in walk_annotations(d):
+    for comp, a in walk_annotations(d, stats):
         cname = safe(lambda c=comp: c.name, "") or ""
         if comp_want and cname.lower() != comp_want.lower():
             continue
@@ -266,6 +286,17 @@ def set_text_point(ann, xyz, f):
     got = safe(lambda: ann.annotationTextPoint)
     if got is None:
         return None, "The text point did not take (re-read returned nothing)."
+    # The re-read is COMPARED to what was assigned, not just checked for existence: a point that
+    # reads back somewhere else is a move that did not take, and a payload built from the read-back
+    # alone reports that wrong anchor as the new one. 1e-6 cm absorbs float settle, nothing more.
+    landed = tuple(safe(lambda ax=ax: getattr(got, ax)) for ax in ("x", "y", "z"))
+    if not all(isinstance(c, (int, float)) and not isinstance(c, bool) for c in landed):
+        return None, ("The text point read back without readable x/y/z, so where it landed is "
+                      "UNKNOWN - the move is not confirmed.")
+    want = (target.x, target.y, target.z)
+    if max(abs(landed[i] - want[i]) for i in range(3)) > 1e-6:
+        return None, (f"The text point landed at {landed} cm, not the assigned {want} cm - the "
+                      "move did not take.")
     return got, None
 
 

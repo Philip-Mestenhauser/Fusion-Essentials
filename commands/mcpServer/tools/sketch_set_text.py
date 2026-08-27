@@ -516,7 +516,19 @@ def handler(text: str = "", sketch_name: str = "", index: int = -1,
                         "text now carries the new font with its old string."
                         + _already_changed(changed))
             return error(msg)
-        after = _unquote(safe(lambda st=st: st.textParameter.expression))
+        # The landed string is compared to the one asked for, the same way the font is above. The
+        # expression holds the string QUOTED and keeps an inner quote escaped exactly as it was
+        # written, so a landed write matches either unquoted or as the expression itself; an
+        # expression that will not read is evidence of neither and is left to the record.
+        expr = safe(lambda st=st: st.textParameter.expression)
+        after = _unquote(expr)
+        if expr is not None and after != text and expr != _quote(text):
+            msg = (f"Setting the string of sketch text in '{sk_name}' did not take - its "
+                   f"textParameter reads back '{after}', not '{text}'.")
+            if _given(font_name):
+                landed = f"'{font_now}'" if font_now else f"the requested '{font_name}'"
+                msg += f" Its font WAS changed to {landed} before the string was checked."
+            return error(msg + _already_changed(changed))
         record = {"component": comp_name, "sketch": sk_name, "before": before, "after": after}
         if _given(font_name):
             record["font"] = font_now

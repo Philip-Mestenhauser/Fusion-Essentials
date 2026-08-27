@@ -485,8 +485,35 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str 
                 "design_delete_feature - do NOT re-create it.")
         limits_out = lim_changed
 
+    # A joint can be ADDED yet fail to COMPUTE: joints.add() hands back a truthy Joint while Fusion
+    # marks it 'Compute Failed', and every design-wide rollup then counts it BROKEN (assembly_get's
+    # broken_joints, _common.timeline_health). Measured: jointing the child of a ground_to_parent
+    # occurrence returned a joint whose healthState read WARNING with "conflicts with assembly
+    # relationships", moved NOTHING, and still published created:true. So the state is read back here
+    # and a create that did not solve is a refusal, never a plain success. Both the joint and its
+    # timeline item are asked - the measured failure showed on both.
+    tl_obj = safe(lambda: joint.timelineObject)
+    failure = _assert.compute_failure(joint) or _assert.compute_failure(tl_obj)
+    if failure:
+        state_label, detail = failure
+        return error(
+            f"Joint '{joint_name_final}' WAS CREATED but FAILED to compute (health state: "
+            f"{state_label})" + (f": {detail}" if detail else " (it reports no message)")
+            + f" - it does not position the parts. It REMAINS in the timeline: remove it with "
+              f"design_delete_feature(name='{joint_name_final}'), or fix its inputs with joint_edit. "
+              "A part locked by assembly_ground(ground_to_parent=true) - the part itself or an "
+              "ancestor of it - conflicts with a joint that would move it; read the current state "
+              "with assembly_get (is_healthy, broken_joints, ground_to_parent per occurrence).")
+
+    # No failure found - but that verdict rests on a state that must actually have been READ. When
+    # neither the joint nor its timeline item answers healthState, 'healthy' is null (unknown), never
+    # a coerced true: an unread state is not a clean bill of health.
+    healthy = (True if (safe(lambda: joint.healthState) is not None
+                        or safe(lambda: tl_obj.healthState) is not None) else None)
+
     payload = {
         "created": True,
+        "healthy": healthy,
         "joint_name": joint_name_final,
         "joint_type": jtype,
         "input_one": label1,
@@ -501,6 +528,11 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str 
     }
     if rename_warning:
         payload["rename_warning"] = rename_warning
+    if healthy is None:
+        payload["note"] += (" 'healthy' is null - the joint's compute state could not be read off "
+                            "either the joint or its timeline item, so whether it SOLVED is UNKNOWN "
+                            "here (it is not a 'yes'). Check it with assembly_get (is_healthy, "
+                            "broken_joints) before relying on the parts' positions.")
     # The shared flush face-to-face hint (see _joints.FLIP_HINT) - parity with joint_at_geometry:
     # a snap create that seats two opposing planar faces without flip lands the part rotated
     # 180 deg, and the payload says so instead of leaving a coincident-looking embed unexplained.

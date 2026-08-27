@@ -117,7 +117,9 @@ class TestSetText:
 
     def test_below_floor_extension_is_normalized_first(self, rig):
         rig.ann.leaderLineExtension = pe._pmi.LEADER_EXT_FLOOR / 2
-        _payload(pe.handler(action="set_text", annotation="Note1", text="X"))
+        # the rig's markup read-back reports "NEW", so the request has to be the same string for
+        # the landed-text comparison to pass and leave the extension as the thing under test
+        _payload(pe.handler(action="set_text", annotation="Note1", text="NEW"))
         assert rig.ann.leaderLineExtension == pe._pmi.LEADER_EXT_DEFAULT
 
     def test_bad_token_is_refused(self, rig):
@@ -143,6 +145,26 @@ class TestSetText:
         rig.monkeypatch.setattr(pe._pmi, "segments_markup", lambda a: None)
         assert "did not take" in error_message(
             pe.handler(action="set_text", annotation="Note1", text="X"))
+
+    def test_landed_text_that_differs_from_the_request_is_an_error(self, rig):
+        # the write is accepted and the segments READ - they just spell something else. Without the
+        # comparison the payload republishes that other string as the edit's success.
+        msg = error_message(pe.handler(action="set_text", annotation="Note1", text="DEBURR"))
+        assert "'NEW'" in msg and "'DEBURR'" in msg and "did not take" in msg
+
+    def test_landed_text_equal_to_the_request_is_reported_as_the_markup(self, rig):
+        # the exact-equality boundary from the other side: same string, no error
+        out = _payload(pe.handler(action="set_text", annotation="Note1", text="NEW"))
+        assert out["markup"] == "NEW"
+
+    def test_a_symbol_markup_round_trip_is_compared_on_the_encoded_form(self, rig):
+        # build_segments/segments_markup round-trip {symbol} tokens exactly, so the comparison is
+        # against the markup the caller wrote, not a stripped plain-text version of it
+        rig.monkeypatch.setattr(pe._pmi, "segments_markup", lambda a: "{flatness}0.05")
+        out = _payload(pe.handler(action="set_text", annotation="Note1", text="{flatness}0.05"))
+        assert out["markup"] == "{flatness}0.05"
+        assert "0.05" in error_message(
+            pe.handler(action="set_text", annotation="Note1", text="{flatness}0.06"))
 
 
 class TestRename:

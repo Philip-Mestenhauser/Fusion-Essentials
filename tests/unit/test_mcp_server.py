@@ -9,6 +9,8 @@ and self-correct. Also covers the HTTP handler's Origin guard (the DNS-rebinding
 """
 
 import asyncio
+import io
+import json
 import types
 
 import pytest
@@ -543,6 +545,91 @@ class TestTaskManager:
 # http://127.0.0.1:27182. The Origin header is the only thing separating a local browser client
 # from a hostile page, so the check must compare the PARSED scheme+hostname: a substring test
 # admits http://localhost.evil.com, which resolves to the attacker's server.
+
+# ── the JSON door: NaN / Infinity are refused before any tool sees them ─────────────────────────
+#
+# Python's decoder accepts the three NON-STANDARD literals by default, and a non-finite number
+# passes every zero/negative guard it later meets, so the refusal belongs at the parse.
+
+class _PostProbe:
+    """The slice of MCPHandler that do_POST's PARSE step touches: a body to read, a send_error to
+    capture the refusal, and just enough of the accept path for a well-formed body to reach 202."""
+
+    def __init__(self, body: bytes):
+        self.path = '/mcp'
+        self.headers = {'Content-Length': str(len(body))}
+        self.rfile = io.BytesIO(body)
+        self.errors = []
+        self.responses = []
+
+        async def _accept(_request):
+            return None                 # a notification - do_POST answers 202 with no body
+        self.mcp_server = types.SimpleNamespace(handle_request=_accept, session_id="s1")
+
+    def _origin_ok(self):
+        return True
+
+    def send_error(self, code, message=None):
+        self.errors.append((code, message))
+
+    def send_response(self, code, message=None):
+        self.responses.append(code)
+
+    def send_header(self, *_args):
+        pass
+
+    def end_headers(self):
+        pass
+
+
+def _post(mcp_server_module, body: bytes):
+    """The real do_POST driven over `body`; returns the probe it wrote its answer into."""
+    probe = _PostProbe(body)
+    mcp_server_module.MCPHandler.do_POST(probe)
+    return probe
+
+
+class TestJsonConstantRefusal:
+    @pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+    def test_the_hook_refuses_each_literal_by_name(self, mcp_server_module, literal):
+        with pytest.raises(ValueError) as excinfo:
+            mcp_server_module._refuse_json_constant(literal)
+        assert literal in str(excinfo.value)
+
+    @pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+    def test_json_loads_with_the_hook_refuses_the_literal_inside_a_body(self, mcp_server_module,
+                                                                        literal):
+        with pytest.raises(ValueError) as excinfo:
+            json.loads('{"length": %s}' % literal,
+                       parse_constant=mcp_server_module._refuse_json_constant)
+        assert literal in str(excinfo.value)
+
+    def test_a_finite_number_still_parses_with_the_hook_installed(self, mcp_server_module):
+        # the boundary: only the three literals are refused, not numbers in general.
+        parsed = json.loads('{"length": -0.0, "big": 1e308}',
+                            parse_constant=mcp_server_module._refuse_json_constant)
+        assert parsed == {"length": -0.0, "big": 1e308}
+
+    @pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+    def test_a_post_carrying_the_literal_is_refused_400_naming_it(self, mcp_server_module, literal):
+        body = ('{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"model_extrude",'
+                '"arguments":{"distance":%s}}}' % literal).encode()
+        probe = _post(mcp_server_module, body)
+        assert probe.responses == []                     # never dispatched
+        code, message = probe.errors[0]
+        assert code == 400
+        assert literal in message                        # the reason survives to the wire
+
+    def test_a_malformed_body_still_refuses_400_and_says_why(self, mcp_server_module):
+        probe = _post(mcp_server_module, b'{"jsonrpc": "2.0", ')
+        code, message = probe.errors[0]
+        assert code == 400 and message.startswith("Invalid JSON:")
+        assert "\n" not in message                       # it rides in the HTTP status line
+
+    def test_a_well_formed_body_still_reaches_dispatch(self, mcp_server_module):
+        probe = _post(mcp_server_module, b'{"jsonrpc":"2.0","method":"notifications/initialized"}')
+        assert probe.errors == [] and probe.responses == [202]
+
 
 def _origin_allowed(mcp_server_module, origin):
     """Run the real _origin_ok against a header map holding `origin` (None = header absent)."""

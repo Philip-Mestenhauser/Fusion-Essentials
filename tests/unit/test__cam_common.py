@@ -1066,6 +1066,60 @@ class TestOpStateTallyEdges:
         assert tally["total"] == 1 and tally["valid"] == 1
 
 
+def _tally_op(name, state=0, error=False, warning=False, suppressed=False, generating=False,
+              warning_text="Contour Selection: One or more contours are missing selections.",
+              error_text="Toolpath is empty"):
+    """One operation as the tally reads it. The warning default is the measured live text a
+    geometry-less 2D Contour carries while its state still reads valid."""
+    return SimpleNamespace(name=name, operationState=state, hasError=error,
+                           error=error_text if error else "",
+                           hasWarning=warning, warning=warning_text if warning else "",
+                           isSuppressed=suppressed, isGenerating=generating,
+                           generatingProgress=None)
+
+
+class TestWarningOverlayTally:
+    """A WARNED op keeps its lifecycle bucket (measured live: an unselected-geometry 2D Contour reads
+    hasWarning=True, hasError=False, operationState=0 - 'valid', with no toolpath), so the warning is
+    counted as an OVERLAY beside the buckets, and sampled through the SAME predicate it is counted by."""
+
+    def test_a_warned_valid_op_is_counted_in_both_valid_and_warnings(self, operation_cast_passthrough):
+        t = cc.op_state_tally([_tally_op("Contour1", warning=True)])
+        assert t["valid"] == 1 and t["warnings"] == 1 and t["total"] == 1
+        assert t["warning_sample"]["name"] == "Contour1"
+        assert t["warning_sample"]["warning"].startswith("Contour Selection")
+
+    def test_no_warnings_counts_zero_and_samples_nothing(self, operation_cast_passthrough):
+        t = cc.op_state_tally([_tally_op("Face1")])
+        assert t["warnings"] == 0 and t["warning_sample"] is None
+
+    def test_an_errored_ops_warning_is_not_counted(self, operation_cast_passthrough):
+        # its error already blocks the post; counting the warning too would demote a verdict that is
+        # already a BLOCKER, and name a warning as the thing to read instead of the error.
+        t = cc.op_state_tally([_tally_op("Drill1", error=True, warning=True)])
+        assert t["errored"] == 1 and t["warnings"] == 0 and t["warning_sample"] is None
+
+    def test_a_suppressed_ops_warning_is_not_counted(self, operation_cast_passthrough):
+        # a suppressed op is excluded from the post by design, so it can block or demote nothing.
+        t = cc.op_state_tally([_tally_op("Off1", state=2, suppressed=True, warning=True)])
+        assert t["suppressed"] == 1 and t["warnings"] == 0 and t["warning_sample"] is None
+
+    def test_the_sample_is_the_FIRST_counted_warning_not_a_later_one(self, operation_cast_passthrough):
+        t = cc.op_state_tally([_tally_op("Off1", state=2, suppressed=True, warning=True),
+                               _tally_op("Contour1", warning=True, warning_text="first real"),
+                               _tally_op("Contour2", warning=True, warning_text="second real")])
+        assert t["warnings"] == 2 and t["warning_sample"]["name"] == "Contour1"
+
+    def test_only_the_first_warning_LINE_is_sampled(self, operation_cast_passthrough):
+        t = cc.op_state_tally([_tally_op("Contour1", warning=True,
+                                         warning_text="line one\nline two\nline three")])
+        assert t["warning_sample"]["warning"] == "line one"
+
+    def test_an_out_of_date_warned_op_counts_in_both(self, operation_cast_passthrough):
+        t = cc.op_state_tally([_tally_op("Adaptive1", state=1, warning=True)])
+        assert t["out_of_date"] == 1 and t["warnings"] == 1
+
+
 class TestLiveReadinessEdges:
     def _cam(self, ops):
         setup = SimpleNamespace(allOperations=_Coll(list(ops)), name="Setup1",
@@ -1096,6 +1150,155 @@ class TestLiveReadinessEdges:
         monkeypatch.setattr(cc, "walk_operations", _boom)
         sig, err = cc.live_readiness()
         assert sig is None and "CAM tree read failed" in err
+
+
+class TestReadinessWarningVerdict:
+    """The verdict may not overstate. A warning does NOT block a post, so the job stays postable -
+    but 'ready to post' on its own hides an op that reads valid and cut nothing, so a warned job
+    reports the count and names the first warning."""
+
+    def _sig(self, monkeypatch, ops):
+        cam = SimpleNamespace(setups=_Coll([SimpleNamespace(
+            allOperations=_Coll(list(ops)), name="Setup1", hasError=False, error="")]),
+            ncPrograms=_Coll([]))
+        monkeypatch.setattr(cc, "get_cam", lambda: (cam, None))
+        sig, err = cc.live_readiness()
+        assert err is None
+        return sig
+
+    def test_zero_warnings_keeps_the_plain_ready_verdict(self, monkeypatch,
+                                                          operation_cast_passthrough):
+        sig = self._sig(monkeypatch, [_tally_op("Face1"), _tally_op("Face2")])
+        assert sig["warnings"] == 0
+        assert sig["readiness"] == "2 of 2 active ops valid - ready to post."
+        assert sig["samples"]["warning"] is None
+
+    def test_one_warning_demotes_the_verdict_and_names_the_op_and_its_line(
+            self, monkeypatch, operation_cast_passthrough):
+        # the exact boundary the whole change turns on: 1 warning, everything else valid.
+        sig = self._sig(monkeypatch, [_tally_op("Face1"),
+                                      _tally_op("2D Contour1", warning=True)])
+        assert sig["warnings"] == 1
+        assert "ready to post." not in sig["readiness"]      # never the plain verdict
+        assert "postable" in sig["readiness"]                # a warning does not hard-block
+        assert "1 with WARNINGS" in sig["readiness"]
+        assert "2D Contour1" in sig["readiness"]
+        assert "Contour Selection" in sig["readiness"]
+        assert sig["samples"]["warning"]["name"] == "2D Contour1"
+
+    def test_an_errored_job_still_reads_BLOCKER_not_the_warning_verdict(self, monkeypatch,
+                                                                        operation_cast_passthrough):
+        # an error outranks: the warning wording must not displace the verdict that stops the post.
+        sig = self._sig(monkeypatch, [_tally_op("Drill1", error=True),
+                                      _tally_op("2D Contour1", warning=True)])
+        assert sig["readiness"].startswith("BLOCKER:")
+        assert sig["warnings"] == 1                          # still reported as a number
+
+    def test_a_stale_job_with_a_warning_keeps_the_generate_verdict(self, monkeypatch,
+                                                                    operation_cast_passthrough):
+        # not-all-valid already refuses to say ready, so it keeps its own next-action wording.
+        sig = self._sig(monkeypatch, [_tally_op("Adaptive1", state=1, warning=True),
+                                      _tally_op("Face1")])
+        assert "run cam_generate" in sig["readiness"]
+
+    def test_a_suppressed_warned_op_leaves_the_plain_ready_verdict(self, monkeypatch,
+                                                                    operation_cast_passthrough):
+        # boundary on the other side: a warning that does NOT count must not demote anything.
+        sig = self._sig(monkeypatch, [_tally_op("Face1"),
+                                      _tally_op("Off1", state=2, suppressed=True, warning=True)])
+        assert sig["warnings"] == 0
+        assert sig["readiness"] == "1 of 1 active ops valid - ready to post."
+
+    def test_an_unreadable_warning_TEXT_still_names_the_op_and_says_so(
+            self, monkeypatch, operation_cast_passthrough):
+        sig = self._sig(monkeypatch, [_tally_op("Contour1", warning=True, warning_text="")])
+        assert sig["warnings"] == 1
+        assert "ready to post." not in sig["readiness"]      # the demotion does not depend on text
+        assert "'Contour1'" in sig["readiness"] and "unreadable" in sig["readiness"]
+
+    def test_an_unnamed_warning_op_points_at_the_read_rather_than_quoting_a_blank_name(
+            self, monkeypatch, operation_cast_passthrough):
+        sig = self._sig(monkeypatch, [_tally_op(None, warning=True)])
+        assert sig["warnings"] == 1
+        assert "cam_get(include=['operations'])" in sig["readiness"]
+        assert "''" not in sig["readiness"]
+
+
+class TestOperationsSummaryWarningVerdict:
+    """cam_get's operations slice ends on the SAME shared verdict live_readiness does, so the two
+    surfaces cannot disagree about one job: a warned op reads isToolpathValid True with hasToolpath
+    False (measured), which counts as postable here and would otherwise ride inside a plain
+    'ready to post'. The per-op ROWS are untouched by the demotion - only the sentence changes."""
+
+    def _rec(self, name, **kw):
+        base = {"name": name, "state": "valid", "toolpath_valid": True, "is_suppressed": False,
+                "has_error": False, "has_warning": False, "blocked_by": []}
+        base.update(kw)
+        return base
+
+    @pytest.fixture(autouse=True)
+    def _manufacture(self, monkeypatch):
+        monkeypatch.setattr(cc, "validity_basis", lambda: "manufacture_verified")
+
+    def test_zero_warnings_keeps_the_plain_ready_verdict(self):
+        summary = cc._operations_summary([self._rec("Face1"), self._rec("Adaptive1")])
+        assert summary["readiness"] == "2 of 2 active ops have valid toolpaths - ready to post."
+
+    def test_one_warning_demotes_the_verdict_and_names_the_op_and_its_first_line(self):
+        # the exact boundary: 1 counted warning, everything else valid and unblocked.
+        summary = cc._operations_summary([
+            self._rec("Face1"),
+            self._rec("2D Contour1", has_warning=True,
+                      warning="Contour Selection: contours are missing selections.\nSECONDLINE")])
+        readiness = summary["readiness"]
+        assert "ready to post." not in readiness            # never the plain verdict
+        assert "postable" in readiness                      # a warning does not hard-block
+        assert "1 with WARNINGS" in readiness
+        assert "2D Contour1" in readiness
+        assert "contours are missing selections" in readiness
+        assert "SECONDLINE" not in readiness                # only the FIRST warning line rides
+        assert summary["exceptions"] == []                  # the warning still blocks nothing
+        assert summary["active_count"] == 2                 # the rows/tallies are unchanged
+
+    def test_a_suppressed_warned_op_leaves_the_plain_ready_verdict(self):
+        # the other boundary: a warning that does not count must demote nothing.
+        summary = cc._operations_summary([
+            self._rec("Face1"),
+            self._rec("Off1", state="suppressed", is_suppressed=True, toolpath_valid=False,
+                      has_warning=True, warning="empty toolpath")])
+        assert summary["readiness"] == "1 of 1 active ops have valid toolpaths - ready to post."
+
+    def test_an_errored_ops_warning_does_not_displace_the_exception_verdict(self):
+        summary = cc._operations_summary([
+            self._rec("Face1"),
+            self._rec("Drill1", has_error=True, has_warning=True, warning="also warned")])
+        assert "ready to post" not in summary["readiness"]
+        assert "resolve the exceptions" in summary["readiness"]
+
+    def test_an_unverified_workspace_still_gives_no_toolpath_verdict_at_all(self, monkeypatch):
+        monkeypatch.setattr(cc, "validity_basis", lambda: "unverified_design_workspace")
+        summary = cc._operations_summary([self._rec("Contour1", has_warning=True, warning="w")])
+        assert "ready to post" not in summary["readiness"]
+        assert "Manufacture" in summary["readiness"]
+
+
+class TestSharedReadyVerdict:
+    """The ONE builder all three readiness surfaces end on - pinned directly, because it is what
+    makes them agree."""
+
+    def test_no_warnings_is_the_plain_verdict(self):
+        assert cc.ready_verdict("3 of 3 active ops valid", 0, None) == \
+            "3 of 3 active ops valid - ready to post."
+
+    def test_one_warning_demotes_and_names_the_sample(self):
+        out = cc.ready_verdict("3 of 3 active ops valid", 1,
+                               {"name": "Contour1", "warning": "empty toolpath"})
+        assert "ready to post." not in out
+        assert "1 with WARNINGS" in out and "'Contour1'" in out and "empty toolpath" in out
+
+    def test_an_unnamed_sample_points_at_the_read_rather_than_quoting_a_blank_name(self):
+        out = cc.ready_verdict("1 of 1 active ops valid", 1, {"name": None, "warning": "w"})
+        assert "cam_get(include=['operations'])" in out and "''" not in out
 
 
 # --- _attach_setup_invalidation: the per-setup op_states rollup + WHY the setup is stale ---

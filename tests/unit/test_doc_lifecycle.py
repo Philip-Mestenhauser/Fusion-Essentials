@@ -30,6 +30,9 @@ from conftest import load_tool
 
 _data_common = load_tool("_data_common")
 _doc_lifecycle = load_tool("doc_lifecycle")
+# the shared open-document predicate, reached through the module under test so the test asserts
+# against the very object the resolver calls
+_write_guard = _doc_lifecycle._write_guard
 
 
 def _payload(result):
@@ -41,13 +44,16 @@ def _payload(result):
 
 class FakeFile:
     def __init__(self, name, fid="urn:adsk.file:src", child_refs=None,
-                 copy_returns=True, rename_ok=True):
+                 copy_returns=True, rename_ok=True, child_refs_raise=False):
         self.name = name
         self.id = fid
         self._child_refs = list(child_refs or [])
         self.copied_into = None
         self._copy_returns = copy_returns   # False -> DataFile.copy returns nothing
         self._rename_ok = rename_ok         # False -> setting .name raises (rename fails)
+        # True -> the child-reference read fails the way a cloud read can: hasChildReferences
+        # answers True and the enumeration behind it then raises.
+        self._child_refs_raise = child_refs_raise
 
     def __setattr__(self, key, value):
         # a rename-rejecting file raises when the handler sets .name after copy
@@ -58,7 +64,7 @@ class FakeFile:
     # _xref_summary reads hasChildReferences / childReferences.asArray()
     @property
     def hasChildReferences(self):
-        return bool(self._child_refs)
+        return True if self._child_refs_raise else bool(self._child_refs)
 
     @property
     def childReferences(self):
@@ -66,6 +72,8 @@ class FakeFile:
 
         class _C:
             def asArray(self_inner):
+                if outer._child_refs_raise:
+                    raise RuntimeError("3 : cloud read failed")
                 return list(outer._child_refs)
         return _C()
 
@@ -80,15 +88,20 @@ class FakeFile:
 
 
 class FakeFolder:
-    def __init__(self, name, parent=None, is_root=False):
+    """files_raise/folders_raise model the folder whose cloud enumeration fails - the hole in a
+    by-name search space that a swallowed failure would report as an empty folder."""
+
+    def __init__(self, name, parent=None, is_root=False, files_raise=False, folders_raise=False):
         self.name = name
         self.parentFolder = parent
         self.isRoot = is_root
         self._children = []
         self._files = []
+        self._files_raise = files_raise
+        self._folders_raise = folders_raise
 
-    def _add_child(self, name):
-        child = FakeFolder(name, parent=self)
+    def _add_child(self, name, **kwargs):
+        child = FakeFolder(name, parent=self, **kwargs)
         self._children.append(child)
         return child
 
@@ -98,6 +111,8 @@ class FakeFolder:
 
         class _DF:
             def asArray(self_inner):
+                if outer._folders_raise:
+                    raise RuntimeError("3 : cloud read failed")
                 return list(outer._children)
 
             def add(self_inner, nm):
@@ -110,6 +125,8 @@ class FakeFolder:
 
         class _FF:
             def asArray(self_inner):
+                if outer._files_raise:
+                    raise RuntimeError("3 : cloud read failed")
                 return list(outer._files)
         return _FF()
 
@@ -553,10 +570,11 @@ class TestCopyByNameWalkBound:
         deep._files.append(FakeFile("fsub", fid="urn:fsub"))
         b = proj.rootFolder._add_child("B")
         b._files.append(FakeFile("fb", fid="urn:fb"))
-        _matches, seen, visited, truncated = _doc_lifecycle._find_file_by_name(
+        _matches, seen, visited, truncated, unread = _doc_lifecycle._find_file_by_name(
             proj.rootFolder, "NoSuchName")
         assert seen == ["fa", "fb", "fsub"]      # DFS would visit B (fb) before A (fa)
         assert visited == 4 and truncated is False
+        assert unread == []                      # every folder opened
 
     def test_source_folder_scopes_the_walk_under_budget(self, monkeypatch):
         # Many noise folders at root would blow a tiny budget; source_folder starts the walk at the
@@ -580,6 +598,97 @@ class TestCopyByNameWalkBound:
             name="Template", source_project="Library", source_folder="Ghost", project="CAM")
         assert res["isError"] is True
         assert "source_folder" in res["message"] and "Parts" in res["message"]
+
+
+def _install_mp(monkeypatch, projects, active=None, by_id=None):
+    """The _install rig, patched through monkeypatch so it undoes itself (tests/CLAUDE.md)."""
+    data = FakeData(projects)
+    data._by_id = by_id or {}
+    app = FakeApp(data, active)
+    monkeypatch.setattr(_data_common, "app", app)
+    monkeypatch.setattr(_doc_lifecycle, "app", app)
+    return app, data
+
+
+class TestCopyByNameUnreadFolders:
+    """A folder whose enumeration RAISES is a hole in the search space, not an empty folder: a
+    same-name twin could sit in it, so the uniqueness this copy acts on was decided over a space
+    that did not fully open. The walk COUNTS those folders and every path carries the fact - a
+    swallowed failure is what turns an ambiguity into a confident unique match."""
+
+    def _library(self, unread_child=True):
+        proj = FakeProject("Library", pid="p-lib")
+        proj.rootFolder._files.append(FakeFile("Template", fid="urn:adsk.file:root"))
+        proj.rootFolder._add_child("Archive", files_raise=unread_child)
+        return proj
+
+    def test_the_walk_names_the_folder_that_would_not_enumerate(self):
+        proj = self._library()
+        matches, _seen, visited, truncated, unread = _doc_lifecycle._find_file_by_name(
+            proj.rootFolder, "Template")
+        assert len(matches) == 1 and truncated is False and visited == 2
+        assert unread == ["Archive"]
+
+    def test_a_folder_readable_end_to_end_reports_no_unread(self):
+        proj = self._library(unread_child=False)
+        *_rest, unread = _doc_lifecycle._find_file_by_name(proj.rootFolder, "Template")
+        assert unread == []
+
+    def test_a_copy_over_an_unread_folder_carries_the_hole(self, monkeypatch):
+        _install_mp(monkeypatch, [self._library(), FakeProject("CAM")])
+        out = _payload(_doc_lifecycle.copy_document_handler(
+            name="Template", source_project="Library", project="CAM"))
+        assert out["copied"] is True                      # the copy still happened
+        assert out["source_folders_unreadable"] == ["Archive"]
+        assert "same-name twin" in out["note"] and "document_id" in out["note"]
+
+    def test_a_fully_read_copy_carries_no_unread_key(self, monkeypatch):
+        _install_mp(monkeypatch, [self._library(unread_child=False), FakeProject("CAM")])
+        out = _payload(_doc_lifecycle.copy_document_handler(
+            name="Template", source_project="Library", project="CAM"))
+        assert "source_folders_unreadable" not in out
+
+    def test_a_miss_over_an_unread_folder_is_not_reported_as_absent(self, monkeypatch):
+        proj = FakeProject("Library", pid="p-lib")
+        proj.rootFolder._add_child("Archive", files_raise=True)
+        _install_mp(monkeypatch, [proj, FakeProject("CAM")])
+        res = _doc_lifecycle.copy_document_handler(
+            name="Template", source_project="Library", project="CAM")
+        assert res["isError"] is True
+        assert "1 folder(s) could not be read" in res["message"]
+        assert "Archive" in res["message"]
+
+    def test_a_miss_with_every_folder_read_states_no_hole(self, monkeypatch):
+        proj = FakeProject("Library", pid="p-lib")
+        proj.rootFolder._add_child("Archive")
+        _install_mp(monkeypatch, [proj, FakeProject("CAM")])
+        res = _doc_lifecycle.copy_document_handler(
+            name="Template", source_project="Library", project="CAM")
+        assert res["isError"] is True
+        assert "could not be read" not in res["message"]
+
+
+class TestExternalReferenceCount:
+    """external_reference_count is COUNTED, never a fabricated 0: a child-reference read that did
+    not answer is not a source file that references nothing, and a caller checking the copy carried
+    its references along would read the zero as an answer."""
+
+    def test_unreadable_child_references_report_null_not_zero(self, monkeypatch):
+        src = FakeFile("Template", fid="urn:adsk.file:src", child_refs_raise=True)
+        _install_mp(monkeypatch, [FakeProject("CAM")], by_id={"urn:adsk.file:src": src})
+        out = _payload(_doc_lifecycle.copy_document_handler(
+            document_id="urn:adsk.file:src", project="CAM"))
+        assert out["external_reference_count"] is None
+        assert out["external_references"] == []
+        assert "null (not zero)" in out["note"]
+
+    def test_a_source_with_no_references_reports_a_real_zero(self, monkeypatch):
+        src = FakeFile("Template", fid="urn:adsk.file:src")
+        _install_mp(monkeypatch, [FakeProject("CAM")], by_id={"urn:adsk.file:src": src})
+        out = _payload(_doc_lifecycle.copy_document_handler(
+            document_id="urn:adsk.file:src", project="CAM"))
+        assert out["external_reference_count"] == 0      # read, and the answer is none
+        assert "null (not zero)" not in out["note"]
 
 
 class TestCopyDocumentSchema:
@@ -608,17 +717,23 @@ class TestCopyDocumentSchema:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class FakeDeleteFile:
+    """parent_read_raises models the reference read that will not answer: 'flag' fails at
+    hasParentReferences, 'array' fails one step later at parentReferences.asArray()."""
+
     def __init__(self, name, fid="urn:adsk.file:del", parent_refs=None,
-                 delete_returns=True):
+                 delete_returns=True, parent_read_raises=None):
         self.name = name
         self.id = fid
         self._parent_refs = list(parent_refs or [])
         self._delete_returns = delete_returns
+        self._parent_read_raises = parent_read_raises
         self.deleted = False
 
     @property
     def hasParentReferences(self):
-        return bool(self._parent_refs)
+        if self._parent_read_raises == "flag":
+            raise RuntimeError("3 : cloud read failed")
+        return True if self._parent_read_raises == "array" else bool(self._parent_refs)
 
     @property
     def parentReferences(self):
@@ -626,6 +741,8 @@ class FakeDeleteFile:
 
         class _C:
             def asArray(self_inner):
+                if outer._parent_read_raises == "array":
+                    raise RuntimeError("3 : cloud read failed")
                 return list(outer._parent_refs)
         return _C()
 
@@ -720,6 +837,9 @@ class TestDeleteDocument:
             document_id="urn:f", confirm_name="PartA"))
         assert out["deleted"] is True and out["forced"] is False
         assert f.deleted is True
+        # the read ANSWERED and the answer was none: [] here means unreferenced, and only here.
+        assert out["was_referenced_by"] == []
+        assert "reference_state_unreadable" not in out
 
     def test_confirm_name_whitespace_forgiven(self):
         f = FakeDeleteFile("PartA", fid="urn:f")
@@ -735,19 +855,87 @@ class TestDeleteDocument:
         assert res["isError"] is True and "declined to delete" in res["message"]
 
 
+class TestDeleteFailsClosedOnUnreadableReferences:
+    """The orphan guard is only as good as the read behind it. When the reference read does not
+    answer, the file is NOT provably unreferenced - so the destructive path is REFUSED (the
+    unreadable-census shape data_delete_folder uses), and a forced delete publishes null rather than
+    an empty list that reads as 'nothing pointed at it'."""
+
+    def test_an_unreadable_flag_refuses_the_delete(self):
+        f = FakeDeleteFile("PartA", fid="urn:f", parent_read_raises="flag")
+        _install_delete({"urn:f": f})
+        res = _doc_lifecycle.delete_document_handler(document_id="urn:f", confirm_name="PartA")
+        assert res["isError"] is True
+        assert "hasParentReferences" in res["message"]     # names WHICH read failed
+        assert "force=true" in res["message"]
+        assert f.deleted is False                          # deleteMe() was never reached
+
+    def test_an_unreadable_reference_list_refuses_the_delete(self):
+        f = FakeDeleteFile("PartA", fid="urn:f", parent_read_raises="array")
+        _install_delete({"urn:f": f})
+        res = _doc_lifecycle.delete_document_handler(document_id="urn:f", confirm_name="PartA")
+        assert res["isError"] is True
+        assert "parentReferences.asArray()" in res["message"]
+        assert f.deleted is False
+
+    def test_force_deletes_and_publishes_null_not_an_empty_list(self):
+        f = FakeDeleteFile("PartA", fid="urn:f", parent_read_raises="array")
+        _install_delete({"urn:f": f})
+        out = _payload(_doc_lifecycle.delete_document_handler(
+            document_id="urn:f", confirm_name="PartA", force=True))
+        assert out["deleted"] is True and f.deleted is True
+        assert out["was_referenced_by"] is None            # NOT [] - the read never answered
+        assert out["forced"] is True
+        assert out["reference_state_unreadable"] == "parentReferences.asArray()"
+        assert "unknown" in out["note"]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # new_document_handler  (app.documents.add)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class _CloseableDoc:
-    def __init__(self, name, close_ok=True):
+    def __init__(self, name, close_ok=True, urn=None):
         self.name = name
         self._close_ok = close_ok
+        self._urn = urn
         self.close_called_with = None
+
+    @property
+    def dataFile(self):
+        return type("DF", (), {"id": self._urn})() if self._urn else None
 
     def close(self, save_changes):
         self.close_called_with = save_changes
         return self._close_ok
+
+
+class _DiesOnClose:
+    """A document whose name/dataFile stop reading the moment it closes - the live shape. Its
+    identity is only knowable if it was captured BEFORE the close."""
+
+    def __init__(self, name, urn=None):
+        self._name = name
+        self._urn = urn
+        self._dead = False
+        self.close_called_with = None
+
+    @property
+    def name(self):
+        if self._dead:
+            raise RuntimeError("4 : An API Object refers to a deleted Object")
+        return self._name
+
+    @property
+    def dataFile(self):
+        if self._dead:
+            raise RuntimeError("4 : An API Object refers to a deleted Object")
+        return type("DF", (), {"id": self._urn})()
+
+    def close(self, save_changes):
+        self.close_called_with = save_changes
+        self._dead = True
+        return True
 
 
 class _CloseableDocs:
@@ -839,6 +1027,79 @@ class TestCloseDocument:
         res = _doc_lifecycle.close_document_handler()
         assert res["isError"] is True
         assert "No documents are open" in res["message"]
+
+
+class TestCloseActedOn:
+    """A close is the write whose target need not be the active document, so the handler publishes
+    acted_on itself: the write guard would otherwise stamp the post-call ACTIVE document, which names
+    a document that was NOT closed (measured live, both when the closed doc was inactive and when it
+    was the active one Fusion replaced with a fallback)."""
+
+    def _install(self, docs, active):
+        class _App:
+            documents = _CloseableDocs(docs)
+            activeDocument = active
+        _doc_lifecycle.app = _App()
+
+    def test_closing_an_inactive_doc_names_the_closed_doc(self):
+        a, b = _CloseableDoc("A", urn="urn:a"), _CloseableDoc("B", urn="urn:b")
+        self._install([a, b], active=a)                     # A stays open and active; B is closed
+        out = _payload(_doc_lifecycle.close_document_handler(name="B"))
+        assert out["acted_on"] == {"name": "B", "document_id": "urn:b"}
+
+    def test_closing_the_active_doc_names_the_closed_doc(self):
+        a, b = _CloseableDoc("A", urn="urn:a"), _CloseableDoc("B", urn="urn:b")
+        self._install([a, b], active=b)
+        out = _payload(_doc_lifecycle.close_document_handler())    # no name = the active doc
+        assert out["acted_on"] == {"name": "B", "document_id": "urn:b"}
+
+    def test_an_unsaved_doc_reports_a_null_document_id(self):
+        u = _CloseableDoc("Untitled")                       # never saved - no dataFile, no URN
+        self._install([u], active=u)
+        out = _payload(_doc_lifecycle.close_document_handler())
+        assert out["acted_on"] == {"name": "Untitled", "document_id": None}
+
+    def test_identity_is_captured_before_the_close(self):
+        # The document is dead by the time the payload is built, so an identity read placed after
+        # d.close() reports {None, None} - the capture must precede the close.
+        d = _DiesOnClose("Scratch", urn="urn:scratch")
+        self._install([d], active=d)
+        out = _payload(_doc_lifecycle.close_document_handler(name="Scratch"))
+        assert out["acted_on"] == {"name": "Scratch", "document_id": "urn:scratch"}
+
+    def test_two_closed_documents_leave_acted_on_to_the_guard(self):
+        # Boundary: 2 closed. One acted_on cannot state two documents, so the key stays absent and
+        # the guard's fill-if-absent stamp applies; 'closed' is the honest list.
+        a, b = _CloseableDoc("A", urn="urn:a"), _CloseableDoc("B", urn="urn:b")
+        self._install([a, b], active=a)
+        out = _payload(_doc_lifecycle.close_document_handler(close_all=True))
+        assert out["closed"] == ["A", "B"]
+        assert "acted_on" not in out
+
+    def test_close_all_that_closes_exactly_one_still_names_it(self):
+        # The other side of the same boundary: 1 closed (the second target failed), so the single
+        # closed document IS statable and is named.
+        good, bad = _CloseableDoc("Good", urn="urn:good"), _CloseableDoc("Bad", close_ok=False)
+        self._install([good, bad], active=good)
+        out = _payload(_doc_lifecycle.close_document_handler(close_all=True))
+        assert out["closed"] == ["Good"]
+        assert out["acted_on"] == {"name": "Good", "document_id": "urn:good"}
+
+    def test_a_failed_close_is_never_claimed_as_acted_on(self):
+        # Boundary: 0 closed of 2 targets. A document that did NOT close was not acted on.
+        bad1, bad2 = _CloseableDoc("B1", close_ok=False), _CloseableDoc("B2", close_ok=False)
+        self._install([bad1, bad2], active=bad1)
+        res = _doc_lifecycle.close_document_handler(close_all=True)
+        assert res["isError"] is True                       # nothing closed at all
+        assert "acted_on" not in res["content"][0]["text"]
+
+    def test_a_skipped_dead_proxy_is_not_named_as_acted_on(self):
+        good, dead = _CloseableDoc("Good", urn="urn:good"), _CloseableDoc("Dead", urn="urn:dead")
+        dead.isValid = False
+        self._install([good, dead], active=good)
+        out = _payload(_doc_lifecycle.close_document_handler(close_all=True))
+        assert out["skipped_invalid"] == 1
+        assert out["acted_on"] == {"name": "Good", "document_id": "urn:good"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -983,6 +1244,128 @@ class TestOpenIndexAddressing:
         assert d is third and ambiguous is False
         assert names == ["Untitled", "", "Untitled"]
         assert _doc_lifecycle._find_open_document("open:1") == (None, names, False)
+
+
+class TestUrnIdentityIsExact:
+    """The URN branch resolves by LINEAGE EQUALITY and refuses a second hit. It serves doc_activate
+    and the DESTRUCTIVE doc_close, so a prefix match (one lineage id can be another's prefix) or a
+    first-of-several pick closes a document the caller never named."""
+
+    def _open(self, monkeypatch, docs):
+        """The open-document session, patched so it undoes itself (tests/CLAUDE.md)."""
+        class _App:
+            documents = _CloseableDocs(docs)
+            activeDocument = docs[0] if docs else None
+        monkeypatch.setattr(_doc_lifecycle, "app", _App())
+
+    def test_an_exact_lineage_urn_resolves(self, monkeypatch):
+        a = _NamedDoc("P1", urn="urn:adsk.wipprod:dm.lineage:AB")
+        b = _NamedDoc("P2", urn="urn:adsk.wipprod:dm.lineage:CD")
+        self._open(monkeypatch, [a, b])
+        d, _names, ambiguous = _doc_lifecycle._find_open_document(
+            "urn:adsk.wipprod:dm.lineage:CD")
+        assert d is b and ambiguous is False
+
+    def test_a_urn_the_open_id_merely_STARTS_WITH_is_a_miss(self, monkeypatch):
+        # THE boundary: candidate 'urn:...:AB' is a PREFIX of the open doc's 'urn:...:ABC'. Equal is
+        # a hit; shorter-by-one is a different file and must not resolve.
+        doc = _NamedDoc("P1", urn="urn:adsk.wipprod:dm.lineage:ABC")
+        self._open(monkeypatch, [doc])
+        assert _doc_lifecycle._find_open_document(
+            "urn:adsk.wipprod:dm.lineage:ABC")[0] is doc
+        d, _names, ambiguous = _doc_lifecycle._find_open_document(
+            "urn:adsk.wipprod:dm.lineage:AB")
+        assert d is None and ambiguous is False
+
+    def test_a_version_suffixed_urn_still_addresses_its_lineage(self, monkeypatch):
+        # the '?version=N' suffix names a VERSION of the same lineage - dropped on both sides, then
+        # compared for equality (the reading the prefix test was standing in for).
+        doc = _NamedDoc("P1", urn="urn:adsk.wipprod:dm.lineage:AB")
+        self._open(monkeypatch, [doc])
+        d, _names, ambiguous = _doc_lifecycle._find_open_document(
+            "urn:adsk.wipprod:dm.lineage:AB?version=3")
+        assert d is doc and ambiguous is False
+
+    def test_a_lineage_open_as_tab_and_dependency_is_ONE_document(self, monkeypatch):
+        # MEASURED (and held by _write_guard.one_open_document): inserting a saved part into a
+        # second document loads it as a real Document, so app.documents lists the visible tab AND
+        # the dependency instance with the same name and byte-identical dataFile.id. Refusing that
+        # tells the caller to pass the URN they just passed - and both handles are the same
+        # document, so the first resolves.
+        tab = _NamedDoc("P1", urn="urn:adsk.wipprod:dm.lineage:AB")
+        dependency = _NamedDoc("P1", urn="urn:adsk.wipprod:dm.lineage:AB")
+        self._open(monkeypatch, [tab, dependency])
+        d, _names, ambiguous = _doc_lifecycle._find_open_document(
+            "urn:adsk.wipprod:dm.lineage:AB")
+        assert d is tab and ambiguous is False
+
+    def test_close_by_urn_works_while_a_dependency_instance_is_loaded(self, monkeypatch):
+        # the functional consequence: an ordinary assembly must not break close-by-URN.
+        tab = _CloseableDoc("P1", urn="urn:adsk.wipprod:dm.lineage:AB")
+        dependency = _CloseableDoc("P1", urn="urn:adsk.wipprod:dm.lineage:AB")
+        self._open(monkeypatch, [tab, dependency])
+        out = _payload(_doc_lifecycle.close_document_handler(
+            name="urn:adsk.wipprod:dm.lineage:AB"))
+        assert out["closed"] == ["P1"]
+        assert tab.close_called_with is False
+
+    def test_two_versions_of_one_lineage_are_refused_naming_both_ids(self, monkeypatch):
+        # DISTINCT ids under one lineage key - the same file open at two versions. No URN settles
+        # it (both answer to that lineage), so it refuses and names the ids that differ.
+        v_latest = _NamedDoc("P1", urn="urn:adsk.wipprod:dm.lineage:AB")
+        v_pinned = _NamedDoc("P1", urn="urn:adsk.wipprod:dm.lineage:AB?version=2")
+        self._open(monkeypatch, [v_latest, v_pinned])
+        d, names, ambiguous = _doc_lifecycle._find_open_document(
+            "urn:adsk.wipprod:dm.lineage:AB")
+        assert d is None and ambiguous is True             # never `v_latest`
+        assert names == ["P1 (urn:adsk.wipprod:dm.lineage:AB)",
+                         "P1 (urn:adsk.wipprod:dm.lineage:AB?version=2)"]
+
+    def test_close_refuses_two_versions_and_points_at_open_n(self, monkeypatch):
+        a = _CloseableDoc("P1", urn="urn:adsk.wipprod:dm.lineage:AB")
+        b = _CloseableDoc("P1", urn="urn:adsk.wipprod:dm.lineage:AB?version=2")
+        self._open(monkeypatch, [a, b])
+        res = _doc_lifecycle.close_document_handler(name="urn:adsk.wipprod:dm.lineage:AB")
+        assert res["isError"] is True
+        assert "?version=2" in res["message"]              # both ids named
+        assert "open:N" in res["message"]                  # the handle that CAN settle it
+        assert a.close_called_with is None and b.close_called_with is None
+
+    def test_an_unreadable_id_beside_a_readable_one_is_not_one_document(self, monkeypatch):
+        # a hit whose id did not read cannot be shown to be the same document as its neighbour.
+        readable = _NamedDoc("P1", urn="urn:adsk.wipprod:dm.lineage:AB")
+        class _BlindId:
+            name = "P1"
+
+            @property
+            def dataFile(self):
+                raise RuntimeError("4 : An API Object refers to a deleted Object")
+
+        self._open(monkeypatch, [readable, _BlindId()])
+        # the blind doc never matches the lineage, so this stays a single hit and resolves
+        d, _names, ambiguous = _doc_lifecycle._find_open_document(
+            "urn:adsk.wipprod:dm.lineage:AB")
+        assert d is readable and ambiguous is False
+        # ...and the predicate itself refuses to call a None id 'the same document'
+        assert _write_guard.one_open_document(["urn:x", None]) is False
+        assert _write_guard.one_open_document(["urn:x", "urn:x"]) is True
+
+    def test_a_doc_with_an_unreadable_urn_never_matches(self, monkeypatch):
+        # dataFile.id reading None must not collapse into the '' an unreadable read gives and match
+        # a candidate that carries no lineage either.
+        self._open(monkeypatch, [_NamedDoc("Untitled", urn=None)])
+        d, _names, ambiguous = _doc_lifecycle._find_open_document(
+            "urn:adsk.wipprod:dm.lineage:AB")
+        assert d is None and ambiguous is False
+
+    def test_close_by_an_exact_urn_still_closes_that_document(self, monkeypatch):
+        a = _CloseableDoc("P1", urn="urn:adsk.wipprod:dm.lineage:AB")
+        b = _CloseableDoc("P2", urn="urn:adsk.wipprod:dm.lineage:ABC")
+        self._open(monkeypatch, [a, b])
+        out = _payload(_doc_lifecycle.close_document_handler(
+            name="urn:adsk.wipprod:dm.lineage:ABC"))
+        assert out["closed"] == ["P2"]
+        assert a.close_called_with is None
 
 
 class TestCloseAllSkipsDeadProxies:

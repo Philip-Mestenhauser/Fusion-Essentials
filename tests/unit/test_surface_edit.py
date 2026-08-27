@@ -401,24 +401,71 @@ class TestSurfaceTrim:
         assert cells.item(0).isSelected is True and cells.item(1).isSelected is True
         assert out["cells_kept"] == [2]
 
-    def test_keep_out_of_range_index_falls_back_to_larger(self):
-        # an index >= total is dropped, leaving an empty set -> default keeps the largest cell
+    def _keep_scene(self):
         surf = FakeBRepBody("Surf1", is_solid=False)
         tf = FakeTrimFeatures(result_bodies=[FakeBody("Surf1", is_solid=False)],
                               cell_areas=(3.0, 9.0, 1.0))
         comp = FakeComp(FakeFeatures(trim=tf))
         _wire(comp, handle_map={"S": surf, "T": FakeFace()})
-        out = _payload(se.trim_handler(surface="S", trim_tool="T", keep=[7, 9]))
-        assert out["cells_kept"] == [1]                   # largest (area 9 at index 1)
+        return tf
 
-    def test_bad_keep_falls_back_to_larger_default(self):
-        surf = FakeBRepBody("Surf1", is_solid=False)
-        tf = FakeTrimFeatures(result_bodies=[FakeBody("Surf1", is_solid=False)],
-                              cell_areas=(3.0, 9.0, 1.0))
-        comp = FakeComp(FakeFeatures(trim=tf))
-        _wire(comp, handle_map={"S": surf, "T": FakeFace()})
-        out = _payload(se.trim_handler(surface="S", trim_tool="T", keep="garbage"))
-        assert out["cells_kept"] == [1]                   # fell back to largest
+    def test_keep_out_of_range_index_is_refused_naming_the_value(self):
+        # silently falling back to 'largest' trims a DIFFERENT piece than the caller asked to keep,
+        # with nothing in the payload saying so - the refusal names the index and the legal range
+        tf = self._keep_scene()
+        res = se.trim_handler(surface="S", trim_tool="T", keep=[7, 9])
+        assert res["isError"] is True
+        assert "'keep' index 7 does not exist" in res["message"]
+        assert "0..2" in res["message"]
+        assert tf.last_input.cancelled is True            # the open transaction was aborted
+
+    def test_keep_index_at_the_last_cell_is_accepted(self):
+        # total-1 is IN range: the boundary the out-of-range refusal must not swallow
+        tf = self._keep_scene()
+        out = _payload(se.trim_handler(surface="S", trim_tool="T", keep=2))
+        assert out["cells_kept"] == [2]
+        assert tf.last_input.cancelled is False
+
+    def test_keep_index_one_past_the_last_cell_is_refused(self):
+        # total itself is OUT of range - the > vs >= boundary of the range check
+        self._keep_scene()
+        res = se.trim_handler(surface="S", trim_tool="T", keep=3)
+        assert res["isError"] is True
+        assert "'keep' index 3 does not exist" in res["message"]
+
+    def test_negative_keep_index_is_refused_not_read_as_from_the_end(self):
+        self._keep_scene()
+        res = se.trim_handler(surface="S", trim_tool="T", keep=-1)
+        assert res["isError"] is True
+        assert "'keep' index -1 does not exist" in res["message"]
+
+    def test_bad_keep_is_refused_naming_the_value(self):
+        tf = self._keep_scene()
+        res = se.trim_handler(surface="S", trim_tool="T", keep="garbage")
+        assert res["isError"] is True
+        assert "'garbage' is not one" in res["message"]
+        assert "'larger', 'smaller'" in res["message"]
+        assert tf.last_input.cancelled is True
+
+    def test_boolean_keep_is_refused_not_taken_as_index_one(self):
+        # True is an int in Python - taken as an index it would keep cell 1 silently
+        self._keep_scene()
+        res = se.trim_handler(surface="S", trim_tool="T", keep=True)
+        assert res["isError"] is True
+        assert "True is not one" in res["message"]
+
+    def test_a_list_with_one_bad_member_is_refused_whole(self):
+        # keeping the parseable members and dropping the rest would trim a piece nobody named
+        self._keep_scene()
+        res = se.trim_handler(surface="S", trim_tool="T", keep=[0, "x"])
+        assert res["isError"] is True
+        assert "'x' is not one" in res["message"]
+
+    def test_empty_keep_still_takes_the_larger_default(self):
+        # '' / [] are an OMISSION, not a bad value - they must not be refused
+        self._keep_scene()
+        out = _payload(se.trim_handler(surface="S", trim_tool="T", keep=""))
+        assert out["cells_kept"] == [1]                   # largest (area 9 at index 1)
 
     def test_an_unreadable_cell_leaves_the_area_of_every_later_cell_at_its_own_index(self):
         # 'keep' takes a cell INDEX and the kept indices are published, so the areas list is indexed
@@ -899,6 +946,169 @@ class TestOffsetZeroDistance:
         assert out["offset"] is True
         assert out["distance"] == 0.0
         assert "COINCIDENT" in out["note"]
+
+
+class _UnreadableSolidBody:
+    """A result body whose isSolid will not read - the shape bool(safe(...)) turned into a confident
+    'this is a surface'."""
+    def __init__(self, name="Wall1"):
+        self.name = name
+
+    @property
+    def isSolid(self):
+        raise RuntimeError("4 : An API Object refers to a deleted Object")
+
+
+class TestEmptyResultSetIsAnError:
+    def test_thicken_with_no_result_body_is_an_error(self):
+        # with no body there is nothing to read isSolid off, so a payload here can only assert a
+        # SOLID wall it cannot show - result_bodies [] and is_solid false beside it
+        tf = FakeThickenFeatures(result_bodies=[])
+        comp = FakeComp(FakeFeatures(thicken=tf))
+        _wire(comp, handle_map={"F1": FakeFace()})
+        res = se.thicken_handler(faces=["F1"], thickness=3)
+        assert res["isError"] is True
+        assert "owns no result body" in res["message"]
+        assert "design_delete_feature" in res["message"]
+
+    def test_one_result_body_is_the_boundary_that_passes(self):
+        # exactly one body is the smallest non-empty set - the gate must bite at 0 and only at 0
+        tf = FakeThickenFeatures(result_bodies=[FakeBody("Wall1", is_solid=True)])
+        comp = FakeComp(FakeFeatures(thicken=tf))
+        _wire(comp, handle_map={"F1": FakeFace()})
+        out = _payload(se.thicken_handler(faces=["F1"], thickness=3))
+        assert out["result_bodies"] == ["Wall1"]
+
+    def test_thicken_note_states_the_flag_it_read_back(self):
+        tf = FakeThickenFeatures(result_bodies=[FakeBody("Wall1", is_solid=True)])
+        comp = FakeComp(FakeFeatures(thicken=tf))
+        _wire(comp, handle_map={"F1": FakeFace()})
+        out = _payload(se.thicken_handler(faces=["F1"], thickness=3))
+        assert out["is_solid"] is True
+        assert "reading back isSolid=true" in out["note"]
+
+    def test_unreadable_is_solid_is_null_and_unverified_not_a_solid_claim(self):
+        # nothing read the flag, so the note may not narrate a SOLID wall and is_solid may not be
+        # a fabricated false either
+        tf = FakeThickenFeatures(result_bodies=[_UnreadableSolidBody("Wall1")])
+        comp = FakeComp(FakeFeatures(thicken=tf))
+        _wire(comp, handle_map={"F1": FakeFace()})
+        out = _payload(se.thicken_handler(faces=["F1"], thickness=3))
+        assert out["is_solid"] is None
+        assert "is_solid" in out["unverified"]
+        assert "UNVERIFIED" in out["note"]
+        assert "isSolid=true" not in out["note"]
+
+
+class TestOffsetUnreadableFaces:
+    def test_unreadable_feature_faces_publish_null_plus_an_unverified_marker(self):
+        # feature.faces would not read, so the zero-faces refusal never ran: publishing
+        # faces_offset 0 (and an empty body list, and is_solid false) fabricates the very reads
+        # that failed
+        of = FakeOffsetFeatures(result_bodies=[FakeBody("Copy1", is_solid=False)])  # no created faces
+        comp = FakeComp(FakeFeatures(offset=of))
+        _wire(comp, handle_map={"F1": FakeFace()})
+        out = _payload(se.offset_handler(faces=["F1"], distance=2))
+        assert out["faces_offset"] is None
+        assert out["result_bodies"] is None
+        assert out["is_solid"] is None
+        assert out["unverified"] == ["faces_offset", "result_bodies", "is_solid"]
+        assert "Not read back off the feature: faces_offset" in out["note"]
+
+    def test_readable_faces_carry_no_unverified_marker(self):
+        surf = FakeBody("Surf2", is_solid=False)
+        of = FakeOffsetFeatures(result_bodies=[surf], created_faces=[_face_on(surf)])
+        comp = FakeComp(FakeFeatures(offset=of))
+        _wire(comp, handle_map={"F1": FakeFace()})
+        out = _payload(se.offset_handler(faces=["F1"], distance=2))
+        assert out["faces_offset"] == 1
+        assert "unverified" not in out
+
+    def test_unreadable_is_solid_on_a_created_body_is_null_not_false(self):
+        wall = _UnreadableSolidBody("Copy1")
+        of = FakeOffsetFeatures(result_bodies=[wall], created_faces=[_face_on(wall)])
+        comp = FakeComp(FakeFeatures(offset=of))
+        _wire(comp, handle_map={"F1": FakeFace()})
+        out = _payload(se.offset_handler(faces=["F1"], distance=2))
+        assert out["is_solid"] is None
+        assert out["unverified"] == ["is_solid"]
+        assert "isSolid=false" not in out["note"]
+
+
+class TestTrimPhantomGuardDisclosure:
+    def test_a_committed_trim_discloses_what_the_guard_checked(self):
+        # the guard is ONE-SIDED: a foreign cell larger than every target cell but smaller than the
+        # target's whole area passes it. The payload must not let a caller read a committed trim as
+        # "no foreign cell was involved".
+        surf = FakeBRepBody("Surf1", is_solid=False)
+        surf.area = 16.0
+        rb = FakeBody("Surf1", is_solid=False)
+        rb.area = 12.0
+        tf = FakeTrimFeatures(result_bodies=[rb], cell_areas=(4.0, 12.0, 6.0))
+        comp = FakeComp(FakeFeatures(trim=tf))
+        _wire(comp, handle_map={"S": surf, "T": FakeFace()})
+        out = _payload(se.trim_handler(surface="S", trim_tool="T"))
+        assert out["phantom_cell_guard"] == "kept_area_not_above_target_area"
+        assert "smaller than" in out["note"] and "NOT detected" in out["note"]
+
+    def test_an_unreadable_target_area_says_the_guard_never_ran(self):
+        # surf.area does not read -> the gate's own condition is false, so nothing was checked
+        surf = FakeBRepBody("Surf1", is_solid=False)
+        rb = FakeBody("Surf1", is_solid=False)
+        rb.area = 12.0
+        tf = FakeTrimFeatures(result_bodies=[rb], cell_areas=(4.0, 12.0, 6.0))
+        comp = FakeComp(FakeFeatures(trim=tf))
+        _wire(comp, handle_map={"S": surf, "T": FakeFace()})
+        out = _payload(se.trim_handler(surface="S", trim_tool="T"))
+        assert out["phantom_cell_guard"] == "not_applied"
+        assert "NOT applied" in out["note"]
+
+
+class TestSolidVerdictOverBodyFacts:
+    """trim/extend collapse the shared per-body {name, is_solid} projection into one verdict. That
+    projection publishes True/False/None, so the collapse keeps the three apart - any() would fold
+    an unreadable flag into a confident 'a surface'."""
+
+    def test_the_verdict_keeps_the_three_states_apart(self):
+        assert se._solid_verdict([False, True]) is True        # any solid wins
+        assert se._solid_verdict([False, None]) is False       # a flag READ false is an answer
+        assert se._solid_verdict([None, None]) is None         # nothing read -> unknown
+        assert se._solid_verdict([]) is None                   # no body read -> unknown
+
+    def test_trim_publishes_a_null_is_solid_with_an_unverified_marker(self):
+        surf = FakeBRepBody("Surf1", is_solid=False)
+        surf.area = 16.0
+        rb = _UnreadableSolidBody("Surf1")
+        rb.area = 12.0
+        tf = FakeTrimFeatures(result_bodies=[rb], cell_areas=(4.0, 12.0, 6.0))
+        comp = FakeComp(FakeFeatures(trim=tf))
+        _wire(comp, handle_map={"S": surf, "T": FakeFace()})
+        out = _payload(se.trim_handler(surface="S", trim_tool="T"))
+        assert out["is_solid"] is None
+        assert out["unverified"] == ["is_solid"]
+        assert "Not read back off the feature: is_solid." in out["note"]
+
+    def test_trim_on_a_readable_flag_carries_no_marker(self):
+        # the boundary: a flag that READ false is an answer, so the disclosure must not fire on it.
+        surf = FakeBRepBody("Surf1", is_solid=False)
+        surf.area = 16.0
+        rb = FakeBody("Surf1", is_solid=False)
+        rb.area = 12.0
+        tf = FakeTrimFeatures(result_bodies=[rb], cell_areas=(4.0, 12.0, 6.0))
+        comp = FakeComp(FakeFeatures(trim=tf))
+        _wire(comp, handle_map={"S": surf, "T": FakeFace()})
+        out = _payload(se.trim_handler(surface="S", trim_tool="T"))
+        assert out["is_solid"] is False and "unverified" not in out
+
+    def test_extend_publishes_a_null_is_solid_beside_its_landed_distance(self):
+        body = _UnreadableSolidBody("Surf1")
+        xf = FakeExtendFeatures(result_bodies=[body], landed_cm=0.5)
+        comp = FakeComp(FakeFeatures(extend=xf))
+        _wire(comp, handle_map={"E1": FakeEdge(body=FakeBRepBody("Surf1", is_solid=False))})
+        out = _payload(se.extend_handler(edges=["E1"], distance=5))
+        assert out["is_solid"] is None
+        assert out["unverified"] == ["is_solid"]
+        assert out["distance"] == 5.0                 # the length still read back off the feature
 
 
 class TestThickenJoinDisclosure:

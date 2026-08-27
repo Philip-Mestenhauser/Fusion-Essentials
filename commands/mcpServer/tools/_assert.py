@@ -24,6 +24,7 @@ tools/CLAUDE.md for the authoring rule.
 import json
 
 import adsk.core
+import adsk.fusion
 
 from ._common import measured, safe
 
@@ -227,6 +228,54 @@ class DeliverablesExist(Postcondition):
         return f"{self.name}({self.list_key}|{self.single_key})"
 
 
+# Fusion joins the sentences of errorOrWarningMessage with this marker plus the feature's own name,
+# and REPEATS the whole run: one broken joint measured 684 characters carrying the same conflict
+# sentence four times over. A prefix of that blob lands mid-word and reads like a sentence Fusion
+# never finished, so every unhealthy message on the wire is condensed through the reader below.
+_COMPUTE_FAILED_MARKER = "Compute Failed"
+
+# Ceiling for one condensed message. The measured conflict sentence is 149 characters, so a real
+# Fusion failure crosses whole; the cap only bounds a message no one has seen yet.
+_MESSAGE_LIMIT = 240
+
+
+def compute_failure_message(raw, limit=_MESSAGE_LIMIT):
+    """The ONE readable sentence out of a Fusion compute-failure message: the text before the first
+    'Compute Failed' marker, whitespace-collapsed (the raw string carries embedded newlines), and
+    bounded - a cut is marked with a trailing ' ...' so a shortened message never reads as a complete
+    one. '' when there is nothing to say. The single home for this condensation: every surface that
+    republishes a failed compute reads through it, so none of them re-rolls a raw slice."""
+    text = " ".join((raw or "").split(_COMPUTE_FAILED_MARKER)[0].split())
+    if len(text) > limit:
+        return text[:limit].rstrip() + " ..."
+    return text
+
+
+def compute_failure(entity):
+    """('error' | 'warning', condensed message) when `entity` carries a FAILED compute state, else
+    None.
+
+    BOTH states count as failed: Fusion marks a warning-state feature 'Compute Failed' too, and
+    _common.timeline_health / assembly_get's broken_joints already class the two alike - measured, a
+    joint whose healthState read WARNING was the same joint assembly_get listed under broken_joints.
+    The STATE is what is read, never the message text. errorOrWarningMessage is read ONLY on the
+    unhealthy branch: the getter RAISES on some HEALTHY items (measured on a fresh AssemblyConstraint),
+    and a caught adsk error has measured rollback risk in a script context."""
+    if entity is None:
+        return None
+    states = adsk.fusion.FeatureHealthStates
+    hs = safe(lambda: entity.healthState)
+    if hs is None:
+        return None
+    if hs == safe(lambda: states.ErrorFeatureHealthState):
+        label = "error"
+    elif hs == safe(lambda: states.WarningFeatureHealthState):
+        label = "warning"
+    else:
+        return None
+    return label, compute_failure_message(safe(lambda: entity.errorOrWarningMessage))
+
+
 class FeatureHealthy(Postcondition):
     """After a feature-creating Edit: every timeline item the handler ADDED computed cleanly. A
     feature can be add()ed successfully - a truthy feature object returned - yet FAIL to compute
@@ -237,8 +286,6 @@ class FeatureHealthy(Postcondition):
 
     name = "feature_healthy"
     read_tool = "design_get"      # the default projection carries the timeline health rollup
-
-    _ERROR, _WARNING = 2, 1        # timeline healthState convention (same values design_get labels)
 
     def _timeline(self):
         from ._common import design
@@ -266,19 +313,18 @@ class FeatureHealthy(Postcondition):
             item = safe(lambda k=i: tl.item(k))
             if item is None:
                 continue
-            hs = safe(lambda: item.healthState)
             nm = safe(lambda: item.name) or "the created feature"
-            # errorOrWarningMessage is read ONLY inside the unhealthy branches: the getter RAISES
-            # on some HEALTHY items (measured on a fresh AssemblyConstraint), and a caught adsk
-            # error has measured rollback risk in some contexts - so a healthy walk never asks.
-            if hs == self._ERROR:
-                msg = safe(lambda: item.errorOrWarningMessage) or ""
-                return ((f"'{nm}' was created but FAILED to compute. " + msg).strip()[:300]
+            # The shared classifier reads the state and condenses the message - both branches below
+            # publish a WHOLE sentence, never a raw prefix of Fusion's repeating blob.
+            failure = compute_failure(item)
+            if failure is None:
+                continue
+            label, msg = failure
+            if label == "error":
+                return ((f"'{nm}' was created but FAILED to compute. " + msg).strip()
                         + " It remains in the timeline - fix its inputs or remove it with "
                           "design_delete_feature."), {}
-            if hs == self._WARNING:
-                msg = safe(lambda: item.errorOrWarningMessage) or ""
-                warnings.append((nm + ": " + msg).strip().rstrip(":")[:160])
+            warnings.append((nm + ": " + msg).strip().rstrip(":"))
         evidence = {"features_verified": count - before}
         if warnings:
             evidence["feature_warnings"] = warnings
@@ -398,9 +444,10 @@ class ChildGeometryMoved(Postcondition):
     its transform translation plus a WORLD-space point on its DEEPEST owned body (the nested child if
     one exists); after the mutation, an occurrence whose transform TRANSLATED while that geometry point
     stayed frozen is a reposition that did not propagate into the nested geometry - failed, naming the
-    direct-':origin'-snap workaround. A part that did not move (expected-zero) passes trivially, so this
-    is a no-op on the overwhelming majority of joints. Reads geometry back, never a status flag or the
-    transform itself. NEVER mutates - capture/verify are safe() reads."""
+    direct-':origin'-snap workaround. A part that did not move (expected-zero) passes, but its flag is
+    null rather than True: with nothing repositioned there is no move to verify, and
+    'repositioned_occurrences' names the parts that did move. Reads geometry back, never a status flag
+    or the transform itself. NEVER mutates - capture/verify are safe() reads."""
 
     name = "child_geometry_moved"
     read_tool = "find_geometry"          # re-read the GEOMETRY (a vertex/bbox), not assembly_get's transform
@@ -491,6 +538,7 @@ class ChildGeometryMoved(Postcondition):
             return "", {}                     # no occurrence carried a body to gate
         tol = self._MOVE_TOL_CM
         unverified = []
+        repositioned = []
         for occ, tr0, pt0 in before:
             tr1 = self._translation(occ)
             pt1 = self._deep_body_point(occ)
@@ -501,6 +549,8 @@ class ChildGeometryMoved(Postcondition):
                 continue
             parent_moved = self._dist(tr0, tr1)
             child_moved = self._dist(pt0, pt1)
+            if parent_moved > tol:
+                repositioned.append(safe(lambda occ=occ: occ.name) or "an unnamed occurrence")
             if parent_moved > tol and child_moved <= tol:
                 nm = safe(lambda: occ.name) or "a repositioned part"
                 return (f"the joint reported success and repositioned '{nm}' by "
@@ -520,7 +570,15 @@ class ChildGeometryMoved(Postcondition):
             # False and the payload names exactly which parts were never checked.
             return "", {"child_geometry_move_verified": False,
                         "child_geometry_unverified": unverified}
-        return "", {"child_geometry_move_verified": True}
+        if not repositioned:
+            # NOTHING was repositioned, so there was no move to verify. The flag is tri-state for
+            # exactly this: True claimed a VERIFIED MOVE on a call that moved nothing - measured on a
+            # joint that computed broken and left its part where it stood, whose payload then read
+            # created:true + child_geometry_move_verified:true. null is "no verdict", not "no move
+            # happened"; 'repositioned_occurrences' carries the fact the flag no longer overstates.
+            return "", {"child_geometry_move_verified": None, "repositioned_occurrences": []}
+        return "", {"child_geometry_move_verified": True,
+                    "repositioned_occurrences": repositioned}
 
 
 def _verification_failed(post, ex):

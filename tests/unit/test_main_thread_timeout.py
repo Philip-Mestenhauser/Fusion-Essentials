@@ -11,12 +11,16 @@ before running" (that invites a blind retry → double-apply). The invariants pi
     wait for completion instead of reporting a timeout.
   * _reap_stale() drops tasks orphaned by a dropped custom event (TTL-based), so _pending_tasks
     can't grow unbounded.
+  * post() inserts the pending entry BEFORE firing the event (so notify() can never arrive to a
+    missing task) and removes it again if the fire raises - a failed post returns None, leaving the
+    caller no task_id to cancel with, so the entry would otherwise sit until the TTL reap.
 
 The async server loop needs an event loop + Fusion custom events to exercise directly, so we test
 the pure/structural pieces these invariants turn on.
 """
 
 import importlib.util
+import json
 import os
 import sys
 import types
@@ -123,6 +127,73 @@ class TestReapStale:
         TM._pending_tasks["nostamp"] = {"callback": lambda d: None, "data": {}}
         assert TM._reap_stale(ttl=0.0) == 0
         assert "nostamp" in TM._pending_tasks
+
+
+class TestPostAndTheFireBoundary:
+    """post() owns the window between inserting the pending entry and the event that claims it."""
+
+    @pytest.fixture
+    def armed(self, tm, monkeypatch):
+        """A TaskManager that believes it is running, with the fired payloads captured."""
+        TM = tm.TaskManager
+        TM._pending_tasks.clear()
+        monkeypatch.setattr(TM, "_is_running", True)
+        monkeypatch.setattr(TM, "_custom_event", types.SimpleNamespace(eventId="evt-id"))
+        return TM
+
+    def _fake_app(self, tm, monkeypatch, fire):
+        monkeypatch.setattr(tm, "app", types.SimpleNamespace(fireCustomEvent=fire))
+
+    def test_a_failed_fire_leaves_no_pending_entry(self, tm, armed, monkeypatch):
+        def _boom(event_id, payload):
+            raise RuntimeError("Fusion refused the custom event")
+
+        self._fake_app(tm, monkeypatch, _boom)
+        assert armed.post("cmd", lambda data: None, {}) is None
+        assert armed.get_pending_task_count() == 0, (
+            "a post whose fire failed returned None - the caller has no task_id to cancel with, so "
+            "the entry it left behind is unreachable until the TTL reap")
+
+    def test_a_successful_fire_keeps_the_task_pending_for_notify(self, tm, armed, monkeypatch):
+        seen = {}
+
+        def _fire(event_id, payload):
+            # the entry must ALREADY exist here: notify() can run the moment the event fires.
+            seen["count_at_fire"] = len(armed._pending_tasks)
+            seen["payload"] = json.loads(payload)
+            seen["event_id"] = event_id
+
+        self._fake_app(tm, monkeypatch, _fire)
+        task_id = armed.post("cmd", lambda data: None, {"x": 1})
+        assert task_id
+        assert seen["count_at_fire"] == 1
+        assert seen["event_id"] == "evt-id"
+        assert seen["payload"] == {"task_id": task_id, "command": "cmd", "data": {"x": 1}}
+        assert armed.get_pending_task_count() == 1
+        assert armed._pending_tasks[task_id]["command"] == "cmd"
+
+    def test_a_failed_fire_does_not_disturb_another_poster(self, tm, armed, monkeypatch):
+        # the removal is keyed to THIS post's task_id, never a blanket clear of the table.
+        armed._pending_tasks["other"] = {"callback": lambda d: None, "data": {}}
+
+        def _boom(event_id, payload):
+            raise RuntimeError("Fusion refused the custom event")
+
+        self._fake_app(tm, monkeypatch, _boom)
+        assert armed.post("cmd", lambda data: None, {}) is None
+        assert list(armed._pending_tasks) == ["other"]
+
+    def test_post_refuses_a_non_callable_callback(self, tm, armed, monkeypatch):
+        self._fake_app(tm, monkeypatch, lambda event_id, payload: None)
+        assert armed.post("cmd", "not-callable", {}) is None
+        assert armed.get_pending_task_count() == 0
+
+    def test_post_when_not_running_returns_none(self, tm, monkeypatch):
+        TM = tm.TaskManager
+        TM._pending_tasks.clear()
+        monkeypatch.setattr(TM, "_is_running", False)
+        assert TM.post("cmd", lambda data: None, {}) is None
+        assert TM.get_pending_task_count() == 0
 
 
 # ── Item.enforce_timeout flag (no deep imports needed) ──────────────────────

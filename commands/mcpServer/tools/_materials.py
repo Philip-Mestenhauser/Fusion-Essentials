@@ -19,7 +19,7 @@ neither does alone.
 
 import adsk.core
 
-from ._common import error, iter_collection, safe
+from ._common import counted, error, iter_collection, read_flag, safe
 
 app = adsk.core.Application.get()
 
@@ -59,19 +59,25 @@ def libraries():
 
 
 def catalog_census():
-    """One row per loaded library: name, id, is_native, and BOTH entry counts. The counts come
-    straight off the collections and never walk their contents - a stock install's 6 libraries
-    census in 5 ms."""
+    """(rows, readable) - one row per loaded library: name, id, is_native, and BOTH entry counts.
+    The counts come straight off the collections and never walk their contents - a stock install's
+    6 libraries census in 5 ms.
+
+    A count that will not read is null, never 0: this census IS the caller's evidence of what a
+    library holds, and a 0 there reads as "this library is empty" - the one claim an unread count
+    cannot support. `readable` is False when the materialLibraries collection itself would not
+    read, which must never be published as "no libraries are loaded"."""
+    coll = safe(lambda: app.materialLibraries)
     rows = []
-    for lib in libraries():
+    for lib in iter_collection(coll):
         rows.append({
             "name": safe(lambda l=lib: l.name),
             "id": safe(lambda l=lib: l.id),
-            "is_native": safe(lambda l=lib: l.isNative),
-            "material_count": safe(lambda l=lib: l.materials.count, 0) or 0,
-            "appearance_count": safe(lambda l=lib: l.appearances.count, 0) or 0,
+            "is_native": read_flag(lambda l=lib: l.isNative),
+            "material_count": counted(lambda l=lib: l.materials.count),
+            "appearance_count": counted(lambda l=lib: l.appearances.count),
         })
-    return rows
+    return rows, coll is not None
 
 
 def find_library(name):
@@ -103,7 +109,9 @@ def _row(obj, name, scope, with_usage):
     usedBy follow-up."""
     row = {"name": name, "id": safe(lambda: obj.id), "scope": scope}
     if with_usage:
-        row["is_used"] = bool(safe(lambda: obj.isUsed, False))
+        # read_flag: null when the flag will not read. A coerced False says "nothing in this
+        # document uses this material", which is what a caller deletes or overwrites an entry on.
+        row["is_used"] = read_flag(lambda: obj.isUsed)
     return row
 
 
@@ -151,10 +159,17 @@ def browse(design, kind, library="", name_filter="", max_results=0):
         if lerr:
             return None, error(lerr)
         lib_name = safe(lambda: lib.name) or want_lib
-        rows, matched, truncated = entries(collection(lib, kind), lib_name, name_filter, cap)
+        # A collection that would not read yields no rows, and count 0 beside them would claim the
+        # library is empty - the marker is what separates "none" from "not read".
+        coll = collection(lib, kind)
+        rows, matched, truncated = entries(coll, lib_name, name_filter, cap)
         payload = {"kind": kind, "library": lib_name, "library_id": safe(lambda: lib.id),
+                   "readable": coll is not None,
                    "count": matched, "returned": len(rows), "entries": rows}
         note = [f"{len(rows)} of {matched} {kind} in '{lib_name}'."]
+        if coll is None:
+            note.append(f"The library's {kind} collection could not be read (readable=false), so "
+                        "count 0 here means UNKNOWN, not empty.")
         if truncated:
             payload["truncated"] = True
             note.append(f"Narrow with name_filter= or raise max_results= (cap {MAX_CAP}).")
@@ -163,18 +178,36 @@ def browse(design, kind, library="", name_filter="", max_results=0):
         payload["note"] = " ".join(note)
         return payload, None
 
-    doc_rows, doc_matched, doc_truncated = entries(
-        collection(design, kind), "document", name_filter, cap, True)
-    doc = {"count": doc_matched, "returned": len(doc_rows), "entries": doc_rows}
+    doc_coll = collection(design, kind)
+    doc_rows, doc_matched, doc_truncated = entries(doc_coll, "document", name_filter, cap, True)
+    doc = {"readable": doc_coll is not None,
+           "count": doc_matched, "returned": len(doc_rows), "entries": doc_rows}
     if doc_truncated:
         doc["truncated"] = True
-    payload = {"kind": kind, "document": doc, "libraries": catalog_census()}
-    payload["note"] = " ".join([
+    lib_rows, libs_readable = catalog_census()
+    payload = {"kind": kind, "document": doc, "libraries": lib_rows,
+               "libraries_readable": libs_readable,
+               # a library whose count would not read publishes null - counted here so the caller
+               # sees the census is partial without walking the rows for nulls.
+               "unread_libraries": sum(1 for r in lib_rows
+                                       if r["material_count"] is None
+                                       or r["appearance_count"] is None)}
+    note = [
         "Library rows are a census - counts only, no contents.",
         f"Pass library='<name>' for one library's {kind}; name_filter= narrows them and "
         f"max_results= sizes the page (default {DEFAULT_CAP}, cap {MAX_CAP}).",
         "Names repeat, and 'id' names the source asset rather than the entry - document rows "
         "copied from one base share an id, so name and id together identify an entry.",
-        _CONSUMERS[kind],
-    ])
+    ]
+    if not doc["readable"]:
+        note.append(f"The document's {kind} collection could not be read (document.readable=false), "
+                    "so its count 0 means UNKNOWN, not empty.")
+    if not libs_readable:
+        note.append("The material-library collection could not be read (libraries_readable=false) - "
+                    "an empty 'libraries' list here is UNKNOWN, not proof none are loaded.")
+    if payload["unread_libraries"]:
+        note.append(f"{payload['unread_libraries']} library row(s) carry a null count - that "
+                    "library's entries could not be counted (unread_libraries).")
+    note.append(_CONSUMERS[kind])
+    payload["note"] = " ".join(note)
     return payload, None

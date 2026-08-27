@@ -53,16 +53,20 @@ class _Curves:
 
 
 class _Created:
-    """A created sketch entity stand-in - the three fields a projection's result is read back
+    """A created sketch entity stand-in - the four fields a projection's result is read back
     through. is2D is False for a curve lying on a 3D face, True for one on the sketch x-y plane;
-    isReference marks a linked curve; referencedEntity is the source it is linked to, and reads null
-    for a non-parametric reference. `unreadable` drops a field entirely, the case a read-back must
-    not fold into either state."""
-    def __init__(self, is2d=True, referenced=None, is_reference=True, unreadable=()):
+    isReference marks a reference curve; isLinked is the projected curve's own link to its source,
+    the flag project2's isLinked argument asks for; referencedEntity is the source it is linked to,
+    and reads null for a non-parametric reference. `unreadable` drops a field entirely, the case a
+    read-back must not fold into either state."""
+    def __init__(self, is2d=True, referenced=None, is_reference=True, is_linked=True,
+                 unreadable=()):
         if "is2D" not in unreadable:
             self.is2D = is2d
         if "isReference" not in unreadable:
             self.isReference = is_reference
+        if "isLinked" not in unreadable:
+            self.isLinked = is_linked
         self.referencedEntity = referenced
 
 
@@ -73,13 +77,16 @@ class FakeSketch:
     ``creates`` drives project2; ``surface_creates`` drives projectToSurface; ``contributions`` maps a
     source entityToken to how many curves intersectWithSketchPlane makes for it (None = one each), so
     a non-crossing entity is modelled by giving it zero. ``ref_pattern`` sets isReference per created
-    curve, cycling (None = the field does not read). ``silent_growth`` grows the collections but
-    returns an EMPTY list - the case where the census is the only evidence."""
+    curve, cycling (None = the field does not read); ``link_pattern`` does the same for isLinked on
+    project2's result, and when it is omitted every created curve reports the linkage that was
+    asked for. ``silent_growth`` grows the collections but returns an EMPTY list - the case where
+    the census is the only evidence."""
 
     def __init__(self, name="Sketch1", creates=None, base=None, token=None,
                  surface_creates=None, surface_is2d=False, contributions=None,
                  surface_raises=None, intersect_raises=None, plane="XY", unreadable=(),
-                 is_reference=True, unreferenced=False, ref_pattern=None, silent_growth=False):
+                 is_reference=True, unreferenced=False, ref_pattern=None, silent_growth=False,
+                 link_pattern=None):
         self.name = name
         b = base or {}
         self.sketchCurves = _Curves(b.get("line", 0), b.get("arc", 0), b.get("circle", 0))
@@ -94,6 +101,7 @@ class FakeSketch:
         self.is_reference = is_reference
         self.unreferenced = unreferenced
         self.ref_pattern = ref_pattern
+        self.link_pattern = link_pattern
         self.silent_growth = silent_growth
         self.entityToken = token
         self.parentComponent = comp_with_axes()
@@ -119,8 +127,19 @@ class FakeSketch:
         return _Created(is2d=is2d, referenced=referenced, is_reference=flag, unreadable=unread)
 
     def project2(self, entities, is_linked):
+        """The created curves carry isLinked: by default what the call asked for, else the cycling
+        link_pattern (None = the flag does not read on that curve)."""
         self.projected_with = (list(entities), is_linked)
-        return [object() for _ in range(self._grow(self.creates))]
+        n = self._grow(self.creates)
+        if self.silent_growth:
+            return []
+        pattern = self.link_pattern if self.link_pattern is not None else (is_linked,)
+        made = []
+        for i in range(n):
+            flag = pattern[i % len(pattern)]
+            unread = tuple(self.unreadable) + (("isLinked",) if flag is None else ())
+            made.append(_Created(is_linked=bool(flag), unreadable=unread))
+        return made
 
     def projectToSurface(self, *args):
         # SWIG binds both the 3-argument and the 4-argument prototype; record exactly what arrived so
@@ -216,7 +235,8 @@ class TestProject:
     def test_link_true_flows_to_project2(self, call):
         out, sk = call(link=True)
         assert sk.projected_with[1] is True
-        assert out["linked"] is True
+        assert out["linked"] is True                 # read off the curves, not echoed
+        assert out["link_requested"] is True
 
     def test_link_false_flows_to_project2(self, call):
         out, sk = call(link=False)
@@ -228,6 +248,68 @@ class TestProject:
         out, sk = call(link=None)
         assert sk.projected_with[1] is True
         assert out["linked"] is True
+        assert out["link_requested"] is True
+
+
+class TestLinkReadBack:
+    """'linked' is the flag READ OFF the created curves, the way the file's other two actions read
+    isReference back. Echoing the request instead reports link=true on curves that landed unlinked
+    and reports a state on curves that answered nothing."""
+
+    def test_unreadable_islinked_publishes_null_not_the_request(self, call):
+        out, sk = call(link=True, sketch=FakeSketch(creates={"line": 2}, link_pattern=(None,)))
+        assert out["linked"] is None
+        assert out["link_requested"] is True
+        assert "isLinked did not read on any of the 2 created curves" in out["note"]
+        assert "link=true is the value REQUESTED" in out["note"]
+        assert "disagree" not in out["note"]
+
+    def test_one_unreadable_curve_among_readable_ones_publishes_null(self, call):
+        # the boundary: 2 of 3 read True, so there is no answer every created curve agrees on
+        out, sk = call(link=True,
+                       sketch=FakeSketch(creates={"line": 3}, link_pattern=(True, True, None)))
+        assert out["linked"] is None
+        # what was observed is one unread flag, so the note may not report a split result
+        assert "isLinked did not read on 1 of the 3 created curves" in out["note"]
+        assert "split result" not in out["note"]
+
+    def test_every_curve_readable_keeps_the_verdict(self, call):
+        # the one-more boundary on the other side: all three read True -> the claim is made
+        out, sk = call(link=True,
+                       sketch=FakeSketch(creates={"line": 3}, link_pattern=(True, True, True)))
+        assert out["linked"] is True
+        assert "read back as LINKED" in out["note"]
+
+    def test_curves_that_land_unlinked_against_the_request_are_disclosed(self, call):
+        out, sk = call(link=True, sketch=FakeSketch(creates={"line": 2}, link_pattern=(False,)))
+        assert out["linked"] is False and out["link_requested"] is True
+        assert "did not land the way the call asked for" in out["note"]
+
+    def test_a_split_result_publishes_null_and_is_reported_as_a_split(self, call):
+        out, sk = call(link=True,
+                       sketch=FakeSketch(creates={"line": 2}, link_pattern=(True, False)))
+        assert out["linked"] is None
+        assert "Of 2 created curves, 1 read back as LINKED and 1 did not - a split result" \
+            in out["note"]
+
+    def test_an_empty_return_claims_no_linkage(self, call):
+        # the census grew but the call returned nothing to read - zero reads support no claim
+        out, sk = call(link=False, sketch=FakeSketch(creates={"line": 2}, silent_growth=True))
+        assert out["created_count"] == 0
+        assert out["entity_refs"] == ["line:0", "line:1"]
+        assert out["linked"] is None
+        assert "Static copy" not in out["note"]
+
+    def test_an_empty_return_is_not_reported_as_curves_disagreeing(self, call):
+        # project2 returning nothing while the collections still grew reaches the same null verdict
+        # as a split or an unread flag - but there are no created curves to have read anything, so
+        # a note about what they read (or failed to read) states a finding nobody made
+        out, sk = call(link=True, sketch=FakeSketch(creates={"line": 2}, silent_growth=True))
+        assert out["linked"] is None
+        assert "project2 returned no entities to read" in out["note"]
+        assert "link=true is the value REQUESTED" in out["note"]
+        assert "created curves" not in out["note"]
+        assert "split result" not in out["note"]
 
     def test_refs_are_type_index_from_count_delta(self, call):
         # empty sketch -> new line:0, line:1, circle:0, point:0

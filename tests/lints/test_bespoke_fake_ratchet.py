@@ -41,6 +41,7 @@ Two different things move a number here, and they are kept apart:
 import ast
 import os
 
+import _corpus
 import live_api_facts
 
 TESTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # tests/lints/ -> tests/
@@ -177,6 +178,12 @@ _RAISED = {
         "the three spline SketchCurves collections (fitted / cv / fixed), each carrying its own "
         "per-kind shape properties - the conftest solid-body fakes model no sketch-curve "
         "collection at all"),
+    "test_entry_lifecycle.py": (
+        2,
+        "_FakeTaskManager and _FakeServerModule stand in for the add-in's OWN TaskManager and "
+        "mcp_server module, not for any adsk type - the ratchet's drift premise (re-rolled adsk "
+        "fakes go stale against the live API) does not apply, and conftest's Fusion-object-model "
+        "fakes have nothing to reuse for either"),
 }
 
 
@@ -205,16 +212,17 @@ def _raise_offenders(raised, baseline):
 def _all_classes(path):
     """[(name, lineno)] for EVERY class definition in the .py file at `path` - module-level and
     nested (inside functions, methods, or other classes) alike."""
-    tree = ast.parse(open(path, encoding="utf-8").read(), filename=str(path))
-    return [(node.name, node.lineno) for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
+    # the shared parse (_corpus) - the tests/unit tree several lints walk; this walk reads only
+    return [(node.name, node.lineno) for node in ast.walk(_corpus.tree(path))
+            if isinstance(node, ast.ClassDef)]
 
 
 def _conftest_fake_names():
     """Every top-level class name conftest.py defines - the shared fakes a local class must not
     shadow with its OWN redefinition (an import of the same name is not a definition, so it never
     trips this)."""
-    tree = ast.parse(open(CONFTEST_PATH, encoding="utf-8").read(), filename=CONFTEST_PATH)
-    return {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
+    return {node.name for node in _corpus.tree(CONFTEST_PATH).body
+            if isinstance(node, ast.ClassDef)}
 
 
 def _adsk_class_names():

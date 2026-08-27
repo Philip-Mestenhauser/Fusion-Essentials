@@ -106,6 +106,23 @@ class TestStateReporting:
         out = _payload(sut.handler(handle="latest"))
         assert out["handle"] == "up2" and out["source_file"] == "b.step"
 
+    def test_latest_names_the_newest_STILL_TRACKED_upload(self):
+        # up2 was minted, reported complete and popped, while up1 is still transferring. 'latest'
+        # read off the mint counter names up2 - a handle nothing holds - and errors instead of
+        # reporting the upload that IS running. The tracked dict is the source of truth.
+        data_ops._UPLOADS["up1"] = _entry(_future(0), source_file="a.step")
+        data_ops._UPLOAD_HANDLE_SEQ[0] = 2
+        out = _payload(sut.handler(handle="latest"))
+        assert out["handle"] == "up1" and out["source_file"] == "a.step"
+
+    def test_a_bare_call_also_reports_the_newest_tracked_upload(self):
+        # the no-arguments route takes the same 'latest' branch - the counter is not its truth either
+        data_ops._UPLOADS["up1"] = _entry(_future(0), source_file="a.step")
+        data_ops._UPLOADS["up2"] = _entry(_future(0), source_file="b.step")
+        data_ops._UPLOAD_HANDLE_SEQ[0] = 7
+        out = _payload(sut.handler())
+        assert out["handle"] == "up2" and out["source_file"] == "b.step"
+
     def test_file_name_lookup_finds_most_recent_match_and_folder_disambiguates(self):
         # two uploads of the same filename to different folders - a bare file_name lookup picks the
         # MOST RECENT; adding 'folder' disambiguates to the earlier one.

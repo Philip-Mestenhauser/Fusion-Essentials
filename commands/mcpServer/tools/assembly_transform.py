@@ -246,11 +246,22 @@ def move_handler(occurrence: str = "", dx: float = 0.0, dy: float = 0.0, dz: flo
     # grounded/jointed occurrence snaps back), and the payload must report the ACTUAL pose.
     after = safe(lambda: occ.transform2)
     after_arr = safe(lambda: tuple(after.asArray())) if after is not None else None
-    if (bool(dx or dy or dz or rotate_deg or multi)
-            and before_arr and after_arr and after_arr == before_arr):
+    requested = bool(dx or dy or dz or rotate_deg or multi)
+    if (requested and before_arr is not None and after_arr is not None
+            and after_arr == before_arr):
         return error(f"Move was accepted but '{safe(lambda: occ.name)}' reads an unchanged "
                      "transform - it did not move. A grounded/jointed occurrence can snap back: "
                      "free it (assembly_ground false) or pose it through its joint (joint_drive).")
+    # An UNREADABLE transform is not a confirmation. With either side of the compare missing nothing
+    # here read the move back, so publishing moved:true (with a null position beside it) would assert
+    # an effect no read took - the same shape ground_handler refuses when its flag will not read.
+    if requested and (before_arr is None or after_arr is None):
+        which = ("before and after" if before_arr is None and after_arr is None
+                 else "before" if before_arr is None else "after")
+        return error(f"'{safe(lambda: occ.name)}' was moved but its transform could not be read "
+                     f"{which} the change, so the move is UNCONFIRMED - nothing here confirms the "
+                     "occurrence actually moved, and it may have snapped back. Re-read the position "
+                     "with assembly_get (occurrence origin) or model_inspect.")
     # Report the pose back in the caller's 'units' (translation.* is Fusion-internal cm; k is cm-per-unit).
     position = safe(lambda: {"x": round(after.translation.x / k, 4),
                              "y": round(after.translation.y / k, 4),

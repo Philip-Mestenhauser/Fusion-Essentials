@@ -70,6 +70,11 @@ def handler(project: str = "", project_id: str = "", folder: str = "", recursive
             out["note"] += (" The name was matched inside a CAPPED listing - files beyond the cap "
                             "were never compared, so another file there could share this name. Pass "
                             "the lineage URN (or a 'folder') to be exact.")
+        if out.get("name_scope_folders_unreadable"):
+            out["note"] += (f" {out['name_scope_folders_unreadable']} folder(s) could not be READ "
+                            "while resolving that name, so they were never searched - a file of the "
+                            "same name could be sitting in one, which would make this match the "
+                            "wrong file. Pass the lineage URN to be exact.")
         return ok(out)
 
     # ── scoped to a project ──────────────────────────────────────────────────

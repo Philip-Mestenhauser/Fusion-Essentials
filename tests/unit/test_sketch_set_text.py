@@ -298,6 +298,89 @@ class TestEditHandler:
         assert res["isError"] is True and "Provide 'text'" in res["message"]
 
 
+class _StubbornParam:
+    """A textParameter that ACCEPTS an expression assignment and keeps the string it already holds
+    - the platform's 'success that changed nothing', which only the read-back compare catches."""
+    def __init__(self, expr):
+        self._expr = expr
+
+    @property
+    def expression(self):
+        return self._expr
+
+    @expression.setter
+    def expression(self, value):
+        pass
+
+
+class _UnreadableParam(_StubbornParam):
+    """A textParameter whose expression will not read back at all."""
+    @property
+    def expression(self):
+        raise RuntimeError("4 : An API Object refers to a deleted Object")
+
+    @expression.setter
+    def expression(self, value):
+        self._expr = value
+
+
+class TestLandedString:
+    """The edit reads the expression back, so it must COMPARE it to the string that was asked for -
+    the way the font two lines above it is compared. Read and not compared, a write the platform
+    swallowed is reported as 'set': true with the unchanged string sitting in 'after'."""
+
+    def test_a_string_that_does_not_land_is_an_error_not_a_false_ok(self):
+        sk = FakeSketch("S", [FakeText("'old'")])
+        sk.sketchTexts.item(0).textParameter = _StubbornParam("'old'")
+        _install([FakeComp("Root", [sk])])
+        res = st.handler(text="New")
+        assert res["isError"] is True
+        assert "did not take" in res["message"]
+        assert "reads back 'old'" in res["message"] and "not 'New'" in res["message"]
+
+    def test_the_landed_string_matching_the_request_stays_a_success(self):
+        # the boundary partner: an expression that reads back as the requested string passes
+        _install([FakeComp("Root", [FakeSketch("S", [FakeText("'old'")])])])
+        out = _payload(st.handler(text="New"))
+        assert out["changed"][0]["after"] == "New"
+
+    def test_an_escaped_quote_is_not_read_as_a_mismatch(self):
+        # the expression keeps an inner quote ESCAPED exactly as it was written, so comparing the
+        # unquoted read alone would refuse every apostrophe the caller sends
+        sk = FakeSketch("S", [FakeText("'old'")])
+        _install([FakeComp("Root", [sk])])
+        out = _payload(st.handler(text="it's"))
+        assert out["changed_count"] == 1
+        assert sk.sketchTexts.item(0).textParameter.expression == st._quote("it's")
+
+    def test_an_unreadable_expression_is_not_convicted_as_a_mismatch(self):
+        # an expression that will not read is evidence of neither a landed nor a dropped write
+        sk = FakeSketch("S", [FakeText("'old'")])
+        sk.sketchTexts.item(0).textParameter = _UnreadableParam("'old'")
+        _install([FakeComp("Root", [sk])])
+        out = _payload(st.handler(text="New"))
+        assert out["changed_count"] == 1
+        assert out["changed"][0]["after"] is None
+
+    def test_a_mismatch_names_the_texts_this_call_already_changed(self):
+        sk = FakeSketch("S", [FakeText("'a'"), FakeText("'b'")])
+        sk.sketchTexts.item(1).textParameter = _StubbornParam("'b'")
+        _install([FakeComp("Root", [sk])])
+        res = st.handler(text="New")
+        assert res["isError"] is True
+        assert "1 sketch text(s) earlier in this call were already updated ('S')" in res["message"]
+        assert sk.sketchTexts.item(0).textParameter.expression == st._quote("New")
+
+    def test_a_mismatch_after_a_font_change_reports_the_font_that_landed(self):
+        sk = FakeSketch("S", [FakeText("'old'", font="Arial")])
+        sk.sketchTexts.item(0).textParameter = _StubbornParam("'old'")
+        _install([FakeComp("Root", [sk])])
+        res = st.handler(text="New", font_name="Consolas")
+        assert res["isError"] is True
+        assert "did not take" in res["message"]
+        assert "font WAS changed to 'Consolas'" in res["message"]
+
+
 # ── create path ─────────────────────────────────────────────────────────────
 
 class FakeTextInput:

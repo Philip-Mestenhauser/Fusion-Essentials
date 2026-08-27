@@ -117,6 +117,13 @@ def handler(file: str = "", project: str = "", folder: str = "", target_folder: 
     if (meta or {}).get("scope_truncated"):
         note += (" The file was matched by NAME inside a capped listing - files beyond the cap were "
                  "never compared, so confirm 'name'/'file_id' is the file you meant.")
+    if (meta or {}).get("folders_unreadable"):
+        # The file that MOVED is whichever one the name resolved to. A folder that never opened
+        # could hold another file of that name, so the caller has to check it moved the right one -
+        # and this is the last moment the move is cheap to reverse.
+        note += (f" {meta['folders_unreadable']} folder(s) could not be READ while resolving that "
+                 "name, so they were never searched - a file of the same name could be sitting in "
+                 "one. Confirm 'file_id' is the file you meant to move.")
 
     return ok({
         "moved": True,

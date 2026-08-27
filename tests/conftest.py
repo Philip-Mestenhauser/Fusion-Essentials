@@ -19,6 +19,7 @@ touches. Extend them as you add tests for more tools — that is the intended
 workflow.
 """
 
+import contextlib
 import importlib.util
 import json
 import os
@@ -32,12 +33,29 @@ import pytest
 # mocks below are populated from these values - measurement, not hand-typed claims.
 import live_api_facts as _api_facts
 
-# The tool loader spec-loads source files directly; Python would write
-# __pycache__/*.pyc next to the real source. That bytecode is keyed by mtime, so
-# rapidly editing-then-restoring a tool (as a regression check does) can leave a
-# stale .pyc that masks the restored source. Suppress bytecode writing for the
-# whole test process so the cache can never go out of sync with the source.
-sys.dont_write_bytecode = True
+
+@contextlib.contextmanager
+def _no_bytecode():
+    """Suppress .pyc writing for the source THIS harness loads (see load_tool/load_mcp_server).
+
+    The loaders below spec-load repo source directly, so Python would write __pycache__/*.pyc next
+    to it. That bytecode is validated against the source's mtime at ONE-SECOND resolution plus its
+    size, so editing-then-restoring a tool inside one second - what a break/confirm-red/restore
+    regression check does - can leave a .pyc that masks the restored source.
+
+    The suppression is scoped rather than process-wide because pytest gates its assertion-rewrite
+    cache on the SAME flag (_pytest/assertion/rewrite.py: `write = not sys.dont_write_bytecode`),
+    and a process-wide True makes every test module re-parse and re-rewrite on every run. Nothing
+    pytest rewrites is imported inside this block: it wraps the harness's own imports of the
+    adsk-free server packages and its spec-loads of tool/server modules.
+    """
+    saved = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        yield
+    finally:
+        sys.dont_write_bytecode = saved
+
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 COMMANDS_DIR = os.path.join(REPO_ROOT, "commands")
@@ -165,36 +183,41 @@ def load_tool(module_name):
     stubbing ``mcpServer.tools`` as an empty package, then spec-loading the
     single requested module so its ``from ..mcp_primitives ...`` relative
     imports resolve.
+
+    Everything it loads runs under ``_no_bytecode()``: the tool module itself, the ``from . import
+    _common``/``_inputs`` chain its body triggers, and the mcp_primitives packages.
     """
-    if COMMANDS_DIR not in sys.path:
-        sys.path.insert(0, COMMANDS_DIR)
+    with _no_bytecode():
+        if COMMANDS_DIR not in sys.path:
+            sys.path.insert(0, COMMANDS_DIR)
 
-    import mcpServer                  # noqa: F401  empty __init__, cheap
-    import mcpServer.mcp_primitives   # noqa: F401  adsk-free, cheap
+        import mcpServer                  # noqa: F401  empty __init__, cheap
+        import mcpServer.mcp_primitives   # noqa: F401  adsk-free, cheap
 
-    if "mcpServer.tools" not in sys.modules:
-        tools_pkg = types.ModuleType("mcpServer.tools")
-        tools_pkg.__path__ = [TOOLS_DIR]
-        tools_pkg.__package__ = "mcpServer"
-        sys.modules["mcpServer.tools"] = tools_pkg
+        if "mcpServer.tools" not in sys.modules:
+            tools_pkg = types.ModuleType("mcpServer.tools")
+            tools_pkg.__path__ = [TOOLS_DIR]
+            tools_pkg.__package__ = "mcpServer"
+            sys.modules["mcpServer.tools"] = tools_pkg
 
-    full_name = f"mcpServer.tools.{module_name}"
-    # Reuse an already-loaded module instead of re-execing it into a NEW object. This is essential for
-    # the shared substrate (_common/_inputs): tools do `from . import _common`, binding whatever
-    # _common object is in sys.modules at load time. Re-execing _common would create a SECOND _common —
-    # a tool loaded earlier keeps pointing at the first while the conftest snapshot/restore (and a
-    # later test's patch) act on the second, so a patch or restore made through one is invisible
-    # through the other. One canonical module per name keeps the seam single-identity; each test wires
-    # its own per-test state onto that one object (install()/monkeypatch), so reusing it is safe.
-    if full_name in sys.modules:
-        return sys.modules[full_name]
-    spec = importlib.util.spec_from_file_location(
-        full_name, os.path.join(TOOLS_DIR, f"{module_name}.py")
-    )
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[full_name] = module
-    spec.loader.exec_module(module)
-    return module
+        full_name = f"mcpServer.tools.{module_name}"
+        # Reuse an already-loaded module instead of re-execing it into a NEW object. This is essential
+        # for the shared substrate (_common/_inputs): tools do `from . import _common`, binding whatever
+        # _common object is in sys.modules at load time. Re-execing _common would create a SECOND
+        # _common — a tool loaded earlier keeps pointing at the first while the conftest
+        # snapshot/restore (and a later test's patch) act on the second, so a patch or restore made
+        # through one is invisible through the other. One canonical module per name keeps the seam
+        # single-identity; each test wires its own per-test state onto that one object
+        # (install()/monkeypatch), so reusing it is safe.
+        if full_name in sys.modules:
+            return sys.modules[full_name]
+        spec = importlib.util.spec_from_file_location(
+            full_name, os.path.join(TOOLS_DIR, f"{module_name}.py")
+        )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[full_name] = module
+        spec.loader.exec_module(module)
+        return module
 
 
 # Synthetic package root under which the REAL server modules are importable in tests.
@@ -229,48 +252,52 @@ def load_mcp_server():
     (the server only calls log/handle_error), and aliases the ALREADY-LOADED canonical
     ``mcpServer.mcp_primitives`` modules into the chain - the SAME module objects, so
     ``isinstance(item, Item)`` checks inside the server hold for Items built by tool modules.
-    Idempotent: returns the cached module on repeat calls.
+    Idempotent: returns the cached module on repeat calls. Loads under ``_no_bytecode()``, like
+    load_tool - the server modules are spec-loaded repo source too.
     """
     full_name = f"{_SERVER_PKG_ROOT}.commands.mcpServer.server.mcp_server"
     if full_name in sys.modules:
         return sys.modules[full_name]
 
-    install_mock_adsk()
-    if COMMANDS_DIR not in sys.path:
-        sys.path.insert(0, COMMANDS_DIR)
-    importlib.import_module("mcpServer.mcp_primitives")
+    with _no_bytecode():
+        install_mock_adsk()
+        if COMMANDS_DIR not in sys.path:
+            sys.path.insert(0, COMMANDS_DIR)
+        importlib.import_module("mcpServer.mcp_primitives")
 
-    def _pkg(name):
-        mod = types.ModuleType(name)
-        mod.__path__ = []
-        sys.modules[name] = mod
-        return mod
+        def _pkg(name):
+            mod = types.ModuleType(name)
+            mod.__path__ = []
+            sys.modules[name] = mod
+            return mod
 
-    _pkg(_SERVER_PKG_ROOT)
-    lib_pkg = _pkg(f"{_SERVER_PKG_ROOT}.lib")
-    futil_stub = types.ModuleType(f"{_SERVER_PKG_ROOT}.lib.fusion360utils")
-    futil_stub.log = lambda *a, **k: None
-    futil_stub.handle_error = lambda *a, **k: None
-    lib_pkg.fusion360utils = futil_stub
-    sys.modules[futil_stub.__name__] = futil_stub
-    _pkg(f"{_SERVER_PKG_ROOT}.commands")
-    _pkg(f"{_SERVER_PKG_ROOT}.commands.mcpServer")
-    _pkg(f"{_SERVER_PKG_ROOT}.commands.mcpServer.server")
+        _pkg(_SERVER_PKG_ROOT)
+        lib_pkg = _pkg(f"{_SERVER_PKG_ROOT}.lib")
+        futil_stub = types.ModuleType(f"{_SERVER_PKG_ROOT}.lib.fusion360utils")
+        futil_stub.log = lambda *a, **k: None
+        futil_stub.handle_error = lambda *a, **k: None
+        lib_pkg.fusion360utils = futil_stub
+        sys.modules[futil_stub.__name__] = futil_stub
+        _pkg(f"{_SERVER_PKG_ROOT}.commands")
+        _pkg(f"{_SERVER_PKG_ROOT}.commands.mcpServer")
+        _pkg(f"{_SERVER_PKG_ROOT}.commands.mcpServer.server")
 
-    for suffix in ("", ".item", ".tool", ".annotations", ".registry"):
-        src = "mcpServer.mcp_primitives" + suffix
-        importlib.import_module(src)
-        sys.modules[f"{_SERVER_PKG_ROOT}.commands.mcpServer.mcp_primitives{suffix}"] = sys.modules[src]
-    importlib.import_module("mcpServer.version")
-    sys.modules[f"{_SERVER_PKG_ROOT}.commands.mcpServer.version"] = sys.modules["mcpServer.version"]
+        for suffix in ("", ".item", ".tool", ".annotations", ".registry"):
+            src = "mcpServer.mcp_primitives" + suffix
+            importlib.import_module(src)
+            sys.modules[f"{_SERVER_PKG_ROOT}.commands.mcpServer.mcp_primitives{suffix}"] = \
+                sys.modules[src]
+        importlib.import_module("mcpServer.version")
+        sys.modules[f"{_SERVER_PKG_ROOT}.commands.mcpServer.version"] = sys.modules["mcpServer.version"]
 
-    server_dir = os.path.join(COMMANDS_DIR, "mcpServer", "server")
-    for mod_name in ("task_manager", "mcp_server"):
-        fq = f"{_SERVER_PKG_ROOT}.commands.mcpServer.server.{mod_name}"
-        spec = importlib.util.spec_from_file_location(fq, os.path.join(server_dir, f"{mod_name}.py"))
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[fq] = module
-        spec.loader.exec_module(module)
+        server_dir = os.path.join(COMMANDS_DIR, "mcpServer", "server")
+        for mod_name in ("task_manager", "mcp_server"):
+            fq = f"{_SERVER_PKG_ROOT}.commands.mcpServer.server.{mod_name}"
+            spec = importlib.util.spec_from_file_location(
+                fq, os.path.join(server_dir, f"{mod_name}.py"))
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[fq] = module
+            spec.loader.exec_module(module)
     return sys.modules[full_name]
 
 

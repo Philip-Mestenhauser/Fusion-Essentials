@@ -372,6 +372,75 @@ class TestCapturePosition:
         assert out["snapshot_count"] == 2
         assert "null" not in out["note"]
 
+    def test_a_capture_that_REVERTS_the_pending_move_bites(self):
+        # The cardinal sin this gate exists for: snapshots.add() answers with a snapshot object AND
+        # an advanced count while the moved part snaps back to where it stood before the move, so the
+        # marker records the PRE-move pose. Neither the object nor the count says anything about the
+        # POSITION - only the parts' own transforms do.
+        moved = FakeOcc("PartB:1", pos=(2.5, 0.0, 0.0))     # cm: the pending, moved pose
+        _, snaps, _, _ = _install([], pending=True)
+        ja.app.activeProduct.rootComponent.allOccurrences = [moved]
+        real_add = snaps.add
+
+        def reverting_add():
+            snap = real_add()
+            moved.pos = (0.0, 0.0, 0.0)                     # the platform throws the move away
+            return snap
+
+        snaps.add = reverting_add
+        res = ja.capture_position_handler(action="capture")
+        assert res["isError"] is True
+        assert "REVERTED" in res["message"]
+        assert "PartB:1" in res["message"]
+        assert "25.0 mm" in res["message"]                  # the snap-back, in mm
+        assert "action='delete'" in res["message"]          # the stale marker is named for removal
+
+    def test_a_capture_that_HOLDS_the_pose_is_confirmed(self):
+        # the same shape with the pose held: ok, and 'pose_held' says the transforms were re-read
+        held = FakeOcc("PartB:1", pos=(2.5, 0.0, 0.0))
+        _install([], pending=True)
+        ja.app.activeProduct.rootComponent.allOccurrences = [held]
+        out = _payload(ja.capture_position_handler(action="capture"))
+        assert out["captured"] is True
+        assert out["pose_held"] is True
+
+    def test_a_pose_that_cannot_be_read_is_null_not_a_confident_yes(self):
+        # the occurrence exists but its transform will not read, so whether the marker holds the
+        # pending pose is UNKNOWN - published as null with the reason, never as a confirmed hold.
+        blind = FakeOcc("PartB:1", pos=None)
+        _install([], pending=True)
+        ja.app.activeProduct.rootComponent.allOccurrences = [blind]
+        out = _payload(ja.capture_position_handler(action="capture"))
+        assert out["captured"] is True
+        assert out["pose_held"] is None
+        assert "'pose_held' is null" in out["note"]
+
+    # The snap-back tolerance is an EXACT boundary: _MOVE_TOL_CM is joint-solver noise, so a shift OF
+    # exactly that much is not a revert (strictly greater wins) while a hair more is.
+    def _capture_after_shift(self, shift_cm):
+        occ = FakeOcc("PartB:1", pos=(0.0, 0.0, 0.0))
+        _, snaps, _, _ = _install([], pending=True)
+        ja.app.activeProduct.rootComponent.allOccurrences = [occ]
+        real_add = snaps.add
+
+        def shifting_add():
+            snap = real_add()
+            occ.pos = (shift_cm, 0.0, 0.0)
+            return snap
+
+        snaps.add = shifting_add
+        return ja.capture_position_handler(action="capture")
+
+    def test_a_snap_back_of_exactly_the_tolerance_is_not_a_revert(self):
+        res = self._capture_after_shift(ja._MOVE_TOL_CM)
+        assert res["isError"] is False, res
+        assert json.loads(res["content"][0]["text"])["captured"] is True
+
+    def test_a_snap_back_just_over_the_tolerance_is_a_revert(self):
+        res = self._capture_after_shift(ja._MOVE_TOL_CM * 1.001)
+        assert res["isError"] is True
+        assert "REVERTED" in res["message"]
+
     def test_capture_with_nothing_pending_errors(self):
         _install([], pending=False)
         res = ja.capture_position_handler(action="capture")

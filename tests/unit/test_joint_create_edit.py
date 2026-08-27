@@ -641,6 +641,67 @@ def _payload2(result):
     return json.loads(result["content"][0]["text"])
 
 
+class TestCreatedJointHealth:
+    """A joint can be ADDED yet fail to COMPUTE. joints.add() hands back a truthy Joint while Fusion
+    marks it 'Compute Failed' and assembly_get counts it under broken_joints - measured on a joint to
+    the child of a ground_to_parent occurrence, which moved NOTHING and still published created:true.
+    The create reads the state back, so a broken joint is a refusal, never a plain success."""
+
+    def _with_health(self, monkeypatch, joint_health=None, timeline_health=None, msg=""):
+        _d, joints_coll = _install_create(monkeypatch)
+        made = SimpleNamespace(name="Joint1", jointMotion=None, errorOrWarningMessage=msg)
+        if joint_health is not None:
+            made.healthState = joint_health
+        if timeline_health is not None:
+            made.timelineObject = SimpleNamespace(healthState=timeline_health,
+                                                  errorOrWarningMessage=msg)
+        joints_coll.add = lambda ji, m=made: m
+        return joints_coll
+
+    def test_a_joint_that_computed_BROKEN_is_refused_not_created_true(self, monkeypatch):
+        # The measured shape: healthState reads WARNING (Fusion's 'Compute Failed'), so the create
+        # refuses instead of publishing created:true.
+        self._with_health(monkeypatch, joint_health=1,
+                          msg="Can't resolve some component positions because there are conflicts "
+                              "with assembly relationships in the design.Compute FailedJoint1")
+        res = joint.handler(occurrence_one="JO_A", occurrence_two="JO_B")
+        assert res["isError"] is True
+        assert "FAILED to compute" in res["message"]
+        assert "conflicts with assembly relationships" in res["message"]
+        assert "Compute Failed" not in res["message"]     # the repeating blob is condensed
+        assert "design_delete_feature" in res["message"]  # the joint REMAINS - say how to remove it
+        assert "ground_to_parent" in res["message"]       # and name the measured cause
+
+    def test_an_ERROR_health_state_is_refused_too(self, monkeypatch):
+        self._with_health(monkeypatch, joint_health=2, msg="over-constrained")
+        res = joint.handler(occurrence_one="JO_A", occurrence_two="JO_B")
+        assert res["isError"] is True
+        assert "FAILED to compute" in res["message"]
+
+    def test_a_failure_visible_only_on_the_TIMELINE_item_is_still_caught(self, monkeypatch):
+        # The measured failure showed on BOTH the joint and its timeline item; a build where only
+        # the timeline item carries it must not slip through.
+        self._with_health(monkeypatch, joint_health=0, timeline_health=2, msg="broken")
+        res = joint.handler(occurrence_one="JO_A", occurrence_two="JO_B")
+        assert res["isError"] is True
+        assert "FAILED to compute" in res["message"]
+
+    def test_a_HEALTHY_joint_is_created_and_says_so(self, monkeypatch):
+        self._with_health(monkeypatch, joint_health=0)
+        out = _payload2(joint.handler(occurrence_one="JO_A", occurrence_two="JO_B"))
+        assert out["created"] is True
+        assert out["healthy"] is True
+
+    def test_an_UNREADABLE_health_state_is_null_not_a_coerced_healthy(self, monkeypatch):
+        # Neither the joint nor a timeline item answers healthState: whether it solved is UNKNOWN.
+        # A True here would be a clean bill of health nobody read.
+        self._with_health(monkeypatch)
+        out = _payload2(joint.handler(occurrence_one="JO_A", occurrence_two="JO_B"))
+        assert out["created"] is True
+        assert out["healthy"] is None
+        assert "'healthy' is null" in out["note"]
+
+
 class TestCreateHandler:
     def test_requires_both_inputs(self, monkeypatch):
         _install_create(monkeypatch)

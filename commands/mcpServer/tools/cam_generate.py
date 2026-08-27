@@ -330,20 +330,28 @@ def _op_tally(ops) -> dict:
     the setups_errored/programs_errored/samples shape a document-level poll carries (always 0/None
     here: a single setup/operation target has no setup- or program-level error of its own to report)."""
     t = _cam_common.op_state_tally(ops)
+    # warnings + warning_sample travel with the tally: they are what stops this SCOPED verdict
+    # reading plainly ready over a job the document-level one would demote.
     return {"valid": t["valid"], "out_of_date": t["out_of_date"], "errored": t["errored"],
-            "generating": t["generating"], "suppressed": t["suppressed"], "total": t["total"],
+            "generating": t["generating"], "suppressed": t["suppressed"],
+            "warnings": t["warnings"], "total": t["total"],
             "active": t["active"], "setups_errored": 0, "programs_errored": 0,
-            "samples": {"op": t["op_sample"], "setup": None, "program": None}}
+            "samples": {"op": t["op_sample"], "setup": None, "program": None,
+                        "warning": t["warning_sample"]}}
 
 
 def _scope_readiness(t: dict) -> str:
-    """The scoped readiness verdict for an _op_tally (mirrors the op-level branch of live_readiness)."""
+    """The scoped readiness verdict for an _op_tally. The postable sentence itself is
+    _cam_common.ready_verdict - the ONE builder live_readiness and cam_get's summary also end on -
+    so a scoped poll cannot say 'ready to post' over warnings the document poll would name."""
     active_total = t["valid"] + t["out_of_date"] + t["errored"]
     if t["errored"]:
         return (f"BLOCKER: {t['errored']} operation(s) have errors - "
                 "the job will not post until fixed.")
     if active_total and t["valid"] == active_total:
-        return f"{t['valid']} of {active_total} active ops valid - ready to post."
+        return _cam_common.ready_verdict(f"{t['valid']} of {active_total} active ops valid",
+                                         t.get("warnings", 0),
+                                         (t.get("samples") or {}).get("warning"))
     if active_total:
         return f"{t['valid']} of {active_total} active ops valid - run cam_generate to finish the rest."
     return "no active operations to assess."

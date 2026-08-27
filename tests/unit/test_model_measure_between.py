@@ -109,6 +109,41 @@ class TestAngle:
         assert "distance" not in out
 
 
+class TestEdgeTargets:
+    """An edge handle reaches the measurement AS THE EDGE. Without 'edge' in the kind's allow=,
+    TargetRef walks a BRepEdge to its owning BODY - the tool would measure something the caller
+    never named while its own angle guidance points at edge handles."""
+
+    def test_both_target_kinds_accept_an_edge(self):
+        assert "edge" in mb._A.allow and "edge" in mb._B.allow
+
+    def test_an_edge_is_not_widened_to_its_owning_body(self, monkeypatch):
+        # the kind resolves an edge to (entity, 'edge'); _owning_body would hand back the body it
+        # belongs to, and the payload would then label and measure that body instead.
+        edge = type("E", (), {"name": "Edge1"})()
+        mb._A.resolve = lambda raw: ((edge, "edge"), None)
+        mb._B.resolve = lambda raw: ((type("E", (), {"name": "B"})(), "face"), None)
+        seen = []
+
+        class _Mgr:
+            def measureMinimumDistance(self, x, y):
+                seen.append(x)
+                return _Res(2.0, _Pt(0, 0, 0), _Pt(2, 0, 0))
+        monkeypatch.setattr(mb.app, "measureManager", _Mgr())
+        out = _payload(mb.handler(a="h1", b="h2"))
+        assert seen == [edge]
+        assert out["a"] == "edge 'Edge1'"
+
+    def test_the_description_names_the_edge_handle_it_accepts(self):
+        # the claim and the kind agree: a description offering an edge handle is backed by the
+        # allow= above, which is what refuses every kind it does not list
+        assert "face/edge/body" in mb.TOOL_DESCRIPTION
+
+    def test_a_kind_outside_the_allow_set_is_still_refused(self):
+        # the allow= widening is exactly one kind wide - a mesh handle stays refused
+        assert "mesh" not in mb._A.allow and "design" not in mb._A.allow
+
+
 class TestGuards:
     def test_unknown_mode_errors(self):
         _resolve_both()

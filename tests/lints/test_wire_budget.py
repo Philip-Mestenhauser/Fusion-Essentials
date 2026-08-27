@@ -40,7 +40,7 @@ _TOOL_WEIGHTS = {
     "cam_apply_template": 1645,
     "cam_compare_operations": 804,
     "cam_create_machine": 1359,   # under the fleet P40 - add and go
-    "cam_create_operation": 1642,
+    "cam_create_operation": 1727,   # +85: the ORDER (create -> cam_select_geometry -> generate) and the reason generate now defaults to FALSE - measured, generating a selection-driven strategy before its geometry is selected does not fail, it lands an op reading valid with a warning and no toolpath, which a caller cannot recover from the result; paid for by dropping the 'apply an operation half of CAM' framing
     "cam_create_setup": 1762,   # the default-models claim reworded to the walk's truth (surface bodies ride along - measured accepted by Setup.models)
     "cam_delete": 894,
     "cam_edit_folders": 1442,
@@ -134,14 +134,14 @@ _TOOL_WEIGHTS = {
     "model_construction": 4492,   # three modes the API has no other route to (a plane rotated about a curved face's own axis, a plane pinned through a vertex, a plane/point placed along a path proportionally, absolutely, or to an object) plus the distance_type/to_object inputs they need; +78 for the measured chaining rule (BRep chaining follows TANGENT CONTINUITY - a sharp corner stops it, open vs closed decides nothing - so the count, not the promise, is the answer)
     "model_create_component": 2244,
     "model_draft": 2057,
-    "model_emboss": 1458,   # + the sketch-TEXT profile route ('text:<i>' / '<sketch>/text:<i>'), the only path from a nameplate sketch to an engraving
-    "model_extrude": 3245,   # +104: the sketch-TEXT profile form ('text:<i>'), the only route from a text-only sketch to a solid - the index/handle vocabulary alone reads it as an index and dead-ends in the surface branch
+    "model_emboss": 1470,   # +12 schema bytes, no prose: ProfileRef's 'profile' now publishes type ["string","object"], the two forms it has always resolved - a schema-validating client was barred from the {sketch, profile_index} selector the description offers. Same 12 bytes model_sweep's hand-declared profile has always paid. + the sketch-TEXT profile route ('text:<i>' / '<sketch>/text:<i>'), the only path from a nameplate sketch to an engraving
+    "model_extrude": 3397,   # +104: the sketch-TEXT profile form ('text:<i>'), the only route from a text-only sketch to a solid - the index/handle vocabulary alone reads it as an index and dead-ends in the surface branch. +152: target_bodies documents the occurrence-qualified '<occurrence>/<body>' form - Fusion auto-names every component's first body 'Body1', so a cross-component scoped cut is UNADDRESSABLE by bare name (it resolves ambiguously or to the wrong component's body), and the resolver has always accepted the qualified spelling the payload echoes back
     "model_fillet": 3412,   # variable-radius, chord-length and rule fillet, with the rule radius/topology read back
     "model_hole": 4467,   # placement modes (center/on_edge/plane_offsets), points_space sketch/world (the sketch-on-face frame is unknowable a priori - world lets find_geometry positions drive holes directly), modeled thread, tip_angle, thread_type
     "model_inspect": 1713,   # per_body names every occurrence in the subtree and discloses that a parent row aggregates its children - the read that stops a nested body folding invisibly into its parent
     "model_pipe": 2949,   # +86 for the measured chaining rule (tangent continuity, sharp corner stops it). over P40: the path-fraction extents (both ends), section type/size, the order-coupled hollow wall verified off the feature, and the open-path refusal contract; nearest path-driven peer model_sweep
-    "model_loft": 1959,   # + is_closed (the one measured-real loft option; alignment measured a no-op on profiles and dropped) + the ordering sentence relocated from the ProfileRefList kind note
-    "model_measure_between": 1137,
+    "model_loft": 1971,   # +12 schema bytes, no prose: ProfileRefList's items now publish type ["string","object"], the two element forms it has always resolved. + is_closed (the one measured-real loft option; alignment measured a no-op on profiles and dropped) + the ordering sentence relocated from the ProfileRefList kind note
+    "model_measure_between": 1154,   # +17: 'edge' joins the two target kinds, so both input contracts and the description name the edge handle. The measurement API is what an edge handle was always headed for - without the kind listing it, TargetRef silently substituted the edge's owning BODY and the tool measured an entity the caller never named
     "model_measure_relation": 3128,
     "model_mirror": 1364,   # + the features input (parametric feature mirroring by exact name@index, beside bodies)
     "model_move": 2667,   # four move modes (translate/along-entity/rotate/point-to-point); the faces input carries its own refusal; + the conditional-'feature' PRODUCES clause (a direct design creates no timeline feature to name)

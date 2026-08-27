@@ -25,7 +25,12 @@ app = adsk.core.Application.get()
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
 MAP_BLURB = ("_active_identity - the ONE active-document identity read ((name, urn), either may be "
              "None), the same read the write guard stamps 'acted_on' from; _cam_common's generation "
-             "registry and cam_get_status use it to bind a launch to its document")
+             "registry and cam_get_status use it to bind a launch to its document + "
+             "one_open_document (the ONE test for whether several open-document matches are really "
+             "ONE document: an assembly loads its references as real Documents, so a tab and its own "
+             "dependency instance repeat the same name AND lineage URN - identical ids resolve, "
+             "distinct or unreadable ids are a true ambiguity; the write guard and "
+             "doc_lifecycle's open-document resolver share it)")
 
 
 def _active_identity():
@@ -143,6 +148,23 @@ def _collision_refusal(expect, candidates):
             % (len(candidates), expect)}
 
 
+def one_open_document(document_ids):
+    """True when these open-document ids (dataFile.id values) are ONE document, not an ambiguity.
+
+    MEASURED: an assembly loads its references as REAL Documents, so a visible tab and the
+    dependency instance a referencing document loaded both sit in app.documents carrying the same
+    name AND the same lineage URN - one document listed twice (closing the referencing document
+    makes the second entry vanish). Ids that DIFFER are genuinely different candidates (two versions
+    of one lineage, one carrying a '?version=' suffix), and an id that did not read proves nothing -
+    both answer False.
+
+    Every resolver that must pick ONE open document out of several matches asks exactly this, so it
+    is asked in one place: _document_refusal below and doc_lifecycle._find_open_document both call
+    it rather than re-deciding what a repeated document looks like."""
+    ids = list(document_ids)
+    return bool(ids) and all(ids) and len(set(ids)) == 1
+
+
 def _document_refusal(expect, name, urn):
     """None = proceed; a refusal dict = do NOT write. A URN match is exact and sufficient. A bare NAME
     is safe ONLY when it is session-unique: if more than one open document shares that name, the active
@@ -158,12 +180,12 @@ def _document_refusal(expect, name, urn):
     # e matches the ACTIVE doc's NAME - a match only if that name is unique across the open session.
     same = [d for d in _open_documents() if d.get("name") == e]
     if len(same) > 1:
-        # An assembly loads its references as real Documents, so a visible tab and its own
-        # dependency instance share the name AND the lineage URN - that is ONE document, not an
-        # ambiguity. When every candidate carries the active doc's URN, the write lands exactly
-        # where the agent meant; only genuinely different candidates refuse.
-        urns = {d.get("document_id") for d in same}
-        if urns == {urn} and urn:
+        # One document listed twice (tab + dependency instance) is not an ambiguity - see
+        # one_open_document above. When every candidate is that one document AND it is the active
+        # one, the write lands exactly where the agent meant; only genuinely different candidates
+        # refuse.
+        urns = [d.get("document_id") for d in same]
+        if one_open_document(urns) and urn in urns:
             return None
         return _collision_refusal(e, same)
     return None
@@ -192,8 +214,9 @@ def _stamp(result, key, name, urn):
 
 
 def _stamp_acted_on(result, name, urn):
-    """Inject acted_on={name,document_id} into a successful JSON result (an error wasn't an action
-    on a document)."""
+    """Fill acted_on={name,document_id} into a successful JSON result (an error wasn't an action on a
+    document). FILL-IF-ABSENT: a handler that already published its own acted_on is AUTHORITATIVE and
+    keeps it - see wrap()."""
     return _stamp(result, "acted_on", name, urn)
 
 
@@ -226,6 +249,11 @@ def wrap(handler):
         result = handler(**kwargs)
         # Re-read identity AFTER the handler runs: a doc-switching write (doc_new/doc_open/
         # doc_activate) makes a DIFFERENT document active, and acted_on must report that one.
+        # The post-call ACTIVE document is only the right answer for a write that targets the active
+        # document, so the stamp is FILL-IF-ABSENT: a handler whose write can target a NON-active
+        # document publishes acted_on itself and keeps it. Measured: doc_close closing an INACTIVE
+        # document leaves the active one untouched, and closing the ACTIVE one hands the foreground
+        # to a fallback document - the active read names an unclosed document either way.
         name, urn = _active_identity()
         return _stamp_acted_on(result, name, urn)
     guarded.__name__ = getattr(handler, "__name__", "guarded")

@@ -139,9 +139,22 @@ class TestCmToUnit:
 
 
 class TestPtxyz:
+    """A published POSITION is a measurement, and the tri-state is per POINT: every consumer
+    navigates to / measures from the point as a whole, so one component that will not read makes
+    the point unknown rather than a coordinate two thirds measured and one third invented."""
+
     class _Pt:
         def __init__(self, x, y, z):
             self.x, self.y, self.z = x, y, z
+
+    class _BlindZ:
+        """A Point3D whose z read RAISES - a proxy that stopped answering one component."""
+        x = 1.0
+        y = 2.0
+
+        @property
+        def z(self):
+            raise RuntimeError("point component unavailable")
 
     def test_scales_and_rounds(self):
         p = self._Pt(1.0, 2.0, 3.0)
@@ -149,6 +162,24 @@ class TestPtxyz:
 
     def test_none_point_is_none(self):
         assert common.ptxyz(None, 10.0) is None
+
+    def test_one_unreadable_component_makes_the_whole_point_null(self):
+        # safe(read, 0.0) here publishes {x:10, y:20, z:0} - a real-looking coordinate on the XY
+        # plane that nothing measured.
+        assert common.ptxyz(self._BlindZ(), 10.0) is None
+
+    def test_a_genuine_zero_coordinate_is_still_an_answer(self):
+        # the boundary the null must not swallow: the origin is a position, not a failed read.
+        assert common.ptxyz(self._Pt(0.0, 0.0, 0.0), 10.0) == {"x": 0.0, "y": 0.0, "z": 0.0}
+
+    def test_a_non_numeric_component_is_null_not_a_crash(self):
+        # an unmodelled adsk property hands back a truthy child object; multiplying it by the unit
+        # factor would raise inside the read (or worse, publish whatever it multiplies to).
+        assert common.ptxyz(self._Pt(1.0, object(), 3.0), 10.0) is None
+
+    def test_a_boolean_component_is_not_a_coordinate(self):
+        # bool is an int subclass: True would otherwise scale to a 10.0 mm coordinate.
+        assert common.ptxyz(self._Pt(1.0, 2.0, True), 10.0) is None
 
 
 class _Coll:
@@ -190,6 +221,35 @@ class TestResultBodies:
             def bodies(self):
                 raise RuntimeError("gone")
         assert common.result_bodies(Bad()) == []
+
+
+class TestBodyFacts:
+    """The per-body {name, is_solid} projection every feature result is published with. is_solid is
+    a published FLAG, so it holds the read_flag contract: True / False / None, never a coerced
+    False - a body whose flag will not read is not an open surface."""
+
+    class _Body:
+        def __init__(self, name, is_solid):
+            self.name, self.isSolid = name, is_solid
+
+    class _BlindBody:
+        name = "Mystery"
+
+        @property
+        def isSolid(self):
+            raise RuntimeError("3 : flag unavailable")
+
+    def test_flags_pass_through(self):
+        rows = common.body_facts([self._Body("Solid1", True), self._Body("Srf1", False)])
+        assert rows == [{"name": "Solid1", "is_solid": True},
+                        {"name": "Srf1", "is_solid": False}]
+
+    def test_an_unreadable_flag_is_null_not_false(self):
+        rows = common.body_facts([self._BlindBody()])
+        assert rows[0]["is_solid"] is None and rows[0]["name"] == "Mystery"
+
+    def test_no_bodies_is_an_empty_list(self):
+        assert common.body_facts([]) == []
 
 
 class TestTargetSketch:

@@ -267,9 +267,14 @@ def body_facts(bodies):
     """[{name, is_solid}] read LIVE per body - the per-body projection a feature result reports its
     bodies with. Kept beside result_bodies because the two are always used together: the walk gets
     the fresh references, this reads what a caller publishes about each one. A caller that needs a
-    single verdict takes all()/any() over is_solid rather than collapsing the list here, so a MIXED
-    result can still name the body that is not solid."""
-    return [{"name": safe(lambda b=b: b.name), "is_solid": bool(safe(lambda b=b: b.isSolid))}
+    single verdict collapses the list itself rather than here, so a MIXED result can still name the
+    body that is not solid.
+
+    is_solid goes through ``read_flag``: True / False / None, never a coerced False - a body whose
+    flag will not read is not an open surface, and a plain ``all()``/``any()`` over these values
+    would fold that unknown into a confident verdict. The verdict a caller builds must keep the
+    three states apart (see surface_edit's any-True / else-False-if-any-False / else-None)."""
+    return [{"name": safe(lambda b=b: b.name), "is_solid": read_flag(lambda b=b: b.isSolid)}
             for b in bodies]
 
 
@@ -670,13 +675,20 @@ def scale(units: str):
 
 
 def ptxyz(p, f):
-    """{x, y, z} for a Point3D ``p``, each scaled by ``f`` and rounded to 6 decimals; None if ``p``
-    is None."""
+    """{x, y, z} for a Point3D ``p``, each scaled by ``f`` and rounded to 6 decimals - or None when
+    ``p`` is None or ANY of its three components will not read.
+
+    The whole-POINT counterpart of ``measured``: a point is one answer, so a 0.0 stand-in for a
+    component that did not read publishes the world origin (or a point one third invented) as a
+    measured coordinate, and 0 is an answer here - "on the origin", "on the XY plane". The tri-state
+    is per point rather than per component because every consumer navigates to / measures from the
+    point as a whole."""
     if p is None:
         return None
-    return {"x": round(safe(lambda: p.x, 0.0) * f, 6),
-            "y": round(safe(lambda: p.y, 0.0) * f, 6),
-            "z": round(safe(lambda: p.z, 0.0) * f, 6)}
+    x, y, z = safe(lambda: p.x), safe(lambda: p.y), safe(lambda: p.z)
+    if not all(isinstance(c, (int, float)) and not isinstance(c, bool) for c in (x, y, z)):
+        return None
+    return {"x": round(x * f, 6), "y": round(y * f, 6), "z": round(z * f, 6)}
 
 
 # ── measurement (the one measureMinimumDistance core both measure tools share) ────────────────────

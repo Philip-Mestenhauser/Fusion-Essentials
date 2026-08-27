@@ -118,7 +118,16 @@ class TaskManager:
                 cls._pending_tasks[task_id] = {'command': command, 'callback': callback,
                                                'data': data, 'created': time.monotonic()}
             event_data = {'task_id': task_id, 'command': command, 'data': data}
-            app.fireCustomEvent(cls._custom_event.eventId, json.dumps(event_data))
+            try:
+                app.fireCustomEvent(cls._custom_event.eventId, json.dumps(event_data))
+            except Exception:
+                # The entry is inserted BEFORE the fire so notify() can never arrive to a missing
+                # task. If the fire itself fails, no event will ever claim that entry, and post()
+                # returns None - so the caller has no task_id to cancel() with. Remove it here or it
+                # lingers until the TTL reap.
+                with cls._tasks_lock:
+                    cls._pending_tasks.pop(task_id, None)
+                raise
             return task_id
         except Exception:
             futil.handle_error('TaskManager.post')

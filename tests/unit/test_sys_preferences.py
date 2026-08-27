@@ -127,6 +127,14 @@ def _wire_enum(monkeypatch, group, member, family=Choices):
     monkeypatch.setitem(get.GROUP_MEMBERS, group, members)
 
 
+def _wire_minimum(monkeypatch, group, member, minimum):
+    """Give one member a documented minimum - the table's own column, wired per test so the bound is
+    exercised on whichever value TYPE the test is about."""
+    members = dict(get.GROUP_MEMBERS[group])
+    members[member] = members[member]._replace(minimum=minimum)
+    monkeypatch.setitem(get.GROUP_MEMBERS, group, members)
+
+
 @pytest.fixture
 def prefs(monkeypatch):
     """The default application: readable everywhere, nothing frozen."""
@@ -472,6 +480,67 @@ class TestDocumentedMinimum:
     def test_a_value_at_the_minimum_is_accepted(self, prefs):
         assert _payload(setp.handler(member="compatibility.recoverSaveScanFrequency",
                                      value=1))["now"] == 1
+
+
+class TestNonFiniteValues:
+    """json.loads accepts NaN / Infinity / -Infinity, so either reaches 'value'. Neither is a number
+    a preference can hold, this write has no undo, and int() of one RAISES - so both are refused
+    before the assignment, naming the value that arrived."""
+
+    @pytest.fixture
+    def float_member(self, monkeypatch):
+        """A member whose CURRENT value reads as a float, so the write takes the float branch."""
+        p = _make_prefs(values={"graphics": {"hiddenEdgeDimming": 0.5}})
+        monkeypatch.setattr(setp, "app", types.SimpleNamespace(preferences=p))
+        return p
+
+    @pytest.mark.parametrize("value,named", [(float("nan"), "nan"), (float("inf"), "inf"),
+                                             (float("-inf"), "-inf")])
+    def test_a_non_finite_float_member_write_is_refused_naming_the_value(self, float_member,
+                                                                         value, named):
+        msg = _message(setp.handler(member="graphics.hiddenEdgeDimming", value=value))
+        assert named in msg.lower() and "finite" in msg
+        assert "Nothing was written" in msg
+        assert float_member.graphicsPreferences.hiddenEdgeDimming == 0.5
+
+    @pytest.mark.parametrize("value,named", [(float("nan"), "nan"), (float("inf"), "inf")])
+    def test_a_non_finite_integer_member_write_is_refused_rather_than_crashing(self, prefs,
+                                                                              value, named):
+        # int(nan) raises ValueError, so without the guard the fractional-value check itself is
+        # where the call dies - an exception out of the handler, not a refusal.
+        msg = _message(setp.handler(member="display.generalPrecision", value=value))
+        assert named in msg.lower() and "finite" in msg
+        assert prefs.unitAndValuePreferences.generalPrecision == 3
+
+    def test_a_finite_float_is_still_accepted(self, float_member):
+        assert _payload(setp.handler(member="graphics.hiddenEdgeDimming", value=0.25))["now"] == 0.25
+
+
+class TestFloatMinimum:
+    """The documented minimum is a property of the MEMBER, not of the int branch: a float member
+    carrying one is bounded by exactly the same refusal."""
+
+    @pytest.fixture
+    def dimming(self, monkeypatch):
+        p = _make_prefs(values={"graphics": {"hiddenEdgeDimming": 0.5}})
+        monkeypatch.setattr(setp, "app", types.SimpleNamespace(preferences=p))
+        _wire_minimum(monkeypatch, "graphics", "hiddenEdgeDimming", 1.0)
+        return p
+
+    def test_a_float_below_the_minimum_is_refused_before_assignment(self, dimming):
+        msg = _message(setp.handler(member="graphics.hiddenEdgeDimming", value=0.999))
+        assert "at least 1.0" in msg and "0.999" in msg
+        assert "Nothing was written" in msg
+        assert dimming.graphicsPreferences.hiddenEdgeDimming == 0.5
+
+    def test_a_float_at_the_minimum_is_accepted(self, dimming):
+        # the boundary is >=, not >: the minimum is itself a legal value
+        assert _payload(setp.handler(member="graphics.hiddenEdgeDimming", value=1.0))["now"] == 1.0
+
+    def test_a_float_member_without_a_minimum_is_unbounded(self, monkeypatch):
+        p = _make_prefs(values={"graphics": {"hiddenEdgeDimming": 0.5}})
+        monkeypatch.setattr(setp, "app", types.SimpleNamespace(preferences=p))
+        assert _payload(setp.handler(member="graphics.hiddenEdgeDimming", value=-4.0))["now"] == -4.0
 
 
 class TestWriteGuards:

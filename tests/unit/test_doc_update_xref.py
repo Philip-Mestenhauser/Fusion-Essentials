@@ -22,7 +22,8 @@ class FakeRef:
     .version recomputes isOutOfDate against dataFile.latestVersionNumber, mirroring the real API's
     documented "setting this property will cause ... to update" effect."""
     def __init__(self, name, is_out_of_date=True, version=1, latest_returns=True,
-                 latest_raises=None, stays_stale=False, latest_version=None, setter_raises=None):
+                 latest_raises=None, stays_stale=False, latest_version=None, setter_raises=None,
+                 file_id=None):
         self._name = name
         self._is_out_of_date = is_out_of_date
         self._version = version
@@ -31,7 +32,10 @@ class FakeRef:
         self._stays_stale = stays_stale       # the platform lie: True returned, ref still stale
         self._setter_raises = setter_raises   # confirmed live: the setter can ALSO refuse a derive
         lv = version + 1 if latest_version is None else latest_version
-        self.dataFile = type("DF", (), {"name": name, "latestVersionNumber": lv})()
+        # file_id is the source DataFile's LINEAGE id - what says two rows point at one file. The
+        # default None models the id that will not read.
+        self.dataFile = type("DF", (), {"name": name, "latestVersionNumber": lv,
+                                        "id": file_id})()
 
     @property
     def version(self):
@@ -203,6 +207,62 @@ class TestUpdateBehavior:
         out = _payload(xr.handler(name="Alpha"))
         assert out["updated_count"] == 1
         assert out["updated"][0]["name"] == "Alpha"
+
+
+class TestNameFilterIdentity:
+    """'name' is a source document's display NAME, so it is matched case-INSENSITIVELY (the caller
+    types what a read printed) - and a name is not an identity: Fusion allows same-name files in
+    different folders. Every row of the matched FILE refreshes together; a name covering two
+    DIFFERENT files is refused instead of refreshing both."""
+
+    def test_match_is_case_insensitive(self):
+        _install([FakeRef("PartA", is_out_of_date=True, file_id="urn:a")])
+        out = _payload(xr.handler(name="parta"))
+        assert out["updated_count"] == 1
+        assert out["updated"][0]["name"] == "PartA"
+
+    def test_every_row_of_one_file_refreshes_together(self):
+        # an occurrence xref and a derive off the SAME source document: one file, two rows.
+        xref = FakeRef("Src", is_out_of_date=True, file_id="urn:one")
+        dref = FakeRef("Src", is_out_of_date=True, file_id="urn:one")
+        _install(refs=[xref], derive_feats=[FakeDeriveFeat("Derive1", dref)])
+        out = _payload(xr.handler(name="Src"))
+        assert out["updated_count"] == 2
+        assert {row["kind"] for row in out["updated"]} == {"xref", "derive"}
+
+    def test_two_distinct_files_sharing_a_name_are_refused(self):
+        # THE boundary: 2 distinct source files behind one name - refuse, refreshing NEITHER.
+        a = FakeRef("Bolt", is_out_of_date=True, file_id="urn:a")
+        b = FakeRef("Bolt", is_out_of_date=True, file_id="urn:b")
+        _install([a, b])
+        res = xr.handler(name="Bolt")
+        assert res["isError"] is True
+        assert "2 DIFFERENT source files" in res["message"]
+        assert "urn:a" in res["message"] and "urn:b" in res["message"]
+        assert "Omit 'name'" in res["message"]          # the escape that refreshes everything
+        assert a.version == 1 and b.version == 1       # neither was touched
+        assert a.isOutOfDate is True and b.isOutOfDate is True
+
+    def test_unreadable_source_ids_cannot_prove_one_file(self):
+        # two rows whose file ids do not read cannot be SHOWN to be one file, so the ambiguity is
+        # reported rather than merged on an assumption the reads do not support.
+        _install([FakeRef("Bolt", is_out_of_date=True), FakeRef("Bolt", is_out_of_date=True)])
+        res = xr.handler(name="Bolt")
+        assert res["isError"] is True
+        assert "source file id unreadable" in res["message"]
+
+    def test_a_single_matched_file_still_refreshes(self):
+        # the other side of the boundary: 1 distinct file, however many rows point at it.
+        _install([FakeRef("Bolt", is_out_of_date=True, file_id="urn:a"),
+                  FakeRef("Nut", is_out_of_date=True, file_id="urn:b")])
+        out = _payload(xr.handler(name="Bolt"))
+        assert out["updated_count"] == 1
+        assert out["updated"][0]["name"] == "Bolt"
+
+    def test_a_case_variant_miss_still_lists_the_available_names(self):
+        _install([FakeRef("PartA", file_id="urn:a")])
+        res = xr.handler(name="Ghost")
+        assert res["isError"] is True and "PartA" in res["message"]
 
 
 # ── derive links (Document.documentReferences can miss these entirely - confirmed live) ───────────

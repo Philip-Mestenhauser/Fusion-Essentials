@@ -9,6 +9,8 @@ is read-first-or-refuse, assign, read back, and the payload publishes 'previous'
 member tier table lives in sys_get_preferences; this tool enforces it.
 """
 
+import math
+
 import adsk.core
 
 from ..mcp_primitives.tool import Tool
@@ -27,6 +29,12 @@ RETURNS = [
 ]
 
 _UNREAD = object()      # a getter that RAISED - distinct from a member that reads None
+
+# json.loads accepts NaN / Infinity / -Infinity, so either can arrive as 'value'. Neither is a
+# number a preference can hold, int() of one raises outright, and this write has no undo - so both
+# are refused before the assignment, naming the value that arrived.
+_NOT_FINITE = ("'{name}' takes a finite number; got {value}. NaN and Infinity are not values a "
+               "preference can hold.")
 
 
 def _resolve_member(path):
@@ -105,6 +113,8 @@ def _coerce(member, previous, value):
         # is-prefixed and holds an enum int, not a bool.
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return None, f"'{member.name}' takes an integer; got {type(value).__name__} {value!r}."
+        if not math.isfinite(value):
+            return None, _NOT_FINITE.format(name=member.name, value=value)
         if isinstance(value, float) and value != int(value):
             return None, f"'{member.name}' takes an integer; got {value!r}."
         # Measured: an int OUTSIDE the member's enum is accepted and stored (materialDisplayUnit=99
@@ -120,6 +130,11 @@ def _coerce(member, previous, value):
     if isinstance(previous, float):
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return None, f"'{member.name}' takes a number; got {type(value).__name__} {value!r}."
+        if not math.isfinite(value):
+            return None, _NOT_FINITE.format(name=member.name, value=value)
+        if member.minimum is not None and float(value) < member.minimum:
+            return None, (f"'{member.name}' takes a value of at least {member.minimum}; "
+                          f"got {float(value)}.")
         return float(value), ""
     if isinstance(previous, str):
         if not isinstance(value, str):

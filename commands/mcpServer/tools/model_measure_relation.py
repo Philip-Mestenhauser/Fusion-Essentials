@@ -69,10 +69,16 @@ _TOL = _inputs.Distance("tolerance", allow_zero=True, allow_negative=False, desc
 # ── pure vector math (plain tuples in cm; no adsk objects, so it is unit-testable) ────────────────
 
 def _v(p):
-    """A Point3D/Vector3D as an (x, y, z) tuple, or None."""
+    """A Point3D/Vector3D as an (x, y, z) tuple - None when the object is absent OR any one of its
+    three components will not read. A point whose components do not all read is no position at all:
+    a 0.0 stand-in publishes the world origin as a measured coordinate, and every consumer below
+    compares this tuple against a tolerance, so one fabricated component decides a verdict."""
     if p is None:
         return None
-    return (safe(lambda: p.x, 0.0), safe(lambda: p.y, 0.0), safe(lambda: p.z, 0.0))
+    xyz = (safe(lambda: p.x), safe(lambda: p.y), safe(lambda: p.z))
+    if not all(isinstance(c, (int, float)) and not isinstance(c, bool) for c in xyz):
+        return None
+    return xyz
 
 
 def _sub(a, b):
@@ -242,9 +248,16 @@ def _fmt(x):
 def _rel_coaxial(ea, ka, eb, kb, tol_cm, tol_deg, inv, units):
     oa, da, la = _axis(ea, ka)
     ob, db, lb = _axis(eb, kb)
-    if da is None or db is None:
+    # The LABEL says the entity was the right KIND; the numbers say whether it could be read. Split
+    # so a cylindrical face whose axis will not read is reported as unreadable, not as "not a
+    # cylinder" - and never scored against a tolerance on fabricated coordinates.
+    if la is None or lb is None:
         return _needs("coaxial", "an axis on EACH entity (a cylindrical face)",
-                      ea, ka, eb, kb, da is None, db is None)
+                      ea, ka, eb, kb, la is None, lb is None)
+    if oa is None or da is None or ob is None or db is None:
+        return error("coaxial: an axis origin or direction did not read as three numbers, so the "
+                     "axis lines cannot be compared - the relation is UNKNOWN, not a pass. Re-run "
+                     "find_geometry for fresh handles and retry.")
     ang = _line_angle_deg(da, db)
     offs = _line_offset(oa, da, ob, db)
     if ang is None or offs is None:
@@ -273,9 +286,12 @@ def _rel_coaxial(ea, ka, eb, kb, tol_cm, tol_deg, inv, units):
 def _rel_parallel(ea, ka, eb, kb, tol_cm, tol_deg, inv, units):
     da, la = _direction(ea, ka)
     db, lb = _direction(eb, kb)
-    if da is None or db is None:
+    if la is None or lb is None:
         return _needs("parallel", "a direction on EACH entity (a cylinder axis or a planar-face normal)",
-                      ea, ka, eb, kb, da is None, db is None)
+                      ea, ka, eb, kb, la is None, lb is None)
+    if da is None or db is None:
+        return error("parallel: a direction did not read as three numbers, so the directions "
+                     "cannot be compared - the relation is UNKNOWN, not a pass.")
     ang = _line_angle_deg(da, db)
     if ang is None:
         return error("parallel: a direction was degenerate (zero-length); cannot compare.")
@@ -294,9 +310,12 @@ def _rel_parallel(ea, ka, eb, kb, tol_cm, tol_deg, inv, units):
 def _rel_perpendicular(ea, ka, eb, kb, tol_cm, tol_deg, inv, units):
     da, la = _direction(ea, ka)
     db, lb = _direction(eb, kb)
-    if da is None or db is None:
+    if la is None or lb is None:
         return _needs("perpendicular", "a direction on EACH entity (a cylinder axis or a planar-face normal)",
-                      ea, ka, eb, kb, da is None, db is None)
+                      ea, ka, eb, kb, la is None, lb is None)
+    if da is None or db is None:
+        return error("perpendicular: a direction did not read as three numbers, so the directions "
+                     "cannot be compared - the relation is UNKNOWN, not a pass.")
     ang = _line_angle_deg(da, db)
     if ang is None:
         return error("perpendicular: a direction was degenerate (zero-length); cannot compare.")
@@ -316,8 +335,11 @@ def _rel_perpendicular(ea, ka, eb, kb, tol_cm, tol_deg, inv, units):
 def _rel_flush(ea, ka, eb, kb, tol_cm, tol_deg, inv, units):
     oa, na, la = _plane(ea, ka)
     ob, nb, lb = _plane(eb, kb)
-    if na is None or nb is None:
-        return _needs("flush", "two PLANAR faces", ea, ka, eb, kb, na is None, nb is None)
+    if la is None or lb is None:
+        return _needs("flush", "two PLANAR faces", ea, ka, eb, kb, la is None, lb is None)
+    if oa is None or na is None or ob is None or nb is None:
+        return error("flush: a face plane's origin or normal did not read as three numbers, so the "
+                     "planes cannot be compared - the relation is UNKNOWN, not a pass.")
     ang = _line_angle_deg(na, nb)
     un = _unit(na)
     if ang is None or un is None:
@@ -354,17 +376,22 @@ def _min_distance_cm(ea, eb):
     # score an unreadable gap as CONTACT - the one answer a relation check must never invent.
     value = safe(lambda: mr.value)
     if not isinstance(value, (int, float)):
-        return None, None, ("the minimum distance could not be read off the measurement result, so "
-                            "the relation is UNKNOWN - it is not reported as touching.")
+        return None, None, error(
+            "The minimum distance could not be read off the measurement result, so the relation is "
+            "UNKNOWN - it is not reported as touching. Re-run find_geometry for fresh handles and "
+            "retry.")
     return value, mr, None
 
 
 def _rel_concentric(ea, ka, eb, kb, tol_cm, tol_deg, inv, units):
     ca, la = _circle_center(ea, ka)
     cb, lb = _circle_center(eb, kb)
-    if ca is None or cb is None:
+    if la is None or lb is None:
         return _needs("concentric", "a CIRCULAR entity on EACH side (a circular/arc edge or a "
-                      "cylindrical face)", ea, ka, eb, kb, ca is None, cb is None)
+                      "cylindrical face)", ea, ka, eb, kb, la is None, lb is None)
+    if ca is None or cb is None:
+        return error("concentric: a center point did not read as three numbers, so the centers "
+                     "cannot be compared - the relation is UNKNOWN, not a pass.")
     d = _mag(_sub(cb, ca))
     passed = bool(d <= tol_cm)
     verdict = "PASS" if passed else "FAIL"

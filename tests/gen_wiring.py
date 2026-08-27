@@ -36,7 +36,7 @@ if COMMANDS_DIR not in sys.path:
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 WIRING_PATH = os.path.join(TESTS_DIR, "generated", "TOOL_POINTER_MAP.md")
 
-from gen_manifest import _FAMILY_PREFIXES  # noqa: E402 - single source for the family map
+from gen_manifest import _FAMILY_PREFIXES, claim_name  # noqa: E402 - single source for the family map
 
 _DOMAINS = sorted({lab for _, lab in _FAMILY_PREFIXES})
 # sys_capability_map names every family's entry tool by design - a catalog, not a workflow tip.
@@ -135,6 +135,24 @@ def _tool_handler_map(tree):
     return mapping
 
 
+def _called_local_names(node, fns):
+    """The same-module function names `node`'s body CALLS, in first-call order (deduplicated).
+
+    Matches a bare `helper(...)` and an attribute call whose final name is a module function
+    (`_slice_geometry(...)`, `mod._slice_geometry(...)`); a call to the enclosing function itself is
+    excluded so a recursive handler is not walked into.
+    """
+    out = []
+    for n in ast.walk(node):
+        if not isinstance(n, ast.Call):
+            continue
+        f = n.func
+        name = f.id if isinstance(f, ast.Name) else (f.attr if isinstance(f, ast.Attribute) else None)
+        if name in fns and name != node.name:
+            out.append(name)
+    return list(dict.fromkeys(out))
+
+
 def _attribute(mod_name, tool_name):
     """(note_string_LIST, extra_desc_strings) belonging to a tool - its REGISTERED handler's
     notes (resolved by call-site, see _tool_handler_map) plus module-level DESC constants.
@@ -144,7 +162,15 @@ def _attribute(mod_name, tool_name):
     handler = _tool_handler_map(ast.parse(src)).get(tool_name)
     note = []
     if handler and handler in fns:
-        note += _note_error_strings(fns[handler])
+        node = fns[handler]
+        note += _note_error_strings(node)
+        # ONE call hop into same-module helpers: a rich read's handler is a router, and the notes it
+        # can actually return are built in the _slice_* helpers it dispatches to. Harvesting only the
+        # handler body reports those tools as having no guidance surface at all. The hop stops at one
+        # level (a helper's own callees are NOT followed) so a shared low-level utility called deep in
+        # the chain does not get its strings attributed to every tool above it.
+        for callee in _called_local_names(node, fns):
+            note += _note_error_strings(fns[callee])
     else:
         stem = tool_name.split("_", 1)[1] if "_" in tool_name else tool_name
         for fn_name, node in fns.items():
@@ -173,9 +199,11 @@ def _smells(text):
 
 # ── collect: per-tool {desc, note_text, family, readonly} + reference edges by surface ──────────────
 
-def collect():
-    from mcpServer.mcp_primitives import registry
+def collect(registry=None):
+    if registry is None:
+        from mcpServer.mcp_primitives import registry
     records = {}
+    owner = {}
     input_names = set()
     for mod_name in _tool_modules():
         mod = load_tool(mod_name)
@@ -186,6 +214,9 @@ def collect():
         rt()
         for item in registry.get_tools():
             name = item.get_name()
+            # A second module registering this name would overwrite records[name] here, so the map
+            # would describe one tool while the server serves the other. Refuse, naming both files.
+            claim_name(owner, name, mod_name)
             d = item.to_dict()
             ann = d.get("annotations") or {}
             props = list((d.get("inputSchema") or {}).get("properties", {}).keys())

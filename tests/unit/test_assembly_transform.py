@@ -83,13 +83,46 @@ class FakeMatrix:
         self.rotation = (angle, axis, origin)
 
     def transformBy(self, other):
+        """Compose `other` onto this matrix. A real Matrix3D ACCUMULATES - two successive moves of
+        +5mm leave the occurrence 10mm out - so the rotation angle and the translation add rather
+        than replace. Overwriting them would make a second identical move read as an unchanged
+        transform, i.e. as no move at all."""
         self.composed.append(other)
-        # carry rotation + translation forward so the translate-only path still surfaces the vector.
         if getattr(other, "rotation", None) is not None:
-            self.rotation = other.rotation
+            angle, axis, origin = other.rotation
+            prior = self.rotation[0] if self.rotation is not None else 0.0
+            self.rotation = (prior + angle, axis, origin)
         ot = getattr(other, "translation", None)
         if ot is not None:
-            self._translation = ot
+            if self._translation is None:
+                self._translation = ot
+            else:
+                a, b = self._xyz(self._translation), self._xyz(ot)
+                self._translation = ("vec", a[0] + b[0], a[1] + b[1], a[2] + b[2])
+
+    @staticmethod
+    def _xyz(v):
+        """The three components of whatever stands in for a Vector3D here - the ('vec', x, y, z)
+        tuple Vector3D.create is faked as, or a _Vec/Point3D-shaped object."""
+        if v is None:
+            return (0.0, 0.0, 0.0)
+        if isinstance(v, tuple):
+            return tuple(float(c) for c in v[1:4])
+        return (float(getattr(v, "x", 0.0)), float(getattr(v, "y", 0.0)),
+                float(getattr(v, "z", 0.0)))
+
+    def asArray(self):
+        """Matrix3D.asArray - the 16 row-major floats. The move handler reads this on BOTH sides of
+        the write and refuses when either read is unavailable, so a fake without it sends every move
+        down the UNCONFIRMED path. State-sensitive by construction: the translation column and the
+        rotation angle come off this matrix's current values, so a matrix that was composed reads
+        differently from one that was not (which is exactly what the before/after compare asks)."""
+        tx, ty, tz = self._xyz(self._translation)
+        angle = float(self.rotation[0]) if self.rotation is not None else 0.0
+        return (1.0, 0.0, 0.0, tx,
+                0.0, 1.0, 0.0, ty,
+                0.0, 0.0, 1.0, tz,
+                0.0, 0.0, angle, 1.0)
 
 
 class _FakeJointColl:
@@ -378,6 +411,69 @@ class TestMove:
         res = asm.move_handler(occurrence="Block:1", dx=10)
         assert res["isError"] is True
         assert "did not move" in res["message"]
+
+    # An UNREADABLE transform is not a confirmation. The compare that proves the move took needs a
+    # reading on BOTH sides, so a missing reading on either one is a refusal - publishing moved:true
+    # with a null position beside it would assert an effect no read took. Each side is pinned
+    # separately so a guard covering only one of them still goes red.
+    def test_an_unreadable_pose_AFTER_the_write_is_refused_not_moved_true(self):
+        _, occs, _ = _install(["Block:1"])
+
+        class BlindAfter(FakeMatrix):
+            def __init__(self):
+                super().__init__()
+                self.reads = 0
+
+            def asArray(self):
+                self.reads += 1
+                if self.reads > 1:          # the BEFORE read answers, the AFTER read does not
+                    raise RuntimeError("transform unreadable")
+                return super().asArray()
+
+        occs[0].transform2 = BlindAfter()
+        res = asm.move_handler(occurrence="Block:1", dx=10)
+        assert res["isError"] is True
+        assert "UNCONFIRMED" in res["message"]
+        assert "after the change" in res["message"]
+
+    def test_an_unreadable_pose_BEFORE_the_write_is_refused_not_moved_true(self):
+        _, occs, _ = _install(["Block:1"])
+
+        class BlindBefore(FakeMatrix):
+            def __init__(self):
+                super().__init__()
+                self.reads = 0
+
+            def asArray(self):
+                self.reads += 1
+                if self.reads == 1:         # only the BEFORE read fails
+                    raise RuntimeError("transform unreadable")
+                return super().asArray()
+
+        occs[0].transform2 = BlindBefore()
+        res = asm.move_handler(occurrence="Block:1", dx=10)
+        assert res["isError"] is True
+        assert "UNCONFIRMED" in res["message"]
+        assert "before the change" in res["message"]
+
+    def test_a_wholly_unreadable_pose_names_both_sides(self):
+        _, occs, _ = _install(["Block:1"])
+
+        class Blind(FakeMatrix):
+            def asArray(self):
+                raise RuntimeError("transform unreadable")
+
+        occs[0].transform2 = Blind()
+        res = asm.move_handler(occurrence="Block:1", dx=10)
+        assert res["isError"] is True
+        assert "before and after the change" in res["message"]
+
+    def test_a_readable_pose_on_both_sides_still_moves(self):
+        # the refusal is scoped to the unreadable case - a normal move is untouched by it
+        _install(["Block:1"])
+        out = _payload(asm.move_handler(occurrence="Block:1", dx=10))
+        assert out["moved"] is True
+        assert "UNCONFIRMED" not in out.get("note", "")
 
     def test_translate_sets_transform(self):
         _, occs, _ = _install(["Block:1"])

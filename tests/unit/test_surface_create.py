@@ -271,6 +271,17 @@ class FakeEdge:
         self.body = body
 
 
+class _UnreadableSolidBody:
+    """A result body whose isSolid will not read - the shape bool(safe(...)) turned into a confident
+    'this is an open sheet'."""
+    def __init__(self, name="Surf1"):
+        self.name = name
+
+    @property
+    def isSolid(self):
+        raise RuntimeError("4 : An API Object refers to a deleted Object")
+
+
 def _wire_adsk(handle_map=None):
     import adsk.fusion, adsk.core
     fo = adsk.fusion.FeatureOperations
@@ -478,6 +489,61 @@ class TestSurfaceExtrude:
         assert out["created"] is True
         assert owner_ef.last_input is not None      # the OWNER built the surface extrude
         assert active_ef.last_input is None         # NOT the active component (the bSet trap)
+
+
+class TestEmptyResultSetIsAnError:
+    """'created: true' beside result_bodies [] claims a sheet the payload cannot show - and leaves
+    is_solid with nothing to read off, so the sheet/solid note is narrated from nothing."""
+
+    def test_extrude_with_no_result_body_is_an_error(self):
+        ef = FakeExtrudeFeatures(result_bodies=[])
+        comp = FakeComp(FakeFeatures(ef=ef), sketches=[FakeSketch("S")])
+        _install(comp)
+        res = sc.extrude_handler(sketch_name="S", distance=5)
+        assert res["isError"] is True
+        assert "owns no result body" in res["message"]
+        assert "design_delete_feature" in res["message"]
+
+    def test_one_extrude_body_is_the_boundary_that_passes(self):
+        ef = FakeExtrudeFeatures(result_bodies=[FakeBody("Surf1", is_solid=False)])
+        comp = FakeComp(FakeFeatures(ef=ef), sketches=[FakeSketch("S")])
+        _install(comp)
+        out = _payload(sc.extrude_handler(sketch_name="S", distance=5))
+        assert out["result_bodies"] == ["Surf1"]
+
+    def test_revolve_with_no_result_body_is_an_error(self):
+        rf = FakeRevolveFeatures(result_bodies=[])
+        comp = FakeComp(FakeFeatures(rf=rf), sketches=[FakeSketch("S")])
+        _install(comp)
+        res = sc.revolve_handler(sketch_name="S", angle_deg=180)
+        assert res["isError"] is True
+        assert "owns no result body" in res["message"]
+
+    def test_one_revolve_body_is_the_boundary_that_passes(self):
+        rf = FakeRevolveFeatures(result_bodies=[FakeBody("Surf1", is_solid=False)])
+        comp = FakeComp(FakeFeatures(rf=rf), sketches=[FakeSketch("S")])
+        _install(comp)
+        out = _payload(sc.revolve_handler(sketch_name="S", angle_deg=180))
+        assert out["result_bodies"] == ["Surf1"]
+
+    def test_extrude_unreadable_is_solid_is_null_and_unverified(self):
+        ef = FakeExtrudeFeatures(result_bodies=[_UnreadableSolidBody("Surf1")])
+        comp = FakeComp(FakeFeatures(ef=ef), sketches=[FakeSketch("S")])
+        _install(comp)
+        out = _payload(sc.extrude_handler(sketch_name="S", distance=5))
+        assert out["is_solid"] is None
+        assert out["unverified"] == ["is_solid"]
+        assert "UNVERIFIED" in out["note"]
+        assert "isSolid=false" not in out["note"]
+
+    def test_revolve_unreadable_is_solid_is_null_and_unverified(self):
+        rf = FakeRevolveFeatures(result_bodies=[_UnreadableSolidBody("Surf1")])
+        comp = FakeComp(FakeFeatures(rf=rf), sketches=[FakeSketch("S")])
+        _install(comp)
+        out = _payload(sc.revolve_handler(sketch_name="S", angle_deg=180))
+        assert out["is_solid"] is None
+        assert out["unverified"] == ["is_solid"]
+        assert "isSolid=false" not in out["note"]
 
 
 # ── surface_revolve ─────────────────────────────────────────────────────────
@@ -807,6 +873,80 @@ class TestSurfacePatch:
         h1 = "TOK1|@circular_edge:4.000000,5.000000,6.000000"
         out = _payload(sc.patch_handler(boundaries=[h0, h1]))
         assert out["patched"] == 2 and out["failed"] == 0
+
+    def test_patch_is_solid_is_read_back_not_hardcoded_false(self):
+        # is_solid is read off the patch body, never the module's expectation that a patch is a
+        # surface: a literal False here would report an open sheet for a body reading solid
+        e1 = FakeEdge()
+        pf = FakePatchFeatures(result_bodies=[FakeBody("Patch1", is_solid=True)])
+        comp = FakeComp(FakeFeatures(pf=pf))
+        _install(comp, handle_map={"E1": e1})
+        out = _payload(sc.patch_handler(boundary="E1"))
+        assert out["is_solid"] is True
+        assert "SOLID" in out["note"]
+        assert "isSolid=false" not in out["note"]
+
+    def test_patch_unreadable_is_solid_is_null_and_unverified(self):
+        e1 = FakeEdge()
+        pf = FakePatchFeatures(result_bodies=[_UnreadableSolidBody("Patch1")])
+        comp = FakeComp(FakeFeatures(pf=pf))
+        _install(comp, handle_map={"E1": e1})
+        out = _payload(sc.patch_handler(boundary="E1"))
+        assert out["is_solid"] is None
+        assert out["unverified"] == ["is_solid"]
+        assert "UNVERIFIED" in out["note"]
+
+    def test_patch_with_no_result_body_is_an_error(self):
+        # 'patched: true' beside result_bodies [] claims a fill the payload cannot show
+        e1 = FakeEdge()
+        pf = FakePatchFeatures(result_bodies=[])
+        comp = FakeComp(FakeFeatures(pf=pf))
+        _install(comp, handle_map={"E1": e1})
+        res = sc.patch_handler(boundary="E1")
+        assert res["isError"] is True
+        assert "owns no result body" in res["message"]
+
+    def test_one_patch_body_is_the_boundary_that_passes(self):
+        e1 = FakeEdge()
+        pf = FakePatchFeatures(result_bodies=[FakeBody("Patch1", is_solid=False)])
+        comp = FakeComp(FakeFeatures(pf=pf))
+        _install(comp, handle_map={"E1": e1})
+        out = _payload(sc.patch_handler(boundary="E1"))
+        assert out["result_bodies"] == ["Patch1"]
+
+    def test_multi_loop_bodyless_patch_is_a_per_loop_failure(self):
+        pf = FakePatchFeatures(result_bodies=[])
+        comp = FakeComp(FakeFeatures(pf=pf))
+        _install(comp, handle_map={"R0": FakeEdge(), "R1": FakeEdge()})
+        out = _payload(sc.patch_handler(boundaries=["R0", "R1"]))
+        assert out["patched"] == 0 and out["failed"] == 2
+        assert "owns no result body" in out["errors"][0]["error"]
+
+    def test_multi_loop_is_solid_is_the_aggregate_read_back(self):
+        pf = FakePatchFeatures(result_bodies=[FakeBody("P", is_solid=False)])
+        comp = FakeComp(FakeFeatures(pf=pf))
+        _install(comp, handle_map={"R0": FakeEdge(), "R1": FakeEdge()})
+        out = _payload(sc.patch_handler(boundaries=["R0", "R1"]))
+        assert out["is_solid"] is False
+        assert [p["is_solid"] for p in out["patches"]] == [False, False]
+
+    def test_multi_loop_solid_result_is_not_reported_as_a_surface(self):
+        # the aggregate is read off the patch bodies - a literal False here would call a body
+        # reading isSolid=true an open surface
+        pf = FakePatchFeatures(result_bodies=[FakeBody("P", is_solid=True)])
+        comp = FakeComp(FakeFeatures(pf=pf))
+        _install(comp, handle_map={"R0": FakeEdge(), "R1": FakeEdge()})
+        out = _payload(sc.patch_handler(boundaries=["R0", "R1"]))
+        assert out["is_solid"] is True
+        assert "isSolid=false" not in out["note"]
+
+    def test_multi_loop_unreadable_is_solid_is_null_and_unverified(self):
+        pf = FakePatchFeatures(result_bodies=[_UnreadableSolidBody("P")])
+        comp = FakeComp(FakeFeatures(pf=pf))
+        _install(comp, handle_map={"R0": FakeEdge(), "R1": FakeEdge()})
+        out = _payload(sc.patch_handler(boundaries=["R0", "R1"]))
+        assert out["is_solid"] is None
+        assert out["unverified"] == ["is_solid"]
 
     def test_singular_boundary_composite_handle_string_not_shredded(self):
         # A lone composite handle passed as a STRING resolves to its ONE edge

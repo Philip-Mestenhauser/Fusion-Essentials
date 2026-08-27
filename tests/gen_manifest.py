@@ -101,9 +101,27 @@ def collect():
         conftest._restore_adsk_dicts(saved_adsk)
 
 
+def claim_name(owner, name, mod_name):
+    """Record which MODULE registered `name`, raising SystemExit if a second module claims it.
+
+    The registry is one flat namespace, and the live server registers every module into a SINGLE
+    registry - so two modules registering the same tool name means one silently wins there. This
+    walk resets the registry per module, which would otherwise hide that collision entirely (each
+    module looks clean in isolation). Both files are named so the duplicate is fixable at a glance.
+    Shared with gen_wiring so the manifest and the pointer map refuse the same collision.
+    """
+    prev = owner.get(name)
+    if prev is not None and prev != mod_name:
+        raise SystemExit(
+            f"tool name collision: {name!r} is registered by BOTH tools/{prev}.py and "
+            f"tools/{mod_name}.py. The registry is one flat namespace, so on the live server one "
+            "of them silently wins and the other tool is unreachable - rename one.")
+    owner[name] = mod_name
+
+
 def _collect_unguarded(registry):
     tools = []
-    seen = set()
+    owner = {}
     for mod_name in _tool_modules():
         mod = load_tool(mod_name)
         rt = getattr(mod, "register_tool", None)
@@ -113,9 +131,7 @@ def _collect_unguarded(registry):
         rt()
         for item in registry.get_tools():
             name = item.get_name()
-            if name in seen:
-                continue
-            seen.add(name)
+            claim_name(owner, name, mod_name)
             d = item.to_dict()
             props = list((d.get("inputSchema") or {}).get("properties", {}).keys())
             tools.append({

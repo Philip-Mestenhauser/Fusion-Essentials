@@ -347,6 +347,31 @@ class TestFeatureHealthy:
         assert out["feature_health_confirmed"] is False
         assert "features_verified" not in out
 
+    def test_a_repeating_fusion_message_is_condensed_to_one_whole_sentence(self, monkeypatch):
+        # Fusion's errorOrWarningMessage repeats its sentence, joined by 'Compute Failed' + the
+        # feature name - measured at 684 characters for one broken joint. A raw prefix of that blob
+        # crossed the wire cut mid-word ("...assembly relationships.C"), reading like a sentence
+        # Fusion never finished. The published warning is the FIRST sentence, whole, with no marker
+        # text and no embedded newlines.
+        sentence = ("Can't resolve some component positions because there are conflicts with "
+                    "assembly relationships in the design.\n\nInspect existing assembly relationships.")
+        blob = ("Compute FailedChildJ".join([sentence] * 4))
+        tl = _FakeTimeline()
+        p = self._wire(monkeypatch, tl)
+
+        def handler(**kw):
+            tl.items.append(_FakeTimelineItem("ChildJ", 1, blob))
+            return _ok({"created": True})
+
+        out = _payload(kernel.wrap(handler, [p])())
+        published = out["feature_warnings"][0]
+        assert published.endswith("Inspect existing assembly relationships.")
+        assert "Compute Failed" not in published
+        assert "\n" not in published
+        assert published == ("ChildJ: Can't resolve some component positions because there are "
+                             "conflicts with assembly relationships in the design. Inspect "
+                             "existing assembly relationships.")
+
     def test_compute_warning_is_evidence_not_failure(self, monkeypatch):
         tl = _FakeTimeline()
         p = self._wire(monkeypatch, tl)
@@ -457,6 +482,48 @@ def _occ(name, transl, bodies=None, children=None):
         childOccurrences=_coll(children or []))
 
 
+class TestComputeFailureReaders:
+    """The shared compute-failure readers every republished failure message goes through."""
+
+    def test_message_stops_at_the_first_marker(self):
+        raw = "Slot is outside the body.Compute FailedCut1Slot is outside the body."
+        assert kernel.compute_failure_message(raw) == "Slot is outside the body."
+
+    def test_message_collapses_the_embedded_newlines(self):
+        assert kernel.compute_failure_message("a\n\nb") == "a b"
+
+    def test_empty_and_none_answer_empty(self):
+        assert kernel.compute_failure_message(None) == ""
+        assert kernel.compute_failure_message("") == ""
+
+    # The cap is an EXACT boundary: a message OF the limit crosses whole, one character more is cut
+    # and MARKED, so a shortened message never reads as a complete one.
+    def test_a_message_exactly_at_the_limit_is_not_cut(self):
+        text = "x" * kernel._MESSAGE_LIMIT
+        assert kernel.compute_failure_message(text) == text
+
+    def test_a_message_one_over_the_limit_is_cut_and_marked(self):
+        text = "x" * (kernel._MESSAGE_LIMIT + 1)
+        out = kernel.compute_failure_message(text)
+        assert out.endswith(" ...")
+        assert out == "x" * kernel._MESSAGE_LIMIT + " ..."
+
+    def test_classifier_labels_error_warning_and_healthy(self):
+        assert kernel.compute_failure(_FakeTimelineItem("F", 2, "bad")) == ("error", "bad")
+        assert kernel.compute_failure(_FakeTimelineItem("F", 1, "iffy")) == ("warning", "iffy")
+        assert kernel.compute_failure(_FakeTimelineItem("F", 0, "")) is None
+
+    def test_an_unreadable_state_is_no_verdict(self):
+        # A health state that will not read is not a failure AND not a pass - the caller decides.
+        class _Blind:
+            @property
+            def healthState(self):
+                raise RuntimeError("healthState unreadable")
+
+        assert kernel.compute_failure(_Blind()) is None
+        assert kernel.compute_failure(None) is None
+
+
 class TestChildGeometryMoved:
     def _wire(self, monkeypatch, occs):
         p = kernel.ChildGeometryMoved()
@@ -498,13 +565,67 @@ class TestChildGeometryMoved:
         assert "LOCK" in res["message"] and "ground_to_parent" in res["message"]
         assert "joint the WRAPPER" in res["message"]
 
-    def test_no_move_passes_trivially(self, monkeypatch):
+    def test_no_move_passes_but_verifies_no_move(self, monkeypatch):
+        # Nothing was repositioned, so there is no move to verify: the call PASSES (an expected-zero
+        # joint is legitimate) but the flag is null, not True. A True here is the measured false-ok -
+        # a joint that computed broken and moved nothing published created:true beside
+        # child_geometry_move_verified:true, and the flag was the reason it read as confirmed.
         cbody = _body(_pt(0, 0, 0))
         child = _occ("Child:1", _pt(0, 0, 0), bodies=[cbody])
         wrapper = _occ("Wrapper:1", _pt(0, 0, 0), children=[child])
         p = self._wire(monkeypatch, [wrapper])
         out = _payload(kernel.wrap(lambda **kw: _ok({"created": True}), [p])())
-        assert out["child_geometry_move_verified"] is True   # expected-zero motion passes
+        assert out["child_geometry_move_verified"] is None
+        assert out["repositioned_occurrences"] == []
+
+    def test_a_propagated_move_names_the_part_it_repositioned(self, monkeypatch):
+        cbody = _body(_pt(0, 0, 0))
+        child = _occ("Child:1", _pt(0, 0, 0), bodies=[cbody])
+        wrapper = _occ("Wrapper:1", _pt(0, 0, 0), children=[child])
+        p = self._wire(monkeypatch, [wrapper])
+
+        def handler(**kw):
+            wrapper.transform.translation = _pt(8.5, 8.5, 0)
+            cbody.boundingBox.minPoint = _pt(8.5, 8.5, 0)
+            return _ok({"created": True})
+
+        out = _payload(kernel.wrap(handler, [p])())
+        assert out["child_geometry_move_verified"] is True
+        assert out["repositioned_occurrences"] == ["Wrapper:1"]
+
+    # The move tolerance is an EXACT boundary: _MOVE_TOL_CM is solver noise, so a shift OF exactly
+    # that much is not a reposition (strictly greater wins) while a hair more is.
+    def test_a_shift_of_exactly_the_tolerance_is_not_a_reposition(self, monkeypatch):
+        tol = kernel.ChildGeometryMoved._MOVE_TOL_CM
+        cbody = _body(_pt(0, 0, 0))
+        child = _occ("Child:1", _pt(0, 0, 0), bodies=[cbody])
+        wrapper = _occ("Wrapper:1", _pt(0, 0, 0), children=[child])
+        p = self._wire(monkeypatch, [wrapper])
+
+        def handler(**kw):
+            wrapper.transform.translation = _pt(tol, 0, 0)
+            cbody.boundingBox.minPoint = _pt(tol, 0, 0)
+            return _ok({"created": True})
+
+        out = _payload(kernel.wrap(handler, [p])())
+        assert out["child_geometry_move_verified"] is None
+        assert out["repositioned_occurrences"] == []
+
+    def test_a_shift_just_over_the_tolerance_is_a_reposition(self, monkeypatch):
+        tol = kernel.ChildGeometryMoved._MOVE_TOL_CM
+        cbody = _body(_pt(0, 0, 0))
+        child = _occ("Child:1", _pt(0, 0, 0), bodies=[cbody])
+        wrapper = _occ("Wrapper:1", _pt(0, 0, 0), children=[child])
+        p = self._wire(monkeypatch, [wrapper])
+
+        def handler(**kw):
+            wrapper.transform.translation = _pt(tol * 1.001, 0, 0)
+            cbody.boundingBox.minPoint = _pt(tol * 1.001, 0, 0)
+            return _ok({"created": True})
+
+        out = _payload(kernel.wrap(handler, [p])())
+        assert out["child_geometry_move_verified"] is True
+        assert out["repositioned_occurrences"] == ["Wrapper:1"]
 
     def test_samples_the_deepest_nested_body_not_the_direct_body(self, monkeypatch):
         # The wrapper's OWN direct body follows the move, but the deeper nested child body is frozen -

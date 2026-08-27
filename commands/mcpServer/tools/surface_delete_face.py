@@ -145,14 +145,21 @@ def delete_face_handler(faces=None, heal=False) -> dict:
     # consumed a whole body (every face gone) - surface that as a warning, never fake success.
     result = [{
         "name": safe(lambda b=b: b.name),
-        "faces": int(safe(lambda b=b: b.faces.count, 0) or 0),
-        "is_solid": bool(safe(lambda b=b: b.isSolid)),
+        # counted, never safe(..., 0): a result body whose faces collection will not enumerate is
+        # not a body with zero faces. Summed as 0 it drops the after-total by that body's whole
+        # count, and the verdict below then reads the largest possible delete (26 -> 0) off a
+        # number nobody measured.
+        "faces": _common.counted(lambda b=b: b.faces.count),
+        # read_flag: informational here (no gate reads it), so a flag that will not read publishes
+        # null rather than calling a body a surface the delete may not have opened.
+        "is_solid": _common.read_flag(lambda b=b: b.isSolid),
     } for b in _common.result_bodies(feature)]
 
     bodies_before = len(bodies)
     bodies_after = len(result)
     bodies_consumed = max(0, bodies_before - bodies_after)
-    faces_after_total = sum(r["faces"] for r in result)
+    unreadable_after = [r["name"] for r in result if r["faces"] is None]
+    faces_after_total = None if unreadable_after else sum(r["faces"] for r in result)
 
     payload["feature"] = safe(lambda: feature.name)
     payload["result_bodies"] = result
@@ -162,10 +169,45 @@ def delete_face_handler(faces=None, heal=False) -> dict:
         payload["warning"] = ("%d input body(ies) were fully consumed by the delete - no result body "
                               "remains. Deleting every face of a body removes the body." % bodies_consumed)
         payload["note"] = payload["warning"]
-    else:
-        healed = " and healed the opening" if heal else ""
-        payload["note"] = ("Deleted %d face(s)%s; body face count %d -> %d."
-                           % (len(face_ents), healed, faces_before_total, faces_after_total))
+        return ok(payload)
+
+    # The other half of the direct path's contract: there, an unreadable face count is UNVERIFIED
+    # rather than a success, because the count is the evidence. Same here for the AFTER side - a
+    # result body that will not report its faces leaves the delta unmeasurable, so the verdict is
+    # refused rather than rendered on a coerced zero.
+    if faces_after_total is None:
+        return error("Delete-face reported no error, but the face count of %d result body(ies) (%s) "
+                     "would not read back, so whether any face was deleted is UNVERIFIED - a count "
+                     "that will not read is not a count of zero. Check the bodies with "
+                     "design_get(include=['tree']) / find_geometry before building on them."
+                     % (len(unreadable_after),
+                        ", ".join(n or "unnamed" for n in unreadable_after)))
+
+    # Same gate the direct path runs, on the same evidence: a face count that did not move means
+    # nothing was deleted, whatever the feature object says. Skipped only when no input body's
+    # count could be read at all (total 0), where the delta is not evidence of anything.
+    delta = faces_after_total - faces_before_total
+    if faces_before_total and delta == 0:
+        return error("Delete-face reported no error but no input body's face count changed "
+                     "(%d -> %d) - nothing was deleted. "
+                     % (faces_before_total, faces_after_total)
+                     + _common.failed_effect_remedy(design, feature))
+    payload["faces_delta"] = delta
+    # Built from the MEASURED delta, never from the request: len(face_ents) is how many faces were
+    # ASKED for, and on a heal the two need not agree (healing re-merges neighbours, so 3 requested
+    # faces can net -1). `heal` is an input flag, so the note says it was REQUESTED - an add() that
+    # did not raise is not a read-back of the opening being closed.
+    healed = " (heal requested)" if heal else ""
+    verb = "The delete landed" if delta < 0 else "The edit landed"
+    payload["note"] = ("%s%s; body face count %d -> %d (%d face(s) requested)."
+                       % (verb, healed, faces_before_total, faces_after_total, len(face_ents)))
+    if delta > 0:
+        payload["warning"] = (
+            "The face count ROSE by %d - unexpected for a delete, which normally lowers it. The "
+            "edit did land (the count moved), but the requested face(s) may not be what was "
+            "removed: inspect the body with design_get(include=['tree']) / find_geometry before "
+            "building on it." % delta)
+        payload["note"] += " " + payload["warning"]
     return ok(payload)
 
 

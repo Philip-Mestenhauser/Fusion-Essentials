@@ -316,6 +316,65 @@ class TestVersions:
         assert "never saved" in out["note"].lower()
 
 
+class TestVersionHistoryCompleteness:
+    """The readable/complete marker pair, mirroring the xref_tree and used_in slices: a version
+    list is authoritative ONLY on a full walk: without these markers an unreadable df.versions
+    reads as version_count=1 with truncated=false - a lineage that looks COMPLETE."""
+
+    class _BlindVersions:
+        """A versions collection whose count read RAISES (a cloud read that failed)."""
+        @property
+        def count(self):
+            raise RuntimeError("versions unavailable")
+
+        def item(self, i):
+            raise AssertionError("must not be reached")
+
+    def test_a_full_read_is_marked_complete(self):
+        df = _DFileVers(open_num=2, latest=2, others=[_Ver(1)])
+        _install(_Doc("Bracket", data_file=df))
+        out = dg._slice_versions()
+        assert out["history_readable"] is True and out["history_complete"] is True
+        assert out["unreadable_count"] == 0
+
+    def test_unreadable_versions_collection_is_not_a_complete_history(self):
+        df = _DFileVers(open_num=3, latest=9, others=[])
+        df.versions = self._BlindVersions()
+        _install(_Doc("Bracket", data_file=df))
+        out = dg._slice_versions()
+        assert out["version_count"] == 1            # only the open version could be read
+        assert out["history_readable"] is False and out["history_complete"] is False
+        assert "history_readable=false" in out["note"]
+
+    def test_a_version_that_will_not_read_is_counted_not_silently_dropped(self):
+        # a row skipped without a marker shortens the history while the payload still reads whole.
+        class _NoNumber:
+            versionId = "urn:v:?"
+            dateCreated = 1_700_000_000
+            description = ""
+        df = _DFileVers(open_num=2, latest=2, others=[_Ver(1), _NoNumber()])
+        _install(_Doc("Bracket", data_file=df))
+        out = dg._slice_versions()
+        assert out["unreadable_count"] == 1
+        assert out["history_readable"] is True and out["history_complete"] is False
+
+    def test_a_duplicate_of_the_open_version_is_not_counted_unreadable(self):
+        # the boundary between "already seen" and "could not be read": df is added first, so its
+        # own row arriving again through df.versions is a de-dup, not a hole.
+        df = _DFileVers(open_num=2, latest=2, others=[_Ver(2), _Ver(1)])
+        _install(_Doc("Bracket", data_file=df))
+        out = dg._slice_versions()
+        assert out["version_count"] == 2 and out["unreadable_count"] == 0
+        assert out["history_complete"] is True
+
+    def test_a_capped_list_is_readable_but_not_complete(self):
+        df = _DFileVers(open_num=3, latest=3, others=[_Ver(1), _Ver(2)])
+        _install(_Doc("Bracket", data_file=df))
+        out = dg._slice_versions(versions_max=2)
+        assert out["truncated"] is True
+        assert out["history_readable"] is True and out["history_complete"] is False
+
+
 class TestVersionMilestones:
     def test_milestone_row_carries_flag_and_name(self):
         # the NAME lives only in the Milestones collection - the row is matched to it by version.

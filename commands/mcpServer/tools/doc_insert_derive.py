@@ -143,12 +143,14 @@ def _collect_source_entities(source_design, component_names, body_names):
     error). Empty names -> ([], [], None) so the caller can fall back to the whole design."""
     entities, labels = [], []
     source_root = safe(lambda: source_design.rootComponent)
-    root_name = safe(lambda: source_root.name)
     comps, err = _resolve_source_components(source_design, component_names)
     if err:
         return None, None, err
     for want, comp in zip(component_names, comps):
-        if (safe(lambda: comp.name) or "") == root_name:
+        # same_component, not a NAME compare: the resolved component and source_design.rootComponent
+        # are separate wrappers (component identity is never stable), and a name that will not read
+        # on one of them would send the ROOT down the occurrence branch, where it has none.
+        if _common.same_component(comp, source_root):
             entities.append(comp)                       # the whole source design (Component form)
             labels.append(f"{want} (whole design)")
             continue

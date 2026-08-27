@@ -308,8 +308,8 @@ class TestCameraRestore:
     restore (or a zoom) the viewport refuses is NAMED, never swallowed."""
 
     class _Viewport:
-        """A viewport whose camera assignment can be made to raise, modelling a platform that
-        refuses the restore after accepting the move."""
+        """A viewport whose camera READ or camera assignment can be made to raise, modelling a
+        platform that refuses the snapshot, or refuses the restore after accepting the move."""
 
         class _StuckExtents:
             """A camera whose viewExtents will not be written - the zoom the platform drops."""
@@ -321,14 +321,17 @@ class TestCameraRestore:
             def viewExtents(self, value):
                 raise RuntimeError("extents locked")
 
-        def __init__(self, refuse_assign=False, zoom_raises=False):
+        def __init__(self, refuse_assign=False, zoom_raises=False, camera_unreadable=False):
             self._refuse = refuse_assign
+            self._unreadable = camera_unreadable
             self._camera = (self._StuckExtents() if zoom_raises
                             else SimpleNamespace(viewExtents=1.0))
             self.assigned = []
 
         @property
         def camera(self):
+            if self._unreadable:
+                raise RuntimeError("camera unavailable")
             return self._camera
 
         @camera.setter
@@ -379,6 +382,21 @@ class TestCameraRestore:
         rig.setattr(gs._view_common, "apply_named_view", lambda v, name: None)
         result = gs.handler(view="top")
         assert [c["type"] for c in result["content"]] == ["image"]
+
+    def test_a_camera_that_will_not_snapshot_says_the_view_is_LEFT_where_the_shot_put_it(self, rig):
+        # The snapshot is the only thing that makes the move undoable. When the camera cannot be
+        # READ the orient still happens, so the payload owes the caller the fact that the viewport
+        # is parked at the capture view - silence reads as "your view came back".
+        vp = self._Viewport(camera_unreadable=True)
+        rig.setattr(gs, "app", SimpleNamespace(activeViewport=vp))
+        oriented = []
+        rig.setattr(gs._view_common, "apply_named_view", lambda v, name: oriented.append(name))
+        result = gs.handler(view="front")
+        assert result["isError"] is False and oriented == ["front"]   # the camera DID move
+        assert [c["type"] for c in result["content"]] == ["text", "image"]
+        text = result["content"][0]["text"]
+        assert "LEFT at the capture view" in text
+        assert "view_set(orient)" in text
 
     def test_a_zoom_the_camera_refuses_is_disclosed_not_silently_dropped(self, rig):
         # The caller asked for zoom=0.5; a swallowed failure returns the FITTED frame as if the

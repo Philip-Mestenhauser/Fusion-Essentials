@@ -100,6 +100,44 @@ class TestClassify:
         assert out["kind"] == "other"
 
 
+# ── _xyz: a position reads whole, or not at all ────────────────────────────
+
+class _HalfReadablePoint:
+    """A point whose .y read raises - the partly-readable case behind every published position."""
+
+    x = 1.0
+    z = 3.0
+
+    @property
+    def y(self):
+        raise RuntimeError("4 : An API Object refers to a deleted Object")
+
+
+class TestPointReads:
+    def test_a_point_whose_component_will_not_read_is_null_not_the_origin(self):
+        # 0.0 for the component that failed publishes a coordinate the read never took, and the
+        # caller cannot tell it from a part really sitting on that plane.
+        assert sel._xyz(_HalfReadablePoint()) is None
+
+    def test_a_non_numeric_component_is_null(self):
+        from unittest.mock import Mock
+        assert sel._xyz(types.SimpleNamespace(x=Mock(), y=0.0, z=0.0)) is None
+
+    def test_an_absent_point_is_null(self):
+        assert sel._xyz(None) is None
+
+    def test_a_genuine_origin_is_still_a_reading(self):
+        # 0,0,0 is an ANSWER (a vertex at the world origin), distinguishable from the null above
+        assert sel._xyz(FakePoint(0, 0, 0)) == {"x": 0.0, "y": 0.0, "z": 0.0}
+
+    def test_components_are_rounded_to_six_places(self):
+        assert sel._xyz(FakePoint(1.23456789, -2.0, 3.5)) == {"x": 1.234568, "y": -2.0, "z": 3.5}
+
+    def test_a_records_picked_point_is_null_rather_than_a_fabricated_origin(self):
+        rec = sel._selection_record(types.SimpleNamespace(entity=None, point=_HalfReadablePoint()))
+        assert rec["picked_point"] is None
+
+
 # ── handler 'require' mismatch flagging ────────────────────────────────────
 
 class TestRequireFlag:
@@ -149,6 +187,44 @@ class TestRequireFlag:
         result = sel.get_user_selection_handler()
         assert result["isError"] is True
         assert "Nothing is selected in Fusion" in result["message"]
+
+    def test_a_full_walk_that_found_nothing_states_the_absence(self, monkeypatch):
+        # nothing was left unread, so "does not include" is a verdict the read can back
+        monkeypatch.setattr(sel, "_ui", lambda: self._fake_ui_with([BRepBody(name="Block")]))
+        out = _payload(sel.get_user_selection_handler(require="face"))
+        assert out["truncated"] is False
+        assert out["matches_required"] is False
+        assert "does not include a 'face'" in out["note"]
+
+
+class TestRequireOverATruncatedWalk:
+    """'require' is judged over the WALKED prefix. With 60 selections and the only face past the
+    cap, a flat False says the selection holds no face - which is machine-checkably wrong. Absence
+    over an unwalked tail is unknown (null), and the note says how far the walk got."""
+
+    def _ui_with(self, entities):
+        return _fake_ui(entities=entities)
+
+    def test_a_required_kind_one_past_the_cap_is_unknown_not_absent(self, monkeypatch):
+        entities = [BRepBody(name=f"B{i}") for i in range(50)]
+        entities.append(BRepFace(Plane(FakeVector3D(0, 0, 1))))     # index 50 - one past the walk
+        monkeypatch.setattr(sel, "_ui", lambda: self._ui_with(entities))
+        out = _payload(sel.get_user_selection_handler(require="face", max_results=50))
+        assert out["truncated"] is True
+        assert out["matches_required"] is None
+        assert "first 50 of 51" in out["note"] and "unknown" in out["note"]
+        assert "does not include" not in out["note"]
+
+    def test_the_last_selection_inside_the_cap_still_counts_as_found(self, monkeypatch):
+        # the other side of the same boundary: index cap-1 IS walked, so the face is really found
+        entities = [BRepBody(name=f"B{i}") for i in range(49)]
+        entities.append(BRepFace(Plane(FakeVector3D(0, 0, 1))))     # index 49 - the last one walked
+        entities.append(BRepBody(name="tail"))
+        monkeypatch.setattr(sel, "_ui", lambda: self._ui_with(entities))
+        out = _payload(sel.get_user_selection_handler(require="face", max_results=50))
+        assert out["truncated"] is True
+        assert out["matches_required"] is True
+        assert "unknown" not in out["note"]
 
 
 # ── BOUNDED READS: the selection echo is capped (CLAUDE.md "Bound it") ──────────────────────────
@@ -369,6 +445,20 @@ def _install_fake_pick_handler(monkeypatch):
     monkeypatch.setattr(sel, "_PickHandler", _Stub)
 
 
+def _register_hold(ui, pending=True):
+    """One hold's pick listener, registered the way _begin_request registers it: the handler goes on
+    the event AND into its own box, which is what every detach is keyed to. pending=False leaves the
+    process-wide slot alone - the shape of an ORPHAN whose hold has already ended. Returns
+    (box, done)."""
+    box, done = {}, threading.Event()
+    handler = sel._PickHandler(box, done)
+    box["handler"] = handler
+    ui.activeSelectionChanged.add(handler)
+    if pending:
+        sel._pending["handler"] = handler
+    return box, done
+
+
 def _fake_pickable_design(bodies=1, sketches=0, occs=0):
     """A design SimpleNamespace just deep enough for _pickable_counts: rootComponent carrying
     bRepBodies/sketches/allOccurrences counts, no allComponents attribute (so the shared
@@ -404,11 +494,8 @@ class TestOnSelectionChanged:
         face = BRepFace(Plane(FakeVector3D(0, 0, 1)), centroid=FakePoint(1, 1, 1), entity_token="TOK1")
         ui = _fake_ui()
         monkeypatch.setattr(sel, "_ui", lambda: ui)
-        sentinel_handler = object()
-        sel._pending["handler"] = sentinel_handler
-        ui.activeSelectionChanged.handlers.append(sentinel_handler)
+        box, done = _register_hold(ui)
 
-        box, done = {}, threading.Event()
         picked = types.SimpleNamespace(entity=face, point=FakePoint(1, 1, 1))
         sel._on_selection_changed(types.SimpleNamespace(currentSelection=[picked]), box, done)
 
@@ -416,7 +503,7 @@ class TestOnSelectionChanged:
         assert box["result"]["selection_count"] == 1
         assert box["result"]["selections"][0]["handle"] == "TOK1|@face:1.000000,1.000000,1.000000"
         assert sel._pending["handler"] is None            # detached itself
-        assert sentinel_handler not in ui.activeSelectionChanged.handlers
+        assert ui.activeSelectionChanged.handlers == []
 
     def test_empty_selection_keeps_waiting(self, monkeypatch):
         ui = _fake_ui()
@@ -562,6 +649,105 @@ class TestRequestSelectionTimeout:
         assert out["waited_seconds"] == 0.05
         assert "not a tool defect" in out["note"]
         assert sel._pending["handler"] is None   # the timeout cleanup detached the listener
+        # the cleanup reached the main thread, so there is nothing to disclose
+        assert "listener_detached" not in out
+
+
+# ── the two windows around an expiring wait: a late pick, and a cleanup that never ran ───────────
+
+class TestRequestSelectionExpiryWindow:
+    """The wait expiring is not proof nothing was picked. The listener fires on the MAIN thread and
+    so does the cancel marshal, so a click landing between the two is captured in the box and is a
+    real selection - reporting 'timeout' over it denies a pick the user made."""
+
+    def _face(self):
+        return BRepFace(Plane(FakeVector3D(0, 0, 1)), centroid=FakePoint(9, 9, 9), entity_token="TOK9")
+
+    def test_a_pick_landing_as_the_wait_expires_wins_over_the_timeout(self, monkeypatch):
+        face = self._face()
+        ui = _fake_ui()
+        monkeypatch.setattr(sel, "_ui", lambda: ui)
+        posts = []
+
+        def _post(command, callback, data):
+            posts.append(data)
+            if len(posts) == 2:
+                # the cancel marshal: the user clicked just after the wait gave up, and the pick
+                # is captured before the listener is detached
+                sel._pending["handler"].notify(types.SimpleNamespace(currentSelection=[
+                    types.SimpleNamespace(entity=face, point=FakePoint(9, 9, 9))]))
+            callback(data)
+            return "fake-task"
+
+        monkeypatch.setattr(sel, "_task_manager", lambda: types.SimpleNamespace(
+            is_running=lambda: True, start=lambda: True, post=_post, cancel=lambda t: False))
+
+        res = sel.request_user_selection_handler(what="face", wait_seconds=0.05)
+        out = _payload(res)
+        assert res["isError"] is False
+        assert out["status"] == "picked"
+        assert out["selection_count"] == 1
+        assert out["selections"][0]["handle"] == "TOK9|@face:9.000000,9.000000,9.000000"
+        assert "expired" in out["note"]
+        assert out["acted_on"] == {"name": "TestDoc", "document_id": "urn:test:doc"}
+
+    def test_a_cleanup_that_never_reached_the_main_thread_is_disclosed(self, monkeypatch):
+        ui = _fake_ui()
+        monkeypatch.setattr(sel, "_ui", lambda: ui)
+        posts = []
+
+        def _post(command, callback, data):
+            posts.append(data)
+            if len(posts) == 1:
+                callback(data)          # _begin_request registers the listener
+                return "fake-task"
+            return None                 # the cancel never reaches Fusion's main thread
+
+        monkeypatch.setattr(sel, "_task_manager", lambda: types.SimpleNamespace(
+            is_running=lambda: True, start=lambda: True, post=_post, cancel=lambda t: False))
+
+        out = _payload(sel.request_user_selection_handler(wait_seconds=0.05))
+        assert out["status"] == "timeout"
+        assert out["listener_detached"] is False
+        assert "still registered" in out["note"]
+        # the claim is checkable: the listener really is still on the event, and still referenced
+        assert len(ui.activeSelectionChanged.handlers) == 1
+        assert sel._pending["handler"] is not None
+
+
+# ── an ORPHAN listener may only ever detach ITSELF ───────────────────────────────────────────────
+
+class TestOrphanPickListener:
+    """A hold whose cleanup never ran leaves its listener registered. Detaching by whatever the
+    pending slot happens to hold lets that orphan unhook the CURRENT hold's listener - a wait that
+    can then never wake, only expire."""
+
+    def test_an_orphan_firing_leaves_the_current_holds_listener_attached(self, monkeypatch):
+        ui = _fake_ui()
+        monkeypatch.setattr(sel, "_ui", lambda: ui)
+        orphan_box, orphan_done = _register_hold(ui, pending=False)
+        current_box, current_done = _register_hold(ui)          # the live hold, registered second
+        face = BRepFace(Plane(FakeVector3D(0, 0, 1)), centroid=FakePoint(1, 1, 1), entity_token="TOK1")
+
+        orphan_box["handler"].notify(types.SimpleNamespace(currentSelection=[
+            types.SimpleNamespace(entity=face, point=FakePoint(1, 1, 1))]))
+
+        assert orphan_box["handler"] not in ui.activeSelectionChanged.handlers   # detached itself
+        assert ui.activeSelectionChanged.handlers == [current_box["handler"]]    # and only itself
+        assert sel._pending["handler"] is current_box["handler"]
+        assert not current_done.is_set()        # the live hold can still be woken by a real pick
+        assert orphan_done.is_set()             # the orphan's own dead box took the result
+
+    def test_a_survivor_is_detached_before_the_new_hold_registers(self, monkeypatch):
+        ui = _fake_ui()
+        monkeypatch.setattr(sel, "_ui", lambda: ui)
+        orphan_box, _done = _register_hold(ui, pending=True)
+        _install_fake_task_manager(monkeypatch)
+
+        sel.request_user_selection_handler(wait_seconds=0.05)
+
+        assert orphan_box["handler"] not in ui.activeSelectionChanged.handlers
+        assert ui.activeSelectionChanged.handlers == []   # nor did the new hold leave one behind
 
 
 # ── sys_request_selection: only one wait may be pending at a time ────────────────────────────────

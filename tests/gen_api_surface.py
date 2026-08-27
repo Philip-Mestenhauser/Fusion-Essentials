@@ -214,18 +214,26 @@ def _render(root, properties, factories, bools):
     return "\n".join(lines)
 
 
+# Failure is raised as SystemExit, not returned: gen_all.py imports this module and calls main(),
+# discarding the return value, so only SystemExit gates the aggregate --check.
+def _fail(msg):
+    print(msg, file=sys.stderr)
+    raise SystemExit(1)
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     check = "--check" in argv
     root, properties, factories, bools = build()
     if root is None:
-        msg = ("Fusion Python bindings not found - cannot generate the API surface. Looked under "
-               "the Autodesk webdeploy production/pre-production trees.")
-        if check and os.path.isfile(OUT_PATH):
-            print(f"{msg} Keeping the existing tests/api_surface.py.")
-            return 0
-        print(msg, file=sys.stderr)
-        return 1
+        # No bindings means the surface CANNOT be recomputed, so nothing here can tell a current
+        # tests/api_surface.py from one generated against a Fusion release ago - and the lint that
+        # checks every input-property assignment against that table is only as true as the table.
+        # A machine without Fusion therefore fails: it is a visible limitation, not a pass.
+        _fail("Fusion Python bindings not found - cannot generate or verify the API surface. "
+              "Looked under: " + "; ".join(_BINDING_GLOBS) + ". "
+              + ("--check cannot prove tests/api_surface.py is current without them; run this on a "
+                 "machine with Fusion installed." if check else ""))
     text = _render(root, properties, factories, bools)
     if check:
         current = ""
@@ -233,9 +241,7 @@ def main(argv=None):
             with open(OUT_PATH, encoding="utf-8") as fh:
                 current = fh.read()
         if current.replace("\r\n", "\n") != text:
-            print("tests/api_surface.py is STALE - regenerate: py -3 tests/gen_api_surface.py",
-                  file=sys.stderr)
-            return 1
+            _fail("tests/api_surface.py is STALE - regenerate: py -3 tests/gen_api_surface.py")
         print(f"api surface current: {len(properties)} classes, {len(factories)} factories")
         return 0
     with open(OUT_PATH, "w", encoding="utf-8", newline="\n") as fh:

@@ -4,7 +4,7 @@
 """MCP building block: measure the distance or angle BETWEEN two entities.
 
   model_measure_between -> the minimum distance (a gap / clearance / wall thickness) or the angle
-                           between two targets - each a face/body/occurrence/component by a
+                           between two targets - each a face/edge/body/occurrence/component by a
                            find_geometry handle or a name. The relational complement to model_inspect
                            (which measures ONE target's own size/mass). Read-only.
 
@@ -26,8 +26,13 @@ app = adsk.core.Application.get()
 
 _MODES = ("distance", "angle")
 
-_A = _inputs.TargetRef("a", required=True, allow=("body", "face", "occurrence", "component"))
-_B = _inputs.TargetRef("b", required=True, allow=("body", "face", "occurrence", "component"))
+# 'edge' rides on BOTH refs so an edge handle reaches the measurement as the EDGE. Without it,
+# TargetRef resolves an edge handle to the edge's OWNING BODY (_owning_body, taken because 'body' is
+# allowed) - a silent widening that measures an entity the caller never named. What the measurement
+# API makes of an edge is reported by the call itself: _common.min_distance and the measureAngle
+# guard below each surface a refusal, so an edge can never become a wrong number here.
+_A = _inputs.TargetRef("a", required=True, allow=("body", "face", "edge", "occurrence", "component"))
+_B = _inputs.TargetRef("b", required=True, allow=("body", "face", "edge", "occurrence", "component"))
 
 
 def handler(a: str = "", b: str = "", mode: str = "distance", units: str = "mm") -> dict:
@@ -120,7 +125,7 @@ def handler(a: str = "", b: str = "", mode: str = "distance", units: str = "mm")
 
 
 TOOL_DESCRIPTION = (
-    "Measure the distance or angle BETWEEN two targets - each a find_geometry handle (face/body) or an "
+    "Measure the distance or angle BETWEEN two targets - each a find_geometry handle (face/edge/body) or an "
     "occurrence/component/body name. mode='distance' (default) returns the minimum gap (clearance / wall "
     "thickness; 0 = touching) + the two closest points, in 'units'. mode='angle' returns the angle "
     "between them in degrees. The relational complement to model_inspect (which measures one target)."

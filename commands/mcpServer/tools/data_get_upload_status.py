@@ -47,11 +47,12 @@ def handler(handle: str = "", file_name: str = "", folder: str = "") -> dict:
             return error(f"No upload with handle '{handle}'. Active handles: "
                          f"{', '.join(data_ops._UPLOADS.keys()) or '(none)'}.")
     elif key.lower() == "latest" or (not key and not file_name):
-        key = f"up{data_ops._UPLOAD_HANDLE_SEQ[0]}"
-        entry = data_ops._UPLOADS.get(key)
-        if not entry:
-            return error(f"No upload with handle '{key}'. Active handles: "
-                         f"{', '.join(data_ops._UPLOADS.keys()) or '(none)'}.")
+        # 'latest' = the newest STILL-TRACKED upload, taken from the live dict (insertion order is
+        # mint order). The mint counter keeps climbing past entries popped at their terminal state,
+        # so deriving the handle from it names an upload that is already gone while an older one is
+        # still running. _UPLOADS is non-empty here - the guard above returned otherwise.
+        key = list(data_ops._UPLOADS)[-1]
+        entry = data_ops._UPLOADS[key]
 
     if entry is None and file_name:
         key, entry = _find_by_name(file_name, folder)

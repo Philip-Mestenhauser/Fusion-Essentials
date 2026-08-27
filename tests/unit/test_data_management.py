@@ -448,6 +448,28 @@ class FakeDelFolder:
         return True
 
 
+class _BlindDelFolder(FakeDelFolder):
+    """A folder whose census reads RAISE - a permission-blocked or mid-sync cloud folder. Its
+    contents are UNKNOWN, which is not the same as empty: the whole subtree may be sitting there."""
+
+    def __init__(self, *args, blind_files=True, blind_subs=True, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._blind_files = blind_files
+        self._blind_subs = blind_subs
+
+    @property
+    def dataFiles(self):
+        if self._blind_files:
+            raise RuntimeError("3 : folder contents could not be enumerated")
+        return _Arr(self._files)
+
+    @property
+    def dataFolders(self):
+        if self._blind_subs:
+            raise RuntimeError("3 : subfolders could not be enumerated")
+        return _Arr(self._subs)
+
+
 def _install_folder_tree(root):
     """Install a data hub whose findFolderById walks a fake tree."""
     index = {}
@@ -535,6 +557,79 @@ class TestDeleteFolderGate:
         res = _del("root", confirm_name="Root", force=True)   # non-empty, no recursive_confirm
         assert res["isError"] is True
         assert "at least" in res["message"]
+
+
+class TestDeleteFolderUnreadableCensus:
+    """The gate reads two counts to decide between 'delete this directly' and 'this is a subtree
+    wipe - demand force AND a second acknowledgment'. A count that will not READ is not a zero: the
+    folder falls to the GUARDED side, or an unreadable census becomes the quiet way past every
+    guard on an irreversible delete."""
+
+    def test_both_counts_unreadable_refuses_and_names_the_failed_reads(self):
+        blind = _BlindDelFolder("b", "Blind")
+        _install_folder_tree(blind)
+        res = _del("b", confirm_name="Blind")
+        assert res["isError"] is True
+        assert blind.deleted is False
+        # WHICH read failed decides the caller's next step (retry a transient cloud failure vs.
+        # accept a blind delete), so it is named rather than summarized.
+        assert "dataFiles.count" in res["message"] and "dataFolders.count" in res["message"]
+        assert "NOT provably empty" in res["message"]
+
+    def test_one_unreadable_count_refuses_too_and_names_only_that_read(self):
+        # The readable half reads zero - alone that says 'empty'. The unreadable half is exactly
+        # what the delete would be blind to, so one failure is enough to close the direct path.
+        blind = _BlindDelFolder("b", "Blind", blind_subs=False)
+        _install_folder_tree(blind)
+        res = _del("b", confirm_name="Blind")
+        assert res["isError"] is True and blind.deleted is False
+        assert "dataFiles.count" in res["message"]
+        assert "dataFolders.count" not in res["message"]   # that one answered - do not blame it
+
+    def test_the_other_unreadable_count_refuses_as_well(self):
+        blind = _BlindDelFolder("b", "Blind", blind_files=False)
+        _install_folder_tree(blind)
+        res = _del("b", confirm_name="Blind")
+        assert res["isError"] is True and blind.deleted is False
+        assert "dataFolders.count" in res["message"]
+        assert "dataFiles.count" not in res["message"]
+
+    def test_both_counts_reading_zero_still_deletes_directly(self):
+        # The other side of the boundary: counts that READ as zero ARE proof of emptiness, so the
+        # direct delete stays open with no force and no recursive_confirm.
+        empty = FakeDelFolder("e", "Empty")
+        _install_folder_tree(empty)
+        res = _del("e", confirm_name="Empty")
+        assert res["isError"] is False and empty.deleted is True
+
+    def test_force_alone_does_not_open_a_blind_delete(self):
+        blind = _BlindDelFolder("b", "Blind")
+        _install_folder_tree(blind)
+        res = _del("b", confirm_name="Blind", force=True)
+        assert res["isError"] is True and blind.deleted is False
+
+    def test_a_recursive_confirm_that_does_not_match_is_refused(self):
+        blind = _BlindDelFolder("b", "Blind")
+        _install_folder_tree(blind)
+        res = _del("b", confirm_name="Blind", force=True, recursive_confirm="blind")
+        assert res["isError"] is True and blind.deleted is False   # case-sensitive, like the name gate
+
+    def test_force_plus_recursive_confirm_deletes_and_the_payload_says_it_was_blind(self):
+        blind = _BlindDelFolder("b", "Blind")
+        _install_folder_tree(blind)
+        out = _payload(_del("b", confirm_name="Blind", force=True, recursive_confirm="Blind"))
+        assert blind.deleted is True
+        assert out["census_unreadable"] == ["dataFiles.count", "dataFolders.count"]
+        # null, never a fabricated zero - and 'recursive' is unknown, not False
+        assert out["contained_files"] is None and out["contained_subfolders"] is None
+        assert out["recursive"] is None
+
+    def test_a_readable_empty_delete_claims_no_blindness(self):
+        empty = FakeDelFolder("e", "Empty")
+        _install_folder_tree(empty)
+        out = _payload(_del("e", confirm_name="Empty"))
+        assert "census_unreadable" not in out
+        assert out["contained_files"] == 0 and out["recursive"] is False
 
 
 # ── data_ops handlers: create project / create folder / upload / list folders ────
@@ -626,6 +721,19 @@ def _install_proj_data(projects):
     return data
 
 
+def _refuse_child(monkeypatch, name):
+    """Make folder creation fail for ONE named child - the cloud declining a create partway through
+    a mkdir -p, which is what leaves earlier segments behind."""
+    original = FakeProjFolder._add_child
+
+    def guarded(self, child_name):
+        if child_name == name:
+            raise RuntimeError("3 : folder creation refused")
+        return original(self, child_name)
+
+    monkeypatch.setattr(FakeProjFolder, "_add_child", guarded)
+
+
 class TestCreateProject:
     def test_creates_and_reports_id(self):
         data = _install_proj_data([])
@@ -689,6 +797,40 @@ class TestCreateFolder:
         _install_proj_data([])
         res = dm.create_folder_handler(folder_name="X")
         assert res["isError"] is True and "project" in res["message"]
+
+    def test_a_failure_after_mkdir_p_names_the_parents_it_left_behind(self, monkeypatch):
+        # auto_created_parents only ships on the ok path, so an error is the ONLY place a caller
+        # hears that this call already made two folders it will not be cleaning up.
+        proj, _root = self._proj()
+        _install_proj_data([proj])
+        _refuse_child(monkeypatch, "Vises")
+        res = dm.create_folder_handler(folder_name="Vises", project="Proj",
+                                       parent_folder="Fixtures/Mills")
+        assert res["isError"] is True
+        assert "'Fixtures'" in res["message"] and "'Mills'" in res["message"]
+        assert "NOT removed" in res["message"]
+
+    def test_a_mkdir_p_that_raises_partway_names_only_what_it_had_created(self, monkeypatch):
+        # The raise loses the returned list, so the created names have to have been recorded as
+        # they were made - and a segment that never got created must not be claimed as retained.
+        proj, _root = self._proj()
+        _install_proj_data([proj])
+        _refuse_child(monkeypatch, "Mills")
+        res = dm.create_folder_handler(folder_name="Vises", project="Proj",
+                                       parent_folder="Fixtures/Mills")
+        assert res["isError"] is True
+        assert "'Fixtures'" in res["message"] and "NOT removed" in res["message"]
+        assert "'Mills'" not in res["message"]
+
+    def test_a_failure_that_created_nothing_claims_no_partial_success(self, monkeypatch):
+        # The boundary: no parent path, so nothing was auto-created and the error must not invent
+        # folders for the caller to go hunting.
+        proj, _root = self._proj()
+        _install_proj_data([proj])
+        _refuse_child(monkeypatch, "Parts")
+        res = dm.create_folder_handler(folder_name="Parts", project="Proj")
+        assert res["isError"] is True
+        assert "NOT removed" not in res["message"]
 
 
 class TestUploadFile:
@@ -791,6 +933,46 @@ class TestUploadFile:
             file_path=str(f), project="Proj", folder="New/Deep", create_path=True))
         assert out["auto_created_parents"] == ["New", "Deep"]
         assert out["destination_folder"] == "New/Deep"
+
+    def test_an_upload_that_will_not_start_names_the_folders_create_path_left(self, tmp_path,
+                                                                              monkeypatch):
+        proj, _ = self._proj_with_path()
+        _install_proj_data([proj])
+        f = tmp_path / "p.step"
+        f.write_text("x")
+
+        def _boom(self, path):
+            raise RuntimeError("3 : upload rejected")
+
+        monkeypatch.setattr(FakeProjFolder, "uploadFile", _boom)
+        res = dm.upload_file_handler(file_path=str(f), project="Proj", folder="New/Deep",
+                                     create_path=True)
+        assert res["isError"] is True
+        assert "'New'" in res["message"] and "'Deep'" in res["message"]
+        assert "NOT removed" in res["message"]
+
+    def test_an_immediately_failed_upload_also_names_the_retained_folders(self, tmp_path):
+        # The upload is refused, but the destination path it created for that upload stays.
+        proj, _ = self._proj_with_path()
+        _install_proj_data([proj])
+        f = tmp_path / "p.step"
+        f.write_text("x")
+        self._set_future(2)
+        res = dm.upload_file_handler(file_path=str(f), project="Proj", folder="New/Deep",
+                                     create_path=True)
+        assert res["isError"] is True and "FAILED" in res["message"]
+        assert "'New'" in res["message"] and "'Deep'" in res["message"]
+
+    def test_a_failed_upload_into_an_existing_folder_claims_no_retained_folders(self, tmp_path):
+        # The boundary: create_path made nothing, so there is no partial success to disclose.
+        proj, _ = self._proj_with_path()
+        _install_proj_data([proj])
+        f = tmp_path / "p.step"
+        f.write_text("x")
+        self._set_future(2)
+        res = dm.upload_file_handler(file_path=str(f), project="Proj", folder="Imports/STEP")
+        assert res["isError"] is True
+        assert "NOT removed" not in res["message"]
 
 
 class TestListFolders:

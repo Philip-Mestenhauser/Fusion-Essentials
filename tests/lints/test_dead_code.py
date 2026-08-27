@@ -29,8 +29,10 @@ framework entry point is mentioned somewhere in the corpus and needs no special-
 """
 
 import ast
+from functools import lru_cache
 from pathlib import Path
 
+import _corpus
 from conftest import TOOLS_DIR
 
 MCP_ROOT = Path(TOOLS_DIR).parent          # commands/mcpServer
@@ -53,16 +55,23 @@ _DEFINITION_EXEMPT = {}
 
 
 def _py_files(root):
-    return [p for p in root.rglob("*.py") if "__pycache__" not in p.parts]
+    return list(_corpus.py_files(root))
 
 
 def _parse(path):
-    return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    # The shared parse: this lint walks the same ~420-module corpus in four tests, and the imports
+    # test re-walks the server half. Every walk below is read-only, which is what lets one AST per
+    # file serve them all (_corpus).
+    return _corpus.tree(path)
 
 
+@lru_cache(maxsize=None)
 def _mention_counts():
     """name -> total mention sites across the corpus: every Name id, Attribute attr, import
-    alias, and identifier-shaped string passed to a *attr/monkeypatch-style call."""
+    alias, and identifier-shaped string passed to a *attr/monkeypatch-style call.
+
+    One index per process: the two tests that need it index the SAME corpus, and building it is
+    a full walk of every module. Read-only for callers - the dict is cached."""
     counts = {}
 
     def bump(name):
@@ -121,18 +130,26 @@ def _module_definitions(tree):
     return out
 
 
-def _local_mentions(tree, name, skip_import_alias=True):
-    """Mentions of `name` inside one module, excluding the import statement that binds it."""
-    n = 0
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Name) and node.id == name:
-            n += 1
-        elif isinstance(node, ast.Attribute) and node.attr == name:
-            n += 1
-        elif not skip_import_alias and isinstance(node, ast.alias) \
-                and (node.asname or node.name.split(".")[0]) == name:
-            n += 1
-    return n
+@lru_cache(maxsize=None)
+def _local_counts(path):
+    """name -> mentions inside ONE module: Name ids and Attribute attrs, from a single walk.
+
+    An ast.alias is deliberately not a mention - the import statement that BINDS a name is what
+    makes an unused import detectable. One walk per file rather than one per name: the import check
+    asks about every name a file imports, and a walk apiece is what made this the slowest lint.
+    Read-only for callers; the dict is cached."""
+    counts = {}
+    for node in ast.walk(_corpus.tree(path)):
+        if isinstance(node, ast.Name):
+            counts[node.id] = counts.get(node.id, 0) + 1
+        elif isinstance(node, ast.Attribute):
+            counts[node.attr] = counts.get(node.attr, 0) + 1
+    return counts
+
+
+def _local_mentions(path, name):
+    """Mentions of `name` inside the module at `path`, excluding the import that binds it."""
+    return _local_counts(str(path)).get(name, 0)
 
 
 def _stale_definition_exemptions(table, counts, defined):
@@ -167,7 +184,7 @@ class TestNoUnusedImports:
         for path in files:
             if path.name == "__init__.py":
                 continue          # a package __init__'s imports are its re-export surface
-            src_lines = path.read_text(encoding="utf-8").splitlines()
+            src_lines = _corpus.text(path).splitlines()
             tree = _parse(path)
             imported = []
             for node in ast.walk(tree):
@@ -181,7 +198,7 @@ class TestNoUnusedImports:
             for name in imported:
                 if (path.name, name) in _IMPORT_SEAMS:
                     continue
-                if _local_mentions(tree, name) == 0:
+                if _local_mentions(path, name) == 0:
                     offenders.append(f"{path.relative_to(REPO)}: import '{name}' is never used")
         assert not offenders, "Unused imports (delete them, or name a test seam):\n" + "\n".join(offenders)
 
@@ -199,7 +216,7 @@ class TestNoUnusedImports:
                        if isinstance(node, (ast.Import, ast.ImportFrom)) for a in node.names]
             if name not in aliases:
                 stale.append(f"{fname}: '{name}' no longer imported ({reason})")
-            elif _local_mentions(tree, name) > 0:
+            elif _local_mentions(path, name) > 0:
                 stale.append(f"{fname}: '{name}' is now used locally - drop the seam entry")
         assert not stale, "Stale _IMPORT_SEAMS entries:\n" + "\n".join(stale)
 

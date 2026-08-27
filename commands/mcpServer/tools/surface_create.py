@@ -75,11 +75,17 @@ def _open_profile_from_curves(comp, ents):
 
 
 def _body_names_and_solid(feature):
-    """(names, any_solid) for a feature's result bodies - read each body's name + isSolid LIVE."""
+    """(names, is_solid) for a feature's result bodies - each body's name and isSolid read LIVE.
+
+    is_solid is True when ANY body reads solid, False when a flag read and none did, and None when
+    NO body's flag could be read at all. read_flag rather than bool(safe(...)): a body whose isSolid
+    will not read is not thereby an open sheet, and every note here is worded off this value."""
     bodies = _common.result_bodies(feature)
     names = [safe(lambda b=b: b.name) for b in bodies]
-    any_solid = any(bool(safe(lambda b=b: b.isSolid)) for b in bodies)
-    return names, any_solid
+    flags = [_common.read_flag(lambda b=b: b.isSolid) for b in bodies]
+    if True in flags:
+        return names, True
+    return names, (False if False in flags else None)
 
 
 def _landed_depth(feature, want_cm, k):
@@ -159,10 +165,26 @@ def extrude_handler(sketch_name: str = "", curves=None, distance: float = 0.0,
         return error(_common.no_feature_error(design, "Surface extrude"))
 
     names, any_solid = _body_names_and_solid(feature)
+    # An empty result set is a failure: 'created: true' beside result_bodies [] claims a sheet the
+    # payload cannot show, and there is no body to read isSolid off.
+    if not names:
+        return error("Surface extrude reported success but the feature owns no result body - no "
+                     "sheet was created. " + _common.failed_effect_remedy(design, feature))
     landed, rerr = _landed_depth(feature, float(distance) * k, k)
     if rerr:
         return error(rerr + " " + _common.failed_effect_remedy(design, feature))
 
+    unverified = []
+    if any_solid is False:
+        note = ("Open surface body created (isSolid=false). Feed it to "
+                "surface_trim/extend/patch/thicken.")
+    elif any_solid is True:
+        note = ("The result reads back SOLID (isSolid=true) - the profile closed into a solid, not "
+                "a sheet.")
+    else:
+        note = ("Surface body created, but no result body's isSolid flag could be read back - "
+                "whether it is an open sheet is UNVERIFIED.")
+        unverified.append("is_solid")
     payload = {
         "created": True,
         "feature": safe(lambda: feature.name),
@@ -174,15 +196,15 @@ def extrude_handler(sketch_name: str = "", curves=None, distance: float = 0.0,
         "distance": round(float(distance), 6),
         "units": units,
         "symmetric": bool(symmetric),
-        "note": ("Open surface body created (isSolid=false). Feed it to surface_trim/extend/patch/thicken."
-                 if not any_solid else
-                 "The result reads back SOLID (isSolid=true) - the profile closed into a solid, not a sheet."),
+        "note": note,
     }
     if landed is None:
-        payload["unverified"] = ["distance"]
+        unverified.append("distance")
         payload["note"] += " Not read back off the feature: distance."
     else:
         payload["distance"] = landed
+    if unverified:
+        payload["unverified"] = unverified
     return ok(payload)
 
 
@@ -255,8 +277,19 @@ def revolve_handler(sketch_name: str = "", curves=None, axis: str = "z",
         return error(_common.no_feature_error(design, "Surface revolve"))
 
     names, any_solid = _body_names_and_solid(feature)
+    if not names:
+        return error("Surface revolve reported success but the feature owns no result body - no "
+                     "sheet was created. " + _common.failed_effect_remedy(design, feature))
 
-    return ok({
+    if any_solid is False:
+        note = "Open surface body created (isSolid=false)."
+    elif any_solid is True:
+        note = ("The result reads back SOLID (isSolid=true) - the profile closed into a solid, not "
+                "a sheet.")
+    else:
+        note = ("Surface body created, but no result body's isSolid flag could be read back - "
+                "whether it is an open sheet is UNVERIFIED.")
+    payload = {
         "created": True,
         "feature": safe(lambda: feature.name),
         "operation": op_key,
@@ -266,9 +299,11 @@ def revolve_handler(sketch_name: str = "", curves=None, axis: str = "z",
         "result_bodies": names,
         "is_solid": any_solid,       # read back from the body, not assumed (expected False for a shell)
         "symmetric": bool(symmetric),
-        "note": ("Open surface body created (isSolid=false)." if not any_solid else
-                 "The result reads back SOLID (isSolid=true) - the profile closed into a solid, not a sheet."),
-    })
+        "note": note,
+    }
+    if any_solid is None:
+        payload["unverified"] = ["is_solid"]
+    return ok(payload)
 
 
 # ── surface_patch ───────────────────────────────────────────────────────────
@@ -288,6 +323,18 @@ def _rails_readback(patch_input, expected):
                    f"back {n} entity(ies) after assigning {expected}, so the patch would run "
                    "without them.")
     return n, ""
+
+
+def _patch_note(is_solid):
+    """The sentence a patch payload states its RESULT with - worded off the isSolid actually read
+    back off the patch body, never off the expectation that a patch makes a surface."""
+    if is_solid is False:
+        return "Closed boundary filled with a surface (isSolid=false)."
+    if is_solid is True:
+        return ("Closed boundary filled, and the result reads back isSolid=true - a SOLID, not the "
+                "open surface a patch normally makes.")
+    return ("Closed boundary filled, but no result body's isSolid flag could be read back - "
+            "whether the patch is an open surface is UNVERIFIED.")
 
 
 def _patch_one_loop(comp, boundary, op, cont, cont_key, rails=()):
@@ -352,11 +399,16 @@ def _patch_one_loop(comp, boundary, op, cont, cont_key, rails=()):
     if not feature:
         return None, _common.no_feature_error(_common.design(), "Patch",
                                              "(The boundary may not form a closed loop.)")
-    names, _ = _body_names_and_solid(feature)
+    names, is_solid = _body_names_and_solid(feature)
+    if not names:
+        return None, ("Patch reported success but the feature owns no result body - the loop was "
+                      "not filled. "
+                      + _common.failed_effect_remedy(_common.design(), feature))
     return {
     "feature": safe(lambda: feature.name),
     "result_body": names[0] if names else None,
     "result_bodies": names,
+    "is_solid": is_solid,
     "boundary_edge_count": len(ents),
     "interior_rail_count": rail_count,
     }, None
@@ -420,10 +472,12 @@ def patch_handler(boundary=None, boundaries=None, continuity: str = "connected",
         "continuity": cont_key,
         "result_body": r["result_body"],
         "result_bodies": r["result_bodies"],
-        "is_solid": False,
+        "is_solid": r["is_solid"],      # read off the patch body, not the module's expectation
         "boundary_edge_count": r["boundary_edge_count"],
-        "note": "Closed boundary filled with a surface (isSolid=false).",
+        "note": _patch_note(r["is_solid"]),
         }
+        if r["is_solid"] is None:
+            payload["unverified"] = ["is_solid"]
         if r["interior_rail_count"] is not None:
             # the count PatchFeatureInput.interiorRailsAndPoints reads back, not the number asked for
             payload["interior_rail_count"] = r["interior_rail_count"]
@@ -431,19 +485,26 @@ def patch_handler(boundary=None, boundaries=None, continuity: str = "connected",
 
     # Multi-loop: report how many patched + per-loop bodies + any per-loop failures.
     all_bodies = [n for r in results for n in r["result_bodies"]]
-    return ok({
+    flags = [r["is_solid"] for r in results]
+    agg = True if True in flags else (False if False in flags else None)
+    payload = {
         "patched": len(results),
         "requested": len(loops),
         "failed": len(errors),
         "operation": op_key,
         "continuity": cont_key,
         "result_bodies": all_bodies,
-        "patches": [{"feature": r["feature"], "bodies": r["result_bodies"]} for r in results],
+        "patches": [{"feature": r["feature"], "bodies": r["result_bodies"],
+                     "is_solid": r["is_solid"]} for r in results],
         "errors": errors,
-        "is_solid": False,
-        "note": (f"Patched {len(results)} of {len(loops)} loop(s) into surface bodies (isSolid=false)."
+        "is_solid": agg,
+        "note": (f"Patched {len(results)} of {len(loops)} loop(s)."
+                 + (" " + _patch_note(agg) if results else "")
                  + (" Some loops failed - see 'errors'." if errors else "")),
-    })
+    }
+    if results and agg is None:
+        payload["unverified"] = ["is_solid"]
+    return ok(payload)
 
 
 # ── tool / item wiring ──────────────────────────────────────────────────────

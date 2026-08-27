@@ -29,6 +29,28 @@ def _ref_name(ref):
     return safe(lambda: ref.dataFile.name) or "(unknown)"
 
 
+def _source_groups(rows):
+    """Group matched reference rows by the SOURCE FILE they point at: {key: [(kind, label)]}.
+
+    The key is the source DataFile's lineage id - the only thing that says two rows refresh the SAME
+    file, since one document can be referenced by several rows (an occurrence xref plus a derive off
+    the same source) while two DIFFERENT files may share a NAME. A row whose id does not read gets a
+    key of its own: two unreadable ids cannot be shown to be one file, so the caller is owed the
+    ambiguity refusal rather than a merge the reads do not support."""
+    groups = {}
+    for kind, label, ref in rows:
+        fid = safe(lambda r=ref: r.dataFile.id)
+        groups.setdefault(fid if fid else ("unreadable", id(ref)), []).append((kind, label))
+    return groups
+
+
+def _group_label(key, members):
+    """One line of the ambiguity refusal: the source file's URN (or that it would not read) and the
+    kinds of reference row pointing at it."""
+    who = key if isinstance(key, str) else "(source file id unreadable)"
+    return f"{who} [{', '.join(kind for kind, _ in members)}]"
+
+
 def _derive_refs(doc):
     """Every (label, DocumentReference) pair off a DeriveFeature across every component (root and
     every sub-component, via the shared all_components walk). Resolved straight off `doc` (not
@@ -103,23 +125,36 @@ def handler(name: str = "", only_out_of_date: bool = True) -> dict:
                    "note": "This document has no external references (occurrence xrefs or derive links)."})
 
     want = (name or "").strip()
-    matched = 0
-    updated = []
-    skipped = []
-    errors = []
-    for kind, items in (("xref", xref_items), ("derive", derive_items)):
-        for rname, ref in items:
-            if want and rname != want:
-                continue
-            matched += 1
-            outcome, record = _refresh_one(ref, rname, only_out_of_date, use_setter=(kind == "derive"))
-            record["kind"] = kind
-            {"updated": updated, "skipped": skipped, "error": errors}[outcome].append(record)
+    rows = [(kind, rname, ref)
+            for kind, items in (("xref", xref_items), ("derive", derive_items))
+            for rname, ref in items]
+    if want:
+        # Case-INSENSITIVE match: 'name' is a source document's display NAME, not an identifier.
+        # Every row of the matched FILE is refreshed (one source can be referenced several times),
+        # but a name shared by DIFFERENT source files is refused rather than refreshed en masse.
+        rows = [r for r in rows if r[1].strip().lower() == want.lower()]
+        groups = _source_groups(rows)
+        if len(groups) > 1:
+            listed = "; ".join(_group_label(k, m) for k, m in groups.items())
+            return error(
+                f"'{name}' names {len(groups)} DIFFERENT source files referenced by this document: "
+                f"{listed}. Fusion allows same-name files in different folders, so refreshing them "
+                "all could pull a version you did not ask for - refusing. Omit 'name' to refresh "
+                "every out-of-date reference, or inspect the rows with "
+                "doc_get(include=['xref_tree']).")
 
-    if want and matched == 0:
+    if want and not rows:
         available = [rname for rname, _ in xref_items] + [rname for rname, _ in derive_items]
         return error(f"No external reference named '{name}'. References in this document: "
                       f"{', '.join(available)}.")
+
+    updated = []
+    skipped = []
+    errors = []
+    for kind, rname, ref in rows:
+        outcome, record = _refresh_one(ref, rname, only_out_of_date, use_setter=(kind == "derive"))
+        record["kind"] = kind
+        {"updated": updated, "skipped": skipped, "error": errors}[outcome].append(record)
 
     if errors:
         return error(f"Some references failed to update: {json.dumps(errors)}. "

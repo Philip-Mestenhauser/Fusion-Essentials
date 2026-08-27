@@ -34,6 +34,9 @@ _RELOAD_DELAY_SECONDS = 0.5
 # install_reload_event() at server start, removed by uninstall_reload_event().
 _reload_event = None
 _reload_handler = None
+# Why the install failed, quoted in the refusal: without the event, fireCustomEvent reaches nothing
+# and a scheduled reload never happens.
+_install_error = ""
 
 
 def _addin_root_folder() -> str:
@@ -106,44 +109,69 @@ def _purge_addin_modules() -> int:
     return len(doomed)
 
 
+def _perform_reload():
+    """The deferred stop -> purge -> run, as a plain function - kept separate from
+    _ReloadEventHandler so it is directly testable (adsk.core.CustomEventHandler is a bare Mock
+    under the unit-test harness, where `class X(mock_instance)` yields another Mock rather than a
+    working subclass, so notify() itself never runs there).
+
+    Every outcome goes to the Fusion log: this runs after the HTTP response has flushed, with the
+    MCP server it is tearing down already gone, so the log is the only channel left."""
+    try:
+        app.log('Fusion-Essentials MCP: performing deferred add-in reload')
+        script = _find_self_script()
+        if not script:
+            app.log('Fusion-Essentials MCP reload: could not locate own Script object')
+            return
+        # stop() tears down the current add-in (incl. this MCP server). It answers whether the
+        # teardown happened, and a false means run() below re-enters an add-in that never stopped.
+        if not script.stop():
+            app.log('Fusion-Essentials MCP reload: Script.stop() returned False - the add-in '
+                    'did not stop, so the re-run below may load nothing')
+        # CRITICAL: bust the module cache BEFORE run(), or run() re-imports the
+        # STALE cached modules and edits to existing files don't load. This is the
+        # whole point of a reload tool - without it, only brand-new files appear.
+        try:
+            purged = _purge_addin_modules()
+            app.log(f'Fusion-Essentials MCP reload: purged {purged} cached add-in module(s)')
+        except Exception as e:
+            app.log(f'Fusion-Essentials MCP reload: module purge failed (continuing): {e}')
+        # run() now re-imports the add-in fresh from disk.
+        if not script.run(False):
+            app.log('Fusion-Essentials MCP reload: Script.run(False) returned False - the add-in '
+                    'did NOT restart and the MCP server is down; start it from the Scripts and '
+                    'Add-Ins dialog (Shift+S)')
+    except Exception as e:
+        app.log(f'Fusion-Essentials MCP reload failed: {e}')
+
+
 class _ReloadEventHandler(adsk.core.CustomEventHandler):
-    """Performs the actual stop()+run() on the main thread, outside any MCP call."""
+    """Fires the deferred reload on the main thread, outside any MCP call. See _perform_reload."""
 
     def notify(self, args):
-        try:
-            app.log('Fusion-Essentials MCP: performing deferred add-in reload')
-            script = _find_self_script()
-            if not script:
-                app.log('Fusion-Essentials MCP reload: could not locate own Script object')
-                return
-            # stop() tears down the current add-in (incl. this MCP server).
-            script.stop()
-            # CRITICAL: bust the module cache BEFORE run(), or run() re-imports the
-            # STALE cached modules and edits to existing files don't load. This is the
-            # whole point of a reload tool - without it, only brand-new files appear.
-            try:
-                purged = _purge_addin_modules()
-                app.log(f'Fusion-Essentials MCP reload: purged {purged} cached add-in module(s)')
-            except Exception as e:
-                app.log(f'Fusion-Essentials MCP reload: module purge failed (continuing): {e}')
-            # run() now re-imports the add-in fresh from disk.
-            script.run(False)
-        except Exception as e:
-            app.log(f'Fusion-Essentials MCP reload failed: {e}')
+        _perform_reload()
 
 
 def install_reload_event():
     """Register the reload custom event + handler. Called at server start."""
-    global _reload_event, _reload_handler
+    global _reload_event, _reload_handler, _install_error
+    # Start from nothing: a failed install that left the previous run's event object in place would
+    # let handler() schedule against an event this session never registered.
+    _reload_event, _reload_handler, _install_error = None, None, ''
     try:
         try:
             app.unregisterCustomEvent(RELOAD_EVENT_ID)
         except Exception:
             pass
         _reload_event = app.registerCustomEvent(RELOAD_EVENT_ID)
+        if not _reload_event:
+            _install_error = f'app.registerCustomEvent({RELOAD_EVENT_ID}) returned nothing'
+            app.log(f'Fusion-Essentials MCP: {_install_error}')
+            return
         _reload_handler = _ReloadEventHandler()
         _reload_event.add(_reload_handler)
     except Exception as e:
+        _install_error = str(e)
         app.log(f'Fusion-Essentials MCP: failed to install reload event: {e}')
 
 
@@ -166,6 +194,17 @@ def uninstall_reload_event():
 
 def handler() -> dict:
     """Schedule a deferred reload and return immediately (does NOT reload inline)."""
+    # The timer below fires a custom event. With no event registered, fireCustomEvent reaches
+    # nothing at all: the reload silently never happens, and "Reload scheduled." would send the
+    # caller on to test code that was never loaded.
+    if _reload_event is None or _reload_handler is None:
+        why = _install_error or 'the event is not registered on this server'
+        text = ("Reload NOT scheduled: the deferred-reload event is not installed (" + why + "), "
+                "so firing it would reach nothing and the add-in would keep running the code "
+                "already in memory. Reload it from Fusion's Scripts and Add-Ins dialog (Shift+S) "
+                "instead - stop the add-in, then run it.")
+        return {"content": [{"type": "text", "text": text}], "isError": True, "message": text}
+
     def _fire():
         try:
             app.fireCustomEvent(RELOAD_EVENT_ID)

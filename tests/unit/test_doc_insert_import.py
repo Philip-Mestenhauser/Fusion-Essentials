@@ -8,6 +8,7 @@ import types
 
 import pytest
 
+import adsk.fusion
 from conftest import (BRepBody, MakeComp, _NamedCollection, error_message, load_tool, make_design,
                       payload)
 
@@ -441,7 +442,8 @@ class TestFeatureHealthAcrossADocumentSwitch:
         # The skip may only apply to the new-document path: an import into the OPEN design must
         # still fail on a feature that computed with an error.
         post = mod._FeatureHealthyHere()
-        broken = types.SimpleNamespace(name="Imported1", healthState=post._ERROR,
+        error_state = adsk.fusion.FeatureHealthStates.ErrorFeatureHealthState
+        broken = types.SimpleNamespace(name="Imported1", healthState=error_state,
                                        errorOrWarningMessage="bad geometry")
         timeline = types.SimpleNamespace(count=1, item=lambda i: broken)
         monkeypatch.setattr(post, "_timeline", lambda: timeline)

@@ -249,6 +249,27 @@ class TestMoveVerification:
         assert out["moved"] is False and out["already_in_target"] is True
         assert df.moves == []
 
+    def test_a_name_match_over_unread_folders_says_so_in_the_note(self, monkeypatch):
+        # The file that moved is whichever one the name resolved to. A folder that never opened
+        # could hold another of that name, so the caller is told while reversing it is still cheap.
+        root, docs, _p, _f = _tree()
+        df = _cloud_file(docs, _project(root))
+        monkeypatch.setattr(dmv, "resolve_file_reference",
+                            lambda *a, **kw: (df, {"matched_by": "name", "urn": "urn:lin:AAA",
+                                                   "folders_unreadable": 1}, None))
+        monkeypatch.setattr(dmv, "_resolve_data_file", lambda raw: (df, raw, [raw]))
+        out = _payload(dmv.handler(file="probe_note.txt", project="P1",
+                                   target_folder="Parts/Fixtures"))
+        assert out["moved"] is True
+        assert "1 folder(s) could not be READ" in out["note"]
+        assert "file_id" in out["note"]
+
+    def test_a_move_over_a_fully_read_scope_carries_no_such_caveat(self, wired):
+        root, docs, _p, _f = _tree()
+        wired(_cloud_file(docs, _project(root)))
+        out = _payload(dmv.handler(file="urn:lin:AAA", target_folder="Parts/Fixtures"))
+        assert "could not be READ" not in out["note"]
+
     def test_an_ambiguous_name_refusal_is_passed_through(self, wired):
         wired(err="'notes.txt' names 2 files in project 'P1' - refusing to guess which")
         assert "names 2 files" in error_message(

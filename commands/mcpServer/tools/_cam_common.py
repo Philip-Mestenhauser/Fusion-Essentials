@@ -25,7 +25,10 @@ MAP_BLURB = ("get_cam (the shared CAM-product resolver every CAM tool calls) + w
              "error) wrapper handing back the resolver's refusal verbatim) + find_operation (the "
              "(obj, available_names) wrapper over the same resolver) + expression_error (the post-set "
              "CAMParameter evaluation read-back every CAM param editor gates on) + live_readiness "
-             "(the one CAM job-health signal) + op_state_facts / op_primary_state / validity_basis "
+             "(the one CAM job-health signal) + ready_verdict / first_line (the ONE postable-verdict "
+             "sentence every readiness surface emits - it demotes 'ready to post' whenever active-op "
+             "warnings > 0, naming the first warning op and line, so no scoped or summary re-roll "
+             "can overstate) + op_state_facts / op_primary_state / validity_basis "
              "(the shared per-op lifecycle read, its one mutually-exclusive bucket classifier, and "
              "the Manufacture-workspace trust gate every op-state rollup reads) + clamp_rows (the "
              "ONE 'max_results' clamp - a non-numeric request falls back to the read's default, the "
@@ -287,11 +290,35 @@ def find_operation(cam, name):
     return None, [n.name for n in nodes]
 
 
+def first_line(text) -> str:
+    """The first line of a fault message, '' when there is none - the trim every disclosure SAMPLE
+    takes, so a multi-line warning/error body never rides inside a one-sentence verdict."""
+    lines = (text or "").strip().splitlines()
+    return lines[0] if lines else ""
+
+
 def first_error_line(obj):
     """First line of an object's .error (the disclosure signal; the full text is the per-item record's
     job). '' if none."""
-    msg = (safe(lambda: obj.error) or "").strip().splitlines()
-    return msg[0] if msg else ""
+    return first_line(safe(lambda: obj.error))
+
+
+def first_warning_line(obj):
+    """First line of an object's .warning - the same disclosure signal for the softer fault. '' if none."""
+    return first_line(safe(lambda: obj.warning))
+
+
+def counts_as_warning(facts: dict) -> bool:
+    """Whether an op's warning counts toward the readiness overlay. A warning on an ERRORED op says
+    nothing beyond its error (which already blocks), and a SUPPRESSED op is excluded from the post,
+    so neither demotes a verdict. The ONE predicate every readiness surface counts AND samples
+    through, so the count and the named sample can never describe different sets.
+
+    Read by key so BOTH shapes carrying these facts answer it: op_state_facts (the live per-op read
+    op_state_tally walks) and cam_get's per-op RECORD, which carries has_warning/has_error/
+    is_suppressed but no raw operation_state."""
+    return (bool(facts.get("has_warning")) and not facts.get("has_error")
+            and not (facts.get("is_suppressed") or facts.get("operation_state") == 2))
 
 
 def op_state_facts(op) -> dict:
@@ -317,23 +344,33 @@ def op_state_tally(ops) -> dict:
     the ONE per-op walk both share, classifying every op from the same op_state_facts. An ERRORED op
     is its OWN bucket: it has a parameter/geometry fault and will NEVER finish generating, so counting
     it as out_of_date/generating would make a poller wait forever. 'generating' is an independent
-    OVERLAY bit (an op can be valid/out_of_date AND generating).
+    OVERLAY bit (an op can be valid/out_of_date AND generating), and so is 'warnings': a WARNED op
+    stays in its lifecycle bucket (measured: an unselected-geometry 2D Contour reports hasWarning
+    with hasError False and operationState 0 - it reads 'valid' and has no toolpath at all), so a
+    verdict built from the buckets alone overstates a job carrying warnings.
 
-    Returns {valid, out_of_date, errored, generating, suppressed, total, active, op_sample} -
-    op_sample is the first errored op's {name, error}, or None. Each caller layers its OWN payload
+    Returns {valid, out_of_date, errored, generating, suppressed, warnings, total, active,
+    op_sample, warning_sample} - op_sample is the first errored op's {name, error} and
+    warning_sample the first counted-warning op's {name, warning}, both None when there is none
+    (each is sampled through the same predicate as its count). Each caller layers its OWN payload
     shape on top (live_readiness adds setup-/program-level errors + a readiness verdict; the scoped
     poller adds setups_errored=0/programs_errored=0). This is a DIFFERENT tally from cam_get's
     op_states (a per-SETUP, mutually-exclusive-bucket rollup via op_primary_state) - same raw facts,
     different shape for a different question ("what's live right now" vs "this setup's state mix)."""
-    valid = ood = errored = generating = suppressed = total = 0
+    valid = ood = errored = generating = suppressed = warnings = total = 0
     active = None
     op_sample = None
+    warning_sample = None
     for raw in (ops or []):
         op = adsk.cam.Operation.cast(raw)
         if op is None:
             continue
         facts = op_state_facts(op)
         total += 1
+        if counts_as_warning(facts):
+            warnings += 1                            # OVERLAY: the op still lands in a bucket below
+            if warning_sample is None:
+                warning_sample = {"name": facts["name"], "warning": first_warning_line(op)}
         if facts["has_error"]:
             errored += 1                             # FAILED, not pending - its own bucket
             if op_sample is None:
@@ -352,7 +389,35 @@ def op_state_tally(ops) -> dict:
             if active is None or (prog and prog not in ("Pending", "0.0%")):
                 active = {"op": facts["name"], "progress": prog}
     return {"valid": valid, "out_of_date": ood, "errored": errored, "generating": generating,
-            "suppressed": suppressed, "total": total, "active": active, "op_sample": op_sample}
+            "suppressed": suppressed, "warnings": warnings, "total": total, "active": active,
+            "op_sample": op_sample, "warning_sample": warning_sample}
+
+
+def _warning_phrase(sample) -> str:
+    """The 'name - first warning line' clause a readiness verdict names its first warning by. A
+    sample that could not be read says so rather than naming a blank operation."""
+    if not sample or not sample.get("name"):
+        return "cam_get(include=['operations']) lists which."
+    text = (sample.get("warning") or "").strip()
+    return f"'{sample['name']}'" + (f" - {text}" if text else " (warning text unreadable).")
+
+
+def ready_verdict(measure: str, warned: int, warning_sample) -> str:
+    """The ONE 'this scope is postable' sentence - built here for EVERY readiness surface
+    (live_readiness's document signal, cam_get_status's scoped poll, cam_get's operations summary),
+    so no surface can emit a plain 'ready to post' over a job carrying warnings.
+
+    `measure` is the caller's own count clause ("3 of 3 active ops valid") - each surface counts a
+    different thing and keeps its own noun; the VERDICT that clause earns is this function's.
+
+    A WARNED op does NOT block: the job is still postable, so this is never demoted to a blocker.
+    But an op can bucket as valid and carry a warning meaning it cut nothing (measured: a
+    geometry-less 2D Contour reads isToolpathValid True with hasToolpath False), which a plain
+    'ready to post' hides - so the count is stated and the first warning named instead."""
+    if not warned:
+        return f"{measure} - ready to post."
+    return (f"{measure}, {warned} with WARNINGS - postable, but read the warnings first: "
+            f"{_warning_phrase(warning_sample)}")
 
 
 def live_readiness():
@@ -363,20 +428,24 @@ def live_readiness():
     even with clean ops; Setup and NCProgram expose the same hasError/error as Operation).
 
     Returns (signal, None) or (None, reason). signal:
-      {valid, out_of_date, errored, generating, suppressed, total, active,
-       setups_errored, programs_errored, readiness, samples:{op,setup,program}}
+      {valid, out_of_date, errored, generating, suppressed, warnings, total, active,
+       setups_errored, programs_errored, readiness, samples:{op,setup,program,warning}}
     Each level carries ONE sample (name + first error line) - the disclosure signal; the full per-item
     texture is cam_get(include=['operations'/'nc_programs']). 'active' is the op currently computing.
     An ERRORED op is its OWN bucket: it has a parameter/geometry fault and will NEVER finish generating,
-    so counting it as out_of_date/generating would make a poller wait forever.
+    so counting it as out_of_date/generating would make a poller wait forever. A WARNED op does NOT
+    block - it can be posted - but it never reads as a plain 'ready to post' either: the verdict states
+    the warning count and names the first one, because an op can carry a warning and still bucket as
+    valid (measured: a 2D Contour with no geometry selected reads valid with no toolpath).
     """
     cam, err = get_cam()
     if err:
         return None, err
-    samples = {"op": None, "setup": None, "program": None}
+    samples = {"op": None, "setup": None, "program": None, "warning": None}
     try:
         tally = op_state_tally(walk_operations(cam))
         samples["op"] = tally["op_sample"]
+        samples["warning"] = tally["warning_sample"]
         setups_errored = 0
         for s in setups(cam):
             if safe(lambda s=s: s.hasError, False):
@@ -394,6 +463,7 @@ def live_readiness():
     except Exception as e:
         return None, str(e)
     valid, ood, errored = tally["valid"], tally["out_of_date"], tally["errored"]
+    warned = tally["warnings"]
     active_total = valid + ood + errored          # active = everything not suppressed
     if errored or setups_errored or programs_errored:
         readiness = ("BLOCKER: "
@@ -403,13 +473,15 @@ def live_readiness():
                          f"{errored} operation(s)" if errored else ""] if b)
                      + " have errors - the job will not post until fixed.")
     elif active_total and valid == active_total:
-        readiness = f"{valid} of {active_total} active ops valid - ready to post."
+        readiness = ready_verdict(f"{valid} of {active_total} active ops valid",
+                                  warned, samples["warning"])
     elif active_total:
         readiness = f"{valid} of {active_total} active ops valid - run cam_generate to finish the rest."
     else:
         readiness = "no active operations to assess."
     return {"valid": valid, "out_of_date": ood, "errored": errored, "generating": tally["generating"],
-            "suppressed": tally["suppressed"], "total": tally["total"], "active": tally["active"],
+            "suppressed": tally["suppressed"], "warnings": warned, "total": tally["total"],
+            "active": tally["active"],
             "setups_errored": setups_errored, "programs_errored": programs_errored,
             "readiness": readiness, "samples": samples}, None
 
@@ -723,17 +795,26 @@ def _operations_summary(op_records) -> dict:
     'state' - which _operation_summary derives through op_primary_state, so this tally and the
     per-setup op_states rollup are the SAME classification and cannot contradict each other;
     exceptions = only ACTIVE ops that block (suppressed ops never block); readiness = a factual
-    next-action string, gated by validity_basis (no toolpath verdict unless Manufacture-verified)."""
+    next-action string, gated by validity_basis (no toolpath verdict unless Manufacture-verified)
+    and worded by the shared ready_verdict, so a warned job never reads plainly ready here either."""
     states = {}
     exceptions = []
     active_total = 0
     valid_active = 0
+    warned = 0
+    warning_sample = None
     for r in op_records:
         st = r.get("state")
         states[st] = states.get(st, 0) + 1
         if r.get("is_suppressed"):
             continue                              # suppressed = excluded from posting; not active, not blocking
         active_total += 1
+        # Counted through the SAME predicate live_readiness counts by (the record carries the facts
+        # it reads), so the two surfaces can never disagree about which warnings demote a verdict.
+        if counts_as_warning(r):
+            warned += 1
+            if warning_sample is None:
+                warning_sample = {"name": r.get("name"), "warning": first_line(r.get("warning"))}
         has_err = bool(r.get("has_error"))
         # An op counts as good-to-post only when its toolpath is valid AND it carries no error.
         # has_error is the authoritative per-op fault flag this record ships beside the toolpath flag
@@ -752,7 +833,9 @@ def _operations_summary(op_records) -> dict:
                "validity_basis": basis}
     if basis == "manufacture_verified":
         if active_total and valid_active == active_total and not exceptions:
-            summary["readiness"] = f"{active_total} of {active_total} active ops have valid toolpaths - ready to post."
+            summary["readiness"] = ready_verdict(
+                f"{active_total} of {active_total} active ops have valid toolpaths",
+                warned, warning_sample)
         else:
             summary["readiness"] = (f"{valid_active} of {active_total} active ops have valid toolpaths - "
                                     "resolve the exceptions (run cam_generate) before posting.")

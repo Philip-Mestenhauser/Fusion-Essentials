@@ -384,6 +384,77 @@ class TestLoft:
         res = so.loft_handler(profiles=["H0", "H1", "H2"], operation="cut")
         assert res["isError"] is True and "changed nothing" in res["message"]
 
+    def test_loft_with_no_result_body_is_an_error(self):
+        # 'lofted: true' beside result_bodies [] claims a body the payload cannot show
+        self._profiles_design(result_bodies=[])
+        res = so.loft_handler(profiles=["H0", "H1"])
+        assert res["isError"] is True
+        assert "owns no result body" in res["message"]
+        assert "design_delete_feature" in res["message"]
+
+    def test_one_result_body_is_the_boundary_that_passes(self):
+        self._profiles_design(result_bodies=[_FakeBRepBody("Body1", True)])
+        out = _payload(so.loft_handler(profiles=["H0", "H1"]))
+        assert out["result_bodies"] == ["Body1"]
+
+    def test_a_cut_that_consumed_its_target_is_not_refused_for_an_empty_result(self):
+        # a cut/intersect that ate the body outright leaves no result body, and the volume gate
+        # above has already proven material moved - refusing there would call a real cut a failure
+        eaten = _FakeBRepBody("Eaten", is_solid=True, volume=4.0)
+        lf = self._cut_design([eaten], moves=[(eaten, None)])
+        lf._result_bodies = []
+        out = _payload(so.loft_handler(profiles=["H0", "H1", "H2"], operation="cut"))
+        assert out["result_bodies"] == []
+
+    def test_a_cut_whose_census_never_read_does_not_buy_the_empty_result_carve_out(self):
+        # The census was SAMPLED but no volume read at either end, so the no-op gate above stayed
+        # silent and nothing about this cut is proven. Keying the carve-out on "a census exists"
+        # rather than on measured movement lets an empty result set through as a success.
+        blind = _FakeBRepBody("Blind", is_solid=True, volume=None)
+        lf = self._cut_design([blind])          # no moves: the volume is None at both ends
+        lf._result_bodies = []
+        res = so.loft_handler(profiles=["H0", "H1", "H2"], operation="cut")
+        assert res["isError"] is True
+        assert "owns no result body" in res["message"]
+
+    # The band boundary is tested from a ZERO base volume: `v - 0.0` is exact in binary floating
+    # point, where subtracting the band from a realistic volume lands an ulp either side of it and
+    # would test the neighbourhood of the boundary rather than the boundary itself.
+
+    def test_a_measurable_cut_at_the_no_change_band_keeps_the_carve_out(self):
+        # delta exactly AT the band is the smallest movement the volume gate does not refuse, so it
+        # is the boundary the carve-out must accept - the >= / > edge of `moved`
+        band = so._common.NO_VOLUME_CHANGE_CM3
+        bar = _FakeBRepBody("Bar", is_solid=True, volume=0.0)
+        lf = self._cut_design([bar], moves=[(bar, band)])
+        lf._result_bodies = []
+        out = _payload(so.loft_handler(profiles=["H0", "H1", "H2"], operation="cut"))
+        assert out["result_bodies"] == []
+        assert out["volume_delta_cm3"] == round(band, 6)
+
+    def test_a_cut_just_inside_the_no_change_band_is_still_refused_as_a_no_op(self):
+        # one notch below the band: the volume gate owns this refusal, and the carve-out must not
+        # rescue it
+        band = so._common.NO_VOLUME_CHANGE_CM3
+        bar = _FakeBRepBody("Bar", is_solid=True, volume=0.0)
+        lf = self._cut_design([bar], moves=[(bar, band / 2)])
+        lf._result_bodies = []
+        res = so.loft_handler(profiles=["H0", "H1", "H2"], operation="cut")
+        assert res["isError"] is True
+        assert "changed nothing" in res["message"]
+
+    def test_unreadable_is_solid_is_null_and_narrated_as_unverified(self):
+        # feature.isSolid did not read: safe() made it falsy, so the note claimed "Result is a
+        # SURFACE" off a flag nobody read
+        lf = _FakeLoftFeatures(result_is_solid=None)      # no isSolid attribute at all
+        _install(_FakeFeatures(loft=lf),
+                 handle_map={"H0": _FakeProfile("0"), "H1": _FakeProfile("1")})
+        out = _payload(so.loft_handler(profiles=["H0", "H1"]))
+        assert out["is_solid"] is None
+        assert out["unverified"] == ["is_solid"]
+        assert "UNVERIFIED" in out["note"]
+        assert "Result is a SURFACE" not in out["note"]
+
     def test_loft_built_on_the_profiles_owning_component(self):
         # The profiles are OWNED by a sub-component while a DIFFERENT component is active. Handing
         # another component's native profile to the active component's features raises bSet live,
@@ -496,6 +567,39 @@ class TestStitch:
         res = so.stitch_handler(bodies=["Srf1", "Srf2"], operation="weld")
         assert res["isError"] is True
         assert "new, join, cut, intersect" in res["message"]
+
+    def test_became_solid_is_null_when_one_result_flag_will_not_read(self):
+        # bool(safe(...)) turns an unreadable isSolid into a False, and all() then publishes
+        # became_solid=false with a gap diagnosis ("increase tolerance") off a flag nobody read.
+        class _BlindBody:
+            name = "Mystery"
+
+            @property
+            def isSolid(self):
+                raise RuntimeError("3 : flag unavailable")
+
+        s1 = _FakeBRepBody("Srf1", is_solid=False)
+        s2 = _FakeBRepBody("Srf2", is_solid=False)
+        result = [_FakeBRepBody("Solid1", is_solid=True), _BlindBody()]
+        _install(_FakeFeatures(stitch=_FakeStitchFeatures(result)),
+                 bodies_by_name={"Srf1": s1, "Srf2": s2})
+        out = _payload(so.stitch_handler(bodies=["Srf1", "Srf2"]))
+        assert out["is_solid"] == [True, None]
+        assert out["became_solid"] is None
+        assert out["unverified"] == ["became_solid"]
+        assert "UNVERIFIED" in out["note"]
+        assert "did NOT close" not in out["note"]
+
+    def test_every_flag_readable_and_true_is_still_a_solid(self):
+        # the boundary beside the null: with every flag READ, all() still decides - the tri-state
+        # must not turn a genuine watertight stitch into an unverified one.
+        s1 = _FakeBRepBody("Srf1", is_solid=False)
+        s2 = _FakeBRepBody("Srf2", is_solid=False)
+        result = [_FakeBRepBody("Solid1", is_solid=True), _FakeBRepBody("Solid2", is_solid=True)]
+        _install(_FakeFeatures(stitch=_FakeStitchFeatures(result)),
+                 bodies_by_name={"Srf1": s1, "Srf2": s2})
+        out = _payload(so.stitch_handler(bodies=["Srf1", "Srf2"]))
+        assert out["became_solid"] is True and "unverified" not in out
 
     def test_became_solid_false_when_only_some_result_bodies_closed(self):
         # mixed result: one closed solid + one still-open surface -> all(flags) is False -> NOT solid

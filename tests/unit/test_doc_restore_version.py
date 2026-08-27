@@ -1,9 +1,10 @@
 """Tests for `doc_restore_version` - promoting a prior cloud version back to latest.
 
-Pins the honesty contract: a promote() that returns false is an ERROR (never a false ok); a promote()
-that reports success but leaves the tip unchanged is flagged 'pending' (not claimed confirmed); and the
-verify-after-write re-reads the fresh DataFile to confirm the new tip actually appeared. Plus the guards
-(no cloud DataFile, unknown version, no selector, already-latest no-op).
+Pins the honesty contract: a promote() that returns false is an ERROR (never a false ok); 'restored'
+means the cloud tip ACTUALLY advanced, with the raw API answer kept beside it under
+promote_call_returned_true; the confirming read is PUMPED to a deadline (the new tip is not visible the
+instant promote returns) and a tip that never moves is reported pending with what was read. Plus the
+guards (no cloud DataFile, unknown version, no selector, already-latest no-op).
 """
 
 import json
@@ -57,8 +58,16 @@ class _Fresh:
 
 
 class _Data:
-    def __init__(self, fresh_latest): self._latest = fresh_latest
-    def findFileById(self, lineage): return _Fresh(self._latest)
+    """findFileById. A LIST of tip numbers serves one per call (the last repeats), so the cloud's
+    'not visible yet, then visible' sequence can be modelled; None serves no file at all."""
+    def __init__(self, fresh_latest):
+        self._seq = list(fresh_latest) if isinstance(fresh_latest, (list, tuple)) else [fresh_latest]
+        self.calls = 0
+
+    def findFileById(self, lineage):
+        self.calls += 1
+        latest = self._seq[min(self.calls - 1, len(self._seq) - 1)]
+        return None if latest is None else _Fresh(latest)
 
 
 class _App:
@@ -67,8 +76,14 @@ class _App:
         self.data = _Data(fresh_latest)
 
 
-def _use(monkeypatch, doc, fresh_latest):
-    monkeypatch.setattr(drv, "app", _App(doc, fresh_latest))
+def _use(monkeypatch, doc, fresh_latest, deadline=0.0):
+    """Point the tool at a fake app. deadline=0 makes the confirming pump take a single attempt;
+    raise it (the poll sleep is 0) to exercise the retry without waiting."""
+    app = _App(doc, fresh_latest)
+    monkeypatch.setattr(drv, "app", app)
+    monkeypatch.setattr(drv, "_VERSION_DEADLINE_S", deadline)
+    monkeypatch.setattr(drv, "_POLL_SLEEP", 0)
+    return app
 
 
 class TestRestoreHonesty:
@@ -77,6 +92,7 @@ class TestRestoreHonesty:
         _use(monkeypatch, _Doc(df), fresh_latest=6)   # after promote the tip advanced to 6
         out = _payload(drv.handler(version_number=2))
         assert out["restored"] is True
+        assert out["promote_call_returned_true"] is True
         assert out.get("pending") is None
         assert out["restored_version"] == 2
         assert out["latest_before"] == 5 and out["latest_after"] == 6
@@ -88,13 +104,83 @@ class TestRestoreHonesty:
         assert res["isError"] is True
         assert "did not take effect" in error_message(res)
 
-    def test_pending_when_tip_did_not_advance(self, monkeypatch):
-        # promote() said true but the fresh DataFile tip is unchanged -> report pending, not confirmed.
+    def test_a_settled_equal_tip_is_not_restored(self, monkeypatch):
+        # THE boundary: latest_after == latest_before is NOT an advance. promote() returning true is
+        # kept as its own raw fact; 'restored' may only claim what the re-read showed.
         df = _DF(latest=5, others=[_VerR(2, promote_result=True)])
         _use(monkeypatch, _Doc(df), fresh_latest=5)
         out = _payload(drv.handler(version_number=2))
-        assert out["restored"] is True
+        assert out["restored"] is False
+        assert out["promote_call_returned_true"] is True
         assert out["pending"] is True
+        note = out["note"]
+        assert "NOT advanced" in note
+        assert f"{drv._VERSION_DEADLINE_S:.0f}s of re-reading" in note   # what was actually waited
+        assert "latest reads 5, was 5" in note
+
+    def test_one_more_than_the_baseline_is_restored(self, monkeypatch):
+        # the other side of the same boundary: exactly +1 counts as the new tip.
+        df = _DF(latest=5, others=[_VerR(2)])
+        _use(monkeypatch, _Doc(df), fresh_latest=6)
+        assert _payload(drv.handler(version_number=2))["restored"] is True
+
+    def test_a_tip_that_appears_on_a_later_read_is_confirmed_by_the_pump(self, monkeypatch):
+        # The cloud tip is not visible the instant promote() returns. A single immediate sample
+        # reports this successful restore as pending; the pump re-reads until it lands.
+        df = _DF(latest=5, others=[_VerR(2)])
+        app = _use(monkeypatch, _Doc(df), fresh_latest=[5, 5, 6], deadline=5.0)
+        out = _payload(drv.handler(version_number=2))
+        assert app.data.calls >= 3            # the first fetches did NOT show the new tip
+        assert out["restored"] is True
+        assert out["latest_after"] == 6
+
+    def test_the_pump_gives_up_at_the_bound_with_the_reading_it_last_got(self, monkeypatch):
+        df = _DF(latest=5, others=[_VerR(2)])
+        app = _use(monkeypatch, _Doc(df), fresh_latest=5, deadline=0.02)
+        out = _payload(drv.handler(version_number=2))
+        assert app.data.calls >= 2            # it retried rather than single-shotting
+        assert out["latest_after"] == 5       # the LAST reading, not a dropped one
+        assert out["restored"] is False
+
+    def test_an_unreadable_pre_call_tip_is_reported_not_diagnosed(self, monkeypatch):
+        # With no pre-call number there is nothing to settle against: the read runs once, and the
+        # payload may claim neither a duration it did not spend nor a non-advancement it never saw.
+        class _NoTipBefore:
+            id = "urn:lineage"
+            versionNumber = 5
+            versions = _VerColl([_VerR(2)])
+
+            @property
+            def latestVersionNumber(self):
+                raise RuntimeError("2 : InternalValidationError")
+
+        app = _use(monkeypatch, _Doc(_NoTipBefore()), fresh_latest=7, deadline=5.0)
+        out = _payload(drv.handler(version_number=2))
+        assert app.data.calls == 1                  # nothing to settle against - no fake wait
+        assert out["restored"] is False and out["pending"] is True
+        assert out["latest_before"] is None
+        assert out["latest_after"] == 7             # what WAS read is still reported
+        note = out["note"]
+        assert "could not be read BEFORE the call" in note and "7" in note
+        assert "of re-reading" not in note          # no duration was spent
+
+    def test_without_a_lineage_urn_the_held_handle_is_the_only_read(self, monkeypatch):
+        # No lineage id means there is nothing to re-fetch BY, so the held handle is all there is -
+        # and it carries the pre-call number, which is why this reports pending rather than restored.
+        df = _DF(latest=5, others=[_VerR(2)])
+        df.id = None
+        app = _use(monkeypatch, _Doc(df), fresh_latest=9)
+        out = _payload(drv.handler(version_number=2))
+        assert app.data.calls == 0                  # findFileById was never reached
+        assert out["latest_after"] == 5 and out["restored"] is False
+
+    def test_an_unresolvable_fresh_file_reports_an_unreadable_tip(self, monkeypatch):
+        df = _DF(latest=5, others=[_VerR(2)])
+        _use(monkeypatch, _Doc(df), fresh_latest=None)   # findFileById answers nothing
+        out = _payload(drv.handler(version_number=2))
+        assert out["restored"] is False and out["pending"] is True
+        assert out["latest_after"] is None
+        assert "latest reads unreadable" in out["note"]
 
 
 class TestGuards:

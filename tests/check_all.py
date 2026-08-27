@@ -13,7 +13,8 @@ Stages (each fails loudly with the command that repairs it):
 Green comes in two honest flavors: LIVE-VERIFIED (stage 4 ran against a reachable Fusion) and
 OFFLINE (--offline was passed; the mocks were NOT re-confirmed against the installed Fusion).
 A missing Fusion without --offline is a FAILURE - skipping live verification is always a visible
-choice, never an accident.
+choice, never an accident. For the same reason --live and --offline are refused together (one of
+them would have to be discarded silently).
 
 Usage:
   py -3 tests/check_all.py                 # generators + suite + receipt + facts stamp check
@@ -62,18 +63,27 @@ def _fusion_up():
         return False
 
 
-def main():
+def build_parser():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--live", action="store_true",
-                    help="run the FULL live measurement (regenerates facts + ledger + stamp)")
-    ap.add_argument("--offline", action="store_true",
-                    help="no Fusion available: skip the live gate, visibly")
+    # --live RUNS the live gate and --offline SKIPS it, so together one flag must be discarded.
+    # Silently following --offline would print an OFFLINE GREEN for a run the caller asked to be
+    # live-verified - the opposite of "skipping live verification is always a visible choice".
+    # A mutually exclusive group refuses the pair up front, naming both flags.
+    gate = ap.add_mutually_exclusive_group()
+    gate.add_argument("--live", action="store_true",
+                      help="run the FULL live measurement (regenerates facts + ledger + stamp)")
+    gate.add_argument("--offline", action="store_true",
+                      help="no Fusion available: skip the live gate, visibly (refused with --live)")
     ap.add_argument("--fast", action="store_true",
                     help="generators + lints only")
     ap.add_argument("--gen", action="store_true",
                     help="generator staleness checks only")
-    args = ap.parse_args()
+    return ap
+
+
+def main():
+    args = build_parser().parse_args()
 
     if not _run("gen_all --check", [sys.executable, os.path.join(TESTS, "gen_all.py"), "--check"],
                 "py -3 tests/gen_all.py   (then commit the regenerated files)"):

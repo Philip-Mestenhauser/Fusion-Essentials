@@ -52,7 +52,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | ✎ | `model_hole` | Drill HOLES with the real Hole command (not a sketch + extrude-cut), so the feature carries hole/thread metadata |
 | · | `model_inspect` | Measure a target - size, mass, or mesh stats - in one read |
 | ✎ | `model_loft` | Loft a body through an ORDERED list of >=2 profiles (the loft runs through them in the order given - order is load-bearing), optionally shaped by 'rails' (guide... |
-| · | `model_measure_between` | Measure the distance or angle BETWEEN two targets - each a find_geometry handle (face/body) or an occurrence/component/body name |
+| · | `model_measure_between` | Measure the distance or angle BETWEEN two targets - each a find_geometry handle (face/edge/body) or an occurrence/component/body name |
 | · | `model_measure_relation` | Assert a named geometric RELATION between two entities and get pass/fail WITH the evidence - the measured angle / axis offset / min distance and the tolerance i... |
 | ✎ | `model_mirror` | Mirror solid BODIES or timeline FEATURES across a plane - make the symmetric half (a V-bank's other side, a left/right part, a symmetric housing) |
 | ✎ | `model_move` | Move BODIES as a feature in the TIMELINE, so the move replays on every recompute |
@@ -135,7 +135,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | ✎ | `cam_apply_template` | Apply a CAM toolpath template to a setup, recreating the template's operations in that setup |
 | · | `cam_compare_operations` | Compare two CAM operations by name and report which parameters differ, with the value on each side |
 | ✎ | `cam_create_machine` | Create a MACHINE in the LOCAL machine library from a Fusion machine template - the answer when cam_edit_setup(machine=...) finds no match |
-| ✎ | `cam_create_operation` | CREATE a CAM milling operation in a setup (the 'apply an operation' half of CAM) |
+| ✎ | `cam_create_operation` | CREATE a CAM milling operation in a setup |
 | ✎ | `cam_create_setup` | Create a CAM (Manufacture) SETUP on the active part - the prerequisite for any CAM job, since the other CAM tools (cam_apply_template, cam_generate) need a setu... |
 | ⚠ | `cam_delete` | Delete a CAM entity - a setup, operation, folder, or pattern - by name (the CAM-side delete; design_delete_feature / design_delete_occurrence only act on the de... |
 | ✎ | `cam_edit_folders` | Manage a CAM setup's folders: list them, create one, rename one, or move operations into one |

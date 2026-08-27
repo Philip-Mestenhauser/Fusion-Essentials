@@ -1107,6 +1107,157 @@ class TestMarkConstructionWindow:
         assert pre[0].isConstruction is False and pre[2].isConstruction is False
 
 
+class TestBrokenChain:
+    """A chain draw is NOT atomic: the segments before a failing one are already in the sketch. A
+    refusal naming none of them reads as "nothing happened", so the caller retries the whole chain
+    and draws those segments a second time."""
+
+    @staticmethod
+    def _fail_at(sketch, n, exc=None):
+        """The nth (1-based) addByTwoPoints call hands back nothing - or raises `exc` - while the
+        earlier calls land normally."""
+        real = sketch.sketchLines.addByTwoPoints
+        seen = {"n": 0}
+
+        def _add(a, b):
+            seen["n"] += 1
+            if seen["n"] == n:
+                if exc is not None:
+                    raise exc
+                return None
+            return real(a, b)
+        sketch.sketchLines.addByTwoPoints = _add
+
+    _SQUARE = [[0, 0], [10, 0], [10, 10], [0, 10], [0, 0]]      # 5 points -> 4 segments
+
+    def test_a_mid_chain_failure_names_every_segment_that_landed(self, monkeypatch):
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        self._fail_at(s, 3)
+        res = sk.add_sketch_geometry_handler(kind="polyline", points=self._SQUARE)
+        assert res["isError"] is True
+        assert "polyline segment 3 of 4 (10,10)->(0,10) did not draw" in res["message"]
+        assert "The first 2 segment(s) DID land" in res["message"]
+        assert "(0,0)->(10,0), (10,0)->(10,10)" in res["message"]
+        assert "sketch_delete_entity" in res["message"]
+        assert s.sketchLines.count == 2          # and they really are still in the sketch
+
+    def test_the_second_segment_failing_names_exactly_the_one_that_landed(self, monkeypatch):
+        # the boundary between "nothing landed" and the listing: one landed segment
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        self._fail_at(s, 2)
+        res = sk.add_sketch_geometry_handler(kind="polyline", points=self._SQUARE)
+        assert "The first 1 segment(s) DID land" in res["message"]
+        assert "(0,0)->(10,0)." in res["message"]
+        assert "(10,0)->(10,10)," not in res["message"]
+        assert s.sketchLines.count == 1
+
+    def test_the_first_segment_failing_says_nothing_landed(self, monkeypatch):
+        # the other side of that boundary: no partial state to clean up, and no listing
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        self._fail_at(s, 1)
+        res = sk.add_sketch_geometry_handler(kind="polyline", points=self._SQUARE)
+        assert res["isError"] is True
+        assert "No segment landed" in res["message"]
+        assert "DID land" not in res["message"]
+        assert s.sketchLines.count == 0
+
+    def test_a_raising_segment_carries_fusions_message_beside_the_landed_ones(self, monkeypatch):
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        self._fail_at(s, 3, exc=RuntimeError("3 : VCS_SKETCH_SOLVING_FAILED"))
+        res = sk.add_sketch_geometry_handler(kind="polyline", points=self._SQUARE)
+        assert res["isError"] is True
+        assert "VCS_SKETCH_SOLVING_FAILED" in res["message"]
+        assert "The first 2 segment(s) DID land" in res["message"]
+
+    def test_a_closed_path_failure_is_named_for_the_kind_that_was_asked_for(self, monkeypatch):
+        # closed_path draws through the same chain, with the repeated first point as the last
+        # segment - so its own kind and segment total are what the caller is told
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        self._fail_at(s, 3)
+        res = sk.add_sketch_geometry_handler(kind="closed_path",
+                                             points=[[0, 0], [10, 0], [10, 10]])
+        assert "closed_path segment 3 of 3 (10,10)->(0,0) did not draw" in res["message"]
+        assert "The first 2 segment(s) DID land" in res["message"]
+
+    def test_a_long_chain_caps_the_named_segments_and_counts_the_rest(self, monkeypatch):
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        pts = [[i, 0] for i in range(12)]        # 12 points -> 11 segments
+        self._fail_at(s, 11)
+        res = sk.add_sketch_geometry_handler(kind="polyline", points=pts)
+        assert "The first 10 segment(s) DID land" in res["message"]
+        assert res["message"].count("->") == 1 + sk._MAX_NAMED_SEGMENTS   # the failed one + the cap
+        assert "(+4 more)" in res["message"]
+
+    def test_a_broken_construction_chain_says_the_landed_segments_are_not_marked(self, monkeypatch):
+        # is_construction runs after the chain completes, so the segments left behind are plain
+        # geometry - claiming otherwise would send the caller looking for construction lines
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        self._fail_at(s, 3)
+        res = sk.add_sketch_geometry_handler(kind="polyline", points=self._SQUARE,
+                                             is_construction=True)
+        assert "They are plain geometry" in res["message"]
+        assert [c.isConstruction for c in s.sketchLines._items] == [False, False]
+
+    def test_a_complete_chain_reports_no_partial_state(self, monkeypatch):
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        out = _payload(sk.add_sketch_geometry_handler(kind="polyline", points=self._SQUARE))
+        assert out["curves_added"] == 4
+
+
+class _DeferStuck(FakeSketch):
+    """A sketch that refuses to leave deferred compute: setting isComputeDeferred back to False
+    raises, so the draw finishes with the sketch still deferred."""
+
+    _deferred = False
+
+    @property
+    def isComputeDeferred(self):
+        return self._deferred
+
+    @isComputeDeferred.setter
+    def isComputeDeferred(self, value):
+        if self._deferred and not value:
+            raise RuntimeError("compute cannot be resumed on this sketch")
+        self._deferred = bool(value)
+
+
+class TestComputeDeferredRestore:
+    """The draw defers compute and restores it in a finally. A restore that raises leaves the sketch
+    DEFERRED - swallowed, the call reports a clean success over a sketch whose profiles can read
+    stale."""
+
+    def test_a_refused_restore_is_disclosed_on_the_success(self, monkeypatch):
+        s = _DeferStuck(); _install_draw(monkeypatch, s)
+        out = _payload(sk.add_sketch_geometry_handler(kind="circle", cx=0, cy=0, radius=5))
+        assert out["compute_deferred"] is True
+        assert "compute DEFERRED" in out["note"]
+        assert "cannot be resumed" in out["note"]
+        assert s.isComputeDeferred is True          # the state the disclosure describes
+
+    def test_a_clean_restore_carries_no_disclosure(self, monkeypatch):
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        out = _payload(sk.add_sketch_geometry_handler(kind="circle", cx=0, cy=0, radius=5))
+        assert "compute_deferred" not in out
+        assert "DEFERRED" not in out["note"]
+        assert s.isComputeDeferred is False
+
+    def test_a_refused_restore_is_appended_to_a_draw_failure(self, monkeypatch):
+        # the draw error is the headline, but the deferred sketch is state the caller must know
+        s = _DeferStuck(); _install_draw(monkeypatch, s)
+        monkeypatch.setattr(s.sketchCircles, "addByCenterRadius", lambda c, r: None)
+        res = sk.add_sketch_geometry_handler(kind="circle", cx=0, cy=0, radius=5)
+        assert res["isError"] is True
+        assert "returned no entity" in res["message"]
+        assert "compute DEFERRED" in res["message"]
+
+    def test_a_refused_restore_is_appended_to_a_broken_chain(self, monkeypatch):
+        s = _DeferStuck(); _install_draw(monkeypatch, s)
+        TestBrokenChain._fail_at(s, 2)
+        res = sk.add_sketch_geometry_handler(kind="polyline", points=[[0, 0], [1, 0], [2, 0]])
+        assert "The first 1 segment(s) DID land" in res["message"]
+        assert "compute DEFERRED" in res["message"]
+
+
 class TestPolyline:
     def test_open_polyline_segment_count(self, monkeypatch):
         s = FakeSketch(); _install_draw(monkeypatch, s)

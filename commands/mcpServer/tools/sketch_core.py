@@ -282,7 +282,45 @@ def _effective_spline_degree(sketch):
     return safe(lambda: coll.item(n - 1).geometry.degree)
 
 
-def _draw_polyline(sketch, points, k):
+# How many landed segments a broken-chain error names before it summarizes the rest - a chain can
+# hold hundreds of points, and the error crosses the wire.
+_MAX_NAMED_SEGMENTS = 6
+
+
+def _segment_text(a, b) -> str:
+    """One segment as '(x1,y1)->(x2,y2)', in the call's own units."""
+    return f"({a[0]:g},{a[1]:g})->({b[0]:g},{b[1]:g})"
+
+
+class _ChainBroken(Exception):
+    """A polyline/closed_path chain that stopped part-way, carrying the segments that DID land.
+
+    Those segments are in the sketch and stay there, so a refusal naming none of them sends the
+    caller into a retry that draws them a second time."""
+
+    def __init__(self, kind, failed, total, points, cause=None):
+        self.kind = kind
+        self.failed = failed
+        self.total = total
+        self.landed = [(points[j - 1], points[j]) for j in range(1, failed)]
+        super().__init__(self._message(points, cause))
+
+    def _message(self, points, cause):
+        head = (f"{self.kind} segment {self.failed} of {self.total} "
+                f"{_segment_text(points[self.failed - 1], points[self.failed])} did not draw")
+        head += f": {cause}." if cause is not None else "."
+        if not self.landed:
+            return head + " No segment landed, so nothing was added to the sketch."
+        named = ", ".join(_segment_text(a, b) for a, b in self.landed[:_MAX_NAMED_SEGMENTS])
+        if len(self.landed) > _MAX_NAMED_SEGMENTS:
+            named += f", ... (+{len(self.landed) - _MAX_NAMED_SEGMENTS} more)"
+        return (f"{head} The first {len(self.landed)} segment(s) DID land and are still in the "
+                f"sketch: {named}. Delete them as 'line:<index>' with sketch_delete_entity "
+                "(sketch_get lists the indexes) before retrying - a retry of the whole chain draws "
+                "them a second time.")
+
+
+def _draw_polyline(sketch, points, k, kind="polyline"):
     """Draw a connected chain of lines through 'points' (a list of (x,y) in user units * k = cm).
 
     Each segment STARTS at the previous segment's endSketchPoint (the same SketchPoint object), so
@@ -291,20 +329,37 @@ def _draw_polyline(sketch, points, k):
     closure forms the profile with NO explicit closing coincident constraint. That constraint is what
     the sketch solver rejects on many outlines (VCS_SKETCH_SOLVING_FAILED, live-verified), so
     closed_path delegates to this repeated-first-point shape. Returns a label, or None if < 2 points.
+
+    A segment that does not draw raises _ChainBroken: the chain is not atomic, so the earlier
+    segments are already in the sketch and the failure carries them.
     """
     pts = [(float(x), float(y)) for x, y in (points or [])]
     if len(pts) < 2:
         return None
     lines = sketch.sketchCurves.sketchLines
     prev_end = None
+    total = len(pts) - 1
     for i in range(1, len(pts)):
         start = prev_end if prev_end is not None else _pt(pts[i - 1][0], pts[i - 1][1], k)
         end = _pt(pts[i][0], pts[i][1], k)
-        ln = lines.addByTwoPoints(start, end)
+        try:
+            ln = lines.addByTwoPoints(start, end)
+        except Exception as e:
+            raise _ChainBroken(kind, i, total, pts, cause=e) from e
         if ln is None:
-            return None
+            raise _ChainBroken(kind, i, total, pts)
         prev_end = safe(lambda ln=ln: ln.endSketchPoint)
-    return f"polyline {len(pts)} pts, {len(pts) - 1} segments"
+    return f"polyline {len(pts)} pts, {total} segments"
+
+
+def _restore_clause(restore_error, sketch) -> str:
+    """The sentence a result carries when the sketch could not be taken back OUT of deferred
+    compute, or ''. The sketch stays deferred, which the caller cannot see from the counts."""
+    if not restore_error:
+        return ""
+    return (f" The sketch '{safe(lambda: sketch.name)}' was left with compute DEFERRED - restoring "
+            f"it raised: {restore_error}. Until compute resumes, its profiles and geometry can read "
+            "stale.")
 
 
 def _all_sketch_curves_count(sketch):
@@ -491,7 +546,7 @@ def _draw(sketch, kind, p, k):
         # closing coincident the solver rejects on many outlines. Scales like polyline (no ~48 ceiling).
         if kind == "closed_path" and len(pts) >= 2:
             pts = pts + [pts[0]]
-        label = _draw_polyline(sketch, pts, k)
+        label = _draw_polyline(sketch, pts, k, kind)
         if label and kind == "closed_path":
             label += " (closed)"
         return label
@@ -720,6 +775,9 @@ def add_sketch_geometry_handler(kind: str = "", sketch_name: str = "", units: st
     # Draw (defer compute so the single add is efficient and consistent).
     before_kind = _kind_curve_count(sketch, kind)
     deferred_set = False
+    restore_error = None
+    draw_error = None
+    label = None
     try:
         sketch.isComputeDeferred = True
         deferred_set = True
@@ -727,17 +785,27 @@ def add_sketch_geometry_handler(kind: str = "", sketch_name: str = "", units: st
         label = _draw(sketch, kind, p, k)
         if is_construction and label:
             _mark_recent_construction(sketch, before)
+    except _ChainBroken as broken:
+        draw_error = str(broken)
+        if is_construction and broken.landed:
+            draw_error += (" They are plain geometry: is_construction is applied once the chain "
+                           "completes, so it never reached them.")
     except Exception as e:
-        return error(f"Failed to draw {kind}: {e}")
+        draw_error = f"Failed to draw {kind}: {e}"
     finally:
         if deferred_set:
             try:
                 sketch.isComputeDeferred = False
-            except Exception:
-                pass
+            except Exception as e:
+                # The restore is a MUTATION of its own: a refused one leaves the sketch deferred,
+                # which every result below discloses rather than swallows.
+                restore_error = str(e)
 
+    if draw_error:
+        return error(draw_error + _restore_clause(restore_error, sketch))
     if not label:
-        return error(f"Drawing {kind} returned no entity (check the parameters).")
+        return error(f"Drawing {kind} returned no entity (check the parameters)."
+                     + _restore_clause(restore_error, sketch))
 
     # VERIFY the draw against the sketch's own collection for this kind: a factory can hand back an
     # object without the curve landing in the sketch, and that is a failure, not a success.
@@ -752,7 +820,8 @@ def add_sketch_geometry_handler(kind: str = "", sketch_name: str = "", units: st
             counted = _KIND_REF_TOKEN.get(kind, kind)
             return error(f"Drawing {kind} returned an entity but the sketch's own {counted} "
                          f"collection count did not change ({before_kind} -> {after_kind}) - "
-                         "nothing was added. Re-read sketch_get.")
+                         "nothing was added. Re-read sketch_get."
+                         + _restore_clause(restore_error, sketch))
 
     out = {
     "drawn": label,
@@ -794,6 +863,9 @@ def add_sketch_geometry_handler(kind: str = "", sketch_name: str = "", units: st
                        "(sketch_get(include_entities=true) lists the indexes).")
     if kind in _REF_LESS_NOTES:
         out["note"] = _REF_LESS_NOTES[kind]
+    if restore_error:
+        out["compute_deferred"] = True
+        out["note"] += _restore_clause(restore_error, sketch)
     return ok(out)
 
 

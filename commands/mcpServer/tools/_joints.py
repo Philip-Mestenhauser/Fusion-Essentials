@@ -563,7 +563,15 @@ def jo_assembly_proxy(design, jo, comp):
     occs = list(safe(lambda: root.allOccurrencesByComponent(comp)) or []) if root else []
     if len(occs) == 1:
         proxy = safe(lambda: jo.createForAssemblyContext(occs[0]))
-        return (proxy or jo), None
+        if proxy is None:
+            # The native is the object the line above says Fusion refuses, so falling back to it
+            # hands the joint the input that yields 'Provided input paths for joint are not valid'.
+            nm = safe(lambda: jo.name) or "?"
+            path = safe(lambda: occs[0].fullPathName) or safe(lambda: occs[0].name) or "its one occurrence"
+            return None, (f"Joint Origin '{nm}' could not be read in the assembly's space ({path}), "
+                          "so where that frame sits in the model is unknown. Pass its handle from "
+                          "assembly_get(include=['joint_origins']).")
+        return proxy, None
     if not occs:
         return jo, None                       # not instanced in the assembly; native is the only form
     nm = safe(lambda: jo.name) or "?"

@@ -523,7 +523,9 @@ class TestExportRefinement:
                                          file_path=str(tmp_path / "p.obj")))
         # the options object carried the high refinement enum
         assert des.exportManager.calls[-1].meshRefinement == "RHIGH"
+        # it LANDED, so applied and requested agree
         assert out["refinement"] == "high"
+        assert out["refinement_requested"] == "high"
 
     def test_bad_refinement_rejected(self, tmp_path):
         _wire_adsk()
@@ -531,15 +533,11 @@ class TestExportRefinement:
         res = mx.export_handler(format="obj", refinement="ultra", file_path=str(tmp_path / "p.obj"))
         assert res["isError"] is True and "refinement" in res["message"]
 
-    def test_refinement_not_applied_still_reports_requested_key(self, tmp_path):
-        # build whose ExportOptions ignores meshRefinement (STL-style): _apply_refinement returns None,
-        # but the payload still reports the requested refinement key (applied_refinement or ref).
-        _wire_adsk()
-        des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
-
+    def _no_refine_export(self, des, tmp_path, refinement="high"):
+        """Export through options that DROP the meshRefinement write: the read-back never equals the
+        enum, so _apply_refinement returns None - the density never landed. The dropped set is the
+        only condition modelled here; which builds/formats behave this way is not asserted."""
         class _NoRefineOptions(FakeExportOptions):
-            # setting meshRefinement is a no-op -> reading it back never equals the enum, so
-            # _apply_refinement returns None (the format doesn't support it).
             def __setattr__(self, k, v):
                 if k == "meshRefinement":
                     return
@@ -550,12 +548,47 @@ class TestExportRefinement:
             des.exportManager.calls.append(rec)
             return rec
         des.exportManager.createSTLExportOptions = _stl_opt
-        out = _payload(mx.export_handler(format="stl", refinement="high",
-                                         file_path=str(tmp_path / "p.stl")))
-        # the options object never carried the enum (unsupported) ...
+        return _payload(mx.export_handler(format="stl", refinement=refinement,
+                                          file_path=str(tmp_path / "p.stl")))
+
+    def test_refinement_that_never_landed_is_published_null_not_as_the_request(self, tmp_path):
+        # The request must never masquerade as the effect: the read-back did not equal the value set,
+        # so 'refinement' is null - only the REQUEST is echoed, under its own key.
+        _wire_adsk()
+        des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
+        out = self._no_refine_export(des, tmp_path)
         assert getattr(des.exportManager.calls[-1], "meshRefinement", None) is None
-        # ... yet the reported refinement falls back to the requested key, not None
-        assert out["refinement"] == "high"
+        assert out["refinement"] is None
+        assert out["refinement_requested"] == "high"
+
+    def test_a_refinement_that_did_not_land_says_so_on_the_wire(self, tmp_path):
+        # The note states the fact the code OBSERVED - the read-back disagreed - and stops there: the
+        # density the writer then used was never read, so the note calls it unconfirmed.
+        _wire_adsk()
+        des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
+        note = self._no_refine_export(des, tmp_path)["note"]
+        assert "did NOT land" in note
+        assert "did not read back the value that was set" in note
+        assert "unconfirmed" in note
+
+    def test_the_unlanded_refinement_note_attributes_no_cause(self, tmp_path):
+        # WHY the set did not stick is not readable from the handler, so the note must not name a
+        # format or a missing property as the reason - a guessed cause on the wire is a false claim.
+        _wire_adsk()
+        des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
+        note = self._no_refine_export(des, tmp_path)["note"].lower()
+        for guess in ("stl", "carry no meshrefinement", "carries no meshrefinement",
+                      "does not support", "default density"):
+            assert guess not in note, guess
+
+    def test_a_landed_refinement_adds_no_did_not_land_note(self, tmp_path):
+        # the disclosure is conditional - a successful set must not warn about itself
+        _wire_adsk()
+        des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
+        out = _payload(mx.export_handler(format="obj", refinement="low",
+                                         file_path=str(tmp_path / "p.obj")))
+        assert out["refinement"] == "low"
+        assert "did NOT land" not in out["note"]
 
 
 # â”€â”€ mesh_export: split_by_component (one mesh file per top-level occurrence) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -708,8 +741,40 @@ class TestSaveAsMesh:
         _install(FakeDesign(comp, design_type=0), handle_map={"H": src})
         out = _payload(mx.save_as_mesh_handler(body="H", quality="very_high"))
         assert out["quality"] == "very_high"
+        assert out["quality_requested"] == "very_high"
         # the calculator received the VeryHigh quality enum value
         assert src.meshManager._calc.quality == 15
+
+    def _tessellate_without_the_quality_member(self, quality="high"):
+        """save_as_mesh on a build carrying no TriangleMeshQualityOptions member for the request -
+        setQuality is never called and the calculator runs at its own default level of detail."""
+        fusion = _wire_adsk()
+        delattr(fusion.TriangleMeshQualityOptions, "HighQualityTriangleMesh")
+        comp = FakeComp("Comp")
+        src = _mesh_source("SolidA", parent_comp=comp)
+        _install(FakeDesign(comp, design_type=0), handle_map={"H": src})
+        return _payload(mx.save_as_mesh_handler(body="H", quality=quality)), src
+
+    def test_quality_that_never_reached_setquality_is_published_null(self):
+        # the tessellation ran at the calculator's DEFAULT LOD, so publishing the requested key as
+        # 'quality' would report a level of detail the mesh does not have.
+        out, src = self._tessellate_without_the_quality_member()
+        assert src.meshManager._calc.quality is None      # setQuality was never called
+        assert out["quality"] is None
+        assert out["quality_requested"] == "high"
+
+    def test_an_unlanded_quality_says_so_on_the_wire(self):
+        out, _src = self._tessellate_without_the_quality_member()
+        assert "did NOT land" in out["note"] and "default level of detail" in out["note"]
+
+    def test_a_landed_quality_adds_no_did_not_land_note(self):
+        _wire_adsk()
+        comp = FakeComp("Comp")
+        src = _mesh_source("SolidA", parent_comp=comp)
+        _install(FakeDesign(comp, design_type=0), handle_map={"H": src})
+        out = _payload(mx.save_as_mesh_handler(body="H", quality="low"))
+        assert out["quality"] == "low"
+        assert "did NOT land" not in out["note"]
 
     def test_optional_name_renames_the_mesh(self):
         _wire_adsk()
@@ -786,6 +851,16 @@ class TestWeld:
         idx = [0, 1, 2]
         wc, wi = mx._weld(coords, idx)
         assert len(wc) // 3 == 3 and wi == [0, 1, 2]
+
+    def test_vertices_agreeing_to_the_quantization_merge(self):
+        # the merge keys on round(x, 6), not on equality: 1e-9 apart is ONE vertex.
+        wc, wi = mx._weld([0.0, 0.0, 0.0, 1e-9, 0.0, 0.0], [0, 1])
+        assert len(wc) // 3 == 1 and wi == [0, 0]
+
+    def test_vertices_beyond_the_quantization_stay_distinct(self):
+        # 1e-3 apart is two vertices - the quantization is a floor, not a modelling tolerance.
+        wc, wi = mx._weld([0.0, 0.0, 0.0, 1e-3, 0.0, 0.0], [0, 1])
+        assert len(wc) // 3 == 2 and wi == [0, 1]
 
     def test_malformed_input_returned_unchanged(self):
         # ragged coordinate list (not a multiple of 3) is passed through untouched, never raises

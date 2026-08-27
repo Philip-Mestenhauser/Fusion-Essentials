@@ -37,12 +37,22 @@ def _constraint_collection(sketch):
     return safe(lambda: sketch.geometricConstraints)
 
 
+def _unread_count_error(noun, what):
+    """The refusal for a collection count that will not read. A count that will not read is not a
+    count of zero: coerced to 0 it satisfies the after < before gate with nothing measured behind
+    it, and publishes that fabricated zero as the state of the sketch."""
+    return (f"The sketch's {noun} count would not read, so {what} cannot be verified - a count that "
+            "will not read is not a count of zero. Re-read the sketch with sketch_get.")
+
+
 def _resolve_constraint(sketch, idx):
     """A geometric constraint by creation-order index, or (None, error_string)."""
     coll = _constraint_collection(sketch)
-    n = safe(lambda: coll.count, 0) if coll is not None else 0
     if coll is None:
         return None, "This sketch exposes no geometric constraints collection."
+    n = _common.counted(lambda: coll.count)
+    if n is None:
+        return None, _unread_count_error("constraint", f"'constraint:{idx}'")
     if idx < 0 or idx >= n:
         return None, f"constraint index {idx} out of range - the sketch has {n} constraint(s)."
     return safe(lambda: coll.item(idx)), None
@@ -56,12 +66,23 @@ def _resolve_text(sketch, idx):
     """A sketch text by creation-order index - the SAME index sketch_set_text edits by - or
     (None, error_string)."""
     coll = _text_collection(sketch)
-    n = safe(lambda: coll.count, 0) if coll is not None else 0
     if coll is None:
         return None, "This sketch exposes no sketch texts collection."
+    n = _common.counted(lambda: coll.count)
+    if n is None:
+        return None, _unread_count_error("sketch text", f"'text:{idx}'")
     if idx < 0 or idx >= n:
         return None, f"text index {idx} out of range - the sketch has {n} sketch text(s)."
     return safe(lambda: coll.item(idx)), None
+
+
+def _unverified_delete(ref, noun, before):
+    """The refusal for a delete whose AFTER count will not read: the removal is unverified, and the
+    coerced zero it replaces both passes the after < before gate and publishes '<noun>s_after: 0'."""
+    return error(f"Delete of {ref} was called but the sketch's {noun} count would not read back, so "
+                 f"whether it was removed is UNVERIFIED - a count that will not read is not a count "
+                 f"of zero. The sketch held {before} {noun}(s) before the call. Re-read it with "
+                 "sketch_get before deleting more.")
 
 
 def handler(sketch_name: str = "", target: str = "") -> dict:
@@ -95,17 +116,22 @@ def handler(sketch_name: str = "", target: str = "") -> dict:
     # --- constraint path (resolved here; resolve_entity_ref only knows curves/points) ---
     if kind == "constraint":
         coll = _constraint_collection(sketch)
-        before = safe(lambda: coll.count, 0) if coll is not None else 0
+        before = _common.counted(lambda: coll.count) if coll is not None else None
         ent, cerr = _resolve_constraint(sketch, idx)
         if cerr:
             return error(cerr)
+        if before is None:
+            return error(_unread_count_error("constraint", f"deleting {ref}")
+                         + " Nothing was deleted.")
         ctype = safe(lambda: type(ent).__name__)
         try:
             # The MUTATION - not safe-wrapped, so a genuine failure raises and is reported.
             did = ent.deleteMe()
         except Exception as e:
             return error(f"Could not delete {ref}: {e}")
-        after = safe(lambda: coll.count, 0) if coll is not None else before
+        after = _common.counted(lambda: coll.count)
+        if after is None:
+            return _unverified_delete(ref, "constraint", before)
         if not did or after >= before:
             return error(f"Delete of {ref} did not take (constraint count {before} -> {after}). "
                          "It may be a fixed/driving constraint the solver won't remove.")
@@ -123,10 +149,13 @@ def handler(sketch_name: str = "", target: str = "") -> dict:
     # so it has its own resolve; sketch_set_text creates and edits these by the same index) ---
     if kind == "text":
         coll = _text_collection(sketch)
-        before = safe(lambda: coll.count, 0) if coll is not None else 0
+        before = _common.counted(lambda: coll.count) if coll is not None else None
         ent, terr = _resolve_text(sketch, idx)
         if terr:
             return error(terr)
+        if before is None:
+            return error(_unread_count_error("sketch text", f"deleting {ref}")
+                         + " Nothing was deleted.")
         # The string is captured BEFORE the mutation - a deleted text's wrapper is not guaranteed to
         # still answer, and this is what tells the caller WHICH text went.
         content = _unquote(safe(lambda: ent.textParameter.expression))
@@ -135,7 +164,9 @@ def handler(sketch_name: str = "", target: str = "") -> dict:
             did = ent.deleteMe()
         except Exception as e:
             return error(f"Could not delete {ref}: {e}")
-        after = safe(lambda: coll.count, 0) if coll is not None else before
+        after = _common.counted(lambda: coll.count)
+        if after is None:
+            return _unverified_delete(ref, "sketch text", before)
         if not did or after >= before:
             return error(f"Delete of {ref} did not take (sketch text count {before} -> {after}). "
                          "The text is still in the sketch.")
@@ -156,17 +187,23 @@ def handler(sketch_name: str = "", target: str = "") -> dict:
 
     # Count the SAME collection resolve_entity_ref indexes, so the read-back proves this delete.
     coll = _common.entity_collection(sketch, kind)
-    before = safe(lambda: coll.count, 0) if coll is not None else 0
+    before = _common.counted(lambda: coll.count) if coll is not None else None
 
     ent = resolve_entity_ref(sketch, ref)
     if ent is None:
-        return error(f"Could not resolve {ref} - the sketch has {before} {kind}(s). "
+        held = (f"has {before} {kind}(s)" if before is not None
+                else f"reports no readable {kind} count")
+        return error(f"Could not resolve {ref} - the sketch {held}. "
                      "Indexes are 0-based in creation order; list them with sketch_get.")
+    if before is None:
+        return error(_unread_count_error(kind, f"deleting {ref}") + " Nothing was deleted.")
     try:
         did = ent.deleteMe()
     except Exception as e:
         return error(f"Could not delete {ref}: {e}")
-    after = safe(lambda: coll.count, 0) if coll is not None else before
+    after = _common.counted(lambda: coll.count)
+    if after is None:
+        return _unverified_delete(ref, kind, before)
     if not did or after >= before:
         return error(f"Delete of {ref} did not take ({kind} count {before} -> {after}). The entity "
                      "may be consumed by a dimension/constraint - remove those first.")

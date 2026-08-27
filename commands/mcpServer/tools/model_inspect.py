@@ -43,18 +43,14 @@ _MAX_PER_OCCURRENCE_ROWS = 200   # per_body rows: one per occurrence, each cross
 # ── small geometry helpers ───────────────────────────────────────────────────
 
 
-def _vecxyz(v):
-    if v is None:
-        return None
-    return [round(safe(lambda: v.x, 0.0), 6), round(safe(lambda: v.y, 0.0), 6),
-            round(safe(lambda: v.z, 0.0), 6)]
-
-
 def _vec(v, f=1.0):
-    if v is None:
-        return None
-    return [round(safe(lambda: v.x, 0.0) * f, 6), round(safe(lambda: v.y, 0.0) * f, 6),
-            round(safe(lambda: v.z, 0.0) * f, 6)]
+    """[x, y, z] for a Vector3D/Point3D, scaled by `f` - or None when v is None or any component
+    will not read. The list form of the shared whole-point tri-state (_common.ptxyz), which is the
+    same contract the extents below hold: a 0.0 stand-in for an unreadable component publishes a
+    direction/position nobody measured, and 0 is an answer here (an axis-aligned vector's other two
+    components are genuinely 0)."""
+    p = _common.ptxyz(v, f)
+    return None if p is None else [p["x"], p["y"], p["z"]]
 
 
 def _measurable_geometry(entity):
@@ -166,7 +162,7 @@ def _bbox(design, entity, desc, frame, units):
             "y": _common.measured(lambda: obb.width, f),
             "z": _common.measured(lambda: obb.height, f),
             "center": _common.ptxyz(safe(lambda: obb.centerPoint), f),
-            "frame_axes": {"x_axis": _vecxyz(x_vec), "y_axis": _vecxyz(y_vec), "z_axis": _vecxyz(z_vec)},
+            "frame_axes": {"x_axis": _vec(x_vec), "y_axis": _vec(y_vec), "z_axis": _vec(z_vec)},
             "note": "Measured in the joint-origin frame; x/y/z are the part-space extents. Feed "
                     "these to param_set to drive stock size.",
         })

@@ -505,6 +505,31 @@ class TestOccWorldFrameGuards:
         assert out["x_axis"] == [1.0, 0.0, 0.0] and out["z_axis"] == [0.0, 0.0, 1.0]
         assert "y_axis" not in out
 
+    def test_a_translation_component_that_will_not_read_omits_the_origin(self):
+        # 0.0 for the component that failed places the part AT the world origin as a measured
+        # position - the same fabrication axis_vec refuses for a direction, on the number a caller
+        # positions and measures against.
+        import types
+        m = types.SimpleNamespace(translation=_RaisingCoord(), getAsCoordinateSystem=lambda: None)
+        occ = types.SimpleNamespace(transform2=m, bRepBodies=[])
+        assert "origin" not in geom.occ_world_frame(occ, 1.0)
+
+    def test_a_non_numeric_translation_component_omits_the_origin(self):
+        import types
+        from unittest.mock import Mock
+        m = types.SimpleNamespace(translation=FakeVector3D(Mock(), 0, 0),
+                                  getAsCoordinateSystem=lambda: None)
+        occ = types.SimpleNamespace(transform2=m, bRepBodies=[])
+        assert "origin" not in geom.occ_world_frame(occ, 1.0)
+
+    def test_an_occurrence_really_at_the_world_origin_publishes_zeros(self):
+        # 0,0,0 is an ANSWER (an unmoved occurrence), distinguishable from the omissions above
+        import types
+        m = types.SimpleNamespace(translation=FakeVector3D(0, 0, 0),
+                                  getAsCoordinateSystem=lambda: None)
+        occ = types.SimpleNamespace(transform2=m, bRepBodies=[])
+        assert geom.occ_world_frame(occ, 10.0)["origin"] == [0.0, 0.0, 0.0]
+
     def test_an_unreadable_bbox_endpoint_omits_the_bbox_keys(self):
         import types
 

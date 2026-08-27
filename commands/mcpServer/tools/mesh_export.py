@@ -121,9 +121,11 @@ def _resolve_export_target(design, target):
 
 
 def _apply_refinement(opts, refine_key):
-    """Best-effort: set MeshRefinementSettings on an export-options object when the format/build
-    supports it. Returns the applied key if it took, else None. Never fails the export over a missing
-    attribute (OBJ/3MF expose meshRefinement; STL may not)."""
+    """Set MeshRefinementSettings on an export-options object and READ IT BACK. Returns the key when
+    the read-back equals the value assigned - the only evidence the setting took - else None. The
+    read-back is the whole test: it covers a build whose options object carries no meshRefinement and
+    one that carries it but does not keep the assignment, without telling the two apart. Never fails
+    the export over a refinement that did not stick; the caller reports what landed."""
     mrs = safe(lambda: adsk.fusion.MeshRefinementSettings)
     member = _REFINEMENTS.get(refine_key)
     val = safe(lambda: getattr(mrs, member)) if (mrs is not None and member) else None
@@ -296,6 +298,14 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
     note = ("Exported a MESH file to local disk (the design was not modified). To round-trip it "
             "into the cloud, upload it with data_upload_file; to re-import it as a mesh body, use "
             "mesh_insert.")
+    if applied_refinement is None:
+        # ONE fact was observed: _apply_refinement's read-back did not equal the value assigned. WHY it
+        # did not is not readable from here, so neither the comment nor the note names a cause - and
+        # what density the writer then used is equally unobserved. The request is NOT the effect:
+        # 'refinement' is null and only the request is echoed, under its own key.
+        note = (f"Refinement '{ref}' did NOT land: the export options did not read back the value "
+                "that was set, so 'refinement' is null and the density this file was written at is "
+                "unconfirmed. 'refinement_requested' is what was asked for. " + note)
     if redirected_from_mesh:
         note = ("Target was a MESH body, which ExportManager cannot write to a file on its own (it "
             "returns success but writes nothing). Exported its owning component instead - the "
@@ -305,7 +315,8 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
         "format": fmt,
         "target": desc,
         "redirected_from_mesh": redirected_from_mesh,
-        "refinement": applied_refinement or ref,
+        "refinement": applied_refinement,          # what LANDED; null when the set did not take
+        "refinement_requested": ref,
         "file_path": path,
         "file_exists": True,
         "size_bytes": size,
@@ -316,32 +327,41 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
 # ── save_as_mesh: tessellate a BRep body -> persistent MeshBody (inverse of mesh_to_brep) ────────
 
 def _tessellate(body, quality_key):
-    """Run the BRep body's mesh calculator and return (TriangleMesh, error). READ-ONLY (no design
-    mutation) - so it can run OUTSIDE the base-feature scope. The mutation is the later addBy... call."""
+    """Run the BRep body's mesh calculator and return (TriangleMesh, applied_quality, error).
+    READ-ONLY (no design mutation) - so it can run OUTSIDE the base-feature scope. The mutation is the
+    later addBy... call.
+
+    applied_quality is the key that ACTUALLY reached setQuality, and None when this build carries no
+    TriangleMeshQualityOptions member for it - the calculator then ran at its own default level of
+    detail, which is not what was asked for and must never be published as if it were."""
     mm = safe(lambda: body.meshManager)
     if mm is None:
-        return None, error("This body has no meshManager - cannot tessellate it into a mesh.")
+        return None, None, error("This body has no meshManager - cannot tessellate it into a mesh.")
     calc = safe(lambda: mm.createMeshCalculator())
     if calc is None:
-        return None, error("meshManager.createMeshCalculator() returned nothing - cannot tessellate.")
+        return None, None, error("meshManager.createMeshCalculator() returned nothing - cannot "
+                                 "tessellate.")
 
     tmo = safe(lambda: adsk.fusion.TriangleMeshQualityOptions)
     qual = safe(lambda: getattr(tmo, _QUALITIES[quality_key])) if tmo is not None else None
+    applied = None
     if qual is not None:
         # setQuality answers whether the quality took; a false leaves the DEFAULT tessellation,
         # so the file would not be at the quality the payload reports.
         if not safe(lambda: calc.setQuality(qual)):
-            return None, error(f"Fusion refused mesh quality '{quality_key}' (setQuality returned "
-                               "false), so nothing was exported at that quality.")
+            return None, None, error(f"Fusion refused mesh quality '{quality_key}' (setQuality "
+                                     "returned false), so nothing was exported at that quality.")
+        applied = quality_key
 
     # calculate is a real computation that can raise on a degenerate body - surface it, don't swallow.
     try:
         tm = calc.calculate()
     except Exception as e:
-        return None, error(f"Mesh tessellation (calculate) failed: {e}")
+        return None, applied, error(f"Mesh tessellation (calculate) failed: {e}")
     if tm is None:
-        return None, error("Mesh calculator returned no TriangleMesh (tessellation produced nothing).")
-    return tm, None
+        return None, applied, error("Mesh calculator returned no TriangleMesh (tessellation produced "
+                                    "nothing).")
+    return tm, applied, None
 
 
 def _weld(coords, coord_idx):
@@ -351,8 +371,8 @@ def _weld(coords, coord_idx):
     vertices), so the resulting mesh is topologically open - adjacent triangles do not share edges -
     and reports isClosed=false even for a watertight solid, which blocks mesh_to_brep. Welding
     deduplicates vertices at a fixed quantization (1e-6 cm ~ 10 nm, far below any modelling
-    tolerance) so a watertight solid produces a watertight mesh. Geometry is preserved exactly:
-    only identical coordinates are merged.
+    tolerance) so a watertight solid produces a watertight mesh. Vertices whose coordinates AGREE TO
+    THAT QUANTIZATION collapse into one, so a merged vertex can shift by at most it.
 
     coords: flat [x0,y0,z0, x1,y1,z1, ...]; coord_idx: per-corner indices into the vertex list.
     Returns (welded_coords, welded_idx). Returns the inputs unchanged if they look malformed.
@@ -404,7 +424,7 @@ def save_as_mesh_handler(body: str = "", quality: str = "normal", name: str = ""
         return error("Could not resolve a component to add the mesh body into.")
 
     # 1) calculate - READ-ONLY, runs OUTSIDE the base-feature scope.
-    tm, terr = _tessellate(src, qual)
+    tm, applied_quality, terr = _tessellate(src, qual)
     if terr:
         return terr
 
@@ -418,8 +438,8 @@ def save_as_mesh_handler(body: str = "", quality: str = "normal", name: str = ""
 
     # WELD coincident vertices: the calculator emits one node per triangle corner, so without this the
     # mesh is topologically open (isClosed=false even for a watertight solid) and mesh_to_brep refuses
-    # it. Welding leaves the normals per-corner (correct for flat shading) and only merges identical
-    # coordinates, so geometry is unchanged. (coordIndexList and normalIndexList are independent lists.)
+    # it. Welding leaves the normals per-corner (correct for flat shading) and merges vertices that
+    # agree to 1e-6 cm. (coordIndexList and normalIndexList are independent lists.)
     coords, coord_idx = _weld(coords, coord_idx)
     node_count = len(coords) // 3
 
@@ -447,19 +467,28 @@ def save_as_mesh_handler(body: str = "", quality: str = "normal", name: str = ""
     final_name, rename_warning = _common.apply_rename(mb, name)
 
     mode = _inputs.current_design_type(design)
+    # 'quality' is what setQuality actually took, null when this build carried no enum member for the
+    # request (the calculator then ran at its own default) - the request is echoed separately so the
+    # two can never be confused.
+    quality_note = ("" if applied_quality is not None else
+                    f" Quality '{qual}' did NOT land: this build exposes no "
+                    "TriangleMeshQualityOptions member for it, so setQuality was never called and "
+                    "the tessellation ran at the calculator's default level of detail. 'quality' is "
+                    "null; 'quality_requested' is what was asked for.")
     payload = {
         "saved_as_mesh": True,
         "name": final_name,
         "handle": safe(lambda: mb.entityToken),
         "source_body": safe(lambda: src.name),
         "component": safe(lambda: comp.name),
-        "quality": qual,
+        "quality": applied_quality,          # what LANDED; null when setQuality was never called
+        "quality_requested": qual,
         "triangle_count": tri_count,
         "node_count": node_count,
         "note": ("Tessellated the BRep body into a persistent MESH body. " + (
             "Wrapped in a BaseFeature edit scope (parametric design requires it for a mesh write)."
             if mode == _inputs.MODE_PARAMETRIC else
-            "Direct design - no base-feature scope needed.") +
+            "Direct design - no base-feature scope needed.") + quality_note +
             " Inspect it with model_inspect (mesh target), edit with mesh_reduce / mesh_remesh, or "
             "export it with mesh_export."),
     }

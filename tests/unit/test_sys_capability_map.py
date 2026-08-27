@@ -119,3 +119,19 @@ class TestGatedTools:
         assert "No such tool available" in note
         assert "client" in note.lower()
         assert "server" in note.lower()
+
+    def test_the_note_qualifies_the_client_deny_diagnosis_by_enabled_now(self, monkeypatch):
+        # this is the ONE block whose rows can be SERVER-disabled: a row reading enabled_now false
+        # is missing because the server's own checkbox is off (its enable_path sits beside it), so
+        # sending that case to the client's permission config is a wrong diagnosis.
+        monkeypatch.setattr(cm, "GATED_TOOLS", {"sys_execute_script": "Allow AI to execute scripts"})
+        monkeypatch.setattr(cm, "has_tool", lambda name: False)
+        _install(["sys_capability_map"])
+        out = _payload(cm.handler())
+        note = out["gated"]["note"]
+        assert out["gated"]["tools"][0]["enabled_now"] is False
+        assert "enabled_now false" in note and "enable_path" in note
+        # the client-deny sentence is scoped to a tool that IS present, never left unqualified
+        client_claim = note[note.index("No such tool available"):]
+        assert "enabled_now true" in note[:note.index("No such tool available")]
+        assert "CLIENT permission config" in client_claim

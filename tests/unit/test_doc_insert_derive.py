@@ -396,6 +396,32 @@ class TestCollectSourceEntities:
         ents, labels, err = io._collect_source_entities(src, ["Lonely"], [])
         assert ents is None and "no occurrence" in err
 
+    def test_the_root_is_recognised_by_identity_not_by_its_name(self):
+        # The resolved component and source_design.rootComponent are separate WRAPPERS of one
+        # component (component identity is never stable), and a per-field read on a source design is
+        # guarded because it can fail. Here the rootComponent wrapper's name will not read: a NAME
+        # compare then misses the root and sends the whole design down the occurrence branch, where
+        # the root has none. The shared entityToken is what settles it.
+        named_root = types.SimpleNamespace(name="Assembly", entityToken="tok-root",
+                                           bRepBodies=_NamedCollection([]),
+                                           meshBodies=_NamedCollection([]))
+
+        class _UnreadableName:
+            entityToken = "tok-root"
+
+            @property
+            def name(self):
+                raise RuntimeError("3 : cloud read failed")
+
+        src = types.SimpleNamespace(
+            rootComponent=_UnreadableName(),
+            allComponents=_NamedCollection([named_root, _src_comp("Sub")]))
+        src.rootComponent.allOccurrencesByComponent = lambda c: _NamedCollection([])
+        ents, labels, err = io._collect_source_entities(src, ["Assembly"], [])
+        assert err is None
+        assert ents == [named_root]                    # the whole design, not a no-occurrence error
+        assert "whole design" in labels[0]
+
 
 # ── read-back: subtree body count + new-derived-occurrence diff ───────────────────────────────────
 

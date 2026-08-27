@@ -21,8 +21,9 @@ import adsk.core
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import iter_collection, ok, error, safe
+from ._common import counted, iter_collection, ok, error, read_flag, safe
 from . import _assert
+from . import _write_guard
 from ._data_common import (
     _data, _agent_description, _find_project, _split_path,
     _resolve_folder_path, _ensure_folder_path, _folder_path_string,
@@ -81,20 +82,22 @@ def _settled_lineage_urn(doc):
 # ---------------------------------------------------------------------------
 
 def _xref_summary(data_file):
-    """Best-effort list of a DataFile's child references, so a caller can confirm a copy still
-    carries its referenced components (DataFile.copy does not re-copy reference targets)."""
+    """A DataFile's child references (bounded) and HOW MANY there are, so a caller can confirm a
+    copy still carries its referenced components (DataFile.copy does not re-copy reference targets).
+
+    Returns (rows, count). count is None when the reference read did not answer: an unreadable read
+    is not "this file references nothing", and a 0 published for it reads as exactly that. rows are
+    capped at _MAX_XREFS while count stays the true total."""
+    if read_flag(lambda: data_file.hasChildReferences) is False:
+        return [], 0
+    refs = safe(lambda: data_file.childReferences.asArray())
+    count = counted(lambda: len(refs))
     out = []
-    if not safe(lambda: data_file.hasChildReferences, False):
-        return out
-    try:
-        refs = data_file.childReferences.asArray()
-    except Exception:
-        return out
     for r in (refs or []):
         out.append({"name": safe(lambda: r.name), "id": safe(lambda: r.id)})
         if len(out) >= _MAX_XREFS:
             break
-    return out
+    return out, count
 
 
 def copy_document_handler(document_id: str = "", name: str = "",
@@ -115,6 +118,7 @@ def copy_document_handler(document_id: str = "", name: str = "",
 
     # --- resolve the source DataFile ---
     src = None
+    unread = []          # folders the by-name walk could not enumerate (empty on the URN path)
     if document_id:
         try:
             src = data.findFileById(document_id)
@@ -151,7 +155,7 @@ def copy_document_handler(document_id: str = "", name: str = "",
                     f"root: {', '.join(n for n in opts if n) or '(none)'}. "
                     "Use data_get(include=['folders']) to see the structure.")
             scope_label = _folder_path_string(start) or scope_label
-        matches, seen, visited, truncated = _find_file_by_name(start, name)
+        matches, seen, visited, truncated, unread = _find_file_by_name(start, name)
         if truncated:
             # A partial search cannot prove the name is unique (an unsearched folder could hold a
             # same-name twin), so a budget-cut walk is REFUSED - never acted on. Name what was
@@ -168,9 +172,13 @@ def copy_document_handler(document_id: str = "", name: str = "",
                 "lineage URN, from data_get" + (" or the matches above" if found else "") + ") to "
                 "skip the walk, or narrow it with source_folder='<path>'.")
         if not matches:
+            # A folder that would not enumerate leaves a hole in the search space, so "not found"
+            # would be a verdict this walk never reached - say which happened.
+            hole = (f" {len(unread)} folder(s) could not be read ({', '.join(unread)}), so the "
+                    "name may sit in one of them." if unread else "")
             return error(f"Document '{name}' not found under {scope_label} of source project "
                           f"'{safe(lambda: sproj.name)}'. Files seen: "
-                          f"{', '.join(seen[:30]) or '(none)'}. "
+                          f"{', '.join(seen[:30]) or '(none)'}.{hole} "
                           "Use data_get, or pass document_id (URN).")
         if len(matches) > 1:
             rows = "; ".join(
@@ -230,7 +238,7 @@ def copy_document_handler(document_id: str = "", name: str = "",
                       f"(id {safe(lambda: existing.id)}). Copy into a different folder, "
                       "or remove the existing copy first.")
 
-    xrefs = _xref_summary(src)
+    xrefs, xref_count = _xref_summary(src)
 
     try:
         copied = src.copy(target)  # adsk.core: DataFile.copy(targetFolder) -> DataFile
@@ -260,12 +268,24 @@ def copy_document_handler(document_id: str = "", name: str = "",
     "destination_folder": (_folder_path_string(target) or "(project root)"),
     "auto_created_parents": auto_created,
     "external_references": xrefs,
-    "external_reference_count": len(xrefs),
+    # counted, never a fabricated 0: a reference read that did not answer is not "no references".
+    "external_reference_count": xref_count,
     "note": ("The copy preserves external references: each referenced component still "
         "points at its ORIGINAL source file - the references are not re-copied. This tool "
         "does not offer a Document.saveAs-based copy mode that shares lineage for joint "
         "auto-repair."),
     }
+    if xref_count is None:
+        result["note"] += (" The source's child references could not be READ, so "
+                           "external_reference_count is null (not zero) and 'external_references' is "
+                           "empty for that reason, not because the source carries none.")
+    if unread:
+        # The by-name search left a hole: the uniqueness this copy acted on was decided over a
+        # search space that did not fully open, so the caller hears it on the SUCCESS path too.
+        result["source_folders_unreadable"] = unread
+        result["note"] += (f" The by-name source search could not read {len(unread)} folder(s) "
+                           f"({', '.join(unread)}), so a same-name twin there would not have been "
+                           "seen - address the source by document_id (URN) if that matters.")
     if rename_error:
         result["rename_warning"] = rename_error
     return ok(result)
@@ -289,16 +309,24 @@ def _find_file_by_name(root_folder, name):
     caller must refuse rather than trust a partial search (an unsearched folder could hold a
     same-name twin).
 
-    Returns (matches, seen_names, visited, truncated), each match a (file, folder_path_string) pair.
+    A folder whose dataFiles/dataFolders enumeration RAISES is recorded in `unread` (its path) rather
+    than silently skipped - the same hole _data_read._walk_folder records: a folder that never opened
+    could hold a second file of this name, so a swallowed failure turns an ambiguity into a confident
+    unique match. Every caller carries the fact.
+
+    Returns (matches, seen_names, visited, truncated, unread), each match a (file,
+    folder_path_string) pair and `unread` the paths of the folders that would not enumerate.
     """
     want = (name or "").strip().lower()
     seen = []
     matches = []
+    unread = []
     queue = [root_folder] if root_folder is not None else []
     visited = 0
     while queue and visited < _WALK_FOLDER_BUDGET:
         folder = queue.pop(0)
         visited += 1
+        unreadable_here = False
         try:
             for f in folder.dataFiles.asArray():
                 nm = safe(lambda f=f: f.name)
@@ -307,13 +335,15 @@ def _find_file_by_name(root_folder, name):
                     if nm.strip().lower() == want:
                         matches.append((f, _folder_path_string(folder)))
         except Exception:
-            pass
+            unreadable_here = True
         try:
             for sub in folder.dataFolders.asArray():
                 queue.append(sub)
         except Exception:
-            pass
-    return matches, seen, visited, bool(queue)
+            unreadable_here = True
+        if unreadable_here:
+            unread.append(_folder_path_string(folder) or "(project root)")
+    return matches, seen, visited, bool(queue), unread
 
 
 def _file_in_folder_by_name(folder, name):
@@ -333,20 +363,27 @@ def _file_in_folder_by_name(folder, name):
 # ---------------------------------------------------------------------------
 
 def _parent_ref_summary(data_file):
-    """List the files that REFERENCE this DataFile (its parents), bounded - deleting it would
-    orphan them, so the tool refuses unless forced."""
+    """The files that REFERENCE this DataFile (its parents), bounded, plus the reference read that
+    would NOT answer - deleting a referenced file orphans them, so the tool refuses unless forced.
+
+    Returns (parents, unreadable): unreadable NAMES the read that failed ('hasParentReferences' or
+    'parentReferences.asArray()'), else None. It is a sentinel, not a formality: [] published for a
+    failed read is indistinguishable from a file nothing points at, so the destructive path fails
+    CLOSED on it instead of proceeding to deleteMe() (see delete_document_handler)."""
+    has = read_flag(lambda: data_file.hasParentReferences)
+    if has is None:
+        return [], "hasParentReferences"
+    if has is False:
+        return [], None
+    refs = safe(lambda: data_file.parentReferences.asArray())
+    if refs is None:
+        return [], "parentReferences.asArray()"
     out = []
-    if not safe(lambda: data_file.hasParentReferences, False):
-        return out
-    try:
-        refs = data_file.parentReferences.asArray()
-    except Exception:
-        return out
-    for r in (refs or []):
+    for r in refs:
         out.append({"name": safe(lambda: r.name), "id": safe(lambda: r.id)})
         if len(out) >= _MAX_XREFS:
             break
-    return out
+    return out, None
 
 
 def _is_document_open(file_id):
@@ -405,7 +442,18 @@ def delete_document_handler(document_id: str = "", confirm_name: str = "",
         return error(f"'{actual_name}' is currently OPEN - close it before deleting "
             "(Fusion will not delete an open document).")
 
-    parents = _parent_ref_summary(df)
+    parents, refs_unreadable = _parent_ref_summary(df)
+    if refs_unreadable and not force:
+        # Fail CLOSED: the read that would have shown the orphan risk is the one that failed, so
+        # this file is NOT provably unreferenced and the orphan guard cannot run. The refusal names
+        # WHICH read failed, since the caller's options differ (retry a transient cloud failure vs.
+        # accept a delete with no reference check at all).
+        return error(
+            f"Whether '{actual_name}' is referenced by other files could not be read "
+            f"({refs_unreadable} failed), so it is NOT provably unreferenced - deleting it may "
+            "orphan references this call cannot list. Refusing. Retry once the file reads "
+            "(data_get(file=<urn>)), or pass force=true to delete WITHOUT the reference check. "
+            "Nothing was deleted.")
     if parents and not force:
         names = ", ".join(p.get("name") or "?" for p in parents)
         return error(
@@ -421,13 +469,22 @@ def delete_document_handler(document_id: str = "", confirm_name: str = "",
         return error(f"Fusion declined to delete '{actual_name}' (it may be referenced or "
     "open). No change was made.")
 
-    return ok({
+    payload = {
     "deleted": True,
     "name": actual_name,
     "document_id": document_id,
-    "was_referenced_by": parents,
-    "forced": bool(parents and force),
-    })
+    # Null, never [], when the reference read did not answer: an empty list says "nothing
+    # referenced this file", which is not what an unreadable read supports.
+    "was_referenced_by": None if refs_unreadable else parents,
+    "forced": bool(force and (parents or refs_unreadable)),
+    }
+    if refs_unreadable:
+        payload["reference_state_unreadable"] = refs_unreadable
+        payload["note"] = (f"The file's reference state could not be read ({refs_unreadable} "
+                           "failed) and force=true deleted it anyway, so whether other files "
+                           "referenced it - and are now orphaned - is unknown; "
+                           "'was_referenced_by' is null, not empty.")
+    return ok(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -637,14 +694,27 @@ def new_document_handler() -> dict:
 # Document lifecycle: save (in place) / close / activate / list open documents
 # ---------------------------------------------------------------------------
 
+def _lineage_key(urn):
+    """The LINEAGE part of a URN - its '?version=N' suffix dropped - which is what says WHICH FILE a
+    reference addresses. Two URNs name the same document when their lineage keys are EQUAL; a
+    startswith test also accepts a LONGER urn, and one lineage id can be another's prefix, so a
+    prefix match can resolve to a document the caller never named. Anything unreadable is ''."""
+    return urn.split("?")[0].strip() if isinstance(urn, str) else ""
+
+
 def _find_open_document(name):
     """Return the open Document identified by `name`, and a sample of the open names.
 
     `name` may be a lineage URN or a Fusion web URL (the UNAMBIGUOUS identity - Fusion allows several
     open docs to share a display name, e.g. two 'Untitled' or two files both named 'P1-Gimbal'); it is
-    matched against each open doc's dataFile.id first. Failing that, it is matched as a display name by
-    case-insensitive EXACT match. A name that matches MORE THAN ONE open doc is REFUSED (returns None +
-    an ambiguous flag) rather than silently acting on the wrong one - pass the URN to disambiguate.
+    matched against each open doc's dataFile.id first, by LINEAGE EQUALITY. Failing that, it is matched
+    as a display name by case-insensitive EXACT match. A value that matches MORE THAN ONE open doc is
+    REFUSED (returns None + an ambiguous flag) rather than silently acting on the wrong one - except
+    where the repeat is ONE document listed twice (_write_guard.one_open_document), which resolves. A
+    shared display name is disambiguated by the URN, a lineage open at two VERSIONS only by 'open:N'.
+
+    `names` is the open display names, for the caller's message; on a URN refusal each candidate is
+    annotated with its document id, since the names there are twins and the id is what differs.
     Operates on app.documents (all loaded docs - a superset of the user's visible tabs).
 
     Returns (document_or_None, names, ambiguous_bool)."""
@@ -677,14 +747,26 @@ def _find_open_document(name):
             return open_docs[idx][0], names, False
         return None, names, False
 
-    # 1) URN / web-URL identity: resolve the raw value to candidate URNs, match an open doc's dataFile.id.
-    urn_candidates = _urn_candidates(raw) if raw else []
-    urn_candidates = [c for c in urn_candidates if c.startswith("urn:")]
-    if urn_candidates:
-        for d, _nm in open_docs:
+    # 1) URN / web-URL identity: resolve the raw value to candidate URNs, then match an open doc's
+    # dataFile.id by LINEAGE EQUALITY.
+    wanted = {_lineage_key(c) for c in _urn_candidates(raw) if c.startswith("urn:")} if raw else set()
+    wanted.discard("")
+    if wanted:
+        hits = []
+        for d, nm in open_docs:
             did = safe(lambda d=d: d.dataFile.id)
-            if isinstance(did, str) and any(did == c or did.startswith(c.split("?")[0]) for c in urn_candidates):
-                return d, names, False
+            if _lineage_key(did) in wanted:
+                hits.append((d, nm, did))
+        if len(hits) > 1 and not _write_guard.one_open_document([i for _d, _nm, i in hits]):
+            # Distinct ids under one lineage - two VERSIONS of the file open at once. No URN can
+            # settle it (every candidate answers to that lineage), so the ids are named here and the
+            # caller's refusal points at open:N.
+            return None, [f"{nm or '(unnamed)'} ({i})" for _d, nm, i in hits], True
+        if hits:
+            # Repeated ids are ONE document listed twice - an assembly's own dependency instance
+            # beside its visible tab (_write_guard.one_open_document holds that measured fact). Both
+            # handles address the same document, so the first is returned without disclosure.
+            return hits[0][0], names, False
         # A URN was supplied but no OPEN doc carries it - not a name; report a clean miss (not ambiguous).
         return None, names, False
 
@@ -751,8 +833,9 @@ def close_document_handler(name: str = "", save_changes: bool = False,
         if ambiguous:
             return error(f"'{name}' matches more than one OPEN document - refusing to guess which to "
                          "close. Pass the lineage URN / web URL, or the 'open:N' index from doc_get "
-                         "(the only handle for an UNSAVED same-name doc with no URN). Open: "
-                         f"{', '.join(n for n in names if n)}.")
+                         "(the only handle for an UNSAVED same-name doc with no URN, and for one "
+                         "lineage open at two VERSIONS, where every candidate answers to the same "
+                         f"URN). Open: {', '.join(n for n in names if n)}.")
         if not d:
             return error(f"No open document matched '{name}'. Open: {', '.join(n for n in names if n)}. "
                          "(A shared name needs a lineage URN or the 'open:N' index from doc_get.)")
@@ -764,6 +847,7 @@ def close_document_handler(name: str = "", save_changes: bool = False,
         targets = [active]
 
     closed, errors, skipped_invalid = [], [], 0
+    closed_identities = []
     for d in targets:
         # A close_all closes reference/dependency docs too; closing one INVALIDATES its now-orphaned
         # reference proxies, so a later close on such a dead proxy raises a cosmetic error. Skip a proxy
@@ -772,9 +856,13 @@ def close_document_handler(name: str = "", save_changes: bool = False,
             skipped_invalid += 1
             continue
         nm = safe(lambda d=d: d.name)
+        # The closed document's identity is read BEFORE the close - afterwards the document is gone
+        # and neither its name nor its lineage URN reads back.
+        ident = {"name": nm, "document_id": safe(lambda d=d: d.dataFile.id)}
         try:
             if d.close(bool(save_changes)):
                 closed.append(nm)
+                closed_identities.append(ident)
             else:
                 errors.append({nm: "close returned false"})
         except Exception as e:
@@ -794,14 +882,23 @@ def close_document_handler(name: str = "", save_changes: bool = False,
         note += f" Skipped {skipped_invalid} already-invalidated reference doc(s)."
     if errors:
         note += f" {len(errors)} of {len(targets)} target(s) failed to close - see 'errors'."
-    return ok({
+    payload = {
     "closed": closed, "closed_count": len(closed),
     "errors": errors,
     "skipped_invalid": skipped_invalid,
     "save_changes": bool(save_changes),
     "remaining_open": safe(lambda: app.documents.count),
     "note": note,
-    })
+    }
+    # The write guard stamps acted_on from the POST-call ACTIVE document, which a close never leaves
+    # pointing at the document it closed (measured live: closing an INACTIVE document names the
+    # untouched active one; closing the ACTIVE document names the fallback Fusion brought forward).
+    # This handler holds the true identity, so it publishes acted_on itself for a ONE-document close
+    # and the guard's fill-if-absent stamp stands aside. A multi-document close_all acted on several
+    # documents, which the single-identity acted_on shape cannot state - 'closed' lists them there.
+    if len(closed_identities) == 1:
+        payload["acted_on"] = closed_identities[0]
+    return ok(payload)
 
 
 def activate_document_handler(name: str = "") -> dict:
@@ -813,8 +910,9 @@ def activate_document_handler(name: str = "") -> dict:
     if ambiguous:
         return error(f"'{name}' matches more than one OPEN document - refusing to guess which to "
                      "activate. Pass the lineage URN / web URL, or the 'open:N' index from doc_get "
-                     "(the only handle for an UNSAVED same-name doc with no URN). Open: "
-                     f"{', '.join(n for n in names if n)}.")
+                     "(the only handle for an UNSAVED same-name doc with no URN, and for one "
+                     "lineage open at two VERSIONS, where every candidate answers to the same "
+                     f"URN). Open: {', '.join(n for n in names if n)}.")
     if not d:
         return error(f"No open document matched '{name}'. Open: {', '.join(n for n in names if n)}. "
                      "(A shared name needs a lineage URN or the 'open:N' index from doc_get.)")

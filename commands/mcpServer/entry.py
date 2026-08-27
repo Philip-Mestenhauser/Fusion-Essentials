@@ -218,6 +218,11 @@ def _collect_items():
 def start():
     """Called when the module is enabled and the add-in starts."""
     global _http_server, _server_thread, _mcp
+    # The TaskManager is started first and owns a registered custom event plus the pending-task
+    # table, so every path that leaves without a running server must stop it again. One guard in
+    # finally covers all of them - including an unexpected raise, which the blanket except below
+    # otherwise reports and swallows, leaking the started TaskManager until the next add-in stop().
+    server_running = False
     try:
         TaskManager.start()
 
@@ -229,6 +234,7 @@ def start():
             _mcp = result["mcp"]
             _http_server = result["http_server"]
             _server_thread = result["thread"]
+            server_running = True
             futil.log(
                 f'{CMD_NAME}: running on http://{HOST}:{PORT}/mcp '
                 f'({len(items)} item(s) registered)'
@@ -246,17 +252,18 @@ def start():
 
         elif status == mcp_server.START_PORT_IN_USE:
             # Autodesk's built-in MCP server already holds the port; our bind failed.
-            TaskManager.stop()
             _warn_port_conflict(
                 f'Fusion-Essentials MCP server could not start: port {PORT} is already in use.'
             )
         else:
             # Some other startup failure; details already logged.
-            TaskManager.stop()
             futil.log(f'{CMD_NAME}: failed to start ({result.get("message", "unknown error")})')
     except Exception:
         # A failure here must never break the rest of the add-in.
         futil.handle_error(f'{CMD_NAME}.start')
+    finally:
+        if not server_running:
+            TaskManager.stop()
 
 
 def _start_ownership_check():

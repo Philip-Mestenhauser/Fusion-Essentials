@@ -205,12 +205,28 @@ class TestCreate:
         assert out["generation_started"] is False
         assert "no future" in out["generate_error"]
 
-    def test_default_generates(self, monkeypatch):
-        # generate defaults to True (the useful default — an operation with no toolpath is incomplete)
+    def test_default_does_not_generate(self, monkeypatch):
+        # generate defaults to FALSE: a selection-driven strategy generated before its geometry is
+        # selected does not fail - it lands a warned op with no toolpath that still reads valid
+        # (measured on a live 2D Contour), so the honest default is to wait for cam_select_geometry.
         cam = _install(monkeypatch)
         out = _payload(cco.handler(setup="Setup1", strategy="face",
                                    tool_library_url="u", tool_index=0))
-        assert out["generation_started"] is True and len(cam.generated) == 1
+        assert out["generation_started"] is False and cam.generated == []
+        assert "generation_handle" not in out
+
+    def test_the_default_note_names_the_order_geometry_then_generate(self, monkeypatch):
+        # the note is the only place a caller learns why nothing generated and what comes next.
+        _install(monkeypatch)
+        out = _payload(cco.handler(setup="Setup1", strategy="face",
+                                   tool_library_url="u", tool_index=0))
+        assert "cam_select_geometry" in out["note"] and "cam_generate" in out["note"]
+
+    def test_the_wire_default_matches_the_handler_default(self, monkeypatch):
+        # the schema an agent reads must not promise a different default than the handler applies.
+        prop = cco.tool.to_dict()["inputSchema"]["properties"]["generate"]
+        assert "default false" in prop["description"]
+        assert "default true" not in cco.TOOL_DESCRIPTION
 
 
 # ── document-library tool reference (the scriptless-CAM-chain fix) ───────────

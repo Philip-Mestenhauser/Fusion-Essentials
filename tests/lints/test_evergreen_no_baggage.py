@@ -32,11 +32,9 @@ _SWEPT_DIRS = (
 # identical list of phrases as ITS OWN smell-detection pattern (for tool wire text, not this file) -
 # both would otherwise trip on their own pattern list. TOOL_MANIFEST.md/TOOL_POINTER_MAP.md are
 # GENERATED digests of the registry/tool source - sweeping the source they are built from already
-# covers their content, so they are excluded rather than checked twice. CHANGELOG.md
-# is the one SANCTIONED history document (dated, additive, per-release): the evergreen rule keeps
-# history narrative out of living code and docs, not out of the changelog whose genre it is.
+# covers their content, so they are excluded rather than checked twice.
 _EXCLUDED_FILES = {"test_evergreen_no_baggage.py", "gen_wiring.py", "TOOL_MANIFEST.md",
-                   "TOOL_POINTER_MAP.md", "CHANGELOG.md"}
+                   "TOOL_POINTER_MAP.md"}
 
 # phrase -> case-insensitive denylist (history narrative + plan back-references naming a phrase).
 # Word-boundary wrapped so e.g. "the fix" does not match inside "the fixture", "used to" does not
@@ -115,6 +113,17 @@ _DATE_EXEMPT_FILES = {
 _RUN_NUMBER = re.compile(r"\brun[ -]\d")
 _ITEM_NUMBER = re.compile(r"\bitem[ -]\d+\b|#\s*item\s*\d*\s*:")
 
+# The non-phrase checks, as (reported token, pattern) - _LOWER_CHECKS are searched against the
+# LOWERCASED line, _RAW_CHECKS against the raw one (the TODO / Class-letter / label shapes are
+# case-sensitive by design). Naming them here is what lets one scan drive both the whole-file
+# screen and the line pass off the same objects. _DATE stays out: it alone is skipped in an exempt
+# file and searched with the spec-pinned tokens stripped.
+_LOWER_CHECKS = (("run-number reference", _RUN_NUMBER), ("item-number reference", _ITEM_NUMBER))
+_RAW_CHECKS = (("Bug <letter>", _BUG_LETTER), ("WO-<digit>", _WO_DIGIT),
+               ("Class <letter>", _CLASS_LETTER), ("item-number label", _ITEM_LABEL),
+               ("review-process artifact", _REVIEW_ARTIFACT), ("TODO marker", _TODO_MARKER),
+               ("Phase <n> label", _PHASE_LABEL))
+
 _ALLOWLIST = {
     "tests/lints/test_generated_docs_current.py:8":
         "'remember to' states the human failure mode this gate compensates for, not an instruction",
@@ -126,9 +135,8 @@ _ALLOWLIST = {
 def _iter_files():
     for base in _SWEPT_DIRS:
         for root, dirs, files in os.walk(base):
-            # evals/results/ holds per-run RECORDS: dated, additive, per-run history documents -
-            # the same sanctioned genre as CHANGELOG.md (and gitignored besides). History narrative
-            # is their content, not baggage.
+            # evals/results/ holds per-run RECORDS: dated, additive, per-run history documents
+            # (and gitignored besides). History narrative is their content, not baggage.
             if root.replace("\\", "/").endswith("tests/live/evals"):
                 dirs[:] = [d for d in dirs if d != "results"]
             dirs[:] = [d for d in dirs if d != "__pycache__"]
@@ -141,38 +149,58 @@ def _iter_files():
 
 
 def _line_offenders(path):
-    offenders = []
-    date_exempt = os.path.basename(path) in _DATE_EXEMPT_FILES
+    """Every (lineno, token, line) offender in one file.
+
+    Reads the file WHOLE and screens each check against the full text first, then walks the lines
+    with only the checks that survived - ~100 regexes against every line of every file is the
+    scan's whole cost, and almost every file carries none of them.
+
+    The screen is sound in both directions. Each check screens itself: the same compiled pattern
+    searched against the whole text (a superset of any line match - no pattern is line-anchored,
+    and \\n is a non-word character, so a line-start \\b holds identically inside the full text),
+    and each phrase screens as the literal substring its own pattern is built from. So a check the
+    screen drops cannot match a line, and a file no check survives has no offender at all. _DATE
+    screens un-stripped, which only costs a file with a spec-pinned protocol id the fast exit - the
+    line pass below still strips those tokens and still skips a date-exempt file.
+    """
     with open(path, encoding="utf-8") as fh:
-        for i, line in enumerate(fh, 1):
-            low = line.lower()
-            for phrase, phrase_re in _PHRASES:
-                if phrase_re.search(low):
-                    offenders.append((i, phrase, line.strip()))
-            if not date_exempt:
-                undated = line
-                for tok in _DATE_OK_TOKENS:
-                    undated = undated.replace(tok, "")
-                if _DATE.search(undated):
-                    offenders.append((i, "calendar date", line.strip()))
-            if _RUN_NUMBER.search(low):
-                offenders.append((i, "run-number reference", line.strip()))
-            if _ITEM_NUMBER.search(low):
-                offenders.append((i, "item-number reference", line.strip()))
-            if _BUG_LETTER.search(line):
-                offenders.append((i, "Bug <letter>", line.strip()))
-            if _WO_DIGIT.search(line):
-                offenders.append((i, "WO-<digit>", line.strip()))
-            if _CLASS_LETTER.search(line):
-                offenders.append((i, "Class <letter>", line.strip()))
-            if _ITEM_LABEL.search(line):
-                offenders.append((i, "item-number label", line.strip()))
-            if _REVIEW_ARTIFACT.search(line):
-                offenders.append((i, "review-process artifact", line.strip()))
-            if _TODO_MARKER.search(line):
-                offenders.append((i, "TODO marker", line.strip()))
-            if _PHASE_LABEL.search(line):
-                offenders.append((i, "Phase <n> label", line.strip()))
+        text = fh.read()
+    low = text.lower()
+    phrases = [pair for pair in _PHRASES if pair[0] in low]
+    lower_checks = [pair for pair in _LOWER_CHECKS if pair[1].search(low)]
+    raw_checks = [pair for pair in _RAW_CHECKS if pair[1].search(text)]
+    dated = bool(_DATE.search(text))
+    if not (phrases or lower_checks or raw_checks or dated):
+        return []
+    return _offenders_by_line(path, text, phrases, lower_checks, raw_checks, dated)
+
+
+def _offenders_by_line(path, text, phrases=_PHRASES, lower_checks=_LOWER_CHECKS,
+                       raw_checks=_RAW_CHECKS, dated=True):
+    """The line pass: every check in `phrases`/`lower_checks`/`raw_checks` against every line, in
+    the order they are reported. Called with the defaults it runs the FULL check set - which is
+    what test_the_screen_changes_no_verdict compares the screened scan against."""
+    offenders = []
+    check_date = dated and os.path.basename(path) not in _DATE_EXEMPT_FILES
+    # split on "\n" alone - the boundary iterating the file object uses. str.splitlines() also
+    # breaks on a form feed, which would shift every line number after one.
+    for i, line in enumerate(text.split("\n"), 1):
+        low = line.lower()
+        for phrase, phrase_re in phrases:
+            if phrase_re.search(low):
+                offenders.append((i, phrase, line.strip()))
+        if check_date:
+            undated = line
+            for tok in _DATE_OK_TOKENS:
+                undated = undated.replace(tok, "")
+            if _DATE.search(undated):
+                offenders.append((i, "calendar date", line.strip()))
+        for token, check in lower_checks:
+            if check.search(low):
+                offenders.append((i, token, line.strip()))
+        for token, check in raw_checks:
+            if check.search(line):
+                offenders.append((i, token, line.strip()))
     return offenders
 
 
@@ -220,6 +248,50 @@ class TestNoHistoricalOrPlanBaggage:
         cool.write_text("# assert result matches the fixture output\n", encoding="utf-8")
         assert _line_offenders(str(hot)), "'for now' must trip the evergreen scan"
         assert not _line_offenders(str(cool)), "'the fixture' must NOT trip ('the fix' is word-bounded)"
+
+    def test_every_pattern_is_a_named_check(self):
+        # The scan only line-scans the checks its whole-file screen matched, so a pattern that is
+        # in no check table is never screened and never run: a silent hole. This goes red the
+        # moment a pattern is added without joining _LOWER_CHECKS / _RAW_CHECKS.
+        import test_evergreen_no_baggage as mod
+        wired = {id(p) for _, p in _LOWER_CHECKS + _RAW_CHECKS} | {id(_DATE)}
+        loose = sorted(name for name, obj in vars(mod).items()
+                       if isinstance(obj, re.Pattern) and id(obj) not in wired)
+        assert not loose, ("these patterns belong to no check table, so the scan neither screens "
+                           f"nor runs them: {loose}")
+
+    def test_the_screen_changes_no_verdict(self, tmp_path):
+        # One planted line per detection class: the screened scan must return EXACTLY what the
+        # unconditional line pass returns - same lineno, same token, same text - and a clean line
+        # must stay clean through both.
+        planted = {
+            "phrase": "# for now, this branch is unused\n",
+            "date": "# verified live 2026-07-08: the parameter lands\n",
+            "run": "# fixed in run 01 of the pipeline\n",
+            "item": "# the item-5 bug: z collapsed\n",
+            "bug_letter": "# Bug C is closed\n",
+            "work_order": "# WO-3 covers the holder\n",
+            "class_letter": "# Class B inputs are refused\n",
+            "item_label": "# C7: the holder reduction\n",
+            "review_artifact": "# ROUND-2 PROBE P1 measured it\n",
+            "todo": "# TODO: wire the guard\n",
+            "phase": "# Phase 2 of the plan\n",
+        }
+        for label, text in planted.items():
+            probe = tmp_path / f"probe_{label}.py"
+            probe.write_text(text, encoding="utf-8")
+            fast = _line_offenders(str(probe))
+            slow = _offenders_by_line(str(probe), text)
+            assert fast == slow, f"{label}: prefilter dropped {slow} (got {fast})"
+            assert fast, f"{label}: the planted line must trip at all"
+        # a clean file, and the two superset cases the prefilter deliberately lets through to the
+        # line pass (a spec-pinned protocol id, a date-exempt receipt), all agree with the line pass
+        for name, text in (("cool.py", "# assert result matches the fixture output\n"),
+                           ("proto.py", "# answers protocolVersion 2025-03-26 to older clients\n"),
+                           ("test_tool_verify_receipt.py", 'LEDGER = "verified 2026-07-27"\n')):
+            probe = tmp_path / name
+            probe.write_text(text, encoding="utf-8")
+            assert _line_offenders(str(probe)) == _offenders_by_line(str(probe), text) == []
 
     def test_the_diary_patterns_bite(self, tmp_path):
         # each newer diary shape trips; the sanctioned look-alikes do not.

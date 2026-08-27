@@ -53,6 +53,14 @@ class _Body:
         return _Coll(self._faces)
 
 
+class _UnreadableFacesBody(_Body):
+    """Present and named, but its faces collection will not enumerate - the read `safe(..., 0)`
+    turns into a confident 'this body has zero faces'."""
+    @property
+    def faces(self):
+        raise RuntimeError("4 : An API Object refers to a deleted Object")
+
+
 class _Feature:
     def __init__(self, name="DeleteFace1", bodies=()):
         self.name = name
@@ -138,13 +146,16 @@ def test_plain_delete_reports_face_count_delta():
 def test_heal_routes_to_deleteFaceFeatures():
     body = _Body("Solid1", is_solid=True, face_count=6)
     target = body._faces[0]
-    result = _Feature(bodies=[_Body("Solid1", is_solid=True, face_count=6)])
+    result = _Feature(bodies=[_Body("Solid1", is_solid=True, face_count=5)])
     feats = _wire({"F1": target}, delete=_DelFeatures(result), surface_delete=_DelFeatures(result))
     out = payload(sdf.delete_face_handler(faces=["F1"], heal=True))
     assert out["heal"] is True
     assert feats.deleteFaceFeatures.calls == 1
     assert feats.surfaceDeleteFaceFeatures.calls == 0
-    assert "healed" in out["note"]
+    # `heal` is an input flag, never read back: the note may say it was REQUESTED, not that the
+    # opening was closed.
+    assert "heal requested" in out["note"]
+    assert "and healed the opening" not in out["note"]
 
 
 def test_consumed_body_is_reported():
@@ -188,11 +199,137 @@ def test_faces_from_two_bodies_tracked():
     assert out["faces_requested"] == 2
 
 
+def test_result_row_is_solid_is_null_when_the_flag_will_not_read():
+    # informational, but still a published FLAG: bool(safe(...)) calls a body an open surface off a
+    # read that failed, which is exactly what a delete-face caller inspects the row for.
+    body = _Body("Srf1", face_count=6)
+    target = body._faces[0]
+    survivor = _Body("Srf1", face_count=5)
+    del survivor.isSolid                              # the flag will not read at all
+    result = _Feature(bodies=[survivor])
+    _wire({"F1": target}, surface_delete=_DelFeatures(result))
+    out = payload(sdf.delete_face_handler(faces=["F1"], heal=False))
+    assert out["result_bodies"][0]["is_solid"] is None
+    assert out["result_bodies"][0]["faces"] == 5      # the readable fields still publish
+
+
+def test_result_row_is_solid_passes_a_readable_flag_through():
+    # the boundary beside it: a flag that READ false stays false, not null.
+    body = _Body("Srf1", face_count=6)
+    target = body._faces[0]
+    result = _Feature(bodies=[_Body("Srf1", is_solid=False, face_count=5)])
+    _wire({"F1": target}, surface_delete=_DelFeatures(result))
+    out = payload(sdf.delete_face_handler(faces=["F1"], heal=False))
+    assert out["result_bodies"][0]["is_solid"] is False
+
+
 def test_missing_faces_rejected():
     _wire({}, surface_delete=_DelFeatures(_Feature()))
     res = sdf.delete_face_handler(faces=None)
     assert res["isError"] is True
     assert "needs a list of geometry handles" in res["message"]
+
+
+# ── PARAMETRIC: the face-count gate the direct path already ran ──────────────────────────────
+
+class TestParametricFaceCountGate:
+    """A feature object is not proof a face went. The parametric branch published
+    "Deleted N face(s); body face count 26 -> 26" off the REQUEST; these pin the measured delta as
+    the verdict, at the 0/-1 boundary."""
+
+    def _run(self, before, after, heal=False, requested=1):
+        body = _Body("Srf1", face_count=before)
+        targets = {"F%d" % i: body._faces[i] for i in range(requested)}
+        result = _Feature(bodies=[_Body("Srf1", face_count=after)])
+        _wire(targets, surface_delete=_DelFeatures(result), delete=_DelFeatures(result))
+        return sdf.delete_face_handler(faces=list(targets), heal=heal)
+
+    def test_unchanged_face_count_is_an_error(self):
+        res = self._run(before=26, after=26)
+        assert res["isError"] is True
+        msg = error_message(res)
+        assert "no input body's face count changed" in msg and "26 -> 26" in msg
+        assert "design_delete_feature" in msg        # parametric: there IS a feature to remove
+
+    def test_one_face_fewer_is_the_boundary_that_passes(self):
+        # delta -1 is the smallest real delete; the gate must bite at 0 and only at 0
+        out = payload(self._run(before=26, after=25))
+        assert out["faces_delta"] == -1
+        assert out["faces_after"] == 25
+
+    def test_the_note_reports_the_measured_delta_not_the_requested_count(self):
+        # 3 faces requested, a heal that nets -1: the note must not read "Deleted 3 face(s)"
+        out = payload(self._run(before=9, after=8, heal=True, requested=3))
+        assert out["faces_delta"] == -1
+        assert "9 -> 8" in out["note"]
+        assert "3 face(s) requested" in out["note"]
+        assert "Deleted 3 face" not in out["note"]
+
+    def test_a_rising_face_count_is_flagged_not_narrated_as_a_delete(self):
+        out = payload(self._run(before=7, after=9))
+        assert out["faces_delta"] == 2
+        assert "ROSE" in out["warning"]
+        assert "The edit landed" in out["note"] and "The delete landed" not in out["note"]
+
+    def test_an_unreadable_before_count_does_not_refuse(self):
+        # No input body's face count read (total 0), so the delta is evidence of nothing - the
+        # feature object is what this path is graded on, and a 0-vs-0 must not read as a no-op.
+        body = _UnreadableFacesBody("Srf1", face_count=1)
+        target = body._faces[0]
+        result = _Feature(bodies=[_Body("Srf1", face_count=0)])
+        _wire({"F1": target}, surface_delete=_DelFeatures(result))
+        out = payload(sdf.delete_face_handler(faces=["F1"], heal=False))
+        assert out["faces_before"] == 0 and out["faces_after"] == 0
+
+
+class TestParametricAfterCountMustRead:
+    """The AFTER side of the same contract: a result body whose faces will not enumerate is not a
+    body with zero faces. Coerced to 0 it drops the after-total by that body's whole count, and the
+    verdict then reads the largest possible delete off a number nobody measured."""
+
+    def test_one_unreadable_result_body_among_readable_ones_is_refused(self):
+        b1 = _Body("Srf1", face_count=13)
+        b2 = _Body("Srf2", face_count=13)
+        result = _Feature(bodies=[_Body("Srf1", face_count=12),
+                                  _UnreadableFacesBody("Srf2", face_count=12)])
+        _wire({"F1": b1._faces[0], "F2": b2._faces[0]}, surface_delete=_DelFeatures(result))
+        res = sdf.delete_face_handler(faces=["F1", "F2"], heal=False)
+        assert res["isError"] is True
+        msg = error_message(res)
+        assert "1 result body(ies) (Srf2)" in msg
+        assert "not a count of zero" in msg
+        assert "UNVERIFIED" in msg
+
+    def test_every_result_body_unreadable_is_refused(self):
+        body = _Body("Srf1", face_count=26)
+        result = _Feature(bodies=[_UnreadableFacesBody("Srf1", face_count=26)])
+        _wire({"F1": body._faces[0]}, surface_delete=_DelFeatures(result))
+        res = sdf.delete_face_handler(faces=["F1"], heal=False)
+        assert res["isError"] is True
+        # the fabricated verdict this refusal replaces
+        assert "26 -> 0" not in error_message(res)
+
+    def test_every_result_body_readable_stays_a_success(self):
+        # the boundary on the other side: zero unreadable bodies renders the verdict as before
+        b1 = _Body("Srf1", face_count=13)
+        b2 = _Body("Srf2", face_count=13)
+        result = _Feature(bodies=[_Body("Srf1", face_count=12), _Body("Srf2", face_count=12)])
+        _wire({"F1": b1._faces[0], "F2": b2._faces[0]}, surface_delete=_DelFeatures(result))
+        out = payload(sdf.delete_face_handler(faces=["F1", "F2"], heal=False))
+        assert out["faces_before"] == 26 and out["faces_after"] == 24
+        assert out["faces_delta"] == -2
+
+    def test_a_consumed_body_still_reports_with_the_after_count_left_null(self):
+        # the consumed branch owns the empty/short result set and keeps its warning; the after-count
+        # it cannot measure is published as null rather than as a fabricated total
+        b1 = _Body("Srf1", face_count=6)
+        b2 = _Body("Srf2", face_count=6)
+        result = _Feature(bodies=[_UnreadableFacesBody("Srf1", face_count=5)])
+        _wire({"F1": b1._faces[0], "F2": b2._faces[0]}, surface_delete=_DelFeatures(result))
+        out = payload(sdf.delete_face_handler(faces=["F1", "F2"], heal=False))
+        assert out["bodies_consumed"] == 1
+        assert out["faces_after"] is None
+        assert "consumed" in out["warning"]
 
 
 def test_parametric_no_op_remedy_names_the_timeline_feature():

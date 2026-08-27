@@ -873,6 +873,44 @@ class TestTargetBodies:
         res = ex.handler(sketch_name="S", distance=5, operation="cut", target_bodies="Nope")
         assert res["isError"] is True and "Nope" in res["message"]
 
+    def test_the_documented_occurrence_qualified_slash_form_resolves(self):
+        # target_bodies' description tells the caller to scope a shared body name as
+        # '<occurrence>/<body>' ("RingOuter:1/Body1"). That claim is only worth making if something
+        # fails when it stops being true: this drives the exact advertised spelling through the kind
+        # the tool wires, so dropping '/' from the qualified-reference resolver goes red here.
+        import types
+        ef = _install_geom()
+        design = ex.app.activeProduct
+
+        def _placed(occ_name, comp_name, body_name):
+            body = _FakeBody(body_name)
+            body.isSolid = True
+            body.entityToken = f"tok-{occ_name}"
+            body.parentComponent = types.SimpleNamespace(name=comp_name)
+            occ = types.SimpleNamespace(
+                name=occ_name, fullPathName=occ_name,
+                bRepBodies=type("BB", (), {
+                    "itemByName": staticmethod(lambda n, b=body: b if n == b.name else None),
+                    "count": 1, "item": staticmethod(lambda i, b=body: b)})())
+            body.assemblyContext = occ
+            return occ, body
+
+        outer_occ, outer_body = _placed("RingOuter:1", "RingOuter", "Body1")
+        inner_occ, inner_body = _placed("RingInner:1", "RingInner", "Body1")
+        design.rootComponent.allOccurrences = [outer_occ, inner_occ]
+        design.rootComponent.bRepBodies = type("BB", (), {
+            "itemByName": staticmethod(lambda n: None), "count": 0,
+            "item": staticmethod(lambda i: None)})()
+
+        got, err = ex._TARGET_BODIES.resolve(["RingOuter:1/Body1"])
+        assert err is None, err
+        assert got == [outer_body]                  # the RIGHT component's body, not the other one
+
+        # and the bare name both components answer to is REFUSED, not silently resolved to one
+        _bare, bare_err = ex._TARGET_BODIES.resolve(["Body1"])
+        assert bare_err is not None
+        assert "RingOuter:1" in bare_err and "RingInner:1" in bare_err
+
     def test_scoped_echo_qualifies_same_named_bodies_by_owning_component(self):
         # Fusion auto-names every body 'Body1' by default, so two DIFFERENT target bodies that
         # happen to share that name must still read as distinguishable entries in
@@ -1052,6 +1090,34 @@ class TestThroughAllVolumeCheck:
         out = _payload(ex.handler(sketch_name="S", operation="cut", extent="through_all",
                                   distance=-1, target_bodies="KeepMe"))
         assert out["through_all_volume_removed_cm3"] == {"KeepMe": 40.0}
+
+    def test_twin_body_names_report_two_distinct_qualified_keys(self):
+        # Fusion auto-names every component's first body 'Body1', so a cut scoped across two
+        # components sees the SAME bare name twice. Keyed by that bare name the dict COLLAPSES to one
+        # entry and the second silently overwrites the first - measured live, a cut removing 3.0 cm3
+        # from one component and 1.0 cm3 from another published {"Body1": 1.0}, a receipt that cannot
+        # tell "cut both" from "cut one". The key is the occurrence-qualified name 'scoped_to_bodies'
+        # already echoes, so both bodies stay addressable and both deltas survive.
+        h1, h2 = "/v" + "A" * 70, "/v" + "B" * 70
+        outer = _FakeBody("Body1")
+        outer.parentComponent = type("C", (), {"name": "RingOuter"})()
+        outer.volume, outer.entityToken = 10.0, "outer"
+        inner = _FakeBody("Body1")
+        inner.parentComponent = type("C", (), {"name": "RingInner"})()
+        inner.volume, inner.entityToken = 20.0, "inner"
+
+        def _cut(inp):
+            outer.volume, inner.volume = 7.0, 19.0      # -3.0 cm3 and -1.0 cm3
+
+        ef = _install_geom(bodies={h1: outer, h2: inner})
+        ef.on_add = _cut
+        out = _payload(ex.handler(sketch_name="S", operation="cut", extent="through_all",
+                                  distance=-1, target_bodies=[h1, h2]))
+        removed = out["through_all_volume_removed_cm3"]
+        assert removed == {"RingOuter/Body1": 3.0, "RingInner/Body1": 1.0}
+        assert len(removed) == 2                        # neither entry overwrote the other
+        # and the keys are the SAME spelling the scoped echo publishes, so a caller can hand one back
+        assert sorted(removed) == sorted(out["scoped_to_bodies"])
 
     def test_solo_body_in_component_is_the_implied_target(self):
         # No target_bodies given, but exactly ONE solid body exists - the unambiguous single-part

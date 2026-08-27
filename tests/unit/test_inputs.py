@@ -223,13 +223,13 @@ class TestSelfHealingHandle:
 # ── ONE token, SEVERAL entities: the pick is the locator's, or the handle is refused ─────────────
 #
 # findEntityByToken answers with a VECTOR. Measured live: splitting a face made the pre-split token
-# resolve to BOTH survivors (equal halves at different centroids), and one native token resolves to a
-# proxy per occurrence. Those candidates sit in different places, so returning the first silently
-# acts on geometry the caller never picked.
+# resolve to BOTH survivors (a straight split yields different centroids; a CONCENTRIC split puts
+# both at the SAME centroid), so returning the first silently acts on geometry the caller never
+# picked.
 
 class _SplitFace(FakePlanarFace):
-    """A planar face at a known centroid - a survivor of a split, or one instance's proxy. `context`
-    is the assembly path an ambiguity refusal names each candidate by."""
+    """A planar face at a known centroid - a survivor of a split. `context` is the assembly path an
+    ambiguity refusal names each candidate by."""
 
     def __init__(self, centroid, context=None):
         super().__init__()
@@ -314,6 +314,30 @@ class TestTokenResolvingToSeveralEntities:
         assert val is None
         assert "2 entities" in err and "co-located" in err
 
+    def test_a_second_candidate_EXACTLY_at_the_tolerance_is_still_co_located(self, token_env):
+        # The co-located COUNT is judged on the SAME 1-micron gate as the match: a second candidate
+        # sitting exactly AT the tolerance is still "at the recorded position", so the pick is
+        # refused. Counting it as outside would hand the handle to the nearer one on a tie the
+        # tolerance itself calls a tie.
+        at, edge = _SplitFace((0.0, 0.0, 0.0)), _SplitFace((inp._LOCATOR_TOL_CM, 0.0, 0.0))
+        token_env({"TOK": [at, edge]})
+        handle = f"TOK{inp._HANDLE_SEP}planar_face:0.0,0.0,0.0"
+        val, err = inp.GeometryHandle("on_face", require="planar_face").resolve(handle)
+        assert val is None and val is not at
+        assert "2 of them sit at the recorded position" in err
+
+    def test_a_target_miss_carries_the_refusal_the_CALLERS_OWN_handle_earned(self, token_env):
+        # TargetRef's mirror of the BodyRef case: its step-4 _resolve_any_body re-attempt can
+        # mutilate the composite handle (the ':' rsplit) and overwrite the refusal channel - the
+        # early capture keeps the miss describing the caller's handle, never the mutilated prefix.
+        a, b = _SplitFace((5.0, 0.0, 0.0)), _SplitFace((5.0, 0.0, 0.0))
+        token_env({"TOK": [a, b]})
+        handle = f"TOK{inp._HANDLE_SEP}planar_face:5.0,0.0,0.0"
+        val, err = inp.TargetRef("target").resolve(handle)
+        assert val is None
+        assert "co-located" in err and "sit at the recorded position" in err
+        assert "no position locator" not in err
+
     def test_one_entity_still_resolves_with_no_locator_involved(self, token_env):
         # The ordinary case must be untouched: a token naming exactly one entity resolves as before.
         only = _SplitFace((3.0, 0.0, 0.0))
@@ -329,6 +353,20 @@ class TestTokenResolvingToSeveralEntities:
         val, err = inp.TargetRef("target").resolve("TOK")
         assert val is None
         assert "2 entities" in err and "find_geometry" in err
+
+    def test_a_body_miss_carries_the_refusal_the_CALLERS_OWN_handle_earned(self, token_env):
+        # The body vocabularies below the handle path rsplit on ':' - the same ':' a composite
+        # handle's locator carries - and re-resolve that mutilated prefix as a BARE token. The miss
+        # must report what the caller's OWN value hit (co-located candidates), never the bare
+        # token's "no position locator", which describes a string the caller never passed.
+        token_env({"TOK": [_SplitFace((5.0, 0.0, 0.0)), _SplitFace((5.0, 0.0, 0.0))]})
+        handle = f"TOK{inp._HANDLE_SEP}planar_face:5.0,0.0,0.0"
+        val, err = inp.BodyRef("body").resolve(handle)
+        assert val is None
+        assert inp.BODY_MISS in err and "also tried as a handle" in err
+        assert "2 entities" in err and "co-located" in err
+        assert "sit at the recorded position" in err
+        assert "no position locator" not in err
 
 
 # ── GeometryHandleList: the 'these specific edges/bodies' shape ─────────────
@@ -819,6 +857,24 @@ class TestPlaneRef:
         val, err = inp.PlaneRef("plane", required=True).resolve("")
         assert val is None and "is required" in err
 
+    def test_a_plane_whose_proxy_FAILS_is_refused_naming_the_plane_and_the_occurrence(self):
+        # the native is the component-LOCAL object Fusion refuses in this context - the very thing
+        # the lift exists to avoid - so a failed createForAssemblyContext must not fall back to it.
+        design = _install_planes(subs=[("Tower", ["Datum_A"], ["Tower:1"])])
+        native = _sub_plane(design, "Tower", "Datum_A")
+        native.createForAssemblyContext = lambda occ: None
+        val, err = inp.PlaneRef("plane").resolve("Datum_A")
+        assert val is None and val is not native
+        assert "Datum_A" in err and "Tower:1" in err
+
+    def test_a_QUALIFIED_plane_whose_proxy_FAILS_is_refused_the_same_way(self):
+        design = _install_planes(subs=[("Tower", ["Datum_A"], ["Tower:1"])])
+        native = _sub_plane(design, "Tower", "Datum_A")
+        native.createForAssemblyContext = lambda occ: None
+        val, err = inp.PlaneRef("plane").resolve("Tower:1:Datum_A")
+        assert val is None and val is not native
+        assert "Datum_A" in err and "Tower:1" in err
+
     def test_composite_face_handle_resolves(self):
         # PlaneRef already routes through _resolve_token_entity, so a COMPOSITE planar-face handle
         # ('<token>|@planar_face:x,y,z') must resolve by its bare token. Guards against a regression
@@ -1238,6 +1294,31 @@ class TestDistanceUnits:
         d = inp.Distance("dist", allow_zero=False)
         _, err = d.resolve_scaled(0, 0.1)
         assert "non-zero" in err
+
+    @pytest.mark.parametrize("raw", ["nan", "NaN", float("nan")])
+    def test_a_non_finite_NaN_length_is_refused_naming_the_value(self, raw):
+        # NaN passes BOTH guards under it - every comparison against NaN is False - so without the
+        # finite check it reaches ValueInput.createByReal as a dimension.
+        d = inp.Distance("dist", allow_zero=False, allow_negative=False)
+        val, err = d.resolve_scaled(raw, 0.1)
+        assert val is None
+        assert "finite" in err and "nan" in err.lower()
+
+    @pytest.mark.parametrize("raw, named", [("inf", "inf"), ("Infinity", "inf"),
+                                            ("-inf", "-inf"), (float("inf"), "inf"),
+                                            (float("-inf"), "-inf")])
+    def test_a_non_finite_INFINITE_length_is_refused_naming_the_value(self, raw, named):
+        d = inp.Distance("dist")
+        val, err = d.resolve_scaled(raw, 0.1)
+        assert val is None
+        assert "finite" in err and named in err
+
+    def test_the_largest_FINITE_float_still_resolves(self):
+        # the boundary the check draws is finite-vs-not, not large-vs-small: a huge but finite
+        # length is the caller's problem to make sense of, not this guard's to refuse.
+        import sys
+        val, err = inp.Distance("dist").resolve_scaled(sys.float_info.max, 1.0)
+        assert err is None and val == sys.float_info.max
 
     def test_unit_field_returns_scale(self):
         u = inp.UnitField()
@@ -2111,6 +2192,42 @@ class TestProfileRef:
         _install_profiles(sketches=[("S", [FakeProfile("p0")])])
         val, err = inp.ProfileRef("profile").resolve({"sketch": "Nope", "profile_index": 0})
         assert val is None and "no sketch named" in err
+
+
+class TestProfileRefSchema:
+    """The PUBLISHED schema must carry both forms _resolve_one_profile accepts - a handle/text
+    STRING and the legacy {sketch, profile_index} OBJECT. A bare "string" type bars a
+    schema-validating client from the very selector the input's own description offers."""
+
+    def test_the_single_profile_schema_declares_both_forms(self):
+        sch = inp.ProfileRef("profile").schema()
+        assert sch["type"] == ["string", "object"]
+
+    def test_the_list_schema_declares_both_forms_per_ELEMENT(self):
+        sch = inp.ProfileRefList("profiles").schema()
+        assert sch["type"] == "array"
+        assert sch["items"] == {"type": ["string", "object"]}
+
+    def test_resolve_inputs_takes_the_object_AND_the_string_through_one_declaration(
+            self, monkeypatch):
+        p0, p1 = FakeProfile("p0"), FakeProfile("p1")
+        _install_profiles(handle_map={"PROFTOK": p1}, sketches=[("Sketch1", [p0, p1])],
+                          monkeypatch=monkeypatch)
+        spec = [inp.ProfileRef("profile")]
+        by_object, err = inp.resolve_inputs(spec, {"profile": {"sketch": "Sketch1",
+                                                               "profile_index": 0}})
+        assert err is None and by_object["profile"] is p0
+        by_string, err = inp.resolve_inputs(spec, {"profile": "PROFTOK"})
+        assert err is None and by_string["profile"] is p1
+
+    def test_a_list_takes_an_object_element_beside_a_string_one_in_ORDER(self, monkeypatch):
+        p0, p1 = FakeProfile("p0"), FakeProfile("p1")
+        _install_profiles(handle_map={"PROFTOK": p1}, sketches=[("Sketch1", [p0, p1])],
+                          monkeypatch=monkeypatch)
+        vals, err = inp.resolve_inputs(
+            [inp.ProfileRefList("profiles")],
+            {"profiles": [{"sketch": "Sketch1", "profile_index": 0}, "PROFTOK"]})
+        assert err is None and vals["profiles"] == [p0, p1]
 
 
 class FakeAreaProfile(FakeProfile):
@@ -3057,6 +3174,28 @@ class TestJointOriginRef:
         assert err is None
         assert getattr(jo, "native", None) is native      # a PROXY, not the native
         assert jo.context is occ                            # proxied into the RIGHT occurrence
+
+    def test_a_bare_name_whose_proxy_FAILS_is_refused_naming_the_frame_and_the_occurrence(self):
+        # a native sub-component JO is what yields 'Provided input paths for joint are not valid',
+        # so a failed lift must refuse rather than hand that object back as the resolved frame.
+        native = _JO("Stock_Center")
+        native.createForAssemblyContext = lambda occ: None
+        sub = _Comp("Stock", [native])
+        occ = _OccJO("Stock:1", sub)
+        design = _DesignJO(_RootJO(jos=[], occ_by_comp={"Stock": [occ]}), subs=[sub])
+        jo, err = _install_jo(design).resolve("Stock_Center")
+        assert jo is None and jo is not native
+        assert "Stock_Center" in err and "Stock:1" in err
+
+    def test_a_QUALIFIED_name_whose_proxy_FAILS_is_refused_the_same_way(self):
+        native = _JO("Center")
+        native.createForAssemblyContext = lambda occ: None
+        sub = _Comp("Tower", [native])
+        occ = _OccJO("Tower:1", sub)
+        design = _DesignJO(_RootJO(jos=[], occ_by_comp={"Tower": [occ]}), subs=[sub])
+        jo, err = _install_jo(design).resolve("Tower:1:Center")
+        assert jo is None and jo is not native
+        assert "Center" in err and "Tower:1" in err
 
     def test_bare_name_on_single_instance_subcomponent_is_proxied(self):
         # a UNIQUE bare name whose owning component has ONE occurrence resolves - proxied into it.

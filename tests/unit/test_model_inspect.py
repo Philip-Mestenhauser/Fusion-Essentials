@@ -296,6 +296,15 @@ class TestWorldAlignedExtentsAreMeasurements:
         assert (out["x"], out["y"], out["z"]) == (None, None, None)
         assert out["center"] == {"x": None, "y": None, "z": None}
 
+    def test_the_published_corner_points_hold_the_same_contract(self, monkeypatch):
+        # min_point/max_point go through the shared whole-point read: the unreadable corner is
+        # null, not the world origin - a caller navigating to {0,0,0} would go to the wrong place.
+        box = FakeBoundingBox3D(FakePoint(0, 0, 0), self._BlindPoint())
+        ent = self._entity(monkeypatch, box)
+        out = _payload(mi._bbox(None, ent, "body 'Plate'", "", "mm"))
+        assert out["max_point"] is None
+        assert out["min_point"] == {"x": 0.0, "y": 0.0, "z": 0.0}   # a READ origin is an answer
+
     def test_a_genuinely_flat_axis_still_reports_zero(self, monkeypatch):
         # the null must mean UNREADABLE and nothing else: a real zero extent is still a 0
         box = FakeBoundingBox3D(FakePoint(0, 0, 5), FakePoint(1, 2, 5))
@@ -528,7 +537,23 @@ class TestRouterErrorPropagation:
 
 class TestVecHelpers:
     def test_none_vectors_stay_none(self):
-        assert mi._vec(None) is None and mi._vecxyz(None) is None
+        assert mi._vec(None) is None
 
     def test_vec_scales_components(self):
         assert mi._vec(SimpleNamespace(x=1.0, y=2.0, z=3.0), 10.0) == [10.0, 20.0, 30.0]
+
+    def test_a_component_that_will_not_read_makes_the_whole_vector_null(self):
+        # a 0.0 stand-in for one component publishes a DIFFERENT direction/position as if measured
+        # (a CoM at [1, 2, 0], a frame axis pointing somewhere nobody read).
+        class _Blind:
+            x = 1.0
+            y = 2.0
+
+            @property
+            def z(self):
+                raise RuntimeError("vector component unavailable")
+        assert mi._vec(_Blind(), 10.0) is None
+
+    def test_a_real_zero_component_still_reads_zero(self):
+        # the null must mean UNREADABLE only: an axis-aligned vector's other components are 0.
+        assert mi._vec(SimpleNamespace(x=0.0, y=0.0, z=1.0), 10.0) == [0.0, 0.0, 10.0]

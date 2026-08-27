@@ -144,6 +144,45 @@ def _flag_tally(items, attr):
     return yes, no, unknown
 
 
+def _landed_flag(yes: int, no: int, unknown: int):
+    """read_flag semantics over a whole created set, from its _flag_tally counts: True/False when
+    every created entity agrees, None otherwise. None covers the three cases that support no single
+    claim - nothing was returned to read, the field would not read, and the entities disagree - so a
+    payload publishes null rather than the value the request asked for. The three are DIFFERENT
+    observations, which is why the note is worded from the counts and not from this verdict."""
+    n = yes + no + unknown
+    if not n or unknown:
+        return None
+    if yes == n:
+        return True
+    if no == n:
+        return False
+    return None
+
+
+def _link_note(landed, requested: bool, yes: int, no: int, unknown: int) -> str:
+    """The sentence about a project2 result's linkage, worded from the isLinked read-back on the
+    created curves - each branch states only what it observed. An empty return, a flag that would
+    not read, and curves that disagree are three different states, and none of them is the
+    requested value confirmed."""
+    asked = "true" if requested else "false"
+    if landed is True:
+        return "Linked: the curves read back as LINKED, so they update when the source moves."
+    if landed is False:
+        return ("Static copy: the curves read back as NOT linked, so they do not track the source "
+                "geometry.")
+    n = yes + no + unknown
+    unconfirmed = f"link={asked} is the value REQUESTED, not a confirmed state."
+    if not n:
+        return "project2 returned no entities to read, so " + unconfirmed
+    if unknown == n:
+        return f"isLinked did not read on any of the {n} created curves, so " + unconfirmed
+    if unknown:
+        return f"isLinked did not read on {unknown} of the {n} created curves, so " + unconfirmed
+    return (f"Of {n} created curves, {yes} read back as LINKED and {no} did not - a split result, "
+            f"so no one linkage holds for them ({unconfirmed})")
+
+
 def _linkage_note(n: int, ref_yes: int, ref_no: int, ref_unknown: int, source: str) -> str:
     """The sentence about the created curves' linkage, worded from the isReference read-back. Empty
     when the call returned nothing to read - with zero reads there is no linkage to claim either way.
@@ -353,17 +392,18 @@ def _into_sketch(sketch, entities, link) -> dict:
     ents, eerr = _ENTITIES.resolve(entities)
     if eerr:
         return error(eerr)
-    linked = True if link is None else bool(link)
+    requested = True if link is None else bool(link)
 
     before = _addressable_counts(sketch)
     try:
-        created = sketch.project2(ents, linked)
+        created = sketch.project2(ents, requested)
     except Exception as e:
         return error(f"Projection failed in sketch '{safe(lambda: sketch.name)}': {e}")
 
     # Honesty read-back: a projection that adds nothing is a failure, not a false ok. Trust the count
     # of entities the API says it created, then confirm the collections actually grew.
-    created_count = len(created) if created is not None else 0
+    items = _as_list(created)
+    created_count = len(items)
     after = _addressable_counts(sketch)
     if created_count <= 0 and _delta(before, after) <= 0:
         return error(
@@ -372,10 +412,16 @@ def _into_sketch(sketch, entities, link) -> dict:
             "was added.")
 
     refs = _new_refs(before, after)
+    # 'linked' is READ OFF the created curves - the same read-back shape the other two actions use
+    # for isReference - so it is the landed state, never the request echoed at the caller.
+    link_yes, link_no, link_unknown = _flag_tally(items, "isLinked")
+    linked = _landed_flag(link_yes, link_no, link_unknown)
     note = ("Geometry projected. " + _REFS_NOTE + " "
-            + ("Linked: the curves update when the source geometry moves."
-               if linked else "Static copy: the curves do NOT track the source geometry.")
+            + _link_note(linked, requested, link_yes, link_no, link_unknown)
             + " Extrude a resulting profile via sketch_get -> model_extrude.")
+    if linked is not None and linked != requested:
+        note += (f" link={'true' if requested else 'false'} was requested, so the curves did not "
+                 "land the way the call asked for.")
     if created_count > len(refs):
         note += _SHORTFALL_NOTE
 
@@ -384,6 +430,7 @@ def _into_sketch(sketch, entities, link) -> dict:
         "action": "into_sketch",
         "sketch": safe(lambda: sketch.name),
         "linked": linked,
+        "link_requested": requested,
         "created_count": created_count,
         "entity_refs": refs,
         "note": note,

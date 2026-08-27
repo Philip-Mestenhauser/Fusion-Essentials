@@ -473,6 +473,68 @@ def _live_op(name, state=0, generating=False, error=False):
                            hasError=error, error="broken" if error else "")
 
 
+def _warn_op(name, state=0, warning="Contour Selection: contours are missing selections.",
+             error=False, suppressed=False):
+    """One op as the SCOPED tally reads it. The warning default is the measured live shape of a
+    geometry-less 2D Contour: hasWarning True while operationState still reads 0."""
+    return SimpleNamespace(name=name, operationState=state, isGenerating=False,
+                           hasError=error, error="broken" if error else "",
+                           hasWarning=bool(warning), warning=warning or "",
+                           isSuppressed=suppressed)
+
+
+class TestScopedReadinessWarningVerdict:
+    """A SCOPED poll (target=a setup/operation, or a scoped handle) ends on the same shared verdict
+    the document poll does - _cam_common.ready_verdict - so it cannot read plainly ready over
+    warnings the document-level signal names. Getting there needs the tally to CARRY them: drop
+    warnings/warning_sample out of _op_tally and the plain verdict silently comes back."""
+
+    def _out(self, monkeypatch, ops):
+        import adsk.cam
+        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
+        cam = _FakeCAM([_setup("Roughing", ops)])
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(gen, "_collect_op_health",
+                            lambda: {"warnings": [], "errors": [], "empty": []})
+        return _payload(gen.status_handler(target="Roughing"))
+
+    def test_the_tally_carries_the_warning_count_and_its_sample(self, monkeypatch):
+        import adsk.cam
+        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
+        t = gen._op_tally([_warn_op("Face1", warning=""), _warn_op("2D Contour1")])
+        assert t["warnings"] == 1
+        assert t["samples"]["warning"]["name"] == "2D Contour1"
+        assert t["samples"]["warning"]["warning"].startswith("Contour Selection")
+
+    def test_zero_warnings_keeps_the_plain_scoped_ready_verdict(self, monkeypatch):
+        out = self._out(monkeypatch, [_warn_op("Face1", warning=""),
+                                      _warn_op("Face2", warning="")])
+        assert out["live_states"]["warnings"] == 0
+        assert out["live_states"]["readiness"] == "2 of 2 active ops valid - ready to post."
+
+    def test_one_warning_demotes_the_scoped_verdict_and_names_the_op_and_its_line(self, monkeypatch):
+        # the exact boundary the scoped path was overstating: 1 warning, everything else valid.
+        out = self._out(monkeypatch, [_warn_op("Face1", warning=""), _warn_op("2D Contour1")])
+        readiness = out["live_states"]["readiness"]
+        assert out["live_states"]["warnings"] == 1
+        assert "ready to post." not in readiness
+        assert "postable" in readiness and "1 with WARNINGS" in readiness
+        assert "2D Contour1" in readiness
+        assert "contours are missing selections" in readiness
+        assert readiness in out["note"]                  # and it reaches the agent-facing note
+
+    def test_a_suppressed_warned_op_leaves_the_scoped_verdict_plain(self, monkeypatch):
+        out = self._out(monkeypatch, [_warn_op("Face1", warning=""),
+                                      _warn_op("Off1", state=2, suppressed=True)])
+        assert out["live_states"]["warnings"] == 0
+        assert out["live_states"]["readiness"] == "1 of 1 active ops valid - ready to post."
+
+    def test_an_errored_scope_still_reads_BLOCKER_not_the_warning_verdict(self, monkeypatch):
+        out = self._out(monkeypatch, [_warn_op("Drill1", error=True, warning=""),
+                                      _warn_op("2D Contour1")])
+        assert out["live_states"]["readiness"].startswith("BLOCKER:")
+
+
 class TestStatusLivePoll:
     def setup_method(self):
         gen._GENERATIONS.clear()

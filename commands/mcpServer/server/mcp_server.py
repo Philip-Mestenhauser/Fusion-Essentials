@@ -91,6 +91,15 @@ _SCHEMA_OMITTED_ARGS = {
 }
 
 
+def _refuse_json_constant(literal: str):
+    """json.loads' hook for the three NON-STANDARD literals Python's decoder accepts by default -
+    NaN, Infinity, -Infinity. None of them is a JSON number, and none is a length, a count or an
+    index any tool can act on: NaN in particular passes every ``> 0`` / ``!= 0`` guard downstream
+    (each comparison against it is False), so it is refused here at the door, naming the literal."""
+    raise ValueError(f"'{literal}' is not a JSON number - NaN, Infinity and -Infinity are not "
+                     "valid JSON. Send a finite number.")
+
+
 def _in_set(value: Any, allowed: frozenset) -> bool:
     """value in allowed, but an unhashable value (a list/dict where a string enum is expected) is
     simply not a member rather than a TypeError."""
@@ -435,9 +444,14 @@ class MCPHandler(BaseHTTPRequestHandler):
         try:
             content_length = int(self.headers.get('Content-Length', 0))
             post_data = self.rfile.read(content_length)
-            request_data = json.loads(post_data.decode('utf-8'))
-        except (ValueError, json.JSONDecodeError):
-            self.send_error(400, "Invalid JSON")
+            request_data = json.loads(post_data.decode('utf-8'),
+                                      parse_constant=_refuse_json_constant)
+        except (ValueError, json.JSONDecodeError) as e:
+            # The parse failure's own reason travels to the caller: "Invalid JSON" alone cannot tell
+            # a truncated body from a refused NaN literal, and a client can only correct what it is
+            # told. Whitespace-collapsed, because this rides in the HTTP status line.
+            detail = " ".join(str(e).split()) or "the body could not be parsed"
+            self.send_error(400, f"Invalid JSON: {detail}")
             return
 
         try:

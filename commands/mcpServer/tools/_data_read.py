@@ -354,6 +354,9 @@ def file_facts_handler(file: str = "", project: str = "", project_id: str = "",
     return ok({
         "matched_by": meta.get("matched_by"),
         "name_scope_truncated": bool(meta.get("scope_truncated")),
+        # Folders whose enumeration RAISED while this name was resolved: a hole in the search space
+        # the cap flag does not describe, so a unique match over one is not a settled unique match.
+        "name_scope_folders_unreadable": meta.get("folders_unreadable", 0),
         "file": {
             "name": name,
             "id": safe(lambda: df.id),                     # lineage URN (stable across versions)

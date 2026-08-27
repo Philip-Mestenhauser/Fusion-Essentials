@@ -636,6 +636,19 @@ class TestFileFacts:
         assert out["file"]["name"] == "x.txt"
         assert out["version"]["is_latest"] is None         # unknown, not a guessed True
 
+    def test_a_name_matched_over_unread_folders_publishes_the_hole_count(self, resolves):
+        # The resolver counts folders whose enumeration RAISED; publishing only the cap flag leaves
+        # an agent reading name_scope_truncated=false on a resolution that skipped folders entirely.
+        resolves(_full_file(), meta={"matched_by": "name", "folders_unreadable": 2})
+        out = _payload(dm.file_facts_handler(file="probe_note.txt", project="P"))
+        assert out["name_scope_folders_unreadable"] == 2
+        assert out["name_scope_truncated"] is False    # a DIFFERENT hole - the cap never tripped
+
+    def test_a_match_over_a_fully_read_scope_publishes_zero_holes(self, resolves):
+        resolves(_full_file(), meta={"matched_by": "name", "folders_unreadable": 0})
+        out = _payload(dm.file_facts_handler(file="probe_note.txt", project="P"))
+        assert out["name_scope_folders_unreadable"] == 0
+
     def test_a_resolution_error_is_returned_verbatim(self, resolves):
         resolves(err="'notes.txt' names 2 files in project 'P1' - refusing to guess which")
         res = dm.file_facts_handler(file="notes.txt", project="P1")

@@ -63,6 +63,68 @@ class TestWalkAnnotations:
         assert [a.name for _c, a in pm.walk_annotations(object())] == ["B"]
 
 
+class TestWalkHoles:
+    """The walk's own honesty: what it could NOT read is counted, so a caller publishing tallies
+    over it can say the design may hold more than it saw."""
+
+    def test_a_complete_walk_reports_zero_holes(self, monkeypatch):
+        comp = _comp("Root", [_ann("A"), _ann("B")])
+        monkeypatch.setattr(pm._common, "all_components", lambda d: [comp])
+        stats = {}
+        assert len(list(pm.walk_annotations(object(), stats))) == 2
+        assert stats == {"components_unreadable": 0, "items_unreadable": 0}
+
+    def test_an_empty_but_readable_component_is_not_a_hole(self, monkeypatch):
+        # the exact boundary: count 0 IS an answer. Counting it as unreadable would report a hole
+        # on every component that simply carries no PMI.
+        monkeypatch.setattr(pm._common, "all_components", lambda d: [_comp("Root", [])])
+        stats = {}
+        assert list(pm.walk_annotations(object(), stats)) == []
+        assert stats["components_unreadable"] == 0
+
+    def test_a_component_whose_collection_will_not_read_is_counted(self, monkeypatch):
+        blank = SimpleNamespace(name="NoPMI", pmiAnnotations=None)
+        monkeypatch.setattr(pm._common, "all_components",
+                            lambda d: [blank, _comp("Root", [_ann("A")]), blank])
+        stats = {}
+        assert [a.name for _c, a in pm.walk_annotations(object(), stats)] == ["A"]
+        assert stats["components_unreadable"] == 2 and stats["items_unreadable"] == 0
+
+    def test_a_count_that_raises_is_a_hole_not_an_empty_component(self, monkeypatch):
+        class _Raising:
+            @property
+            def count(self):
+                raise RuntimeError("the collection is not available")
+
+            def item(self, i):
+                raise AssertionError("must never be reached")
+        comp = SimpleNamespace(name="Root", pmiAnnotations=_Raising())
+        monkeypatch.setattr(pm._common, "all_components", lambda d: [comp])
+        stats = {}
+        assert list(pm.walk_annotations(object(), stats)) == []
+        assert stats["components_unreadable"] == 1
+
+    def test_an_item_that_will_not_read_is_counted_without_dropping_its_siblings(self, monkeypatch):
+        def boom(i):
+            if i == 0:
+                raise RuntimeError("bad index")
+            return _ann("B")
+        comp = SimpleNamespace(name="Root",
+                               pmiAnnotations=SimpleNamespace(count=2, item=boom))
+        monkeypatch.setattr(pm._common, "all_components", lambda d: [comp])
+        stats = {}
+        assert [a.name for _c, a in pm.walk_annotations(object(), stats)] == ["B"]
+        assert stats["items_unreadable"] == 1 and stats["components_unreadable"] == 0
+
+    def test_annotation_hits_hands_the_hole_record_through(self, monkeypatch):
+        blank = SimpleNamespace(name="NoPMI", pmiAnnotations=None)
+        monkeypatch.setattr(pm._common, "all_components",
+                            lambda d: [blank, _comp("Root", [_ann("Note1")])])
+        stats = {}
+        hits, _available = pm.annotation_hits(object(), "Note1", stats=stats)
+        assert len(hits) == 1 and stats["components_unreadable"] == 1
+
+
 class TestAnnotationHits:
     """The raw resolution: it COUNTS, it never refuses - that judgment belongs to the caller, and
     pmi_edit's suppressed-PMI re-check needs the count to tell a miss from an ambiguity."""
@@ -500,6 +562,64 @@ class TestSetTextPoint:
                 raise AttributeError(key)
         got, err = pm.set_text_point(Stubborn(), [1, 2, 3], 0.1)
         assert got is None and "did not take" in err
+
+    def test_a_point_that_reads_back_somewhere_else_is_an_error(self):
+        # the platform accepts the assignment and the re-read WORKS - it just answers a different
+        # place. Existence alone passes that; the comparison is what catches it, and without it the
+        # payload publishes the wrong anchor as the new one.
+        class Drifting:
+            leaderLineExtension = 0.5
+            plane = None
+            annotationTextPoint = SimpleNamespace(x=9.0, y=9.0, z=9.0)
+
+            def __setattr__(self, key, value):
+                pass                    # accepts the assignment, keeps its own point
+        got, err = pm.set_text_point(Drifting(), [10, 20, 30], 0.1)
+        assert got is None and "did not take" in err and "9.0" in err
+
+    def test_a_sub_micron_settle_is_not_a_failed_move(self):
+        # the exact boundary on the other side of 1e-6 cm: float settle must not fail the move
+        class Settling:
+            leaderLineExtension = 0.5
+            plane = None
+
+            def __setattr__(self, key, value):
+                if key == "annotationTextPoint":
+                    object.__setattr__(self, key, SimpleNamespace(
+                        x=value.x + 5e-7, y=value.y, z=value.z))
+                else:
+                    object.__setattr__(self, key, value)
+        got, err = pm.set_text_point(Settling(), [10, 20, 30], 0.1)
+        assert err is None and got.x == pytest.approx(1.0, abs=1e-5)
+
+    def test_a_drift_just_over_the_tolerance_is_reported(self):
+        class Drifting:
+            leaderLineExtension = 0.5
+            plane = None
+
+            def __setattr__(self, key, value):
+                if key == "annotationTextPoint":
+                    object.__setattr__(self, key, SimpleNamespace(
+                        x=value.x + 1.1e-6, y=value.y, z=value.z))
+                else:
+                    object.__setattr__(self, key, value)
+        got, err = pm.set_text_point(Drifting(), [10, 20, 30], 0.1)
+        assert got is None and "did not take" in err
+
+    def test_a_point_whose_coordinates_will_not_read_is_unknown_not_confirmed(self):
+        class Opaque:
+            leaderLineExtension = 0.5
+            plane = None
+
+            def __setattr__(self, key, value):
+                pass
+
+            def __getattr__(self, key):
+                if key == "annotationTextPoint":
+                    return SimpleNamespace()        # a point object with no x/y/z at all
+                raise AttributeError(key)
+        got, err = pm.set_text_point(Opaque(), [1, 2, 3], 0.1)
+        assert got is None and "UNKNOWN" in err
 
 
 # ── the light record ──────────────────────────────────────────────────────────────────────────

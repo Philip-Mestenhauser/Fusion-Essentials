@@ -73,11 +73,17 @@ def _component_of(entity):
 
 
 def _xyz(pt):
+    """{x, y, z} rounded to 6dp, or None when the point is absent or any component will not read.
+    A point whose components do not all read is no position at all: a 0.0 stand-in publishes the
+    world origin as a measured coordinate (the _common.measured contract, for a whole point)."""
     if pt is None:
         return None
-    return {"x": round(safe(lambda: pt.x, 0.0), 6),
-    "y": round(safe(lambda: pt.y, 0.0), 6),
-    "z": round(safe(lambda: pt.z, 0.0), 6)}
+    x = safe(lambda: pt.x)
+    y = safe(lambda: pt.y)
+    z = safe(lambda: pt.z)
+    if not all(isinstance(c, (int, float)) and not isinstance(c, bool) for c in (x, y, z)):
+        return None
+    return {"x": round(x, 6), "y": round(y, 6), "z": round(z, 6)}
 
 
 def _face_direction(face):
@@ -342,8 +348,8 @@ def _on_selection_changed(args, box, done):
 
     Ignores a change TO EMPTY (a deselect/Escape) and leaves `done` unset so the caller keeps
     waiting; on the first NON-EMPTY selection it captures the sys_get_selection-shaped result into
-    `box` and sets `done`, waking the HTTP thread blocked on it, and detaches the listener so it
-    never fires a second time."""
+    `box` and sets `done`, waking the HTTP thread blocked on it, and detaches ITS OWN listener (the
+    one `box` was registered with) so it never fires a second time."""
     sels = safe(lambda: args.currentSelection) or []
     if not len(sels):
         return    # a clear/deselect, not a pick - keep waiting for a real one; done stays unset
@@ -355,7 +361,7 @@ def _on_selection_changed(args, box, done):
     except Exception as e:
         box["error"] = str(e)
     finally:
-        _detach_pick_handler()
+        _detach_pick_handler(box.get("handler"))
         done.set()
 
 
@@ -373,13 +379,20 @@ class _PickHandler(adsk.core.ActiveSelectionEventHandler):
         _on_selection_changed(args, self._box, self._done)
 
 
-def _detach_pick_handler():
-    """Remove the currently-registered pick handler (if any) from activeSelectionChanged. Runs on
-    the main thread - called from within notify() itself, or from a marshaled cleanup after a
-    timeout. A best-effort no-op if there is nothing registered."""
-    h = _pending.get("handler")
-    if h is not None:
-        safe(lambda: _ui().activeSelectionChanged.remove(h))
+def _detach_pick_handler(handler):
+    """Remove ONE pick handler from activeSelectionChanged, and clear the process-wide pending slot
+    while that slot still holds THAT handler. Runs on the main thread - called from within notify()
+    itself, or from a marshaled cleanup after a timeout. A best-effort no-op when there is nothing
+    to remove.
+
+    Keyed to the handler it is given, never to whatever the slot happens to hold: an orphan that
+    outlived its own hold (its cleanup never reached the main thread) detaches itself and nothing
+    else, so it cannot unhook the listener a LATER hold is blocked on - a wait whose listener is
+    gone can only expire."""
+    if handler is None:
+        return
+    safe(lambda: _ui().activeSelectionChanged.remove(handler))
+    if _pending.get("handler") is handler:
         _pending["handler"] = None
 
 
@@ -470,21 +483,41 @@ def _begin_request(kind, clear_current, wait_seconds, expect_document):
         })
         return out
 
+    # A survivor from an earlier hold - one whose cleanup never reached the main thread - is still
+    # registered and still fires. Detach it BEFORE adding this hold's listener, so the two cannot
+    # both be live on the same event.
+    _detach_pick_handler(_pending.get("handler"))
     box, done = {}, threading.Event()
     handler = _PickHandler(box, done)
+    box["handler"] = handler        # the handler each detach is keyed to (see _detach_pick_handler)
     ui.activeSelectionChanged.add(handler)
     _pending["handler"] = handler
     out["box"], out["done"] = box, done
     return out
 
 
-def _cancel_pending_wait():
-    """Runs on the main thread (via _call_on_main_thread) after a timeout: detach the pick listener
-    so a LATE selection change (the user clicks just after we gave up) never fires into a stale
-    hold. Best-effort - if the main thread is unreachable the listener self-detaches on its own
-    next real notify() instead (see _PickHandler.notify)."""
-    _detach_pick_handler()
+def _cancel_pending_wait(box):
+    """Runs on the main thread (via _call_on_main_thread) after a timeout: detach THIS hold's pick
+    listener so a LATE selection change (the user clicks just after we gave up) never fires into a
+    stale hold. Reaching the main thread at all is what the caller checks - a marshal that failed
+    leaves the listener registered, which the timeout payload discloses."""
+    _detach_pick_handler(box.get("handler"))
     return {"detached": True}
+
+
+def _completed_pick(box, kind, setup, extra_note=""):
+    """The result for a CAPTURED pick - the one shape whether it woke the wait or landed while the
+    wait was expiring."""
+    if "error" in box:
+        return error(f"Could not read the completed selection: {box['error']}")
+    payload = dict(box["result"])
+    payload.update({
+        "status": "picked",
+        "requested_kind": kind,
+        "active_document": setup.get("doc_name"),
+        "note": _outputs.produces_block(RETURNS) + extra_note,
+    })
+    return _write_guard._stamp_acted_on(ok(payload), setup.get("doc_name"), setup.get("doc_urn"))
 
 
 def request_user_selection_handler(what: str = "any", clear_current: bool = True,
@@ -530,21 +563,21 @@ def request_user_selection_handler(what: str = "any", clear_current: bool = True
 
         box, done = setup["box"], setup["done"]
         if done.wait(timeout=wait_s):
-            if "error" in box:
-                return error(f"Could not read the completed selection: {box['error']}")
-            payload = dict(box["result"])
-            payload.update({
-                "status": "picked",
-                "requested_kind": kind,
-                "active_document": setup.get("doc_name"),
-                "note": _outputs.produces_block(RETURNS),
-            })
-            return _write_guard._stamp_acted_on(ok(payload), setup.get("doc_name"), setup.get("doc_urn"))
+            return _completed_pick(box, kind, setup)
+
+        # The wait expired. The listener fires on the MAIN thread, and so does this cancel marshal,
+        # so once the marshal returns no further pick can land - and a click that DID land while the
+        # wait was expiring is already in the box. A captured pick is the answer; the timeout verdict
+        # below would deny a selection the user actually made.
+        cancel = _call_on_main_thread(_cancel_pending_wait, {"box": box})
+        if done.is_set():
+            return _completed_pick(box, kind, setup, extra_note=(
+                f"\nThe pick landed as the {wait_s:g}s wait expired and was captured - it is a real "
+                "selection, not a timeout."))
 
         # Timed out - an expected outcome, not a defect: say so plainly, and make it unmistakable
         # that nothing was picked (isError stays False; 'status' is the machine-checkable signal).
-        _call_on_main_thread(_cancel_pending_wait, {})
-        return ok({
+        payload = {
             "status": "timeout",
             "requested_kind": kind,
             "waited_seconds": wait_s,
@@ -554,7 +587,15 @@ def request_user_selection_handler(what: str = "any", clear_current: bool = True
                 "usually means the user is not at the Fusion window or never learned a pick was "
                 "wanted. Tell the user what to click and that Fusion will wait, get their go-ahead, "
                 "then request once more. (sys_get_selection reads a pick made after this hold ended.)"),
-        })
+        }
+        cancel_error = cancel.get("error") if isinstance(cancel, dict) else "the cleanup did not run"
+        if cancel_error:
+            payload["listener_detached"] = False
+            payload["note"] += (f" The pick listener could NOT be detached ({cancel_error}), so it "
+                "is still registered in Fusion and will fire on the user's next click, into this "
+                "expired hold that nothing is waiting on. The next sys_request_selection detaches "
+                "it before registering its own.")
+        return ok(payload)
     finally:
         with _pending_lock:
             _pending["active"] = False
@@ -604,12 +645,21 @@ def get_user_selection_handler(require: str = "", max_results: int = _SELECTION_
     if want:
         kinds = {s.get("kind") for s in selections}
         payload["required_kind"] = want
-        payload["matches_required"] = want in kinds
-        if want not in kinds:
-            mismatch_note = (f"Selection does not include a '{want}'. It contains: "
-                             f"{', '.join(k for k in kinds if k)}. Re-prompt with "
-                             "sys_request_selection if you need a different kind.")
-            payload["note"] = (payload.get("note", "") + " " + mismatch_note).strip()
+        if want in kinds:
+            payload["matches_required"] = True
+        elif truncated:
+            # The walk stopped at the cap, so the kinds set describes the WALKED PREFIX only. With
+            # 60 selections and the only face at index 55, "the selection does not include a face"
+            # is false - absence over an unwalked tail is unknown, not a verdict.
+            payload["matches_required"] = None
+            payload["note"] += (f" No '{want}' in the first {len(selections)} of {count} "
+                                f"selections - the rest were not read, so whether the selection "
+                                f"includes a '{want}' is unknown. Raise max_results to walk them.")
+        else:
+            payload["matches_required"] = False
+            payload["note"] += (f" Selection does not include a '{want}'. It contains: "
+                                f"{', '.join(k for k in kinds if k)}. Re-prompt with "
+                                "sys_request_selection if you need a different kind.")
     return ok(payload)
 
 

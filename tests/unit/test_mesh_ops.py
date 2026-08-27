@@ -842,6 +842,51 @@ class TestMeshReduce:
         res = mo.mesh_reduce_handler(mesh="H", target="face_count", value=0)
         assert res["isError"] is True and "positive" in res["message"].lower()
 
+    def test_facecount_negative_rejected(self):
+        self._setup()
+        res = mo.mesh_reduce_handler(mesh="H", target="face_count", value=-5)
+        assert res["isError"] is True and "positive" in res["message"].lower()
+
+    def test_a_fractional_facecount_under_one_is_refused_naming_it(self):
+        # 0.5 truncated to int is a ZERO-face target - a request the after<before gate reads as a
+        # successful reduce. It is refused instead, and the refusal names the offending value.
+        src, feats = self._setup()
+        res = mo.mesh_reduce_handler(mesh="H", target="face_count", value=0.5)
+        assert res["isError"] is True
+        assert "0.5" in res["message"] and "WHOLE face count" in res["message"]
+        assert feats.last_input is None            # nothing was configured, nothing ran
+
+    def test_a_fractional_facecount_is_refused_rather_than_silently_truncated(self):
+        # 10.9 -> 10 would decimate to a target the caller never asked for, with no echo of the shift.
+        src, feats = self._setup()
+        res = mo.mesh_reduce_handler(mesh="H", target="face_count", value=10.9)
+        assert res["isError"] is True
+        assert "10.9" in res["message"]
+        assert feats.last_input is None
+
+    def test_the_smallest_whole_facecount_is_accepted(self):
+        # 1 is the boundary the > 0 guard admits - a whole count, so it runs.
+        src, feats = self._setup()
+        out = _payload(mo.mesh_reduce_handler(mesh="H", target="face_count", value=1))
+        assert out["reduced"] is True
+        assert out["face_count_target"] == 1
+        assert abs(feats.last_input.facecount.real - 1.0) < 1e-9
+
+    def test_an_integral_float_facecount_is_accepted_and_echoed(self):
+        # 10.0 IS a whole count (the wire carries numbers, not ints) - accepted, and the integer that
+        # reached the feature input is published so the caller can see what was targeted.
+        src, feats = self._setup()
+        out = _payload(mo.mesh_reduce_handler(mesh="H", target="face_count", value=10.0))
+        assert out["reduced"] is True
+        assert out["face_count_target"] == 10
+        assert abs(feats.last_input.facecount.real - 10.0) < 1e-9
+
+    def test_the_applied_facecount_target_is_only_published_for_face_count(self):
+        # a proportion reduce has no face-count target to report
+        src, feats = self._setup()
+        out = _payload(mo.mesh_reduce_handler(mesh="H", target="proportion", value=30))
+        assert "face_count_target" not in out
+
     def test_max_deviation_sets_valueinput_scaled_to_cm(self):
         src, feats = self._setup()
         # max_deviation is a LENGTH: 1 mm input -> 0.1 cm handed to the ValueInput.

@@ -17,6 +17,7 @@ reason; the table is shrink-only - migrating a file to the seeded values deletes
 import os
 import re
 
+import _corpus
 import live_api_facts
 
 UNIT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "unit")
@@ -39,13 +40,19 @@ _ALLOWLIST = {}
 
 
 def _offending_lines(path):
+    src = _corpus.text(path)
+    # Whole-file screen first: a line match is also a match in the file's full text (no pattern is
+    # line-anchored, and the one lookbehind sees "\n" at a line start, which is outside its class),
+    # so a file matching nothing here has no offending line - which is nearly every file. A file
+    # whose only hits sit in comments still falls through to the line pass, which skips them.
+    if not any(p.search(src) for p in _PATTERNS):
+        return []
     out = []
-    with open(path, encoding="utf-8") as fh:
-        for i, line in enumerate(fh, 1):
-            if line.lstrip().startswith("#"):
-                continue
-            if any(p.search(line) for p in _PATTERNS):
-                out.append((i, line.strip()))
+    for i, line in enumerate(src.split("\n"), 1):
+        if line.lstrip().startswith("#"):
+            continue
+        if any(p.search(line) for p in _PATTERNS):
+            out.append((i, line.strip()))
     return out
 
 

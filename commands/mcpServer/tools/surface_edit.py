@@ -58,6 +58,36 @@ def _abort(trim_input):
     return _common.cancel_input(trim_input, "trim")
 
 
+_KEEP_FORMS = "'keep' takes 'larger', 'smaller', or cell index number(s)"
+
+
+def _parse_keep_indices(keep, total):
+    """(set of cell indices, error) for an explicit 'keep'. A value that is not a cell index, or an
+    index outside 0..total-1, is REFUSED naming the value - never swapped for the largest cell,
+    which would trim away a different piece of the surface than the caller asked to keep."""
+    if isinstance(keep, (list, tuple)):
+        items = list(keep)
+    elif isinstance(keep, str):
+        items = [s.strip() for s in keep.split(",") if s.strip()]
+    else:
+        items = [keep]
+    out = set()
+    for v in items:
+        if isinstance(v, bool):
+            return None, f"{_KEEP_FORMS} - {v} is not one."
+        try:
+            i = int(v)
+        except (TypeError, ValueError):
+            return None, f"{_KEEP_FORMS} - '{v}' is not one."
+        if not 0 <= i < total:
+            return None, (f"'keep' index {i} does not exist - this trim computed {total} cell(s), "
+                          f"so the valid indices are 0..{total - 1}.")
+        out.add(i)
+    if not out:
+        return None, f"{_KEEP_FORMS} - '{keep}' names no cell."
+    return out, ""
+
+
 def _select_cells(trim_input, keep):
     """Decide which BRepCells to KEEP (leave isSelected=False) vs REMOVE (set isSelected=True).
 
@@ -66,56 +96,33 @@ def _select_cells(trim_input, keep):
     partial compute and populates input.bRepCells; with zero cells selected add() raises "No cells are
     selected". Map 'keep' -> the set of cell indices to keep, then remove (select) everything else.
 
-    'keep' forms (lenient): None / "larger" -> keep the single largest cell by cellBody.area;
-    "smaller" -> keep the single smallest; an int/str index or a list of indices -> keep those.
-    Anything unparseable falls back to the larger-remainder default.
+    'keep' forms: omitted / "larger" -> keep the single largest cell by cellBody.area; "smaller" ->
+    keep the single smallest; an int/str index or a list of indices -> keep those. Anything else is
+    REFUSED naming the value.
 
-    Returns (kept_indices, kept_area, total, err). err is set only when there are no cells.
+    Returns (kept_indices, kept_area, total, err). err is a complete refusal sentence.
     """
     cells = trim_input.bRepCells
     total = int(safe(lambda: cells.count, 0) or 0)
     if total == 0:
-        return None, None, 0, "the trim tool does not divide the surface (no cells)."
+        return None, None, 0, ("Trim failed: the trim tool does not divide the surface (no cells). "
+                               "(The trim tool must INTERSECT the surface and divide it.)")
 
     areas = [float(safe(lambda i=i: cells.item(i).cellBody.area, 0.0) or 0.0) for i in range(total)]
     # A cell's INDEX is its address ('keep' takes an int index, 'areas' is indexed by it, and the
     # kept indices are published), so this walk and the selection walk below stay positional:
     # iter_collection drops an unreadable cell, sliding every later cell onto the wrong index.
 
-    keep_set = None
-    if isinstance(keep, str):
-        kk = keep.strip().lower()
-        if kk == "smaller":
-            keep_set = {min(range(total), key=lambda i: areas[i])}
-        elif kk == "larger" or kk == "":
-            keep_set = None  # default below
-        else:
-            try:
-                keep_set = {int(kk)}
-            except (ValueError, TypeError):
-                keep_set = None
-    elif isinstance(keep, bool):
-        keep_set = None  # don't treat True/False as an index
-    elif isinstance(keep, int):
-        keep_set = {keep}
-    elif isinstance(keep, (list, tuple)):
-        idxs = set()
-        for v in keep:
-            try:
-                idxs.add(int(v))
-            except (ValueError, TypeError):
-                pass
-        keep_set = idxs or None
-
-    # validate parsed indices are in range; otherwise fall back to default
-    if keep_set is not None:
-        keep_set = {i for i in keep_set if 0 <= i < total}
-        if not keep_set:
-            keep_set = None
-
-    if keep_set is None:
+    named = keep.strip().lower() if isinstance(keep, str) else keep
+    if named in (None, "", [], "larger"):
         # DEFAULT: keep the single largest cell by area
         keep_set = {max(range(total), key=lambda i: areas[i])}
+    elif named == "smaller":
+        keep_set = {min(range(total), key=lambda i: areas[i])}
+    else:
+        keep_set, kerr = _parse_keep_indices(named, total)
+        if kerr:
+            return None, None, total, kerr
 
     kept_area = 0.0
     for i in range(total):
@@ -132,9 +139,28 @@ def _select_cells(trim_input, keep):
 
 def _result_bodies(feature):
     """(names, any_solid) for a feature's bodies - the tuple THIS tool's payloads want, collapsed
-    from the shared per-body {name, is_solid} projection."""
+    from the shared per-body {name, is_solid} projection. body_facts publishes each flag as
+    True/False/None, so the collapse is _solid_verdict, not any(): folding a None in would publish
+    'a surface' about a body whose flag nobody read."""
     facts = _common.body_facts(_common.result_bodies(feature))
-    return [f["name"] for f in facts], any(f["is_solid"] for f in facts)
+    return [f["name"] for f in facts], _solid_verdict([f["is_solid"] for f in facts])
+
+
+def _solid_verdict(flags):
+    """The ONE any-solid collapse over True/False/None flags: True when any body reads solid, False
+    when a flag read and none did, None when no flag read at all (an empty list included). The
+    unknown stays unknown - a verdict that swallowed it would publish 'a surface' about a body
+    nothing was read from."""
+    if True in flags:
+        return True
+    return False if False in flags else None
+
+
+def _any_solid(bodies):
+    """_solid_verdict over bodies read HERE. read_flag rather than bool(safe(...)): a body whose
+    isSolid will not read is not a surface, and publishing it as one is the false claim this
+    returns None for."""
+    return _solid_verdict([_common.read_flag(lambda b=b: b.isSolid) for b in bodies])
 
 
 def _landed_length(getter, want_cm, k, subject, field):
@@ -202,9 +228,9 @@ def trim_handler(surface=None, trim_tool=None, keep=None) -> dict:
         trim_input = comp.features.trimFeatures.createInput(tool)
         kept, kept_area, total, cerr = _select_cells(trim_input, keep)
         if cerr:
-            # no cells -> genuinely no intersection; abort the open transaction and report honestly
-            return error(f"Trim failed: {cerr} (The trim tool must INTERSECT the surface and "
-                         f"divide it.){_abort(trim_input)}")
+            # no intersection, or a 'keep' naming no real cell - either way the open transaction
+            # must be aborted before returning, and nothing is trimmed on a guessed cell.
+            return error(cerr + _abort(trim_input))
         cell_info = {"cells_total": total, "cells_kept": kept,
     "cells_removed": [i for i in range(total) if i not in set(kept)],
     "kept_area": kept_area}
@@ -214,6 +240,9 @@ def trim_handler(surface=None, trim_tool=None, keep=None) -> dict:
         # LARGER than the target's own area proves that (a subset of the target can never exceed it).
         # Cancel BEFORE add so no wrong feature lands. Live-verified: HIDING the overlapping surface
         # drops the phantom cells and the trim is correct (the cell compute is visibility-governed).
+        # SCOPE, one-sided: passing this test proves nothing. A foreign cell that is larger than every
+        # cell of the target but smaller than the target's whole area sails through, so the payload
+        # publishes phantom_cell_guard naming exactly what was and was not checked.
         if kept_area is not None and area_before and kept_area > area_before * (1 + 1e-6):
             aborted = _abort(trim_input)
             return error(
@@ -256,6 +285,23 @@ def trim_handler(surface=None, trim_tool=None, keep=None) -> dict:
     }
     if cell_info is not None:
         payload.update(cell_info)
+    # Disclose what the phantom-cell gate above actually proved - it is a one-sided test, and a
+    # caller must not read a committed trim as "no foreign cell was involved".
+    if area_before and cell_info is not None and cell_info["kept_area"] is not None:
+        payload["phantom_cell_guard"] = "kept_area_not_above_target_area"
+        payload["note"] += (
+            " Phantom-cell guard: the ONLY check made is that the kept area does not exceed the "
+            "target's own area, so a cell belonging to an overlapping surface that is smaller than "
+            "that is NOT detected. Hide overlapping surfaces, or pass an explicit 'keep' index, "
+            "when another surface touches this one.")
+    else:
+        payload["phantom_cell_guard"] = "not_applied"
+        payload["note"] += (
+            " Phantom-cell guard: NOT applied - the target's own area could not be read, so a cell "
+            "belonging to an overlapping surface would not have been detected at all.")
+    if any_solid is None:
+        payload["unverified"] = ["is_solid"]
+        payload["note"] += " Not read back off the feature: is_solid."
     return ok(payload)
 
 
@@ -325,11 +371,14 @@ def extend_handler(edges=None, distance: float = 0.0, units: str = "mm",
         "units": units,
         "note": "Surface extended from its open edges.",
     }
+    unverified = ["is_solid"] if any_solid is None else []
     if landed is None:
-        payload["unverified"] = ["distance"]
-        payload["note"] += " Not read back off the feature: distance."
+        unverified.append("distance")
     else:
         payload["distance"] = landed
+    if unverified:
+        payload["unverified"] = unverified
+        payload["note"] += " Not read back off the feature: " + ", ".join(unverified) + "."
     if ea_key:
         payload["extend_alignment"] = ea_key
     return ok(payload)
@@ -378,18 +427,33 @@ def offset_handler(faces=None, distance: float = 0.0, units: str = "mm",
     if readable and faces_offset == 0:
         return error("Offset reported success but created no faces - nothing was offset. The feature "
                      "remains in the timeline; remove it with design_delete_feature.")
-    names = [safe(lambda b=b: b.name) for b in created]
-    any_solid = any(bool(safe(lambda b=b: b.isSolid)) for b in created)
     requested = len(face_ents)
-    note = "Faces offset into a new surface (isSolid=false)."
+    unverified = []
+    if readable:
+        names = [safe(lambda b=b: b.name) for b in created]
+        any_solid = _any_solid(created)
+        if any_solid is None:
+            unverified.append("is_solid")
+    else:
+        # feature.faces could not be read at all, so NOTHING about the created surface was checked:
+        # a 0 face count, an empty body list and is_solid=false would each be a fabricated read of
+        # the very thing that would not read. Publish null and name what went unverified.
+        names, any_solid, faces_offset = None, None, None
+        unverified = ["faces_offset", "result_bodies", "is_solid"]
+    note = "Faces offset into a new surface."
     if distance == 0:
-        note = ("Faces copied as a COINCIDENT surface (distance=0; isSolid=false) - the zero-offset "
+        note = ("Faces copied as a COINCIDENT surface (distance=0) - the zero-offset "
                 "copy-face idiom.")
-    if faces_offset > requested:
+    if any_solid is False:
+        note += " The created body reads back isSolid=false (a surface)."
+    elif any_solid is True:
+        note += (" The created body reads back isSolid=true - offsetting a face of a SOLID yields a "
+                 "solid, not a surface.")
+    if faces_offset is not None and faces_offset > requested:
         note += (f" chaining=true EXPANDED the selection: {requested} face(s) requested, "
                  f"{faces_offset} tangent-connected face(s) offset. Pass chaining=false to offset "
                  "only the picked faces.")
-    return ok({
+    payload = {
         "offset": True,
         "feature": safe(lambda: feature.name),
         "operation": op_key,
@@ -400,7 +464,11 @@ def offset_handler(faces=None, distance: float = 0.0, units: str = "mm",
         "distance": round(float(distance), 6),
         "units": units,
         "note": note,
-    })
+    }
+    if unverified:
+        payload["unverified"] = unverified
+        payload["note"] += " Not read back off the feature: " + ", ".join(unverified) + "."
+    return ok(payload)
 
 
 # ── surface_thicken (produces a solid) ──────────────────────────────────────
@@ -465,11 +533,18 @@ def thicken_handler(faces=None, thickness: float = 0.0, units: str = "mm",
     # beside a solid 'closed'. Fall back to the coarse read only if the faces are unreadable.
     created, _face_count, readable = _created_bodies(feature)
     if readable and created:
-        names = [safe(lambda b=b: b.name) for b in created]
-        any_solid = any(bool(safe(lambda b=b: b.isSolid)) for b in created)
+        bodies = created
     else:
-        names, any_solid = _result_bodies(feature)
-    if names and not any_solid:
+        bodies = _common.result_bodies(feature)
+    names = [safe(lambda b=b: b.name) for b in bodies]
+    any_solid = _any_solid(bodies)
+    # An EMPTY result set is a failure, not a quiet success: with nothing to read isSolid off, the
+    # solid gate below has nothing to judge and the payload would claim a wall it cannot show.
+    if not bodies:
+        return error("Thicken reported success but the feature owns no result body - no wall was "
+                     "created, so there is nothing to read isSolid back off. "
+                     + _common.failed_effect_remedy(design, feature))
+    if any_solid is False:
         return error("Thicken reported success but no CREATED body reads isSolid=true - the wall "
                      "did not close into a solid. The feature remains in the timeline; inspect it "
                      "with model_inspect or remove it with design_delete_feature.")
@@ -479,6 +554,16 @@ def thicken_handler(faces=None, thickness: float = 0.0, units: str = "mm",
                                   "wall", "thickness")
     if rerr:
         return error(rerr + " " + _common.failed_effect_remedy(design, feature))
+    # The note states what the created body ACTUALLY read back - a hardcoded "isSolid=true" beside
+    # an is_solid the payload could not read is the contradiction this wording exists to prevent.
+    unverified = []
+    if any_solid is True:
+        note = ("Faces thickened into a wall reading back isSolid=true - a SOLID. The "
+                "surface->solid bridge.")
+    else:
+        note = ("Faces thickened, but no created body's isSolid flag could be read back, so "
+                "whether the wall closed into a SOLID is UNVERIFIED.")
+        unverified.append("is_solid")
     payload = {
         "thickened": True,
         "feature": safe(lambda: feature.name),
@@ -488,13 +573,15 @@ def thicken_handler(faces=None, thickness: float = 0.0, units: str = "mm",
         "thickness": round(float(thickness), 6),
         "units": units,
         "symmetric": bool(symmetric),
-        "note": "Faces thickened into a SOLID wall (isSolid=true). The surface->solid bridge.",
+        "note": note,
     }
     if landed is None:
-        payload["unverified"] = ["thickness"]
+        unverified.append("thickness")
         payload["note"] += " Not read back off the feature: thickness."
     else:
         payload["thickness"] = landed
+    if unverified:
+        payload["unverified"] = unverified
     if tt_key:
         payload["thicken_type"] = tt_key
     # join no-fuse disclosure: a created body whose token was NOT among the pre-add solids is a NEW

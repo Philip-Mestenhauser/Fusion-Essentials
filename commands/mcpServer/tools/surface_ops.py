@@ -40,10 +40,11 @@ def _cut_check_bodies(comp):
 
 def _result_body_report(feature):
     """Read result bodies + their isSolid OFF THE FEATURE (never assumed). Returns
-    (body_names, is_solid_flags)."""
+    (body_names, is_solid_flags), each flag read_flag's True / False / None - a flag that will not
+    read is UNKNOWN, not an open surface, so a verdict built over these must keep None apart."""
     bodies = _common.result_bodies(feature)
     names = [safe(lambda b=b: b.name) for b in bodies]
-    flags = [bool(safe(lambda b=b: b.isSolid)) for b in bodies]
+    flags = [_common.read_flag(lambda b=b: b.isSolid) for b in bodies]
     return names, flags
 
 
@@ -167,6 +168,10 @@ def loft_handler(profiles=None, rails=None, centerline="", operation="new",
         return error(_common.no_feature_error(design, "Loft"))
 
     volume_delta_cm3 = None
+    # These live outside the census branch: the empty-result gate below reads them to decide whether
+    # material movement was PROVEN, and an un-run census must read as "proved nothing", not as an
+    # absent variable. readable=False is exactly that case - no body's volume read at both ends.
+    delta, readable, consumed = 0.0, False, []
     if check_bodies:
         delta, readable = _geom.volume_delta(check_bodies, vol_before)
         # A body whose volume read BEFORE and reads unreadable now was consumed whole - a real effect
@@ -185,7 +190,24 @@ def loft_handler(profiles=None, rails=None, centerline="", operation="new",
                          + _common.failed_effect_remedy(design, feature))
 
     body_names, _flags = _result_body_report(feature)
-    is_solid = safe(lambda: feature.isSolid)
+    # An empty result set claims a loft the payload cannot show. The ONE case where it is not a
+    # failure is a cut/intersect PROVEN to have moved material: a body consumed whole, or a volume
+    # delta that READ and cleared the no-change band. Merely having SAMPLED a census proves nothing
+    # - a census whose volumes never read leaves the gate above silent, so it buys no exemption.
+    moved = bool(consumed) or (readable and abs(delta) >= _common.NO_VOLUME_CHANGE_CM3)
+    if not body_names and not moved:
+        return error("Loft reported success but the feature owns no result body - nothing was "
+                     "built. " + _common.failed_effect_remedy(design, feature))
+    # read_flag, not safe(): an unreadable isSolid is not a surface, and the note below is worded
+    # off this value rather than off the falsiness of an absent read.
+    is_solid = _common.read_flag(lambda: feature.isSolid)
+    if is_solid is True:
+        shape = "Result is a SOLID."
+    elif is_solid is False:
+        shape = "Result is a SURFACE - pair with model_stitch/model_thicken to close it."
+    else:
+        shape = ("The feature's isSolid flag could not be read back, so whether the result is a "
+                 "solid or a surface is UNVERIFIED.")
     payload = {
         "lofted": True,
         "feature": safe(lambda: feature.name),
@@ -195,10 +217,10 @@ def loft_handler(profiles=None, rails=None, centerline="", operation="new",
         "has_centerline": center_ent is not None,
         "is_solid": is_solid,
         "result_bodies": body_names,
-        "note": ("Lofted through %d profiles in order. " % len(secs)) + (
-            "Result is a SOLID." if is_solid else
-            "Result is a SURFACE - pair with model_stitch/model_thicken to close it."),
+        "note": ("Lofted through %d profiles in order. " % len(secs)) + shape,
     }
+    if is_solid is None:
+        payload["unverified"] = ["is_solid"]
     if is_closed is not None:
         payload["is_closed"] = bool(is_closed)
     # Published only where the before/after pair was READABLE: a null here would read as "no material
@@ -262,8 +284,15 @@ def stitch_handler(bodies=None, tolerance=None, units="mm", operation="new") -> 
 
     # HONEST result: read each RESULT body's isSolid back. became_solid is true ONLY if every result
     # body is a closed solid; gaps>tolerance leave an open surface and we say so - never fake success.
+    # A flag that would not read makes the verdict null, NOT false: all() over an unreadable flag
+    # would report "did not close" - a gap-diagnosis - off a flag nobody read.
     body_names, flags = _result_body_report(feature)
-    became_solid = all(flags) if flags else False
+    if not flags:
+        became_solid = False
+    elif None in flags:
+        became_solid = None
+    else:
+        became_solid = all(flags)
     # The default is a raw internal value (0.01 cm); when the caller didn't pass one, report it
     # converted INTO the caller's 'units' - reporting the bare cm number would be false for cm/in callers.
     reported_tolerance = (round(float(tolerance), 6) if tolerance is not None
@@ -279,12 +308,18 @@ def stitch_handler(bodies=None, tolerance=None, units="mm", operation="new") -> 
     "is_solid": flags,
     "became_solid": became_solid,
     }
-    if became_solid:
+    if became_solid is True:
         payload["note"] = "Surfaces closed into a SOLID within tolerance."
-    else:
+    elif became_solid is False:
         payload["note"] = (
             f"Surfaces did NOT close into a solid within tolerance ({payload['tolerance']} {units}). "
             "The result is still a surface - increase tolerance or check for gaps/overlaps.")
+    else:
+        payload["unverified"] = ["became_solid"]
+        payload["note"] = (
+            "The stitch ran, but at least one result body's isSolid flag could not be read back, so "
+            "whether the surfaces closed into a SOLID is UNVERIFIED - check the body with "
+            "model_inspect or design_get(include=['tree'], tree_bodies=true).")
     return ok(payload)
 
 

@@ -11,6 +11,8 @@ exists.
 Tests must patch the design seam on THIS module too (``_inputs._common.design``), not just
 ``_common``'s - see ``tests/CLAUDE.md`` "the dual-seam trap"."""
 
+import math
+
 import adsk.core
 import adsk.fusion
 
@@ -881,6 +883,11 @@ def _resolve_any_body(name, raw):
         if owner is not None and (_is_brep(owner) or _is_mesh(owner)):
             return owner, None
         return None, f"'{name}': handle points at a {type(ent).__name__}, not a body."
+    # Captured NOW, for the caller's OWN value: the qualified-body vocabulary below rsplits on ':'
+    # - the ':' inside a composite handle's locator - and its re-resolve of that mutilated prefix
+    # OVERWRITES the refusal channel with a bare-token reason describing a string the caller never
+    # passed (measured: the accurate "co-located" reason was replaced by "no position locator").
+    handle_suffix = _handle_refusal_suffix()
     # Name path: refuse an AMBIGUOUS name (2+ distinct bodies share it) with the QUALIFIED candidate
     # list rather than grabbing the first - one of those qualified names, or a find_geometry handle,
     # picks the exact one. A single match resolves.
@@ -926,7 +933,7 @@ def _resolve_any_body(name, raw):
                   "find_geometry, a body name (bare, or '<occurrence-or-component>:<body>'), or a "
                   "single-body component/occurrence name "
                   "(see design_get(include=['tree']) / model_extrude output)."
-                  + _handle_refusal_suffix())
+                  + handle_suffix)
 
 
 class BodyRef(InputKind):
@@ -1455,7 +1462,8 @@ class PlaneRef(InputKind):
         if len(hits) > 1:
             return None, (f"'{self.name}': occurrence '{head}' has {len(hits)} construction planes "
                           f"named '{tail}' - rename them, or pass the plane's handle.")
-        return (_common.safe(lambda: hits[0].createForAssemblyContext(occ)) or hits[0]), None
+        return _proxy_or_refuse(f"'{self.name}': construction plane '{tail}'", hits[0], occ,
+                                "Pass the plane's handle from find_geometry.")
 
     def _in_context(self, des, comp, cp, owner):
         """(the plane usable where this call builds, error). A plane native to ANOTHER component is
@@ -1471,7 +1479,9 @@ class PlaneRef(InputKind):
             return None, self._instance_refusal(des, cp, owner)
         if occ is None:
             return cp, None
-        return (_common.safe(lambda: cp.createForAssemblyContext(occ)) or cp), None
+        nm = _common.safe(lambda: cp.name) or "?"
+        return _proxy_or_refuse(f"'{self.name}': construction plane '{nm}'", cp, occ,
+                                "Pass the plane's handle from find_geometry.")
 
     def _ambiguous(self, des, s, matches):
         """The refusal for a name several components carry: every hit named as the string that
@@ -1672,6 +1682,26 @@ def single_placement(label, ent, comp, design):
     return None, (f"{label} belongs to component '{owner_name}', which is not placed in the "
                   "assembly, so it cannot be brought into the assembly's space. Pass a handle at "
                   "geometry in the instance you mean, or a world axis (x/y/z).")
+
+
+def _proxy_or_refuse(label, ent, occ, fix_hint):
+    """(the entity proxied into `occ`, error) - the leaf op an assembly-context lift ends on.
+
+    A component-LOCAL entity is refused by Fusion in another component's context ('object is not in
+    the assembly context of this component') - which is exactly what the native entity is - so a
+    createForAssemblyContext handing back nothing is REFUSED, naming the entity and the occurrence
+    it would not proxy into. An `or ent` fallback returns the very object the lift exists to avoid,
+    and the call then fails inside the API with nothing pointing at why.
+
+    `label` opens the refusal with the caller's own noun for the entity; `fix_hint` closes it with a
+    form that reaches the instance directly."""
+    proxy = _common.safe(lambda: ent.createForAssemblyContext(occ))
+    if proxy is not None:
+        return proxy, None
+    path = (_common.safe(lambda: occ.fullPathName) or _common.safe(lambda: occ.name)
+            or "its one occurrence")
+    return None, (f"{label} could not be read in the assembly's space ({path}), so where it sits in "
+                  f"the model is unknown. {fix_hint}")
 
 
 def _datum_world_line(name, ent):
@@ -1912,6 +1942,12 @@ class Distance(InputKind):
             v = float(raw)
         except Exception:
             return None, f"'{self.name}' must be a number."
+        # NaN and +/-Infinity are floats but not LENGTHS: float() builds them from 'nan'/'inf', and
+        # Python's JSON decoder accepts the NaN/Infinity literals, so they arrive here. Both guards
+        # below let them through (every comparison against NaN is False) and the value reaches
+        # ValueInput.createByReal as a dimension.
+        if not math.isfinite(v):
+            return None, f"'{self.name}' must be a finite number, got {v}."
         if not self.allow_zero and v == 0:
             return None, f"'{self.name}' must be non-zero, got {v}."
         if not self.allow_negative and v < 0:
@@ -2264,7 +2300,9 @@ class JointOriginRef(InputKind):
         native = _common.safe(lambda: occ.component.jointOrigins.itemByName(tail))
         if native is None:
             return None, (f"'{self.name}': occurrence '{head}' has no Joint Origin named '{tail}'.")
-        return (_common.safe(lambda: native.createForAssemblyContext(occ)) or native), None
+        return _proxy_or_refuse(
+            f"'{self.name}': Joint Origin '{tail}'", native, occ,
+            "Pass its handle from assembly_get(include=['joint_origins']).")
 
     def _resolve_bare(self, des, name):
         matches = _joints.find_joint_origins_by_name(des, name)
@@ -2391,6 +2429,10 @@ class TargetRef(InputKind):
             if _is_brep(ent):
                 return self._check(ent, "body")
             return None, f"'{self.name}': handle points at a {type(ent).__name__}, not a measurable target."
+        # Captured NOW, for the caller's OWN value: step 4's _resolve_any_body re-attempts the
+        # string through vocabularies that can mutilate a composite handle (its ':' rsplit) and
+        # overwrite the refusal channel with a reason about a string the caller never passed.
+        handle_suffix = _handle_refusal_suffix()
         # 2) an occurrence (fullPathName preferred, then name). An AMBIGUOUS name is a hard error here
         # (propagate it) rather than falling through to the component/body paths, which could resolve
         # to an unrelated entity and mask the ambiguity.
@@ -2427,7 +2469,7 @@ class TargetRef(InputKind):
         empty_hint = ", or '' (whole design)" if "design" in self.allow else ""
         return None, (f"'{self.name}': '{s}' did not resolve to a body handle, an occurrence/component/"
                       f"body name{empty_hint}. See design_get(include=['tree']) / find_geometry."
-                      + _handle_refusal_suffix())
+                      + handle_suffix)
 
 
 class TargetRefList(InputKind):
@@ -2700,6 +2742,12 @@ class ProfileRef(InputKind):
             return ""
         return " A sketch TEXT: 'text:<i>' (sketch_get's id), or '<sketch>/text:<i>'."
 
+    def schema(self) -> dict:
+        # Both accepted forms, because _resolve_one_profile takes both: a handle/text STRING, and the
+        # legacy {sketch, profile_index} OBJECT. A bare "string" type bars a schema-validating client
+        # from the selector this input's own description offers.
+        return {"type": ["string", "object"], "description": self._full_desc()}
+
     def contract_note(self) -> str:
         return ("A profile - a stable 'handle' (entityToken; prefer this, it survives rebuilds) OR a "
                 "legacy {sketch, profile_index} selector (a blind, order-unstable index)."
@@ -2722,7 +2770,10 @@ class ProfileRefList(ProfileRef):
     MAP_HINT = "an ORDERED list of profiles (loft - order is load-bearing)"
 
     def schema(self) -> dict:
-        return {"type": "array", "items": {"type": "string"}, "description": self._full_desc()}
+        # items carries BOTH element forms ProfileRef.resolve takes - a handle/text string and the
+        # legacy {sketch, profile_index} object.
+        return {"type": "array", "items": {"type": ["string", "object"]},
+                "description": self._full_desc()}
 
     def contract_note(self) -> str:
         return ("An ORDERED list of profiles, used in the order given (no sort, no dedupe). Each a "

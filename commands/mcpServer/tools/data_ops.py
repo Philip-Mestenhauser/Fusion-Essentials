@@ -68,6 +68,20 @@ def create_project_handler(name: str = "", purpose: str = "") -> dict:
 # data_create_folder
 # ---------------------------------------------------------------------------
 
+def _retained_parents(auto_created):
+    """The clause an ERROR appends when mkdir -p already created folders before the call failed.
+
+    Those folders are real, kept mutations: a failure after them is a PARTIAL success, and the
+    error is the only place the caller ever hears about them (the auto_created_parents field only
+    ships on the ok path)."""
+    if not auto_created:
+        return ""
+    return (" This call had already created the folder(s) "
+            + ", ".join(f"'{n}'" for n in auto_created)
+            + " on the way there, and they were NOT removed - delete them with data_delete_folder "
+              "if they were not wanted.")
+
+
 def create_folder_handler(folder_name: str = "", project: str = "", project_id: str = "",
                           parent_folder: str = "") -> dict:
     """Create a folder, auto-creating missing parent path segments (mkdir -p)."""
@@ -93,29 +107,33 @@ def create_folder_handler(folder_name: str = "", project: str = "", project_id: 
 
     # Resolve (creating as needed) the parent path. Empty -> project root.
     parent_segments = _split_path(parent_folder)
+    # auto_created is passed IN so a path that raises halfway still names the folders it made.
     auto_created = []
     try:
-        parent, auto_created = _ensure_folder_path(root, parent_segments)
+        parent, auto_created = _ensure_folder_path(root, parent_segments, created_out=auto_created)
     except Exception as e:
-        return error(f"Could not prepare parent path '{parent_folder}': {e}")
+        return error(f"Could not prepare parent path '{parent_folder}': {e}"
+                     + _retained_parents(auto_created))
 
     # Duplicate guard scoped to the resolved parent (a same-named folder elsewhere is fine).
     existing = _child_folder_by_name(parent, folder_name)
     if existing:
         return error(f"A folder named '{folder_name}' already exists at "
                       f"'{_folder_path_string(parent) or '(project root)'}' "
-                      f"(id {safe(lambda: existing.id)}).")
+                      f"(id {safe(lambda: existing.id)})." + _retained_parents(auto_created))
 
     try:
         folder = parent.dataFolders.add(folder_name)
     except Exception as e:
-        return error(f"Failed to create folder '{folder_name}': {e}")
+        return error(f"Failed to create folder '{folder_name}': {e}"
+                     + _retained_parents(auto_created))
     if not folder:
-        return error(f"Folder creation returned nothing for '{folder_name}'.")
+        return error(f"Folder creation returned nothing for '{folder_name}'."
+                     + _retained_parents(auto_created))
     if _child_folder_by_name(parent, folder_name) is None:
         return error(f"dataFolders.add returned a folder but '{folder_name}' does not appear when "
                      f"'{_folder_path_string(parent) or '(project root)'}' is re-listed - the "
-                     "creation did not land.")
+                     "creation did not land." + _retained_parents(auto_created))
     return ok({"created": True, "name": safe(lambda: folder.name),
         "id": safe(lambda: folder.id),
         "project": safe(lambda: proj.name),
@@ -169,9 +187,11 @@ def upload_file_handler(file_path: str = "", project: str = "", project_id: str 
     if segments:
         if create_path:
             try:
-                target, auto_created = _ensure_folder_path(root, segments)
+                target, auto_created = _ensure_folder_path(root, segments,
+                                                           created_out=auto_created)
             except Exception as e:
-                return error(f"Could not prepare destination path '{folder}': {e}")
+                return error(f"Could not prepare destination path '{folder}': {e}"
+                             + _retained_parents(auto_created))
         else:
             target, missing = _resolve_folder_path(root, segments)
             if not target:
@@ -193,14 +213,16 @@ def upload_file_handler(file_path: str = "", project: str = "", project_id: str 
         # finish (that would freeze the UI thread) - we report the initial state.
         future = target.uploadFile(file_path)
     except Exception as e:
-        return error(f"Upload failed to start for '{file_path}': {e}")
+        return error(f"Upload failed to start for '{file_path}': {e}"
+                     + _retained_parents(auto_created))
     if not future:
-        return error("Upload returned no future object.")
+        return error("Upload returned no future object." + _retained_parents(auto_created))
 
     state = safe(lambda: future.uploadState)
     if state == 2:
         return error(f"Upload of '{os.path.basename(file_path)}' reports FAILED immediately - "
-                     "the file was not accepted. Check the format and the destination folder.")
+                     "the file was not accepted. Check the format and the destination folder."
+                     + _retained_parents(auto_created))
     new_name = None
     new_id = None
     try:
@@ -359,10 +381,21 @@ def _prune_empty_folder_lists(nodes):
 # ---------------------------------------------------------------------------
 
 def _folder_counts(folder):
-    """(file_count, subfolder_count) for a folder's IMMEDIATE children, best-effort."""
+    """(file_count, subfolder_count) for a folder's IMMEDIATE children; None for a count that would
+    not read. None is NOT zero here - see _unreadable_counts, which is what the delete gate asks."""
     files = safe(lambda: folder.dataFiles.count, None)
     subs = safe(lambda: folder.dataFolders.count, None)
     return files, subs
+
+
+def _unreadable_counts(file_count, sub_count):
+    """The census reads that would not answer, named as the caller sees them ([] when both read).
+
+    A folder whose census failed is NOT provably empty: it may hold an entire subtree, so the delete
+    gate treats an unreadable count exactly like a non-empty folder rather than opening the
+    empty-folder door on a read that never happened."""
+    return [label for label, value in (("dataFiles.count", file_count),
+                                       ("dataFolders.count", sub_count)) if value is None]
 
 
 # Folder-visit budget for the recursive blast-radius count. Each visited folder is a main-thread
@@ -433,10 +466,24 @@ def delete_folder_handler(folder_id: str = "", confirm_name: str = "",
             "really mean this folder.")
 
     file_count, sub_count = _folder_counts(folder)
+    unreadable = _unreadable_counts(file_count, sub_count)
     non_empty = bool((file_count or 0) or (sub_count or 0))
     recursive_confirm = (recursive_confirm or "").strip()
 
-    if non_empty:
+    if unreadable:
+        # Fail CLOSED: the census that would have shown a subtree is the read that failed, so the
+        # direct empty-folder delete is refused and the same force + recursive_confirm the recursive
+        # wipe needs is demanded instead. The refusal names WHICH read failed, since the caller's
+        # options differ (retry a transient cloud failure vs. accept a blind delete).
+        if not force or recursive_confirm != actual_name:
+            return error(
+                f"The contents of '{actual_name}' could not be read ({' and '.join(unreadable)} "
+                "failed), so it is NOT provably empty - it may hold an entire subtree this delete "
+                "would remove irreversibly, and no blast-radius preview can be built. Refusing. "
+                "Retry once the folder reads (data_get(include=['folders'])), or pass force=true "
+                f"AND recursive_confirm='{actual_name}' to delete it WITHOUT a census. Nothing was "
+                "deleted.")
+    elif non_empty:
         # NON-EMPTY = a recursive subtree wipe. Compute the full blast radius (nested files too),
         # bounded by a folder-visit budget so a huge subtree can't hang the preview.
         subtree_state = {"visits": 0, "truncated": False}
@@ -469,14 +516,21 @@ def delete_folder_handler(folder_id: str = "", confirm_name: str = "",
     if not did:
         return error(f"Fusion declined to delete folder '{actual_name}'. No change was made.")
 
-    return ok({
+    payload = {
     "deleted": True,
     "name": actual_name,
     "folder_id": folder_id,
     "contained_files": file_count,
     "contained_subfolders": sub_count,
-    "recursive": bool(non_empty),
-    })
+    # Whether this delete took a subtree with it is only knowable from a census that READ.
+    "recursive": None if unreadable else bool(non_empty),
+    }
+    if unreadable:
+        payload["census_unreadable"] = unreadable
+        payload["note"] = ("The folder's contents could not be read before the delete ("
+                           + " and ".join(unreadable) + " failed), so what went with it is "
+                           "unknown - 'contained_files'/'contained_subfolders' are null, not zero.")
+    return ok(payload)
 
 
 # --- tool definitions ---

@@ -49,9 +49,38 @@ SCRIPT_HATCH = "sys_execute_script"
 # model writes. Classified by family (the registry's own naming schema), never per-tool by hand.
 CLOUD_FAMILIES = ("data", "doc")
 
+# Write-kind tools whose EFFECT LEAVES THE DOCUMENT: they put bytes on the filesystem, into a shared
+# library other documents and other people read, or restart the add-in itself. The modeling posture
+# promises to auto-allow LOCAL MODEL writes - work an operator can see in the timeline and undo - so
+# these do not belong in it, whatever their family. Family alone cannot decide this: cam_generate is
+# a local toolpath compute while its sibling cam_post writes an NC file a machine will run.
+# Reason per tool, because the classification is a judgment about effect, not a name pattern.
+#
+# view_screenshot also writes a file and is deliberately NOT here: it is agent-to-agent workflow
+# (the agent's only way to look at the model), it overwrites just the PNG the caller named, and the
+# owner auto-approves it - see _OWNER_ALLOWED_WRITES in tests/lints/test_permission_posture.py.
+LEAVES_DOCUMENT = {
+    "cam_post": "writes an NC program to disk - the file a machine then runs",
+    "cam_edit_tools": "writes the shared CAM tool library, which every other document reads",
+    "cam_create_machine": "writes the shared machine library, which every other document reads",
+    "cam_save_template": "writes a toolpath template into the shared CAM template library",
+    "cam_generate_setup_sheet": "writes a setup-sheet document (HTML/Excel) to disk",
+    "design_export": "writes a design file (f3d/step/...) to disk",
+    "mesh_export": "writes a mesh file (stl/obj/3mf) to disk",
+    "drawing_export": "writes a drawing file (pdf/dwg/...) to disk",
+    "sys_reload_addin": "restarts the add-in - it tears down and reloads the running server",
+}
+
 
 def _family(name):
     return name.split("_", 1)[0]
+
+
+def leaves_document(name):
+    """True when this tool's write does NOT stay inside the active document - so the modeling
+    posture must ask before it runs. Two ways to qualify: a cloud/document-lifecycle FAMILY, or a
+    named LEAVES_DOCUMENT effect (a file on disk, a shared library, the add-in itself)."""
+    return _family(name) in CLOUD_FAMILIES or name in LEAVES_DOCUMENT
 
 
 def bucket(tool):
@@ -84,8 +113,9 @@ def build_presets(tools):
     no destructive-kind tool ever lands in an allow list, and the script hatch is denied everywhere.
 
       conservative  - auto-allow reads only; writes ask; destructive + the script hatch are denied.
-      modeling      - auto-allow reads and LOCAL model writes; cloud/document writes and every
-                      destructive write ask; the script hatch is denied.
+      modeling      - auto-allow reads and LOCAL model writes; cloud/document writes, writes whose
+                      effect LEAVES the document (see LEAVES_DOCUMENT), and every destructive write
+                      ask; the script hatch is denied.
     """
     b = buckets(tools)
     reads, writes, destructive = b["read"], b["write"], b["destructive"]
@@ -96,11 +126,11 @@ def build_presets(tools):
         "deny": _wire(destructive + [SCRIPT_HATCH]),
     }
 
-    local_writes = [n for n in writes if _family(n) not in CLOUD_FAMILIES]
-    cloud_writes = [n for n in writes if _family(n) in CLOUD_FAMILIES]
+    local_writes = [n for n in writes if not leaves_document(n)]
+    outward_writes = [n for n in writes if leaves_document(n)]
     modeling = {
         "allow": _wire(reads + local_writes),
-        "ask": _wire(sorted(cloud_writes + destructive)),
+        "ask": _wire(sorted(outward_writes + destructive)),
         "deny": _wire([SCRIPT_HATCH]),
     }
     return {"conservative": conservative, "modeling": modeling}
@@ -110,7 +140,9 @@ _PRESET_BLURB = {
     "conservative": "Auto-allow reads only. Every write asks; destructive writes and the "
                     "arbitrary-code hatch are denied. The safest default.",
     "modeling": "Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). "
-                "Cloud/document writes and every destructive write ask; the script hatch is denied.",
+                "Cloud/document writes, writes whose effect LEAVES the document (see 'Writes that "
+                "leave the document' above), and every destructive write ask; the script hatch is "
+                "denied.",
 }
 
 
@@ -171,6 +203,23 @@ def render(tools):
         " denied in every preset below. Enable it only for a trusted, supervised session.",
         "",
     ]
+
+    lines += [
+        "## Writes that leave the document (the modeling posture asks for these)",
+        "",
+        "A write= kind says the model changes; it does not say WHERE the change lands. These"
+        " write-kind tools put bytes outside the active document - on the filesystem, into a shared"
+        " library other documents read, or into the add-in itself - so the modeling posture, which"
+        " promises to auto-allow local model work an operator can see and undo, asks before each one."
+        " Cloud/document-lifecycle families"
+        f" ({', '.join('`' + f + '`' for f in CLOUD_FAMILIES)}) ask for the same reason.",
+        "",
+        "| Tool | Where the effect lands |",
+        "|---|---|",
+    ]
+    for name in sorted(LEAVES_DOCUMENT):
+        lines.append(f"| `{WIRE_PREFIX}{name}` | {LEAVES_DOCUMENT[name]} |")
+    lines.append("")
 
     section_order = [
         ("read", "read - safe to auto-allow"),

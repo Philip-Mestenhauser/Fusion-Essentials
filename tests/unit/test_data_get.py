@@ -179,6 +179,22 @@ class TestFileScope:
     def test_an_untruncated_match_carries_no_caveat(self, stub):
         assert "CAPPED listing" not in _payload(dge.handler(file="notes.txt", project="P1"))["note"]
 
+    def test_a_name_matched_over_unread_folders_gets_the_unsearched_caveat(self, stub, monkeypatch):
+        # A folder that never opened is a hole in the search space the cap flag does not describe:
+        # the same name could sit in it, which would make this "unique" match the wrong file.
+        import sys
+        monkeypatch.setitem(sys.modules, "mcpServer.tools._data_read",
+            type("DR", (), {"file_facts_handler": staticmethod(
+                lambda **kw: _ok({"matched_by": "name", "name_scope_folders_unreadable": 2,
+                                  "file": {"name": "notes.txt"}}))}))
+        note = _payload(dge.handler(file="notes.txt", project="P1"))["note"]
+        assert "2 folder(s) could not be READ" in note
+        assert "lineage URN" in note                  # the exact reference that dodges the hole
+
+    def test_a_match_over_a_fully_read_scope_carries_no_unsearched_caveat(self, stub):
+        assert "could not be READ" not in _payload(
+            dge.handler(file="notes.txt", project="P1"))["note"]
+
     def test_file_with_include_is_refused_rather_than_silently_ignored(self, stub):
         res = dge.handler(file="notes.txt", project="P1", include=["folders"])
         assert "does not apply to the 'file' scope" in error_message(res)

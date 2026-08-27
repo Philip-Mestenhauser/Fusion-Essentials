@@ -64,6 +64,14 @@ def _do_set_text(ann, comp, text):
     got = _pmi.segments_markup(ann)
     if got is None:
         return error("The text edit did not take (segments unreadable after the set).")
+    # The landed markup is COMPARED to the request, the way rename compares the name and
+    # apply_note_format compares each format knob. build_segments -> segments_markup round-trips
+    # exactly (one text/symbol/line-break segment per markup piece, re-encoded by the same table),
+    # so a difference is the platform keeping something other than what was asked for.
+    if got != text:
+        return error(f"The note's segments read back as '{got}', not the requested '{text}' - the "
+                     "text edit did not take as asked. The annotation is left carrying what is "
+                     "quoted above, not the request.")
     rec = _pmi.annotation_record(comp, ann)
     rec["markup"] = got
     return ok(rec)

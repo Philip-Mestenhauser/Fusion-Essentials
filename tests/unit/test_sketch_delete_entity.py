@@ -50,6 +50,23 @@ class _RaisesOnDelete(FakeEntity):
         raise RuntimeError("entity is consumed by a dimension")
 
 
+class _UnreadableCount(_DelColl):
+    """A collection whose count RAISES on the reads named by `raise_on` (1-based read numbers;
+    omitted = every read raises). The delete path reads the count before the mutation, again while
+    resolving the index, and once more after - so which read stops answering is the variable."""
+    def __init__(self, items, raise_on=None):
+        super().__init__(items)
+        self._raise_on = raise_on
+        self._reads = 0
+
+    @property
+    def count(self):
+        self._reads += 1
+        if self._raise_on is None or self._reads in self._raise_on:
+            raise RuntimeError("2 : InternalValidationError : count")
+        return len(self._i)
+
+
 def FakeText(content, delete_ok=True):
     """A SketchText: a deletable entity whose string is read off textParameter.expression, QUOTED
     (as it is live)."""
@@ -317,6 +334,120 @@ class TestDeleteText:
         _install(s)
         res = sd.handler(sketch_name="S", target="text:0")
         assert res["isError"] is True and "no sketch texts collection" in res["message"]
+
+
+# ── a count that will not read is not a count of zero ────────────────────────
+
+class TestCountsMustRead:
+    """Coerced to 0, an unreadable AFTER count satisfies `after < before` and publishes
+    '<kind>s_after: 0' - a delete verdict, and the sketch's whole state, read off a number nobody
+    measured. Each path refuses instead, and the readable case one entity down still passes."""
+
+    def test_an_unreadable_after_count_is_refused_not_read_as_a_delete(self):
+        s = _sketch()
+        s.sketchCurves.sketchLines = _UnreadableCount(s.sketchCurves.sketchLines._i, raise_on=(3,))
+        _install(s)
+        res = sd.handler(sketch_name="S", target="line:1")
+        assert res["isError"] is True
+        assert "UNVERIFIED" in res["message"]
+        assert "not a count of zero" in res["message"]
+        assert "held 2 line(s)" in res["message"]
+
+    def test_the_readable_case_one_entity_down_still_succeeds(self):
+        # the boundary the refusal above must not swallow: a count that DOES read back one lower
+        s = _sketch(); _install(s)
+        out = _payload(sd.handler(sketch_name="S", target="line:1"))
+        assert out["lines_before"] == 2 and out["lines_after"] == 1
+
+    def test_an_unreadable_before_count_deletes_nothing(self):
+        s = _sketch()
+        s.sketchCurves.sketchLines = _UnreadableCount(s.sketchCurves.sketchLines._i, raise_on=(1,))
+        _install(s)
+        res = sd.handler(sketch_name="S", target="line:1")
+        assert res["isError"] is True
+        assert "Nothing was deleted" in res["message"]
+        assert s.sketchCurves.sketchLines._i[1].name == "L1"      # still there
+
+    def test_an_unreadable_constraint_after_count_is_refused(self):
+        s = _sketch()
+        s.geometricConstraints = _UnreadableCount(s.geometricConstraints._i, raise_on=(3,))
+        _install(s)
+        res = sd.handler(sketch_name="S", target="constraint:1")
+        assert res["isError"] is True
+        assert "UNVERIFIED" in res["message"] and "held 3 constraint(s)" in res["message"]
+
+    def test_an_unreadable_text_after_count_is_refused(self):
+        s = FakeSketch("S")
+        s.sketchTexts = _UnreadableCount([FakeText("LABEL")], raise_on=(3,))
+        _install(s)
+        res = sd.handler(sketch_name="S", target="text:0")
+        assert res["isError"] is True
+        assert "UNVERIFIED" in res["message"] and "held 1 sketch text(s)" in res["message"]
+
+    def test_a_constraint_count_that_never_reads_is_not_reported_as_zero(self):
+        # the resolve-time half: 'the sketch has 0 constraint(s)' is a fabricated census, and it
+        # sends the caller looking for constraints that may well be there
+        s = _sketch()
+        s.geometricConstraints = _UnreadableCount(s.geometricConstraints._i)
+        _install(s)
+        res = sd.handler(sketch_name="S", target="constraint:1")
+        assert res["isError"] is True
+        assert "not a count of zero" in res["message"]
+        assert "0 constraint(s)" not in res["message"]
+
+    def test_a_text_count_that_never_reads_is_not_reported_as_zero(self):
+        s = FakeSketch("S")
+        s.sketchTexts = _UnreadableCount([FakeText("LABEL")])
+        _install(s)
+        res = sd.handler(sketch_name="S", target="text:0")
+        assert res["isError"] is True
+        assert "not a count of zero" in res["message"]
+        assert "0 sketch text(s)" not in res["message"]
+
+    def test_a_constraint_count_that_reads_only_at_resolve_time_still_deletes_nothing(self):
+        # the flaky-count sequence: the BEFORE read raises, the resolver's own read then answers -
+        # without a readable baseline no after < before verdict is possible, so the delete must not
+        # run at all (the entity is provably still resolvable, and provably still present)
+        s = _sketch()
+        s.geometricConstraints = _UnreadableCount(s.geometricConstraints._i, raise_on=(1,))
+        _install(s)
+        res = sd.handler(sketch_name="S", target="constraint:1")
+        assert res["isError"] is True
+        assert "Nothing was deleted" in res["message"]
+        assert len(s.geometricConstraints._i) == 3                # nothing removed
+
+    def test_a_text_count_that_reads_only_at_resolve_time_still_deletes_nothing(self):
+        s = FakeSketch("S")
+        s.sketchTexts = _UnreadableCount([FakeText("LABEL")], raise_on=(1,))
+        _install(s)
+        res = sd.handler(sketch_name="S", target="text:0")
+        assert res["isError"] is True
+        assert "Nothing was deleted" in res["message"]
+        assert len(s.sketchTexts._i) == 1                         # nothing removed
+
+    def test_an_absent_constraints_collection_is_named_not_treated_as_empty(self):
+        s = _sketch()
+        s.geometricConstraints = None
+        _install(s)
+        res = sd.handler(sketch_name="S", target="constraint:0")
+        assert res["isError"] is True
+        assert "exposes no geometric constraints" in res["message"]
+
+    def test_no_active_design_is_refused(self):
+        sd.app = type("A", (), {"activeProduct": None})()
+        sd._common.app = sd.app
+        res = sd.handler(sketch_name="S", target="line:0")
+        assert res["isError"] is True
+        assert "No active design" in res["message"]
+
+    def test_a_curve_count_that_never_reads_names_the_unread_census(self):
+        s = _sketch()
+        s.sketchCurves.sketchLines = _UnreadableCount(s.sketchCurves.sketchLines._i)
+        _install(s)
+        res = sd.handler(sketch_name="S", target="line:1")
+        assert res["isError"] is True
+        assert "no readable line count" in res["message"]
+        assert "has 0 line(s)" not in res["message"]
 
 
 # ── guards ───────────────────────────────────────────────────────────────────

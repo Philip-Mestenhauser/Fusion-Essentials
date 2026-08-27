@@ -9,6 +9,8 @@ module entry into the rest of the suite).
 import os
 import types
 
+import pytest
+
 from conftest import load_tool
 
 ra = load_tool("sys_reload_addin")
@@ -24,6 +26,38 @@ def _module_at(path):
 
 def _install_root(monkeypatch, root=_FAKE_ROOT):
     monkeypatch.setattr(ra, "_addin_root_folder", lambda: root)
+
+
+def _install_event(monkeypatch):
+    """The state a successful install_reload_event() leaves: an event object with the handler on it.
+    Without it the tool refuses to schedule, so every schedule test states the precondition."""
+    monkeypatch.setattr(ra, "_reload_event", types.SimpleNamespace(add=lambda h: True))
+    monkeypatch.setattr(ra, "_reload_handler", object())
+    monkeypatch.setattr(ra, "_install_error", "")
+
+
+def _fake_app(monkeypatch, **members):
+    """ra.app with a capturing log(); returns the list of logged lines."""
+    lines = []
+    monkeypatch.setattr(ra, "app", types.SimpleNamespace(log=lines.append, **members))
+    return lines
+
+
+class _Script:
+    """The Script object a reload drives: stop()/run() answer whether they worked, which is the
+    whole question the deferred worker has to report."""
+
+    def __init__(self, stop=True, run=True):
+        self._stop, self._run = stop, run
+        self.calls = []
+
+    def stop(self):
+        self.calls.append("stop")
+        return self._stop
+
+    def run(self, arg):
+        self.calls.append(("run", arg))
+        return self._run
 
 
 class TestPurgeAddinModules:
@@ -94,6 +128,7 @@ class TestReloadResponseTeachesReconnect:
     /health."""
 
     def test_note_teaches_next_tool_call_not_health_polling(self, monkeypatch):
+        _install_event(monkeypatch)
         monkeypatch.setattr(ra.threading, "Timer",
                             lambda *a, **k: types.SimpleNamespace(start=lambda: None))
         res = ra.handler()
@@ -104,3 +139,129 @@ class TestReloadResponseTeachesReconnect:
         assert "Do not poll /health" in text
         # machine-readable pointer for clients that read fields, not prose
         assert res["next"] == "sys_capability_map"
+
+
+class TestScheduleRefusedWithoutTheEvent:
+    """The timer fires a CUSTOM EVENT. With no event registered, fireCustomEvent reaches nothing at
+    all: the reload never happens, and "Reload scheduled." sends the caller on to test code that was
+    never loaded."""
+
+    def _no_timer(self, monkeypatch):
+        armed = []
+        monkeypatch.setattr(ra.threading, "Timer",
+                            lambda *a, **k: armed.append(a) or types.SimpleNamespace(
+                                start=lambda: None))
+        return armed
+
+    def test_a_missing_event_refuses_and_quotes_the_install_failure(self, monkeypatch):
+        armed = self._no_timer(monkeypatch)
+        monkeypatch.setattr(ra, "_reload_event", None)
+        monkeypatch.setattr(ra, "_reload_handler", None)
+        monkeypatch.setattr(ra, "_install_error", "3 : the event name is already registered")
+        res = ra.handler()
+        assert res["isError"] is True
+        assert "3 : the event name is already registered" in res["message"]
+        assert "Scripts and Add-Ins" in res["message"]
+        assert armed == []              # nothing was scheduled, so nothing may claim it was
+
+    def test_a_missing_handler_refuses_too(self, monkeypatch):
+        # the event exists but carries no handler: firing it still reaches nothing
+        armed = self._no_timer(monkeypatch)
+        monkeypatch.setattr(ra, "_reload_event", types.SimpleNamespace(add=lambda h: True))
+        monkeypatch.setattr(ra, "_reload_handler", None)
+        monkeypatch.setattr(ra, "_install_error", "")
+        res = ra.handler()
+        assert res["isError"] is True
+        assert "not registered on this server" in res["message"]
+        assert armed == []
+
+    def test_an_installed_event_schedules(self, monkeypatch):
+        armed = self._no_timer(monkeypatch)
+        _install_event(monkeypatch)
+        res = ra.handler()
+        assert res["isError"] is False
+        assert len(armed) == 1
+
+    def test_a_failed_install_is_recorded_and_the_next_reload_quotes_it(self, monkeypatch):
+        # a stale event object from an earlier install must not survive a failed one, or the
+        # refusal never fires and the schedule goes to an event this session never registered
+        monkeypatch.setattr(ra, "_reload_event", types.SimpleNamespace(add=lambda h: True))
+        monkeypatch.setattr(ra, "_reload_handler", object())
+        monkeypatch.setattr(ra, "_install_error", "")
+        self._no_timer(monkeypatch)
+
+        def _boom(_event_id):
+            raise RuntimeError("3 : the event name is already registered")
+
+        _fake_app(monkeypatch, registerCustomEvent=_boom,
+                  unregisterCustomEvent=lambda _event_id: True)
+        ra.install_reload_event()
+        assert "already registered" in ra._install_error
+        assert ra._reload_event is None and ra._reload_handler is None
+        assert "already registered" in ra.handler()["message"]
+
+    def test_an_event_that_registers_as_nothing_is_recorded(self, monkeypatch):
+        monkeypatch.setattr(ra, "_reload_event", None)
+        monkeypatch.setattr(ra, "_reload_handler", None)
+        monkeypatch.setattr(ra, "_install_error", "")
+        logged = _fake_app(monkeypatch, registerCustomEvent=lambda _event_id: None,
+                           unregisterCustomEvent=lambda _event_id: True)
+        ra.install_reload_event()
+        assert "returned nothing" in ra._install_error
+        assert any("returned nothing" in line for line in logged)
+
+
+class TestDeferredWorkerReportsWhatHappened:
+    """The worker runs after the HTTP response, with the server it tears down already gone - the
+    Fusion log is the only channel left, so a stop()/run() that answered False lands there instead
+    of being discarded."""
+
+    def test_a_false_stop_is_logged(self, monkeypatch):
+        script = _Script(stop=False)
+        monkeypatch.setattr(ra, "_find_self_script", lambda: script)
+        monkeypatch.setattr(ra, "_purge_addin_modules", lambda: 3)
+        logged = _fake_app(monkeypatch)
+        ra._perform_reload()
+        assert any("Script.stop() returned False" in line for line in logged)
+        assert ("run", False) in script.calls        # the reload still attempts the re-run
+
+    def test_a_false_run_is_logged_with_the_recovery(self, monkeypatch):
+        script = _Script(run=False)
+        monkeypatch.setattr(ra, "_find_self_script", lambda: script)
+        monkeypatch.setattr(ra, "_purge_addin_modules", lambda: 3)
+        logged = _fake_app(monkeypatch)
+        ra._perform_reload()
+        blob = "\n".join(logged)
+        assert "Script.run(False) returned False" in blob
+        assert "Scripts and Add-Ins" in blob
+
+    def test_a_clean_reload_logs_no_failure(self, monkeypatch):
+        script = _Script()
+        monkeypatch.setattr(ra, "_find_self_script", lambda: script)
+        monkeypatch.setattr(ra, "_purge_addin_modules", lambda: 3)
+        logged = _fake_app(monkeypatch)
+        ra._perform_reload()
+        assert script.calls == ["stop", ("run", False)]
+        assert not any("returned False" in line for line in logged)
+        assert any("purged 3" in line for line in logged)
+
+    def test_the_module_cache_is_busted_between_stop_and_run(self, monkeypatch):
+        # run() before the purge re-imports the STALE modules, which is the whole defect this tool
+        # exists to avoid - the order is the contract.
+        order = []
+        script = _Script()
+        monkeypatch.setattr(script, "stop", lambda: order.append("stop") or True)
+        monkeypatch.setattr(script, "run", lambda arg: order.append("run") or True)
+        monkeypatch.setattr(ra, "_find_self_script", lambda: script)
+        monkeypatch.setattr(ra, "_purge_addin_modules", lambda: order.append("purge") or 1)
+        _fake_app(monkeypatch)
+        ra._perform_reload()
+        assert order == ["stop", "purge", "run"]
+
+    def test_a_missing_script_object_stops_before_touching_anything(self, monkeypatch):
+        monkeypatch.setattr(ra, "_find_self_script", lambda: None)
+        monkeypatch.setattr(ra, "_purge_addin_modules",
+                            lambda: pytest.fail("purged with no script to re-run"))
+        logged = _fake_app(monkeypatch)
+        ra._perform_reload()
+        assert any("could not locate own Script object" in line for line in logged)

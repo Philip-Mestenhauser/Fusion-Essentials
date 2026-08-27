@@ -325,6 +325,109 @@ class TestConcentric:
 
 # ── guards + contract ─────────────────────────────────────────────────────────
 
+class TestUnreadableGeometry:
+    """A coordinate that will not read makes the relation UNKNOWN, never a verdict. _v is
+    whole-point tri-state: one unreadable component and the point is None, because a 0.0 stand-in
+    puts the world origin into a comparison the caller reads as pass/fail."""
+
+    class _Blind:
+        """A point whose z refuses to read - the shape a per-component 0.0 default hides."""
+
+        def __init__(self, x, y):
+            self.x, self.y = x, y
+
+        @property
+        def z(self):
+            raise RuntimeError("this coordinate is unavailable")
+
+    def _cyl_with(self, origin, axis):
+        st = mr.adsk.core.SurfaceTypes.CylinderSurfaceType
+        return type("Cyl", (), {"origin": origin, "axis": axis, "radius": 1.0,
+                                "surfaceType": st})()
+
+    def test_a_whole_point_is_none_when_any_one_component_will_not_read(self):
+        assert mr._v(self._Blind(1.0, 2.0)) is None
+        assert mr._v(_P(1.0, 2.0, 3.0)) == (1.0, 2.0, 3.0)     # all three read -> the tuple
+
+    def test_a_non_numeric_component_is_unreadable_too(self):
+        # an adsk mock hands back a truthy child object for anything unmodeled; letting one
+        # through would put it into the vector math as if it were a coordinate
+        assert mr._v(type("P", (), {"x": 1.0, "y": 2.0, "z": object()})()) is None
+
+    def test_a_bool_component_is_not_a_coordinate(self):
+        assert mr._v(type("P", (), {"x": 1.0, "y": 2.0, "z": True})()) is None
+
+    def test_coaxial_on_an_unreadable_axis_origin_is_unknown_not_coincident(self):
+        # both axes point +z; with z coerced to 0.0 the two origins would read as the SAME line
+        # and the call would return passed=true on a measurement that was never made.
+        _resolve_ab(_face(self._cyl_with(self._Blind(0.0, 0.0), _P(0, 0, 1))), "face",
+                    _face(_cyl((0, 0, 0), (0, 0, 1))), "face")
+        res = mr.handler(relation="coaxial")
+        assert res["isError"] is True
+        msg = error_message(res)
+        assert "UNKNOWN" in msg and "not a pass" in msg
+
+    def test_flush_on_an_unreadable_plane_origin_is_unknown_not_coplanar(self):
+        st = mr.adsk.core.SurfaceTypes.PlaneSurfaceType
+        blind = type("Pl", (), {"origin": self._Blind(0.0, 0.0), "normal": _P(0, 0, 1),
+                                "surfaceType": st})()
+        _resolve_ab(_face(blind), "face", _face(_plane((0, 0, 0), (0, 0, 1))), "face")
+        res = mr.handler(relation="flush")
+        assert res["isError"] is True and "UNKNOWN" in error_message(res)
+
+    def test_concentric_on_an_unreadable_center_is_unknown_not_coincident(self):
+        ct = mr.adsk.core.Curve3DTypes.Circle3DCurveType
+        blind = type("E", (), {"geometry": type("G", (), {
+            "curveType": ct, "center": self._Blind(0.0, 0.0)})()})()
+        _resolve_ab(blind, "edge", _circ_edge((0, 0, 0)), "edge")
+        res = mr.handler(relation="concentric")
+        assert res["isError"] is True and "UNKNOWN" in error_message(res)
+
+    def test_parallel_on_an_unreadable_direction_is_unknown_not_parallel(self):
+        _resolve_ab(_face(self._cyl_with(_P(0, 0, 0), self._Blind(0.0, 0.0))), "face",
+                    _face(_cyl((0, 0, 0), (0, 0, 1))), "face")
+        res = mr.handler(relation="parallel")
+        assert res["isError"] is True and "UNKNOWN" in error_message(res)
+
+    def test_a_wrong_kind_still_gets_the_kind_refusal_not_the_unreadable_one(self):
+        # the two are told apart: a planar face asked for 'coaxial' is the WRONG KIND, and its
+        # message must keep naming what each entity actually is
+        _faces(_plane((0, 0, 0), (0, 0, 1)), _cyl((0, 0, 0), (0, 0, 1)))
+        msg = error_message(mr.handler(relation="coaxial"))
+        assert "planar face" in msg and "UNKNOWN" not in msg
+
+
+class TestUnreadableDistance:
+    """The min-distance core hands its callers a RESULT, never a bare string: clearance/touching
+    return it straight to the wire, where a string would cross as a malformed payload."""
+
+    def _blind_measure(self, monkeypatch, value):
+        _faces(_plane((0, 0, 0), (0, 0, 1)), _plane((0, 0, 1), (0, 0, 1)))
+        _install_mgr(monkeypatch, _MR(value))
+
+    def test_the_core_returns_an_error_result_not_a_string(self, monkeypatch):
+        self._blind_measure(monkeypatch, None)
+        _d, _mr_res, err = mr._min_distance_cm(object(), object())
+        assert isinstance(err, dict) and err["isError"] is True
+
+    def test_clearance_surfaces_it_as_a_normal_error(self, monkeypatch):
+        self._blind_measure(monkeypatch, None)
+        res = mr.handler(relation="clearance")
+        assert res["isError"] is True and "UNKNOWN" in error_message(res)
+
+    def test_touching_surfaces_it_as_a_normal_error_rather_than_claiming_contact(self, monkeypatch):
+        # the dangerous direction: an unreadable gap must never be scored against the tolerance,
+        # which would report the parts as touching
+        self._blind_measure(monkeypatch, None)
+        res = mr.handler(relation="touching")
+        assert res["isError"] is True and "not reported as touching" in error_message(res)
+
+    def test_a_readable_zero_still_measures(self, monkeypatch):
+        # the boundary the unreadable case is confused with: 0.0 IS a measurement
+        self._blind_measure(monkeypatch, 0.0)
+        assert _payload(mr.handler(relation="touching"))["passed"] is True
+
+
 class TestGuards:
     def test_unknown_relation_errors(self):
         _faces(_cyl((0, 0, 0), (0, 0, 1)), _cyl((0, 0, 0), (0, 0, 1)))

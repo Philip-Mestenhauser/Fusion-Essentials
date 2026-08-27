@@ -138,11 +138,15 @@ def navigate_folder_path(root, path):
     return cur, cur_path, None
 
 
-def _ensure_folder_path(root, segments):
+def _ensure_folder_path(root, segments, created_out=None):
     """Walk a folder path from `root`, creating any missing segments (mkdir -p).
-    Returns (deepest_folder, created_names_list) or raises on failure."""
+    Returns (deepest_folder, created_names_list) or raises on failure.
+
+    Pass `created_out` (a list the caller owns) to receive each created name AS it is created: the
+    return value is lost when a later segment raises, and the folders already made are real
+    mutations the caller has to disclose."""
     cur = root
-    created = []
+    created = created_out if created_out is not None else []
     for seg in segments:
         nxt = _child_folder_by_name(cur, seg)
         if not nxt:

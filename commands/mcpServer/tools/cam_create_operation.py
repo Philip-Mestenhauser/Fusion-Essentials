@@ -1,8 +1,8 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Create (and by default generate) a CAM milling operation in a setup: pick a strategy, a tool by
-(library_url, index) reference, add it, and generate the toolpath."""
+"""Create a CAM milling operation in a setup: pick a strategy, a tool by (library_url, index)
+reference, and add it. Generating is opt-in (generate=true) - the geometry selection comes first."""
 
 import adsk.core
 import adsk.cam
@@ -64,7 +64,7 @@ def _strategy_names(setup):
 
 
 def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
-            tool_index: int = -1, tool_scope: str = "", generate: bool = True) -> dict:
+            tool_index: int = -1, tool_scope: str = "", generate: bool = False) -> dict:
     """See TOOL_DESCRIPTION."""
     cam, cerr = get_cam()
     if not cam:
@@ -125,7 +125,10 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
         "strategy": strategy,
         "generation_started": False,
         "note": "Operation created. " + ("" if generate else
-                "Pass generate=true (or call cam_generate) to compute the toolpath."),
+                "No toolpath yet: select the geometry it cuts with cam_select_geometry, THEN compute "
+                "it (cam_generate, or generate=true here). Generating a selection-driven strategy "
+                "before its geometry is selected does not fail - it leaves the operation reading "
+                "valid with a selection WARNING and no toolpath (measured on a 2D Contour)."),
     }
 
     if generate:
@@ -159,12 +162,13 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
 
 
 TOOL_DESCRIPTION = (
-    "CREATE a CAM milling operation in a setup (the 'apply an operation' half of CAM). 'setup' = the "
+    "CREATE a CAM milling operation in a setup. 'setup' = the "
     "setup name; 'strategy' = face / adaptive / pocket2d / drill / bore / contour2d / ... (validated "
     "against the setup's compatible strategies). TOOL ref: 'tool_scope=document' + 'tool_index' (this "
     "doc's library - what cam_edit_tools scope='document' adds; no URL needed) OR 'tool_library_url' "
-    "+ 'tool_index' (a shared library). 'generate' (default true) computes the toolpath. Then "
-    "cam_select_geometry targets the geometry. cam_create_setup makes the setup first."
+    "+ 'tool_index' (a shared library). Order: create -> cam_select_geometry -> generate=true here "
+    "(or cam_generate); 'generate' defaults to FALSE because generating before the geometry is "
+    "selected yields a warned op with no toolpath. cam_create_setup makes the setup first."
 )
 
 tool = (
@@ -179,7 +183,7 @@ tool = (
     .add_input_property("tool_index", {"type": "integer",
             "description": "Tool index within the chosen library (from cam_edit_tools)."})
     .add_input_property("generate", {"type": "boolean",
-            "description": "Generate the toolpath after creating (default true)."})
+            "description": "Generate the toolpath after creating (default false - select geometry first)."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)

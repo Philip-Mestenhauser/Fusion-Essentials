@@ -17,6 +17,7 @@ keeps each entry real (still defined there, still different from the home defini
 import os
 import re
 
+import _corpus
 from conftest import TOOLS_DIR
 
 # symbol -> (home module, is a function def vs a plain module-level assignment)
@@ -36,6 +37,11 @@ _DENYLIST = {
     # the not-a-number fallback and the 1..ceiling hold cannot be right in one read and stale in the
     # next (each read still passes its OWN default/ceiling pair).
     "clamp_rows": ("_cam_common", "def"),
+    # The ONE identical-open-documents test (a visible tab and its dependency instance share the
+    # name AND the lineage URN - that is ONE document, not an ambiguity; measured live). The write
+    # guard's expect_document check and doc_lifecycle's URN resolver both answer through it - a
+    # local re-roll is how the two resolvers drift into opposite verdicts on the same state.
+    "one_open_document": ("_write_guard", "def"),
     # The ONE create-flow rename-with-disclosure: sets entity.name, reads it back, returns
     # (final_name, warning-or-None). A per-tool try/except-pass copy is the swallowed-rename defect
     # this helper replaced - the payload must disclose a rename that declined or landed deduped.
@@ -286,7 +292,9 @@ def _all_tool_files():
 
 
 def _read(fn):
-    return open(os.path.join(TOOLS_DIR, fn), encoding="utf-8").read()
+    # Shared with every other lint reading this corpus: the denylist sweep asks for each tool file
+    # once per symbol (~150 x ~190), and _corpus reads each one once per process.
+    return _corpus.text(os.path.join(TOOLS_DIR, fn))
 
 
 def _bracket_delta(line):
@@ -322,7 +330,10 @@ class TestHelperDefinedOnlyInItsHomeModule:
             pattern = _pattern(symbol, kind)
             defined_in = []
             for fn in _all_tool_files():
-                if pattern.search(_read(fn)):
+                src = _read(fn)
+                # the symbol's own name is a literal in both patterns, so a file that never
+                # mentions it cannot define it - and that is nearly every (symbol, file) pair
+                if symbol in src and pattern.search(src):
                     defined_in.append(fn)
             elsewhere = [fn for fn in defined_in
                          if fn != home_file and (fn[:-3], symbol) not in _ALLOWLIST]

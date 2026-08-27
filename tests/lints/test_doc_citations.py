@@ -23,7 +23,10 @@ skipped, not flagged.
 
 import re
 from collections import Counter
+from functools import lru_cache
 from pathlib import Path
+
+import _corpus
 
 REPO = Path(__file__).resolve().parent.parent.parent
 MCP = REPO / "commands" / "mcpServer"
@@ -51,7 +54,10 @@ _INLINE_CODE = re.compile(r"`([^`]+)`")
 _RUNTIME_LOGS = {"futil.log", "app.log"}
 
 
+@lru_cache(maxsize=None)
 def _present():
+    # basename -> how many files carry it, over the whole repo. Both tests below ask for it, and
+    # the three walks are the expensive half of this lint, so the census is built once per process.
     counts = Counter()
     for ext in ("*.py", "*.md", "*.log"):
         counts.update(p.name for p in REPO.rglob(ext))
@@ -76,7 +82,7 @@ class TestDocCitations:
         present = _present()
         offenders = []
         for src in _scanned_files():
-            text = src.read_text(encoding="utf-8")
+            text = _corpus.text(src)
             for cite in sorted(set(_FILE.findall(text))):
                 if _basename(cite) not in present:
                     offenders.append(f"{src.relative_to(REPO)} cites '{cite}' - no file named "
@@ -94,7 +100,7 @@ class TestDocCitations:
         for doc in CONSTITUTION_DOCS:
             if not doc.exists():
                 continue
-            for m in _INLINE_CODE.finditer(doc.read_text(encoding="utf-8")):
+            for m in _INLINE_CODE.finditer(_corpus.text(doc)):
                 content = m.group(1).strip()
                 if not (_FILE.fullmatch(content) and ("/" in content or "\\" in content)):
                     continue

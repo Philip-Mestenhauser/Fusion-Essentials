@@ -28,7 +28,7 @@ _TO_OBJECT = _inputs.GeometryHandle("to_object", require="face", required=False,
     description="Extrude up to THIS face (a find_geometry face handle) instead of by 'distance'.")
 # target_bodies: scope a cut/join/intersect to these bodies so it doesn't bleed through others.
 _TARGET_BODIES = _inputs.BodyRefList("target_bodies", required=False,
-    description="Bodies a cut/join/intersect may affect (prevents cut bleed-through into other bodies).")
+    description="Bodies a cut/join/intersect may affect (prevents cut bleed-through into other bodies). Fusion names every component's first body 'Body1', so scope across components with the qualified form '<occurrence>/<body>' - e.g. 'RingOuter:1/Body1'.")
 
 # extent: the depth STYLE. 'distance' is the legacy default (distance/symmetric/taper_deg); the other
 # three map to measured ExtrudeFeatureInput setters - see TOOL_DESCRIPTION for each mode's inputs.
@@ -683,7 +683,12 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
     if check_bodies:
         deltas, vol_after = {}, _geom.volumes(check_bodies)
         for b in check_bodies:
-            nm = safe(lambda b=b: b.name) or "?"
+            # The OCCURRENCE-QUALIFIED name, the same spelling 'scoped_to_bodies' echoes. Fusion
+            # auto-names every component's first body 'Body1', so keying by the bare name COLLAPSES a
+            # cut scoped across two components into one entry and silently overwrites the first
+            # (measured: a cut removing 3.0 cm3 from one component and 1.0 from another published
+            # {"Body1": 1.0}) - a receipt that cannot tell "cut both" from "cut one".
+            nm = _qualified_body_name(b) or "?"
             before, after = vol_before.get(id(b)), vol_after.get(id(b))
             if isinstance(before, (int, float)) and isinstance(after, (int, float)):
                 deltas[nm] = round(before - after, 6)

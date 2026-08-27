@@ -368,6 +368,32 @@ class TestTimelineSlice:
         names = {e["name"] for e in s["exceptions"]}
         assert names == {"Bad", "Warned"}                # the failures; suppressed excluded
 
+    def test_unreadable_row_flags_are_null_and_survive_the_terse_razor(self):
+        # bool(safe(...)) turns an unreadable flag into a False, which EQUALS the noise default, so
+        # terse drops it and the row reads as a normal healthy feature. Null keeps it visible.
+        row_obj = self._tlobj(0, "Odd")
+        del row_obj.isSuppressed
+        del row_obj.isRolledBack
+        out, err = dg._slice_timeline(self._design_with([row_obj]), True, "")
+        assert err is None
+        row = out["timeline"][0]
+        assert row["is_suppressed"] is None and row["is_rolled_back"] is None
+
+    def test_a_row_whose_suppressed_flag_did_not_read_is_not_filtered_out(self):
+        # the gate's None-behavior, decided explicitly: only a flag that READ True hides a row, so
+        # include_suppressed=false never drops a row on a flag nobody read.
+        hidden = self._tlobj(1, "Unknown")
+        del hidden.isSuppressed
+        d = self._design_with([self._tlobj(0, "Live"), hidden])
+        out, _ = dg._slice_timeline(d, include_suppressed=False, group="")
+        assert [o["name"] for o in out["timeline"]] == ["Live", "Unknown"]
+
+    def test_a_row_that_reads_suppressed_is_still_filtered_out(self):
+        # the boundary on the other side: a True flag is an answer and still hides the row.
+        d = self._design_with([self._tlobj(0, "Live"), self._tlobj(1, "Hid", suppressed=True)])
+        out, _ = dg._slice_timeline(d, include_suppressed=False, group="")
+        assert [o["name"] for o in out["timeline"]] == ["Live"]
+
     def test_slice_no_timeline_errors(self):
         from types import SimpleNamespace
         class _NoTL:
@@ -889,6 +915,32 @@ class TestWalkOccurrenceReference:
     def test_local_node_has_no_source_fields(self):
         node = dg._walk_occurrence(_tocc("Gear:1"), 0, 3, {"n": 0, "truncated": False})
         assert node["is_reference"] is False and "source_version" not in node
+
+    def test_unreadable_is_reference_is_null_not_false(self):
+        # read_flag honesty: a coerced False claims "this is a local component" about an occurrence
+        # nothing was read from.
+        occ = _tocc("Lib:1")
+        del occ.isReferencedComponent
+        node = dg._walk_occurrence(occ, 0, 3, {"n": 0, "truncated": False})
+        assert node["is_reference"] is None
+
+    def test_a_null_is_reference_still_reads_the_freshness_block(self):
+        # the gate's None-behavior, decided explicitly: None takes the TRUE branch, because a local
+        # occurrence simply carries no documentReference while an xref whose own flag will not read
+        # still has real staleness to publish - the False branch would drop a STALE reference.
+        df = SimpleNamespace(id="urn:adsk:9", name="LibPart", fusionWebURL="https://autodesk/x")
+        occ = _tocc("Lib:1", docref=SimpleNamespace(version=2, isOutOfDate=True, dataFile=df))
+        del occ.isReferencedComponent
+        node = dg._walk_occurrence(occ, 0, 3, {"n": 0, "truncated": False})
+        assert node["is_reference"] is None
+        assert node["is_out_of_date"] is True and node["source_name"] == "LibPart"
+
+    def test_a_false_is_reference_still_skips_the_freshness_block(self):
+        # the other side of that gate: a flag that READ false is an answer, so the cloud reads stay
+        # unpaid for a genuinely local occurrence.
+        occ = _tocc("Gear:1", docref=SimpleNamespace(version=2, isOutOfDate=True, dataFile=None))
+        node = dg._walk_occurrence(occ, 0, 3, {"n": 0, "truncated": False})
+        assert node["is_reference"] is False and "is_out_of_date" not in node
 
 
 # ── the configurations slice (_slice_configurations) ───────────────────────────────────────────────
