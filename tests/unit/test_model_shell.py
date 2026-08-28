@@ -87,7 +87,8 @@ class FakeShellFeatures:
     def add(self, inp):
         if not self.return_feature:
             return None
-        self.body.volume -= self.volume_delta
+        if self.volume_delta:
+            self.body.volume -= self.volume_delta
         self.body._faces += self.faces_added
         inside_v = inp.insideThickness.value if inp.insideThickness else 0.0
         outside_v = inp.outsideThickness.value if inp.outsideThickness else 0.0
@@ -241,7 +242,38 @@ class TestHonesty:
         sf = FakeShellFeatures(body, volume_delta=0.0, faces_added=0)
         _install(body, sf)
         res = sh.handler(thickness=2, units="mm")
-        assert res["isError"] is True and "unchanged" in res["message"]
+        assert res["isError"] is True
+        assert "the read-back volume did not drop (100 cm3 before, 100 cm3 after)" in res["message"]
+
+    def test_the_no_op_error_states_the_read_and_not_a_guessed_cause(self):
+        # Nothing in the handler reads the thickness against the geometry, so naming the thickness
+        # as the reason is a claim no read backs; the numbers it did read, and the reads that would
+        # show what happened, are what the message can stand behind.
+        body = FakeBody(volume=100.0, faces=6)
+        _install(body, FakeShellFeatures(body, volume_delta=0.0, faces_added=0))
+        msg = sh.handler(thickness=2, units="mm")["message"]
+        assert "likely" not in msg and "too large" not in msg
+        assert "model_inspect" in msg and "view_section" in msg
+
+    def test_an_unreadable_volume_convicts_on_the_face_count_it_did_read(self):
+        # Only ONE of the two reads runs: with no volume to compare, the face count is what
+        # convicts, so claiming "volume and face count identical" would name a read that never
+        # happened.
+        class _NoVolumeBody(FakeBody):
+            @property
+            def volume(self):
+                raise RuntimeError("volume unreadable")
+
+            @volume.setter
+            def volume(self, _value):
+                pass
+
+        body = _NoVolumeBody(faces=6)
+        _install(body, FakeShellFeatures(body, volume_delta=0.0, faces_added=0))
+        res = sh.handler(thickness=2, units="mm")
+        assert res["isError"] is True
+        assert "the face count read back identical (6 before and after)" in res["message"]
+        assert "volume" not in res["message"]
 
     def test_no_feature_returned_is_error(self):
         body = FakeBody()

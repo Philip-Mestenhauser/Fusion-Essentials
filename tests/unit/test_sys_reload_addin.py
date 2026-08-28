@@ -175,6 +175,18 @@ class TestScheduleRefusedWithoutTheEvent:
         assert "not registered on this server" in res["message"]
         assert armed == []
 
+    def test_the_refusal_is_the_shared_error_envelope(self, monkeypatch):
+        # this tool builds its SUCCESS result by hand (a status sentence, not a json payload), and
+        # a hand-built refusal beside it is how one of the three keys drifts. The refusal is
+        # _common.error's - text content, isError, and a message MIRRORING that same text.
+        self._no_timer(monkeypatch)
+        monkeypatch.setattr(ra, "_reload_event", None)
+        monkeypatch.setattr(ra, "_reload_handler", None)
+        monkeypatch.setattr(ra, "_install_error", "3 : the event name is already registered")
+        res = ra.handler()
+        assert res == ra.error(res["message"])
+        assert res["content"][0]["text"] == res["message"]
+
     def test_an_installed_event_schedules(self, monkeypatch):
         armed = self._no_timer(monkeypatch)
         _install_event(monkeypatch)

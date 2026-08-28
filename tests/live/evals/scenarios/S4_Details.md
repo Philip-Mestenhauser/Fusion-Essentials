@@ -6,12 +6,16 @@ fixture: P3-Gimbal (the S3 artifact - the jointed, motion-linked gyroscope at re
   PINNED first. The agent details the LIVING mechanism and saves AS A NEW document (P4-Gimbal);
   P3-Gimbal's cloud version must remain untouched. Missing fixture = ask - never create a project.
 budget:
-  max_tool_calls: 75
-  max_tokens: 100000
+  max_tool_calls: 85
+  max_tokens: 115000
 substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
 perturbations: none (baseline)
 expected_refusals: none
 ---
+
+> NEEDS-RUN - UNMEASURED WORDING: the split swing-clearance grade below (interference for ADDED
+> material, a measured gap for the HOLES) has not been exercised by a blind executor, so the budget
+> is a provisional pin, not a measurement. This banner stands until a blind run measures it.
 
 # S4 - Details: real-part features on a living mechanism
 
@@ -58,9 +62,15 @@ at the extremes, restore). JUSTIFY each declared range - it must be anchored, no
 either drive PAST your declared extreme until the checker names a real contact (proving your
 range sits inside the physical limit with margin), or derive the limit from geometry you read
 and state the arithmetic. The expected in-range result is ZERO overlapping pairs (the design's
-support engagements are flush contacts, not overlaps); the mounting holes and new features must
-stay clear of the rings' FULL swing. Name any overlap with its volume and the two bodies; a hole
-or feature the rings swing into at an extreme is a FAIL.
+support engagements are flush contacts, not overlaps); name any overlap with its volume and the
+two bodies. That sweep grades the material you ADDED - a boss or your chosen detail is what can
+overlap a swinging ring. It cannot grade the mounting HOLES: a hole REMOVES material, so a hole
+bored straight into a ring's path still reports zero overlaps. Prove the holes by MEASUREMENT
+instead - at the pose where a ring comes CLOSEST to the holes, take a fresh minimum-distance read
+between the hole (its wall or its edge) and that ring and report the gap in mm for the worst hole,
+or derive it from geometry you read (the hole's distance from the swing axis and its radius
+against the ring's swept extent) and state the arithmetic. A gap that is zero or negative means
+the swing reaches the hole - a FAIL.
 
 Finally save AS A NEW document: P4-Gimbal into MCP Test Project / Pipeline-v1/{{RUN_FOLDER}} (create the folder path if missing; never a project).
 
@@ -74,11 +84,15 @@ POSTCONDITIONS - verify EACH with your own fresh read; report actual values WITH
   features; your choice-detail exists and is named.
 - mechanism alive: fresh assembly read - all joints healthy, motion link present, rest pose
   unchanged from staging (orientation reads within float noise).
-- interference re-check ran at rest AND at each ring pivot's two travel extremes, with each
-  declared range JUSTIFIED (an out-of-range contact probe or read-derived limit arithmetic); the
-  mounting holes and new features stay clear of the rings' full swing (zero overlapping pairs,
-  or any overlap NAMED with its volume and the two bodies); report the checker's output at each
-  pose.
+- ADDED MATERIAL CLEARS THE SWING: the interference re-check ran at rest AND at each ring pivot's
+  two travel extremes, with each declared range JUSTIFIED (an out-of-range contact probe or
+  read-derived limit arithmetic); report the checker's output at each pose - zero overlapping
+  pairs, or any overlap NAMED with its volume and the two bodies.
+- HOLES CLEAR THE SWING, BY MEASUREMENT: the interference check cannot grade the mounting holes
+  (removed material never overlaps anything), so report the MEASURED gap for the worst-placed
+  hole - a fresh minimum-distance read naming both targets, taken at the pose where the ring comes
+  closest, in mm - or the read-derived arithmetic that stands in for it (hole distance from the
+  swing axis and hole radius vs the ring's swept extent). Zero or negative is a FAIL.
 - timeline healthy; doc_get -> saved as "P4-Gimbal", real URN, version >= 1, in MCP Test Project
   / Pipeline-v1/{{RUN_FOLDER}} - AND P3-Gimbal still at the version you found it.
 
@@ -104,10 +118,13 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
   material changes (S3 established the baseline).
 - The free-choice detail is deliberate: grades judgment + honest naming, and varies the feature
   mix across runs (keeps the scenario from calcifying one workflow - the bingo-card rule).
-- Placement sanity for holes: "clear of the rings' swing" is gradeable via the ring-pivot
-  TRAVEL-RANGE sweep interference check - a hole pattern inside the swing shows up at a ring pivot's
-  travel extreme, not in a count and not at a single comfortable pose (fixed mid-range poses sit
-  under the binding threshold; the extremes are where the swing actually reaches the plate).
+- Placement sanity for holes is graded by MEASUREMENT, not by the interference sweep: a hole is
+  REMOVED material, so a hole bored into the rings' path cannot produce an overlapping pair at any
+  pose - the sweep would certify a hole it never examined. The sweep still grades the material the
+  run ADDS (the turned boss, the free-choice detail), where a travel extreme is exactly where an
+  overlap appears (fixed mid-range poses sit under the binding threshold). Grade the two clauses
+  separately, and uphold the hole clause only from a distance read (or read-derived arithmetic)
+  with both targets and the pose named.
 - The mechanism is a crank-rotor motion link (crank -> rotor spin),
   NOT "two linked ring pivots" - the ring pivots are independent revolutes. Grade the staging
   description as the crank-rotor link it actually is.
@@ -116,5 +133,6 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
   pairs, proving it bites and locating the true limit - and this clause makes that protocol
   required instead of optional diligence.
 - Staging: doc_open S3 artifact BY URN, confirm active; run the block. Budget: the last
-  measured run (Agent-executor harness) was 58 calls, PASS incl. the out-of-range probe;
-  75 = 58 + 25% rounded.
+  measured run (Agent-executor harness) was 58 calls, PASS incl. the out-of-range probe; the
+  measured hole-clearance reads add to that, so 85 calls / 115k output tokens is a provisional
+  pin - recalibrate at the first measured run of this wording.

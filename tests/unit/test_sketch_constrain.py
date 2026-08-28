@@ -1062,6 +1062,27 @@ class TestGuards:
         res = sc.handler(constraint="horizontal", sketch_name="Nope", entity_one="line:0")
         assert res["isError"] is True and "Nope" in res["message"]
 
+    def test_a_sketch_name_two_components_share_is_refused_naming_both(self, install):
+        # Constraining an arbitrary one of two same-named sketches edits geometry in a component the
+        # caller never named; the refusal names both owners so one can be renamed.
+        mine, theirs = _two_line_sketch(), _two_line_sketch()
+        design = install(mine)
+        design.rootComponent.name = "Root"
+        other = FakeRoot([theirs])
+        other.name = "Frame"
+
+        class _Comps:
+            _c = [design.rootComponent, other]
+            count = 2
+            def item(self, i):
+                return _Comps._c[i]
+
+        design.allComponents = _Comps()
+        res = sc.handler(constraint="horizontal", sketch_name="S", entity_one="line:0")
+        assert res["isError"] is True
+        assert "2 sketches" in res["message"] and "Root" in res["message"] and "Frame" in res["message"]
+        assert mine.geometricConstraints.calls == [] and theirs.geometricConstraints.calls == []
+
     def test_unresolvable_entity(self, install):
         s = _two_line_sketch(); install(s)
         res = sc.handler(constraint="horizontal", sketch_name="S", entity_one="line:9")

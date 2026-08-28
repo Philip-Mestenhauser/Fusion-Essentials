@@ -11,7 +11,7 @@ import math
 import adsk.core
 import pytest
 
-from conftest import (FakeBoundingBox3D, FakePoint, assert_no_active_design,
+from conftest import (FakeBoundingBox3D, FakePoint, MakeComp, assert_no_active_design,
                       assert_unknown_units, error_message,
                       install, load_tool, make_design, make_sketch, make_sketch_curve, payload,
                       sketch_curves_edit)
@@ -78,6 +78,71 @@ class TestGuards:
         res = mod.handler(action="trim", sketch_name="Nope", entity_one="line:0", x1=1, y1=1)
         msg = error_message(res)
         assert "No sketch named 'Nope'" in msg and "Plate" in msg
+
+    def test_a_shared_sketch_name_is_refused_with_its_owners(self, mod, sketch, monkeypatch):
+        # Two components can each hold a "Plate". The refusal names them and nothing is trimmed;
+        # calling it "No sketch named 'Plate'" states the opposite of what the walk read.
+        refusal = "2 sketches are named 'Plate' ('Plate' in Root, 'Plate' in Frame)"
+        monkeypatch.setattr(mod._common, "find_or_recent_sketch", lambda d, n: (None, n, refusal))
+        trimmed = []
+        monkeypatch.setattr(_lines(sketch).item(0), "trim", lambda p: trimmed.append(p),
+                            raising=False)
+        msg = error_message(mod.handler(action="trim", sketch_name="Plate",
+                                        entity_one="line:0", x1=1, y1=1))
+        assert msg == refusal and "No sketch named" not in msg
+        assert trimmed == []          # no curve was touched
+
+    def test_the_available_list_qualifies_a_name_two_components_share(self, mod, monkeypatch):
+        # Bare, the list read "Available: Plate, Plate" - two sketches in two components printed as
+        # one name twice, which reads as a duplicated entry rather than as two different sketches.
+        alpha = MakeComp(name="Alpha", sketches=[make_sketch("Plate")])
+        beta = MakeComp(name="Beta", sketches=[make_sketch("Plate")])
+        install(mod, make_design(comp=alpha, all_components=[alpha, beta]))
+        monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: FakePoint(x, y, z))
+        msg = error_message(mod.handler(action="trim", sketch_name="Nope", entity_one="line:0",
+                                        x1=1, y1=1))
+        assert "Available: Plate (Alpha), Plate (Beta)" in msg
+
+    def test_a_design_with_no_sketches_lists_none(self, mod, monkeypatch):
+        install(mod, make_design(sketches=[]))
+        monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: FakePoint(x, y, z))
+        msg = error_message(mod.handler(action="trim", sketch_name="Nope", entity_one="line:0",
+                                        x1=1, y1=1))
+        assert "Available: (none)" in msg
+
+    def test_a_padded_name_reports_the_stripped_name_it_searched_for(self, mod, sketch):
+        # The resolver strips before searching, so the miss must name what was searched for -
+        # echoing the raw input tells the caller a name that was never looked up.
+        msg = error_message(mod.handler(action="trim", sketch_name="  Ghost  ",
+                                        entity_one="line:0", x1=1, y1=1))
+        assert "No sketch named 'Ghost'" in msg and "'  Ghost  '" not in msg
+
+    def test_a_blank_name_with_no_sketch_says_so_instead_of_naming_none(self, mod, monkeypatch):
+        # A blank name means "the most recent sketch", so the requested name is None - a caller
+        # that formats it into the named-miss branch puts the literal 'None' on the wire.
+        install(mod, make_design(sketches=[]))
+        monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: FakePoint(x, y, z))
+        msg = error_message(mod.handler(action="trim", sketch_name="", entity_one="line:0",
+                                        x1=1, y1=1))
+        assert msg == "No sketch to edit. Draw one first with sketch_create + sketch_add_geometry."
+        assert "'None'" not in msg
+
+    def test_a_whitespace_only_name_takes_the_most_recent_sketch(self, mod, monkeypatch):
+        # " " strips to blank, so it is the most-recent-sketch request - not a search for a sketch
+        # literally named with a space.
+        line = make_sketch_curve("L0", length=10.0)
+        last = make_sketch("Last", lines=[line])
+        install(mod, make_design(sketches=[make_sketch("First"), last]))
+        monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: FakePoint(x, y, z))
+        short = make_sketch_curve("L2", length=4.0)
+
+        def _trim(point, create_constraints=True):
+            sketch_curves_edit(last, last.sketchCurves.sketchLines, remove=[line], add=[short])
+            return _result(short)
+
+        line.trim = _trim
+        out = payload(mod.handler(action="trim", sketch_name=" ", entity_one="line:0", x1=1, y1=1))
+        assert out["sketch"] == "Last"
 
     def test_missing_entity_one_is_refused(self, mod, sketch):
         msg = error_message(mod.handler(action="trim", x1=1, y1=1))

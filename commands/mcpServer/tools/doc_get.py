@@ -13,7 +13,8 @@ import adsk.core
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe, terse, counted, design, all_components
+from ._common import ok, error, safe, terse, counted, design, all_components, iter_collection
+from . import _common
 from . import _data_read
 from . import _outputs
 
@@ -333,6 +334,43 @@ def _xref_row(occ, depth, counters):
     return row
 
 
+def _unresolved_row(occ, parent_path, depth, detail, counters):
+    """One UNRESOLVED-reference record (kind 'unresolved'): an occurrence whose referenced component
+    will not load. It counts as unreadable, so it flows into the existing unreadable_count /
+    all_current machinery rather than needing a channel of its own.
+
+    Neither freshness field exists for it: occ.documentReference raises with the SAME text an
+    ordinary local occurrence gives, and the reference is absent from Document.documentReferences
+    entirely - so no source document, version or out_of_date flag can be published. fullPathName also
+    raises, hence the path is built from the parent's."""
+    counters["unreadable"] += 1
+    name = safe(lambda: occ.name)
+    return {"path": (f"{parent_path}+{name}" if parent_path and name else (name or "(unreadable name)")),
+            "depth": depth,
+            "kind": "unresolved",
+            "readable": False,
+            "warning": ("the occurrence's referenced component could not be loaded, so this "
+                        f"reference has no readable source document or version: {detail}")}
+
+
+def _unresolved_children(occ, parent_path, depth, refs, cap, counters, state):
+    """Append a row for each unresolved reference among `occ`'s COMPONENT-LOCAL children.
+
+    The freshness walk descends childOccurrences, which silently DROPS an occurrence whose reference
+    is broken (its assembly path is invalid); component.occurrences still holds it. Measured: the
+    walk's own gate misses it twice over - isReferencedComponent reads FALSE on a broken reference,
+    so even reaching the occurrence would not have produced a row."""
+    comp = safe(lambda: occ.component)
+    for child in iter_collection(safe(lambda: comp.occurrences) if comp else None):
+        is_broken, detail = _common.broken_reference(child)
+        if not is_broken:
+            continue
+        if len(refs) >= cap:
+            state["truncated"] = True
+            return
+        refs.append(_unresolved_row(child, parent_path, depth, detail, counters))
+
+
 def _derive_row(comp, feat, counters):
     """One DERIVE-feature freshness record (kind 'derive'): a derive's DocumentReference lives on the
     FEATURE (Component.features.deriveFeatures item), never on an occurrence - a derived occurrence
@@ -389,7 +427,7 @@ def _slice_xref_tree(xref_max=_XREF_CAP, max_depth=None):
     cap = max(1, int(xref_max))
     limit = None if max_depth is None else max(1, int(max_depth))
 
-    def walk(occs, depth):
+    def walk(occs, depth, parent_path):
         if state["truncated"] or occs is None:
             return
         if limit is not None and depth > limit:
@@ -402,26 +440,51 @@ def _slice_xref_tree(xref_max=_XREF_CAP, max_depth=None):
             occ = safe(lambda i=i: occs.item(i))
             if occ is None:
                 continue
+            is_broken, detail = _common.broken_reference(occ)
+            if is_broken:
+                # An unresolved occurrence answers nothing below it either, so it gets its row and
+                # the walk does not descend into it.
+                if len(refs) >= cap:
+                    state["truncated"] = True
+                    return
+                refs.append(_unresolved_row(occ, parent_path, depth, detail, counters))
+                continue
             if safe(lambda occ=occ: occ.isReferencedComponent, False):
                 if len(refs) >= cap:
                     state["truncated"] = True # stop collecting; the rollup is now partial
                     return
                 refs.append(_xref_row(occ, depth, counters))
-            walk(safe(lambda occ=occ: occ.childOccurrences), depth + 1)
+            path = safe(lambda occ=occ: occ.fullPathName) or parent_path
+            _unresolved_children(occ, path, depth + 1, refs, cap, counters, state)
+            walk(safe(lambda occ=occ: occ.childOccurrences), depth + 1, path)
 
-    walk(safe(lambda: root.occurrences), 1)
+    walk(safe(lambda: root.occurrences), 1, safe(lambda: root.name))
     _walk_derive_rows(d, refs, cap, counters, state)
     complete = not (state["truncated"] or state["depth_capped"])
     all_current = complete and counters["stale"] == 0 and counters["unreadable"] == 0
-    note = ("Covers both link kinds: kind='xref' (referenced occurrences) and kind='derive' (derive "
-            "features). all_current is authoritative ONLY on a complete walk; it is false whenever any "
+    unresolved = [r for r in refs if r.get("kind") == "unresolved"]
+    note = ("Covers three link kinds: kind='xref' (referenced occurrences), kind='derive' (derive "
+            "features) and kind='unresolved' (an occurrence whose referenced component could not be "
+            "loaded). all_current is authoritative ONLY on a complete walk; it is false whenever any "
             "ref is stale, any ref is unreadable, or the walk was capped (truncated/depth_capped). "
+            "reference_link_count counts LINKS - one per referencing occurrence plus one per derive "
+            "feature - which is a different noun from workspace_orient's "
+            "references.referenced_documents (referenced DOCUMENTS), so the two legitimately differ. "
             "This walks the in-session assembly; refresh stale refs with doc_update_xref.")
+    if unresolved:
+        note += (f" {len(unresolved)} UNRESOLVED reference(s) found. Reading such an occurrence's "
+                 "component raises, so it carries no source document, version or out_of_date flag - "
+                 "doc_update_xref cannot refresh it. It is also absent from the document's "
+                 "documentReferences and from childOccurrences, so no freshness read can see it; "
+                 "open the browser tree in Fusion and hover the flagged node for the reason.")
     if not complete:
         note += " Walk was partial - all_current reflects only the examined refs."
     return {
         "available": True,
-        "reference_count": len(refs),
+        # The noun is IN the key: LINKS, not documents (workspace_orient's
+        # references.referenced_documents) - the two counted different things under one name.
+        "reference_link_count": len(refs),
+        "unresolved_count": len(unresolved),
         "stale_count": counters["stale"],
         "unreadable_count": counters["unreadable"],
         "all_current": all_current,
@@ -567,8 +630,9 @@ TOOL_DESCRIPTION = (
     "the CLOUD data model (hubs/projects/files) use data_get. Opt-in cloud slices via include=[...]: "
     "'versions' = the active doc's version history (number/date/description/id + is_milestone/"
     "milestone_name, newest-first, capped); "
-    "'xref_tree' = recursive freshness walk of referenced components AND derive links (kind='xref'/"
-    "'derive') with current-vs-latest version + an all_current/stale_count rollup; 'used_in' = the "
+    "'xref_tree' = recursive freshness walk of referenced components, derive links and refs that "
+    "will not load (kind='xref'/'derive'/'unresolved'), with current-vs-latest version and an "
+    "all_current/stale/unresolved rollup; 'used_in' = the "
     "REVERSE view (where-used) - documents "
     "that reference THIS one (a drawing made from it, a parent assembly that inserts it), each with "
     "name/type/version/URN and a by-type rollup. open_documents is capped (max_results, default 50) and "

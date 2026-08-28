@@ -12,6 +12,7 @@ closure that must still see the collection bound in its enclosing handler.
 import ast
 import os
 
+import _corpus
 import api_surface
 
 TOOLS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
@@ -165,10 +166,12 @@ def _bindings(nodes, coll_vars):
 
 def _offenders_in(path):
     """[(line, var, prop, class)] for every property assigned onto a resolved input whose name is
-    not a real member of that input's class."""
-    with open(path, encoding="utf-8") as fh:
-        tree = ast.parse(fh.read(), filename=path)
+    not a real member of that input's class.
+
+    The tree comes from _corpus, shared with every other lint that parses the same file, and this
+    walk only READS it: the two dict writes below are keyed BY a node's value, never onto a node."""
     offenders = []
+    tree = _corpus.tree(path)
     for nodes, enclosing in _scopes(tree):
         visible = enclosing + nodes
         bound = _bindings(visible, _collection_vars(visible))

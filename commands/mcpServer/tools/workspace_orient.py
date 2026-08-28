@@ -277,18 +277,42 @@ def _grounded_count(root):
     return grounded
 
 
-def _browser_digest(root):
+def _unresolved_descendants(walk, name):
+    """How many unresolved references sit anywhere under the top-level occurrence `name`, read off the
+    ONE census. The walk records each broken row's parent path, which starts at the top-level
+    occurrence's own name, so a subtree is matched by that prefix."""
+    if not name:
+        return 0
+    return sum(1 for b in walk.broken
+               if b["parent_path"] == name or (b["parent_path"] or "").startswith(name + "+"))
+
+
+def _browser_digest(root, walk):
     """A DEPTH-1 digest of the top-level occurrences - name, component, child + body counts, grounded,
     is-x-ref - NOT the full tree. The point is orientation ('what are the major pieces?'), not the
-    exhaustive structure (that's design_get(include=['tree'])'s job, on demand)."""
+    exhaustive structure (that's design_get(include=['tree'])'s job, on demand).
+
+    ``is_xref`` describes THAT ROW; a reference nested below it does not set the flag, which is why
+    the note names the depth. ``unresolved_descendants`` is the one subtree-wide number here, taken
+    from the shared census rather than a second walk, because an unresolved reference is a health
+    fact the orientation read must not need a deeper call to expose."""
     digest = []
     occs = safe(lambda: root.occurrences)
     count = safe(lambda: occs.count, 0) if occs else 0
     for o in islice(_common.iter_collection(occs), _DIGEST_LIMIT):
+        is_broken, detail = _common.broken_reference(o)
+        name = safe(lambda o=o: o.name)
+        if is_broken:
+            # Every other read on such an occurrence raises; a row of swallowed defaults would show
+            # it as an ordinary empty component, which is how it stayed invisible.
+            digest.append({"name": name if name else "(unreadable name)",
+                           "unresolved": True, "detail": detail})
+            continue
         digest.append({
-        "name": safe(lambda o=o: o.name),
+        "name": name,
         "component": safe(lambda o=o: o.component.name),
         "children": safe(lambda o=o: o.childOccurrences.count, 0),
+        "unresolved_descendants": _unresolved_descendants(walk, name),
         "bodies": safe(lambda o=o: o.bRepBodies.count, 0),
         "grounded": bool(safe(lambda o=o: o.isGrounded, False)),
         "is_xref": bool(safe(lambda o=o: o.isReferencedComponent, False)),
@@ -376,7 +400,7 @@ def handler() -> dict:
         out["has_cam"] = has_cam
         if cam:
             out["cam"] = cam
-        out["references"] = {"count": xref_count, "out_of_date": out_of_date}
+        out["references"] = {"referenced_documents": xref_count, "out_of_date": out_of_date}
         note = ("A document is open but no Design product is active. "
     "Switch to the Design workspace, or use the CAM tools if has_cam is true.")
         if out_of_date:
@@ -386,7 +410,15 @@ def handler() -> dict:
 
     root = safe(lambda: design.rootComponent)
     mode = _design_mode(design)
-    occ_total = safe(lambda: root.allOccurrences.count, 0) or 0
+    # The ONE design-wide census. root.allOccurrences.count RAISES on a design holding an unresolved
+    # external reference, and safe(read, 0) published that as total_occurrences:0 beside
+    # top_level_occurrences:5 - a read failure dressed as a fact. The walk falls back to
+    # component.occurrences and reports WHICH walk answered; total is null when neither did.
+    occ_walk = _common.occurrence_walk(design)
+    occ_total = occ_walk.total
+    unresolved = [{"name": b["name"], "parent_path": b["parent_path"], "detail": b["detail"]}
+                  for b in occ_walk.broken]
+    unresolved_names = sorted({u["name"] for u in unresolved})
     # Bodies and sketches are design-wide (every component, not just root): a sub-component's sketch or
     # body must count, or a multi-part doc under-reports (a doc whose only sketches live in
     # sub-components reads sketches:0 from a root-only count).
@@ -407,7 +439,7 @@ def handler() -> dict:
             if hs in (1, 2):
                 broken_relations.append(safe(lambda rel=rel: rel.name) or f"({kind})")
     grounded = _grounded_count(root)
-    digest, top_level = _browser_digest(root)
+    digest, top_level = _browser_digest(root, occ_walk)
     has_cam, cam = _cam_summary(doc)
 
     out["has_design"] = True
@@ -416,7 +448,11 @@ def handler() -> dict:
     "units": safe(lambda: design.unitsManager.defaultLengthUnits),
     "mode": mode,
     "top_level_occurrences": top_level,
+    # null, never 0, when neither walk enumerated: an unreadable census is UNKNOWN, and a
+    # fabricated 0 beside a non-zero top_level_occurrences is a contradiction an agent reads
+    # as an empty design.
     "total_occurrences": occ_total,
+    "occurrences_walk": occ_walk.method,
     "bodies": body_total,
     "sketches": sketch_total,
     "parameters": param_total,
@@ -442,10 +478,18 @@ def handler() -> dict:
         # Out-of-date references are a HEALTH problem - a template with stale parts shows the wrong
         # geometry - so they count against is_healthy, alongside timeline errors and broken joints.
         "out_of_date_references": out_of_date,
+        # An occurrence whose referenced component cannot be loaded is a HEALTH fact, not an opt-in
+        # detail: measured, a template holding one read is_healthy:true under a note declaring the
+        # document clean. Disjoint from out_of_date_references - a broken reference has no
+        # DocumentReference at all, so no isOutOfDate read can ever carry it.
+        "unresolved_references": unresolved,
         "is_healthy": (errors == 0 and not broken_joints and not broken_relations
-                       and not out_of_date and not rolled_back),
+                       and not out_of_date and not rolled_back and not unresolved),
     }
-    out["references"] = {"count": xref_count, "out_of_date": out_of_date}
+    # The noun is IN the key: this counts referenced DOCUMENTS (Document.documentReferences), while
+    # doc_get(include=['xref_tree']).reference_link_count counts reference LINKS (one per referencing
+    # occurrence plus one per derive feature) - the two legitimately differ on one document.
+    out["references"] = {"referenced_documents": xref_count, "out_of_date": out_of_date}
     out["has_cam"] = has_cam
     if cam:
         out["cam"] = cam
@@ -454,11 +498,14 @@ def handler() -> dict:
     # ── POINTERS: the heart of progressive disclosure. Name the TARGETED tool for each area, and when
     # the design is large, steer AWAY from whole-design dumps toward a scoped call. The agent reads
     # these instead of guessing which family to probe - situational awareness without the round trips.
-    large = occ_total > _BIG_OCCURRENCES or body_total > _BIG_BODIES
+    # An UNREADABLE census cannot be called large: it steers by the counts that DID read, so a null
+    # total never silently becomes a zero in a size comparison.
+    occ_known = occ_total if occ_total is not None else 0
+    large = occ_known > _BIG_OCCURRENCES or body_total > _BIG_BODIES
     pointers["assembly_structure"] = (
         f"design_get(include=['tree'], component='<name from browser_digest>') - {occ_total} occurrences is large; "
         "scope to a component rather than dumping the whole tree."
-        if occ_total > _BIG_OCCURRENCES else
+        if occ_known > _BIG_OCCURRENCES else
         "design_get(include=['tree']) - small enough to walk the whole assembly in one call.")
     pointers["geometry"] = (
         f"find_geometry(target='<occurrence/body>') - {body_total} bodies; always scope by target "
@@ -489,6 +536,16 @@ def handler() -> dict:
         pointers["fix_relations"] = (
             f"assembly_get() - {len(broken_relations)} assembly relation(s) failed to compute "
             f"({', '.join(broken_relations[:5])}); assembly_edit_relations repairs or removes one.")
+    if unresolved:
+        # No pointer to a repair TOOL: the API exposes no path from a broken occurrence to its source
+        # file, project or hub (component and documentReference both raise, and the ref is absent
+        # from Document.documentReferences), so nothing here can fetch or relink it. The pointer names
+        # the read that lists them and the one place the reason IS visible.
+        pointers["unresolved_references"] = (
+            f"design_get(include=['tree']) - {len(unresolved)} occurrence(s) "
+            f"({', '.join(unresolved_names[:5])}) reference a component that could not be loaded; "
+            "the tree marks each row unresolved:true. Their source file is not readable through the "
+            "API - open the browser tree in Fusion and hover the flagged node for the reason.")
     if out_of_date:
         pointers["fix_references"] = (
             f"doc_update_xref() - {len(out_of_date)} external reference(s) are OUT OF DATE "
@@ -506,7 +563,7 @@ def handler() -> dict:
     # judge whether it's a problem here.
     # The gate matches is_healthy exactly, broken_relations included - a design whose only fault is
     # a failed assembly constraint must not read "No compute errors ..." beside is_healthy false.
-    if errors or broken_joints or broken_relations or out_of_date or rolled_back:
+    if errors or broken_joints or broken_relations or out_of_date or rolled_back or unresolved:
         bits = []
         if errors:
             bits.append(f"{errors} timeline error(s)")
@@ -514,6 +571,8 @@ def handler() -> dict:
             bits.append(f"{len(broken_joints)} joint(s) failed to compute")
         if broken_relations:
             bits.append(f"{len(broken_relations)} assembly relation(s) failed to compute")
+        if unresolved:
+            bits.append(f"{len(unresolved)} UNRESOLVED reference(s): {', '.join(unresolved_names)}")
         if out_of_date:
             bits.append(f"{len(out_of_date)} out-of-date reference(s)")
         if rolled_back:
@@ -528,8 +587,26 @@ def handler() -> dict:
     if warnings:
         verdict += (f"{warnings} timeline WARNING(s) present (not errors) - "
                     "design_get(include=['timeline']) lists which. ")
+    if unresolved:
+        verdict += (
+            "An UNRESOLVED reference means reading that occurrence's component RAISES, so the source "
+            "component is not loaded. Its source file, project and hub are NOT readable through the "
+            "API (component and documentReference both raise, and the reference is absent from the "
+            "document's documentReferences) - open the browser tree in Fusion and hover the flagged "
+            "node for the reason. Such an occurrence also has no readable placement, bodies or "
+            "children, so it is excluded from geometry searches and interference checks. ")
+    if occ_total is None:
+        verdict += ("total_occurrences is null: NEITHER occurrence walk enumerated, so the design's "
+                    "occurrence count is unknown rather than zero. ")
+    elif occ_walk.method == _common.WALK_RECURSED:
+        verdict += ("occurrences_walk='recursed': root.allOccurrences raised, so total_occurrences "
+                    "was rebuilt from component.occurrences. ")
     out["note"] = (
         verdict +
+        "browser_digest is DEPTH-1: is_xref describes each top-level row ITSELF, so a reference "
+        "nested below one leaves every flag false - doc_get(include=['xref_tree']) walks every "
+        "depth. references.referenced_documents counts referenced DOCUMENTS; xref_tree's "
+        "reference_link_count counts reference LINKS, so the two differ by design. "
         "Use 'pointers' to drill down with scoped calls instead of whole-design dumps."
         + (" Design is LARGE - prefer scoped calls." if large else "")
         + ("" if out["document"]["data_model"]["saved_to_cloud"] else
@@ -543,7 +620,8 @@ TOOL_DESCRIPTION = (
     "sys_capability_map for the tool families, then this.) Returns the document + its data-model "
     "location (hub/project/folder + "
     "URN), overall bounding box, camera state, current selection, content counts + a depth-1 browser "
-    "digest, a health rollup (timeline errors, broken joints, out-of-date references -> is_healthy), CAM "
+    "digest, a health rollup (timeline errors, broken joints, out-of-date AND unresolved references -> "
+    "is_healthy), CAM "
     "presence, and a 'pointers' block naming the targeted tool to refine each area (design_get(include=['tree']), "
     "find_geometry, assembly_get, cam_get). Orient here, then drill down with those scoped calls."
 )

@@ -7,12 +7,16 @@ fixture: P2a-Gimbal (the S2a artifact - the primary bodies, ENGAGED at their sup
   saves AS A NEW document (P2-Gimbal); P2a-Gimbal's cloud version must remain untouched. Missing
   fixture = ask the user - never create a project.
 budget:
-  max_tool_calls: 110
-  max_tokens: 173000
+  max_tool_calls: 122
+  max_tokens: 190000
 substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
 perturbations: none (baseline)
 expected_refusals: none
 ---
+
+> NEEDS-RUN - UNMEASURED WORDING: the volumetric-audit habit and the body-census postcondition
+> below have not been exercised by a blind executor, so the budget is a provisional pin, not a
+> measurement. This banner stands until a blind run measures this wording.
 
 # S2b - Hardware II: the pivot interfaces
 
@@ -45,6 +49,12 @@ report BLOCKED.
 Cold start: sys_capability_map, then workspace_orient. LOOK at your work with screenshots as you
 go and read them against fresh numbers.
 
+VOLUMETRIC AUDIT HABIT: after each pin, bore, and seat lands (a build milestone) and once as a
+FINAL audit before the save, take a fresh volumetric inventory - per-body volume reads plus a body
+census (which component holds how many bodies) - and read it against what you intended: a bore
+that cut nothing, a cut that ate a neighbouring feature, and an orphan offcut left behind are all
+invisible to interference checks and screenshots.
+
 GOAL - build the PIVOT INTERFACES that let the next stage joint the mechanism:
 
 - PHYSICAL PIVOT PINS: real solid pins ALONG the pivot construction lines, each pin bridging
@@ -68,6 +78,13 @@ You choose bore sizes, pin housing, and order. Grading is on STATE and HONESTY, 
 
 POSTCONDITIONS - verify EACH with your own fresh read call; report actual values WITH units.
 
+- BODY CENSUS AND VOLUMES: the FINAL volumetric audit accounts for EVERY body - a body census
+  (which component holds how many bodies) plus a per-body volume read. Each pin you added is ONE
+  connected solid of its own, each inherited part is still ONE connected solid, and no orphan lump
+  or bore offcut is left anywhere. Report each body's volume with units and the read that produced
+  it, and for each part you bored, its volume before vs after with the removal that explains the
+  difference - a bore whose volume delta is ZERO cut nothing (a no-op or mis-scoped cut) and a
+  delta far larger than the bore ate neighbouring material; either is a FAIL, not a rounding note.
 - PINS COLLINEAR AND THREADING: each pin is a solid cylinder whose axis is COLLINEAR with its
   pivot construction line (report the axis direction and its distance from the line - ~0), and
   a fresh read shows its extent spanning INTO BOTH parts it joins.
@@ -148,6 +165,11 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
 - Handoff: P2-Gimbal is the artifact S3's fixture consumes (its fixture wording names the S2b
   artifact).
 - Staging: doc_open the S2a artifact BY URN (force_api_open), confirm active; run the block.
-- Budget: the last measured run (Agent-executor harness) was 70 calls; the parametric-pins and
-  engagement-contact reads add a handful, so 110 is a provisional pin - recalibrate at the
-  first measured run_eval run of the current wording.
+- THE VOLUMETRIC AUDIT CLAUSE (scenario-authoring-spec.md, physical-deliverable requirement):
+  this stage both ADDS solids (the pins) and REMOVES material (the bores), so the grader re-issues
+  its own per-body volume inventory + body census before upholding a PASS. The per-bored-part
+  before/after delta is the check nothing else here makes: a mis-scoped or no-op cut leaves the
+  interference read, the health read, and every screenshot green while the bore does not exist.
+- Budget: the last measured run (Agent-executor harness) was 70 calls; the parametric-pins,
+  engagement-contact, and volumetric-audit reads add to that, so 122 calls / 190k output tokens is
+  a provisional pin - recalibrate at the first measured run_eval run of the current wording.

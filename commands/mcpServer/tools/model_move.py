@@ -186,9 +186,15 @@ def _axis_entity(raw, comp, design, context=None):
         return None, (f"'axis': the active component has no {raw} origin construction axis to move "
                       "along. Pass a find_geometry handle at a straight edge or sketch line.")
     # An origin construction axis is refused ("3 : Invalid entity") unless it is proxied into the
-    # occurrence the moved body belongs to. Proxying alone is not enough - see _host_for.
+    # occurrence the moved body belongs to. Proxying alone is not enough - see _host_for. The lift
+    # ends on the shared leaf op, which REFUSES a createForAssemblyContext that handed back nothing:
+    # falling back to the native axis returns the very entity the lift exists to avoid, and defineAs
+    # then fails inside the API with nothing pointing at why.
     if context is not None:
-        ent = safe(lambda: ent.createForAssemblyContext(context)) or ent
+        return _inputs._proxy_or_refuse(
+            f"'axis': the {raw} origin construction axis", ent, context,
+            "Pass a find_geometry handle at a straight edge or sketch line in the moved body's "
+            "own component.")
     return ent, None
 
 

@@ -189,8 +189,11 @@ def mesh_get_handler(target: str = "", max_results: int = 50, units: str = "mm")
         root = safe(lambda: design.rootComponent)
         if root is not None:
             comps.append(root)
-        for o in (safe(lambda: root.allOccurrences) or []) if root else []:
-            c = safe(lambda: o.component)
+        # The shared census, not a bare root.allOccurrences: that property RAISES on a design holding
+        # an unresolved external reference, and the empty walk would sweep the ROOT ONLY while
+        # reporting the result as design-wide.
+        for o in _common.all_occurrences(design):
+            c = safe(lambda o=o: o.component)
             if c is not None and c not in comps:
                 comps.append(c)
     else:

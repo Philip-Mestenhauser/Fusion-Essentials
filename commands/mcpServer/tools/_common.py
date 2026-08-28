@@ -15,7 +15,7 @@ import adsk.core
 import adsk.fusion
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
-MAP_BLURB = "ok/error/safe, measured (a scaled number or None - the honest counterpart to safe(read, 0.0) for anything a caller treats as a MEASUREMENT, where 0 is an answer) + read_flag (the same honesty for a BOOLEAN: True/False/None, never a coerced False - the ONE unreadable-flag read every set-then-read-back gate and every published flag goes through) + counted (the same honesty for an INTEGER COUNT: the int or None, never a coerced 0/1 - for a count an absent read does NOT make zero, like a body's lumps or a built path's entities; safe(read, 0) stays right for a TALLY over a collection that may be absent), design/target_component, resolve_sketch + resolve_or_recent_sketch (the name-or-most-recent sketch contract), resolve_entity_ref + resolve_entity_refs (the ONE '<type>:<index>' sketch-entity resolver and the comma-separated list parser over it), SKETCH_ANCHORS + parse_anchor_ref + anchor_point (the ONE entity-anchored position grammar - a ref's optional third segment ':start/:end/:mid/:center' naming WHICH point of the entity is meant, and the resolve to that SketchPoint; sketch_dimension and sketch_constrain read the same forms through it, and 'mid' CREATES a midpoint-constrained point where the others only read one), most_recent_body + resolve_body_or_recent (the ONE 'that body, or the most recent one' resolution every whole-body edit runs: a given handle/name goes through the caller's own BodyRef, empty falls back to most_recent_body, and the caller words the no-body error), NO_VOLUME_CHANGE_CM3 (the ONE band a before/after volume difference counts as no change at all - every material-changing feature judges its silent no-op against it), result_bodies + body_facts (the feature-result walk and the per-body {name, is_solid} projection it is published with), open_profile_from_sketch, scale, timeline_health (the shared before/after edit guard), set_verified (the set-then-read-back every FeatureInput property assignment needs - a SWIG proxy accepts an unknown name silently), apply_rename (the ONE create-flow rename-with-disclosure: sets entity.name, reads it back, returns (final_name, warning-or-None) - a declined or deduped rename is DISCLOSED in the payload, never swallowed and never an error on a create that succeeded), cancel_input (the ONE abort for a partial-computing createInput transaction - trim/boundary fill - that reports a refused cancel instead of swallowing it), direct_feature_absence + no_feature_error + failed_effect_remedy + DIRECT_FEATURE_NOTE (the one mode gate for a Features.*.add() that returns nothing: measured per-class in DIRECT designs while the edit LANDS, so a site with a feature-independent effect check falls through to it, a site without one refuses honestly, and a wrong-effect error ends with the remedy that actually exists in that mode) + null_feature_note (the ONE sentence a payload appends for a null feature - DIRECT mode, or the base-feature edit scope that suppressed it - so no site re-rolls the branch or infers a design mode from the missing object), census_host + body_count (the resolve-the-collection-ONCE-before-the-mutation body census a feature-free effect check counts on - measured: the pieces land in the TARGET's parentComponent, not the active component), same_component (the ONE same-component test - component wrappers are measured NEVER identity-stable, so `a is b` between two component references is always False and must never carry the comparison), iter_collection (the ONE count/item(i) walk over a Fusion collection - every present item, empty when the collection is absent), native_token (the ONE physical-body identity read - (nativeObject or self).entityToken, safe at both steps - the key that collapses a native body and its occurrence proxies to one body; a local safe(lambda: b.entityToken) re-roll is how a de-dup counts one body twice), all_occurrences + occurrence_paths + component_contains (the ONE assembly-context occurrence walk - root.allOccurrences, the only source of true fullPathNames - plus the path census a structural edit diffs to read its effect back, and the cycle test a re-parent/instance refuses on), build_path (the ONE feature-path resolver every sweep/pipe/path-pattern/on-path datum builds its adsk.fusion.Path with: 'sketch:<name>' chains a path sketch's curves, ONE find_geometry edge handle chains from that seed across TANGENT connections - a sharp corner stops the chain, so the built Path's count is the truth - and a JSON list of edge handles is used exactly and must connect) - the response+resolve substrate"
+MAP_BLURB = "ok/error/safe, measured (a scaled number or None - the honest counterpart to safe(read, 0.0) for anything a caller treats as a MEASUREMENT, where 0 is an answer) + read_flag (the same honesty for a BOOLEAN: True/False/None, never a coerced False - the ONE unreadable-flag read every set-then-read-back gate and every published flag goes through) + counted (the same honesty for an INTEGER COUNT: the int or None, never a coerced 0/1 - for a count an absent read does NOT make zero, like a body's lumps or a built path's entities; safe(read, 0) stays right for a TALLY over a collection that may be absent), design/target_component, find_sketches_by_name + find_sketch + resolve_sketch + find_or_recent_sketch + resolve_or_recent_sketch (the ONE design-wide by-name sketch walk - active component, then root, then the rest - its resolve-one, which REFUSES a name SEVERAL sketches carry naming each owning component instead of first-matching, and the name-or-most-recent contract over it: find_or_recent_sketch hands the refusal back as a third value so a caller with a wire string NAMES the duplicate, resolve_* drop it for a caller with nowhere to put it), resolve_entity_ref + resolve_entity_refs (the ONE '<type>:<index>' sketch-entity resolver and the comma-separated list parser over it), SKETCH_ANCHORS + parse_anchor_ref + anchor_point (the ONE entity-anchored position grammar - a ref's optional third segment ':start/:end/:mid/:center' naming WHICH point of the entity is meant, and the resolve to that SketchPoint; sketch_dimension and sketch_constrain read the same forms through it, and 'mid' CREATES a midpoint-constrained point where the others only read one), most_recent_body + resolve_body_or_recent (the ONE 'that body, or the most recent one' resolution every whole-body edit runs: a given handle/name goes through the caller's own BodyRef, empty falls back to most_recent_body, and the caller words the no-body error), NO_VOLUME_CHANGE_CM3 (the ONE band a before/after volume difference counts as no change at all - every material-changing feature judges its silent no-op against it), result_bodies + body_facts (the feature-result walk and the per-body {name, is_solid} projection it is published with), open_profile_from_sketch, scale, timeline_health (the shared before/after edit guard), set_verified (the set-then-read-back every FeatureInput property assignment needs - a SWIG proxy accepts an unknown name silently), apply_rename (the ONE create-flow rename-with-disclosure: sets entity.name, reads it back, returns (final_name, warning-or-None) - a declined or deduped rename is DISCLOSED in the payload, never swallowed and never an error on a create that succeeded), cancel_input (the ONE abort for a partial-computing createInput transaction - trim/boundary fill - that reports a refused cancel instead of swallowing it), direct_feature_absence + no_feature_error + failed_effect_remedy + DIRECT_FEATURE_NOTE (the one mode gate for a Features.*.add() that returns nothing: measured per-class in DIRECT designs while the edit LANDS, so a site with a feature-independent effect check falls through to it, a site without one refuses honestly, and a wrong-effect error ends with the remedy that actually exists in that mode) + null_feature_note (the ONE sentence a payload appends for a null feature - DIRECT mode, or the base-feature edit scope that suppressed it - so no site re-rolls the branch or infers a design mode from the missing object), census_host + body_count (the resolve-the-collection-ONCE-before-the-mutation body census a feature-free effect check counts on - measured: the pieces land in the TARGET's parentComponent, not the active component), same_component (the ONE same-component test - component wrappers are measured NEVER identity-stable, so `a is b` between two component references is always False and must never carry the comparison), iter_collection (the ONE count/item(i) walk over a Fusion collection - every present item, empty when the collection is absent), native_token (the ONE physical-body identity read - (nativeObject or self).entityToken, safe at both steps - the key that collapses a native body and its occurrence proxies to one body; a local safe(lambda: b.entityToken) re-roll is how a de-dup counts one body twice), occurrence_walk + all_occurrences + occurrence_paths + component_contains (the ONE design-wide occurrence census and its projections: root.allOccurrences is the fast path and the only source of true fullPathNames, but the PROPERTY ACCESS ITSELF raises on a design holding an unresolved external reference, so occurrence_walk falls back to a component.occurrences recursion and publishes WHICH walk answered (occurrences_walk: allOccurrences / recursed / unreadable), its usable rows, its unresolved rows and a total that is None - never 0 - when nothing enumerated; all_occurrences is the usable-rows-only list, occurrence_paths the path census a structural edit diffs to read its effect back, and component_contains the cycle test a re-parent/instance refuses on) + broken_reference (the ONE unresolved-external-reference detector: occ.component RAISING AT ALL is the gate and the raise text is published verbatim as the detail - isReferencedComponent, documentReference, isValid and isLightBulbOn were each measured LYING on a real broken reference), build_path (the ONE feature-path resolver every sweep/pipe/path-pattern/on-path datum builds its adsk.fusion.Path with: 'sketch:<name>' chains a path sketch's curves, ONE find_geometry edge handle chains from that seed across TANGENT connections - a sharp corner stops the chain, so the built Path's count is the truth - and a JSON list of edge handles is used exactly and must connect) - the response+resolve substrate"
 
 app = adsk.core.Application.get()
 
@@ -117,8 +117,8 @@ def same_component(a, b) -> bool:
     takes the "different component" branch every time.
 
     Compares by entityToken (exact - every wrapper of one component reports the same one), falling
-    back to name (the hedge _joints.jo_assembly_proxy and assembly_get already use) when a token
-    cannot be read, and keeping the identity check only as a free short-circuit."""
+    back to name only when a token cannot be read, and keeping the identity check as a free
+    short-circuit."""
     if a is None or b is None:
         return False
     if a is b:
@@ -187,33 +187,269 @@ def all_components(d):
     return out or [root]
 
 
+def broken_reference(occ):
+    """(is_broken, detail) for ONE occurrence - the ONE unresolved-external-reference detector.
+
+    The gate is ``occ.component`` RAISING AT ALL, and ``detail`` is that exception's text verbatim.
+    A component that cannot be read is unusable to every caller whatever the wording, so the gate is
+    the raise itself rather than a substring match the platform could reword.
+
+    Every OTHER candidate signal was measured LYING on a real broken reference (an occurrence whose
+    source project is archived): ``isReferencedComponent`` reads False where a live xref reads True;
+    ``documentReference`` raises the SAME "not referencing an external component" text an ordinary
+    local occurrence gives, so it cannot tell the two apart; ``isValid`` and ``isLightBulbOn`` both
+    read True. ``name`` still reads, and is the only identity a caller can publish.
+
+    Structurally the broken occurrence is present in ``component.occurrences`` and ABSENT from
+    ``childOccurrences`` (its assembly path is invalid), which is why ``occurrence_walk`` scans the
+    component-local collection for it."""
+    try:
+        occ.component
+    except Exception as exc:                    # noqa: BLE001 - the raise IS the signal
+        return True, (str(exc) or type(exc).__name__)
+    return False, None
+
+
+# The walk that produced an occurrence census, published beside every count it feeds.
+WALK_FAST = "allOccurrences"        # root.allOccurrences enumerated
+WALK_RECURSED = "recursed"          # it raised; the census was rebuilt from component.occurrences
+WALK_UNREADABLE = "unreadable"      # neither path enumerated - the census is UNKNOWN, not empty
+
+_WALK_MAX_DEPTH = 24                # a guard on the recursion, not a modelling limit
+_WALK_MAX_NODES = 20000
+
+
+class OccurrenceWalk:
+    """The result of ONE design-wide occurrence census: the usable rows, the unresolved ones, and HOW
+    the census was taken.
+
+    ``occurrences`` holds only occurrences whose component READS - the rows a caller can go on to
+    measure, name or proxy. ``broken`` holds one record per unresolved reference
+    ({name, parent_path, detail}); those rows answer almost nothing (``fullPathName``, ``isVisible``
+    and ``childOccurrences.count`` all raise on them), so they are kept apart rather than salted
+    into a list every consumer iterates. ``total`` counts both, and is None only when nothing
+    enumerated - the state that must reach the wire as null, never as 0 with a truncation flag
+    denying anything was lost."""
+
+    __slots__ = ("occurrences", "broken", "broken_occurrences", "method", "complete", "_census")
+
+    def __init__(self, occurrences, broken, method, complete, broken_occurrences=None):
+        self.occurrences = occurrences
+        self.broken = broken
+        # Pinned at construction, BEFORE any cap slices the row list - a cap bounds what is rendered,
+        # never what the design was found to hold.
+        self._census = len(occurrences) + len(broken)
+        # The raw objects behind `broken`, in the same order. `broken` is pure wire data (it is
+        # published), so a resolver that must still MATCH an unresolved occurrence by name - and
+        # refuse it with the real reason instead of "no such occurrence" - reads them from here.
+        self.broken_occurrences = list(broken_occurrences or [])
+        self.method = method
+        self.complete = complete
+
+    @property
+    def readable(self):
+        return self.method != WALK_UNREADABLE
+
+    @property
+    def total(self):
+        """How many occurrences the design holds, unresolved ones included - or None when the census
+        could not be taken at all. A count from an INCOMPLETE walk (``complete`` False) is a lower
+        bound; the flag, not the number, is what says so."""
+        return None if not self.readable else self._census
+
+    def names(self):
+        """The unresolved occurrences' names, for a wire string that must NAME them."""
+        return [b["name"] for b in self.broken]
+
+
+def _broken_record(occ, parent_path, detail):
+    """One unresolved-reference row. ``name`` is the only identity that reads on such an occurrence;
+    when even that raises, the row publishes the parent path and says the name is unreadable rather
+    than dropping the row."""
+    name = safe(lambda: occ.name)
+    return {"name": name if name else "(unreadable name)",
+            "name_readable": name is not None,
+            "parent_path": parent_path,
+            "detail": detail}
+
+
+def _recursed_walk(root):
+    """Rebuild one component's subtree census WITHOUT ``allOccurrences``, which an unresolved
+    reference ANYWHERE IN THAT SUBTREE makes raise (measured on both the root component and a
+    mid-tree container; a leaf component whose subtree is clean still answers).
+
+    Two collections per node, because neither alone is both correct and complete: assembly-context
+    children (``childOccurrences``, and ``root.occurrences`` at the top) carry the true
+    fullPathNames but silently DROP an unresolved child, while the component-local collection
+    (``component.occurrences``) DOES hold it. So the healthy rows are taken from the first and the
+    unresolved rows from the second, each classified by ``broken_reference``.
+
+    Returns (occurrences, broken, complete, broken_occurrences); complete is False when any node's
+    collection would not enumerate or a depth/node cap was hit, so a short census is never mistaken
+    for the whole design."""
+    occs, broken, broken_occs = [], [], []
+    state = {"complete": True, "n": 0}
+
+    def record_broken(occ, parent_path, detail):
+        broken.append(_broken_record(occ, parent_path, detail))
+        broken_occs.append(occ)
+
+    def enumerate_coll(coll):
+        """(items, readable) for one collection. The COUNT is read through ``counted``, so a
+        collection whose count raises is UNREADABLE - not empty. ``iter_collection`` alone would
+        swallow that raise into a zero-length walk, which is the exact defect this walk exists to
+        stop happening one level up."""
+        if coll is None:
+            return [], False
+        n = counted(lambda: coll.count)
+        if n is None:
+            return [], False
+        return list(iter_collection(coll)), True
+
+    def scan_broken(comp, parent_path):
+        """The unresolved children of one component-local collection."""
+        children, readable = enumerate_coll(safe(lambda: comp.occurrences))
+        if not readable:
+            state["complete"] = False
+            return
+        for child in children:
+            is_broken, detail = broken_reference(child)
+            if is_broken:
+                record_broken(child, parent_path, detail)
+
+    def descend(occ, path, depth):
+        if depth > _WALK_MAX_DEPTH or state["n"] >= _WALK_MAX_NODES:
+            state["complete"] = False
+            return
+        comp = safe(lambda: occ.component)
+        if comp is None:
+            state["complete"] = False
+            return
+        scan_broken(comp, path)
+        kids, readable = enumerate_coll(safe(lambda: occ.childOccurrences))
+        if not readable:
+            state["complete"] = False
+            return
+        walk_children(kids, path, depth)
+
+    def walk_children(children, path, depth):
+        for child in children:
+            state["n"] += 1
+            if state["n"] > _WALK_MAX_NODES:
+                state["complete"] = False
+                return
+            # An unresolved occurrence is not expected in an assembly-context collection (measured:
+            # childOccurrences drops it) - if one does surface here it is skipped, because the
+            # component-local scan is the ONE place unresolved rows are collected, and collecting it
+            # twice would double-count the census.
+            if broken_reference(child)[0]:
+                continue
+            occs.append(child)
+            name = safe(lambda c=child: c.name) or "?"
+            descend(child, f"{path}+{name}" if path else name, depth + 1)
+
+    top, readable = enumerate_coll(safe(lambda: root.occurrences))
+    if not readable:
+        # Neither walk answered: the census is UNKNOWN. Returning the unreadable shape is what makes
+        # the caller publish null rather than an empty design.
+        return [], [], False, []
+    # The root's own collection is BOTH the component-local and the assembly-context one, so the
+    # unresolved scan runs over it directly rather than through descend().
+    for child in top:
+        is_broken, detail = broken_reference(child)
+        if is_broken:
+            record_broken(child, safe(lambda: root.name), detail)
+    walk_children(top, "", 0)
+    return occs, broken, state["complete"], broken_occs
+
+
+def component_walk(comp, cap=None):
+    """The ONE occurrence census over a COMPONENT's subtree, and the honest report of how it was taken.
+
+    ``allOccurrences`` is the fast path and, on the ROOT component, the only source of true assembly
+    fullPathNames - an occurrence handle taken from ``<component>.occurrences`` reads a
+    COMPONENT-LOCAL path (measured). But the PROPERTY ACCESS ITSELF raises
+    (``InternalValidationError : occ``, measured) whenever the subtree holds an unresolved external
+    reference, and ``safe(read) or []`` there turns "the assembly could not be read" into "the
+    assembly is empty" - which consumers then publish as fact. So a raise falls back to
+    ``_recursed_walk`` and the result SAYS which walk answered.
+
+    ``cap`` bounds the returned ``occurrences`` list for a caller that only renders/labels; the
+    census counts (``total``, ``broken``) stay whole, so a cap never shrinks the reported design."""
+    if comp is None:
+        return OccurrenceWalk([], [], WALK_UNREADABLE, False)
+    flat = safe(lambda: list(comp.allOccurrences))
+    if flat is not None:
+        occs, broken, broken_occs = [], [], []
+        for o in flat:
+            # A None slot is an item the collection would not hand over - not an unresolved
+            # reference. It stays in the census (as it always has) so the count still reflects the
+            # collection's own size; every consumer reads occurrence fields through safe().
+            if o is None:
+                occs.append(o)
+                continue
+            is_broken, detail = broken_reference(o)
+            if is_broken:
+                broken.append(_broken_record(o, None, detail))
+                broken_occs.append(o)
+            else:
+                occs.append(o)
+        walk = OccurrenceWalk(occs, broken, WALK_FAST, True, broken_occs)
+    else:
+        occs, broken, complete, broken_occs = _recursed_walk(comp)
+        if not occs and not broken and not complete:
+            return OccurrenceWalk([], [], WALK_UNREADABLE, False)
+        walk = OccurrenceWalk(occs, broken, WALK_RECURSED, complete, broken_occs)
+    if cap is not None:
+        walk.occurrences = walk.occurrences[:cap]
+    return walk
+
+
+def occurrence_walk(d, cap=None):
+    """The design-wide occurrence census: ``component_walk`` over the ROOT component, which is the
+    only scope whose occurrence handles carry true assembly fullPathNames."""
+    return component_walk(safe(lambda: d.rootComponent) if d else None, cap=cap)
+
+
 def all_occurrences(d, cap=None):
-    """Every occurrence in the design, in ASSEMBLY context, as a flat list. ``allOccurrences`` is a
-    property of the ROOT COMPONENT and is the only walk that reports true assembly fullPathNames: an
-    occurrence handle taken from ``<component>.occurrences`` reads a COMPONENT-LOCAL path (measured).
-    The occurrence counterpart of ``all_components`` - the basis of the by-name resolver
-    (``_inputs._resolve_occurrence``) and of every before/after assembly census. ``cap`` bounds the
-    list for a caller that only renders/labels (a view tool never needs an unbounded walk)."""
-    root = safe(lambda: d.rootComponent) if d else None
-    occs = list(safe(lambda: root.allOccurrences) or []) if root is not None else []
-    return occs[:cap] if cap is not None else occs
+    """Every USABLE occurrence in the design, in ASSEMBLY context, as a flat list - the occurrence
+    counterpart of ``all_components``, the basis of the by-name resolver
+    (``_inputs._resolve_occurrence``) and of every before/after assembly census.
+
+    A thin projection of ``occurrence_walk``: it survives a raising ``allOccurrences`` by falling
+    back to the component-local recursion, and it OMITS unresolved references (whose every geometry
+    read raises). A caller that publishes a COUNT, a completeness claim, or a health verdict must
+    call ``occurrence_walk`` instead - this list alone cannot say whether it is the whole design."""
+    return occurrence_walk(d, cap=cap).occurrences
 
 
 def occurrence_paths(d):
     """Every occurrence fullPathName in the design, as a set - the before/after census a structural
-    edit (instance, re-parent) diffs to read back WHICH paths it actually added."""
-    return {(safe(lambda o=o: o.fullPathName) or "") for o in all_occurrences(d)}
+    edit (instance, re-parent) diffs to read back WHICH paths it actually added.
+
+    An occurrence whose path will not read contributes '' rather than being dropped, unresolved
+    references included (their fullPathName raises): a caller filters '' out, where a silently
+    dropped row would make the diff report a phantom new path."""
+    walk = occurrence_walk(d)
+    paths = {(safe(lambda o=o: o.fullPathName) or "") for o in walk.occurrences}
+    if walk.broken:
+        paths.add("")
+    return paths
 
 
 def component_contains(outer, inner):
     """True when component `inner` IS `outer` or sits anywhere inside it - the cycle test a structural
-    edit refuses on (a component cannot hold an instance of itself). Walks ``Component.allOccurrences``
-    (the component's own subtree) and compares through ``same_component``, since component wrappers are
-    never identity-stable."""
+    edit refuses on (a component cannot hold an instance of itself). Compares through
+    ``same_component``, since component wrappers are never identity-stable.
+
+    Walks the subtree through ``component_walk``, not a bare ``Component.allOccurrences``: that
+    property raises whenever the subtree holds an unresolved external reference (measured), and a
+    swallowed raise would answer False - "no cycle" - about a subtree nothing was read from, which is
+    the answer that LETS the illegal edit through."""
     if same_component(outer, inner):
         return True
-    inside = safe(lambda: outer.allOccurrences) if outer is not None else None
-    return any(same_component(safe(lambda o=o: o.component), inner) for o in list(inside or []))
+    return any(same_component(safe(lambda o=o: o.component), inner)
+               for o in component_walk(outer).occurrences)
 
 
 def all_meshes(d):
@@ -325,20 +561,20 @@ def open_profile_from_sketch(comp, sketch, verb, no_curves_error=None):
     return prof, None
 
 
-def resolve_sketch(d, name):
-    """Resolve a sketch BY NAME across the whole design - the ONE true resolver every by-name sketch
-    tool should use. Search order: the ACTIVE edit component first (where model_create_component(
-    activate=true) + sketch_create just put it - the common assembly case), then the root component,
-    then every other component. Returns the live Sketch or None.
+def find_sketches_by_name(d, name):
+    """Every (sketch, owning_component) carrying EXACTLY ``name``, in the design-wide search order:
+    the ACTIVE edit component first (where model_create_component(activate=true) + sketch_create just
+    put it - the common assembly case), then the root component, then every other component. A LIST,
+    because a sketch name is only component-locally unique: two components can each hold a 'Sketch1'.
+    The caller decides - one hit resolves, several REFUSE with the owning components; never the
+    first hit, which silently draws on/deletes from an arbitrary component's sketch.
 
-    A plain ``design.rootComponent.sketches.itemByName`` only finds sketches in the ROOT component, so
-    a sketch drawn in an activated SUB-component (the normal multi-part workflow) would be invisible to
-    a by-name sketch op even though model_extrude/revolve (which use target_component) can see it. This
-    one resolver searches the active component first, so every by-name sketch op stays consistent.
-    """
+    Each component is asked with its own ``sketches.itemByName``, so a sketch drawn in an activated
+    SUB-component (the normal multi-part workflow) is found, which a plain
+    ``design.rootComponent.sketches.itemByName`` never sees."""
     nm = (name or "").strip()
     if not nm:
-        return None
+        return []
     # Active component first, then root, then the rest - de-duplicated by entityToken (component
     # wrappers are NEVER identity-stable - see same_component - so `c not in ordered` can never
     # dedupe; a component whose token will not read is walked again, which only costs a re-read).
@@ -352,38 +588,112 @@ def resolve_sketch(d, name):
         if tok is not None:
             seen.add(tok)
         ordered.append(c)
+    # The hits are de-duplicated by the SKETCH's own entityToken (id() only where none reads): the
+    # ordered walk deliberately visits the active component, the root and allComponents' copy of
+    # each, and two component wrappers hand back two different Python objects for ONE sketch. Keying
+    # the walk on the components alone would report that one sketch as several same-named ones.
+    out, seen_sk = [], set()
     for comp in ordered:
         sk = safe(lambda c=comp: c.sketches.itemByName(nm))
-        if sk:
-            return sk
-    return None
+        if not sk:
+            continue
+        tok = safe(lambda s=sk: s.entityToken)
+        key = tok if tok is not None else id(sk)
+        if key in seen_sk:
+            continue
+        seen_sk.add(key)
+        out.append((sk, comp))
+    return out
+
+
+def find_sketch(d, name):
+    """Resolve ONE sketch by name design-wide. Returns (sketch, error_or_None) - the REFUSING form
+    of ``resolve_sketch``, for a caller that can return the refusal.
+
+    A name carried by SEVERAL sketches is refused naming each owning component; a name exactly one
+    sketch carries resolves (search order above); a name NO sketch carries is (None, None), so each
+    caller keeps wording its own not-found error off ``all_sketch_names``."""
+    hits = find_sketches_by_name(d, name)
+    if len(hits) == 1:
+        return hits[0][0], None
+    if not hits:
+        return None, None
+    nm = (name or "").strip()
+    where = ", ".join(f"'{nm}' in {safe(lambda c=c: c.name) or '(unnamed component)'}"
+                      for _sk, c in hits[:8])
+    return None, (f"{len(hits)} sketches are named '{nm}' ({where}) - sketch names are only unique "
+                  "within a component. Rename one so the name resolves to a single sketch, then "
+                  "retry (sketch_get lists the sketches).")
+
+
+def resolve_sketch(d, name):
+    """Resolve a sketch BY NAME across the whole design - the ONE true resolver every by-name sketch
+    tool should use. Returns the live Sketch, or None both when NO sketch carries the name and when
+    SEVERAL do: a shared name is refused, never first-matched. A caller that can surface WHY calls
+    ``find_sketch`` instead, which carries the refusal text naming each owning component.
+
+    Search order (``find_sketches_by_name``): the ACTIVE edit component first, then the root
+    component, then every other component - so a sketch drawn in an activated SUB-component is
+    reachable by name, and among several UNIQUELY-named sketches the active component's is the one
+    the assembly workflow means."""
+    return find_sketch(d, name)[0]
+
+
+def find_or_recent_sketch(d, name):
+    """The ONE name-or-default sketch contract, in its REFUSING form: a NAME resolves DESIGN-WIDE
+    via ``find_sketch`` (active component first, then root, then the rest - a root master sketch
+    stays reachable from an activated sub-component); an EMPTY name means the most recently created
+    sketch in the ACTIVE component. Returns (sketch-or-None, the stripped requested name or None
+    when blank, ambiguity_error-or-None).
+
+    The third value is what separates the two ways a NAME fails to identify a sketch: a name NO
+    sketch carries comes back (None, name, None) and the caller words its own not-found error, while
+    a name SEVERAL sketches carry comes back (None, name, the refusal naming each owning component)
+    and the caller returns that text - a caller collapsing both into "no sketch named X" states the
+    opposite of what was read."""
+    nm = (name or "").strip()
+    if nm:
+        sk, ambiguous = find_sketch(d, nm)
+        return sk, nm, ambiguous
+    coll = safe(lambda: target_component(d).sketches)
+    n = safe(lambda: coll.count, 0) if coll is not None else 0
+    return (coll.item(n - 1) if n else None), None, None
 
 
 def resolve_or_recent_sketch(d, name):
-    """The ONE name-or-default sketch contract: a NAME resolves DESIGN-WIDE via ``resolve_sketch``
-    (active component first, then root, then the rest - a root master sketch stays reachable from an
-    activated sub-component); an EMPTY name means the most recently created sketch in the ACTIVE
-    component. Returns (sketch-or-None, the stripped requested name or None when blank) - the caller
-    words its own not-found error off the requested name."""
-    nm = (name or "").strip()
-    if nm:
-        return resolve_sketch(d, nm), nm
-    coll = safe(lambda: target_component(d).sketches)
-    n = safe(lambda: coll.count, 0) if coll is not None else 0
-    return (coll.item(n - 1) if n else None), None
+    """The same name-or-default contract with the ambiguity refusal DROPPED: a name SEVERAL sketches
+    carry answers None like a name none carries, since neither one identifies a sketch. Returns
+    (sketch-or-None, the stripped requested name or None when blank).
+
+    For a caller that returns a message, ``find_or_recent_sketch`` above is the form to call - it
+    hands back the refusal naming each owning component. This one is for a caller with nowhere to
+    put it (a postcondition fingerprint)."""
+    sketch, requested, _ambiguous = find_or_recent_sketch(d, name)
+    return sketch, requested
 
 
 def all_sketch_names(d):
     """Every sketch name across the design (all components), for 'Available: ...' error messages -
-    so a not-found message lists sketches wherever they live, not just in the root component."""
-    names = []
+    so a not-found message lists sketches wherever they live, not just in the root component.
+
+    A name SEVERAL sketches carry is rendered QUALIFIED by its owning component ("Plate (Alpha)",
+    "Plate (Beta)"); a name only one sketch carries stays bare. Sketch names are unique only within
+    a component, so a repeated bare name reads as one sketch listed twice - and the qualified form
+    is also what ``find_sketch`` refuses that name with. A component whose own name will not read
+    leaves its entry bare, since there is nothing measured to qualify it with. Still a flat list of
+    strings: every caller joins it as it already did."""
+    pairs = []
     for comp in all_components(d):
         coll = safe(lambda c=comp: c.sketches)
+        owner = safe(lambda c=comp: c.name)
         for i in range(safe(lambda: coll.count, 0) if coll else 0):
             nm = safe(lambda i=i, cl=coll: cl.item(i).name)
             if nm:
-                names.append(nm)
-    return names
+                pairs.append((nm, owner))
+    counts = {}
+    for nm, _owner in pairs:
+        counts[nm] = counts.get(nm, 0) + 1
+    return [f"{nm} ({owner})" if counts[nm] > 1 and owner else nm for nm, owner in pairs]
 
 
 # ── terse: drop default-valued fields from a repeated record ────────────────

@@ -94,13 +94,34 @@ def _str_parts(node):
     return [n.value for n in ast.walk(node) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
 
 
+# One parse per tool FILE, not per tool: _attribute runs once per registered tool (and needed the
+# module twice itself), and the guard census walks every module again - about 370 redundant parses
+# of 184 files, ~3s of gen_all --check. The key carries the file's stat, so a module rewritten
+# under a monkeypatched TOOLS_DIR (or edited between runs in one process) is parsed again rather
+# than served stale.
+_parsed = {}
+
+
+def _parse_module(mod_name):
+    """(functions, top-level non-docstring strings, tool -> handler map) for one tool module."""
+    path = os.path.join(TOOLS_DIR, mod_name + ".py")
+    st = os.stat(path)
+    key = (path, st.st_mtime_ns, st.st_size)
+    hit = _parsed.get(key)
+    if hit is None:
+        with open(path, encoding="utf-8") as fh:
+            tree = ast.parse(fh.read())
+        fns = {node.name: node for node in tree.body
+               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        top_desc = [s for node in tree.body
+                    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                    for s in _non_doc_strings(node)]
+        hit = _parsed[key] = (fns, top_desc, _tool_handler_map(tree))
+    return hit
+
+
 def _module_functions(mod_name):
-    src = open(os.path.join(TOOLS_DIR, mod_name + ".py"), encoding="utf-8").read()
-    tree = ast.parse(src)
-    fns = {node.name: node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    top_desc = [s for node in tree.body
-                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-                for s in _non_doc_strings(node)]
+    fns, top_desc, _handlers = _parse_module(mod_name)
     return fns, top_desc
 
 
@@ -157,9 +178,8 @@ def _attribute(mod_name, tool_name):
     """(note_string_LIST, extra_desc_strings) belonging to a tool - its REGISTERED handler's
     notes (resolved by call-site, see _tool_handler_map) plus module-level DESC constants.
     Falls back to whole-stem name matching for an unusual registration shape."""
-    fns, top_desc = _module_functions(mod_name)
-    src = open(os.path.join(TOOLS_DIR, mod_name + ".py"), encoding="utf-8").read()
-    handler = _tool_handler_map(ast.parse(src)).get(tool_name)
+    fns, top_desc, handlers = _parse_module(mod_name)
+    handler = handlers.get(tool_name)
     note = []
     if handler and handler in fns:
         node = fns[handler]

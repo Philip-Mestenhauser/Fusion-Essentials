@@ -6,6 +6,7 @@ no-active-doc guard. The adsk Document fakes capture the read so a regression to
 """
 
 import json
+from types import SimpleNamespace
 
 from conftest import load_tool, error_message
 
@@ -483,12 +484,54 @@ class _DRef:
         self.isOutOfDate = ood
 
 
+class _Comp:
+    """The component behind an occurrence. `occurrences` is the COMPONENT-LOCAL collection - the one
+    place an occurrence with an unresolved reference is visible, since childOccurrences drops it."""
+    def __init__(self, name, comp_local=None):
+        self.name = name
+        self.occurrences = _OccList(comp_local or [])
+
+
 class _Occ:
-    def __init__(self, path, is_ref=False, dref=None, children=None):
+    def __init__(self, path, is_ref=False, dref=None, children=None, comp_local=None):
         self.fullPathName = path
         self.isReferencedComponent = is_ref
         self.documentReference = dref
         self.childOccurrences = _OccList(children or [])
+        self.name = path.split("+")[-1]
+        # A real Occurrence ALWAYS answers .component; one that raises is the unresolved-reference
+        # signal (_BrokenOcc below). Its component-local collection defaults to the assembly-context
+        # children, which is what a design with no unresolved reference looks like.
+        self.component = _Comp(self.name.split(":")[0],
+                               comp_local if comp_local is not None else (children or []))
+
+
+class _BrokenOcc:
+    """An occurrence whose referenced component will not load: reading `component` RAISES, which is
+    the ONLY reliable signal - isReferencedComponent reads False and documentReference raises the
+    same text an ordinary local occurrence gives (both measured on a live specimen)."""
+    RAISE_TEXT = ("3 : The occurrence's referenced component is unavailable (broken or missing "
+                  "external reference).")
+
+    def __init__(self, name):
+        self.name = name
+        self.isReferencedComponent = False
+
+    @property
+    def component(self):
+        raise RuntimeError(self.RAISE_TEXT)
+
+    @property
+    def fullPathName(self):
+        raise RuntimeError("2 : InternalValidationError : path.valid()")
+
+    @property
+    def childOccurrences(self):
+        raise RuntimeError("2 : InternalValidationError : path.valid()")
+
+    @property
+    def documentReference(self):
+        raise RuntimeError("3 : Occurrence is not referencing an external component")
 
 
 class _DeriveFeatColl:
@@ -512,6 +555,7 @@ class _Root:
     def __init__(self, occs, name="Root", derive_feats=None):
         self.occurrences = _OccList(occs)
         self.name = name
+        self.component = _Comp(name, occs)
         self.features = _Features(derive_feats or [])   # empty by default - most tests don't derive
 
 
@@ -530,7 +574,7 @@ class TestXrefTree:
         sub = _Occ("Sub:1", is_ref=False, children=[stale])
         _use_design(monkeypatch, _Root([sub]))
         out = dg._slice_xref_tree()
-        assert out["reference_count"] == 1
+        assert out["reference_link_count"] == 1
         r = out["references"][0]
         assert r["depth"] == 2 and r["out_of_date"] is True and r["source_document"] == "Part"
         assert out["stale_count"] == 1
@@ -541,7 +585,7 @@ class TestXrefTree:
         b = _Occ("B:1", is_ref=True, dref=_DRef("B", 1, 1, False))
         _use_design(monkeypatch, _Root([a, b]))
         out = dg._slice_xref_tree()
-        assert out["reference_count"] == 2
+        assert out["reference_link_count"] == 2
         assert out["stale_count"] == 0
         assert out["all_current"] is True
 
@@ -570,7 +614,7 @@ class TestXrefTree:
         _use_design(monkeypatch, _Root([sub]))
         out = dg._slice_xref_tree(max_depth=1)
         assert out["depth_capped"] is True
-        assert out["reference_count"] == 0        # the depth-2 ref was not walked
+        assert out["reference_link_count"] == 0        # the depth-2 ref was not walked
         assert out["all_current"] is False        # a depth-capped walk is partial
 
     def test_occurrence_row_carries_xref_kind(self, monkeypatch):
@@ -578,6 +622,161 @@ class TestXrefTree:
         _use_design(monkeypatch, _Root([a]))
         out = dg._slice_xref_tree()
         assert out["references"][0]["kind"] == "xref"
+
+
+class TestXrefTreeUnresolved:
+    """The measured defect: this slice returned unreadable_count 0 / all_current true on a document
+    holding an occurrence whose referenced component would not load. Two independent reasons - the
+    walk gate reads isReferencedComponent (FALSE on a broken reference) and the walk descends
+    childOccurrences (which drops it)."""
+
+    def test_zero_unresolved_leaves_the_rollup_clean(self, monkeypatch):
+        a = _Occ("A:1", is_ref=True, dref=_DRef("A", 1, 1, False))
+        _use_design(monkeypatch, _Root([a]))
+        out = dg._slice_xref_tree()
+        assert out["unresolved_count"] == 0
+        assert out["unreadable_count"] == 0 and out["all_current"] is True
+        assert "UNRESOLVED" not in out["note"]
+
+    def test_a_broken_TOP_LEVEL_occurrence_is_counted_and_blocks_all_current(self, monkeypatch):
+        _use_design(monkeypatch, _Root([_BrokenOcc("45740")]))
+        out = dg._slice_xref_tree()
+        assert out["unresolved_count"] == 1
+        assert out["unreadable_count"] == 1        # it flows into the EXISTING unreadable machinery
+        assert out["all_current"] is False
+        row = out["references"][0]
+        assert row["kind"] == "unresolved" and row["readable"] is False
+        assert "45740" in row["path"]
+        assert _BrokenOcc.RAISE_TEXT in row["warning"]
+        assert "out_of_date" not in row and "source_document" not in row
+
+    def test_a_child_that_only_the_component_local_collection_holds_is_found(self, monkeypatch):
+        # the structural blindness: the broken child is absent from childOccurrences, so a walk that
+        # only descends there can never reach it however its gate is written.
+        broken = _BrokenOcc("45740")
+        container = _Occ("Op1:1", is_ref=False, children=[_Occ("Part:1", is_ref=False)],
+                         comp_local=[broken, _Occ("Part:1", is_ref=False)])
+        _use_design(monkeypatch, _Root([container]))
+        out = dg._slice_xref_tree()
+        assert out["unresolved_count"] == 1
+        assert out["references"][0]["path"] == "Op1:1+45740"
+        assert out["references"][0]["depth"] == 2
+
+    def test_the_note_says_the_reference_cannot_be_refreshed(self, monkeypatch):
+        # doc_update_xref acts on a DocumentReference, and a broken reference has none - promising
+        # a refresh would send the agent at a tool that cannot touch it.
+        _use_design(monkeypatch, _Root([_BrokenOcc("45740")]))
+        note = dg._slice_xref_tree()["note"]
+        assert "doc_update_xref cannot refresh it" in note
+        assert "browser tree" in note
+
+    def test_the_cap_stops_collecting_unresolved_rows_and_flags_the_walk_partial(self, monkeypatch):
+        # a cap reached is a PARTIAL rollup: all_current must not be claimed over rows never walked,
+        # and that is just as true when the row that hit the cap was an unresolved one.
+        a = _Occ("A:1", is_ref=True, dref=_DRef("A", 1, 1, False))
+        _use_design(monkeypatch, _Root([a, _BrokenOcc("45740")]))
+        out = dg._slice_xref_tree(xref_max=1)
+        assert out["truncated"] is True
+        assert out["all_current"] is False
+        assert out["reference_link_count"] == 1
+        assert out["unresolved_count"] == 0        # never collected, so never counted
+
+    def test_the_cap_also_stops_the_component_local_unresolved_scan(self, monkeypatch):
+        # the unresolved children are found on a SECOND collection; that pass shares the one cap, or
+        # a capped walk would keep growing past the bound the caller set.
+        broken = _BrokenOcc("45740")
+        container = _Occ("Op1:1", is_ref=True, dref=_DRef("Op1", 1, 1, False),
+                         comp_local=[broken])
+        _use_design(monkeypatch, _Root([container]))
+        out = dg._slice_xref_tree(xref_max=1)
+        assert out["truncated"] is True
+        assert out["reference_link_count"] == 1
+        assert out["unresolved_count"] == 0
+
+    def test_the_count_key_names_its_noun(self, monkeypatch):
+        # UNRES-2: this counts LINKS while workspace_orient's references key counts DOCUMENTS; the
+        # two disagreed under one name.
+        _use_design(monkeypatch, _Root([_Occ("A:1", is_ref=True, dref=_DRef("A", 1, 1, False))]))
+        out = dg._slice_xref_tree()
+        assert "reference_link_count" in out and "reference_count" not in out
+        assert "referenced_documents" in out["note"]
+
+
+class _SpyOcc:
+    """An occurrence that counts every read of its component - the evidence for whether the walk
+    reached it at all, which a row count alone cannot show."""
+    def __init__(self, path):
+        self.fullPathName = path
+        self.name = path.split("+")[-1]
+        self.isReferencedComponent = False
+        self.documentReference = None
+        self.childOccurrences = _OccList([])
+        self.reads = 0
+        self._comp = _Comp(self.name.split(":")[0], [])
+
+    @property
+    def component(self):
+        self.reads += 1
+        return self._comp
+
+
+class TestXrefTreeWalkGuards:
+    """Every read between the root and a row is guarded, and each guard leaves the rollup HONEST -
+    an unwalked branch never reads as an examined-and-clean one."""
+
+    def test_no_active_design_is_unavailable_not_an_empty_walk(self, monkeypatch):
+        monkeypatch.setattr(dg, "design", lambda: None)
+        out = dg._slice_xref_tree()
+        assert out["available"] is False
+        assert "needs a design document" in out["note"]
+        assert "all_current" not in out          # no verdict is formed at all
+
+    def test_a_design_with_no_root_component_is_unavailable(self, monkeypatch):
+        monkeypatch.setattr(dg, "design", lambda: SimpleNamespace(rootComponent=None))
+        out = dg._slice_xref_tree()
+        assert out["available"] is False
+        assert "no root component" in out["note"]
+
+    def test_an_unreadable_child_collection_stops_that_branch_without_a_crash(self, monkeypatch):
+        # childOccurrences reading None is a branch NOT walked; the rest of the tree still reports.
+        sub = _Occ("Sub:1", is_ref=False)
+        sub.childOccurrences = None
+        keeper = _Occ("A:1", is_ref=True, dref=_DRef("A", 1, 1, False))
+        _use_design(monkeypatch, _Root([sub, keeper]))
+        out = dg._slice_xref_tree()
+        assert out["reference_link_count"] == 1
+        assert out["references"][0]["path"] == "A:1"
+
+    def test_an_item_the_collection_will_not_hand_over_is_skipped(self, monkeypatch):
+        keeper = _Occ("A:1", is_ref=True, dref=_DRef("A", 1, 1, False))
+        _use_design(monkeypatch, _Root([None, keeper]))
+        out = dg._slice_xref_tree()
+        assert out["reference_link_count"] == 1
+
+    def test_the_cap_reached_in_a_NESTED_branch_stops_the_outer_walk_too(self, monkeypatch):
+        # once truncated, the remaining siblings are not even VISITED - a walk that kept descending
+        # would pay the whole tree's cost to publish nothing, and the cap exists to bound that cost.
+        deep = [_Occ(f"Sub:1+X{i}:1", is_ref=True, dref=_DRef("X", 1, 1, False)) for i in (1, 2)]
+        sub = _Occ("Sub:1", is_ref=False, children=deep)
+        tail = _SpyOcc("Tail:1")
+        _use_design(monkeypatch, _Root([sub, tail]))
+        out = dg._slice_xref_tree(xref_max=1)
+        assert out["truncated"] is True
+        assert out["reference_link_count"] == 1
+        assert [r["path"] for r in out["references"]] == ["Sub:1+X1:1"]
+        assert out["all_current"] is False
+        assert tail.reads == 0        # the sibling after the cap was never touched
+
+    def test_a_reference_whose_freshness_fields_will_not_read_is_unreadable_not_current(self, monkeypatch):
+        # the DocumentReference EXISTS but its isOutOfDate does not read: publishing out_of_date
+        # false there would assert freshness nothing was read from.
+        a = _Occ("A:1", is_ref=True, dref=_DRef("A", 1, 1, None))
+        _use_design(monkeypatch, _Root([a]))
+        out = dg._slice_xref_tree()
+        row = out["references"][0]
+        assert row["readable"] is False
+        assert "out_of_date" not in row
+        assert out["unreadable_count"] == 1 and out["all_current"] is False
 
 
 # ── (B2) xref_tree slice - derive links ───────────────────────────────────────
@@ -590,7 +789,7 @@ class TestXrefTreeDerive:
         root = _Root([], name="Root", derive_feats=[_DeriveFeat("Derive1", dref)])
         _use_design(monkeypatch, root)
         out = dg._slice_xref_tree()
-        assert out["reference_count"] == 1
+        assert out["reference_link_count"] == 1
         row = out["references"][0]
         assert row["kind"] == "derive"
         assert row["path"] == "Root:Derive1"
@@ -611,7 +810,7 @@ class TestXrefTreeDerive:
         root = _Root([], derive_feats=[])
         _use_design(monkeypatch, root)
         out = dg._slice_xref_tree()
-        assert out["reference_count"] == 0
+        assert out["reference_link_count"] == 0
         assert out["all_current"] is True
 
     def test_component_without_features_attribute_no_crash(self, monkeypatch):
@@ -623,7 +822,7 @@ class TestXrefTreeDerive:
                 self.name = "Root"
         _use_design(monkeypatch, _BareRoot([]))
         out = dg._slice_xref_tree()
-        assert out["reference_count"] == 0
+        assert out["reference_link_count"] == 0
         assert out["all_current"] is True
 
     def test_unreadable_derive_reference_blocks_all_current(self, monkeypatch):
@@ -642,7 +841,7 @@ class TestXrefTreeDerive:
         root = _Root([occ], derive_feats=[_DeriveFeat("Derive1", dref)])
         _use_design(monkeypatch, root)
         out = dg._slice_xref_tree()
-        assert out["reference_count"] == 2
+        assert out["reference_link_count"] == 2
         kinds = {r["kind"] for r in out["references"]}
         assert kinds == {"xref", "derive"}
 

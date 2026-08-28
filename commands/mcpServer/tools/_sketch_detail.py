@@ -14,7 +14,7 @@ import types
 import adsk.core
 import adsk.fusion
 
-from ._common import ok, error, safe, resolve_sketch, all_sketch_names
+from ._common import ok, error, safe, find_sketch, all_sketch_names
 from . import _common
 from . import _geom
 from . import _inputs
@@ -23,10 +23,16 @@ app = adsk.core.Application.get()
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
 MAP_BLURB = ("the ONE-sketch X-ray behind sketch_get(sketch_name=...): entities, construction "
-             "geometry, constraints, dimensions and profiles + sketch_world_frame (the ONE local -> "
-             "world map for a sketch plane: where sketch (0,0) lands in mm, the unit +X/+Y world "
-             "directions and the normal derived from them - sketch_create publishes it on the way in "
-             "and sketch_get on the way out, so a caller places and VERIFIES against the same "
+             "geometry, constraints, dimensions and profiles + sketch_world_frame (the ONE frame "
+             "for a sketch plane: where sketch (0,0) lands in mm, the unit +X/+Y directions and the "
+             "normal derived from them, plus the 'space' those numbers are in - 'world' when the "
+             "root owns the sketch or its component is placed EXACTLY once (the read is lifted "
+             "through that occurrence), 'component_local' when the component is instanced several "
+             "times, since each instance puts the sketch somewhere different and no single world "
+             "frame exists. The axis KEYS follow space - x_world/y_world or x_local/y_local - so a "
+             "consumer keyed on the world name reads a missing key rather than local numbers; "
+             "frame_space_note is the matching wire sentence. sketch_create publishes it on the way "
+             "in and sketch_get on the way out, so a caller places and VERIFIES against the same "
              "numbers) + curve_id (the '<type>:<index>' entity "
              "id every sketch reference is written in, which _common.resolve_entity_ref reads back) "
              "+ unquote_text / font_read_back (the SketchText readers: textParameter.expression "
@@ -64,36 +70,127 @@ def _plane_normal(x_world, y_world):
         x=x_world[1] * y_world[2] - x_world[2] * y_world[1],
         y=x_world[2] * y_world[0] - x_world[0] * y_world[2],
         z=x_world[0] * y_world[1] - x_world[1] * y_world[0])
-    return _geom.unit_vector(cross)
+    n = _geom.unit_vector(cross)
+    # + 0.0 for the same reason the axes get it: a lifted frame's axes carry signed zeros, and
+    # 0.0 * -1.0 is -0.0, so a component that is exactly zero reaches the wire as -0.0 (measured on
+    # a component turned 90 deg about Z, the normal read [0.0, -0.0, 1.0]).
+    return None if n is None else [c + 0.0 for c in n]
+
+
+WORLD_SPACE = "world"
+COMPONENT_LOCAL_SPACE = "component_local"
+
+# The one sentence each space owes the caller, keyed by frame['space']. Both sketch_create (on the
+# way in) and sketch_get (on the way out) append the SAME line, so a caller places and verifies
+# against one story - and neither can assert world while the numbers are not.
+FRAME_SPACE_NOTE = {
+    WORLD_SPACE: (
+        "'frame' maps sketch coords to WORLD (frame.space='world'): sketch (0,0) sits at "
+        "frame.origin_mm, +X runs along frame.x_world, +Y along frame.y_world, and frame.normal is "
+        "the plane's world normal - place geometry from those, not by eye."),
+    COMPONENT_LOCAL_SPACE: (
+        "'frame' is COMPONENT-LOCAL, not world (frame.space='component_local'), so the in-plane "
+        "axes are published as frame.x_local / frame.y_local and there is no frame.x_world on this "
+        "call: this sketch's component is not placed exactly once in this assembly, and each "
+        "instance puts the sketch somewhere different, so no single world frame exists and none is "
+        "guessed. The numbers still map this sketch's own entity coordinates; for one instance's "
+        "world placement read assembly_get and compose it with these."),
+}
+
+
+def frame_space_note(frame) -> str:
+    """The one sentence describing the space `frame`'s numbers are in - the shared line every
+    frame-publishing payload appends, so create and read tell the caller the same story. An
+    unreadable frame (None) gets the local wording: it never claims a world it could not resolve."""
+    space = (frame or {}).get("space") if isinstance(frame, dict) else None
+    return FRAME_SPACE_NOTE.get(space, FRAME_SPACE_NOTE[COMPONENT_LOCAL_SPACE])
+
+
+def _frame_context(sketch):
+    """(the sketch the frame is read off, the space those numbers are in).
+
+    Sketch.origin/xDirection/yDirection are documented "in model space", and MEASURED, model space
+    is the sketch's PARENT COMPONENT rather than the assembly: a sketch on xy in a component placed
+    at world (30,0,0) and turned 90 deg about Z reads origin (0,0,0) and +X (1,0,0) off the NATIVE
+    sketch, while the same sketch proxied into the occurrence that places it reads (3,0,0) cm and
+    +X (0,1,0). So a native sketch owned by a sub-component is lifted through that occurrence
+    before anything is read off it.
+
+    Three cases, which is why this reports a SPACE instead of always claiming world:
+      root-owned, or already a proxy -> nothing to lift; the numbers are world as they stand.
+      component placed EXACTLY ONCE -> read through that occurrence; the numbers are world.
+      component placed SEVERAL times, or none -> MEASURED on two instances of one component, the
+        proxies disagree: one read origin (1.0, 0.5, 0) cm with unrotated axes while its sibling
+        read (-4.0, 0, 0) with axes turned 45 deg. There is no single world frame, so the
+        COMPONENT-LOCAL frame is published and labelled - picking one instance would be the
+        first-match guess this repo refuses.
+
+    An unreadable design also reports component_local: that understates a root-owned sketch rather
+    than claiming a world the read cannot back.
+
+    The lift runs on _inputs.single_placement, the ONE assembly-context walk - its entity_component
+    chain is measured to raise on every read a Sketch does not carry, so it answers None and the
+    walk falls through to parentComponent. The design comes off the sketch, not the active document,
+    so this answers for the document that owns the sketch."""
+    design = safe(lambda: sketch.parentComponent.parentDesign)
+    root = safe(lambda: design.rootComponent) if design is not None else None
+    if root is None:
+        return sketch, COMPONENT_LOCAL_SPACE
+    occ, err = _inputs.single_placement("the sketch", sketch, root, design)
+    if err:
+        return sketch, COMPONENT_LOCAL_SPACE
+    if occ is None:
+        return sketch, WORLD_SPACE
+    proxy = safe(lambda: sketch.createForAssemblyContext(occ))
+    return (proxy, WORLD_SPACE) if proxy is not None else (sketch, COMPONENT_LOCAL_SPACE)
 
 
 def sketch_world_frame(sketch) -> dict:
-    """Map a sketch's local 2D coords to world: where sketch (0,0) lands, where +X/+Y point, and the
-    plane's normal. None when the plane cannot be read.
+    """Map a sketch's local 2D coords out to the space 'space' names: where sketch (0,0) lands,
+    where +X/+Y point, and the plane's normal. None when the plane cannot be read.
+
+    The in-plane axis KEYS name the space they are in: 'x_world'/'y_world' only when the frame
+    really resolved into the assembly, 'x_local'/'y_local' when it did not (see _frame_context).
+    A consumer keyed on x_world therefore gets a MISSING KEY on a component-local frame rather than
+    component-local numbers under a world name - the false reading is structurally impossible, not
+    merely documented. 'space' says which pair is present, and is always published.
+
+    origin_mm and normal keep one name in both spaces: neither claims world, so neither can lie.
 
     On a face (or on xz/yz) the sketch origin is NOT the face centre and the in-plane axes need not
     align with world - reporting this lets the caller place geometry by computed coords, and read a
-    sketch's plane position/normal back, rather than by trial and error. x_world/y_world/normal are
-    unit world directions; origin_mm is in mm."""
+    sketch's plane position/normal back, rather than by trial and error. The axes are unit
+    directions; origin_mm is in mm."""
     def _vec(g):
-        return [round(safe(lambda: g.x, 0.0) or 0.0, 6),
-                round(safe(lambda: g.y, 0.0) or 0.0, 6),
-                round(safe(lambda: g.z, 0.0) or 0.0, 6)]
+        # + 0.0 normalizes IEEE negative zero. The lift is a matrix multiply, so an axis component
+        # that should be zero arrives as a tiny signed residue (-2.220446049250313e-16 measured on a
+        # proxy's xDir); round() collapses that to -0.0, keeping the sign, and -0.0 on the wire
+        # reads as a sign flip. An exactly-zero component arrives as 0.0 and needs no help.
+        return [round(safe(lambda: g.x, 0.0) or 0.0, 6) + 0.0,
+                round(safe(lambda: g.y, 0.0) or 0.0, 6) + 0.0,
+                round(safe(lambda: g.z, 0.0) or 0.0, 6) + 0.0]
 
-    op = safe(lambda: sketch.origin)            # world Point3D of sketch (0,0)
-    xd = safe(lambda: sketch.xDirection)        # world Vector3D of sketch +X
-    yd = safe(lambda: sketch.yDirection)        # world Vector3D of sketch +Y
+    lifted, space = _frame_context(sketch)
+    op = safe(lambda: lifted.origin)            # Point3D of sketch (0,0) in `space`
+    xd = safe(lambda: lifted.xDirection)        # Vector3D of sketch +X in `space`
+    yd = safe(lambda: lifted.yDirection)        # Vector3D of sketch +Y in `space`
     if op is None or xd is None or yd is None:
         return None
-    x_world, y_world = _vec(xd), _vec(yd)
-    return {
-        "origin_mm": [round((safe(lambda: op.x, 0.0) or 0.0) * 10, 4),
-                      round((safe(lambda: op.y, 0.0) or 0.0) * 10, 4),
-                      round((safe(lambda: op.z, 0.0) or 0.0) * 10, 4)],
-        "x_world": x_world,
-        "y_world": y_world,
-        "normal": _plane_normal(x_world, y_world),
+    x_axis, y_axis = _vec(xd), _vec(yd)
+    frame = {
+        "origin_mm": [round((safe(lambda: op.x, 0.0) or 0.0) * 10, 4) + 0.0,
+                      round((safe(lambda: op.y, 0.0) or 0.0) * 10, 4) + 0.0,
+                      round((safe(lambda: op.z, 0.0) or 0.0) * 10, 4) + 0.0],
+        "normal": _plane_normal(x_axis, y_axis),
+        "space": space,
     }
+    # The axis keys are assigned by name in each branch rather than through a lookup: the literal
+    # each space publishes stays greppable, which is what the disclosure lint pins them by.
+    if space == WORLD_SPACE:
+        frame["x_world"], frame["y_world"] = x_axis, y_axis
+    else:
+        frame["x_local"], frame["y_local"] = x_axis, y_axis
+    return frame
 
 
 # local aliases (this module's own record builders read them under the short names)
@@ -474,7 +571,9 @@ def handler(sketch_name: str = "", include_entities: bool = False, units: str = 
     # Resolve across the WHOLE design (active component first, then root, then all sub-components) - a
     # sketch in an activated sub-component (the normal assembly flow) must be findable, not only one in
     # the root component.
-    sketch = resolve_sketch(design, name)
+    sketch, ambiguous = find_sketch(design, name)
+    if ambiguous:
+        return error(ambiguous)
     if not sketch:
         names = all_sketch_names(design)
         return error(f"No sketch named '{name}'. Available: " + (", ".join(n for n in names if n) or "(none)"))
@@ -520,14 +619,16 @@ def handler(sketch_name: str = "", include_entities: bool = False, units: str = 
     if not include_entities:
         out["note"] = ("Overview only, lengths in 'units' (area=units^2). 'profiles[].handle' -> "
                        "ProfileRef for extrude/revolve/loft. Entity coordinates are sketch-LOCAL; "
-                       "use 'frame' to map to world (on the XZ plane local +Y is world -Z; in a nested or offset component the frame reads component-LOCAL). For the "
+                       + frame_space_note(out.get("frame"))
+                       + " On the XZ plane local +Y is world -Z. For the "
                        "full entity/constraint/dimension X-ray, call again with "
                        "include_entities=true.")
         return ok(out)
 
     entities, constraints, dimensions, construction_count, driving_dims, truncated = _entity_xray(sketch, f)
-    note = ("Full X-ray, lengths in 'units'. Entity coordinates are sketch-LOCAL; use 'frame' to map "
-                 "to world (on the XZ plane local +Y is world -Z; in a nested or offset component the frame reads component-LOCAL). "
+    note = ("Full X-ray, lengths in 'units'. Entity coordinates are sketch-LOCAL; "
+                 + frame_space_note(out.get("frame"))
+                 + " On the XZ plane local +Y is world -Z. "
                  "Entity ids ('line:0', 'arc:1', ...) match sketch_constrain "
                  "/ extrude refs. A point OFF the sketch plane (a 3D line's endpoint) carries a 'z' (local "
                  "height along the plane normal); on-plane 2D points omit it. The point flagged origin:true "

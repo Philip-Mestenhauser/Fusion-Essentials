@@ -110,10 +110,38 @@ def _find_occurrence_by_name(root, want):
     return None, None
 
 
+def _unresolved_node(occ, detail):
+    """The tree row for an occurrence whose referenced component will not load. Every other read on it
+    RAISES (fullPathName, isVisible, childOccurrences.count included), so the row carries the name -
+    the one identity that still reads - and the raise text, instead of a full node built from
+    swallowed defaults. Its PRESENCE is the point: the row was absent from this tree entirely, so a
+    container holding one read child_count 4 with four healthy children listed."""
+    name = safe(lambda: occ.name)
+    return {"name": name if name else "(unreadable name)",
+            "unresolved": True,
+            "detail": detail}
+
+
+def _unresolved_children(occ):
+    """The unresolved children of `occ`, classified by the shared detector over the COMPONENT-LOCAL
+    collection. childOccurrences - what this tree descends - silently DROPS an occurrence whose
+    reference is broken (its assembly path is invalid), while component.occurrences holds it."""
+    comp = safe(lambda: occ.component)
+    rows = []
+    for child in _common.iter_collection(safe(lambda: comp.occurrences) if comp else None):
+        is_broken, detail = _common.broken_reference(child)
+        if is_broken:
+            rows.append(_unresolved_node(child, detail))
+    return rows
+
+
 def _walk_occurrence(occ, depth, max_depth, counter, with_bodies=False):
     counter["n"] += 1
     if counter["n"] >= _TREE_MAX_NODES:
         counter["truncated"] = True
+    is_broken, broken_detail = _common.broken_reference(occ)
+    if is_broken:
+        return _unresolved_node(occ, broken_detail)
     node = {
         "name": safe(lambda: occ.name),
         # The entityToken is the EXACT instance identity, and the only one that always is: Fusion
@@ -127,8 +155,12 @@ def _walk_occurrence(occ, depth, max_depth, counter, with_bodies=False):
         # _body_rows holds for is_solid/visible), and the freshness gate below treats None as
         # "try it" rather than as "local".
         "is_reference": _common.read_flag(lambda: occ.isReferencedComponent),
-        "body_count": safe(lambda: occ.bRepBodies.count, 0),
-        "child_count": safe(lambda: occ.childOccurrences.count, 0),
+        # counted, not safe(..., 0): these two counts are the caller's evidence of what this node
+        # HOLDS, and a coerced 0 says "no bodies / no children" about a collection nothing was read
+        # from - which is also what stops the walk below descending. null is the only honest answer
+        # for an unreadable count, and it takes the same (do not descend) branch without claiming it.
+        "body_count": _common.counted(lambda: occ.bRepBodies.count),
+        "child_count": _common.counted(lambda: occ.childOccurrences.count),
     }
     if with_bodies and node["body_count"]:
         rows, truncated = _body_rows(safe(lambda: occ.bRepBodies, None))
@@ -152,7 +184,12 @@ def _walk_occurrence(occ, depth, max_depth, counter, with_bodies=False):
                     node["source_url"] = safe(lambda: df.fusionWebURL)
         except Exception:
             pass
-    if depth + 1 < max_depth and node["child_count"] and counter["n"] < _TREE_MAX_NODES:
+    # The unresolved children are found on the COMPONENT-LOCAL collection and counted here, so
+    # child_count (read off childOccurrences, which drops them) is never the whole story on its own.
+    unresolved_kids = _unresolved_children(occ)
+    if unresolved_kids:
+        node["children_unresolved"] = len(unresolved_kids)
+    if depth + 1 < max_depth and (node["child_count"] or unresolved_kids) and counter["n"] < _TREE_MAX_NODES:
         kids = []
         try:
             for child in occ.childOccurrences:
@@ -162,9 +199,10 @@ def _walk_occurrence(occ, depth, max_depth, counter, with_bodies=False):
                 kids.append(_walk_occurrence(child, depth + 1, max_depth, counter, with_bodies))
         except Exception:
             pass
+        kids.extend(unresolved_kids)
         if kids:
             node["children"] = kids
-    elif node["child_count"]:
+    elif node["child_count"] or unresolved_kids:
         node["children_truncated"] = True
     return node
 
@@ -552,7 +590,10 @@ def _fingerprint(design):
         # design); occurrences = placed instances. The two differ in any multi-instance assembly,
         # and labeling the instance count "components" misstates the design's shape.
         "components": max(0, safe(lambda: design.allComponents.count, 0) - 1),
-        "occurrences": safe(lambda: root.allOccurrences.count, 0),
+        # null, never 0, when neither walk enumerated: root.allOccurrences RAISES on a design holding
+        # an unresolved external reference, and safe(read, 0) published that failure as "no
+        # occurrences" on a multi-part assembly.
+        "occurrences": _common.occurrence_walk(design).total,
         # asBuiltJoints is a separate collection from joints; count both or as-built joints read as 0
         "joints": safe(lambda: root.joints.count, 0) + safe(lambda: root.asBuiltJoints.count, 0),
         # userParameters = the ones an agent can drive; modelParameters includes internal ones it can't.

@@ -85,3 +85,17 @@ an input's legal values must be backed by something that fails when it's false (
 kind's `resolve()`, a guard) — if you can't back it, type the input instead of asserting it. Full rule
 (what crosses the wire, the docstring policy, the read-shape build rules):
 [commands/mcpServer/tools/CLAUDE.md](commands/mcpServer/tools/CLAUDE.md).
+
+## Running commands — never `cd` to the repo root, never redirect stderr
+
+Both shell tools already start in the repo root and already capture stderr, so `cd c:\Source\Fusion-Essentials`
+and `2>&1` are redundant. Together they are worse than redundant: a `cd` combined with an output redirect
+makes the permission layer ask the owner to approve the call by hand, **whatever the allow rules say** -
+it cannot tell where the redirect target resolves after the `cd`. That one habit is the single largest
+source of approval prompts in this repo, and every prompt is a human being interrupted.
+
+So: `py -3 -m pytest tests/unit/test_sketch_core.py -q`, not
+`cd c:\Source\Fusion-Essentials; py -3 -m pytest tests/unit/test_sketch_core.py -q 2>&1 | Select-String "passed|failed"`.
+Pipe to a filter if you want one, just leave the `cd` and the `2>&1` out. Filter with `-q`/`--no-cov` and
+the tail of the output rather than a regex, and prefer the file tools (Read/Grep/Edit/Write) over shell
+equivalents for anything touching files.

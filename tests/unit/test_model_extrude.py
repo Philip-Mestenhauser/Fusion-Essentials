@@ -213,6 +213,42 @@ class TestGuards:
         res = ex.handler(sketch_name="Nope", distance=5)
         assert res["isError"] is True and "No sketch named 'Nope'" in res["message"]
 
+    def test_a_padded_name_reports_the_name_the_walk_searched_for(self):
+        # the resolver STRIPS the name before searching, so the miss quotes the stripped form -
+        # echoing the raw input names a sketch nothing ever looked for.
+        _install([FakeSketch("S")])
+        res = ex.handler(sketch_name="  Ghost  ", distance=5)
+        assert res["isError"] is True
+        assert "No sketch named 'Ghost'" in res["message"]
+        assert "'  Ghost  '" not in res["message"]
+
+    def test_a_blank_name_with_no_sketch_in_the_design_never_quotes_None(self):
+        # a blank name asks for the MOST RECENT sketch, so there is no requested name to quote:
+        # the named-miss branch would render the absent name as the literal string 'None'.
+        _install([])
+        res = ex.handler(distance=5)
+        assert res["isError"] is True
+        assert "'None'" not in res["message"]
+        assert res["message"] == "No sketch to extrude. Create one and draw a closed profile first."
+
+    def test_a_whitespace_only_name_takes_the_most_recent_sketch(self):
+        # ' ' strips to blank, which means the most recent sketch - searching for a space instead
+        # misses every sketch and reports a name no caller typed.
+        _install([FakeSketch("First"), FakeSketch("Last")])
+        res = ex.handler(sketch_name=" ", distance=5)
+        assert "No sketch named" not in json.dumps(res)
+        assert _payload(res)["sketch"] == "Last"
+
+    def test_a_shared_sketch_name_is_refused_with_its_owners(self, monkeypatch):
+        # Two components can each hold an "S". The refusal names them; calling that
+        # "No sketch named 'S'" states the opposite of what the design-wide walk read.
+        _install([FakeSketch("S")])
+        refusal = "2 sketches are named 'S' ('S' in Root, 'S' in Frame)"
+        monkeypatch.setattr(ex._common, "find_or_recent_sketch", lambda d, n: (None, n, refusal))
+        res = ex.handler(sketch_name="S", distance=5)
+        assert res["isError"] is True
+        assert res["message"] == refusal and "No sketch named" not in res["message"]
+
     def test_profile_index_out_of_range(self):
         _install([FakeSketch("S", profile_count=1)])
         res = ex.handler(sketch_name="S", distance=5, profile_index=3)
@@ -888,7 +924,7 @@ class TestTargetBodies:
             body.entityToken = f"tok-{occ_name}"
             body.parentComponent = types.SimpleNamespace(name=comp_name)
             occ = types.SimpleNamespace(
-                name=occ_name, fullPathName=occ_name,
+                name=occ_name, fullPathName=occ_name, component=body.parentComponent,
                 bRepBodies=type("BB", (), {
                     "itemByName": staticmethod(lambda n, b=body: b if n == b.name else None),
                     "count": 1, "item": staticmethod(lambda i, b=body: b)})())
@@ -1585,11 +1621,28 @@ class TestComputeFailedFeature:
         assert res["isError"] is True
         msg = res["message"]
         assert "Extrude3" in msg and "FAILED compute" in msg
-        assert "No target body!Compute Failed" in msg
+        # the SHARED condensation: the sentence before Fusion's repeating 'Compute Failed' marker,
+        # never the raw blob (a prefix of which lands mid-word)
+        assert "No target body!" in msg and "Compute Failed" not in msg
         assert "health state: warning" in msg          # the STATE, read - not the message text
         assert "removed nothing" in msg                # backed by the volume/census evidence
         assert "BodyA" in msg                          # the scoped body that was not reached
         assert "rolled back" in msg and tl.count == 3  # the re-read, not deleteMe's own answer
+
+    def test_the_published_message_is_one_whole_condensed_sentence(self):
+        # Fusion's errorOrWarningMessage carries embedded NEWLINES and REPEATS its sentence, joined
+        # by the 'Compute Failed' marker plus the feature's own name. The shared reader keeps the
+        # first sentence with its whitespace collapsed; a local raw slice republishes the blob.
+        tl = types.SimpleNamespace(count=4)
+        blob = ("No target body!\n\nCheck the profile.Compute FailedExtrude3"
+                "No target body!Compute FailedExtrude3")
+        _install_scoped_cut(feature=_fail_feature(message=blob, timeline=tl), timeline_count=4)
+        ex.app.activeProduct.timeline = tl
+        res = ex.handler(sketch_name="S", distance=-20, operation="cut", target_bodies="BodyA")
+        assert res["isError"] is True
+        msg = res["message"]
+        assert "No target body! Check the profile." in msg
+        assert "Compute Failed" not in msg and "\n" not in msg
 
     def test_the_error_health_state_is_caught_too(self):
         tl = types.SimpleNamespace(count=2)
@@ -1685,7 +1738,7 @@ class TestComputeFailedFeature:
         res = ex.handler(sketch_name="S", distance=-20, operation="cut", target_bodies="BodyA")
         assert res["isError"] is True
         assert "health state: warning" in res["message"]
-        assert "No target body!Compute Failed" in res["message"]
+        assert "No target body!" in res["message"] and "Compute Failed" not in res["message"]
 
     def test_a_healthy_feature_passes_the_health_gate(self):
         import adsk.fusion

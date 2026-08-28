@@ -105,7 +105,18 @@ def _subtree_occurrences(entity, limit):
             if len(out) > limit:
                 break
         return out
-    frontier = list(_common.iter_collection(safe(lambda: entity.childOccurrences)))
+    kids = safe(lambda: entity.childOccurrences)
+    if kids is None:
+        # ``allOccurrences`` did not answer AND there is no ``childOccurrences``: a COMPONENT whose
+        # subtree holds an unresolved external reference, which makes that property RAISE (measured).
+        # The shared census rebuilds the subtree from component.occurrences instead of reporting the
+        # component as holding nothing.
+        for o in _common.component_walk(entity).occurrences:
+            out.append(o)
+            if len(out) > limit:
+                break
+        return out
+    frontier = list(_common.iter_collection(kids))
     while frontier and len(out) <= limit:
         o = frontier.pop(0)
         out.append(o)

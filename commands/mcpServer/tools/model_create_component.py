@@ -121,6 +121,13 @@ def handler(name: str = "", x: float = 0.0, y: float = 0.0, z: float = 0.0,
     if activate:
         activated = bool(safe(lambda: read_occ.activate(), False))
 
+    # The parent lock the caller never asked for: measured on 2705.1.4, the FIRST component created
+    # in an empty design comes back with isGroundToParent True and the next one False. It decides
+    # which member a joint drive displaces, so it is disclosed at create time rather than left for
+    # the caller to discover from a part that would not move. read_flag keeps an unreadable flag
+    # None instead of coercing it to False.
+    ground_to_parent = _common.read_flag(lambda: occ.isGroundToParent)
+
     out = {
         "created": True,
         "occurrence": safe(lambda: occ.name),
@@ -132,11 +139,17 @@ def handler(name: str = "", x: float = 0.0, y: float = 0.0, z: float = 0.0,
         "rotate_axis": (rotate_axis or "z").lower() if rotate_deg else None,
         "units": units,
         "activated": activated,
+        "ground_to_parent": ground_to_parent,
         "note": ("Empty component created" + (f" nested inside '{safe(lambda: parent_occ.fullPathName)}'"
                  if parent_occ is not None else " at root")
                  + ". Activate it (or it is active) then model into it with sketch_create / extrude; "
                  "ground / joint it as an assembly part."),
     }
+    if ground_to_parent:
+        out["note"] += (" ground_to_parent reads TRUE on this new occurrence - it is locked to its "
+                        "parent (the FIRST component of an empty design lands locked; the next one "
+                        "does not), so a joint drive displaces the OTHER member instead of this "
+                        "one. assembly_ground(ground_to_parent=false) releases it.")
     if name_warning:
         out["name_warning"] = name_warning
     if intent_note:

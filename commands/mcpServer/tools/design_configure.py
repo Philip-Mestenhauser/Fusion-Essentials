@@ -361,7 +361,9 @@ def _do_set_appearance(design, table, body, appearances):
         a = _resolve_appearance(design, aname)
         if not a:
             return error(f"No appearance named '{aname}' in the design. Copy it in first "
-                         "(design.appearances.addByCopy) - e.g. an opaque base like 'Powder Coat'.")
+                         "(design.appearances.addByCopy) - appearance_set copies the Fusion "
+                         "Appearance Library's 'Paint - Enamel Glossy (White)' and keeps it in the "
+                         "document as 'MCP Neutral Base'.")
         resolved[rname] = a
 
     appt = safe(lambda: table.appearanceTable)

@@ -36,6 +36,21 @@ _MODULES = ("core", "fusion", "cam", "drawing")
 # contract) and a LEAF record reached only by walking one are never returned by a create* method,
 # so nothing else pulls them in. Named here they get the same real-member list, which is what a
 # test fake impersonating them is checked against.
+_MEASURED_FACTORY_RETURNS = {
+    # 'module.Class.method' -> (the class a LIVE call hands back, the Fusion build it was read on).
+    #
+    # A binding's return annotation is hand-maintained text and can name the wrong class. FACTORIES
+    # is consumed as a statement about the object a tool actually receives, so where a live call
+    # disagrees with the annotation the MEASURED class wins. A row is legitimate only with a
+    # measurement behind it - never a correction that merely looks right - and _apply_measured_returns
+    # raises on a row the bindings have since fixed or dropped, so the table cannot outlive its defect.
+    #
+    # Both rows below: classType() read off the returned object on Fusion 2705.0.108. The bindings
+    # annotate each as adsk.core.Point2D, which is the CENTER ARGUMENT's class, not the return.
+    "core.Arc2D.createByCenter": ("core.Arc2D", "Fusion 2705.0.108"),
+    "core.Circle2D.createByCenter": ("core.Circle2D", "Fusion 2705.0.108"),
+}
+
 _EXTRA_CLASSES = (
     "fusion.PMIAnnotations",
     "fusion.PMILeaderLineNotes",
@@ -118,6 +133,27 @@ def scan_module(path, module_name):
     return properties, factories, bools, other
 
 
+def apply_measured_returns(factories, measured=None):
+    """`factories` with each MEASURED runtime return substituted for a broken binding annotation.
+
+    A row the bindings do not declare, and a row whose annotation now AGREES with the measurement,
+    are both stale: each raises rather than being applied silently, so a fixed binding cannot leave
+    a permanent override behind."""
+    table = _MEASURED_FACTORY_RETURNS if measured is None else measured
+    out = dict(factories)
+    for key, (landed, _read_on) in table.items():
+        if key not in out:
+            raise SystemExit(
+                f"_MEASURED_FACTORY_RETURNS names '{key}', which the bindings no longer declare as "
+                "a create* factory - drop the row or re-measure it live.")
+        if out[key] == landed:
+            raise SystemExit(
+                f"_MEASURED_FACTORY_RETURNS overrides '{key}' to '{landed}', which the bindings now "
+                "annotate themselves - the override is obsolete, drop the row.")
+        out[key] = landed
+    return out
+
+
 def build():
     root = find_bindings()
     if root is None:
@@ -138,6 +174,8 @@ def build():
     # here cannot open a silent hole. Keeping all 1,670 classes would be a half-megabyte of churn
     # on every Fusion update for no extra coverage.
     factories = {k: v for k, v in factories.items() if k.rsplit(".", 1)[1].startswith("create")}
+    # Before `keep`, so the class a caller ACTUALLY receives is the one whose member list is kept.
+    factories = apply_measured_returns(factories)
     keep = set(factories.values()) | set(_EXTRA_CLASSES)
     missing = [c for c in _EXTRA_CLASSES if c not in properties]
     if missing:
@@ -192,6 +230,9 @@ def _render(root, properties, factories, bools):
     lines.append("}")
     lines.append("")
     lines.append("# 'module.Class.method' -> the 'module.Class' it returns.")
+    if _MEASURED_FACTORY_RETURNS:
+        lines.append("# A live-measured return overrides a broken binding annotation for: "
+                     + ", ".join(sorted(_MEASURED_FACTORY_RETURNS)) + ".")
     lines.append("FACTORIES = {")
     for key in sorted(factories):
         lines.append(f'    "{key}": "{factories[key]}",')
@@ -214,8 +255,8 @@ def _render(root, properties, factories, bools):
     return "\n".join(lines)
 
 
-# Failure is raised as SystemExit, not returned: gen_all.py imports this module and calls main(),
-# discarding the return value, so only SystemExit gates the aggregate --check.
+# Failure is raised as SystemExit: gen_all.py checks main()'s return value too, but SystemExit
+# also stops a direct `py -3 tests/gen_api_surface.py --check` run with a non-zero exit.
 def _fail(msg):
     print(msg, file=sys.stderr)
     raise SystemExit(1)

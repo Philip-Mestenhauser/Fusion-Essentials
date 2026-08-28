@@ -10,10 +10,12 @@ import time
 
 import adsk.core
 
-from ._common import safe, all_components
+from ._common import safe, counted, all_components
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
-MAP_BLURB = ("sanitize/component_by_name/verify_written/split_by_occurrence - the export-to-disk "
+MAP_BLURB = ("sanitize/component_by_name/verify_written/split_by_occurrence + top_level_occurrences "
+             "(the root's occurrence census a split export writes one file per - a list, or None "
+             "when the census could not be taken, which is NOT an empty design) - the export-to-disk "
              "substrate shared by design_export + mesh_export; snapshot + verify_written(before=) "
              "- the ONE prove-THIS-call-wrote-the-file pair (capture (exists,size,mtime) before "
              "the write, refuse a byte-identical pre-existing file after); failure_detail - the "
@@ -124,12 +126,25 @@ def pump_until(probe, timeout_s, poll_sleep):
 
 
 def top_level_occurrences(design):
-    """The root component's top-level occurrences, as a plain list (empty if none/unreadable)."""
-    root = design.rootComponent
-    occs = safe(lambda: root.occurrences)
-    if not occs:
-        return []
-    return [occs.item(i) for i in range(occs.count)]
+    """The root component's top-level occurrences as a plain list, or None when the census could not
+    be taken - the collection, its count, or one of its items did not read.
+
+    [] and None are DIFFERENT answers: [] is a read that succeeded and found no occurrence, None is
+    "which occurrences exist is unknown". A split export folds the two together at its own cost - it
+    would report a clean zero-file result over a design whose components it simply could not see -
+    so the caller refuses on None instead of exporting a short (or empty) file set."""
+    root = safe(lambda: design.rootComponent)
+    occs = safe(lambda: root.occurrences) if root is not None else None
+    n = counted(lambda: occs.count) if occs is not None else None
+    if n is None:
+        return None
+    out = []
+    for i in range(n):
+        occ = safe(lambda i=i: occs.item(i))
+        if occ is None:
+            return None       # a hole in the census: N-1 files would read as the whole design
+        out.append(occ)
+    return out
 
 
 _MAX_DETAILED_FAILURES = 5

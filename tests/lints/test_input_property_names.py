@@ -17,6 +17,7 @@ import ast
 
 import pytest
 
+import _corpus
 import api_surface
 from _input_resolution import (_bindings, _collection_vars, _factory_target, _iter_tool_files,
                                _named_assignments_in, _offenders_in, _scopes)
@@ -40,9 +41,7 @@ class TestInputPropertyNamesAreReal:
         """A resolver that silently matches nothing would pass the check above forever."""
         resolved = 0
         for _name, path in _iter_tool_files():
-            with open(path, encoding="utf-8") as fh:
-                tree = ast.parse(fh.read(), filename=path)
-            for node in ast.walk(tree):
+            for node in ast.walk(_corpus.tree(path)):
                 if isinstance(node, ast.Assign) and len(node.targets) == 1 \
                         and isinstance(node.targets[0], ast.Name) \
                         and _factory_target(node.value):
@@ -56,9 +55,7 @@ class TestInputPropertyNamesAreReal:
         the assignments would still resolve every binding and verify nothing."""
         checked = 0
         for _name, path in _iter_tool_files():
-            with open(path, encoding="utf-8") as fh:
-                tree = ast.parse(fh.read(), filename=path)
-            for nodes, enclosing in _scopes(tree):
+            for nodes, enclosing in _scopes(_corpus.tree(path)):
                 visible = enclosing + nodes
                 bound = _bindings(visible, _collection_vars(visible))
                 checked += sum(1 for _l, var, _p in _named_assignments_in(nodes) if var in bound)

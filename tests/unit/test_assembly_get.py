@@ -50,12 +50,17 @@ class _Matrix:
 class FakeOcc:
     def __init__(self, name, comp, origin=(0, 0, 0), bbox=None, body_bbox=None,
                  grounded=False, ground_to_parent=False, body_count=1, basis=None,
-                 full_path=None):
+                 full_path=None, children=(), broken_children=()):
         self.name = name
         # fullPathName is the ONLY thing that tells two nested instances sharing a leaf name apart;
         # a top-level occurrence's path is just its name.
         self.fullPathName = full_path or name
-        self.component = type("C", (), {"name": comp})()
+        # component.occurrences is the COMPONENT-LOCAL superset - the only collection an occurrence
+        # with an unresolved reference appears in; childOccurrences (assembly context) drops it.
+        self.component = type("C", (), {
+            "name": comp,
+            "occurrences": _Coll(list(broken_children) + list(children))})()
+        self.childOccurrences = _Coll(list(children))
         self.transform2 = _Matrix(origin, basis)
         self.boundingBox = _BBox(*bbox) if bbox else None
         # body_bbox models the bodies-only boundingBox2(entityTypes) read; "empty" = no bodies (None).
@@ -67,6 +72,49 @@ class FakeOcc:
         self.isGrounded = grounded
         self.isGroundToParent = ground_to_parent
         self.bRepBodies = type("B", (), {"count": body_count})()
+
+
+UNAVAILABLE = ("3 : The occurrence's referenced component is unavailable (broken or missing "
+               "external reference).")
+
+
+class BrokenOcc:
+    """An occurrence whose referenced component will not load: only `name` reads, every other
+    property RAISES, and isReferencedComponent reads FALSE - so occ.component raising is the only
+    signal a walk can gate on."""
+    def __init__(self, name="45740"):
+        self.name = name
+        self.isReferencedComponent = False
+
+    @property
+    def component(self):
+        raise RuntimeError(UNAVAILABLE)
+
+    @property
+    def fullPathName(self):
+        raise RuntimeError("2 : InternalValidationError : path.valid()")
+
+    @property
+    def bRepBodies(self):
+        raise RuntimeError("2 : InternalValidationError : path.valid()")
+
+    @property
+    def isGrounded(self):
+        raise RuntimeError("2 : InternalValidationError : !objPath.empty()")
+
+
+class RaisingWalk:
+    """root.allOccurrences on a design holding an unresolved reference - the PROPERTY ACCESS itself
+    raises, which is what turned this slice into an empty list published as fact."""
+    @property
+    def count(self):
+        raise RuntimeError("2 : InternalValidationError : occ")
+
+    def item(self, i):
+        raise RuntimeError("2 : InternalValidationError : occ")
+
+    def __iter__(self):
+        raise RuntimeError("2 : InternalValidationError : occ")
 
 
 class _Vec:
@@ -479,6 +527,23 @@ class TestHealth:
         err = out["joints"][0]["error"]
         assert "Compute Failed" not in err and "Can't resolve positions" in err
 
+    def test_the_published_message_is_the_shared_condensation(self):
+        # The message crosses the wire through the ONE shared reader, so the embedded newlines are
+        # collapsed into a sentence that reads whole - a local first-chunk slice keeps them.
+        msg = "Can't resolve positions.\n\nInspect relationships.Compute FailedX"
+        _install([], [FakeJoint("X", 2, "A:1", "B:1", health_state=1, message=msg)])
+        err = _payload(ap.handler())["joints"][0]["error"]
+        assert err == "Can't resolve positions. Inspect relationships."
+
+    def test_a_message_at_the_cap_is_whole_and_one_over_is_marked_cut(self):
+        # The shared reader's exact boundary: 240 characters cross whole, 241 are cut and marked
+        # with a trailing ' ...' so a shortened message never reads as a complete one.
+        for length, cut in ((240, False), (241, True)):
+            _install([], [FakeJoint("X", 2, "A:1", "B:1", health_state=1, message="z" * length)])
+            err = _payload(ap.handler())["joints"][0]["error"]
+            assert err.endswith(" ...") is cut, length
+            assert err.count("z") == (240 if cut else length), length
+
 
 # ── BOUNDED READS: occurrences/joints arrays cap + report truncated (CLAUDE.md "Bound it") ──────
 
@@ -672,6 +737,30 @@ class TestJointOriginsSlice:
         assert len(rows) == 1
         assert rows[0]["qualified_name"] == "Tower:1:Center"     # the resolver-accepted form
         assert rows[0]["component"] == "Tower"
+
+    def test_a_subcomponent_named_like_the_root_is_not_treated_as_the_root(self):
+        # The reference form turns on "is this JO's owner the ROOT component". Deciding that by NAME
+        # calls a sub-component that happens to carry the root's name the root, and hands back a
+        # BARE 'Center' - which addresses nothing: this JO lives in an occurrence and needs its path.
+        root = _SliceRoot(name="Root")
+        root.entityToken = "ROOT"
+        sub = _SliceComp("Root")                     # a sub-component carrying the root's name
+        sub.entityToken = "SUB"
+        root._occ_by_comp = {"Root": [_SliceOcc("Root:1", sub)]}
+        jo = _SliceJO("Center", token="C")
+        refs = [ref for ref, _ctx in ap._jo_instances(_SliceDesign(root, subs=[sub]), jo, sub)]
+        assert refs == ["Root:1:Center"]
+
+    def test_a_second_wrapper_of_the_root_component_still_reads_as_the_root(self):
+        # `comp is root` is always False between two wrappers of ONE component (component identity
+        # is never stable), so an identity test would send every root JO down the occurrence path.
+        root = _SliceRoot(name="Root", occ_by_comp={"Root": [_SliceOcc("Root:1", None)]})
+        root.entityToken = "ROOT"
+        other = _SliceComp("Root")                   # a second wrapper of the SAME component
+        other.entityToken = "ROOT"
+        jo = _SliceJO("Center", token="C")
+        refs = [ref for ref, _ctx in ap._jo_instances(_SliceDesign(root), jo, other)]
+        assert refs == ["Center"]
 
     def test_joint_origins_cap_and_truncated(self):
         jos = [_SliceJO(f"JO{i}", token=f"T{i}") for i in range(5)]
@@ -1318,6 +1407,71 @@ class TestAllOccurrencesSlice:
         kin_design(occs=[FakeOcc("A:1", "A")], joints=[FakeJoint("J", 1, "A:1", None)])
         out = _payload(ap.handler(include=["all_occurrences"], include_joints=False))
         assert "joints" not in out["all_occurrences"][0]
+
+
+class TestUnresolvedReferences:
+    """The measured defect: on a 55-occurrence assembly whose root.allOccurrences RAISED, this tool
+    published all_occurrence_count 0 with all_occurrences_truncated false and is_healthy true -
+    under a note telling the agent to check is_healthy FIRST."""
+
+    def _broken_design(self, kin_design, walk_raises=True):
+        container = FakeOcc("Op1 Workholding Container:1", "Op1",
+                            children=[FakeOcc("48205-125 (1):1", "48205-125",
+                                              full_path="Op1 Workholding Container:1+48205-125 (1):1")],
+                            broken_children=[BrokenOcc("45740")])
+        kin_design(occs=[container])
+        if walk_raises:
+            ap.app.activeProduct.rootComponent.allOccurrences = RaisingWalk()
+        return container
+
+    def test_zero_unresolved_keeps_the_healthy_verdict_and_the_fast_walk(self, kin_design):
+        kin_design(occs=[FakeOcc("Tower:1", "Tower")])
+        out = _payload(ap.handler())
+        assert out["is_healthy"] is True
+        assert out["unresolved_references"] == []
+        assert "UNRESOLVED" not in out["note"]
+
+    def test_one_unresolved_reference_makes_is_healthy_false_and_names_it(self, kin_design):
+        self._broken_design(kin_design)
+        out = _payload(ap.handler())
+        assert out["is_healthy"] is False
+        assert [u["name"] for u in out["unresolved_references"]] == ["45740"]
+        assert out["unresolved_references"][0]["detail"] == UNAVAILABLE
+        assert "45740" in out["note"] and "UNRESOLVED" in out["note"]
+        # the note's own promise must now hold: unresolved_references is one of the named fields
+        assert "unresolved_references" in out["note"]
+
+    def test_a_raising_walk_publishes_the_real_count_not_an_empty_list(self, kin_design):
+        self._broken_design(kin_design)
+        out = _payload(ap.handler(include=["all_occurrences"]))
+        assert out["occurrences_walk"] == "recursed"
+        assert out["all_occurrence_count"] == 3        # container + its child + the unresolved one
+        assert out["all_occurrences"] != []
+        assert out["all_occurrences_truncated"] is False
+        rows = {r["name"]: r for r in out["all_occurrences"]}
+        assert rows["45740"]["unresolved"] is True
+        assert rows["45740"]["parent_path"] == "Op1 Workholding Container:1"
+        # the unresolved row claims NO placement or body count - every one of those reads raises
+        assert "origin" not in rows["45740"] and "body_count" not in rows["45740"]
+
+    def test_an_unreadable_census_publishes_null_and_never_truncated_false_over_a_zero(self, kin_design):
+        # the cardinal shape: 0 + truncated:false is an active claim that nothing was lost.
+        kin_design(occs=[])
+        root = ap.app.activeProduct.rootComponent
+        root.allOccurrences = RaisingWalk()
+        root.occurrences = RaisingWalk()
+        out = _payload(ap.handler(include=["all_occurrences"]))
+        assert out["all_occurrence_count"] is None
+        assert out["occurrences_walk"] == "unreadable"
+        assert out["all_occurrences_truncated"] is False
+        assert "UNKNOWN, not" in out["note"]
+
+    def test_a_broken_TOP_LEVEL_occurrence_gets_a_flagged_row_not_a_blank_record(self, kin_design):
+        kin_design(occs=[BrokenOcc("45740"), FakeOcc("Stock:1", "Stock")])
+        rows = {r["name"]: r for r in _payload(ap.handler())["occurrences"]}
+        assert rows["45740"]["unresolved"] is True
+        assert "grounded" not in rows["45740"]        # never a swallowed False about an unreadable flag
+        assert rows["Stock:1"]["grounded"] is False   # a real read still publishes a real value
 
 
 class TestJointLimitsRead:

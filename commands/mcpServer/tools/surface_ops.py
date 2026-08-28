@@ -287,9 +287,13 @@ def stitch_handler(bodies=None, tolerance=None, units="mm", operation="new") -> 
     # A flag that would not read makes the verdict null, NOT false: all() over an unreadable flag
     # would report "did not close" - a gap-diagnosis - off a flag nobody read.
     body_names, flags = _result_body_report(feature)
+    # An EMPTY result set is not evidence the surfaces stayed open: the false verdict below is a GAP
+    # diagnosis ("increase tolerance"), and that needs a body whose isSolid READ false. A stitch
+    # owning no result body built nothing at all - the same failure the loft above reports.
     if not flags:
-        became_solid = False
-    elif None in flags:
+        return error("Stitch reported success but the feature owns no result body - nothing was "
+                     "stitched. " + _common.failed_effect_remedy(design, feature))
+    if None in flags:
         became_solid = None
     else:
         became_solid = all(flags)

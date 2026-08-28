@@ -98,19 +98,15 @@ def occ_world_frame(occ, inv_k):
                 av = axis_vec(vec)
                 if av is not None:
                     out[key] = av
-    # Bodies-only box (body_aabb): the plain occ.boundingBox also counts visible sketches +
-    # construction datums, so an orphaned oversized sketch mis-reported a 68x10 body as 120x120
-    # (live-verified). None (no bodies) -> bbox omitted, never a datum-inflated box.
-    bb = body_aabb(occ)
-    if bb is not None:
-        mn = safe(lambda: bb.minPoint); mx = safe(lambda: bb.maxPoint)
-        if mn is not None and mx is not None:
-            out["bbox_center"] = [round((mn.x + mx.x) / 2 * inv_k, 3),
-                                  round((mn.y + mx.y) / 2 * inv_k, 3),
-                                  round((mn.z + mx.z) / 2 * inv_k, 3)]
-            out["bbox_size"] = [round((mx.x - mn.x) * inv_k, 3),
-                                round((mx.y - mn.y) * inv_k, 3),
-                                round((mx.z - mn.z) * inv_k, 3)]
+    # Bodies-only box, read through _aabb_extents so every coordinate is a GUARDED read: the plain
+    # occ.boundingBox also counts visible sketches + construction datums, so an orphaned oversized
+    # sketch mis-reported a 68x10 body as 120x120 (live-verified). No bodies, or a corner coordinate
+    # that will not read, -> both bbox keys omitted (the same omit-rather-than-fake contract origin
+    # keeps), never a datum-inflated box and never a box built on a half-read corner.
+    extents = _aabb_extents(occ)
+    if extents is not None:
+        out["bbox_center"] = [round((lo + hi) / 2 * inv_k, 3) for lo, hi in extents]
+        out["bbox_size"] = [round((hi - lo) * inv_k, 3) for lo, hi in extents]
     return out
 
 

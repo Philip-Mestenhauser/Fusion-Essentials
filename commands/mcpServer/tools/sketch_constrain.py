@@ -14,7 +14,7 @@ import adsk.fusion
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe, resolve_sketch, all_sketch_names
+from ._common import ok, error, safe, find_sketch, all_sketch_names
 from . import _common
 from . import _inputs
 from . import _sketch_detail
@@ -589,8 +589,11 @@ def handler(constraint: str = "", sketch_name: str = "", entity_one: str = "",
     if not design:
         return error("No active design.")
     # Resolve across the whole design (active component first) so a sketch in an activated
-    # sub-component is constrainable, not only one in the root component.
-    sketch = resolve_sketch(design, (sketch_name or "").strip())
+    # sub-component is constrainable, not only one in the root component. A name SEVERAL components'
+    # sketches carry is refused with them named, rather than constraining an arbitrary one.
+    sketch, ambiguous = find_sketch(design, (sketch_name or "").strip())
+    if ambiguous:
+        return error(ambiguous)
     if not sketch:
         names = all_sketch_names(design)
         return error(f"No sketch named '{sketch_name}'. Available: "

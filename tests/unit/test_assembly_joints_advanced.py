@@ -128,6 +128,9 @@ class FakeOcc:
         self.name = name
         self.fullPathName = full_path or name
         self.pos = pos
+        # A real Occurrence always answers `component`; a read that RAISES is the
+        # unresolved-external-reference signal the shared occurrence census filters on.
+        self.component = SimpleNamespace(name=name.split(":")[0])
 
     def _matrix(self):
         if self.pos is None:
@@ -1235,17 +1238,57 @@ class TestConstraintRelationshipCount:
         assert out["relationships_submitted"] == 2
         assert "'relationship_count' is null" in out["note"]
 
-    def test_a_count_short_of_the_request_is_disclosed(self, constrain):
-        # the constraint holds ONE relationship where three were submitted - published as read, and
-        # the mismatch said out loud rather than smoothed over
+    def test_a_count_short_of_the_request_is_refused(self, constrain):
+        # the constraint holds ONE relationship where three were submitted: the two missing pairs
+        # constrain nothing, so the parts are not located the way the call describes. The sibling
+        # rigid group refuses the same shortfall; a note-only disclosure would ship created:true.
         constrain(count=1)
+        res = ja.assembly_constraint_handler(relationships=[
+            {"snap_one": "A:1:bottom", "snap_two": "B:1:top"},
+            {"snap_one": "A:1:left", "snap_two": "B:1:left"},
+            {"snap_one": "A:1:back", "snap_two": "B:1:back"}])
+        assert res["isError"] is True
+        assert "only 1 of the 3" in res["message"]
+        assert "action='delete'" in res["message"]      # it REMAINS - name the removal path
+
+    def test_one_short_of_the_request_is_refused(self, constrain):
+        # the N-1 boundary: two landed of three submitted is still a shortfall
+        constrain(count=2)
+        res = ja.assembly_constraint_handler(relationships=[
+            {"snap_one": "A:1:bottom", "snap_two": "B:1:top"},
+            {"snap_one": "A:1:left", "snap_two": "B:1:left"},
+            {"snap_one": "A:1:back", "snap_two": "B:1:back"}])
+        assert res["isError"] is True
+        assert "only 2 of the 3" in res["message"]
+
+    def test_a_full_landing_is_created(self, constrain):
+        # the other side of the boundary: N of N submitted stays ok, with no shortfall wording
+        constrain(count=3)
         out = _payload(ja.assembly_constraint_handler(relationships=[
             {"snap_one": "A:1:bottom", "snap_two": "B:1:top"},
             {"snap_one": "A:1:left", "snap_two": "B:1:left"},
             {"snap_one": "A:1:back", "snap_two": "B:1:back"}]))
-        assert out["relationship_count"] == 1
-        assert out["relationships_submitted"] == 3
-        assert "reads 1 for the 3" in out["note"]
+        assert out["created"] is True and out["relationship_count"] == 3
+        assert "of the 3" not in out["note"]
+
+    def test_a_count_above_the_request_is_disclosed_not_refused(self, constrain):
+        # a surplus is not a shortfall: nothing the caller asked for is missing, so it is said out
+        # loud in the note and the constraint stands
+        constrain(count=3)
+        out = _payload(ja.assembly_constraint_handler(relationships=[
+            {"snap_one": "A:1:bottom", "snap_two": "B:1:top"},
+            {"snap_one": "A:1:left", "snap_two": "B:1:left"}]))
+        assert out["created"] is True
+        assert "reads 3 for the 2" in out["note"]
+
+    def test_an_unreadable_count_is_not_treated_as_a_shortfall(self, constrain):
+        # None is not "fewer than submitted" - it is unknown, and refusing on it would fail every
+        # call on a build whose count cannot be read
+        constrain(blind_count=True)
+        out = _payload(ja.assembly_constraint_handler(relationships=[
+            {"snap_one": "A:1:bottom", "snap_two": "B:1:top"},
+            {"snap_one": "A:1:left", "snap_two": "B:1:left"}]))
+        assert out["created"] is True and out["relationship_count"] is None
 
 
 class TestConstraintMovedVerdict:

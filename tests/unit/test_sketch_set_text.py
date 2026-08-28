@@ -532,6 +532,20 @@ class TestCreate:
         # height 10mm -> 1.0cm handed to createInput2
         assert sk.sketchTexts.last_input.height == 1.0
 
+    def test_create_without_a_height_applies_the_documented_default(self):
+        # 'height' defaults to None on the wire so an edit-time height is DETECTABLE and refused;
+        # the create path is where the documented 5 is applied, and the description promises it.
+        design, sk = _install_create()
+        _payload(st.handler(text="A", create=True, sketch_name="Plate", units="mm"))
+        assert st._DEFAULT_HEIGHT == 5.0
+        assert sk.sketchTexts.last_input.height == 0.5     # 5mm -> 0.5cm
+
+    def test_the_create_default_is_applied_in_the_requested_units(self):
+        # boundary beside it: the default is a number in 'units', not a fixed centimetre value
+        design, sk = _install_create()
+        _payload(st.handler(text="A", create=True, sketch_name="Plate", units="cm"))
+        assert sk.sketchTexts.last_input.height == 5.0
+
     def test_create_position_scaled(self):
         design, sk = _install_create()
         _payload(st.handler(text="A", create=True, sketch_name="Plate", x=20, y=30, units="mm"))
@@ -1003,11 +1017,34 @@ class TestCreateOnlyGuard:
         res = st.handler(text="X", x=10)
         assert res["isError"] is True and "'x'" in res["message"]
 
-    def test_height_and_units_stay_exempt(self):
-        # both carry non-None defaults, so a caller cannot be told apart from the default
+    def test_height_without_create_is_refused_rather_than_ignored(self):
+        # An edit writes textParameter.expression and fontName and NOTHING else, so a height passed
+        # with create=false never reaches the text. Reporting set:true/changed_count:1 over it told
+        # the caller the height had been applied when the text had not moved off its old size.
         _install([FakeComp("Root", [FakeSketch("S", [FakeText("'a'")])])])
-        out = _payload(st.handler(text="X", height=9, units="in"))
+        res = st.handler(text="X", height=20)
+        assert res["isError"] is True
+        assert "'height'" in res["message"] and "create=true" in res["message"]
+
+    def test_a_zero_height_on_the_edit_path_is_still_a_supplied_value(self):
+        # boundary: 0 is falsy but supplied - _given must not read it as "not passed"
+        _install([FakeComp("Root", [FakeSketch("S", [FakeText("'a'")])])])
+        res = st.handler(text="X", height=0)
+        assert res["isError"] is True and "'height'" in res["message"]
+
+    def test_units_stays_exempt(self):
+        # 'units' keeps a non-None default a caller cannot be told apart from, and it only scales
+        # 'height' - so it is not itself evidence of a create-shaped request
+        _install([FakeComp("Root", [FakeSketch("S", [FakeText("'a'")])])])
+        out = _payload(st.handler(text="X", units="in"))
         assert out["changed_count"] == 1
+
+    def test_an_edit_that_names_no_height_is_untouched(self):
+        # the other side of the boundary: height defaults to None now, and a plain edit must not
+        # start refusing itself
+        _install([FakeComp("Root", [FakeSketch("S", [FakeText("'a'")])])])
+        out = _payload(st.handler(text="X"))
+        assert out["changed_count"] == 1 and out["set"] is True
 
     def test_plain_edit_is_unaffected(self):
         _install([FakeComp("Root", [FakeSketch("S", [FakeText("'a'")])])])

@@ -360,7 +360,9 @@ def _source_curves(design, sketch, source_sketch, curve_refs, curve_handles):
         if not name:
             return None, ("'curve_refs' needs 'source_sketch' - the sketch those ids are read "
                           "against, which must not be the sketch being projected into.")
-        src = _common.resolve_sketch(design, name)
+        src, ambiguous = _common.find_sketch(design, name)
+        if ambiguous:
+            return None, ambiguous
         if src is None:
             return None, (f"No sketch named '{name}'. Available: "
                           + (", ".join(n for n in all_sketch_names(design) if n) or "(none)"))
@@ -416,12 +418,22 @@ def _into_sketch(sketch, entities, link) -> dict:
     # for isReference - so it is the landed state, never the request echoed at the caller.
     link_yes, link_no, link_unknown = _flag_tally(items, "isLinked")
     linked = _landed_flag(link_yes, link_no, link_unknown)
+    # MEASURED: project2 honours its isLinked argument exactly - link=true creates curves reading
+    # isLinked True (and isReference True), link=false reads both False. So a set that UNANIMOUSLY
+    # reads the opposite of the request is the call failing to do what it was asked, not a quirk to
+    # narrate in a note. The split / unreadable / empty results stay disclosed in the note instead:
+    # none of them supports one claim about the created set, so none is a measured contradiction.
+    if linked is not None and linked != requested:
+        return error(
+            f"link={'true' if requested else 'false'} was requested, but all {created_count} "
+            f"curve(s) project2 created in sketch '{safe(lambda: sketch.name)}' read back as "
+            + ("LINKED" if linked else "NOT linked")
+            + ". The curves WERE created and remain in the sketch"
+            + (" (" + ", ".join(refs) + ")" if refs else "")
+            + " - delete them with sketch_delete_entity if that linkage is wrong for the job.")
     note = ("Geometry projected. " + _REFS_NOTE + " "
             + _link_note(linked, requested, link_yes, link_no, link_unknown)
             + " Extrude a resulting profile via sketch_get -> model_extrude.")
-    if linked is not None and linked != requested:
-        note += (f" link={'true' if requested else 'false'} was requested, so the curves did not "
-                 "land the way the call asked for.")
     if created_count > len(refs):
         note += _SHORTFALL_NOTE
 
@@ -609,7 +621,9 @@ def handler(entities="", sketch_name: str = "", link: bool = None, action: str =
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")
 
-    sk, requested = _common.resolve_or_recent_sketch(design, sketch_name)
+    sk, requested, ambiguous = _common.find_or_recent_sketch(design, sketch_name)
+    if ambiguous:
+        return error(ambiguous)
     if not sk:
         if (sketch_name or "").strip():
             names = all_sketch_names(design)

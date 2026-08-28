@@ -305,6 +305,42 @@ class TestSketchResolution:
         msg = error_message(mod.handler(file_path=svg, sketch_name="Nope"))
         assert "No sketch named 'Nope'" in msg and "Plate" in msg
 
+    def test_a_padded_sketch_name_is_reported_stripped(self, mod, sketch, svg):
+        # the walk searches the STRIPPED name, so the miss must name that one - quoting the padded
+        # input sends the caller looking for a sketch whose name carries the spaces it typed.
+        msg = error_message(mod.handler(file_path=svg, sketch_name="  Ghost  "))
+        assert "No sketch named 'Ghost'" in msg
+        assert "'  Ghost  '" not in msg
+
+    def test_a_blank_sketch_name_with_no_sketch_never_quotes_none(self, mod, svg):
+        # a blank name leaves the requested name None, so the named-miss wording would print
+        # "No sketch named 'None'" - a sketch nobody asked for. The blank branch words its own.
+        install(mod, make_design(sketches=[]))
+        msg = error_message(mod.handler(file_path=svg, sketch_name=""))
+        assert msg == ("No sketch to import the SVG into. SVG curves land in an EXISTING sketch - "
+                       "make one with sketch_create, then name it in 'sketch_name'.")
+        assert "'None'" not in msg
+
+    def test_a_whitespace_only_sketch_name_targets_the_most_recent_sketch(self, mod, two_sketches,
+                                                                          svg):
+        # ' ' strips to blank, which is the most-recent-sketch request - not a search for a sketch
+        # named with a space.
+        plate, _label = two_sketches
+        out = payload(mod.handler(file_path=svg, sketch_name=" "))
+        assert out["sketch"] == "Label"
+        assert plate.sketchCurves.count == 1
+
+    def test_a_shared_sketch_name_is_refused_with_its_owners(self, mod, two_sketches, svg,
+                                                             monkeypatch):
+        # Two components can each hold a "Plate". The refusal names them and no curve is imported;
+        # calling it "No sketch named 'Plate'" states the opposite of what the walk read.
+        plate, label = two_sketches
+        refusal = "2 sketches are named 'Plate' ('Plate' in Root, 'Plate' in Frame)"
+        monkeypatch.setattr(mod._common, "find_or_recent_sketch", lambda d, n: (None, n, refusal))
+        msg = error_message(mod.handler(file_path=svg, sketch_name="Plate"))
+        assert msg == refusal and "No sketch named" not in msg
+        assert plate.sketchCurves.count == 1 and label.sketchCurves.count == 0   # nothing landed
+
     def test_a_design_with_no_sketch_points_at_sketch_create(self, mod, svg):
         install(mod, make_design(sketches=[]))
         assert "sketch_create" in error_message(mod.handler(file_path=svg))

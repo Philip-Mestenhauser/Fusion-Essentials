@@ -9,7 +9,7 @@ lists, which is the only place that mistake is catchable."""
 
 # The Fusion build the surface was read from. NOT an absolute path - that would differ per user
 # and make the staleness check fail on every machine but the one that generated it.
-BINDINGS_BUILD = "cbbaeb97c048d5e22ed81bf2042c7836721f021c"
+BINDINGS_BUILD = "8a194dd5c08ff06b661291836acad71b5f7126d0"
 
 # 'module.Class' -> every real member name (properties and methods).
 PROPERTIES = {
@@ -305,10 +305,20 @@ PROPERTIES = {
         "hasTexture", "id", "isUsed", "isValid", "name", "normalTexture", "objectType",
         "parent", "roughness", "roughnessTexture", "thisown", "usedBy",
     ),
+    "core.Arc2D": (
+        "asNurbsCurve", "center", "classType", "copy", "createByCenter", "createByThreePoints",
+        "curveType", "endAngle", "endPoint", "evaluator", "getData", "isClockwise", "isValid",
+        "objectType", "radius", "set", "startAngle", "startPoint", "thisown", "transformBy",
+    ),
     "core.Camera": (
         "cameraType", "classType", "create", "eye", "getExtents", "isFitView",
         "isSmoothTransition", "isValid", "objectType", "perspectiveAngle", "setExtents",
         "target", "thisown", "upVector", "viewExtents", "viewOrientation",
+    ),
+    "core.Circle2D": (
+        "asNurbsCurve", "center", "classType", "copy", "createByCenter", "createByThreePoints",
+        "curveType", "evaluator", "getData", "isValid", "objectType", "radius", "set",
+        "thisown", "transformBy",
     ),
     "core.CloudFileDialog": (
         "classType", "dataFile", "dataFiles", "dataFolder", "filename", "filter",
@@ -2361,6 +2371,7 @@ PROPERTIES = {
 }
 
 # 'module.Class.method' -> the 'module.Class' it returns.
+# A live-measured return overrides a broken binding annotation for: core.Arc2D.createByCenter, core.Circle2D.createByCenter.
 FACTORIES = {
     "cam.AdditiveFEADeckBuilder.create": "cam.AdditiveFEADeckBuilder",
     "cam.AdditiveFEADeckBuilder.createBuildPlateXYExtensionCard": "cam.AdditiveFEADeckBuilderCard",
@@ -2467,9 +2478,9 @@ FACTORIES = {
     "cam.ToolLibrary.createEmpty": "cam.ToolLibrary",
     "cam.ToolLibrary.createFromJson": "cam.ToolLibrary",
     "cam.ToolLibrary.createQuery": "cam.ToolQuery",
-    "core.Arc2D.createByCenter": "core.Point2D",
+    "core.Arc2D.createByCenter": "core.Arc2D",
     "core.Camera.create": "core.Camera",
-    "core.Circle2D.createByCenter": "core.Point2D",
+    "core.Circle2D.createByCenter": "core.Circle2D",
     "core.Color.create": "core.Color",
     "core.DataFile.createCopyDesignFileInput": "core.CopyDesignFileInput",
     "core.DataFile.createCopyFileInput": "core.CopyFileInput",
@@ -2962,30 +2973,30 @@ BOOL_METHODS = frozenset({
     "setFacetControlByFacetNumber", "setFilterEnabled", "setFixedPartingLineDraftFeatureType",
     "setFixedPlaneDraftFeatureType", "setFlatHem", "setFlipVisibility", "setFreeEndCondition",
     "setFullVisibility", "setGroundPlaneOffset", "setHeader", "setHoleSignatureXML",
-    "setInputEntities", "setInputFaces", "setLengthAndOffset", "setLimitsFitsLinear",
-    "setLimitsFitsSizeLimits", "setLimitsFitsStacked", "setLimitsFitsTolerance",
-    "setLimitsLinear", "setLimitsStacked", "setLoops", "setLoopsFromFaces", "setMAX", "setMIN",
-    "setManipulator", "setMaximumSize", "setMidRadii", "setMinimumSize", "setMotionData",
-    "setMovingPartingLineDraftFeatureType", "setNoBuildZoneVisible", "setOccurrences",
-    "setOneSideExtent", "setOneSideToExtent", "setOpacity", "setOpenHem", "setOrientation",
-    "setPassword", "setPlanarMoveVisibility", "setPointSharpEndCondition",
-    "setPointTangentEndCondition", "setPosition", "setPositionAtCenter",
-    "setPositionByPlaneAndOffsets", "setPositionByPoint", "setPositionBySketchPoint",
-    "setPositionBySketchPoints", "setPositionOnEdge", "setQuality", "setRolledHem",
-    "setRopeHem", "setRotateVisibility", "setRotationUsingEdge", "setScaleVisibility",
-    "setSelectionLimits", "setSingle", "setSingleAngle", "setSize", "setSmoothEndCondition",
-    "setSourceEntities", "setSplittingTool", "setStartAndEndFeatures", "setStockMaterialId",
-    "setStockMaterialText", "setSurfaceIntersectionSplitType", "setSymmetric",
-    "setSymmetricExtent", "setTangentEndCondition", "setTeardropHem", "setText",
-    "setTextHeight", "setThickness", "setThicknesses", "setThinExtrude",
-    "setThreadOffsetLength", "setToAlignCoordinateSystems", "setToAsymmetric",
-    "setToClearanceHole", "setToConstantRadius", "setToCounterbore", "setToCountersink",
-    "setToDistanceAndAngle", "setToEqualDistance", "setToHeightAndPitchCoil", "setToIdentity",
-    "setToNonUniform", "setToOverlapAlignmentType", "setToRevolutionAndHeight",
-    "setToRevolutionsAndPitch", "setToRotateTo", "setToRotation", "setToSimple",
-    "setToSimpleHole", "setToSpiral", "setToSymmetricGapAlignmentType", "setToTappedHole",
-    "setToTwoDistances", "setToUniform", "setTranslateVisibility", "setTwoAngles",
-    "setTwoDistances", "setTwoSideAngleExtent", "setTwoSideToExtent",
+    "setInputEntities", "setInputFaces", "setLengthAndOffset", "setLightBulbOn",
+    "setLimitsFitsLinear", "setLimitsFitsSizeLimits", "setLimitsFitsStacked",
+    "setLimitsFitsTolerance", "setLimitsLinear", "setLimitsStacked", "setLoops",
+    "setLoopsFromFaces", "setMAX", "setMIN", "setManipulator", "setMaximumSize", "setMidRadii",
+    "setMinimumSize", "setMotionData", "setMovingPartingLineDraftFeatureType",
+    "setNoBuildZoneVisible", "setOccurrences", "setOneSideExtent", "setOneSideToExtent",
+    "setOpacity", "setOpenHem", "setOrientation", "setPassword", "setPlanarMoveVisibility",
+    "setPointSharpEndCondition", "setPointTangentEndCondition", "setPosition",
+    "setPositionAtCenter", "setPositionByPlaneAndOffsets", "setPositionByPoint",
+    "setPositionBySketchPoint", "setPositionBySketchPoints", "setPositionOnEdge", "setQuality",
+    "setRolledHem", "setRopeHem", "setRotateVisibility", "setRotationUsingEdge",
+    "setScaleVisibility", "setSelectionLimits", "setSingle", "setSingleAngle", "setSize",
+    "setSmoothEndCondition", "setSourceEntities", "setSplittingTool", "setStartAndEndFeatures",
+    "setStockMaterialId", "setStockMaterialText", "setSuppressed",
+    "setSurfaceIntersectionSplitType", "setSymmetric", "setSymmetricExtent",
+    "setTangentEndCondition", "setTeardropHem", "setText", "setTextHeight", "setThickness",
+    "setThicknesses", "setThinExtrude", "setThreadOffsetLength", "setToAlignCoordinateSystems",
+    "setToAsymmetric", "setToClearanceHole", "setToConstantRadius", "setToCounterbore",
+    "setToCountersink", "setToDistanceAndAngle", "setToEqualDistance",
+    "setToHeightAndPitchCoil", "setToIdentity", "setToNonUniform", "setToOverlapAlignmentType",
+    "setToRevolutionAndHeight", "setToRevolutionsAndPitch", "setToRotateTo", "setToRotation",
+    "setToSimple", "setToSimpleHole", "setToSpiral", "setToSymmetricGapAlignmentType",
+    "setToTappedHole", "setToTwoDistances", "setToUniform", "setTranslateVisibility",
+    "setTwoAngles", "setTwoDistances", "setTwoSideAngleExtent", "setTwoSideToExtent",
     "setTwoSidesDistanceExtent", "setTwoSidesExtent", "setTwoSidesToExtent", "setUVDirections",
     "setUnfoldBends", "setWithArray", "setWithCoordinateSystem", "show", "showBusy", "snapTo",
     "splitSupport", "start", "startEdit", "stop", "subtract", "switchConfiguration",

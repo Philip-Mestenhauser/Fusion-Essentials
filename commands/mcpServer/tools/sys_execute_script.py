@@ -14,6 +14,7 @@ add-a-sheet-then-raise script has been measured leaving the sheet behind on one 
 up on another.
 """
 
+import json
 import os
 import re
 import tempfile
@@ -29,7 +30,7 @@ from . import _drawing_common
 app = adsk.core.Application.get()
 
 
-def handler(script: str) -> dict:
+def handler(script: str, read_only: bool = False) -> dict:
     """See TOOL_DESCRIPTION."""
     # Require a `run` function taking a single argument (the Fusion script idiom).
     if not re.search(r'def\s+run\s*\(\s*(\w+)\s*\):', script):
@@ -57,6 +58,11 @@ def handler(script: str) -> dict:
         # passed inside double quotes, so spaces in the path are preserved.
         run_path = temp_file.replace('\\', '/')
 
+        if read_only:
+            # No transaction is opened: there is no design change to group into one undo step, and
+            # the enforcement _run_read_only relies on is what makes that safe rather than a promise.
+            return _run_read_only(run_path)
+
         # Group the script's changes into ONE timeline/undo step via a transaction. Grouping is all
         # it buys - the script cannot control what survives: measured, an UNCAUGHT raise takes the
         # whole command down and its earlier mutations with it, and CATCHING an API error is no
@@ -82,19 +88,7 @@ def handler(script: str) -> dict:
                 app.executeTextCommand('PTransaction.Commit')
                 current_doc.activate()
 
-        result = {"isError": False, "message": "Script executed successfully"}
-        if res:
-            # Python.Run's return text embeds the accumulated TextCommands console log (the same
-            # noise _extract_script_error strips on the failure path). Cut at THIS run's sentinel
-            # first - everything before it accumulated during earlier calls (stale error banners
-            # included) - then strip the per-call log lines.
-            cut = res.rfind(_RUN_SENTINEL)
-            if cut != -1:
-                res = res[cut + len(_RUN_SENTINEL):]
-            cleaned = re.sub(r"\n{3,}", "\n\n", _CONSOLE_NOISE.sub("", res)).strip()
-            if cleaned:
-                result["content"] = [{"type": "text", "text": cleaned}]
-        return result
+        return _ok_result(_clean_output(res))
 
     except Exception as e:
         if transaction_started and transacted_doc and transacted_doc.isValid:
@@ -125,6 +119,80 @@ _CONSOLE_NOISE = re.compile(r"^MCP calling tool: .*$", re.MULTILINE)
 _TB_MARKER = "Traceback (most recent call last):"
 # Printed as the script's FIRST statement; console text before it accumulated during EARLIER calls.
 _RUN_SENTINEL = "<<FE-SCRIPT-OUTPUT>>"
+# What executeTextCommand reports for a text command this Fusion build does not carry.
+_NO_SUCH_COMMAND = "There is no command MCP.Execute"
+_NO_READ_ONLY_CHANNEL = (
+    "read_only is unavailable in this Fusion build: it runs through the MCP.Execute text command, "
+    "and this build reports no such command. Re-run without read_only - that path runs with no "
+    "read-only enforcement, so verify the state afterwards."
+)
+_UNREADABLE_RESULT = (
+    "The read-only channel returned a result this tool could not read (no 'success' field), so "
+    "whether the script ran is unknown. Read the state back before assuming either way. Raw result:"
+)
+
+
+def _clean_output(res: str) -> str:
+    """Reduce a channel's return text to THIS run's own printed output.
+
+    Both channels hand back the accumulated TextCommands console log (the same noise
+    _extract_script_error strips on the failure path). Cut at THIS run's sentinel first - everything
+    before it accumulated during earlier calls, stale error banners included - then strip the
+    per-call log lines."""
+    res = res or ""
+    cut = res.rfind(_RUN_SENTINEL)
+    if cut != -1:
+        res = res[cut + len(_RUN_SENTINEL):]
+    return re.sub(r"\n{3,}", "\n\n", _CONSOLE_NOISE.sub("", res)).strip()
+
+
+def _ok_result(cleaned: str) -> dict:
+    result = {"isError": False, "message": "Script executed successfully"}
+    if cleaned:
+        result["content"] = [{"type": "text", "text": cleaned}]
+    return result
+
+
+def _run_read_only(run_path: str) -> dict:
+    """Run the prepared script file under Fusion's read-only context, via the MCP.Execute text command.
+
+    MEASURED on this build: with readOnly set, `rootComponent.sketches.add(...)` raised "Cannot
+    modify the design from a read-only context" - and so did the same add reached through a nested
+    `executeTextCommand('Python.Run ...')`, so that call does not step around the context. The SAME
+    script with readOnly false created the sketch, which is what makes the refusal the flag's doing
+    rather than the channel's. The context covers the DESIGN only: a read-only script wrote a file
+    to disk in the same probe, so this is a guard on the model, not a process sandbox.
+
+    MCP.Execute takes ONE quoted JSON parameter, so its inner quotes are backslash-escaped. The
+    caller's script is deliberately NOT inlined into that parameter - it stays in the temp file and a
+    fixed loader execs it - so no caller script text ever has to survive the text-command parser."""
+    loader = ("def run(_context):\n"
+              "    path = " + repr(run_path) + "\n"
+              "    with open(path, encoding='utf-8') as fh:\n"
+              "        src = fh.read()\n"
+              "    exec(compile(src, path, 'exec'), {'__name__': '__fe_read_only_script__'})\n")
+    payload = json.dumps({"featureType": "script",
+                          "object": {"readOnly": True, "script": loader}},
+                         separators=(',', ':'))
+    try:
+        res = app.executeTextCommand('MCP.Execute "' + payload.replace('"', '\\"') + '"')
+    except Exception as e:
+        if _NO_SUCH_COMMAND in str(e):
+            return _error_result(_NO_READ_ONLY_CHANNEL)
+        raise
+
+    try:
+        parsed = json.loads(res)
+    except Exception:
+        parsed = None
+    if not isinstance(parsed, dict) or "success" not in parsed:
+        # The channel answered in a shape this tool cannot read, so whether the script ran is
+        # unknown - reporting ok here would be the false success the honesty contract forbids.
+        return _error_result(_UNREADABLE_RESULT + "\n\n" + _clean_output(res)[:2000])
+    cleaned = _clean_output(parsed.get("message") or parsed.get("error") or "")
+    if parsed["success"] is not True:
+        return _error_result(cleaned or "The read-only channel reported failure with no detail.")
+    return _ok_result(cleaned)
 
 
 def _extract_script_error(tb: str) -> str:
@@ -171,22 +239,25 @@ def _error_result(text: str) -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Execute Fusion API Python source code in the user's live Fusion session. "
-    "An escape hatch for actions the typed tools don't cover - prefer a typed tool when one "
-    "exists (see sys_find_tool / sys_capability_map).\n\n"
+    "Execute Fusion API Python in the user's live Fusion session. "
+    "An escape hatch for actions the typed tools don't cover - prefer a typed tool when one exists "
+    "(sys_find_tool / sys_capability_map); this channel has been measured dying mid-session while "
+    "the typed tools kept working.\n\n"
     "REQUIREMENTS:\n"
-    "- The script MUST define a function `def run(context):` which is the entry point.\n"
-    "- DO NOT show any modal UI (no messageBox / no input dialogs) - modal windows "
-    "pause script execution and the agent cannot dismiss them.\n"
+    "- The script MUST define `def run(context):` - the entry point.\n"
+    "- DO NOT show modal UI (messageBox / input dialogs) - it pauses execution and the agent "
+    "cannot dismiss it.\n"
     "- Let exceptions raise rather than swallowing them, so the error text is returned.\n"
     "- ONE mutation per call is the safe shape: a script gets no per-item failure isolation, so a "
     "bulk edit that half-fails cannot report WHICH item failed. On a DESIGN document an UNCAUGHT "
-    "raise (Fusion API error or plain Python) always rolls the WHOLE script back, earlier mutations "
-    "and printed output with it - and catching an error is NO GUARANTEE the earlier work survived: "
-    "some Fusion API errors take the whole command down even when caught. On a DRAWING document "
-    "rollback is NOT GUARANTEED either way. Batch work belongs in separate calls.\n"
-    "- Use print() to return values/information; printed output is included in the result.\n\n"
-    "Read the state first (e.g. workspace_orient), and verify it again after."
+    "raise (API or plain Python) always rolls the WHOLE script back, earlier mutations and printed "
+    "output with it - and catching an error is NO GUARANTEE the earlier work survived: some API "
+    "errors take the whole command down even when caught. On a DRAWING document rollback is NOT "
+    "GUARANTEED either way.\n"
+    "- On a DRAWING document, reading a document's .products has been measured killing the call; "
+    "use app.activeProduct instead.\n"
+    "- Use print() to return values; printed output is included in the result.\n\n"
+    "Read the state first (workspace_orient) and verify it after."
 )
 
 tool = Tool.create_with_string_input(
@@ -194,6 +265,13 @@ tool = Tool.create_with_string_input(
     description=TOOL_DESCRIPTION,
     input_param_name="script",
     input_param_description="Fusion API Python source code to execute. Must define def run(context):",
+).add_input_property(
+    "read_only",
+    {"type": "boolean",
+     "description": "Run under Fusion's read-only context and open no transaction: a design change "
+                    "RAISES 'Cannot modify the design from a read-only context' instead of "
+                    "applying. Guards the DESIGN only - a read-only script still writes files. "
+                    "Default false."},
 ).strict_schema()
 
 # enforce_timeout=False: a long script cannot be interrupted mid-run and would still COMMIT, so

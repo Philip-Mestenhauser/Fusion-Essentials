@@ -14,6 +14,7 @@ can assert on them.
 """
 
 import json
+import types
 
 from conftest import load_tool, BRepBody, _NamedCollection
 
@@ -43,6 +44,9 @@ class FakeOcc:
         self.isLightBulbOn = bulb
         self.isIsolated = isolated
         self.isVisible = bulb
+        # A real Occurrence always answers `component`; one whose read RAISES is an unresolved
+        # external reference, which the shared census keeps out of this walk.
+        self.component = types.SimpleNamespace(name=name.split(":")[0])
 
 
 class FakeRoot:

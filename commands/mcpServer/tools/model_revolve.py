@@ -135,7 +135,9 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
         return error("No active design. Create or open a document first (see doc_new).")
     comp = target_component(design)
 
-    sketch, requested = _common.resolve_or_recent_sketch(design, sketch_name)
+    sketch, requested, ambiguous = _common.find_or_recent_sketch(design, sketch_name)
+    if ambiguous:
+        return error(ambiguous)
     if not sketch:
         if requested:
             names = _common.all_sketch_names(design)

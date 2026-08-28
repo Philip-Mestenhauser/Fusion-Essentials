@@ -160,8 +160,8 @@ class FakeColl:
 
 
 class FakeSketch:
-    def __init__(self):
-        self.name = "S"
+    def __init__(self, name="S"):
+        self.name = name
         self.sketchDimensions = FakeDims()
         lines = FakeColl([FakeLine(), FakeLine()])
         circles = FakeColl([FakeCircle(), FakeCircle()])
@@ -176,10 +176,14 @@ class FakeSketch:
 
 
 class FakeDesign:
-    def __init__(self, sketch):
+    def __init__(self, sketches):
+        # Creation order, so the LAST entry is the most recent sketch - what a blank sketch_name
+        # resolves to. itemByName answers by name, like the live collection.
+        items = list(sketches)
         self.rootComponent = type("R", (), {
-            "sketches": type("SS", (), {"itemByName": staticmethod(lambda n: sketch if n == "S" else None),
-                                        "count": 1, "item": staticmethod(lambda i: sketch)})(),
+            "sketches": type("SS", (), {
+                "itemByName": staticmethod(lambda n: next((s for s in items if s.name == n), None)),
+                "count": len(items), "item": staticmethod(lambda i: items[i])})(),
             # the origin plane a PlaneRef('xy') resolves to - the 'surface' operand's simplest form
             # the origin plane resolves to a real plane OBJECT carrying its name -
             # the payload reports what the surface RESOLVED to, so the name matters
@@ -192,10 +196,13 @@ class FakeDesign:
         return [ent] if ent is not None else []
 
 
-def _install(monkeypatch):
-    """Wire a fake sketch into the tool's design seams for one test; monkeypatch undoes it after."""
-    sketch = FakeSketch()
-    design = FakeDesign(sketch)
+def _install(monkeypatch, sketches=None):
+    """Wire a fake design into the tool's seams for one test; monkeypatch undoes it after.
+
+    The default design holds one sketch named 'S', which is returned. `sketches` replaces that
+    list (creation order, most recent LAST) and the first of them is returned instead."""
+    items = [FakeSketch()] if sketches is None else list(sketches)
+    design = FakeDesign(items)
     monkeypatch.setattr(sd, "app", type("A", (), {"activeProduct": design})())
     monkeypatch.setattr(sd._common, "app", sd.app)
     monkeypatch.setattr(adsk.fusion.Design, "cast",
@@ -205,7 +212,7 @@ def _install(monkeypatch):
     monkeypatch.setattr(do, "AlignedDimensionOrientation", "aligned", raising=False)
     monkeypatch.setattr(do, "HorizontalDimensionOrientation", "horiz", raising=False)
     monkeypatch.setattr(do, "VerticalDimensionOrientation", "vert", raising=False)
-    return sketch
+    return items[0] if items else None
 
 
 def _payload(res):
@@ -908,6 +915,37 @@ class TestGuards:
         _install(monkeypatch)
         res = sd.handler(dim_type="bogus", entity_one="line:0")
         assert res["isError"] is True and "dim_type" in res["message"]
+
+    def test_no_sketch_named(self, monkeypatch):
+        _install(monkeypatch)
+        res = sd.handler(dim_type="radius", sketch_name="Nope", entity_one="circle:0")
+        assert res["isError"] is True and "No sketch named 'Nope'" in res["message"]
+
+    def test_a_padded_name_reports_the_name_the_walk_searched_for(self, monkeypatch):
+        # the resolver STRIPS the name before searching, so the miss quotes the stripped form -
+        # echoing the raw input names a sketch nothing ever looked for.
+        _install(monkeypatch)
+        res = sd.handler(dim_type="radius", sketch_name="  Ghost  ", entity_one="circle:0")
+        assert res["isError"] is True
+        assert "No sketch named 'Ghost'" in res["message"]
+        assert "'  Ghost  '" not in res["message"]
+
+    def test_a_blank_name_with_no_sketch_in_the_design_never_quotes_None(self, monkeypatch):
+        # a blank name asks for the MOST RECENT sketch, so there is no requested name to quote:
+        # the named-miss branch would render the absent name as the literal string 'None'.
+        _install(monkeypatch, sketches=[])
+        res = sd.handler(dim_type="radius", entity_one="circle:0")
+        assert res["isError"] is True
+        assert "'None'" not in res["message"]
+        assert res["message"] == "No sketch to dimension. Create one first with sketch_create."
+
+    def test_a_whitespace_only_name_takes_the_most_recent_sketch(self, monkeypatch):
+        # ' ' strips to blank, which means the most recent sketch - searching for a space instead
+        # misses every sketch and reports a name no caller typed.
+        _install(monkeypatch, sketches=[FakeSketch("First"), FakeSketch("Last")])
+        res = sd.handler(dim_type="radius", sketch_name=" ", entity_one="circle:0")
+        assert "No sketch named" not in json.dumps(res)
+        assert _payload(res)["sketch"] == "Last"
 
     def test_bad_entity_one(self, monkeypatch):
         _install(monkeypatch)

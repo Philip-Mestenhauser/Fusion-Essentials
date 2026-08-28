@@ -99,19 +99,39 @@ def _install(monkeypatch, joint_names, asbuilt=()):
 class TestFindJoint:
     def test_finds_root_joint_by_exact_name(self, monkeypatch):
         des = _install(monkeypatch, ["Wheel_Spin", "Crank1_to_Wheel"])
-        j = jml.find_joint(des, "Wheel_Spin")
-        assert j.name == "Wheel_Spin"
+        j, err = jml.find_joint(des, "Wheel_Spin")
+        assert err is None and j.name == "Wheel_Spin"
 
     def test_finds_as_built_joint(self, monkeypatch):
         # asBuiltJoints is a SEPARATE collection from joints - a joint living only there must still
         # resolve (joint_motion_link must not fork its own root-only lookup).
         des = _install(monkeypatch, ["Wheel_Spin"], asbuilt=["Spin_Link"])
-        j = jml.find_joint(des, "Spin_Link")
-        assert j is not None and j.name == "Spin_Link"
+        j, err = jml.find_joint(des, "Spin_Link")
+        assert err is None and j is not None and j.name == "Spin_Link"
 
-    def test_unknown_name_returns_none(self, monkeypatch):
+    def test_unknown_name_returns_none_without_an_error(self, monkeypatch):
+        # A miss is (None, None): each caller words its own not-found message off its own listing.
         des = _install(monkeypatch, ["Wheel_Spin"])
-        assert jml.find_joint(des, "Ghost") is None
+        assert jml.find_joint(des, "Ghost") == (None, None)
+
+    def test_a_name_two_components_share_refuses_the_link(self, monkeypatch):
+        # The handler's side of the refusal: two components each hold a 'Revolute1', so neither
+        # member of the link can be identified and nothing is created.
+        def tokened(name, token, comp):
+            j = FakeJoint(name)
+            j.entityToken = token
+            j.parentComponent = type("C", (), {"name": comp})()
+            return j
+        des = _install(monkeypatch, ["Wheel_Spin"])
+        des.rootComponent.joints = FakeJoints([tokened("Revolute1", "t1", "Arm"),
+                                               FakeJoint("Wheel_Spin")])
+        sub = type("Sub", (), {"joints": FakeJoints([tokened("Revolute1", "t2", "Gripper")]),
+                               "asBuiltJoints": FakeJoints([])})()
+        des.allComponents = [sub]
+        res = jml.handler(joint_one="Revolute1", joint_two="Wheel_Spin")
+        assert res["isError"] is True
+        assert "Arm" in res["message"] and "Gripper" in res["message"]
+        assert des.rootComponent.motionLinks.added is None      # nothing was created
 
 
 class TestAllJoints:
@@ -292,6 +312,57 @@ class TestLinkCreation:
         assert "platform will not couple" in res["message"]
         assert des.rootComponent.motionLinks.last_link.deleted is True   # rolled back
 
+    def test_a_successful_rollback_does_not_claim_the_link_remains(self, monkeypatch):
+        # deleteMe() answered True - the broken link is gone, so the error must NOT tell the caller
+        # to go delete something that no longer exists.
+        des = _install(monkeypatch, ["A", "B"])
+        des.rootComponent.motionLinks.add = (
+            lambda inp: _link_that_raises(des.rootComponent.motionLinks))
+        res = jml.handler(joint_one="A", joint_two="B", ratio=2.0)
+        assert res["isError"] is True
+        assert "REMAINS" not in res["message"]
+        assert "assembly_edit_relations" not in res["message"]
+
+    def test_a_declined_rollback_says_the_link_REMAINS(self, monkeypatch):
+        # deleteMe() returning False leaves exactly the broken DEFAULT-ratio link the rollback exists
+        # to prevent. Discarding that bool reports the link as cleaned up when it is still coupling
+        # the two joints, so the error names it, its default ratio, and the delete path.
+        des = _install(monkeypatch, ["A", "B"])
+        link = _link_that_raises(des.rootComponent.motionLinks)
+        link.deleteMe = lambda: False
+        des.rootComponent.motionLinks.add = _bind_link(des.rootComponent.motionLinks, link)
+        res = jml.handler(joint_one="A", joint_two="B", ratio=2.0)
+        assert res["isError"] is True
+        assert "could not apply the ratio" in res["message"]
+        assert "REMAINS" in res["message"]
+        assert "1:1" in res["message"]                     # the ratio it is stuck at
+        assert "MotionLink1" in res["message"]             # named, so the delete resolves
+        assert "assembly_edit_relations(kind='motion_link'" in res["message"]
+        assert "action='delete'" in res["message"]
+
+    def test_a_rollback_that_RAISES_also_says_the_link_REMAINS(self, monkeypatch):
+        # a raising deleteMe is no more evidence of removal than a False one
+        des = _install(monkeypatch, ["A", "B"])
+        link = _link_that_raises(des.rootComponent.motionLinks)
+        def boom():
+            raise RuntimeError("delete refused")
+        link.deleteMe = boom
+        des.rootComponent.motionLinks.add = _bind_link(des.rootComponent.motionLinks, link)
+        res = jml.handler(joint_one="A", joint_two="B", ratio=2.0)
+        assert res["isError"] is True and "REMAINS" in res["message"]
+
+    def test_an_unnamed_leftover_link_still_reports_it_remains(self, monkeypatch):
+        # the name is unreadable: the message must not quote a placeholder as the delete argument,
+        # but the fact that a link was left behind still has to be said
+        des = _install(monkeypatch, ["A", "B"])
+        link = _NamelessMotionLink()
+        link.deleteMe = lambda: False
+        des.rootComponent.motionLinks.add = _bind_link(des.rootComponent.motionLinks, link)
+        res = jml.handler(joint_one="A", joint_two="B", ratio=2.0)
+        assert res["isError"] is True and "REMAINS" in res["message"]
+        assert "name could not be read" in res["message"]
+        assert "''" not in res["message"]
+
     def test_setmotiondata_false_return_is_failure(self, monkeypatch):
         # setMotionData returning False (not raising) is still a failure - the tool must not claim a
         # ratio it did not set; it rolls back and errors.
@@ -356,6 +427,19 @@ class TestMirrorOrTranslateTeaching:
         _slider(des, 0, (1, 0, 0))
         out = _payload(jml.handler(joint_one="Slide", joint_two="Spin", ratio=-1))
         assert "MIRROR OR TRANSLATE" not in out["note"]
+
+
+class _NamelessMotionLink(FakeMotionLink):
+    """A MotionLink whose .name RAISES - the leftover link nothing can be addressed by."""
+    def __init__(self):
+        super().__init__()
+        def boom(*a, **k):
+            raise RuntimeError("ratio refused")
+        self.setMotionData = boom
+
+    @property
+    def name(self):
+        raise RuntimeError("name unreadable")
 
 
 def _link_that_raises(mls, msg="joint motion type cannot be linked"):

@@ -75,7 +75,11 @@ def _body_design(body_names=("Body1",), target_name="Body1", removes=True, **kw)
 def _occurrence_design(paths=("Part:1",), removes=True, **kw):
     """A root component holding one occurrence per fullPathName in `paths`; the first is the
     target the removeFeatures fake drops from allOccurrences."""
-    occs = [types.SimpleNamespace(name=p.rsplit("+", 1)[-1], fullPathName=p) for p in paths]
+    # Each occurrence answers `component`, as a real one always does: the shared census classifies an
+    # occurrence whose component read RAISES as an unresolved reference and keeps it out of the walk.
+    occs = [types.SimpleNamespace(name=p.rsplit("+", 1)[-1], fullPathName=p,
+                                  component=types.SimpleNamespace(name=p.split(":")[0]))
+            for p in paths]
     comp = MakeComp("Root", occurrences=occs)
     target = occs[0]
     on_add = (lambda: comp.allOccurrences.remove(target)) if removes else None
@@ -240,7 +244,8 @@ class TestRemoveOccurrence:
         parent_occ = types.SimpleNamespace(name="Sub:1", fullPathName="Sub:1",
                                            component=parent_comp)
         child = types.SimpleNamespace(name="Bolt:1", fullPathName="Sub:1+Bolt:1",
-                                      assemblyContext=parent_occ)
+                                      assemblyContext=parent_occ,
+                                      component=MakeComp("Bolt"))
         root = MakeComp("Root", occurrences=[parent_occ, child])
         parent_comp.features = types.SimpleNamespace(
             removeFeatures=_remove_features(on_add=lambda: root.allOccurrences.remove(child)))
@@ -258,10 +263,15 @@ class TestRemoveOccurrence:
         assert comp.features.removeFeatures.calls == []
 
     def test_an_unreadable_occurrence_walk_after_the_add_is_never_reported_as_success(self):
-        # the WALK raises, not just one item's read - the census cannot answer, so the call reports
-        # an honest "may or may not have taken" instead of letting the exception escape.
+        # BOTH walks raise - allOccurrences and the component.occurrences fallback - so the census
+        # cannot answer and the call reports an honest "may or may not have taken" instead of
+        # letting the exception escape or claiming a verified removal.
         class _RaisingWalk:
             def __iter__(self):
+                raise RuntimeError("gone")
+
+            @property
+            def count(self):
                 raise RuntimeError("gone")
 
         design, comp, occ = _occurrence_design()
@@ -269,11 +279,35 @@ class TestRemoveOccurrence:
         def poison():
             comp.allOccurrences.remove(occ)
             comp.allOccurrences = _RaisingWalk()
+            comp.occurrences = _RaisingWalk()
 
         comp.features.removeFeatures = _remove_features(on_add=poison)
         install(drf, design)
         msg = error_message(drf.handler(occurrence="Part:1"))
         assert "may or may not have taken" in msg
+
+    def test_a_raising_allOccurrences_still_verifies_through_the_fallback_walk(self):
+        # allOccurrences alone raising must NOT make a real removal unverifiable: the shared census
+        # rebuilds from component.occurrences, so the removal is confirmed rather than refused.
+        class _RaisingWalk:
+            def __iter__(self):
+                raise RuntimeError("gone")
+
+            @property
+            def count(self):
+                raise RuntimeError("gone")
+
+        design, comp, occ = _occurrence_design()
+
+        def poison():
+            comp.allOccurrences.remove(occ)
+            comp.occurrences = _NamedCollection([])   # the fallback collection agrees: it really went
+            comp.allOccurrences = _RaisingWalk()
+
+        comp.features.removeFeatures = _remove_features(on_add=poison)
+        install(drf, design)
+        out = payload(drf.handler(occurrence="Part:1"))
+        assert out["removed"] == "Part:1"
 
     def test_a_surviving_occurrence_after_reported_success_is_an_error(self):
         design, comp, occ = _occurrence_design(removes=False)

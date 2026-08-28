@@ -48,8 +48,9 @@ def _cloud_file(name="probe_note.txt", file_extension="sql", writes=None, return
 @pytest.fixture
 def resolves(monkeypatch):
     """Point the tool's file resolution at a stand-in (or at a refusal)."""
-    def _use(df=None, err=None, scope_truncated=False):
-        meta = {"matched_by": "urn", "urn": "urn:lin:AAA", "scope_truncated": scope_truncated}
+    def _use(df=None, err=None, scope_truncated=False, folders_unreadable=0):
+        meta = {"matched_by": "urn", "urn": "urn:lin:AAA", "scope_truncated": scope_truncated,
+                "folders_unreadable": folders_unreadable}
         monkeypatch.setattr(ddf, "resolve_file_reference", lambda *a, **kw: (df, meta, err))
     return _use
 
@@ -259,6 +260,35 @@ class TestFailureIsNeverASuccess:
         out = _payload(ddf.handler(file="probe_note.txt", project="P1",
                                    destination_folder=str(tmp_path)))
         assert "capped listing" not in out["note"]
+
+    def test_a_capped_name_scope_is_a_payload_FACT_not_only_prose(self, resolves, tmp_path):
+        # A caller that reads the payload rather than the note still has to learn the match was
+        # not settled, so the flag travels as its own key - the shape data_get publishes.
+        resolves(_cloud_file(writes="hello"), scope_truncated=True)
+        out = _payload(ddf.handler(file="probe_note.txt", project="P1",
+                                   destination_folder=str(tmp_path)))
+        assert out["name_scope_truncated"] is True
+
+    def test_folders_that_would_not_read_while_resolving_the_name_are_published(self, resolves,
+                                                                                tmp_path):
+        # A folder that never opened is a HOLE in the search space: another file of this name could
+        # be in it, which would make the file now on disk the wrong one.
+        resolves(_cloud_file(writes="hello"), folders_unreadable=2)
+        out = _payload(ddf.handler(file="probe_note.txt", project="P1",
+                                   destination_folder=str(tmp_path)))
+        assert out["name_scope_folders_unreadable"] == 2
+        assert "2 folder(s) could not be READ" in out["note"]
+        assert "lineage URN" in out["note"]
+
+    def test_a_clean_match_publishes_no_cap_and_no_holes(self, resolves, tmp_path):
+        # The other side of the boundary: nothing was capped and every folder read, so the keys say
+        # so positively (false/0) and neither caveat reaches the note.
+        resolves(_cloud_file(writes="hello"))
+        out = _payload(ddf.handler(file="probe_note.txt", project="P1",
+                                   destination_folder=str(tmp_path)))
+        assert out["name_scope_truncated"] is False
+        assert out["name_scope_folders_unreadable"] == 0
+        assert "could not be READ" not in out["note"] and "capped listing" not in out["note"]
 
     def test_an_ambiguous_name_refusal_is_passed_through(self, resolves, tmp_path):
         resolves(err="'notes.txt' names 2 files in project 'P1' - refusing to guess which")

@@ -20,6 +20,7 @@ from . import _common
 from . import _inputs
 from . import _assert
 from .surface_create import _curve_host_component, _open_profile_from_curves
+from .surface_edit import _solid_verdict
 
 app = adsk.core.Application.get()
 
@@ -210,6 +211,7 @@ def ruled_handler(edges=None, ruled_type="tangent", distance=None, units="mm",
             return error(_common.no_feature_error(design, "Ruled surface"))
         # Direct mode: no feature to name or read a type off - report what the model shows instead.
         facts = _common.body_facts(landed)
+        direct_solid = _solid_verdict([f["is_solid"] for f in facts])
         payload = {
             "created": True,
             "ruled_type": type_key,
@@ -218,9 +220,10 @@ def ruled_handler(edges=None, ruled_type="tangent", distance=None, units="mm",
             "units": units,
             "edge_count": len(ents),
             "result_bodies": [f["name"] for f in facts],
-            "is_solid": any(f["is_solid"] for f in facts),
+            "is_solid": direct_solid,
             "bodies_added": len(landed),
-            "unverified": ["ruled_type", "distance", "angle_deg"],
+            "unverified": (["ruled_type", "distance", "angle_deg"]
+                           + (["is_solid"] if direct_solid is None else [])),
             "note": _common.DIRECT_FEATURE_NOTE,
         }
         if dir_label:
@@ -241,9 +244,14 @@ def ruled_handler(edges=None, ruled_type="tangent", distance=None, units="mm",
 
     # is_solid is read off the NEW body only - the parent body in feature.bodies would otherwise
     # decide the verdict, and a ruled surface off a SOLID edge is exactly the draft-check case.
+    # _solid_verdict, not any(): body_facts publishes each flag as True/False/None, and any() folds
+    # an unread flag into False - which is this payload's "an open sheet", the claim a flag nobody
+    # read cannot support.
     facts = _common.body_facts(added)
     names = [f["name"] for f in facts]
-    any_solid = any(f["is_solid"] for f in facts)
+    any_solid = _solid_verdict([f["is_solid"] for f in facts])
+    if any_solid is None:
+        unverified = unverified + ["is_solid"]
 
     payload = {
         "created": True,
@@ -261,14 +269,19 @@ def ruled_handler(edges=None, ruled_type="tangent", distance=None, units="mm",
     payload.update(fields)
     if unverified:
         payload["unverified"] = unverified
-    if any_solid:
+    if any_solid is True:
         payload["note"] = ("The result reads back SOLID (isSolid=true), not the open sheet a ruled "
                            "surface makes - inspect it before building on it.")
-    else:
+    elif any_solid is False:
         payload["note"] = ("New open surface body (isSolid=false), separate from the body the edges "
                            "came from. Join it with model_stitch, or thicken it with surface_thicken."
                            + (" Not read back off the feature: " + ", ".join(unverified) + "."
                               if unverified else ""))
+    else:
+        payload["note"] = ("The ruled surface was created, but no result body's isSolid flag could "
+                           "be read back, so whether it is the open sheet a ruled surface makes or "
+                           "a SOLID is UNVERIFIED - check it with model_inspect."
+                           + " Not read back off the feature: " + ", ".join(unverified) + ".")
     return ok(payload)
 
 

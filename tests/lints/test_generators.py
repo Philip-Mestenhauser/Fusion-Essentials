@@ -19,6 +19,7 @@ import types
 import pytest
 
 import check_all
+import gen_all
 import gen_api_surface
 import gen_manifest
 import gen_posture
@@ -143,6 +144,76 @@ class TestCheckAllLiveGateFlags:
         assert (args.offline, args.fast, args.live) == (True, True, False)
 
 
+# ── gen_all: a generator's RETURN value is a verdict too ─────────────────────
+
+class TestGenAllExitCode:
+    """gen_all fronts every generator in one process, and its --check is what
+    test_generated_docs_current shells. Reading only SystemExit and discarding main()'s RETURN
+    value means a generator that reports failure by returning a code can never fail the aggregate:
+    the stale doc it found is aggregated as a pass."""
+
+    def test_a_returned_failure_code_is_a_failure(self):
+        assert gen_all.exit_code(1) == 1
+        assert gen_all.exit_code(2) == 2
+
+    def test_zero_and_none_are_both_success(self):
+        # None is the shape every generator here uses today (it exits by SystemExit, or returns
+        # nothing); it must not become a failure.
+        assert gen_all.exit_code(0) == 0
+        assert gen_all.exit_code(None) == 0
+
+    def test_false_is_a_failure_and_true_is_not(self):
+        # bool IS an int subclass, so an unguarded int check reads False as exit code 0 - and False
+        # is exactly how a freshness question answers "stale".
+        assert gen_all.exit_code(False) == 1
+        assert gen_all.exit_code(True) == 0
+
+    def test_a_non_numeric_value_follows_the_systemexit_convention(self):
+        assert gen_all.exit_code("tests/api_surface.py is STALE") == 1
+        assert gen_all.exit_code("") == 0
+
+    def test_a_generator_that_RETURNS_one_fails_the_aggregate_naming_it(
+            self, monkeypatch, tmp_path, capsys):
+        # the defect itself: a module whose main() returns 1 and raises nothing.
+        (tmp_path / "gen_returns_one.py").write_text("def main():\n    return 1\n", encoding="utf-8")
+        (tmp_path / "gen_returns_none.py").write_text("def main():\n    return None\n",
+                                                      encoding="utf-8")
+        monkeypatch.syspath_prepend(str(tmp_path))
+        monkeypatch.setattr(gen_all, "_GENERATORS", ("gen_returns_none", "gen_returns_one"))
+        monkeypatch.setattr(gen_all.sys, "argv", ["gen_all.py", "--check"])
+        assert gen_all.main() == 1
+        err = capsys.readouterr().err
+        assert "gen_returns_one" in err and "gen_returns_none" not in err
+
+    def test_every_generator_returning_nothing_still_passes(self, monkeypatch, tmp_path):
+        # the boundary beside it: today's shape, where a clean run returns None.
+        (tmp_path / "gen_clean_a.py").write_text("def main():\n    return None\n", encoding="utf-8")
+        (tmp_path / "gen_clean_b.py").write_text("def main():\n    pass\n", encoding="utf-8")
+        monkeypatch.syspath_prepend(str(tmp_path))
+        monkeypatch.setattr(gen_all, "_GENERATORS", ("gen_clean_a", "gen_clean_b"))
+        monkeypatch.setattr(gen_all.sys, "argv", ["gen_all.py", "--check"])
+        assert gen_all.main() == 0
+
+    def test_a_raised_systemexit_still_fails_the_aggregate(self, monkeypatch, tmp_path, capsys):
+        # the path that already worked keeps working, and is now named in the summary too.
+        (tmp_path / "gen_raises.py").write_text("def main():\n    raise SystemExit(1)\n",
+                                                encoding="utf-8")
+        monkeypatch.syspath_prepend(str(tmp_path))
+        monkeypatch.setattr(gen_all, "_GENERATORS", ("gen_raises",))
+        monkeypatch.setattr(gen_all.sys, "argv", ["gen_all.py", "--check"])
+        assert gen_all.main() == 1
+        assert "gen_raises" in capsys.readouterr().err
+
+    def test_a_bare_sys_exit_is_not_a_failure(self, monkeypatch, tmp_path):
+        # SystemExit(None) is `sys.exit()` - a clean stop, which must not read as exit code 1.
+        (tmp_path / "gen_bare_exit.py").write_text("def main():\n    raise SystemExit()\n",
+                                                   encoding="utf-8")
+        monkeypatch.syspath_prepend(str(tmp_path))
+        monkeypatch.setattr(gen_all, "_GENERATORS", ("gen_bare_exit",))
+        monkeypatch.setattr(gen_all.sys, "argv", ["gen_all.py", "--check"])
+        assert gen_all.main() == 0
+
+
 # ── gen_api_surface: --check cannot pass without the bindings it compares against ──
 
 class TestApiSurfaceCheckNeedsBindings:
@@ -167,6 +238,56 @@ class TestApiSurfaceCheckNeedsBindings:
             gen_api_surface.main([])
         assert exc.value.code == 1
         assert "webdeploy" in capsys.readouterr().err
+
+
+# ── gen_api_surface: a measured runtime return beats a broken binding annotation ──
+
+class TestMeasuredFactoryReturns:
+    """A binding's return annotation can name the wrong class (measured live: Arc2D.createByCenter
+    is annotated adsk.core.Point2D - its CENTER argument - while the call returns an Arc2D). The
+    override substitutes the measured class at generation, and refuses to outlive the defect."""
+
+    def test_a_measured_return_replaces_the_broken_annotation(self):
+        got = gen_api_surface.apply_measured_returns(
+            {"core.Arc2D.createByCenter": "core.Point2D"},
+            {"core.Arc2D.createByCenter": ("core.Arc2D", "Fusion 2705.0.108")})
+        assert got == {"core.Arc2D.createByCenter": "core.Arc2D"}
+
+    def test_annotations_with_no_override_row_are_left_alone(self):
+        got = gen_api_surface.apply_measured_returns(
+            {"core.Arc2D.createByCenter": "core.Point2D", "core.Color.create": "core.Color"},
+            {"core.Arc2D.createByCenter": ("core.Arc2D", "Fusion 2705.0.108")})
+        assert got["core.Color.create"] == "core.Color"
+
+    def test_the_input_mapping_is_not_mutated(self):
+        # the generator keeps using `factories` downstream; an in-place edit would be invisible here
+        # and load-bearing there
+        src = {"core.Arc2D.createByCenter": "core.Point2D"}
+        gen_api_surface.apply_measured_returns(
+            src, {"core.Arc2D.createByCenter": ("core.Arc2D", "Fusion 2705.0.108")})
+        assert src == {"core.Arc2D.createByCenter": "core.Point2D"}
+
+    def test_a_row_the_bindings_dropped_is_refused(self):
+        with pytest.raises(SystemExit) as exc:
+            gen_api_surface.apply_measured_returns(
+                {"core.Color.create": "core.Color"},
+                {"core.Gone.createByCenter": ("core.Gone", "Fusion 2705.0.108")})
+        assert "core.Gone.createByCenter" in str(exc.value)
+
+    def test_a_row_the_bindings_have_since_fixed_is_refused(self):
+        # the override must not silently become a no-op that hides a repaired binding
+        with pytest.raises(SystemExit) as exc:
+            gen_api_surface.apply_measured_returns(
+                {"core.Arc2D.createByCenter": "core.Arc2D"},
+                {"core.Arc2D.createByCenter": ("core.Arc2D", "Fusion 2705.0.108")})
+        assert "obsolete" in str(exc.value)
+
+    def test_the_shipped_table_names_only_real_create_factories(self):
+        # every shipped row must key a factory the committed surface actually carries
+        import api_surface
+        for key in gen_api_surface._MEASURED_FACTORY_RETURNS:
+            assert key.rsplit(".", 1)[1].startswith("create"), key
+            assert key in api_surface.FACTORIES, f"{key} is not in the generated FACTORIES table"
 
 
 # ── name collisions ACROSS modules (each module looks clean in isolation) ─────
@@ -366,6 +487,65 @@ class TestNoteHarvestFollowsOneCallHop:
     def test_a_recursive_handler_yields_its_note_once(self, monkeypatch, tmp_path):
         notes = self._notes(monkeypatch, tmp_path, _RECURSIVE_MODULE, "demo_probe_mod", "demo_probe")
         assert notes.count("recursive handler note, long enough to count.") == 1
+
+
+_TWO_TOOL_MODULE = '''"""Fake module registering two tools out of one file."""
+
+
+def get_handler(**kwargs):
+    return {"note": "the read note, long enough to be harvested."}
+
+
+def edit_handler(**kwargs):
+    return {"note": "the edit note, long enough to be harvested."}
+
+
+tool = Tool.create_simple(name="demo_get", description=D)
+item = Item.create_tool_item(tool=tool, write="read", handler=get_handler)
+edit_tool = Tool.create_simple(name="demo_edit", description=D)
+edit_item = Item.create_tool_item(tool=edit_tool, write="write", handler=edit_handler)
+'''
+
+
+class TestWiringParsesEachModuleOnce:
+    """Attribution runs once per registered TOOL and the guard census walks every module again, so
+    an unmemoized parse re-reads one file several times over - the cost that made gen_wiring the
+    slowest part of the generator check."""
+
+    def _count_parses(self, monkeypatch, work):
+        calls = []
+        real = ast.parse
+        monkeypatch.setattr(gen_wiring.ast, "parse",
+                            lambda *a, **k: (calls.append(1), real(*a, **k))[1])
+        work()
+        return len(calls)
+
+    def test_two_tools_in_one_module_parse_the_file_once(self, monkeypatch, tmp_path):
+        (tmp_path / "twin_mod.py").write_text(_TWO_TOOL_MODULE, encoding="utf-8")
+        monkeypatch.setattr(gen_wiring, "TOOLS_DIR", str(tmp_path))
+        gen_wiring._parsed.clear()
+
+        def work():
+            gen_wiring._attribute("twin_mod", "demo_get")
+            gen_wiring._attribute("twin_mod", "demo_edit")
+            gen_wiring._module_functions("twin_mod")     # the guard census's own walk
+
+        assert self._count_parses(monkeypatch, work) == 1
+
+    def test_a_rewritten_module_is_parsed_again(self, monkeypatch, tmp_path):
+        # The memo is keyed on the file's own stat, not its module NAME: several tests here write a
+        # DIFFERENT module under the same name into their own tmp dir, and a name-keyed memo would
+        # attribute one test's notes to the next.
+        path = tmp_path / "twin_mod.py"
+        path.write_text(_TWO_TOOL_MODULE, encoding="utf-8")
+        monkeypatch.setattr(gen_wiring, "TOOLS_DIR", str(tmp_path))
+        gen_wiring._parsed.clear()
+        first, _ = gen_wiring._attribute("twin_mod", "demo_get")
+        assert "the read note, long enough to be harvested." in first
+        path.write_text(_TWO_TOOL_MODULE.replace("the read note", "the REWRITTEN note"),
+                        encoding="utf-8")
+        again, _ = gen_wiring._attribute("twin_mod", "demo_get")
+        assert "the REWRITTEN note, long enough to be harvested." in again
 
 
 # ── gen_posture: a write whose EFFECT leaves the document is not a local model write ──

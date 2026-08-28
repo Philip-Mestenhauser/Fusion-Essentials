@@ -304,7 +304,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | | Tool | Summary |
 |---|---|---|
 | · | `sys_capability_map` | GETTING STARTED / overview / start here / help: LIST every tool FAMILY this server has - each with a one-line summary, its entry-point tool, and tool count |
-| ⚠ | `sys_execute_script` | Execute Fusion API Python source code in the user's live Fusion session |
+| ⚠ | `sys_execute_script` | Execute Fusion API Python in the user's live Fusion session |
 | · | `sys_find_tool` | SEARCH this server's tools by keyword when you do not know which tool does a job |
 | · | `sys_get_api_doc` | Search the LIVE Fusion API documentation (classes, methods, properties, enum values) by regex, returning names, signatures, and docstrings |
 | · | `sys_get_preferences` | Read the APPLICATION's preferences (app.preferences - settings that belong to no document: versioning, modelling orientation, default units, number display, gra... |

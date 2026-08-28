@@ -25,6 +25,9 @@ same-name-in-two-folders refusal, two miss paths) and directly for its hard fold
 """
 
 import json
+import time
+
+import pytest
 
 from conftest import load_tool
 
@@ -203,6 +206,29 @@ def _install(projects, active=None, by_id=None):
     return app, data
 
 
+@pytest.fixture(autouse=True)
+def pump_clock(monkeypatch):
+    """A VIRTUAL clock for _settled_lineage_urn's post-saveAs pump, in place of real sleep.
+
+    That pump runs a fixed burst - _URN_POLL_TRIES doEvents/sleep rounds - waiting for the cloud to
+    replace the local pre-upload handle with a lineage 'urn:'. No fake here ever settles one, so
+    every no-URN case runs the burst to its end; sleeping it is dead wall-clock for a wait whose
+    outcome is fixed. The replacement only ADVANCES a counter, so the loop still runs its full try
+    count and still reaches the give-up branch, in no real time.
+
+    time.sleep is the interception point because _settled_lineage_urn does `import time` inside
+    itself: there is no module attribute on doc_lifecycle to patch instead. Yields the record so a
+    test can assert the burst actually ran."""
+    record = {"calls": 0, "virtual_seconds": 0.0}
+
+    def _advance(seconds):
+        record["calls"] += 1
+        record["virtual_seconds"] += seconds
+
+    monkeypatch.setattr(time, "sleep", _advance)
+    return record
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # save_document_as_handler  (Document.saveAs — the skill's template-copy path)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -262,12 +288,28 @@ class TestSaveDocumentAs:
         _, target, _, _ = doc.saveas_args
         assert target.name == "MCP Test Parts"
 
-    def test_document_id_null_until_urn_assigned(self):
+    def test_document_id_null_until_urn_assigned(self, pump_clock):
         # right after saveAs the dataFile.id is a local handle, not a urn: -> reported null
         doc = FakeSaveAsDoc(new_urn=None)  # FakeSaveAsDoc gives a non-urn local handle
         _install([FakeProject("CAM")], active=doc)
         out = _payload(_doc_lifecycle.save_document_as_handler(name="X", project="CAM"))
         assert out["document_id"] is None
+        # the give-up branch is reached by EXHAUSTING the burst, not by skipping it: a pump that
+        # stopped early (or never ran) would report the same null having waited for nothing.
+        assert pump_clock["calls"] == _doc_lifecycle._URN_POLL_TRIES
+
+    def test_the_lineage_pump_is_bounded_to_a_few_seconds(self):
+        # The burst blocks Fusion's main thread, so its total budget is the number that matters.
+        budget = _doc_lifecycle._URN_POLL_TRIES * _doc_lifecycle._URN_POLL_SLEEP
+        assert 0 < budget <= 5.0, f"the post-saveAs URN pump would block the call for {budget:g}s"
+
+    def test_a_settled_urn_stops_the_pump_instead_of_running_it_out(self, pump_clock):
+        # The other side of the boundary: the first read already answers a lineage urn, so the burst
+        # must not run at all - the tries are a give-up bound, not a fixed wait.
+        _install([FakeProject("CAM")], active=FakeSaveAsDoc(new_urn="urn:adsk.lineage:immediate"))
+        out = _payload(_doc_lifecycle.save_document_as_handler(name="X", project="CAM"))
+        assert out["document_id"] == "urn:adsk.lineage:immediate"
+        assert pump_clock["calls"] == 0
 
     def test_document_id_surfaced_when_urn(self):
         doc = FakeSaveAsDoc(new_urn="urn:adsk.lineage:abc")
@@ -1067,14 +1109,30 @@ class TestCloseActedOn:
         out = _payload(_doc_lifecycle.close_document_handler(name="Scratch"))
         assert out["acted_on"] == {"name": "Scratch", "document_id": "urn:scratch"}
 
-    def test_two_closed_documents_leave_acted_on_to_the_guard(self):
-        # Boundary: 2 closed. One acted_on cannot state two documents, so the key stays absent and
-        # the guard's fill-if-absent stamp applies; 'closed' is the honest list.
+    def test_two_closed_documents_publish_an_explicit_null_acted_on(self):
+        # Boundary: 2 closed. One acted_on cannot state two documents - and leaving the key ABSENT
+        # hands it to the guard's fill-if-absent stamp, which reads the post-call ACTIVE document
+        # (a document this call did not close). An explicit null keeps the guard off it.
         a, b = _CloseableDoc("A", urn="urn:a"), _CloseableDoc("B", urn="urn:b")
         self._install([a, b], active=a)
         out = _payload(_doc_lifecycle.close_document_handler(close_all=True))
         assert out["closed"] == ["A", "B"]
-        assert "acted_on" not in out
+        assert "acted_on" in out and out["acted_on"] is None
+
+    def test_the_null_acted_on_note_points_at_the_closed_list(self):
+        # A null with no pointer leaves the caller with no record of what was closed; 'closed' is it.
+        a, b = _CloseableDoc("A", urn="urn:a"), _CloseableDoc("B", urn="urn:b")
+        self._install([a, b], active=a)
+        note = _payload(_doc_lifecycle.close_document_handler(close_all=True))["note"]
+        assert "acted_on is null" in note and "2 documents were closed" in note
+        assert "'closed'" in note
+
+    def test_three_closed_documents_are_the_same_null(self):
+        # Nothing about the shape changes past the boundary - 3 is as unstatable as 2.
+        docs = [_CloseableDoc(n, urn=f"urn:{n}") for n in ("A", "B", "C")]
+        self._install(docs, active=docs[0])
+        out = _payload(_doc_lifecycle.close_document_handler(close_all=True))
+        assert out["closed_count"] == 3 and out["acted_on"] is None
 
     def test_close_all_that_closes_exactly_one_still_names_it(self):
         # The other side of the same boundary: 1 closed (the second target failed), so the single
@@ -1100,6 +1158,28 @@ class TestCloseActedOn:
         out = _payload(_doc_lifecycle.close_document_handler(close_all=True))
         assert out["skipped_invalid"] == 1
         assert out["acted_on"] == {"name": "Good", "document_id": "urn:good"}
+
+    def test_every_target_skipped_publishes_an_explicit_null_acted_on(self):
+        # Boundary: 0 closed with NO close failure (so the call succeeds and reaches the payload).
+        # Leaving acted_on absent hands it to the guard's fill-if-absent stamp, which names the
+        # still-active document - a document this call did not close.
+        alive, dead = _CloseableDoc("Alive", urn="urn:alive"), _CloseableDoc("Dead", urn="urn:dead")
+        dead.isValid = False
+        self._install([dead], active=alive)
+        out = _payload(_doc_lifecycle.close_document_handler(close_all=True))
+        assert out["closed"] == [] and out["closed_count"] == 0
+        assert out["skipped_invalid"] == 1
+        assert "acted_on" in out and out["acted_on"] is None
+        assert dead.close_called_with is None
+
+    def test_the_zero_closed_note_says_so_instead_of_claiming_a_close(self):
+        dead = _CloseableDoc("Dead", urn="urn:dead")
+        dead.isValid = False
+        self._install([dead], active=_CloseableDoc("Alive", urn="urn:alive"))
+        note = _payload(_doc_lifecycle.close_document_handler(close_all=True))["note"]
+        assert "No document was closed." in note
+        assert "acted_on is null" in note and "none of the 1 target(s) closed" in note
+        assert "discarding unsaved changes" not in note   # nothing was closed, with or without save
 
 
 # ─────────────────────────────────────────────────────────────────────────────

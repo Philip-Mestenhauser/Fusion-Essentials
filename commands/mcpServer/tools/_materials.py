@@ -83,7 +83,12 @@ def catalog_census():
 def find_library(name):
     """Resolve ONE loaded library by EXACT case-insensitive name. Returns (library, error_or_None):
     a miss lists the loaded names; a name carried by two loaded libraries is refused rather than
-    resolved to whichever came first."""
+    resolved to whichever came first.
+
+    A miss states which of two DIFFERENT facts it saw. An unreadable materialLibraries collection
+    also yields no names, and reporting that hole as 'Loaded libraries: none' asserts the catalog is
+    empty - the one claim an unread collection cannot support, and the one that sends a caller off
+    to install a library that is already there."""
     want = (name or "").strip().lower()
     hits, names = [], []
     for lib in libraries():
@@ -97,6 +102,12 @@ def find_library(name):
         return hits[0], None
     listed = ", ".join(f"'{n}'" for n in names) or "none"
     if not hits:
+        # Only the refusal pays this second read - it is what tells an EMPTY catalog from an
+        # unreadable one, the same collection-is-None signal catalog_census reports as `readable`.
+        if safe(lambda: app.materialLibraries) is None:
+            return None, ("The material-library collection could not be read, so whether a library "
+                          f"named '{name}' is loaded is UNKNOWN - this is NOT a report that none "
+                          "are loaded. Retry, or read the catalog without 'library'.")
         return None, f"No loaded material library named '{name}'. Loaded libraries: {listed}."
     return None, (f"'{name}' is the name of {len(hits)} loaded libraries - refusing to pick one. "
                   f"Loaded libraries: {listed}. Read them without 'library' to see each one's id.")

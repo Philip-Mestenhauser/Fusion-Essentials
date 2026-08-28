@@ -55,8 +55,90 @@ class RigidJointMotion:
 
 def _occ(referenced=False, parent=None):
     """A joint occurrence stub: isReferencedComponent (+ an optional assemblyContext parent chain) is
-    what the xref-scoped refusal reads to decide plain-vs-xref."""
+    what the xref-scoped refusal reads to decide plain-vs-xref. It carries NO transform2, so its
+    placement is unreadable - the shape the 'no moved key' branch answers."""
     return types.SimpleNamespace(isReferencedComponent=referenced, assemblyContext=parent)
+
+
+class _Vec:
+    def __init__(self, x, y, z):
+        self.x, self.y, self.z = x, y, z
+
+
+class _Matrix:
+    """An occurrence transform2: a translation in CENTIMETRES plus the rotation basis, handed back
+    the way Matrix3D does (getAsCoordinateSystem returns origin, xAxis, yAxis, zAxis)."""
+    def __init__(self, pos, basis):
+        self.translation = _Vec(*pos)
+        self._basis = basis
+
+    def getAsCoordinateSystem(self):
+        return (self.translation,) + tuple(_Vec(*b) for b in self._basis)
+
+
+class _Placed:
+    """A joint member whose placement the fake motion moves, the way a solved mechanism moves the
+    part on one side of the joint. pos is in cm (the API's own length unit)."""
+    def __init__(self, name, pos=(0.0, 0.0, 0.0)):
+        self.name = name
+        self.fullPathName = name
+        self.isReferencedComponent = False
+        self.assemblyContext = None
+        self.pos = list(pos)
+        self.basis = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+
+    @property
+    def transform2(self):
+        return _Matrix(self.pos, self.basis)
+
+
+def _slider_moving(target, axis=(1.0, 0.0, 0.0), vector=(1.0, 0.0, 0.0), turn_vector=None,
+                   also=None):
+    """A slider whose slide value displaces `target` along `axis` (cm per cm of slide); `also` is an
+    optional second (target, axis) pair the same slide moves. When turn_vector is given the direction
+    vector CHANGES on the drive, so a receipt reporting the pre-drive vector can be told from one
+    that re-read it afterwards."""
+    movers = [(target, axis)] + ([also] if also else [])
+
+    class SliderJointMotion:                        # the NAME is what current_joint_type keys on
+        def __init__(self):
+            self.slideLimits = FakeLimits()
+            self.slideDirectionVector = _Vec(*vector)
+            self._v = 0.0
+
+        @property
+        def slideValue(self):
+            return self._v
+
+        @slideValue.setter
+        def slideValue(self, v):
+            step = v - self._v
+            self._v = v
+            for part, ax in movers:
+                part.pos = [p + step * a for p, a in zip(part.pos, ax)]
+            if turn_vector is not None:
+                self.slideDirectionVector = _Vec(*turn_vector)
+    return SliderJointMotion()
+
+
+def _revolute_moving(target, vector=(0.0, 0.0, 1.0)):
+    """A revolute whose rotation value spins `target`'s basis about world z by that angle."""
+    class RevoluteJointMotion:                      # the NAME is what current_joint_type keys on
+        def __init__(self):
+            self.rotationLimits = FakeLimits()
+            self.rotationAxisVector = _Vec(*vector)
+            self._v = 0.0
+
+        @property
+        def rotationValue(self):
+            return self._v
+
+        @rotationValue.setter
+        def rotationValue(self, v):
+            self._v = v
+            c, s = math.cos(v), math.sin(v)
+            target.basis = [[c, s, 0.0], [-s, c, 0.0], [0.0, 0.0, 1.0]]
+    return RevoluteJointMotion()
 
 
 def _plain_occ():
@@ -77,8 +159,15 @@ class FakeJoint:
 
 
 class _Joints:
+    """A joints/asBuiltJoints collection: count/item (the shared _joints walk find_joint resolves a
+    name over, which must see EVERY hit to refuse a shared name) plus itemByName."""
     def __init__(self, joints):
         self._j = list(joints)
+    @property
+    def count(self):
+        return len(self._j)
+    def item(self, i):
+        return self._j[i]
     def itemByName(self, name):
         return next((j for j in self._j if j.name == name), None)
 
@@ -564,14 +653,13 @@ class TestDriveTookGate:
         assert "drive_took" not in out and abs(out["value_now"]["angle_deg"] - 25.0) < 1e-4
 
 
-# ── equivalent-pose semantics: revolute values accumulate across full turns ──
-# A joint sitting at 720 deg commanded to 0 deg is ALREADY at the commanded physical pose - the
-# stored value just kept its full-turn count. That is an equivalent pose, never a failed drive.
+# ── equivalent-pose semantics: a stored angle can carry full turns the command does not ──
+# A joint whose stored value reads 720 deg, commanded to 0 deg, is ALREADY at the commanded physical
+# pose. That is an equivalent pose, never a failed drive.
 
 def _frozen_revolute_at(deg):
-    """A revolute whose stored value is pinned at `deg` - the setter lands nowhere, the way the
-    platform behaves when the commanded value equals the current pose modulo 360 (nothing moves,
-    the accumulated value stays)."""
+    """A revolute whose stored value is pinned at `deg` - the setter lands nowhere, so the read-back
+    keeps a full-turn count the command did not carry."""
     class RevoluteJointMotion:                      # the NAME is what current_joint_type keys on
         def __init__(self):
             self.rotationLimits = FakeLimits()
@@ -593,7 +681,7 @@ class TestEquivalentPose:
         assert "drive_took" not in out                       # NOT a failed drive
         assert "DID NOT TAKE" not in out["note"]             # no grounded-chain blame either
         assert "modulo 360" in out["note"]
-        assert out["value_now"]["angle_deg"] == 720.0        # accumulated, reported honestly
+        assert out["value_now"]["angle_deg"] == 720.0        # the full-turn value, reported honestly
         assert out["value_now"]["angle_deg_normalized"] == 0.0
 
     def test_full_turn_command_at_zero_is_equivalent(self, monkeypatch):
@@ -621,8 +709,8 @@ class TestEquivalentPose:
         res = jd.handler(joint_name="Crank", angle_deg=25)
         assert res["isError"] is True and "DID NOT TAKE" in res["message"]
 
-    def test_accumulated_readback_carries_normalized_twin(self, monkeypatch):
-        # a drive that TOOK to 450 deg reads back both forms: 450 accumulated, 90 normalized.
+    def test_a_multi_turn_readback_carries_its_normalized_twin(self, monkeypatch):
+        # a drive that TOOK to 450 deg reads back both forms: 450 as stored, 90 normalized.
         j = FakeJoint("Crank", RevoluteJointMotion())
         _install(monkeypatch, j)
         out = _payload(jd.handler(joint_name="Crank", angle_deg=450))
@@ -644,10 +732,10 @@ class TestEquivalentPose:
         out = _payload(jd.handler(joint_name="Crank", angle_deg=25))
         assert "angle_deg_normalized" not in out["value_now"]
 
-    def test_delta_accumulating_drive_reports_a_move_not_an_equivalent_pose(self, monkeypatch):
-        # measured live: commanding 90 at stored 2160 MOVES the mechanism (+90) and reads back
-        # 2250 - the value changed, so the receipt must report a move with accumulation, never
-        # "the pose already matches" (which claims nothing moved).
+    def test_a_moving_drive_that_lands_pose_equivalent_reports_the_move(self, monkeypatch):
+        # a joint that answers a command by turning BY the delta reads back a value that changed
+        # (2160 -> 2250) while matching the command modulo 360: the receipt must report the move,
+        # never "the pose already matches", which claims nothing moved.
         class RevoluteJointMotion:                  # the NAME is what current_joint_type keys on
             def __init__(self):
                 self.rotationLimits = FakeLimits()
@@ -689,3 +777,159 @@ class TestEquivalentPose:
         assert out["equivalent_pose"] is True
         assert "not known from this receipt" in out["note"]
         assert "nothing needed to move" not in out["note"]
+
+
+# ── which member the drive displaced ────────────────────────────────────────
+# The drive reports the member whose placement actually changed, sampled either side of the
+# assignment - an observation, never a prediction from the joint's member ordering.
+
+class TestMovedMember:
+    def test_the_first_member_is_named_when_it_is_the_one_that_moves(self, monkeypatch):
+        arm, base = _Placed("Arm:1"), _Placed("Base:1")
+        j = FakeJoint("Rail", _slider_moving(arm), occ_one=arm, occ_two=base)
+        _install(monkeypatch, j)
+        out = _payload(jd.handler(joint_name="Rail", distance=50, units="mm"))
+        assert out["moved"]["occurrence"] == "Arm:1"
+        assert out["moved"]["delta_mm"] == [50.0, 0.0, 0.0]
+        assert "also_moved" not in out
+
+    def test_the_second_member_is_named_when_it_is_the_one_that_moves(self, monkeypatch):
+        # the anchored-first-side case: the same joint, the same command, the OTHER part displaced -
+        # naming occurrenceOne from the member ordering alone would report the wrong part here.
+        arm, base = _Placed("Arm:1"), _Placed("Base:1")
+        j = FakeJoint("Rail", _slider_moving(base, axis=(-1.0, 0.0, 0.0)),
+                      occ_one=arm, occ_two=base)
+        _install(monkeypatch, j)
+        out = _payload(jd.handler(joint_name="Rail", distance=50, units="mm"))
+        assert out["moved"]["occurrence"] == "Base:1"
+        assert out["moved"]["delta_mm"] == [-50.0, 0.0, 0.0]
+
+    def test_both_members_moving_publishes_the_larger_first(self, monkeypatch):
+        arm, base = _Placed("Arm:1"), _Placed("Base:1")
+        j = FakeJoint("Rail", _slider_moving(arm, axis=(0.2, 0.0, 0.0),
+                                             also=(base, (-1.0, 0.0, 0.0))),
+                      occ_one=arm, occ_two=base)
+        _install(monkeypatch, j)
+        out = _payload(jd.handler(joint_name="Rail", distance=10, units="mm"))
+        assert out["moved"]["occurrence"] == "Base:1"          # -10 mm, the larger move
+        assert out["also_moved"]["occurrence"] == "Arm:1"      # +2 mm
+        assert out["also_moved"]["delta_mm"] == [2.0, 0.0, 0.0]
+
+    def test_a_rotation_is_reported_in_degrees(self, monkeypatch):
+        rotor, base = _Placed("Rotor:1"), _Placed("Base:1")
+        j = FakeJoint("Pivot", _revolute_moving(rotor), occ_one=rotor, occ_two=base)
+        _install(monkeypatch, j)
+        out = _payload(jd.handler(joint_name="Pivot", angle_deg=90))
+        assert out["moved"]["occurrence"] == "Rotor:1"
+        assert out["moved"]["delta_deg"] == 90.0
+        assert out["moved"]["delta_mm"] == [0.0, 0.0, 0.0]     # a spin in place moves no origin
+
+    def test_a_drive_that_displaced_nothing_publishes_moved_null(self, monkeypatch):
+        # both placements READ and both unchanged: the honest answer is "nothing moved", which is a
+        # different statement from "the placement could not be measured".
+        arm, base = _Placed("Arm:1"), _Placed("Base:1")
+        j = FakeJoint("Rail", _slider_moving(arm, axis=(0.0, 0.0, 0.0)),
+                      occ_one=arm, occ_two=base)
+        _install(monkeypatch, j)
+        out = _payload(jd.handler(joint_name="Rail", distance=50, units="mm"))
+        assert out["moved"] is None
+        assert "neither member's placement changed" in out["note"]
+
+    def test_an_unreadable_placement_publishes_no_moved_key_at_all(self, monkeypatch):
+        # a null 'moved' would claim nothing moved; these occurrences carry no transform2 at all.
+        j = FakeJoint("Rail", SliderJointMotion(), occ_one=_plain_occ(), occ_two=_plain_occ())
+        _install(monkeypatch, j)
+        out = _payload(jd.handler(joint_name="Rail", distance=50, units="mm"))
+        assert "moved" not in out
+        assert "neither member's placement could be read" in out["note"]
+
+    def test_a_move_exactly_at_the_band_is_not_a_move(self, monkeypatch):
+        # 0.001 mm is the band itself - only a move BEYOND it counts, or solver noise reads as motion.
+        arm, base = _Placed("Arm:1"), _Placed("Base:1")
+        j = FakeJoint("Rail", _slider_moving(arm), occ_one=arm, occ_two=base)
+        _install(monkeypatch, j)
+        out = _payload(jd.handler(joint_name="Rail", distance=0.001, units="mm"))
+        assert out["moved"] is None
+
+    def test_a_move_past_the_band_is_reported(self, monkeypatch):
+        arm, base = _Placed("Arm:1"), _Placed("Base:1")
+        j = FakeJoint("Rail", _slider_moving(arm), occ_one=arm, occ_two=base)
+        _install(monkeypatch, j)
+        out = _payload(jd.handler(joint_name="Rail", distance=0.002, units="mm"))
+        assert out["moved"]["occurrence"] == "Arm:1"
+        assert out["moved"]["delta_mm"] == [0.002, 0.0, 0.0]
+
+
+class TestMovedBandBoundary:
+    """The band gate itself, over crafted samples - a basis rounded the way the placement record
+    rounds it cannot express a rotation this small, so the degree edge is exercised directly."""
+    def _samples(self, monkeypatch, deg):
+        c, s = math.cos(math.radians(deg)), math.sin(math.radians(deg))
+        before = {"origin": [0.0, 0.0, 0.0], "x_axis": [1.0, 0.0, 0.0],
+                  "y_axis": [0.0, 1.0, 0.0], "z_axis": [0.0, 0.0, 1.0]}
+        after = {"origin": [0.0, 0.0, 0.0], "x_axis": [c, s, 0.0],
+                 "y_axis": [-s, c, 0.0], "z_axis": [0.0, 0.0, 1.0]}
+        monkeypatch.setattr(jd, "_placement", lambda occ: after)
+        return [(types.SimpleNamespace(fullPathName="Rotor:1"), before)]
+
+    def test_a_rotation_exactly_at_the_band_is_not_a_move(self, monkeypatch):
+        rows, readable = jd._moved_rows(self._samples(monkeypatch, 0.01))
+        assert rows == [] and readable is True
+
+    def test_a_rotation_past_the_band_is_a_move(self, monkeypatch):
+        rows, readable = jd._moved_rows(self._samples(monkeypatch, 0.011))
+        assert readable is True
+        assert rows[0]["occurrence"] == "Rotor:1" and rows[0]["delta_deg"] == 0.011
+
+    def test_a_rounded_basis_that_did_not_turn_reports_no_rotation(self, monkeypatch):
+        # the axes the placement record publishes are rounded to 4 decimals and so fall short of unit
+        # length; comparing them as-is turns that missing length into rotation (measured live: a part
+        # that had not turned reported 0.5375 deg, which would name a static member as the mover).
+        rounded = {"origin": [0.0, 0.0, 0.0], "x_axis": [0.866, 0.5, 0.0],
+                   "y_axis": [-0.5, 0.866, 0.0], "z_axis": [0.0, 0.0, 1.0]}
+        assert jd._delta_deg(rounded, rounded) == 0.0
+        monkeypatch.setattr(jd, "_placement", lambda occ: dict(rounded))
+        rows, readable = jd._moved_rows([(types.SimpleNamespace(fullPathName="Rotor:1"), rounded)])
+        assert rows == [] and readable is True
+
+
+class TestDriveDirection:
+    def test_the_slide_direction_is_the_vector_read_BEFORE_the_drive(self, monkeypatch):
+        # the drive itself can re-aim the vector; a receipt that re-read it afterwards would publish
+        # a direction the reported delta was never measured against.
+        arm, base = _Placed("Arm:1"), _Placed("Base:1")
+        j = FakeJoint("Rail", _slider_moving(arm, vector=(1.0, 0.0, 0.0),
+                                             turn_vector=(0.0, 1.0, 0.0)),
+                      occ_one=arm, occ_two=base)
+        _install(monkeypatch, j)
+        out = _payload(jd.handler(joint_name="Rail", distance=50, units="mm"))
+        assert out["slide_direction"] == [1.0, 0.0, 0.0]
+        assert "rotation_axis" not in out                  # no angle was commanded
+
+    def test_an_angle_drive_publishes_the_rotation_axis(self, monkeypatch):
+        rotor, base = _Placed("Rotor:1"), _Placed("Base:1")
+        j = FakeJoint("Pivot", _revolute_moving(rotor, vector=(0.0, 0.0, 1.0)),
+                      occ_one=rotor, occ_two=base)
+        _install(monkeypatch, j)
+        out = _payload(jd.handler(joint_name="Pivot", angle_deg=30))
+        assert out["rotation_axis"] == [0.0, 0.0, 1.0]
+        assert "slide_direction" not in out
+
+    def test_a_cylindrical_drive_publishes_both_vectors(self, monkeypatch):
+        m = CylindricalJointMotion()
+        m.slideDirectionVector = _Vec(0.0, 0.0, 1.0)
+        m.rotationAxisVector = _Vec(0.0, 0.0, 1.0)
+        j = FakeJoint("Cyl", m)
+        _install(monkeypatch, j)
+        out = _payload(jd.handler(joint_name="Cyl", angle_deg=30, distance=10, units="mm"))
+        assert out["slide_direction"] == [0.0, 0.0, 1.0]
+        assert out["rotation_axis"] == [0.0, 0.0, 1.0]
+
+    def test_an_unreadable_vector_publishes_no_direction(self, monkeypatch):
+        # the stock SliderJointMotion fake carries no slideDirectionVector - an unread vector is
+        # absent, never substituted with an axis the joint never reported.
+        j = FakeJoint("Rail", SliderJointMotion())
+        _install(monkeypatch, j)
+        out = _payload(jd.handler(joint_name="Rail", distance=50, units="mm"))
+        assert "slide_direction" not in out
+        assert "motion vector" not in out["note"]

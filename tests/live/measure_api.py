@@ -275,6 +275,161 @@ ROWS = [
 """,
     },
     {
+        "id": "joint-drive-moves-occurrence-one",
+        "claim": ("Driving an as-built slider displaces occurrenceONE: with occurrenceTwo locked to "
+                  "its parent, occurrenceOne's transform2 translation moves by +the commanded value "
+                  "along the joint's slideDirectionVector and occurrenceTwo does not move at all"),
+        "encoded_in": ("commands/mcpServer/tools/joint_drive.py the 'moved' placement read-back; "
+                       "tests/unit/test_joint_drive.py TestMovedMember"),
+        "facts_on_pass": {"behavior.joint_drive_moves_occurrence_one": True},
+        "body": """
+    root = des.rootComponent
+    anchor = root.occurrences.addNewComponent(adsk.core.Matrix3D.create())
+    anchor.component.name = "DrvOneAnchor"
+    off = adsk.core.Matrix3D.create()
+    off.translation = adsk.core.Vector3D.create(4.0, 0.0, 0.0)
+    mover = root.occurrences.addNewComponent(off)
+    mover.component.name = "DrvOneMover"
+    anchor.isGroundToParent = True
+    geo = adsk.fusion.JointGeometry.createByPoint(
+        mover.component.originConstructionPoint.createForAssemblyContext(mover))
+    ji = root.asBuiltJoints.createInput(mover, anchor, geo)
+    ji.setAsSliderJointMotion(adsk.fusion.JointDirections.XAxisJointDirection)
+    j = root.asBuiltJoints.add(ji)
+    v = j.jointMotion.slideDirectionVector
+    b1, b2 = mover.transform2.translation, anchor.transform2.translation
+    before_one = (b1.x, b1.y, b1.z)
+    before_two = (b2.x, b2.y, b2.z)
+    j.jointMotion.slideValue = 2.5
+    a1, a2 = mover.transform2.translation, anchor.transform2.translation
+    d_one = (a1.x - before_one[0], a1.y - before_one[1], a1.z - before_one[2])
+    d_two = (a2.x - before_two[0], a2.y - before_two[1], a2.z - before_two[2])
+    one_moved = max(abs(d_one[i] - 2.5 * (v.x, v.y, v.z)[i]) for i in range(3)) < 1e-6
+    two_still = max(abs(c) for c in d_two) < 1e-6
+    emit(one_moved and two_still,
+         "joint-drive-moves-occurrence-one: one delta=" + str(d_one) + " two delta=" + str(d_two)
+         + " slideDirectionVector=(" + str(v.x) + "," + str(v.y) + "," + str(v.z) + ")"
+         + " (expect one = +2.5 along the vector, two = 0)")
+""",
+    },
+    {
+        "id": "joint-drive-sign-follows-slide-direction-vector",
+        "claim": ("A slider drive displaces the moving member ALONG jointMotion.slideDirectionVector "
+                  "- a joint built on the frame Y axis moves the part in +Y, not +X - and the sign "
+                  "follows the commanded value: a negative command lands the part on the other side"),
+        "encoded_in": ("commands/mcpServer/tools/joint_drive.py publishes that vector as "
+                       "'slide_direction' beside the measured 'moved' delta; tests/unit/"
+                       "test_joint_drive.py TestDriveDirection"),
+        "facts_on_pass": {"behavior.joint_drive_sign_follows_slide_direction_vector": True},
+        "body": """
+    root = des.rootComponent
+    anchor = root.occurrences.addNewComponent(adsk.core.Matrix3D.create())
+    anchor.component.name = "DrvSignAnchor"
+    off = adsk.core.Matrix3D.create()
+    off.translation = adsk.core.Vector3D.create(0.0, 4.0, 0.0)
+    mover = root.occurrences.addNewComponent(off)
+    mover.component.name = "DrvSignMover"
+    anchor.isGroundToParent = True
+    geo = adsk.fusion.JointGeometry.createByPoint(
+        mover.component.originConstructionPoint.createForAssemblyContext(mover))
+    ji = root.asBuiltJoints.createInput(mover, anchor, geo)
+    ji.setAsSliderJointMotion(adsk.fusion.JointDirections.YAxisJointDirection)
+    j = root.asBuiltJoints.add(ji)
+    v = j.jointMotion.slideDirectionVector
+    vec = (v.x, v.y, v.z)
+    h = mover.transform2.translation
+    home = (h.x, h.y, h.z)
+    j.jointMotion.slideValue = 2.5
+    p = mover.transform2.translation
+    d_pos = (p.x - home[0], p.y - home[1], p.z - home[2])
+    j.jointMotion.slideValue = -1.0
+    n = mover.transform2.translation
+    d_neg = (n.x - home[0], n.y - home[1], n.z - home[2])
+    on_y = abs(vec[1]) > 0.999 and abs(vec[0]) < 1e-6 and abs(vec[2]) < 1e-6
+    pos_ok = max(abs(d_pos[i] - 2.5 * vec[i]) for i in range(3)) < 1e-6
+    neg_ok = max(abs(d_neg[i] + 1.0 * vec[i]) for i in range(3)) < 1e-6
+    emit(on_y and pos_ok and neg_ok,
+         "joint-drive-sign-follows-slide-direction-vector: vector=" + str(vec)
+         + " delta(+2.5)=" + str(d_pos) + " delta(-1.0)=" + str(d_neg)
+         + " (expect the vector on Y, then +2.5 and -1.0 along it)")
+""",
+    },
+    {
+        "id": "joint-drive-anchored-side-flips-mover",
+        "claim": ("Which member moves is decided by which side is ANCHORED, not by the member order: "
+                  "with occurrenceONE locked to its parent, the same positive slide command displaces "
+                  "occurrenceTWO by MINUS the value along the same slideDirectionVector"),
+        "encoded_in": ("commands/mcpServer/tools/joint_drive.py reports the member that moved "
+                       "instead of naming one from the joint's member order; tests/unit/"
+                       "test_joint_drive.py TestMovedMember"),
+        "facts_on_pass": {"behavior.joint_drive_anchored_side_flips_mover": True},
+        "body": """
+    root = des.rootComponent
+    anchor = root.occurrences.addNewComponent(adsk.core.Matrix3D.create())
+    anchor.component.name = "DrvFlipAnchor"
+    off = adsk.core.Matrix3D.create()
+    off.translation = adsk.core.Vector3D.create(-4.0, 0.0, 0.0)
+    free = root.occurrences.addNewComponent(off)
+    free.component.name = "DrvFlipFree"
+    anchor.isGroundToParent = True
+    geo = adsk.fusion.JointGeometry.createByPoint(
+        free.component.originConstructionPoint.createForAssemblyContext(free))
+    ji = root.asBuiltJoints.createInput(anchor, free, geo)
+    ji.setAsSliderJointMotion(adsk.fusion.JointDirections.XAxisJointDirection)
+    j = root.asBuiltJoints.add(ji)
+    v = j.jointMotion.slideDirectionVector
+    b1, b2 = anchor.transform2.translation, free.transform2.translation
+    before_one = (b1.x, b1.y, b1.z)
+    before_two = (b2.x, b2.y, b2.z)
+    j.jointMotion.slideValue = 2.5
+    a1, a2 = anchor.transform2.translation, free.transform2.translation
+    d_one = (a1.x - before_one[0], a1.y - before_one[1], a1.z - before_one[2])
+    d_two = (a2.x - before_two[0], a2.y - before_two[1], a2.z - before_two[2])
+    one_still = max(abs(c) for c in d_one) < 1e-6
+    two_flipped = max(abs(d_two[i] + 2.5 * (v.x, v.y, v.z)[i]) for i in range(3)) < 1e-6
+    emit(one_still and two_flipped,
+         "joint-drive-anchored-side-flips-mover: one(anchored) delta=" + str(d_one)
+         + " two delta=" + str(d_two) + " slideDirectionVector=(" + str(v.x) + "," + str(v.y)
+         + "," + str(v.z) + ") (expect one = 0, two = -2.5 along the vector)")
+""",
+    },
+    {
+        "id": "joint-revolute-value-stored-verbatim",
+        "claim": ("A revolute jointMotion.rotationValue stores the angle it is GIVEN, verbatim: 750 "
+                  "deg reads back 750, a following 30 deg reads back 30, 100 reads 100 and 390 reads "
+                  "390 - the value neither accumulates the turn it just made nor normalizes into "
+                  "[0,360)"),
+        "encoded_in": ("commands/mcpServer/tools/joint_drive.py value_now + its "
+                       "angle_deg_normalized twin and the equivalent_pose gate; tests/unit/"
+                       "test_joint_drive.py TestEquivalentPose"),
+        "facts_on_pass": {"behavior.joint_revolute_value_stored_verbatim": True},
+        "body": """
+    import math
+    root = des.rootComponent
+    anchor = root.occurrences.addNewComponent(adsk.core.Matrix3D.create())
+    anchor.component.name = "DrvSpinAnchor"
+    off = adsk.core.Matrix3D.create()
+    off.translation = adsk.core.Vector3D.create(0.0, -4.0, 0.0)
+    spinner = root.occurrences.addNewComponent(off)
+    spinner.component.name = "DrvSpinRotor"
+    anchor.isGroundToParent = True
+    geo = adsk.fusion.JointGeometry.createByPoint(
+        spinner.component.originConstructionPoint.createForAssemblyContext(spinner))
+    ji = root.asBuiltJoints.createInput(spinner, anchor, geo)
+    ji.setAsRevoluteJointMotion(adsk.fusion.JointDirections.ZAxisJointDirection)
+    j = root.asBuiltJoints.add(ji)
+    reads = []
+    for want in (750.0, 30.0, 100.0, 390.0):
+        j.jointMotion.rotationValue = math.radians(want)
+        reads.append(round(math.degrees(j.jointMotion.rotationValue), 6))
+    verbatim = all(abs(reads[i] - w) < 1e-4
+                   for i, w in enumerate((750.0, 30.0, 100.0, 390.0)))
+    emit(verbatim,
+         "joint-revolute-value-stored-verbatim: commanded 750/30/100/390 read back "
+         + str(reads) + " (expect the same four values)")
+""",
+    },
+    {
         "id": "design-cast",
         "claim": "Design.cast passes the active design through; a non-design casts to None",
         "encoded_in": "tests/conftest.py install() cast_design + install_mock_adsk Design.cast",
@@ -332,6 +487,41 @@ ROWS = [
         ok = ok and good
         parts.append(label + "=" + ("empty" if good else "NON-EMPTY len " + str(len(r))))
     emit(ok, "find-entity-token-miss: " + ", ".join(parts))
+""",
+    },
+    {
+        "id": "find-entity-token-multi",
+        "claim": ("ONE token can name SEVERAL entities: splitting a face makes the PRE-split token "
+                  "resolve to a vector of BOTH survivors, so taking [0] acts on geometry the caller "
+                  "never picked"),
+        "encoded_in": ("tests/unit/test_inputs.py token_env / _SplitFace (a LIST value models the "
+                       "several entities one token answers with); commands/mcpServer/tools/"
+                       "_inputs.py the locator pick-or-refuse over a multi-entity token"),
+        "need_box": True,
+        "facts_on_pass": {"behavior.find_entity_token_multi_after_face_split": True},
+        "body": """
+    root = des.rootComponent
+    top = None
+    for i in range(body.faces.count):
+        f = body.faces.item(i)
+        if top is None or f.pointOnFace.z > top.pointOnFace.z:
+            top = f
+    tok = top.entityToken
+    before = len(des.findEntityByToken(tok))
+    pi = root.constructionPlanes.createInput()
+    pi.setByOffset(root.xZConstructionPlane, adsk.core.ValueInput.createByReal(0.5))
+    plane = root.constructionPlanes.add(pi)
+    faces = adsk.core.ObjectCollection.create()
+    faces.add(top)
+    si = root.features.splitFaceFeatures.createInput(faces, plane, True)
+    root.features.splitFaceFeatures.add(si)
+    after = des.findEntityByToken(tok)
+    kinds = []
+    for x in after:
+        kinds.append(type(x).__name__)
+    emit(before == 1 and len(after) > 1 and set(kinds) == set(["BRepFace"]),
+         "find-entity-token-multi: pre_split=" + str(before) + " post_split="
+         + str(len(after)) + " kinds=" + ",".join(kinds) + " (expect 1 then >1 BRepFace)")
 """,
     },
     {
@@ -1104,6 +1294,58 @@ ROWS = [
          + " (informational only) post_state=" + str(post_state))
 """,
     },
+    {
+        "id": "cam-errored-op-state-pair",
+        "claim": ("An op whose generation FAULTS (top height below bottom height) reads hasError "
+                  "True with operationState NoToolpath (3), hasToolpath False and isValid True - "
+                  "hasError True beside operationState 0 was NOT observed; the same op regenerated "
+                  "clean reads hasError False, operationState IsValid (0) and a toolpath"),
+        "encoded_in": ("tests/unit/test__cam_common.py TestErroredOpNeverReadsValid, whose fake "
+                       "carries hasError True with operationState 0; _cam_common.op_primary_state, "
+                       "which classifies an errored op before it reads operationState"),
+        "needs": "cam",
+        "body": """
+    import time as _t
+    cam = adsk.cam.CAM.cast(app.activeDocument.products.itemByProductType("CAMProductType"))
+    op = None
+    for i in range(cam.setups.count):
+        if cam.setups.item(i).name == "MeasureSetup":
+            for x in cam.setups.item(i).allOperations:
+                o = adsk.cam.Operation.cast(x)
+                if o is not None and o.name == "Face1":
+                    op = o
+    def _generate(o):
+        f = cam.generateToolpath(o)
+        n = 0
+        while not f.isGenerationCompleted and n < 600:
+            adsk.doEvents()
+            _t.sleep(0.1)
+            n += 1
+        return f.isGenerationCompleted
+    # Baseline: the same op generated clean, so the errored reads below are a DIFFERENCE, not a
+    # first look at an op of unknown history.
+    op.parameters.itemByName("bottomHeight_offset").expression = "0 mm"
+    if not _generate(op):
+        emit(False, "cam-errored-op-state-pair: baseline generation did not complete in 60s"
+             " - inconclusive, rerun")
+        return
+    ok_base = (op.operationState == 0 and op.hasError is False and op.hasToolpath is True)
+    base = ("base=(state " + str(op.operationState) + ", hasError " + repr(op.hasError)
+            + ", hasToolpath " + repr(op.hasToolpath) + ")")
+    # A bottom offset ABOVE the top height is a parameter fault the generator rejects.
+    op.parameters.itemByName("bottomHeight_offset").expression = "50 mm"
+    if not _generate(op):
+        emit(False, "cam-errored-op-state-pair: fault generation did not complete in 60s"
+             " - inconclusive, rerun")
+        return
+    lines = (op.error or "").strip().splitlines()
+    ok_err = (op.hasError is True and op.operationState == 3 and op.hasToolpath is False)
+    emit(ok_base and ok_err,
+         "cam-errored-op-state-pair: " + base + " errored=(hasError " + repr(op.hasError)
+         + ", operationState " + str(op.operationState) + ", hasToolpath " + repr(op.hasToolpath)
+         + ", isValid " + repr(op.isValid) + ") error=" + repr(lines[0] if lines else ""))
+""",
+    },
 ]
 
 
@@ -1236,6 +1478,85 @@ def _judge(row, is_error, payload):
     return "PASS", "; ".join(ln[5:] for ln in lines)[:200]
 
 
+# --- scratch-document bookkeeping -------------------------------------------------------------
+# The run's own document is addressed by its 'open:N' index (doc_get's open_index), never by "the
+# active document": measured live on 2705.1.4 - an uncaught raise inside a row script does NOT close
+# a document the script had already added, the document stays open AND ACTIVE, and a bare
+# doc_close then closes THAT (or whatever else came forward) instead of the scratch.
+
+_ACTIVATE_TRIES = 10
+_ACTIVATE_SLEEP = 0.2
+
+
+def _open_doc_rows():
+    """doc_get's 'open_documents' rows, each carrying the open_index that addresses it. An
+    unreadable session yields [] - every caller treats that as "cannot address anything" and
+    refuses to close, rather than falling back to the active document."""
+    is_error, payload = call("doc_get", {"max_results": 200})
+    if is_error or not isinstance(payload, dict):
+        return []
+    rows = payload.get("open_documents")
+    return rows if isinstance(rows, list) else []
+
+
+def _active_open_index(rows):
+    """The open_index of the ACTIVE document in an open_documents list, or None."""
+    for r in rows:
+        if r.get("is_active"):
+            return r.get("open_index")
+    return None
+
+
+def _stray_indices(rows, scratch_index):
+    """Open indices ABOVE the scratch - documents that appeared during the run - HIGHEST FIRST.
+    Closing in that order leaves the scratch's own 'open:N' address intact, since only indices
+    above a closed document shift."""
+    return sorted((r["open_index"] for r in rows
+                   if isinstance(r.get("open_index"), int) and r["open_index"] > scratch_index),
+                  reverse=True)
+
+
+def _scratch_still_unsaved(rows, scratch_index):
+    """True only when the document at scratch_index is present and NEVER SAVED. The scratch is
+    never saved, so a saved document at that index means the index stopped addressing it and the
+    close must be refused rather than aimed at a real file. doc_get prunes is_saved from a healthy
+    SAVED row, so never-saved is the explicit False - a missing key is not it."""
+    for r in rows:
+        if r.get("open_index") == scratch_index:
+            return r.get("is_saved") is False
+    return False
+
+
+def _reclaim_scratch(scratch_index):
+    """Close every document that appeared above the scratch, then bring the scratch back to the
+    foreground so the next row measures it. Returns how many strays were closed."""
+    rows = _open_doc_rows()
+    strays = _stray_indices(rows, scratch_index)
+    for idx in strays:
+        call("doc_close", {"name": "open:{0}".format(idx), "save_changes": False})
+    if not strays and _active_open_index(rows) == scratch_index:
+        return 0
+    # doc_activate is ASYNC - it reports "pending" until the foreground catches up - so wait for the
+    # switch to READ back before handing the session to the next row.
+    call("doc_activate", {"name": "open:{0}".format(scratch_index)})
+    for _ in range(_ACTIVATE_TRIES):
+        if _active_open_index(_open_doc_rows()) == scratch_index:
+            break
+        time.sleep(_ACTIVATE_SLEEP)
+    return len(strays)
+
+
+def _close_scratch(scratch_index):
+    """Close the run's own document, and nothing else."""
+    _reclaim_scratch(scratch_index)
+    rows = _open_doc_rows()
+    if _scratch_still_unsaved(rows, scratch_index):
+        call("doc_close", {"name": "open:{0}".format(scratch_index), "save_changes": False})
+        return
+    print("NOT closing open:{0}: it no longer reads as an unsaved document, so that index has "
+          "stopped addressing this run's scratch. Close the leftover by hand.".format(scratch_index))
+
+
 def _fusion_version():
     health_gate()
     is_error, payload = call("workspace_orient", {})
@@ -1308,9 +1629,16 @@ def write_ledger(results, fusion_version, stamp_date):
     lines = [
         "# Live-verified mock contracts (generated by measure_api.py - do not edit)",
         "",
-        "Each row is a claim a unit-test fake encodes about the live adsk API, checked against a",
-        "running Fusion by `measure_api.py`. A non-PASS row means the fake (and every test",
-        "leaning on it) does not match the platform: update the fake and its consumers, then",
+        "Each row is a CLAIM about the live adsk API, measured against a running Fusion by",
+        "`measure_api.py`, beside the fakes and tool code that lean on it. PASS means the PLATFORM",
+        "behaved as the claim states on that run. It does NOT mean every fake named in 'encoded in'",
+        "agrees with the claim: a fixture may encode the OPPOSITE on purpose, to keep a consumer",
+        "that must not depend on the real semantics under stress - camera-returns-copy names a fake",
+        "modelling a shared mutable camera, and cam-alloperations-shape names two CAM test files",
+        "whose encodings contradict each other. Each such cell says so in its own words, so the",
+        "'encoded in' text is what tells you which kind of row you are reading.",
+        "",
+        "A non-PASS row means the CLAIM no longer holds: update the fakes and their consumers, then",
         "re-run to refresh the stamp. `--check` fails when the stamp differs from the installed",
         "Fusion or any row is not PASS.",
         "",
@@ -1365,6 +1693,12 @@ def run_measurements(write_json):
     is_error, payload = call("doc_new", {})
     if is_error:
         sys.exit("doc_new refused: {0}".format(payload))
+    scratch = _active_open_index(_open_doc_rows())
+    if scratch is None:
+        sys.exit("doc_new made a document the session would not address (doc_get published no "
+                 "active open_index) - refusing to measure, because the teardown could then only "
+                 "close 'the active document', which is how a run closes someone else's. Close the "
+                 "new Untitled document by hand and re-run.")
     results = []
     facts = {}
     shapes = {}
@@ -1387,9 +1721,13 @@ def run_measurements(write_json):
                     shapes.setdefault(tname, set()).update(attrs)
             results.append((row, status, detail))
             print("  {0:6} {1:28} {2}".format(status, row["id"], detail[:90]))
+            strays = _reclaim_scratch(scratch)
+            if strays:
+                print("  {0:6} {1:28} {2}".format("", "", "reclaimed {0} document(s) the row left "
+                                                  "open".format(strays)))
             time.sleep(0.1)
     finally:
-        call("doc_close", {"save_changes": False})
+        _close_scratch(scratch)
     stamp_date = time.strftime("%Y-%m-%d")
     write_ledger(results, fusion_version, stamp_date)
     print("\nwrote {0} (stamp: Fusion {1}, {2})".format(LEDGER, fusion_version, stamp_date))

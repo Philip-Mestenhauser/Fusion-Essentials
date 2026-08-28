@@ -716,6 +716,16 @@ def assembly_constraint_handler(occurrence_one: str = "", occurrence_two: str = 
     # the submitted number beside it), so no caller reads the ask back as a measurement.
     count = _common.counted(lambda: constraint.geometricRelationships.count)
     submitted = len(specs) or 1
+    # A constraint holding FEWER relationships than were submitted did not land the request: the
+    # missing pairs constrain nothing, so the parts are not located the way the call describes.
+    # Refused for the same reason the sibling rigid group refuses a short member count
+    # (assembly_transform.rigid_group_handler) - a shortfall disclosed only in a note reads as
+    # created:true. An unreadable count (None) is not a shortfall; it stays the null disclosure below.
+    if count is not None and count < submitted:
+        return error(f"Constraint '{cname}' was created but holds only {count} of the {submitted} "
+                     f"relationship(s) submitted - the missing one(s) constrain nothing, so the "
+                     f"parts are not located the way this call describes. "
+                     f"{undo} Then re-submit the relationships that must solve together.")
     moves, measured = _constraint_moves(before_pos, targets)
     note = "Components constrained with the relationship set (type inferred from geometry)."
     if moves:
@@ -732,7 +742,9 @@ def assembly_constraint_handler(occurrence_one: str = "", occurrence_two: str = 
     if count is None:
         note += (f" 'relationship_count' is null - it could not be read off the constraint; "
                  f"{submitted} relationship(s) were submitted.")
-    elif count != submitted:
+    elif count > submitted:
+        # A count ABOVE the request is a surplus, not a shortfall - nothing the caller asked for is
+        # missing, so it is disclosed rather than refused.
         note += f" 'relationship_count' reads {count} for the {submitted} relationship(s) submitted."
     return ok({"created": True, "constraint": name_read,
         "relationship_count": count,

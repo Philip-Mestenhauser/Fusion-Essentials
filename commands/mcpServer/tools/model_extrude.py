@@ -291,32 +291,21 @@ def _solid_count(design) -> int:
 
 
 def _failed_compute(feature):
-    """(state_label, message) when the created feature carries a FAILED compute state, else None.
+    """(state_label, condensed message) when the created feature carries a FAILED compute state,
+    else None.
 
-    BOTH WarningFeatureHealthState and ErrorFeatureHealthState count as failed. Measured: a cut
-    scoped with 'target_bodies' whose profile reaches none of them leaves a timeline item in the
-    WARNING state carrying 'No target body!Compute Failed', so gating on the error state alone
-    passes a feature that computed nothing; the design-wide rollups (_common.timeline_health,
-    assembly_get._health) already classify warning and error alike as a compute failure. The STATE
-    is what is read - never the message text. The ExtrudeFeature and its TimelineObject each carry
-    healthState, and the measured failure was read off the TIMELINE ITEM, so BOTH are asked: the
-    feature first, and its timeline item whenever the feature's own state is not itself a failure
-    (a HEALTHY feature state does not end the check - the timeline item is where the failure showed).
-    A state neither of them reports as a failure yields NO verdict, so a health read that misbehaves
-    cannot sink an extrude that landed."""
-    states = adsk.fusion.FeatureHealthStates
+    The state read and its message condensation are ``_assert.compute_failure``'s - the ONE
+    unhealthy-feature classifier, which counts a WARNING as failed alongside an ERROR. What is
+    local here is WHERE to look: the ExtrudeFeature and its TimelineObject each carry healthState,
+    and the measured failure - a cut scoped with 'target_bodies' whose profile reaches none of them,
+    leaving a WARNING item saying 'No target body!' - was read off the TIMELINE ITEM. So BOTH are
+    asked, the feature first, and a HEALTHY feature state does not end the check. A state neither of
+    them reports as a failure yields NO verdict, so a health read that misbehaves cannot sink an
+    extrude that landed."""
     for get_obj in (lambda: feature, lambda: feature.timelineObject):
-        obj = safe(get_obj)
-        hs = safe(lambda: obj.healthState) if obj is not None else None
-        if hs is None:
-            continue
-        if hs == safe(lambda: states.ErrorFeatureHealthState):
-            label = "error"
-        elif hs == safe(lambda: states.WarningFeatureHealthState):
-            label = "warning"
-        else:
-            continue
-        return label, (safe(lambda: obj.errorOrWarningMessage) or "").strip()
+        failure = _assert.compute_failure(safe(get_obj))
+        if failure is not None:
+            return failure
     return None
 
 
@@ -444,7 +433,9 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
         return error("No active design. Create or open a document first (see doc_new).")
 
     root = target_component(design)
-    sketch, requested = _common.resolve_or_recent_sketch(design, sketch_name)
+    sketch, requested, ambiguous = _common.find_or_recent_sketch(design, sketch_name)
+    if ambiguous:
+        return error(ambiguous)
     if not sketch:
         if requested:
             names = _common.all_sketch_names(design)

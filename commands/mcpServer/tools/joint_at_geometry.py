@@ -30,7 +30,8 @@ app = adsk.core.Application.get()
 # the joint's own state - no separate assembly_get needed to know if it computed).
 RETURNS = [
     _outputs.ReturnsName("joint_name", of="joint", consumers=["joint_edit", "joint_motion_link"]),
-    _outputs.ReturnsValue("healthy", "whether the joint actually COMPUTES (added != working)"),
+    _outputs.ReturnsValue("healthy", "whether the joint actually COMPUTES (added != working); null "
+                                     "when its state does not read as one Fusion names"),
 ]
 
 _MOTIONS = {"rigid", "revolute", "slider", "cylindrical", "ball"}
@@ -118,6 +119,36 @@ def _axis_entity(entity):
         if safe(lambda: entity.geometry.curveType) == adsk.core.Curve3DTypes.Circle3DCurveType:
             return entity
     return None
+
+
+# healthState value -> the state's own name, for the states that are NOT a compute failure. The
+# members are read off adsk.fusion.FeatureHealthStates by NAME, never a hand-typed int.
+_NON_FAILURE_STATES = (("healthy", "HealthyFeatureHealthState"),
+                       ("suppressed", "SuppressedFeatureHealthState"),
+                       ("rolled_back", "RolledBackFeatureHealthState"))
+
+
+def _health_verdict(joint):
+    """(healthy, state_name, message) for the created joint - the tri-state read behind the payload's
+    authoritative 'healthy' flag.
+
+    healthy True: the joint reports a state that is not a compute failure. False: the shared
+    classifier (_assert.compute_failure) read an ERROR or WARNING state - the only two states that
+    ARE a failed compute - and `message` is its condensed text. None: the state is Unknown, or a
+    member this build does not carry, or the read itself did not answer - so whether the joint
+    computes was not established here and no verdict may be published for it."""
+    failure = _assert.compute_failure(joint)
+    if failure is not None:
+        label, msg = failure
+        return False, label, msg
+    states = safe(lambda: adsk.fusion.FeatureHealthStates)
+    hs = safe(lambda: joint.healthState)
+    if states is None or hs is None:
+        return None, None, None
+    for name, member in _NON_FAILURE_STATES:
+        if hs == safe(lambda m=member: getattr(states, m)):
+            return True, name, None
+    return None, None, None
 
 
 def _axis_note(mot, ax_name, use_custom):
@@ -233,14 +264,14 @@ def handler(handle_one: str = "", handle_two: str = "", motion: str = "revolute"
     o2 = safe(lambda: joint.occurrenceTwo.name)
     # CHECK HEALTH at the source: a joint can be ADDED yet fail to COMPUTE (over-constrained) - the
     # 'Compute Failed' the user sees first. Surface it here so the caller doesn't trust a broken joint.
-    hs = safe(lambda: joint.healthState)
-    healthy = (hs is None) or (hs == 0)
+    healthy, health_state, failure_message = _health_verdict(joint)
     out = {
     "jointed": True,
     "joint_name": joint_name_final,
     "motion": mot,
     "axis": None if mot in _NO_AXIS_MOTIONS else ("auto(geometry)" if use_custom else ax_name),
     "healthy": healthy,
+    "health_state": health_state,
     "flipped": bool(flip),
     "geometry_one": l1,
     "geometry_two": l2,
@@ -260,10 +291,25 @@ def handler(handle_one: str = "", handle_two: str = "", motion: str = "revolute"
     # of the free part - live-verified, typically embedding it in the other part. Say so.
     if normals_oppose and not flip:
         out["flip_hint"] = FLIP_HINT
-    if not healthy:
-        msg = (safe(lambda: joint.errorOrWarningMessage) or "").split("Compute Failed")[0].strip()
+    if healthy is False:
+        # The message is _assert's condensation: Fusion's errorOrWarningMessage repeats its sentence
+        # joined by 'Compute Failed' + the joint's name, and a raw slice of that blob can land
+        # mid-word. Held to this site's own 200-character ceiling, tighter than the reader's default,
+        # because the warning carries a lead-in sentence of its own.
+        msg = _assert.compute_failure_message(failure_message, 200)
         out["health_warning"] = ("This joint FAILED TO COMPUTE (likely over-constrained): "
-                                 + (msg[:200] or "conflicts with assembly relationships"))
+                                 + (msg or "conflicts with assembly relationships"))
+    elif healthy is None:
+        # An Unknown / unreadable state is not a failure and not a clean compute - claiming either
+        # would be a verdict this read never took.
+        out["health_warning"] = ("This joint's health state did not read as one Fusion names, so "
+                                 "whether it computes is UNVERIFIED here - 'healthy' is null. "
+                                 "Re-read it with assembly_get (is_healthy / broken_joints).")
+    elif health_state in ("suppressed", "rolled_back"):
+        # A state that is not a compute failure but is not an active compute either: published by
+        # NAME, with no claim about what the joint does or does not position.
+        out["note"] += (f" This joint's health state reads '{health_state}' - not a compute failure. "
+                        "Read what it positions with assembly_get.")
 
     # Report how far a part was repositioned to align the keypoints. The move is legitimate joint
     # behavior (keypoints align at a face CENTROID / edge MIDPOINT) - flagging it just ends the silence

@@ -2,16 +2,18 @@
 
 The logic pinned here, no live Fusion: color parsing (#RRGGBB / RRGGBB / r,g,b, with the malformed
 cases rejected), target resolution (body name, occurrence, component -> all bodies), the override idiom
-(addByCopy a base appearance, set its ColorProperty.value to a Color, assign to .appearance), and the
-guards (bad color, bad opacity, no design, missing target, no base appearance, component with no bodies).
+(addByCopy the NAMED base appearance out of the named material library, write the Color into its
+albedo channel only, assign to .appearance), and the guards (bad color, bad opacity, no design,
+missing target, absent library/base appearance, component with no bodies).
 Fakes capture the assignments so a regression to a wrong attribute fails here.
 """
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
-from conftest import load_tool
+from conftest import load_tool, _NamedCollection
 
 ap = load_tool("appearance_set")
 
@@ -70,10 +72,16 @@ class TestParseColor:
 
 # ── fakes ──────────────────────────────────────────────────────────────────────
 
+# The ColorProperty ids MEASURED on the base appearance the tool copies, in the order the live
+# appearance exposes them: the albedo the color belongs in, and the luminance modifier beside it.
+BASE_COLOR_IDS = ("opaque_albedo", "opaque_luminance_modifier")
+
+
 # The handler detects color props by type(p).__name__ == "ColorProperty" (mirrors the real API class
 # name), so the fake's class must be literally named ColorProperty.
-def FakeColorProperty():
+def FakeColorProperty(prop_id):
     inst = type("ColorProperty", (), {})()
+    inst.id = prop_id  # the handler picks the channel to write by this id
     inst.value = None  # the handler sets this to the Color
     return inst
 
@@ -99,10 +107,10 @@ class FakeAppearance:
     instance: two different assets can share a name, and two different appearances can share an
     id (a copy keeps its source asset's id - see addByCopy below)."""
 
-    def __init__(self, name, color_props=1, appearance_id=None):
+    def __init__(self, name, color_props=BASE_COLOR_IDS, appearance_id=None):
         self.name = name
         self.id = appearance_id if appearance_id is not None else f"asset:{name}"
-        props = [FakeColorProperty() for _ in range(color_props)] + [_OtherProperty()]
+        props = [FakeColorProperty(pid) for pid in color_props] + [_OtherProperty()]
         self.appearanceProperties = FakeProps(props)
 
 
@@ -187,8 +195,8 @@ class FakeOcc:
 
 
 # The id every appearance this tool mints in these tests carries: the copy keeps the base's id,
-# and _install*/_install_mp seed "Base" as the design's only existing appearance.
-MINTED_ID = "asset:Base"
+# and _install*/_install_mp seed the tool's own base name as the design's only existing appearance.
+MINTED_ID = f"asset:{ap._BASE_NAME}"
 
 
 class FanoutOcc(FakeOcc):
@@ -254,7 +262,7 @@ class FakeDesign:
         return [e] if e is not None else []
 
 
-def _install(root, existing_appearances=("Base",), tokens=None):
+def _install(root, existing_appearances=(ap._BASE_NAME,), tokens=None):
     apps = FakeAppearances([FakeAppearance(n) for n in existing_appearances])
     design = FakeDesign(root, apps, tokens)
     ap._common.design = lambda: design
@@ -266,6 +274,20 @@ def _install(root, existing_appearances=("Base",), tokens=None):
     # handle_token: the handler calls _inputs.handle_token(name) before findEntityByToken
     ap._inputs.handle_token = lambda s: s
     return design, apps
+
+
+def _install_libraries(monkeypatch, *libraries):
+    """Install the material-library catalog on the seam appearance_set resolves its base through
+    (_materials.find_library reads _materials.app.materialLibraries)."""
+    monkeypatch.setattr(ap._materials, "app",
+                        SimpleNamespace(materialLibraries=_NamedCollection(libraries)))
+
+
+def _library(name, *appearances):
+    """One loaded material library holding `appearances` - the shape find_library walks and the
+    tool then resolves its base out of by exact name."""
+    return SimpleNamespace(name=name, id=f"lib:{name}",
+                           appearances=_NamedCollection(appearances))
 
 
 def _payload(result):
@@ -343,7 +365,7 @@ class TestApply:
         # The direct-write branches run the SAME two-key comparison as the fan-out: a body that
         # silently kept an earlier copy minted from the same base shares the applied appearance's
         # id, so an id-only read-back would call this stuck write a success.
-        stuck = FakeAppearance("AgentColor_FF0000", appearance_id="asset:Base")
+        stuck = FakeAppearance("AgentColor_FF0000", appearance_id=MINTED_ID)
         body = FakeBody("Body1")
         body.__class__ = type("StuckBody", (FakeBody,), {
             "appearance": property(lambda self: stuck, lambda self, v: None)})
@@ -376,7 +398,7 @@ class TestApply:
         assert "failed" not in out["note"]
 
     def test_a_component_body_left_holding_a_same_base_copy_lands_in_failed(self):
-        stuck = FakeAppearance("AgentColor_FF0000", appearance_id="asset:Base")
+        stuck = FakeAppearance("AgentColor_FF0000", appearance_id=MINTED_ID)
         good, bad = FakeBody("Good"), FakeBody("Bad")
         bad.__class__ = type("StuckBody2", (FakeBody,), {
             "appearance": property(lambda self: stuck, lambda self, v: None)})
@@ -448,12 +470,12 @@ class TestApply:
         assert b1.appearance is not None and b2.appearance is not None
         assert set(out["applied_to"]) == {"B1", "B2"}
 
-    def test_opacity_passed_through(self):
+    def test_opaque_default_reaches_the_color_property(self):
         body = FakeBody("Body1")
         _install(FakeRoot(bodies=[body]))
-        out = _payload(ap.handler(target="Body1", color="#102030", opacity=128))
-        assert out["opacity"] == 128
-        assert body.appearance.appearanceProperties.item(0).value == ("color", 16, 32, 48, 128)
+        out = _payload(ap.handler(target="Body1", color="#102030"))
+        assert out["opacity"] == 255
+        assert body.appearance.appearanceProperties.item(0).value == ("color", 16, 32, 48, 255)
 
     def test_default_appearance_name_from_color(self):
         body = FakeBody("Body1")
@@ -481,12 +503,33 @@ class TestReuseExistingAppearance:
         # the named appearance exists but its color was never set (a raced/aborted first call):
         # the reuse path re-applies the requested color instead of trusting the stale one
         root = FakeRoot(bodies=[FakeBody("B1")])
-        design, apps = _install(root, existing_appearances=("Base", "AgentColor_FF0000"))
+        design, apps = _install(root, existing_appearances=(ap._BASE_NAME, "AgentColor_FF0000"))
         out = _payload(ap.handler(target="B1", color="#FF0000"))
         assert out["appearance_reused"] is True
         assert apps.copied == []                         # no copy attempted
         reused = apps.itemByName("AgentColor_FF0000")
         assert reused.appearanceProperties.item(0).value == ("color", 255, 0, 0, 255)
+
+    def test_a_color_appearance_that_lands_between_the_lookup_and_the_copy_is_reused(self):
+        # a parallel call can create the colour name in the gap: addByCopy refuses the duplicate,
+        # and the re-check must adopt that one (and re-apply the colour to it) rather than fail
+        body = FakeBody("B1")
+        design, apps = _install(FakeRoot(bodies=[body]))
+        raced = FakeAppearance("AgentColor_1E8E3E")
+
+        def land_it(base, name):
+            apps._items.append(raced)
+            return None
+        apps.addByCopy = land_it
+        out = _payload(ap.handler(target="B1", color="#1E8E3E"))
+        assert out["appearance_reused"] is True
+        assert body.appearance is raced
+        assert raced.appearanceProperties.item(0).value == ("color", 30, 142, 62, 255)
+
+    def test_a_colour_copy_that_returns_nothing_is_an_honest_failure(self):
+        _install(FakeRoot(bodies=[FakeBody("B1")]))[1].addByCopy = lambda base, name: None
+        res = ap.handler(target="B1", color="#1E8E3E")
+        assert res["isError"] is True and "addByCopy" in res["message"]
 
     def test_different_color_still_creates_its_own_appearance(self):
         b1, b2 = FakeBody("B1"), FakeBody("B2")
@@ -506,10 +549,43 @@ class TestGuards:
         res = ap.handler(target="Body1", color="nope")
         assert res["isError"] is True and "hex" in res["message"].lower()
 
-    def test_bad_opacity_errors(self):
+    def test_non_integer_opacity_names_the_one_legal_value(self):
+        # the TYPE error must not advertise a range the very next guard refuses
+        _install(FakeRoot(bodies=[FakeBody("Body1")]))
+        res = ap.handler(target="Body1", color="#000000", opacity="translucent")
+        assert res["isError"] is True
+        assert "255" in res["message"] and "0-255" not in res["message"]
+
+    def test_out_of_range_opacity_is_refused(self):
         _install(FakeRoot(bodies=[FakeBody("Body1")]))
         res = ap.handler(target="Body1", color="#000000", opacity=999)
-        assert res["isError"] is True and "0-255" in res["message"]
+        assert res["isError"] is True and "999" in res["message"]
+
+    def test_translucent_opacity_is_refused_not_reported_as_applied(self):
+        # transparency is the appearance's Prism class, not the color alpha, so a request this
+        # tool cannot deliver must fail rather than come back as a landed 'opacity' field
+        _install(FakeRoot(bodies=[FakeBody("Body1")]))
+        res = ap.handler(target="Body1", color="#000000", opacity=128)
+        assert res["isError"] is True
+        assert "128" in res["message"] and "transparen" in res["message"].lower()
+
+    def test_one_below_opaque_is_refused(self):
+        # the exact boundary on the refusing side
+        _install(FakeRoot(bodies=[FakeBody("Body1")]))
+        res = ap.handler(target="Body1", color="#000000", opacity=254)
+        assert res["isError"] is True
+
+    def test_opaque_is_accepted(self):
+        # the exact boundary on the accepting side - the guard must not refuse the one legal value
+        _install(FakeRoot(bodies=[FakeBody("Body1")]))
+        res = ap.handler(target="Body1", color="#000000", opacity=255)
+        assert "isError" not in res or res["isError"] is False
+
+    def test_zero_opacity_is_refused(self):
+        # fully transparent is the same undeliverable request, not a special case
+        _install(FakeRoot(bodies=[FakeBody("Body1")]))
+        res = ap.handler(target="Body1", color="#000000", opacity=0)
+        assert res["isError"] is True
 
     def test_no_active_design_errors(self):
         ap._common.design = lambda: None
@@ -523,14 +599,18 @@ class TestGuards:
         res = ap.handler(target="Ghost", color="#000000")
         assert res["isError"] is True and "ghost" in res["message"].lower()
 
-    def test_no_base_appearance_errors(self):
-        # design has no appearances AND no material libraries with any -> honest failure
-        root = FakeRoot(bodies=[FakeBody("Body1")])
-        _install(root, existing_appearances=())
-        import adsk.core
-        adsk.core.Application.get().materialLibraries = FakeProps([])  # no libs
+    def test_the_base_library_being_absent_is_refused_by_name(self, monkeypatch):
+        # The design holds no base yet - only the metal that entered it first - and the named
+        # library is not loaded. The refusal must name the library it looked in; falling back to
+        # the appearance already in the document is what made every override a tinted metal.
+        design, apps = _install(FakeRoot(bodies=[FakeBody("Body1")]),
+                                existing_appearances=("Steel - Satin",))
+        _install_libraries(monkeypatch, _library("Fusion Material Library"))
         res = ap.handler(target="Body1", color="#000000")
-        assert res["isError"] is True and "base appearance" in res["message"].lower()
+        assert res["isError"] is True
+        assert ap._BASE_LIBRARY in res["message"]
+        assert "Fusion Material Library" in res["message"]      # what IS loaded
+        assert apps.copied == []
 
     def test_component_with_no_bodies_errors(self):
         comp = FakeComponent("Empty", bodies=[])
@@ -549,7 +629,7 @@ class TestGuards:
         _resolve_to(comp, "component")
         res = ap.handler(target="Empty", color="#CC2200")
         assert res["isError"] is True
-        assert apps.copied == [] and apps.count == 1        # only the pre-existing "Base"
+        assert apps.copied == [] and apps.count == 1        # only the pre-existing base
         assert apps.itemByName("AgentColor_CC2200") is None
 
     def test_no_editable_color_property_errors(self):
@@ -560,7 +640,7 @@ class TestGuards:
 
         # make addByCopy return a propertyless appearance (no ColorProperty to set)
         def copy_no_color(base, name):
-            a = FakeAppearance(name, color_props=0)
+            a = FakeAppearance(name, color_props=())
             a.appearanceProperties = FakeProps([_OtherProperty()])
             apps.copied.append((base, name, a))
             return a
@@ -572,7 +652,7 @@ class TestGuards:
 
 # ── occurrence fan-out: where an occurrence-level write actually landed ───────
 
-def _install_mp(monkeypatch, root, existing_appearances=("Base",), tokens=None):
+def _install_mp(monkeypatch, root, existing_appearances=(ap._BASE_NAME,), tokens=None):
     """The monkeypatch install (tests/CLAUDE.md canonical pattern): every seam is torn down after
     the test instead of left poked on the module."""
     apps = FakeAppearances([FakeAppearance(n) for n in existing_appearances])
@@ -673,7 +753,7 @@ class TestOccurrenceFanout:
 
     @pytest.mark.parametrize("applied_id,applied_name", [
         (None, "AgentColor_1E8E3E"),        # the applied appearance's id would not read
-        ("asset:Base", None),               # ...or its name would not
+        (MINTED_ID, None),                  # ...or its name would not
         (None, None),
     ])
     def test_an_unreadable_applied_key_classifies_nothing_it_could_not_compare(
@@ -782,25 +862,159 @@ class TestResolveExtra:
         assert out["applied_to"] == ["B"]
 
 
-class TestBaseAppearanceFallback:
-    def test_falls_back_to_material_library_when_design_has_none(self):
-        # design has NO appearances; a material library exposes one -> that one is the base
+class TestTheColorBase:
+    """Every override is copied from ONE named appearance out of ONE named library, kept in the
+    document under a fixed name. design.appearances.item(0) - whichever appearance entered the
+    document first, measured 'Steel - Satin', an interior_model=1 METAL with no opaque_albedo
+    channel - is never the base, so an override is never a tinted metal."""
+
+    def _fresh(self, monkeypatch, *lib_appearances):
+        """A design holding no base yet - just the metal that entered it first, which item(0) hands
+        back - plus the named library carrying `lib_appearances`."""
+        design, apps = _install_mp(monkeypatch, FakeRoot(bodies=[FakeBody("Body1")]),
+                                   existing_appearances=("Steel - Satin",))
+        _install_libraries(monkeypatch, _library(ap._BASE_LIBRARY, *lib_appearances))
+        return design, apps
+
+    def test_the_named_library_appearance_is_copied_in_under_the_base_name(self, monkeypatch):
+        # the library lists the metal first and the matte alternative last: the base is picked by
+        # EXACT name, not by position
+        source = FakeAppearance(ap._BASE_SOURCE)
+        design, apps = self._fresh(monkeypatch, FakeAppearance("Steel - Satin"), source,
+                                   FakeAppearance("Plastic - Matte (White)"))
+        out = _payload(ap.handler(target="Body1", color="#1E8E3E"))
+        # two copies: the base out of the library, then the color override off that base
+        assert [(c[0], c[1]) for c in apps.copied] == [
+            (source, ap._BASE_NAME), (apps.itemByName(ap._BASE_NAME), "AgentColor_1E8E3E")]
+        assert out["base_appearance"] == ap._BASE_NAME and out["base_reused"] is False
+        assert ap._BASE_SOURCE in out["note"] and ap._BASE_LIBRARY in out["note"]
+
+    def test_item_zero_is_never_the_base(self, monkeypatch):
+        # The design's FIRST appearance is a metal carrying no albedo channel. Copying it (the
+        # insertion-order pick) would mint a tinted metal and the albedo write would find nothing.
+        metal = FakeAppearance("Steel - Satin", color_props=("metal_f0",))
+        source = FakeAppearance(ap._BASE_SOURCE)
+        design, apps = _install_mp(monkeypatch, FakeRoot(bodies=[FakeBody("Body1")]),
+                                   existing_appearances=())
+        design.appearances = FakeAppearances([metal])
+        _install_libraries(monkeypatch, _library(ap._BASE_LIBRARY, source))
+        out = _payload(ap.handler(target="Body1", color="#1E8E3E"))
+        assert design.appearances.copied[0][0] is source        # NOT item(0)
+        assert design.appearances.item(0) is metal              # ...which is still sitting there
+        assert metal.appearanceProperties.item(0).value is None  # and was not written to
+        assert out["base_appearance"] == ap._BASE_NAME
+
+    def test_a_second_call_reuses_the_base_already_in_the_document(self, monkeypatch):
+        design, apps = self._fresh(monkeypatch, FakeAppearance(ap._BASE_SOURCE))
+        first = _payload(ap.handler(target="Body1", color="#1E8E3E"))
+        second = _payload(ap.handler(target="Body1", color="#FF6D00"))
+        assert first["base_reused"] is False and second["base_reused"] is True
+        # the base was copied in ONCE; the second call only minted its own colour off it
+        assert [c[1] for c in apps.copied] == [ap._BASE_NAME, "AgentColor_1E8E3E",
+                                               "AgentColor_FF6D00"]
+        assert ap._BASE_SOURCE not in second["note"]
+
+    def test_the_base_is_looked_up_before_the_library_is_walked(self, monkeypatch):
+        # The steady state: the base is already in the document, so no library read happens at all
+        # (an unreadable catalog would refuse if it did).
+        design, apps = _install_mp(monkeypatch, FakeRoot(bodies=[FakeBody("Body1")]))
+        monkeypatch.setattr(ap._materials, "app", SimpleNamespace())   # no materialLibraries
+        out = _payload(ap.handler(target="Body1", color="#1E8E3E"))
+        assert out["base_reused"] is True and out["base_appearance"] == ap._BASE_NAME
+        assert [c[1] for c in apps.copied] == ["AgentColor_1E8E3E"]
+
+    def test_the_base_appearance_being_absent_from_the_library_is_refused_by_name(self, monkeypatch):
+        # the library IS loaded but carries no appearance of that name -> name what was looked for
+        design, apps = self._fresh(monkeypatch, FakeAppearance("Plastic - Matte (White)"))
+        res = ap.handler(target="Body1", color="#1E8E3E")
+        assert res["isError"] is True
+        assert ap._BASE_SOURCE in res["message"] and ap._BASE_LIBRARY in res["message"]
+        assert apps.copied == []                # nothing minted from a substitute
+
+    def test_a_duplicated_library_name_is_refused_not_first_matched(self, monkeypatch):
+        _install_mp(monkeypatch, FakeRoot(bodies=[FakeBody("Body1")]), existing_appearances=())
+        _install_libraries(monkeypatch,
+                           _library(ap._BASE_LIBRARY, FakeAppearance(ap._BASE_SOURCE)),
+                           _library(ap._BASE_LIBRARY, FakeAppearance(ap._BASE_SOURCE)))
+        res = ap.handler(target="Body1", color="#1E8E3E")
+        assert res["isError"] is True and "refusing to pick one" in res["message"]
+
+    def test_a_copy_that_returns_nothing_is_an_honest_failure(self, monkeypatch):
+        design, apps = self._fresh(monkeypatch, FakeAppearance(ap._BASE_SOURCE))
+        monkeypatch.setattr(apps, "addByCopy", lambda base, name: None)
+        res = ap.handler(target="Body1", color="#1E8E3E")
+        assert res["isError"] is True
+        assert ap._BASE_NAME in res["message"] and "addByCopy" in res["message"]
+
+    def test_a_base_that_lands_between_the_lookup_and_the_copy_is_reused(self, monkeypatch):
+        # a parallel call can create the base name in the gap: addByCopy refuses the duplicate, and
+        # the re-check must find that one rather than report a failure
+        design, apps = self._fresh(monkeypatch, FakeAppearance(ap._BASE_SOURCE))
+        raced = FakeAppearance(ap._BASE_NAME)
+
+        def land_it(base, name):
+            if name == ap._BASE_NAME:
+                apps._items.append(raced)
+                return None
+            return FakeAppearances.addByCopy(apps, base, name)
+        monkeypatch.setattr(apps, "addByCopy", land_it)
+        out = _payload(ap.handler(target="Body1", color="#1E8E3E"))
+        assert out["base_reused"] is True
+        assert apps.copied[0][0] is raced       # the colour was minted off the raced-in base
+
+    def test_an_unreadable_appearances_collection_is_refused(self, monkeypatch):
+        design, apps = self._fresh(monkeypatch, FakeAppearance(ap._BASE_SOURCE))
+        del design.appearances
+        res = ap.handler(target="Body1", color="#1E8E3E")
+        assert res["isError"] is True and "could not be read" in res["message"]
+
+    def test_a_reused_colour_appearance_publishes_no_base_it_did_not_read(self, monkeypatch):
+        # the named appearance already exists, so no base was consulted - the payload may not claim
+        # which base that appearance rides on
+        design, apps = _install_mp(monkeypatch, FakeRoot(bodies=[FakeBody("Body1")]))
+        _payload(ap.handler(target="Body1", color="#1E8E3E"))
+        out = _payload(ap.handler(target="Body1", color="#1E8E3E"))
+        assert out["appearance_reused"] is True
+        assert "base_appearance" not in out and "base_reused" not in out
+
+
+class TestTheColorLandsOnTheAlbedoOnly:
+    """The base exposes two ColorProperties. Writing both puts the requested colour into a channel
+    the caller never named; the write is scoped to the albedo."""
+
+    def test_only_the_albedo_channel_is_written(self):
         body = FakeBody("Body1")
-        root = FakeRoot(bodies=[body])
-        apps = FakeAppearances([])                      # empty design appearances
-        design = FakeDesign(root, apps)
-        ap._common.design = lambda: design
-        import adsk.core, adsk.fusion
-        adsk.core.Color.create = staticmethod(lambda r, g, b, o: ("color", r, g, b, o))
-        adsk.fusion.BRepFace = FakeFace
-        adsk.fusion.BRepBody = FakeBody
-        ap._inputs.handle_token = lambda s: s
+        _install(FakeRoot(bodies=[body]))
+        _payload(ap.handler(target="Body1", color="#1E8E3E"))
+        props = body.appearance.appearanceProperties
+        assert props.item(0).id == "opaque_albedo"
+        assert props.item(0).value == ("color", 30, 142, 62, 255)
+        assert props.item(1).id == "opaque_luminance_modifier"
+        assert props.item(1).value is None
 
-        lib_appr = FakeAppearance("LibBase")
-        lib = type("Lib", (), {"appearances": FakeProps([lib_appr])})()
-        adsk.core.Application.get().materialLibraries = FakeProps([lib])
+    def test_an_appearance_with_no_albedo_channel_is_refused(self):
+        # a document appearance carrying the requested name but only a metal colour channel: there
+        # is nothing to write the colour into, and a tinted metal is not what was asked for
+        root = FakeRoot(bodies=[FakeBody("Body1")])
+        design, apps = _install(root, existing_appearances=(ap._BASE_NAME,))
+        apps._items.append(FakeAppearance("AgentColor_1E8E3E", color_props=("metal_f0",)))
+        res = ap.handler(target="Body1", color="#1E8E3E")
+        assert res["isError"] is True
+        assert "metal_f0" in res["message"] and "opaque_albedo" in res["message"]
+        assert "different 'name'" in res["message"]
 
-        out = _payload(ap.handler(target="Body1", color="#0A0B0C"))
-        assert out["applied"] is True
-        # the copy was made from the library appearance
-        assert apps.copied[0][0] is lib_appr
+    def test_a_read_only_albedo_channel_is_refused_not_reported_as_applied(self):
+        # the channel is there but declines the write - the colour did not land, so the call must
+        # not come back applied
+        def refuse(self, value):
+            raise RuntimeError("this ColorProperty is texture-backed")
+
+        body = FakeBody("Body1")
+        design, apps = _install(FakeRoot(bodies=[body]))
+        stubborn = FakeAppearance("AgentColor_1E8E3E", color_props=())
+        stubborn.appearanceProperties = FakeProps([type("ColorProperty", (), {
+            "id": "opaque_albedo", "value": property(lambda self: None, refuse)})()])
+        apps._items.append(stubborn)
+        res = ap.handler(target="Body1", color="#1E8E3E")
+        assert res["isError"] is True and "opaque_albedo" in res["message"]
+        assert body.appearance is None

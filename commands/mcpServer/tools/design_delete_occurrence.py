@@ -41,8 +41,9 @@ def handler(occurrence: str = "") -> dict:
     occurrence: the instance to delete, by handle (its entityToken, from design_get(include=['tree']) -
     the exact identity) or by fullPathName/name (either is refused, not guessed, when several instances
     answer to it - the refusal hands back their handles). The result names any joints the
-    delete removed and reports timeline health before/after. A pattern/mirror child can't be deleted
-    on its own (deleteMe returns false) - that is reported with a pointer to the owning feature.
+    delete removed and reports timeline health before/after. A refused delete (deleteMe returns
+    false, with no reason of its own) is reported with a pointer to the timeline read that names
+    the feature which built the instance.
     """
     design = _common.design()
     if not design:
@@ -59,21 +60,35 @@ def handler(occurrence: str = "") -> dict:
     was_grounded = bool(safe(lambda: occ.isGrounded, False))
 
     err_before, _, _ = _timeline_health(design)
+    # The assembly-context path census BEFORE the delete is what makes the one after it mean
+    # something: a census that cannot see this path to begin with (an unreadable fullPathName, an
+    # occurrence walk that will not read) proves nothing by not seeing it afterwards either.
+    paths_before = _common.occurrence_paths(design)
     try:
         did = occ.deleteMe()
     except Exception as e:
         return error(f"Could not delete '{name}': {e}")
     if not did:
-        # deleteMe returns false (not an exception) for an instance Fusion won't remove on its own -
-        # most often a feature-owned (pattern/mirror) child.
+        # deleteMe reports refusal by RETURNING FALSE rather than raising, and the bool carries no
+        # reason - so the error states the return value and points at the read that names an owner.
         return error(
-            f"Fusion refused to delete '{name}' (deleteMe returned false). It is likely owned by a "
-            "pattern/mirror feature - delete or reduce that feature's count instead.")
+            f"Fusion refused to delete '{name}': deleteMe() returned false, which carries no reason. "
+            "Read design_get(include=['timeline']) to see which feature built this instance - an "
+            "instance a pattern/mirror feature owns is removed by editing or deleting THAT feature "
+            "(design_delete_feature), not through the instance.")
+
+    if full_path in paths_before and full_path in _common.occurrence_paths(design):
+        return error(f"deleteMe() reported success but '{full_path}' is still in the assembly's "
+                     "occurrence walk - it was NOT deleted. Nothing was rolled back; re-read "
+                     "design_get(include=['tree']) to see what is actually there.")
+    # True only when the re-read PROVED the path left the assembly; null when the census could not
+    # settle it. An unreadable check is never counted as absence.
+    gone = True if full_path in paths_before else None
 
     err_after, warn_after, _ = _timeline_health(design)
 
     out = {
-        "deleted": True,
+        "deleted": gone,
         "occurrence": name,
         "full_path": full_path,
         "removed_joints": joints,
@@ -81,14 +96,21 @@ def handler(occurrence: str = "") -> dict:
         "note": "Occurrence deleted. If it was the last instance of its component, the component was "
         "removed too. Pair with workspace_orient / design_get(include=['tree']) to confirm the assembly.",
     }
+    if gone is None:
+        out["note"] = (f"deleteMe() reported success for '{name}', but its absence is UNVERIFIED: "
+                       f"the occurrence walk did not carry '{full_path}' even before the delete, so "
+                       "the re-read cannot prove the instance is gone - and a check that could not "
+                       "read is not a check that found nothing. Nothing was rolled back; re-read "
+                       "design_get(include=['tree']) to see what is actually there.")
     if joints:
         out["joints_warning"] = (
             f"Deleting '{name}' also removed {len(joints)} joint(s) it participated in "
             f"({', '.join(joints[:6])}) - other parts those joints positioned are now free.")
     if len(err_after) > len(err_before):
         out["timeline_warning"] = (
-            f"The delete introduced a timeline error ({err_after}). The deletion stands - a "
-            "downstream feature referenced the removed geometry; undo in Fusion if unintended.")
+            f"The timeline carries a new error after this call ({err_after}) that it did not carry "
+            "before. Nothing was rolled back; 'deleted' says whether the occurrence's absence was "
+            "verified (null = it was not). Undo in Fusion if this was not wanted.")
     elif warn_after:
         out["timeline_warnings"] = warn_after
     return ok(out)

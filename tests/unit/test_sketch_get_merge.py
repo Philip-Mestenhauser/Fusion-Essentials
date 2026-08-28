@@ -2,11 +2,16 @@
 
 sketch_get is ONE tool switched by specificity: no sketch_name -> summary list; a sketch_name ->
 full detail (delegated to the _sketch_detail engine). The return is always about sketches; only the
-depth changes. The routing tests pin that the right engine is called for each case; the walk tests
-pin that the summary reaches sketches in SUB-components and tags each row with its owner.
+depth changes. The routing tests pin BOTH halves of each branch - the engine that must run, and the
+other one, monkeypatched to a sentinel that fails the test if it is invoked at all (routing to both
+depths costs a caller the heavy read they did not ask for, and reads green on a
+'the right one ran' assertion alone). The walk tests pin that the summary reaches sketches in
+SUB-components and tags each row with its owner.
 """
 
 import json
+import sys
+import types
 
 from conftest import load_tool
 
@@ -23,6 +28,21 @@ class _Coll:
         return self._items[i] if 0 <= i < len(self._items) else None
 
 
+def _never(what):
+    """A stand-in for the depth that must NOT run on this call: invoked at all, it fails the test
+    by name instead of quietly returning a result the assertions would never look at."""
+    def _refuse(*args, **kwargs):
+        raise AssertionError(f"{what} was invoked - sketch_get routed to the wrong depth")
+    return _refuse
+
+
+def _no_detail_engine(monkeypatch):
+    """Install a _sketch_detail engine whose handler refuses to be called. Same module-table seam
+    the delegation test installs its stub through, so it intercepts the same lookup."""
+    monkeypatch.setitem(sys.modules, "mcpServer.tools._sketch_detail",
+                        types.SimpleNamespace(handler=_never("the _sketch_detail engine")))
+
+
 class TestSketchGetRouting:
     def test_no_name_lists_summary(self, monkeypatch):
         called = {}
@@ -31,8 +51,7 @@ class TestSketchGetRouting:
             called["summary"] = True
             return {"isError": False}
         monkeypatch.setattr(sketches, "get_sketches_handler", fake_summary)
-        # ensure detail is NOT used
-        import sys
+        _no_detail_engine(monkeypatch)          # the detail slice must NOT be reached
         res = sketches.sketch_get_handler(sketch_name="")
         assert called.get("summary") is True
         assert res["isError"] is False
@@ -51,8 +70,9 @@ class TestSketchGetRouting:
         # The handler resolves the engine by NAME in the module table on every call, so installing
         # the stub there routes it - whatever else has already imported the real engine. Binding the
         # engine through the package attribute instead makes this test pass or fail on load order.
-        import sys
         monkeypatch.setitem(sys.modules, "mcpServer.tools._sketch_detail", FakeDetail)
+        # the reciprocal negative: a named sketch must not ALSO run the design-wide summary walk
+        monkeypatch.setattr(sketches, "get_sketches_handler", _never("the summary walk"))
 
         res = sketches.sketch_get_handler(sketch_name="Emblem", include_entities=True, units="in")
         assert seen.get("name") == "Emblem"     # routed to the detail engine with the name
@@ -67,6 +87,7 @@ class TestSketchGetRouting:
             called["summary"] = True
             return {"isError": False}
         monkeypatch.setattr(sketches, "get_sketches_handler", fake_summary)
+        _no_detail_engine(monkeypatch)          # a blank-ish name is not a name to look up
         sketches.sketch_get_handler(sketch_name="   ")
         assert called.get("summary") is True     # blank-ish name -> summary, not detail
 

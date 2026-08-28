@@ -73,7 +73,10 @@ def _isolate_for_fit(name):
     if target is None:
         return None, None, err
     target_path = safe(lambda: target.fullPathName)
-    occs = safe(lambda: list(root.allOccurrences)) or []
+    # The shared census, not a bare root.allOccurrences: that property RAISES on a design holding an
+    # unresolved external reference, and an empty walk would hide NOTHING while the shot is published
+    # as an isolated view of the target.
+    occs = _common.all_occurrences(design)
     prev = []
     for o in occs:
         if _keep_visible(safe(lambda o=o: o.fullPathName), target_path):

@@ -40,9 +40,9 @@ def _is_slider(joint):
 _SLIDER_PAIR_NOTE = (
     " MIRROR OR TRANSLATE: the ratio sign alone does not determine whether this slider pair "
     "mirrors about the center or travels together - it also depends on each slide direction and "
-    "each joint's occurrence ordering. Prove the motion: joint_drive one member a small distance, "
-    "read both occurrence positions with assembly_get, then drive back to 0. joint_edit "
-    "(world_axis) re-aims a slide direction if the motion is not the one you meant.")
+    "each joint's occurrence ordering. Prove the motion: joint_drive one member a small distance "
+    "and read its 'moved' - the occurrence that was displaced and by how much - then drive back to "
+    "0. joint_edit (world_axis) re-aims a slide direction if the motion is not the one you meant.")
 
 
 def handler(joint_one: str = "", joint_two: str = "", ratio: float = 1.0) -> dict:
@@ -56,8 +56,10 @@ def handler(joint_one: str = "", joint_two: str = "", ratio: float = 1.0) -> dic
     if not design:
         return error("No active design.")
     root = safe(lambda: design.rootComponent)
-    j1 = find_joint(design, j1name)
-    j2 = find_joint(design, j2name)
+    j1, amb1 = find_joint(design, j1name)
+    j2, amb2 = find_joint(design, j2name)
+    if amb1 or amb2:
+        return error(amb1 or amb2)
     if not j1 or not j2:
         missing = j1name if not j1 else j2name
         names = _joint_names(design)
@@ -115,9 +117,25 @@ def handler(joint_one: str = "", joint_two: str = "", ratio: float = 1.0) -> dic
         # remaining BAD_JOINT_DOF is a genuine platform incompatibility for THIS motion pair (e.g. two
         # sliders). The added link is now a COMPUTE-FAILED feature; roll it back so we don't leave a
         # broken 1:1 link the user never asked for, and return an honest error.
-        safe(lambda: ml.deleteMe())
-        return error("Created the link but could not apply the ratio: the platform will not couple "
-                     f"these two joints' motion. (Fusion: {ratio_error})")
+        link_name = safe(lambda: ml.name)
+        try:
+            rolled_back = bool(ml.deleteMe())
+        except Exception:
+            rolled_back = False
+        msg = ("Created the link but could not apply the ratio: the platform will not couple "
+               f"these two joints' motion. (Fusion: {ratio_error})")
+        if not rolled_back:
+            # The rollback is itself a mutation whose result must be read: a declined deleteMe leaves
+            # exactly the link this branch exists to prevent - one coupling the two joints at the
+            # API's DEFAULT 1:1, a ratio nobody asked for - so the caller is told it REMAINS and how
+            # to remove it, rather than reading the refusal as "nothing was left behind".
+            msg += (" The rollback FAILED as well: the motion link "
+                    + (f"'{link_name}' " if link_name else "(its name could not be read) ")
+                    + "REMAINS in the design at the platform's DEFAULT 1:1 ratio - it couples these "
+                      "two joints even though the requested ratio was never applied. Delete it by "
+                      "name with assembly_edit_relations(kind='motion_link', name=..., "
+                      "action='delete'); assembly_get(include=['relations']) names it.")
+        return error(msg)
 
     out = {
                 "linked": True,

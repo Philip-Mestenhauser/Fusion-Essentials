@@ -19,6 +19,8 @@ a measurement, and `_COUNTISH` names are exempt.
 import ast
 import os
 
+import _corpus
+
 TOOLS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
                          "commands", "mcpServer", "tools")
 
@@ -37,12 +39,12 @@ _COUNTISH = frozenset({"count", "len", "quantity", "numberOfFaces", "triangleCou
 # Sites where a numeric fallback is NOT a fabricated measurement. Each needs a reason naming why
 # the number is defensible - the value must not reach a payload as a measurement. Shrink-only.
 _ALLOWED = {
-    "_inputs.py:1753": "a degeneracy GUARD - an unreadable vector length is treated as zero so the "
+    "_inputs.py:1758": "a degeneracy GUARD - an unreadable vector length is treated as zero so the "
                       "direction is REFUSED, which is the safe direction",
-    "assembly_get.py:252": "a joint origin's offsetX genuinely defaults to 0 (live-verified: a "
+    "assembly_get.py:265": "a joint origin's offsetX genuinely defaults to 0 (live-verified: a "
                            "face/sketch-anchored JO reports geometry.origin as-is)",
-    "assembly_get.py:253": "offsetY, same contract as offsetX",
-    "assembly_get.py:254": "offsetZ, same contract as offsetX",
+    "assembly_get.py:266": "offsetY, same contract as offsetX",
+    "assembly_get.py:267": "offsetZ, same contract as offsetX",
     "cam_edit_tools.py:435": "a generic CAM-parameter reader whose 'default' is the CALLER's chosen "
                              "value for an absent parameter, not the tool's own request",
     "joint_create_edit.py:272": "picking the LARGEST face - an unreadable area sorts last and is "
@@ -78,10 +80,11 @@ def _params(fn):
 
 
 def _offenders_in(path):
-    """[(lineno, kind, detail)] for every safe() whose fallback fabricates a value."""
-    with open(path, encoding="utf-8") as fh:
-        tree = ast.parse(fh.read(), filename=path)
+    """[(lineno, kind, detail)] for every safe() whose fallback fabricates a value.
+
+    The tree is _corpus's, shared with the other lints over this corpus; this walk only reads it."""
     out = []
+    tree = _corpus.tree(path)
 
     def walk(node, params):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -147,9 +150,7 @@ class TestNoFabricatedFallbacks:
         offender kinds directly)."""
         seen = 0
         for _name, path in _iter_tool_files():
-            with open(path, encoding="utf-8") as fh:
-                tree = ast.parse(fh.read(), filename=path)
-            for node in ast.walk(tree):
+            for node in ast.walk(_corpus.tree(path)):
                 if isinstance(node, ast.Call):
                     fname = node.func.attr if isinstance(node.func, ast.Attribute) else \
                         getattr(node.func, "id", None)

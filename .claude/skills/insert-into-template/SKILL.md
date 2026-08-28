@@ -155,7 +155,10 @@ never by picking one silently.
 1. `cam_get` - EXPECT `SETUP` among the setups (blank: the active milling setup, else the
    first milling setup). Record the setup, its model component occurrence
    (`selected_models[0]` - the slot component the part swaps into), and its stock/fixture
-   names.
+   names. `selected_models` null (the setup names it in `model_lists_unreadable`) means the
+   list was NOT READ, which is not the same as empty; `[]` means the setup selects no model.
+   Either way there is no slot component to record = STOP, reporting which of the two it was
+   - never index a null or empty list.
 2. `design_get(include=['tree'], component=<model component occurrence>)` - EXPECT
    `PLACEHOLDER` among its child occurrences (blank: the one child occurrence with bodies
    whose name is not WCS/zero-like - a lone cube named like "WCS"/"zero" is the setup's WCS

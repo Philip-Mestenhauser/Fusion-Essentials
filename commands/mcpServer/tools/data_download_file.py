@@ -97,10 +97,21 @@ def handler(file: str = "", project: str = "", folder: str = "", destination_fol
     if (meta or {}).get("scope_truncated"):
         note += (" Matched by NAME inside a capped listing - files beyond the cap were never "
                  "compared, so check 'source' is the file you meant; a lineage URN is exact.")
+    if (meta or {}).get("folders_unreadable"):
+        # The file on disk is whichever one the name resolved to. A folder that never opened could
+        # hold another file of that name, which would make this the wrong file downloaded.
+        note += (f" {meta['folders_unreadable']} folder(s) could not be READ while resolving that "
+                 "name, so they were never searched - a file of the same name could be sitting in "
+                 "one. Pass the lineage URN to be exact.")
 
     return ok({
         "downloaded": True,
         "name": name,
+        # How settled the by-name match was, as data_get publishes it: a capped listing left files
+        # uncompared, an unreadable folder is a hole in the search space. Both read false/0 for a
+        # URN match, which needs no search at all.
+        "name_scope_truncated": bool((meta or {}).get("scope_truncated")),
+        "name_scope_folders_unreadable": (meta or {}).get("folders_unreadable", 0),
         "file_path": path,
         "source": {"project": safe(lambda: df.parentProject.name),
                    "folder_path": _folder_path_string(safe(lambda: df.parentFolder)) or "(project root)",

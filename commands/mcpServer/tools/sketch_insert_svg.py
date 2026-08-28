@@ -99,7 +99,9 @@ def handler(file_path: str = "", sketch_name: str = "", x=None, y=None, units: s
     if not design:
         return error("No active design. Open or create a document first (see doc_new).")
 
-    sketch, requested = _common.resolve_or_recent_sketch(design, sketch_name)
+    sketch, requested, ambiguous = _common.find_or_recent_sketch(design, sketch_name)
+    if ambiguous:
+        return error(ambiguous)
     if sketch is None:
         if requested:
             return error(f"No sketch named '{requested}'. Available: "

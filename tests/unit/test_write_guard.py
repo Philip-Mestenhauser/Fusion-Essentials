@@ -62,6 +62,15 @@ class TestActedOnStamp:
         out = _decode(h())
         assert out["acted_on"] == {"name": "Bracket", "document_id": "urn:lineage:abc"}
 
+    def test_an_explicit_null_acted_on_is_left_alone(self):
+        # A handler that acted on SEVERAL documents (doc_close close_all) publishes acted_on:null
+        # deliberately - one identity cannot name them. The key is PRESENT, so fill-if-absent must
+        # leave it: filling it would name the one document still open as the one acted on.
+        _set_active("StillOpen", "urn:still-open")
+        h = wg.wrap(lambda **kw: _ok({"closed": ["A", "B"], "acted_on": None}))
+        out = _decode(h())
+        assert "acted_on" in out and out["acted_on"] is None
+
     def test_error_result_is_not_stamped(self):
         _set_active("Bracket", "urn:abc")
         h = wg.wrap(lambda **kw: {"content": [{"type": "text", "text": "boom"}],

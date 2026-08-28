@@ -464,7 +464,12 @@ def _fake_pickable_design(bodies=1, sketches=0, occs=0):
     bRepBodies/sketches/allOccurrences counts, no allComponents attribute (so the shared
     _common.all_components walk falls back to [root] - the same shape the real walk degrades to)."""
     c = lambda n: types.SimpleNamespace(count=n)
-    root = types.SimpleNamespace(bRepBodies=c(bodies), sketches=c(sketches), allOccurrences=c(occs))
+    # allOccurrences is ENUMERATED by the shared census, not merely counted, and each row answers
+    # `component` as a real Occurrence does - one that raises is an unresolved reference.
+    occ_rows = [types.SimpleNamespace(component=types.SimpleNamespace(name=f"C{i}"),
+                                      fullPathName=f"C{i}:1") for i in range(occs)]
+    root = types.SimpleNamespace(bRepBodies=c(bodies), sketches=c(sketches),
+                                 allOccurrences=occ_rows)
     return types.SimpleNamespace(rootComponent=root)
 
 
@@ -879,3 +884,78 @@ class TestNothingToSelect:
         assert sel._pickable_counts() is None
         monkeypatch.setattr(sel, "_active_design", lambda: _fake_pickable_design(2, 1, 3))
         assert sel._pickable_counts() == (2, 1, 3)
+
+
+# ── sys_request_selection: what activeSelectionChanged.add()'s bool is allowed to decide ─────────
+
+class TestListenerRegistrationAnswer:
+    """activeSelectionChanged.add() returns a bool. Measured on Fusion 2705.1.4 it answered True for
+    a fresh registration AND for a second add of the same handler, so True is what a working
+    registration looks like and a False is worth acting on rather than discarding: only that
+    listener wakes the hold, so one started on a false answer could only run out wait_seconds.
+
+    The paired remove() answered True for a handler that was never registered - its return carries
+    no information about what was removed - so no branch here reads it."""
+
+    def _ui_answering(self, monkeypatch, answer, land_anyway=False):
+        """A ui whose activeSelectionChanged.add() returns `answer`. land_anyway registers the
+        handler regardless, which is how the refusal's cleanup gets something to clean up."""
+        ui = _fake_ui()
+        real_add = ui.activeSelectionChanged.add
+
+        def _add(handler):
+            if land_anyway:
+                real_add(handler)
+            return answer
+
+        monkeypatch.setattr(ui.activeSelectionChanged, "add", _add)
+        monkeypatch.setattr(sel, "_ui", lambda: ui)
+        return ui
+
+    def test_false_refuses_instead_of_holding(self, monkeypatch):
+        _install_fake_task_manager(monkeypatch)
+        ui = self._ui_answering(monkeypatch, False)
+        res = sel.request_user_selection_handler(wait_seconds=5)
+        assert res["isError"] is True
+        assert "selection listener did not register" in res["message"]
+        # the refusal says what the bool said, and does not narrate a cause for it
+        assert "returned false" in res["message"]
+        assert ui.activeSelectionChanged.handlers == []
+        assert sel._pending["handler"] is None
+
+    def test_the_false_refusal_returns_without_waiting_out_the_hold(self, monkeypatch):
+        # The point of acting on the bool: a hold nothing can wake must not be entered at all. The
+        # wait is kept short deliberately - a regression here BLOCKS for wait_seconds, so the number
+        # is the cost of the red, and 4s is already far outside the refusal's own runtime.
+        _install_fake_task_manager(monkeypatch)
+        self._ui_answering(monkeypatch, False)
+        started = time.monotonic()
+        res = sel.request_user_selection_handler(wait_seconds=4)
+        assert res["isError"] is True
+        assert time.monotonic() - started < 1.0
+
+    def test_a_handler_that_landed_behind_a_false_is_detached_again(self, monkeypatch):
+        # add() answering false while the handler DID land would leave a listener firing into a
+        # hold nobody waits on; the refusal detaches what it registered before returning.
+        _install_fake_task_manager(monkeypatch)
+        ui = self._ui_answering(monkeypatch, False, land_anyway=True)
+        assert sel.request_user_selection_handler(wait_seconds=5)["isError"] is True
+        assert ui.activeSelectionChanged.handlers == []
+
+    def test_true_registers_the_listener_and_starts_the_hold(self, monkeypatch):
+        # the other side of the branch: the answer Fusion actually gives, which must not refuse.
+        _install_fake_task_manager(monkeypatch)
+        ui = self._ui_answering(monkeypatch, True, land_anyway=True)
+        res = sel.request_user_selection_handler(wait_seconds=0.05)
+        assert res["isError"] is False
+        out = _payload(res)
+        assert out["status"] == "timeout"          # nobody picked; the hold really was entered
+        assert len(ui.activeSelectionChanged.handlers) == 0   # detached by the timeout cleanup
+
+    def test_the_gate_keys_on_false_and_not_on_the_pending_slot(self, monkeypatch):
+        # a refused registration must not leave the process-wide pending slot claimed, or the next
+        # request would be refused by the one-at-a-time guard instead of trying again.
+        _install_fake_task_manager(monkeypatch)
+        self._ui_answering(monkeypatch, False)
+        sel.request_user_selection_handler(wait_seconds=5)
+        assert sel._pending["active"] is False and sel._pending["handler"] is None

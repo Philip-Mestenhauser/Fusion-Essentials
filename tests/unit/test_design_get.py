@@ -201,14 +201,34 @@ class TestCatalogSlices:
         assert seen == ["materials", "appearances"]
 
 
+class _OccColl:
+    """N healthy occurrences: an allOccurrences collection that both counts AND enumerates, each row
+    answering `component` (a real Occurrence always does; one that raises is an unresolved
+    reference)."""
+    def __init__(self, n):
+        from types import SimpleNamespace
+        self._items = [SimpleNamespace(component=SimpleNamespace(name=f"C{i}"),
+                                       fullPathName=f"C{i}:1") for i in range(n)]
+        self.count = n
+
+    def item(self, i):
+        return self._items[i]
+
+    def __iter__(self):
+        return iter(self._items)
+
+
 class TestFingerprint:
     """The content fingerprint (`_fingerprint`) - the 'what IS this model' counts in the default slice."""
 
     def _design(self, bodies=0, sketches=0, occs=0, defs=0, joints=0, asbuilt=0, params=0):
         from types import SimpleNamespace
         c = lambda n: SimpleNamespace(count=n)
+        # allOccurrences is ENUMERATED, not just counted: the fingerprint reads its occurrence total
+        # through the shared census, which classifies each row (an occurrence whose component raises
+        # is an unresolved reference, not a countable instance).
         root = SimpleNamespace(bRepBodies=c(bodies), sketches=c(sketches),
-                               allOccurrences=c(occs), joints=c(joints), asBuiltJoints=c(asbuilt))
+                               allOccurrences=_OccColl(occs), joints=c(joints), asBuiltJoints=c(asbuilt))
         return SimpleNamespace(rootComponent=root, userParameters=c(params),
                                allComponents=c(defs))
 
@@ -669,6 +689,63 @@ def _wire_tree(monkeypatch, occs):
     return root
 
 
+class TestTreeUnresolvedRows:
+    """The measured defect: the container read child_count 4 and listed four healthy children while a
+    fifth occurrence, whose referenced component would not load, had no row at all - so an agent
+    concluded the container held four healthy children."""
+
+    def test_zero_unresolved_children_add_no_marker(self):
+        design = _tree_design([_tocc("Bracket:1", kids=[_tocc("Pin:1")])])
+        out, _ = dg._slice_tree(design, 3, "")
+        node = out["children"][0]
+        assert "children_unresolved" not in node
+        assert [k["name"] for k in node["children"]] == ["Pin:1"]
+
+    def test_an_unresolved_child_gets_a_ROW_and_the_parent_counts_it(self):
+        design = _tree_design([_tocc("Op1 Workholding Container:1",
+                                     kids=[_tocc("48205-125 (1):1")],
+                                     broken_kids=[_BrokenOcc("45740")])])
+        out, _ = dg._slice_tree(design, 3, "")
+        node = out["children"][0]
+        # child_count comes off childOccurrences, which DROPS it - so the count alone still reads 1
+        assert node["child_count"] == 1
+        assert node["children_unresolved"] == 1
+        rows = {k["name"]: k for k in node["children"]}
+        assert set(rows) == {"48205-125 (1):1", "45740"}
+        assert rows["45740"]["unresolved"] is True
+        assert rows["45740"]["detail"] == UNAVAILABLE
+        # nothing is claimed about it: no child_count/body_count built from swallowed reads
+        assert "child_count" not in rows["45740"] and "body_count" not in rows["45740"]
+
+    def test_a_broken_TOP_LEVEL_occurrence_is_a_row_not_a_blank_node(self):
+        design = _tree_design([_BrokenOcc("45740"), _tocc("Stock:1")])
+        out, _ = dg._slice_tree(design, 3, "")
+        rows = {c["name"]: c for c in out["children"]}
+        assert rows["45740"] == {"name": "45740", "unresolved": True, "detail": UNAVAILABLE}
+        assert rows["Stock:1"]["child_count"] == 0
+
+    def test_a_node_whose_ONLY_children_are_unresolved_is_not_reported_childless(self):
+        design = _tree_design([_tocc("Op1:1", broken_kids=[_BrokenOcc("45740")])])
+        node = dg._slice_tree(design, 3, "")[0]["children"][0]
+        assert node["child_count"] == 0                 # childOccurrences really is empty
+        assert node["children_unresolved"] == 1
+        assert [k["name"] for k in node["children"]] == ["45740"]
+
+    def test_the_depth_cap_flags_an_unresolved_child_it_did_not_emit(self):
+        design = _tree_design([_tocc("Op1:1", broken_kids=[_BrokenOcc("45740")])])
+        node = dg._slice_tree(design, 1, "")[0]["children"][0]
+        assert node["children_truncated"] is True       # not walked - never "no children"
+        assert node["children_unresolved"] == 1
+
+    def test_the_scoped_tree_shows_it_too(self):
+        design = _tree_design([_tocc("Op1 Workholding Container:1",
+                                     broken_kids=[_BrokenOcc("45740")])])
+        out, err = dg._slice_tree(design, 3, "Op1 Workholding Container")
+        assert err is None
+        assert out["tree"]["children_unresolved"] == 1
+        assert out["tree"]["children"][0]["name"] == "45740"
+
+
 class TestFindOccurrenceByName:
     def test_component_name_roots_at_first_instance(self, monkeypatch):
         # a bare component name is unambiguous for a READ: every instance shows the same structure.
@@ -732,12 +809,40 @@ def _tbody(name, token=None, solid=True, visible=True):
                            isSolid=solid, isVisible=visible)
 
 
-def _tocc(name, comp=None, kids=(), bodies=0, is_ref=False, docref=None, token=None):
+UNAVAILABLE = ("3 : The occurrence's referenced component is unavailable (broken or missing "
+               "external reference).")
+
+
+class _BrokenOcc:
+    """An occurrence whose referenced component will not load. Only `name` reads; component,
+    fullPathName and childOccurrences raise, and isReferencedComponent reads FALSE - so the tree's
+    childOccurrences walk never yields it and no is_reference gate would catch it."""
+    def __init__(self, name="45740"):
+        self.name = name
+        self.isReferencedComponent = False
+
+    @property
+    def component(self):
+        raise RuntimeError(UNAVAILABLE)
+
+    @property
+    def fullPathName(self):
+        raise RuntimeError("2 : InternalValidationError : path.valid()")
+
+    @property
+    def childOccurrences(self):
+        raise RuntimeError("2 : InternalValidationError : path.valid()")
+
+
+def _tocc(name, comp=None, kids=(), bodies=0, is_ref=False, docref=None, token=None,
+          broken_kids=()):
     """A tree-walkable occurrence: named collections (count + iterable) for bodies/children, plus the
-    entityToken the row publishes as its handle."""
+    entityToken the row publishes as its handle. `broken_kids` land ONLY in the component-local
+    collection, mirroring the measured structure - childOccurrences drops an unresolved child."""
     return SimpleNamespace(
         name=name, fullPathName=name, entityToken=token or f"tok-{name}",
-        component=SimpleNamespace(name=comp or name.split(":")[0]),
+        component=SimpleNamespace(name=comp or name.split(":")[0],
+                                  occurrences=_NamedCollection(list(broken_kids) + list(kids))),
         isReferencedComponent=is_ref,
         bRepBodies=_NamedCollection([_tbody(f"B{i+1}") for i in range(bodies)]),
         childOccurrences=_NamedCollection(kids),
@@ -764,6 +869,30 @@ class TestSliceTree:
         assert bracket["body_count"] == 2 and bracket["child_count"] == 1
         assert [k["name"] for k in bracket["children"]] == ["Pin:1"]
         assert out["truncated"] is False and "root_bodies" not in out
+
+    def test_an_unreadable_count_is_null_not_zero(self):
+        # these two counts ARE the caller's evidence of what a node holds, so a coerced 0 says "no
+        # bodies / no children" about a collection nothing was read from - and this walk is exactly
+        # where an agent decides a sub-assembly is empty and stops drilling.
+        occ = _tocc("Gear:1")
+        del occ.bRepBodies
+        del occ.childOccurrences
+        node = dg._walk_occurrence(occ, 0, 3, {"n": 0, "truncated": False})
+        assert node["body_count"] is None and node["child_count"] is None
+        assert "children" not in node and "children_truncated" not in node
+
+    def test_a_genuinely_empty_node_still_reads_zero(self):
+        # the boundary the null must not swallow: 0 is an answer when the collections DID read.
+        node = dg._walk_occurrence(_tocc("Gear:1"), 0, 3, {"n": 0, "truncated": False})
+        assert node["body_count"] == 0 and node["child_count"] == 0
+
+    def test_a_null_body_count_pays_for_no_body_records(self):
+        # the count gates the opt-in body walk; a null must take the same branch a 0 does, without
+        # claiming the node is empty.
+        occ = _tocc("Gear:1")
+        del occ.bRepBodies
+        node = dg._walk_occurrence(occ, 0, 3, {"n": 0, "truncated": False}, with_bodies=True)
+        assert node["body_count"] is None and "bodies" not in node
 
     def test_every_row_carries_its_exact_identity_handle(self):
         # a name repeats under every sub-assembly and even a fullPathName can be worn by two

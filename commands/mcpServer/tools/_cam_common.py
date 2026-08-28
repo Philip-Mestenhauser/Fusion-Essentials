@@ -325,8 +325,11 @@ def op_state_facts(op) -> dict:
     """ONE safe read of the raw per-op lifecycle state Fusion exposes, so every op-state tally
     (cam_get's per-setup op_states via op_primary_state, cam_get_status's live_states via
     op_state_tally) classifies from the SAME facts instead of each re-reading hasError/operationState/
-    isSuppressed/isGenerating/hasWarning independently. operationState: 0=valid, 1=out_of_date,
-    2=suppressed, 3=no_toolpath - op_primary_state is what buckets those into one state."""
+    isSuppressed/isGenerating/hasWarning independently. operationState carries an
+    adsk.cam.OperationStates member - IsValid 0, IsInvalid 1, Suppressed 2, NoToolpath 3 (measured;
+    the ints live in tests/live_api_facts.py) - and op_primary_state is what buckets it, together
+    with the flags above, into the one state name a payload publishes ('out_of_date' is that
+    vocabulary's name for IsInvalid, 'no_toolpath' for NoToolpath)."""
     return {
         "name": safe(lambda: op.name),
         "has_error": bool(safe(lambda: op.hasError, False)),
@@ -493,6 +496,10 @@ def live_readiness():
 
 _MAX_ITEMS = 1000
 
+# safe() cannot tell "read None" from "the read raised", and those are different answers wherever a
+# CAM property RAISES instead of reading empty.
+_MISSING = object()
+
 # Why an operation went out of date - Fusion records it in op.messageLog (NOT in op.warning/op.error,
 # which are empty for a plain invalidation). Two kinds of line:
 #   "<ts> I Invalidated: Design changed: Op1: WCS origin"      <- the high-signal CATEGORY of change
@@ -543,11 +550,21 @@ def _operation_type_name(op_type) -> str:
     return mapping.get(op_type, str(op_type))
 
 
-def _model_names(collection) -> tuple:
-    """(names, truncated) - readable names of an ObjectCollection of models (Occurrence/BRepBody/
-    MeshBody), capped at _MAX_ITEMS. truncated means INCOMPLETE for either reason - the cap was
-    hit, or the collection raised mid-iteration (a short list from a dying walk is
-    indistinguishable from a full read without the flag)."""
+def _model_names(getter) -> tuple:
+    """(names, truncated) - readable names of one of a setup's model/fixture/stock collections
+    (Occurrence/BRepBody/MeshBody), capped at _MAX_ITEMS. Takes the GETTER, not the collection: the
+    property itself RAISES on some setups (measured twice: Setup.models raises "3 : input is null"
+    on a setup whose selected occurrence was removed by doc_insert_occurrence(remove_existing=...)),
+    and safe(read, []) turns that raise into an empty list indistinguishable from a setup that
+    selected nothing.
+
+    names is None when the collection property RAISED - nothing about its contents is claimed.
+    truncated means INCOMPLETE for any of three reasons: the property raised, the cap was hit, or
+    the collection raised mid-iteration (a short list from a dying walk is indistinguishable from a
+    full read without the flag)."""
+    collection = safe(getter, _MISSING)
+    if collection is _MISSING:
+        return None, True
     names = []
     truncated = False
     try:
@@ -622,9 +639,9 @@ def get_cam_setups_handler() -> dict:
                 setups_truncated = True
                 break
             s = cam.setups.item(i)
-            models, models_trunc = _model_names(safe(lambda: s.models, []))
-            fixtures, fixtures_trunc = _model_names(safe(lambda: s.fixtures, []))
-            stock, stock_trunc = _model_names(safe(lambda: s.stockSolids, []))
+            models, models_trunc = _model_names(lambda: s.models)
+            fixtures, fixtures_trunc = _model_names(lambda: s.fixtures)
+            stock, stock_trunc = _model_names(lambda: s.stockSolids)
             setups.append({
         "name": safe(lambda: s.name),
         "operation_type": _operation_type_name(safe(lambda: s.operationType)),
@@ -632,10 +649,12 @@ def get_cam_setups_handler() -> dict:
         "machine": machine_label(safe(lambda: s.machine)),
             # The bound WCS - the only read-back of what cam_edit_setup's 'wcs' binding did.
             "wcs": setup_wcs(s),
+            # null (not []) for a list whose collection property RAISED - see _model_names.
             "selected_models": models,
             "fixtures": fixtures,
             "stock_solids": stock,
-            # True only if one of the three model lists above hit the _MAX_ITEMS cap.
+            # True when any of the three lists above is INCOMPLETE: its property raised, the walk
+            # raised mid-iteration, or the _MAX_ITEMS cap was hit.
             "model_lists_truncated": bool(models_trunc or fixtures_trunc or stock_trunc),
             # operation_count = the REAL total (allOperations sees ops nested in folders); a
             # folder-organized shop setup must not read as empty. folder_count is the depth breadcrumb
@@ -646,6 +665,13 @@ def get_cam_setups_handler() -> dict:
             # Rollup of WHY this setup is stale: how many ops are out of date + the DISTINCT reasons
             # across them (so a cold orientation read hints "the WCS moved", not just "47 stale ops").
             _attach_setup_invalidation(setups[-1], s)
+            # Which of the three lists is null because its property raised - present only when one
+            # is, so the marker names the unread collection instead of leaving a bare null to read
+            # as "none selected".
+            unreadable = [key for key, names in (("selected_models", models), ("fixtures", fixtures),
+                                                 ("stock_solids", stock)) if names is None]
+            if unreadable:
+                setups[-1]["model_lists_unreadable"] = unreadable
             # Setup-level prerequisite: a setup with no machine can't be posted. Verified
             # state, present-and-empty.
             setups[-1]["blocked_by"] = ([] if machine_label(safe(lambda: s.machine))
@@ -958,10 +984,10 @@ def get_setup_references_handler(setup: str = "") -> dict:
             refs = []
             seen_ids = set()
             refs_truncated = False
-            for role, coll in (("model", safe(lambda: s.models, [])),
-                               ("fixture", safe(lambda: s.fixtures, [])),
-                               ("stock", safe(lambda: s.stockSolids, []))):
-                found, role_truncated = _references_in(coll, role)
+            for role, getter in (("model", lambda: s.models),
+                                 ("fixture", lambda: s.fixtures),
+                                 ("stock", lambda: s.stockSolids)):
+                found, role_truncated = _references_in(getter, role)
                 refs_truncated = refs_truncated or role_truncated
                 for ref in found:
                     key = ref.get("source_id")
@@ -980,11 +1006,16 @@ def get_setup_references_handler(setup: str = "") -> dict:
     return ok({"setup_count": len(out_setups), "setups": out_setups})
 
 
-def _references_in(collection, role: str) -> tuple:
-    """(found, truncated) - resolved external-reference info for occurrences in an ObjectCollection,
-    capped at _MAX_ITEMS. truncated means INCOMPLETE: the cap was hit OR the walk raised."""
+def _references_in(getter, role: str) -> tuple:
+    """(found, truncated) - resolved external-reference info for occurrences in one of a setup's
+    model/fixture/stock collections, capped at _MAX_ITEMS. Takes the GETTER for the same reason
+    _model_names does - the property RAISES on some setups. truncated means INCOMPLETE: the property
+    raised, the cap was hit, or the walk raised mid-iteration."""
     found = []
     truncated = False
+    collection = safe(getter, _MISSING)
+    if collection is _MISSING:
+        return found, True
     try:
         for i, item in enumerate(collection):
             if i >= _MAX_ITEMS:
@@ -1201,9 +1232,6 @@ def get_nc_programs_handler() -> dict:
 # Nothing in the API bounds the point count on a path, so the per-point read is capped.
 _INSPECTION_ROW_DEFAULT = 50
 _INSPECTION_ROW_CAP = 200
-
-# safe() cannot tell "read None" from "the read raised", and those are different answers here.
-_MISSING = object()
 
 # The actionable states: everything that is not within tolerance. adsk.cam words the two tolerance
 # states as POSSIBLY indicating that not enough (above) / too much (below) material was removed, so a

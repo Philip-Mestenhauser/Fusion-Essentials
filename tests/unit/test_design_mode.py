@@ -152,9 +152,11 @@ class FakeDesign:
     """A design exposing designType (numeric), an optional timeline, a root component with
     baseFeatures, and an activeEditObject for base-feature-scope detection."""
     def __init__(self, design_type=1, timeline_count=0, base_features=None,
-                 edit_object=None, no_timeline=False, raise_on_set=False):
+                 edit_object=None, no_timeline=False, raise_on_set=False, ignore_set=False):
         self.designType = design_type
         self._raise_on_set = raise_on_set
+        # ignore_set models the platform lie: the assignment is accepted and changes nothing
+        self._ignore_set = ignore_set
         if not no_timeline:
             self.timeline = _Timeline(timeline_count)
         # else: no `timeline` attribute at all -> safe(lambda: design.timeline) returns None
@@ -165,8 +167,11 @@ class FakeDesign:
         self.activeEditObject = edit_object
 
     def __setattr__(self, name, value):
-        if name == "designType" and getattr(self, "_raise_on_set", False):
-            raise RuntimeError("designType assignment blew up")
+        if name == "designType":
+            if getattr(self, "_raise_on_set", False):
+                raise RuntimeError("designType assignment blew up")
+            if getattr(self, "_ignore_set", False):
+                return
         super().__setattr__(name, value)
 
 
@@ -308,6 +313,33 @@ class TestSetMode:
         res = dm.set_mode_handler(target="parametric")
         assert res["isError"] is True and "Could not convert" in res["message"]
 
+    def test_history_discarded_rides_on_the_read_back_not_the_request(self, monkeypatch):
+        # the assignment is accepted and changes nothing (the measured platform lie). A conversion
+        # that did not happen discarded no timeline - so BOTH flags read false, agreeing with the
+        # note. history_discarded=true here would be the request talking, not the design.
+        des = _install(monkeypatch, FakeDesign(design_type=1, ignore_set=True))
+        out = _payload(dm.set_mode_handler(target="direct", confirm_history_loss=True))
+        assert out["converted"] is False
+        assert out["history_discarded"] is False
+        assert out["now"] == "parametric" and des.designType == 1
+        assert "did not take" in out["note"]
+
+    def test_an_unreadable_mode_publishes_null_flags_not_a_verdict(self, monkeypatch):
+        # designType does not decode to either mode after the assignment: whether the conversion
+        # took, and so whether the timeline went with it, is UNKNOWN - null, never false or true.
+        _install(monkeypatch, FakeDesign(design_type="?", ignore_set=True))
+        out = _payload(dm.set_mode_handler(target="direct", confirm_history_loss=True))
+        assert out["converted"] is None
+        assert out["history_discarded"] is None
+        assert out["now"] == "unknown"
+        assert "UNCONFIRMED" in out["note"]
+
+    def test_a_conversion_that_took_still_reports_the_discard(self, monkeypatch):
+        # the other side of the same gate: a PROVEN parametric->direct did discard the timeline.
+        _install(monkeypatch, FakeDesign(design_type=1))
+        out = _payload(dm.set_mode_handler(target="direct", confirm_history_loss=True))
+        assert out["converted"] is True and out["history_discarded"] is True
+
 
 # ── model_base_feature ──────────────────────────────────────────────────────
 
@@ -403,6 +435,76 @@ class TestBaseFeature:
         _install(monkeypatch, FakeDesign(design_type=1))
         out = _payload(dm.base_feature_handler(action="finish"))
         assert out["editing"] is False and out["closed_scopes"] == []
+
+    def test_a_raising_finish_keeps_the_only_handle_to_the_scope(self, monkeypatch):
+        # finishEdit RAISES: the scope is not proven closed, and this object is the only way back to
+        # it (an open base feature is invisible to enumeration). Popping it would strand the scope
+        # open for the rest of the session.
+        des = _install(monkeypatch, FakeDesign(design_type=1))
+        dm.base_feature_handler(action="start")
+        bf = des.rootComponent.features.baseFeatures.added[-1]
+
+        def boom():
+            raise RuntimeError("finishEdit blew up")
+
+        bf.finishEdit = boom
+        out = _payload(dm.base_feature_handler(action="finish"))
+        assert out["closed_scopes"] == []
+        assert out["unclosed_scopes"] == [{"name": bf.name, "finished": None,
+                                           "error": "finishEdit blew up"}]
+        assert out["editing"] is None                  # not a confirmed False
+        assert out["open_scope_count"] == 1
+        assert dm._OPEN_BASE_FEATURES == [bf]          # the handle survives the call
+        assert "may still be" in out["note"]
+
+    def test_a_kept_handle_still_closes_the_scope_on_a_retry(self, monkeypatch):
+        # what keeping the handle buys: the caller can finish again and actually close it.
+        des = _install(monkeypatch, FakeDesign(design_type=1))
+        dm.base_feature_handler(action="start")
+        bf = des.rootComponent.features.baseFeatures.added[-1]
+        bf.finishEdit = lambda: (_ for _ in ()).throw(RuntimeError("transient"))
+        dm.base_feature_handler(action="finish")
+        assert dm._OPEN_BASE_FEATURES == [bf]
+        del bf.finishEdit                              # the retry meets a working finishEdit
+        out = _payload(dm.base_feature_handler(action="finish"))
+        assert bf.finish_count == 1 and bf.editing is False
+        assert len(out["closed_scopes"]) == 1 and out["open_scope_count"] == 0
+
+    def test_a_false_finish_keeps_the_handle_too(self, monkeypatch):
+        # finishEdit returning False is the platform saying it did NOT close: same unproven scope,
+        # same kept handle - publishing finished:false while dropping the object loses it anyway.
+        des = _install(monkeypatch, FakeDesign(design_type=1))
+        dm.base_feature_handler(action="start")
+        bf = des.rootComponent.features.baseFeatures.added[-1]
+        bf.finishEdit = lambda: False
+        out = _payload(dm.base_feature_handler(action="finish"))
+        assert out["closed_scopes"] == []
+        assert out["unclosed_scopes"] == [{"name": bf.name, "finished": False}]
+        assert dm._OPEN_BASE_FEATURES == [bf]
+
+    def test_one_failing_scope_does_not_hold_the_others_open(self, monkeypatch):
+        # two scopes, the inner one raising: the outer still closes and only the failing handle is
+        # kept, so one wedged scope cannot strand the rest.
+        des = _install(monkeypatch, FakeDesign(design_type=1))
+        dm.base_feature_handler(action="start")
+        dm.base_feature_handler(action="start")
+        first, second = des.rootComponent.features.baseFeatures.added[-2:]
+        second.finishEdit = lambda: (_ for _ in ()).throw(RuntimeError("inner stuck"))
+        out = _payload(dm.base_feature_handler(action="finish"))
+        assert [c["name"] for c in out["closed_scopes"]] == [first.name]
+        assert first.finish_count == 1
+        assert dm._OPEN_BASE_FEATURES == [second]
+        assert out["open_scope_count"] == 1
+
+    def test_a_raising_named_finish_is_disclosed_not_reported_as_finished(self, monkeypatch):
+        # the by-name convenience path publishes the name it finished; a raise means it finished
+        # nothing, so the name is null and the platform's own text is handed back.
+        bf = _FakeBaseFeature("Scope1")
+        _install(monkeypatch, FakeDesign(design_type=1, base_features=_Coll([bf])))
+        bf.finishEdit = lambda: (_ for _ in ()).throw(RuntimeError("named finish blew up"))
+        out = _payload(dm.base_feature_handler(action="finish", base_feature="Scope1"))
+        assert out["named_finished"] is None
+        assert out["named_finish_error"] == "named finish blew up"
 
     def test_finish_works_while_design_reads_direct(self, monkeypatch):
         # while a scope is open the design READS direct; finish must NOT gate on mode. We simulate the

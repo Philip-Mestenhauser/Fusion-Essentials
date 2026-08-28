@@ -75,25 +75,50 @@ def _classify(ops, cap):
 
 
 _FALLBACK = "per-setup fallback"
+_OP_FALLBACK = "per-operation fallback"
+
+
+def _and_children(cam, children):
+    """The AND of checkToolpath over each child - the ONE fallback both scopes take when the check on
+    the wider target raises. A non-boolean verdict is returned as-is for the caller's verdict guard
+    to name, never AND-ed into a lie."""
+    verdicts = [cam.checkToolpath(c) for c in children]
+    odd = [v for v in verdicts if not isinstance(v, bool)]
+    return odd[0] if odd else all(verdicts)
 
 
 def _document_verdict(cam):
     """(verdict, checked, err) for the whole document. checkAllToolpaths RAISES
     "3 : The operations are not CAM objects" on some documents (live-verified), so this falls back
     to AND-ing the per-setup checkToolpath calls, which work on the same document. `checked` names
-    the path the verdict came from; a non-boolean is returned as-is for the caller's verdict guard
-    to name, never AND-ed into a lie."""
+    the path the verdict came from."""
     try:
         return cam.checkAllToolpaths(), "checkAllToolpaths", None
     except Exception as first:
         try:
-            verdicts = [cam.checkToolpath(s) for s in setups(cam)]
+            return _and_children(cam, setups(cam)), _FALLBACK, None
         except Exception as second:
             return None, None, (f"The toolpath validity check failed for the document: "
                                 f"checkAllToolpaths raised {first}; the per-setup fallback raised "
                                 f"{second}.")
-        odd = [v for v in verdicts if not isinstance(v, bool)]
-        return (odd[0] if odd else all(verdicts)), _FALLBACK, None
+
+
+def _scoped_verdict(cam, target, ops, label):
+    """(verdict, checked, err) for ONE named setup/folder/pattern/operation - the same shape the
+    document path has: checkToolpath on the target, and when THAT raises, the AND of the checks on
+    the operations nested under it (checkToolpath takes an Operation too). A target that IS an
+    operation has no narrower child, so its raise is reported as the raise it was."""
+    try:
+        return cam.checkToolpath(target), "checkToolpath", None
+    except Exception as first:
+        children = [o for o in (ops or []) if o is not target]
+        if not children:
+            return None, None, f"The toolpath validity check failed for {label}: {first}."
+        try:
+            return _and_children(cam, children), _OP_FALLBACK, None
+        except Exception as second:
+            return None, None, (f"The toolpath validity check failed for {label}: checkToolpath "
+                                f"raised {first}; the per-operation fallback raised {second}.")
 
 
 # The verdict and the per-operation states are INDEPENDENT reads of the same job, so they can
@@ -122,6 +147,9 @@ def _note(passed, label, states, rows, truncated, basis, checked):
     if checked == _FALLBACK:
         parts.append("CAM.checkAllToolpaths raised on this document, so the verdict is the AND of "
                      "the per-setup checks.")
+    elif checked == _OP_FALLBACK:
+        parts.append(f"CAM.checkToolpath raised on the {label}, so the verdict is the AND of the "
+                     "per-operation checks.")
     if outside:
         parts.append("cam_get(include=['operations']) carries the per-operation detail "
                      "(invalidation reasons, error text); cam_generate regenerates out-of-date "
@@ -150,11 +178,9 @@ def handler(scope: str = "", max_results: int = _ROWS_CAP) -> dict:
         if verr:
             return error(verr)
     else:
-        checked = "checkToolpath"
-        try:
-            verdict = cam.checkToolpath(target)
-        except Exception as e:
-            return error(f"The toolpath validity check failed for {label}: {e}")
+        verdict, checked, verr = _scoped_verdict(cam, target, ops, label)
+        if verr:
+            return error(verr)
     if not isinstance(verdict, bool):
         return error(f"The toolpath validity check returned {type(verdict).__name__} for {label}, "
                      "not a true/false verdict - there is no verdict to report.")

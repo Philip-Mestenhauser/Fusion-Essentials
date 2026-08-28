@@ -37,7 +37,9 @@ def is_as_built_joint(x):
 MAP_BLURB = ("build_joint_geometry (keypoint factory per entity kind) + apply_motion (motion-type "
              "dispatch, frame-relative or a custom direction entity) + all_joints (the full joint walk "
              "- joints AND asBuiltJoints, root and every sub-component - that the health rollups count "
-             "broken joints over) + find_joint (resolve ONE by name over those same scopes) + "
+             "broken joints over) + find_joints_by_name / find_joint (the list form over those same "
+             "scopes, and the resolve-one over it - a name SEVERAL joints carry is REFUSED naming "
+             "each hit's owning component, since a joint name is only component-locally unique) + "
              "motion_link_partner (a joint's own MotionLink membership -> linked-partner name; "
              "joint_drive's second-member refusal gates on it) + "
              "all_joint_origins (the ONE JointOrigin walk) / find_joint_origins_by_name / "
@@ -463,26 +465,40 @@ def all_joints(design):
     return out
 
 
-def find_joint(design, name):
-    """Find a Joint or AsBuiltJoint by name (via itemByName - the API's own per-scope resolve-one),
-    over the same scopes as all_joints: the root component, then every sub-component, joints AND
-    asBuiltJoints (both are separate collections, and a joint internal to a sub-component lives there,
-    so a root-only lookup would miss it)."""
+def find_joints_by_name(design, name):
+    """Every Joint or AsBuiltJoint whose name EXACTLY matches `name`, over all_joints - a LIST,
+    because a joint name is only component-locally unique (two sub-assemblies can each hold a
+    'Revolute1'). The caller decides: one hit resolves, several REFUSE with candidates (the house
+    rule for a non-unique name space); never grab the first. The same shape as
+    find_joint_origins_by_name, over the same walk the health rollups count."""
     want = (name or "").strip()
-    j = safe(lambda: design.rootComponent.joints.itemByName(want))
-    if j:
-        return j
-    j = safe(lambda: design.rootComponent.asBuiltJoints.itemByName(want))
-    if j:
-        return j
-    for c in safe(lambda: design.allComponents, []) or []:
-        cand = safe(lambda c=c: c.joints.itemByName(want))
-        if cand:
-            return cand
-        cand = safe(lambda c=c: c.asBuiltJoints.itemByName(want))
-        if cand:
-            return cand
-    return None
+    if not want:
+        return []
+    return [j for j in all_joints(design) if (safe(lambda j=j: j.name) or "") == want]
+
+
+def find_joint(design, name):
+    """Resolve ONE Joint or AsBuiltJoint by name over all_joints' scopes (the root component and
+    every sub-component, joints AND asBuiltJoints - both are separate collections, and a joint
+    internal to a sub-component lives there, so a root-only lookup would miss it). Returns
+    (joint, error_or_None).
+
+    A name carried by SEVERAL joints is REFUSED, naming each hit's owning component: the name space
+    is component-local, so picking one of them targets an arbitrary assembly's joint. A name no
+    joint carries is (None, None) - the caller words its own not-found error, each pointing at the
+    listing read it already names."""
+    hits = find_joints_by_name(design, name)
+    if len(hits) == 1:
+        return hits[0], None
+    if not hits:
+        return None, None
+    want = (name or "").strip()
+    where = ", ".join(
+        f"'{want}' in {safe(lambda j=j: j.parentComponent.name) or '(unreadable component)'}"
+        for j in hits[:8])
+    return None, (f"'{want}' names {len(hits)} joints ({where}) - joint names are only unique within "
+                  "a component. Rename one in Fusion so the name resolves to a single joint "
+                  "(assembly_get lists every joint in the design).")
 
 
 def motion_link_partner(joint):
@@ -557,8 +573,7 @@ def jo_assembly_proxy(design, jo, comp):
     (obj, error): an owning component instanced MORE THAN ONCE is ambiguous which instance carries the
     frame, so it refuses and names the '<occurrence>:<JO name>' form that picks one."""
     root = safe(lambda: design.rootComponent)
-    root_name = safe(lambda: root.name)
-    if comp is root or (comp is not None and safe(lambda: comp.name) == root_name):
+    if _common.same_component(comp, root):
         return jo, None
     occs = list(safe(lambda: root.allOccurrencesByComponent(comp)) or []) if root else []
     if len(occs) == 1:
@@ -588,8 +603,7 @@ def jo_reference_names(design, jo, comp):
     assembly_get JO slice (its qualified_name field) and the JointOriginRef ambiguity candidate list."""
     nm = safe(lambda: jo.name) or "?"
     root = safe(lambda: design.rootComponent)
-    root_name = safe(lambda: root.name)
-    if comp is root or (comp is not None and safe(lambda: comp.name) == root_name):
+    if _common.same_component(comp, root):
         return [nm]
     occs = list(safe(lambda: root.allOccurrencesByComponent(comp)) or []) if root else []
     out = [f"{safe(lambda o=o: o.fullPathName)}:{nm}" for o in occs if safe(lambda o=o: o.fullPathName)]

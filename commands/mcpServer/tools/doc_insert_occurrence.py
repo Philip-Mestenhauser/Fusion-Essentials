@@ -25,7 +25,9 @@ from ._data_common import _b64url_decode, _resolve_data_file
 _INTO_COMPONENT = _inputs.OccurrenceRef("into_component",
         description="Occurrence whose component to insert into (default: root component).")
 _REMOVE_EXISTING = _inputs.OccurrenceRef("remove_existing",
-        description="Existing occurrence to delete first (its joints go with it).")
+        description="Existing occurrence to delete first: its joints go with it, and MEASURED - a "
+                    "feature that referenced its geometry STAYS in the timeline carrying reference "
+                    "failures, neither deleted nor healthy.")
 
 
 def handler(document_id: str = "", into_component: str = "",
@@ -133,8 +135,12 @@ def handler(document_id: str = "", into_component: str = "",
         "rotate_deg": float(rotate_deg or 0.0),
         "note": ("Inserted at the requested placement. This is the source's last SAVED cloud version "
             "- unsaved in-session edits in the source are NOT reflected here (save the source, then "
-            "doc_update_xref). Refine with a joint (see joint_create) if it needs to mate to specific "
-            "geometry. If an occurrence was removed, its joints went with it."),
+            "doc_update_xref). A joint pose the source only DROVE is transient and was never saved, "
+            "so the base pose is what arrived; capture it in the source and save to bring a pose "
+            "across. Refine with a joint (see joint_create) if it needs to mate to specific "
+            "geometry. If an occurrence was removed, its joints went with it and any feature that "
+            "referenced its geometry REMAINS in the timeline carrying reference failures - "
+            "re-point or delete those features."),
     })
 
 
@@ -148,7 +154,9 @@ TOOL_DESCRIPTION = (
     "'remove_existing' = an existing occurrence to delete first (its joints go with it). Place it "
     "with x/y/z (in 'units') and an optional rotate_deg about rotate_axis, or refine later with a "
     "joint. Inserts the source's last SAVED cloud version - unsaved in-session source edits are "
-    "not included (save the source first)."
+    "not included (save the source first). MEASURED: a joint pose the source only DROVE is "
+    "transient and never reaches the saved version - capture it there "
+    "(assembly_capture_position) before saving, or the base pose is what arrives."
 )
 
 tool = (

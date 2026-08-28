@@ -257,6 +257,25 @@ class TestSubComponentHosting:
         assert "Assy:1+Rail:1" in msg and "Assy:1+Rail:2" in msg
         assert sub_feats.added == 0                      # refused before any feature transaction
 
+    def test_an_axis_that_will_not_proxy_is_refused_not_handed_over_native(self, monkeypatch):
+        # The lift exists because the NATIVE origin axis is what defineAs refuses ("3 : Invalid
+        # entity") in the moved body's context - so a createForAssemblyContext that hands back
+        # nothing has nothing safe to fall back to. Falling back to `ent` passes that very entity on
+        # and the call fails inside the API with nothing pointing at why.
+        body = _body("Slug")
+        sub_feats = FakeMoveFeatures([body])
+        sub = _sub_component(bodies=[body], feats=sub_feats)
+        body.parentComponent = sub
+        sub.xConstructionAxis = object()             # answers no createForAssemblyContext
+        _wire_sub(monkeypatch, sub, "Assy:1+Rail:1")
+        monkeypatch.setattr(mm._BODIES, "resolve", lambda raw: ([body], None))
+        res = mm.handler(mode="along_entity", bodies=["Slug"], axis="x", distance=30)
+        assert res["isError"] is True
+        msg = error_message(res)
+        assert "x origin construction axis" in msg
+        assert "Assy:1+Rail:1" in msg                # the occurrence it would not proxy into
+        assert sub_feats.added == 0                  # refused before any feature transaction
+
     def test_an_unplaced_sub_component_is_refused(self, monkeypatch):
         body = _body("Slug")
         sub_feats = FakeMoveFeatures([body])

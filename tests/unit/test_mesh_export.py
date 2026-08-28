@@ -125,6 +125,9 @@ class FakeOcc:
     def __init__(self, name, full_path=None):
         self.name = name
         self.fullPathName = full_path or name
+        # A real Occurrence always answers `component`; a read that RAISES is the
+        # unresolved-external-reference signal the shared occurrence census filters on.
+        self.component = type("C", (), {"name": name.split(":")[0]})()
 
 
 class FakeOccs:
@@ -182,6 +185,17 @@ class FakeExportOptions:
         self.geom = geom
         self.path = path
         self.meshRefinement = None
+
+
+class _NoRefineOptions(FakeExportOptions):
+    """Export options that DROP the meshRefinement write: the read-back never equals the enum, so
+    _apply_refinement returns None - the density never landed. The dropped set is the only condition
+    modelled; which builds/formats behave this way is not asserted."""
+
+    def __setattr__(self, k, v):
+        if k == "meshRefinement":
+            return
+        object.__setattr__(self, k, v)
 
 
 class FakeExportManager:
@@ -534,15 +548,8 @@ class TestExportRefinement:
         assert res["isError"] is True and "refinement" in res["message"]
 
     def _no_refine_export(self, des, tmp_path, refinement="high"):
-        """Export through options that DROP the meshRefinement write: the read-back never equals the
-        enum, so _apply_refinement returns None - the density never landed. The dropped set is the
-        only condition modelled here; which builds/formats behave this way is not asserted."""
-        class _NoRefineOptions(FakeExportOptions):
-            def __setattr__(self, k, v):
-                if k == "meshRefinement":
-                    return
-                object.__setattr__(self, k, v)
-
+        """Export through options that DROP the meshRefinement write (see _NoRefineOptions), so
+        _apply_refinement returns None - the density never landed."""
         def _stl_opt(geom, path):
             rec = _NoRefineOptions("stl", geom, path)
             des.exportManager.calls.append(rec)
@@ -624,6 +631,27 @@ class TestExportSplitByComponent:
         res = mx.export_handler(format="stl", file_path=str(tmp_path), split_by_component=True)
         assert res["isError"] is True and "no top-level occurrences" in res["message"].lower()
 
+    def test_an_unreadable_occurrence_collection_refuses_as_unread_not_as_empty(self, tmp_path):
+        # An unread census is not an empty design: "no top-level occurrences" would state a fact
+        # about the design nothing read, and a zero-file split would read as a clean export.
+        _wire_adsk()
+        comp = FakeComp("Root", occurrences=[FakeOcc("Body:1")])
+
+        class _Blind:
+            @property
+            def count(self):
+                raise RuntimeError("boom")
+            def item(self, i):
+                raise RuntimeError("boom")
+
+        comp.occurrences = _Blind()
+        _install(FakeDesign(comp))
+        res = mx.export_handler(format="stl", file_path=str(tmp_path), split_by_component=True)
+        assert res["isError"] is True
+        assert "did not read" in res["message"]
+        assert "no top-level occurrences" not in res["message"].lower()
+        assert list(tmp_path.iterdir()) == []               # and nothing was written
+
     def test_split_reports_per_occurrence_failure_without_aborting(self, tmp_path):
         # one occurrence writes a file, one fails (execute raises) -> 1 file, the failure in 'failed'
         _wire_adsk()
@@ -647,6 +675,61 @@ class TestExportSplitByComponent:
         # like a complete export of a one-part design
         assert out["partial"] is True
         assert "PARTIAL" in out["note"] and "1 of 2" in out["note"]
+
+    def _split_dropping_refinement_for(self, des, drop_for=()):
+        """Point the STL options factory at _NoRefineOptions for the named occurrences only, so a
+        split export can have some files land the refinement and some not."""
+        drop = set(drop_for)
+
+        def _stl_opt(geom, path):
+            cls = _NoRefineOptions if getattr(geom, "name", "") in drop else FakeExportOptions
+            rec = cls("stl", geom, path)
+            des.exportManager.calls.append(rec)
+            return rec
+        des.exportManager.createSTLExportOptions = _stl_opt
+
+    def test_each_split_file_carries_the_refinement_that_landed_for_it(self, tmp_path):
+        # The applied value _write_mesh_file read back is per FILE - the split payload publishes it
+        # beside the one request, the same applied/requested pair the single-target export does.
+        _wire_adsk()
+        des = _install(FakeDesign(FakeComp("Root", occurrences=[FakeOcc("A:1"), FakeOcc("B:1")])))
+        out = _payload(mx.export_handler(format="stl", refinement="low", file_path=str(tmp_path),
+                                         split_by_component=True))
+        assert out["refinement_requested"] == "low"
+        assert [f["refinement"] for f in out["files"]] == ["low", "low"]
+        assert all(c.meshRefinement == "RLOW" for c in des.exportManager.calls)
+
+    def test_a_split_file_whose_refinement_was_dropped_is_null_not_the_request(self, tmp_path):
+        # The request must never masquerade as the effect in split mode either: the read-back
+        # disagreed for this file, so its 'refinement' is null and only 'refinement_requested' echoes.
+        _wire_adsk()
+        des = _install(FakeDesign(FakeComp("Root", occurrences=[FakeOcc("A:1")])))
+        self._split_dropping_refinement_for(des, drop_for=["A:1"])
+        out = _payload(mx.export_handler(format="stl", refinement="high", file_path=str(tmp_path),
+                                         split_by_component=True))
+        assert out["files"][0]["refinement"] is None
+        assert out["refinement_requested"] == "high"
+        assert "did NOT land" in out["note"] and "unconfirmed" in out["note"]
+
+    def test_a_split_counts_only_the_files_the_refinement_missed(self, tmp_path):
+        # The MIXED case is the boundary: one file landed the density and one did not, so the
+        # per-file key differs between them and the note names the count, not "all files".
+        _wire_adsk()
+        des = _install(FakeDesign(FakeComp("Root", occurrences=[FakeOcc("A:1"), FakeOcc("B:1")])))
+        self._split_dropping_refinement_for(des, drop_for=["B:1"])
+        out = _payload(mx.export_handler(format="stl", refinement="medium", file_path=str(tmp_path),
+                                         split_by_component=True))
+        by_occ = {f["occurrence"]: f["refinement"] for f in out["files"]}
+        assert by_occ == {"A:1": "medium", "B:1": None}
+        assert "1 of the 2 exported file(s)" in out["note"]
+
+    def test_a_split_where_every_refinement_landed_adds_no_did_not_land_note(self, tmp_path):
+        # the disclosure is conditional - a fully successful split must not warn about itself
+        _wire_adsk()
+        _install(FakeDesign(FakeComp("Root", occurrences=[FakeOcc("A:1"), FakeOcc("B:1")])))
+        out = _payload(mx.export_handler(format="stl", refinement="low", file_path=str(tmp_path),
+                                         split_by_component=True))
+        assert "did NOT land" not in out["note"]
 
     def test_split_that_lands_nothing_is_an_error_carrying_the_reasons(self, tmp_path):
         # every occurrence fails -> ZERO deliverables, which is a FAILED export, not an ok payload

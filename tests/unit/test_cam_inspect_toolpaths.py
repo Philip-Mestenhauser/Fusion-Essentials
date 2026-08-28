@@ -148,6 +148,104 @@ class TestWholeDocumentFallback:
         assert "not a true/false verdict" in res["message"] and "str" in res["message"]
 
 
+# ── the scoped path: checkToolpath on the target, then the per-operation fallback ───────────────────
+
+_INPUT_IS_NULL = RuntimeError("3 : input is null")
+
+
+class TestScopedFallback:
+    """A scoped check has the same shape as the document one: when checkToolpath raises on the named
+    target, the verdict is the AND of the checks on the operations nested under it (checkToolpath
+    takes an Operation too). A target that IS an operation has nothing narrower to ask, so its raise
+    is reported as the raise it was."""
+
+    def _wire_raising_target(self, wire, setup, target, op_verdicts=None):
+        """A CAM whose checkToolpath raises for `target` only; anything else answers from
+        `op_verdicts` (by name), or True."""
+        cam = wire(_cam(setup))
+
+        def check(obj):
+            cam.checked.append(obj)
+            if obj is target:
+                raise _INPUT_IS_NULL
+            return True if op_verdicts is None else op_verdicts[obj.name]
+
+        cam.checkToolpath = check
+        return cam
+
+    def test_a_raising_setup_check_falls_back_to_its_operations(self, wire):
+        ops = [FakeOperation("Face1"), FakeOperation("Face2")]
+        setup = FakeSetup("Roughing", ops=ops)
+        cam = self._wire_raising_target(wire, setup, setup)
+        out = _payload(mod.handler(scope="Roughing"))
+        assert cam.checked == [setup, ops[0], ops[1]]   # the target, then every nested operation
+        assert out["passed"] is True
+        assert out["checked"] == "per-operation fallback"
+        assert "CAM.checkToolpath raised on the setup 'Roughing'" in out["note"]
+        assert "per-setup checks" not in out["note"]    # the document path's sentence, not this one
+
+    def test_the_fallback_verdict_is_the_and_of_the_operations(self, wire):
+        ops = [FakeOperation("Face1"), FakeOperation("Bore", operation_state=1)]
+        setup = FakeSetup("Roughing", ops=ops)
+        cam = self._wire_raising_target(wire, setup, setup, {"Face1": True, "Bore": False})
+        out = _payload(mod.handler(scope="Roughing"))
+        assert out["passed"] is False                   # one failing operation fails the scope
+        assert cam.checked == [setup, ops[0], ops[1]]   # every operation asked, no short-circuit
+
+    def test_a_folder_target_falls_back_to_the_operations_nested_in_it(self, wire):
+        ops = [FakeOperation("D1"), FakeOperation("D2")]
+        folder = FakeCAMFolder("Drilling", ops=ops)
+        setup = FakeSetup("S1", ops=[FakeOperation("Face1")], folders=[folder])
+        cam = self._wire_raising_target(wire, setup, folder)
+        out = _payload(mod.handler(scope="Drilling"))
+        assert cam.checked == [folder, ops[0], ops[1]]  # the sibling Face1 is out of scope
+        assert out["checked"] == "per-operation fallback"
+
+    def test_one_nested_operation_is_enough_to_fall_back(self, wire):
+        # Boundary: exactly 1 child. The fallback needs a target NARROWER than the raising one, not
+        # several of them.
+        op = FakeOperation("Face1")
+        setup = FakeSetup("Roughing", ops=[op])
+        cam = self._wire_raising_target(wire, setup, setup, {"Face1": False})
+        out = _payload(mod.handler(scope="Roughing"))
+        assert cam.checked == [setup, op]
+        assert out["passed"] is False and out["checked"] == "per-operation fallback"
+
+    def test_a_setup_with_no_operations_reports_the_raise(self, wire):
+        # Boundary: 0 children - nothing narrower exists to ask, so the raise IS the answer.
+        setup = FakeSetup("Empty")
+        cam = self._wire_raising_target(wire, setup, setup)
+        res = mod.handler(scope="Empty")
+        assert res["isError"] is True
+        assert "setup 'Empty'" in res["message"] and "3 : input is null" in res["message"]
+        assert cam.checked == [setup]                   # nothing else was asked in its place
+
+    def test_an_operation_target_has_nothing_narrower_and_reports_the_raise(self, wire):
+        op = FakeOperation("Drill1")
+        setup = FakeSetup("S1", ops=[op, FakeOperation("Face1")])
+        cam = self._wire_raising_target(wire, setup, op)
+        res = mod.handler(scope="Drill1")
+        assert res["isError"] is True
+        assert "operation 'Drill1'" in res["message"] and "3 : input is null" in res["message"]
+        assert cam.checked == [op]                      # a SIBLING is never checked in its place
+
+    def test_both_the_target_and_the_fallback_raising_names_each(self, wire):
+        cam = wire(_cam(FakeSetup("Roughing", ops=[FakeOperation("Face1")]),
+                        raises=_INPUT_IS_NULL))         # every checkToolpath raises
+        res = mod.handler(scope="Roughing")
+        assert res["isError"] is True
+        assert "setup 'Roughing'" in res["message"]
+        assert "the per-operation fallback raised" in res["message"]
+        assert res["message"].count("3 : input is null") == 2
+
+    def test_a_non_boolean_from_the_fallback_is_refused_not_and_ed(self, wire):
+        setup = FakeSetup("Roughing", ops=[FakeOperation("Face1")])
+        self._wire_raising_target(wire, setup, setup, {"Face1": "true"})
+        res = mod.handler(scope="Roughing")
+        assert res["isError"] is True
+        assert "not a true/false verdict" in res["message"] and "str" in res["message"]
+
+
 # ── the shared resolver's refusals reach this entry point ───────────────────────────────────────────
 
 class TestScopeRefusals:

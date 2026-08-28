@@ -2,7 +2,10 @@
 
 Covers the bounded-read caps (CLAUDE.md "Bound it"): setups_handler's top-level 'truncated'
 and per-setup 'model_lists_truncated', operations_handler's per-setup 'operations_truncated', and
-get_setup_references_handler's per-setup 'references_truncated'. Also covers the pure Tier-1 logic:
+get_setup_references_handler's per-setup 'references_truncated' - plus the third incompleteness
+those flags carry, a model/fixture/stock PROPERTY that raises instead of reading a collection (the
+list goes null and 'model_lists_unreadable' names it, so it never reads as "nothing selected").
+Also covers the pure Tier-1 logic:
 ``_invalidation_reasons`` (parsing op.messageLog into categorical reasons / parameter-change count /
 machine-changed flag), ``op_primary_state`` (the one-bucket-per-op priority order), ``_hms`` (seconds
 -> h:m:s), and the machining-time estimate's feed_scale/rapid_feed/tool_change constants.
@@ -124,6 +127,90 @@ class TestModelListsCap:
         assert len(rec["selected_models"]) == cc._MAX_ITEMS
 
 
+class _RaisingSetup:
+    """A setup whose named model collections RAISE on the PROPERTY read - measured: Setup.models
+    raises "3 : input is null" on a setup whose selected occurrence was removed by
+    doc_insert_occurrence(remove_existing=...)."""
+
+    def __init__(self, raising=("models",), models=(), fixtures=(), stock=()):
+        self._raising = set(raising)
+        self._lists = {"models": list(models), "fixtures": list(fixtures),
+                       "stockSolids": list(stock)}
+
+    def _read(self, key):
+        if key in self._raising:
+            raise RuntimeError("3 : input is null")
+        return self._lists[key]
+
+    @property
+    def models(self):
+        return self._read("models")
+
+    @property
+    def fixtures(self):
+        return self._read("fixtures")
+
+    @property
+    def stockSolids(self):
+        return self._read("stockSolids")
+
+
+class TestUnreadableModelLists:
+    """A model collection whose PROPERTY raises is published as null, never as []. The two answers
+    are different facts - "this setup selected nothing" vs "the collection could not be read" - and
+    safe(read, []) makes them indistinguishable."""
+
+    def test_a_raising_models_property_publishes_null_not_an_empty_list(self, install):
+        install(FakeCAM([_RaisingSetup(raising=("models",))]))
+        rec = _payload(cc.get_cam_setups_handler())["setups"][0]
+        assert rec["selected_models"] is None
+        assert rec["model_lists_truncated"] is True
+        assert rec["model_lists_unreadable"] == ["selected_models"]
+
+    def test_a_readable_empty_collection_stays_an_empty_list(self, install):
+        # The discriminating pair: an empty read is an ANSWER, so it keeps [] , stays untruncated,
+        # and carries no unreadable marker.
+        install(FakeCAM([_RaisingSetup(raising=())]))
+        rec = _payload(cc.get_cam_setups_handler())["setups"][0]
+        assert rec["selected_models"] == [] and rec["fixtures"] == [] and rec["stock_solids"] == []
+        assert rec["model_lists_truncated"] is False
+        assert "model_lists_unreadable" not in rec
+
+    def test_only_the_raising_list_goes_null(self, install):
+        # One unreadable collection must not blank the two that DID read.
+        install(FakeCAM([_RaisingSetup(raising=("fixtures",), models=[_ModelStub("A")],
+                                       stock=[_ModelStub("Stock1")])]))
+        rec = _payload(cc.get_cam_setups_handler())["setups"][0]
+        assert rec["selected_models"] == ["A"] and rec["stock_solids"] == ["Stock1"]
+        assert rec["fixtures"] is None
+        assert rec["model_lists_unreadable"] == ["fixtures"]
+
+    def test_every_raising_list_is_named(self, install):
+        install(FakeCAM([_RaisingSetup(raising=("models", "fixtures", "stockSolids"))]))
+        rec = _payload(cc.get_cam_setups_handler())["setups"][0]
+        assert rec["model_lists_unreadable"] == ["selected_models", "fixtures", "stock_solids"]
+        assert (rec["selected_models"], rec["fixtures"], rec["stock_solids"]) == (None, None, None)
+
+    def test_the_references_slice_flags_the_same_raise_as_incomplete(self, install,
+                                                                     occurrence_cast_passthrough):
+        # The references walk reads the SAME three properties; a raise there leaves an empty
+        # reference list that must not read as "this setup references nothing".
+        setup = _RaisingSetup(raising=("models",))
+        setup.name = "S1"
+        install(FakeCAM([setup]))
+        rec = _payload(cc.get_setup_references_handler())["setups"][0]
+        assert rec["references"] == []
+        assert rec["references_truncated"] is True
+
+    def test_the_references_slice_stays_untruncated_when_the_read_succeeds(self, install,
+                                                                           occurrence_cast_passthrough):
+        setup = _RaisingSetup(raising=())
+        setup.name = "S1"
+        install(FakeCAM([setup]))
+        rec = _payload(cc.get_setup_references_handler())["setups"][0]
+        assert rec["references"] == [] and rec["references_truncated"] is False
+
+
 # ── get_cam_operations_handler: per-setup 'operations_truncated' ─────────────────────────────────
 
 class _OpSetup:
@@ -181,17 +268,21 @@ class TestOperationSummaryStateNaming:
 
 
 # ── the two op-state aggregations agree by construction ─────────────────────────────────────────
-# An op carrying hasError reads operationState 0 ("valid") with no toolpath at all, so a state
-# derived from operationState alone puts that op in the summary's "valid" bucket while the
-# per-setup op_states rollup puts it in "error" - one response contradicting itself, and an agent
-# reading the summary calls an errored op healthy. Both derive through op_primary_state.
+# hasError must outrank operationState in every rollup: a state derived from operationState alone
+# would bucket an errored op by its state while the per-setup op_states rollup puts it in "error" -
+# one response contradicting itself. MEASURED (measure_api row cam-errored-op-state-pair): an
+# errored op reads operationState 3 (NoToolpath) with hasError=True; OperationStates carries no
+# error member. The state-0 pairing below is a deliberate STRESS case - the platform has not been
+# observed producing it - so the classification is proven to hold even where state would read
+# "valid". Both surfaces derive through op_primary_state.
 
 class TestErroredOpNeverReadsValid:
     def _cam(self):
-        """Three healthy ops plus an errored one: no toolpath, hasError, operationState still 0."""
+        """Three healthy ops plus an errored one pinned at operationState 0: the stress case where
+        state alone would read valid, so hasError must win (measured errored ops read state 3)."""
         errored = FakeOperation("Drill1", has_toolpath=False, valid=False, operation_state=0,
                                 has_error=True, error="Toolpath is empty")
-        assert errored.operationState == 0        # the trap this whole class exists for
+        assert errored.operationState == 0        # the stress pairing this class exists to cover
         return FakeCAM([FakeSetup("Setup1", ops=[
             FakeOperation("Face1"), FakeOperation("Adaptive1"), FakeOperation("Contour1"),
             errored])])
@@ -1954,14 +2045,16 @@ def _dying_after(items):
 
 
 class TestPartialReadsAreFlaggedIncomplete:
+    # _model_names / _references_in take the GETTER, so a property that raises before yielding any
+    # collection at all is a THIRD kind of incompleteness beside the cap and the dying walk.
     def test_model_names_from_a_dying_collection_read_truncated(self):
-        names, truncated = cc._model_names(_dying_after(
-            [SimpleNamespace(name="A"), SimpleNamespace(name="B")]))
-        assert names == ["A", "B"]
+        dying = _dying_after([SimpleNamespace(name="A"), SimpleNamespace(name="B")])
+        names, truncated = cc._model_names(lambda: dying)
+        assert names == ["A", "B"]                 # the partial read is kept, not blanked
         assert truncated is True                   # incomplete, not a full read
 
     def test_a_complete_model_walk_stays_untruncated(self):
-        names, truncated = cc._model_names(iter([SimpleNamespace(name="A")]))
+        names, truncated = cc._model_names(lambda: iter([SimpleNamespace(name="A")]))
         assert names == ["A"] and truncated is False
 
     def test_operations_from_a_dying_walk_read_truncated(self):
@@ -1972,8 +2065,15 @@ class TestPartialReadsAreFlaggedIncomplete:
         assert truncated is True
 
     def test_references_from_a_dying_walk_read_truncated(self):
-        found, truncated = cc._references_in(_dying_after([]), "model")
+        dying = _dying_after([])
+        found, truncated = cc._references_in(lambda: dying, "model")
         assert found == [] and truncated is True
+
+    def test_a_raising_property_is_incomplete_in_both_walks(self):
+        def _boom():
+            raise RuntimeError("3 : input is null")
+        assert cc._model_names(_boom) == (None, True)      # null names, never []
+        assert cc._references_in(_boom, "model") == ([], True)
 
 
 

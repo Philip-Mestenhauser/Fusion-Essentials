@@ -1,0 +1,195 @@
+# Copyright (c) Fusion-Essentials contributors
+# Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
+
+"""The blind eval runner's pure decisions: what a run is tagged, what its budgets score, when a
+credential rejection earns a relaunch, and what the process exit code says.
+
+These are the parts that decide whether a run is usable BEFORE a human reads the report - a
+colliding run tag merges two runs' cloud artifacts, a replayed prompt re-runs a scenario over
+already-mutated live state, and a zero exit over a broken harness reads as a clean run. Nothing
+here launches an executor or touches Fusion; the transcripts are built in tmp_path.
+"""
+
+import json
+import os
+import sys
+import time
+
+TESTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(TESTS_DIR, "live", "evals"))
+import run_eval  # noqa: E402
+
+_MCP = "mcp__fusion-essentials__doc_get"
+
+
+def _transcript(tmp_path, mcp_calls=0, other_calls=(), final="", usage=None, name="t.jsonl"):
+    """A minimal stream in the shape audit() parses: assistant tool_use blocks then the result."""
+    path = tmp_path / name
+    with open(path, "w", encoding="utf-8") as fh:
+        for tool in [_MCP] * mcp_calls + list(other_calls):
+            fh.write(json.dumps({"type": "assistant",
+                                 "message": {"content": [{"type": "tool_use", "name": tool}]}})
+                     + "\n")
+        fh.write(json.dumps({"type": "result", "result": final,
+                             "usage": usage or {}, "num_turns": 4}) + "\n")
+    return str(path)
+
+
+def _audit(tmp_path, budget_calls=None, budget_tokens=None, stderr="", **kw):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(exist_ok=True)
+    transcript = _transcript(tmp_path, **kw)
+    report, _final = run_eval.audit(transcript, str(run_dir), budget_calls, budget_tokens, stderr)
+    return report
+
+
+class TestRunTag:
+    def test_tag_carries_the_scenario_stem(self):
+        # gmtime, not localtime: the epoch is fixed, so the expected string is its UTC rendering
+        # and cannot depend on the machine's zone.
+        tag = run_eval.run_tag_for("S6_Vise", time.gmtime(1_770_000_000))
+        assert tag == "Eval-20260202-024000-S6_Vise"
+
+    def test_two_scenarios_in_one_minute_get_different_tags(self):
+        when = time.gmtime(1_770_000_000)
+        assert run_eval.run_tag_for("S4_Details", when) != run_eval.run_tag_for("S8_CAM", when)
+
+    def test_the_same_scenario_seconds_apart_gets_different_tags(self):
+        # The dead-spawn retry relaunches within seconds - minute resolution hands both attempts
+        # the same cloud subfolder.
+        first = run_eval.run_tag_for("S4_Details", time.gmtime(1_770_000_000))
+        second = run_eval.run_tag_for("S4_Details", time.gmtime(1_770_000_007))
+        assert first != second and first.endswith("S4_Details")
+
+
+class TestPromptAssembly:
+    _SCENARIO = ("---\nid: X\n---\n\n## AGENT PROMPT (verbatim)\n\n```\n"
+                 "Save into Pipeline-v1/{{RUN_FOLDER}}\n```\n\n## Grader notes\n\nnever sent\n")
+
+    def test_prompt_is_the_block_plus_exactly_the_connection_lost_rule(self, tmp_path):
+        path = tmp_path / "S.md"
+        path.write_text(self._SCENARIO, encoding="utf-8")
+        prompt = run_eval.extract_prompt(str(path), "Eval-20260201-204000-S")
+        assert prompt == ("Save into Pipeline-v1/Eval-20260201-204000-S\n\n"
+                          + run_eval.CONNECTION_LOST)
+
+
+class TestBudgetScoring:
+    def test_frontmatter_declares_both_caps(self, tmp_path):
+        path = tmp_path / "S.md"
+        path.write_text("budget:\n  max_tool_calls: 110\n  max_tokens: 173000\n", encoding="utf-8")
+        assert run_eval.scenario_budget(str(path)) == (110, 173000)
+
+    def test_output_tokens_are_scored_against_the_declared_cap(self, tmp_path):
+        report = _audit(tmp_path, budget_tokens=1000, usage={"output_tokens": 640})
+        assert report["output_tokens"] == 640
+        assert report["budget_max_tokens"] == 1000
+        assert report["within_token_budget"] is True
+
+    def test_output_tokens_exactly_at_the_cap_are_within(self, tmp_path):
+        report = _audit(tmp_path, budget_tokens=1000, usage={"output_tokens": 1000})
+        assert report["within_token_budget"] is True
+
+    def test_one_token_over_the_cap_is_over(self, tmp_path):
+        report = _audit(tmp_path, budget_tokens=1000, usage={"output_tokens": 1001})
+        assert report["within_token_budget"] is False
+
+    def test_cache_and_input_totals_do_not_count_against_the_token_cap(self, tmp_path):
+        # Cache reads dwarf the executor's own work (21M on a measured run); scoring them would
+        # fail every scenario.
+        report = _audit(tmp_path, budget_tokens=1000,
+                        usage={"output_tokens": 900, "input_tokens": 5000,
+                               "cache_read_input_tokens": 21_000_000})
+        assert report["output_tokens"] == 900 and report["within_token_budget"] is True
+
+    def test_an_undeclared_token_budget_is_not_an_overrun(self, tmp_path):
+        report = _audit(tmp_path, usage={"output_tokens": 999_999})
+        assert report["budget_max_tokens"] is None and report["within_token_budget"] is True
+
+    def test_calls_exactly_at_the_cap_are_within(self, tmp_path):
+        report = _audit(tmp_path, budget_calls=3, mcp_calls=3)
+        assert report["tool_calls_mcp"] == 3 and report["within_call_budget"] is True
+
+    def test_one_call_over_the_cap_is_over(self, tmp_path):
+        report = _audit(tmp_path, budget_calls=3, mcp_calls=4)
+        assert report["within_call_budget"] is False
+
+    def test_the_budget_line_reports_both_actuals_against_both_caps(self):
+        line = run_eval.budget_line({"tool_calls_mcp": 101, "budget_max_tool_calls": 115,
+                                     "within_call_budget": True, "output_tokens": 126_755,
+                                     "budget_max_tokens": 285_000, "within_token_budget": True})
+        assert line == "BUDGET: calls 101/115 WITHIN; output tokens 126755/285000 WITHIN"
+
+    def test_the_budget_line_says_over_for_the_budget_that_blew(self):
+        line = run_eval.budget_line({"tool_calls_mcp": 120, "budget_max_tool_calls": 115,
+                                     "within_call_budget": False, "output_tokens": 10,
+                                     "budget_max_tokens": 285_000, "within_token_budget": True})
+        assert "calls 120/115 OVER" in line and "output tokens 10/285000 WITHIN" in line
+
+    def test_the_budget_line_names_an_undeclared_cap(self):
+        line = run_eval.budget_line({"tool_calls_mcp": 7, "budget_max_tool_calls": None,
+                                     "within_call_budget": True, "output_tokens": 8,
+                                     "budget_max_tokens": None, "within_token_budget": True})
+        assert line == "BUDGET: calls 7 (no budget declared); output tokens 8 (no budget declared)"
+
+
+class TestAuthSignature:
+    def test_a_report_quoting_a_marker_does_not_flag_auth(self, tmp_path):
+        # The executor's prose can quote "not logged in" off a tool result while the credentials
+        # were fine; flagging it replays the whole prompt over live state the run already mutated.
+        report = _audit(tmp_path, mcp_calls=12,
+                        final="The hub read said not logged in, so I reported BLOCKED.",
+                        stderr="")
+        assert report["auth_failure_suspected"] is False
+
+    def test_a_marker_in_the_status_stream_flags_auth(self, tmp_path):
+        report = _audit(tmp_path, stderr="Error: Not logged in. Please run /login")
+        assert report["auth_failure_suspected"] is True
+
+    def test_a_clean_status_stream_does_not_flag_auth(self, tmp_path):
+        report = _audit(tmp_path, mcp_calls=3, stderr="warning: MCP server took 3s to attach")
+        assert report["auth_failure_suspected"] is False
+
+    def test_the_matcher_reads_only_the_status_stream(self):
+        assert run_eval._auth_failure("OAuth token has expired") is True
+        assert run_eval._auth_failure("") is False
+
+
+class TestExitStatus:
+    _CLEAN = {"blind": True, "harness_leak": False, "within_call_budget": True,
+              "source_access_calls": [], "harness_utility_calls": []}
+
+    def test_a_clean_run_exits_zero(self):
+        code, reason = run_eval.exit_status(dict(self._CLEAN))
+        assert code == 0 and "clean" in reason
+
+    def test_dead_spawn_exhaustion_exits_nonzero_naming_it(self):
+        code, reason = run_eval.exit_status(dict(self._CLEAN), dead_spawn_exhausted=True)
+        assert code == run_eval.EXIT_DEAD_SPAWN and code != 0 and "dead spawn" in reason
+
+    def test_a_second_auth_failure_exits_nonzero_naming_it(self):
+        code, reason = run_eval.exit_status(dict(self._CLEAN), auth_exhausted=True)
+        assert code == run_eval.EXIT_AUTH and code != 0 and "credentials" in reason
+
+    def test_broken_blindness_exits_nonzero_naming_the_tools(self):
+        report = dict(self._CLEAN, blind=False, source_access_calls=["Read", "Bash"])
+        code, reason = run_eval.exit_status(report)
+        assert code == run_eval.EXIT_HARNESS_INTEGRITY and "Read, Bash" in reason
+
+    def test_a_harness_utility_leak_exits_nonzero_naming_the_tools(self):
+        report = dict(self._CLEAN, harness_leak=True, harness_utility_calls=["Skill"])
+        code, reason = run_eval.exit_status(report)
+        assert code == run_eval.EXIT_HARNESS_INTEGRITY and "Skill" in reason
+
+    def test_no_report_at_all_exits_nonzero(self):
+        code, reason = run_eval.exit_status(None)
+        assert code != 0 and "no run record" in reason
+
+    def test_a_budget_overrun_alone_still_exits_zero(self):
+        # The runner records; the orchestrator grades. An overrun calibrates the scenario.
+        report = dict(self._CLEAN, within_call_budget=False, within_token_budget=False)
+        assert run_eval.exit_status(report)[0] == 0
+
+    def test_each_harness_failure_has_its_own_code(self):
+        assert len({run_eval.EXIT_OK, run_eval.EXIT_DEAD_SPAWN, run_eval.EXIT_AUTH,
+                    run_eval.EXIT_HARNESS_INTEGRITY}) == 4

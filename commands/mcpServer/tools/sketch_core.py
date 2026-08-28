@@ -17,7 +17,7 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import apply_rename, error, ok, safe, scale, target_component
-from ._sketch_detail import sketch_world_frame
+from ._sketch_detail import frame_space_note, sketch_world_frame
 from . import _common
 from . import _inputs
 
@@ -67,7 +67,7 @@ def _sketch_summary(sketch) -> dict:
 def get_sketches_handler() -> dict:
     """List EVERY sketch in the design (all components), each tagged with its owning component -
     so a sketch inside a sub-component is visible without activating it first (the by-name overview
-    resolves design-wide via resolve_sketch, and this list matches that reach)."""
+    resolves design-wide via find_sketch, and this list matches that reach)."""
     design = _common.design()
     if not design:
         return error("No active design (open or create a document with design geometry).")
@@ -143,9 +143,11 @@ def create_sketch_handler(plane: str = "xy", name: str = "", on_face: str = "") 
 
     final_name, rename_warning = apply_rename(sketch, name)
 
-    # Encode the sketch's world FRAME so the caller can place geometry on the first try instead of
+    # Encode the sketch's FRAME so the caller can place geometry on the first try instead of
     # guess-and-screenshot. On a face (and on xz/yz) the sketch's (0,0) is NOT the face centre and its
-    # axes may not line up with world - report where sketch (0,0) is in world and where +X/+Y point.
+    # axes may not line up with world - report where sketch (0,0) sits and where +X/+Y point, in the
+    # space frame['space'] names: world when the frame resolved into the assembly, component-local
+    # when the sketch's component is instanced several times and no single world frame exists.
     # The same block sketch_get publishes, from the same helper, so place and verify read alike.
     frame = safe(lambda: sketch_world_frame(sketch))
 
@@ -155,12 +157,12 @@ def create_sketch_handler(plane: str = "xy", name: str = "", on_face: str = "") 
         "on": desc,
         "plane": _plane_name(sketch),
         "frame": frame,
-        "note": ("Draw on it with sketch_add_geometry (target this sketch by name). 'frame' maps "
-            "sketch coords to world: sketch (0,0) sits at frame.origin_mm, +X points along "
-            "frame.x_world, +Y along frame.y_world, and frame.normal is the plane's world normal - "
-            "place geometry from those, not by eye. On the "
+        "note": ("Draw on it with sketch_add_geometry (target this sketch by name). "
+            + frame_space_note(frame)
+            + " On the "
             "xz origin plane in particular the frame is NOT world-aligned: local +Y maps to world -Z "
-            "(read frame.y_world for the exact per-plane axis directions). sketch_get(sketch_name) "
+            "(read the frame's own +Y axis for the exact per-plane axis directions). "
+            "sketch_get(sketch_name) "
             "returns the same 'frame' for any sketch, which is how you verify a plane later."),
     }
     if rename_warning:
@@ -715,10 +717,12 @@ def add_sketch_geometry_handler(kind: str = "", sketch_name: str = "", units: st
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")
 
-    sketch, requested = _common.resolve_or_recent_sketch(design, sketch_name)
+    sketch, requested, ambiguous = _common.find_or_recent_sketch(design, sketch_name)
+    if ambiguous:
+        return error(ambiguous)
     if not sketch:
-        if (sketch_name or "").strip():
-            return error(f"No sketch named '{sketch_name}'. Use sketch_get to list them, "
+        if requested:
+            return error(f"No sketch named '{requested}'. Use sketch_get to list them, "
     "or sketch_create first.")
         return error("No sketch to draw on. Create one first with sketch_create.")
 
@@ -906,10 +910,12 @@ def draw_3d_line_handler(sketch_name: str = "", units: str = "mm",
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")
 
-    sketch, _ = _common.resolve_or_recent_sketch(design, sketch_name)
+    sketch, requested, ambiguous = _common.find_or_recent_sketch(design, sketch_name)
+    if ambiguous:
+        return error(ambiguous)
     if not sketch:
-        if (sketch_name or "").strip():
-            return error(f"No sketch named '{sketch_name}'. Use sketch_get or sketch_create.")
+        if requested:
+            return error(f"No sketch named '{requested}'. Use sketch_get or sketch_create.")
         return error("No sketch to draw on. Create one first with sketch_create.")
 
     try:
@@ -994,8 +1000,8 @@ _CREATE_DESC = (
                                         "planar-face handle from find_geometry to sketch directly ON a part's face - on_face takes "
                                         "precedence. An on_face sketch AUTO-PROJECTS the face's boundary edges into it, so re-read "
                                         "sketch_get and pick the region by its area/centroid handle, not a guessed index. "
-                                        "For a sketch in a nested or offset component, the returned 'frame' is "
-                                        "component-LOCAL, not world. Then draw on it with "
+                                        "'frame.space' says whether that frame is world or component-local - a "
+                                        "component instanced several times has no single world frame. Then draw on it with "
                                         "sketch_add_geometry. Requires an open design (see doc_new)."
 )
 create_sketch_tool = (

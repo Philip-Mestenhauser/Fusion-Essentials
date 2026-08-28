@@ -395,6 +395,50 @@ class TestLimits:
         assert "slide" in res["message"].lower() or "linear" in res["message"].lower()
 
 
+class TestLimitsAreReadBackOnEdit:
+    """joint_edit's limit fields are the joint's own read-back, or they are null with the unverified
+    marker - never the request. The edit path carries its own copy of that plumbing (the marker is
+    surfaced after the timeline rolls back), so it is pinned here as well as on the create."""
+
+    def test_a_limit_that_did_not_take_errors_naming_it(self):
+        # a JointLimits that keeps its own value: nothing raises, so only the read-back catches it
+        _, joint = _install(["BoomPivot"], motion="revolute")
+        joint.jointMotion.rotationLimits = _DeafLimits()
+        res = jt.edit_handler(joint_name="BoomPivot", min_deg=-45)
+        assert res["isError"] is True
+        assert "min_deg did not take" in res["message"]
+
+    def test_an_unreadable_read_back_publishes_null_and_the_marker(self):
+        _, joint = _install(["BoomPivot"], motion="revolute")
+        joint.jointMotion.rotationLimits = _BlindLimits()
+        out = _payload(jt.edit_handler(joint_name="BoomPivot", min_deg=-45, max_deg=90))
+        assert out["min_deg"] is None and out["max_deg"] is None
+        assert out["changes"]["min_deg"] is None
+        assert out["limits_unverified"] == ["min_deg", "max_deg"]
+        assert "Limits published null" in out["note"]
+
+    def test_a_verified_edit_carries_no_marker(self):
+        _install(["BoomPivot"], motion="revolute")
+        out = _payload(jt.edit_handler(joint_name="BoomPivot", min_deg=-45))
+        assert "limits_unverified" not in out and "Limits published null" not in out["note"]
+
+
+class _DeafLimits(FakeLimits):
+    """A JointLimits that accepts every value assignment and keeps 0.0 - the swallowed write."""
+    def __setattr__(self, name, value):
+        if name in ("minimumValue", "maximumValue", "restValue"):
+            return object.__setattr__(self, name, 0.0)
+        return object.__setattr__(self, name, value)
+
+
+class _BlindLimits(FakeLimits):
+    """A JointLimits whose value read RAISES - the re-read that cannot be taken."""
+    def __getattribute__(self, name):
+        if name in ("minimumValue", "maximumValue", "restValue"):
+            raise RuntimeError("limit value unreadable")
+        return object.__getattribute__(self, name)
+
+
 # ── world_axis: re-point a joint's motion to a TRUE world axis ───────────────
 
 class TestWorldAxis:

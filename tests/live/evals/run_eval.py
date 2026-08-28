@@ -20,8 +20,15 @@ Run:  py -3 tests/live/evals/run_eval.py scenarios/S1_Foundation.md --model sonn
 
 Output: tests/live/evals/results/run_<scenario>_<n>/ holding prompt.txt (the exact bytes sent),
 transcript.jsonl (the full stream), report.txt (the executor's final message), stderr.txt (the
-CLI's status stream - never credential contents), and audit.json (tool-call names/counts, budget
-comparison, usage, the non-MCP-call check, and the harness_leak / auth_failure auto-flags).
+CLI's status stream - never credential contents), and audit.json (tool-call names/counts, both
+budget comparisons - audited MCP calls and executor OUTPUT tokens - usage, the non-MCP-call check,
+and the harness_leak / auth_failure auto-flags).
+
+Exit code reports HARNESS INTEGRITY, never the scenario's verdict: 0 = a run happened under the
+harness's guarantees; 2 = no executor ever ran (dead spawn through every retry); 3 = credentials
+stayed rejected after the one relaunch; 4 = a guarantee broke (blindness, or a denied tool in the
+transcript). A budget overrun and the executor's own PASS/FAIL are outcomes the orchestrator
+grades, so they leave the code at 0.
 """
 
 import argparse
@@ -92,6 +99,14 @@ CONNECTION_LOST = (
     "do NOT schedule yourself to resume later.")
 
 
+def run_tag_for(stem, when=None):
+    """The per-invocation cloud subfolder tag: SECONDS resolution AND the scenario stem. Minute
+    resolution alone collides in the two ways this harness actually runs - two different scenarios
+    launched inside the same minute, and one scenario retried seconds after a dead spawn - and a
+    collision silently merges two runs' cloud artifacts under one folder name."""
+    return "Eval-" + time.strftime("%Y%m%d-%H%M%S", when or time.localtime()) + "-" + stem
+
+
 def extract_prompt(scenario_path, run_tag):
     """The fenced block under '## AGENT PROMPT (verbatim)', byte-identical except the one
     sanctioned token: {{RUN_FOLDER}} becomes this invocation's run tag (same-name
@@ -120,6 +135,33 @@ def preflight_server():
             pass
         time.sleep(2)
     sys.exit(f"MCP server not reachable at {health} - is Fusion running with the add-in loaded?")
+
+
+def token_total(usage):
+    """The executor's OUTPUT tokens - the figure a scenario's max_tokens budget is set from (a
+    measured run's output total + 25%). Input and cache totals are recorded in audit.json's raw
+    usage beside it; they track prompt caching, not the executor's work, so they are not scored."""
+    try:
+        return int((usage or {}).get("output_tokens") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def budget_line(report):
+    """The pass/fail line for BOTH declared budgets: audited MCP calls and output tokens, each
+    actual-vs-cap. Recorded, not graded - a budget overrun calibrates the scenario (and leaves the
+    exit code at 0); the orchestrator decides what it means for the run."""
+    parts = []
+    for label, actual, cap, within in (
+            ("calls", report["tool_calls_mcp"], report["budget_max_tool_calls"],
+             report["within_call_budget"]),
+            ("output tokens", report["output_tokens"], report["budget_max_tokens"],
+             report["within_token_budget"])):
+        if cap is None:
+            parts.append(f"{label} {actual} (no budget declared)")
+        else:
+            parts.append(f"{label} {actual}/{cap} {'WITHIN' if within else 'OVER'}")
+    return "BUDGET: " + "; ".join(parts)
 
 
 def scenario_budget(scenario_path):
@@ -264,25 +306,30 @@ def launch(prompt, run_dir, model, max_turns):
 # Executors get a COPY of the API credentials; the main session rotates the single-use refresh
 # token, which kills an executor still holding the stale copy.
 # These markers - drawn from the CLI's own not-logged-in / expired-token diagnostics -
-# identify that failure so the run relaunches ONCE with a fresh copy (see main). Matched against a
-# lowercased blob; contents (tokens) are never inspected or logged, only these status strings.
+# identify that failure so the run relaunches ONCE with a fresh copy (see main). Matched against
+# the lowercased status stream; contents (tokens) are never inspected or logged, only these strings.
 _AUTH_FAILURE_MARKERS = ("not logged in", "invalid api key", "oauth token has expired",
                          "oauth token expired", "authentication_error", "please run /login")
 
 
-def _auth_failure(final, stderr):
-    """True when the executor's output carries a credential-rejection signature - the stale-copy
-    death this harness relaunches once to recover from."""
-    blob = ((final or "") + "\n" + (stderr or "")).lower()
-    return any(marker in blob for marker in _AUTH_FAILURE_MARKERS)
+def _auth_failure(stderr):
+    """True when the CLI's OWN status stream carries a credential-rejection signature - the
+    stale-copy death this harness relaunches once to recover from.
+
+    The executor's report body is deliberately NOT searched: a report is agent prose that can
+    quote a marker it read off a tool result ("the hub says not logged in") while the credentials
+    were fine, and a relaunch on that text replays the whole prompt against live state the run
+    already mutated."""
+    return any(marker in (stderr or "").lower() for marker in _AUTH_FAILURE_MARKERS)
 
 
-def audit(transcript_path, run_dir, budget_calls, stderr=""):
+def audit(transcript_path, run_dir, budget_calls, budget_tokens=None, stderr=""):
     """Parse the stream: tool calls (names, order), the final result text, usage - and the
-    blindness check (every call is an allowed MCP call). A harness-utility leak (a denied
+    blindness check (every call is an allowed MCP call). BOTH declared budgets are scored here
+    (audited MCP calls, executor output tokens). A harness-utility leak (a denied
     planning/scheduling tool that still reached the transcript) auto-flags harness_leak; a
-    credential-rejection signature in the output/stderr auto-flags auth_failure_suspected
-    (main relaunches once)."""
+    credential-rejection signature in the CLI's stderr auto-flags auth_failure_suspected
+    (main relaunches once, and only when the executor made zero MCP calls)."""
     calls, final, usage, num_turns = [], "", {}, None
     with open(transcript_path, encoding="utf-8") as fh:
         for line in fh:
@@ -312,15 +359,20 @@ def audit(transcript_path, run_dir, budget_calls, stderr=""):
         "spawn_flake_suspected": mcp_calls == 0,
         "budget_max_tool_calls": budget_calls,
         "within_call_budget": (budget_calls is None or mcp_calls <= budget_calls),
+        # The scenario's max_tokens, scored against the executor's OUTPUT tokens - the metric every
+        # budget in the scenario docs was measured in. At the cap is WITHIN, same as the calls.
+        "budget_max_tokens": budget_tokens,
+        "output_tokens": token_total(usage),
+        "within_token_budget": (budget_tokens is None or token_total(usage) <= budget_tokens),
         "harness_utility_calls": harness_utility,
         # Auto-flag: a denied planning/scheduling tool (Skill, Monitor, Task*, ...) still reached
         # the transcript. Kept true here so no downstream report can read clean over a leak.
         "harness_leak": bool(harness_utility),
         "source_access_calls": source_access,
         "blind": not source_access,
-        # Credential-rejection signature in the executor output/stderr - the stale single-use
-        # refresh-token death. main relaunches once with a fresh copy on this.
-        "auth_failure_suspected": _auth_failure(final, stderr),
+        # Credential-rejection signature in the CLI's stderr - the stale single-use refresh-token
+        # death. main relaunches once with a fresh copy on this, gated on zero MCP calls.
+        "auth_failure_suspected": _auth_failure(stderr),
         "num_turns": num_turns,
         "usage": usage,
         "call_sequence": calls,
@@ -330,6 +382,38 @@ def audit(transcript_path, run_dir, budget_calls, stderr=""):
     with open(os.path.join(run_dir, "report.txt"), "w", encoding="utf-8", newline="\n") as fh:
         fh.write(final)
     return report, final
+
+
+EXIT_OK = 0
+EXIT_DEAD_SPAWN = 2          # no executor ever ran
+EXIT_AUTH = 3                # credentials stayed rejected after the one relaunch
+EXIT_HARNESS_INTEGRITY = 4   # a run happened, but a harness guarantee broke
+
+
+def exit_status(report, dead_spawn_exhausted=False, auth_exhausted=False):
+    """(code, reason) - the process's verdict on THE HARNESS, never on the scenario.
+
+    Non-zero says this run cannot be graded as an experiment: nothing ran, credentials stayed
+    rejected, or the blindness/denial guarantees the launch is built on did not hold. A budget
+    overrun, a FAIL verdict, and a BLOCKED report are outcomes - the orchestrator grades those, so
+    they exit 0. Each path names its reason so a caller reading only the exit code and last line
+    knows which failure it hit."""
+    if dead_spawn_exhausted:
+        return EXIT_DEAD_SPAWN, ("dead spawn persisted through every retry - no executor ever ran, "
+                                 "so there is nothing to grade")
+    if auth_exhausted:
+        return EXIT_AUTH, ("executor credentials were rejected again after the one relaunch - the "
+                           "copied token is not being accepted")
+    if not report:
+        return EXIT_DEAD_SPAWN, "no run record was produced"
+    if not report.get("blind", True):
+        return EXIT_HARNESS_INTEGRITY, ("blindness broken - the executor reached source tools: "
+                                        + ", ".join(report.get("source_access_calls") or ["?"]))
+    if report.get("harness_leak"):
+        return EXIT_HARNESS_INTEGRITY, ("harness-utility leak - denied tools reached the "
+                                        "transcript: "
+                                        + ", ".join(report.get("harness_utility_calls") or ["?"]))
+    return EXIT_OK, "harness clean - the run is gradeable"
 
 
 def main():
@@ -350,9 +434,9 @@ def main():
     # Per-RUN cloud subfolder tag: each invocation's saves land under
     # Pipeline-v1/<run_tag> via the {{RUN_FOLDER}} token, so a run's artifacts can never
     # name-collide with a prior chain's. Chains still hand artifacts forward BY URN.
-    run_tag = time.strftime("Eval-%Y%m%d-%H%M")
+    run_tag = run_tag_for(stem)
 
-    budget_calls, _ = scenario_budget(scenario)
+    budget_calls, budget_tokens = scenario_budget(scenario)
     # --max-turns default is DERIVED from the scenario's own call budget when not passed explicitly:
     # 120 sat below several scenario budgets (S1 154, S2a 130, S7 138) and severed a run at turn 121
     # pre-report. 2x the budget leaves headroom for the report turns; the explicit flag still wins.
@@ -378,18 +462,43 @@ def main():
     # cheap (a lost flip self-terminates in under a minute), so grind a fair number of them.
     spawn_backoffs = [5, 5, 5, 10, 10, 20, 30]
     auth_retry_used = False
+    dead_spawn_exhausted = auth_exhausted = False
     while True:
         n = 1
         while os.path.exists(os.path.join(batch_dir, f"run_{stem}_{n:02d}")):
             n += 1
         run_dir = os.path.join(batch_dir, f"run_{stem}_{n:02d}")
         os.makedirs(run_dir)
-        print(f"run dir: {run_dir}\nmodel: {args.model}  budget: {budget_calls} calls"
-              f"  max_turns: {max_turns}  cloud folder tag: {run_tag}", flush=True)
+        print(f"run dir: {run_dir}\nmodel: {args.model}  budget: {budget_calls} calls / "
+              f"{budget_tokens} output tokens  max_turns: {max_turns}  "
+              f"cloud folder tag: {run_tag}", flush=True)
         transcript, stderr, dead_spawn = launch(prompt, run_dir, args.model, max_turns)
-        report, final = audit(transcript, run_dir, budget_calls, stderr)
+        report, final = audit(transcript, run_dir, budget_calls, budget_tokens, stderr)
+        # AUTH is diagnosed BEFORE the dead-spawn branch, because a credential rejection kills the
+        # executor before its first tool call and so also reads as zero MCP calls. The relaunch is
+        # gated on that zero: an executor that already called tools has MUTATED the live document,
+        # and replaying the whole prompt over that state - the runner stages nothing - compounds
+        # the damage rather than recovering the run.
+        if report["auth_failure_suspected"] and report["tool_calls_mcp"] == 0:
+            if auth_retry_used:
+                auth_exhausted = True
+                print("AUTH FAILURE again after the relaunch - giving up; the copied credentials "
+                      "are being rejected, re-authenticate the main session.", flush=True)
+                break
+            auth_retry_used = True
+            print("AUTH FAILURE (executor credentials rejected - stale single-use token) - "
+                  "relaunching once with freshly copied credentials...", flush=True)
+            time.sleep(5)
+            preflight_server()
+            continue
+        if report["auth_failure_suspected"]:
+            print(f"  auth marker in the CLI's status stream, but the executor made "
+                  f"{report['tool_calls_mcp']} MCP calls - NOT relaunching (a replay with no "
+                  f"restage would re-run the prompt against already-mutated live state).",
+                  flush=True)
         if dead_spawn or report["spawn_flake_suspected"]:
             if not spawn_backoffs:
+                dead_spawn_exhausted = True
                 print("DEAD SPAWN persisted through all retries - giving up; the API/CLI side "
                       "is refusing tool use right now, try again later.", flush=True)
                 break
@@ -399,20 +508,17 @@ def main():
             time.sleep(wait)
             preflight_server()
             continue
-        if report["auth_failure_suspected"] and not auth_retry_used:
-            auth_retry_used = True
-            print("AUTH FAILURE (executor credentials rejected - stale single-use token) - "
-                  "relaunching once with freshly copied credentials...", flush=True)
-            time.sleep(5)
-            preflight_server()
-            continue
         break
     print(json.dumps({k: report[k] for k in
-                      ("tool_calls_mcp", "spawn_flake_suspected", "within_call_budget", "blind",
+                      ("tool_calls_mcp", "spawn_flake_suspected", "within_call_budget",
+                       "output_tokens", "within_token_budget", "blind",
                        "source_access_calls", "harness_utility_calls", "harness_leak",
                        "auth_failure_suspected", "num_turns")}, indent=1))
-    print("\n== executor's final report ==\n" + final)
-    return 0
+    print(budget_line(report))
+    print("\n== executor's final report ==\n" + (final or "(no final report)"))
+    code, reason = exit_status(report, dead_spawn_exhausted, auth_exhausted)
+    print(f"\nHARNESS: exit {code} - {reason}", flush=True)
+    return code
 
 
 if __name__ == "__main__":

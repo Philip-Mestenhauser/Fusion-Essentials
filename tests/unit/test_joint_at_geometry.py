@@ -456,6 +456,33 @@ class TestHandler:
         assert "FAILED TO COMPUTE" in out["health_warning"]
         assert "Compute Failed" not in out["health_warning"]   # message trimmed
 
+    def test_the_health_warning_is_one_whole_condensed_sentence(self, monkeypatch):
+        # Fusion's errorOrWarningMessage carries embedded NEWLINES and REPEATS its sentence, joined
+        # by the marker plus the joint's own name. The shared reader collapses the whitespace, so
+        # the wire sentence reads whole rather than as a raw slice of the blob.
+        blob = ("Can't resolve positions.\n\nInspect relationships.Compute FailedJoint1"
+                "Can't resolve positions.Compute FailedJoint1")
+        _install_design(monkeypatch, {"a": FakeBRepFace(_ST.CylinderSurfaceType),
+                                      "b": FakeBRepFace(_ST.CylinderSurfaceType)},
+                        joint_health=1, joint_msg=blob)
+        out = _payload(jg.handler(handle_one="a", handle_two="b", motion="revolute"))
+        warning = out["health_warning"]
+        assert warning.endswith("Can't resolve positions. Inspect relationships.")
+        assert "Compute Failed" not in warning and "\n" not in warning
+
+    def test_a_message_at_the_cap_is_whole_and_one_character_over_is_marked_cut(self, monkeypatch):
+        # the exact cap boundary this site passes to the shared reader: 200 characters cross whole,
+        # 201 are cut and marked, so a shortened message never reads as a complete one.
+        for length, cut in ((200, False), (201, True)):
+            _install_design(monkeypatch, {"a": FakeBRepFace(_ST.CylinderSurfaceType),
+                                          "b": FakeBRepFace(_ST.CylinderSurfaceType)},
+                            joint_health=1, joint_msg="z" * length)
+            warning = _payload(jg.handler(handle_one="a", handle_two="b",
+                                          motion="revolute"))["health_warning"]
+            assert warning.endswith(" ...") is cut, length
+            # 'z' appears nowhere in the fixed lead-in, so this counts the MESSAGE's own characters
+            assert warning.count("z") == (200 if cut else length), length
+
     def test_healthy_joint_no_warning(self, monkeypatch):
         _install_design(monkeypatch, {"a": FakeBRepFace(_ST.CylinderSurfaceType), "b": FakeBRepFace(_ST.CylinderSurfaceType)})
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="revolute"))
@@ -651,6 +678,85 @@ class TestHandler:
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="rigid"))
         assert not getattr(joints.last_input, "isFlipped", False)
         assert out["flipped"] is False
+
+
+class TestHealthVerdict:
+    """The created joint's own state decides the payload's authoritative flag. Only the ERROR and
+    WARNING states are a failed compute; SUPPRESSED / ROLLED BACK are states published by NAME with
+    no failure claim, and a state this read cannot classify (Unknown, or a healthState that will not
+    answer) leaves 'healthy' null instead of asserting either verdict. The enum members come from
+    adsk.fusion.FeatureHealthStates, never a hand-typed int."""
+
+    _FHS = adsk.fusion.FeatureHealthStates
+
+    def _cyl_pair(self, monkeypatch, **kw):
+        return _install_design(monkeypatch, {"a": FakeBRepFace(_ST.CylinderSurfaceType),
+                                             "b": FakeBRepFace(_ST.CylinderSurfaceType)}, **kw)
+
+    def _out(self, monkeypatch, **kw):
+        self._cyl_pair(monkeypatch, **kw)
+        return _payload(jg.handler(handle_one="a", handle_two="b", motion="revolute"))
+
+    def test_a_healthy_joint_names_its_state(self, monkeypatch):
+        out = self._out(monkeypatch, joint_health=self._FHS.HealthyFeatureHealthState)
+        assert out["healthy"] is True and out["health_state"] == "healthy"
+        assert "health_warning" not in out
+
+    def test_an_error_state_is_the_failure_verdict(self, monkeypatch):
+        out = self._out(monkeypatch, joint_health=self._FHS.ErrorFeatureHealthState,
+                        joint_msg="Can't resolve positions.")
+        assert out["healthy"] is False and out["health_state"] == "error"
+        assert "FAILED TO COMPUTE" in out["health_warning"]
+
+    def test_a_warning_state_is_also_a_failure_verdict(self, monkeypatch):
+        # Fusion marks a WARNING-state feature 'Compute Failed' too, and assembly_get's
+        # broken_joints classes the two alike - so this tool must not split them either.
+        out = self._out(monkeypatch, joint_health=self._FHS.WarningFeatureHealthState,
+                        joint_msg="Conflicting relationships.")
+        assert out["healthy"] is False and out["health_state"] == "warning"
+        assert "FAILED TO COMPUTE" in out["health_warning"]
+
+    def test_a_suppressed_joint_is_not_published_as_a_failed_compute(self, monkeypatch):
+        out = self._out(monkeypatch, joint_health=self._FHS.SuppressedFeatureHealthState)
+        assert out["healthy"] is True and out["health_state"] == "suppressed"
+        assert "health_warning" not in out
+        assert "'suppressed'" in out["note"] and "FAILED TO COMPUTE" not in out["note"]
+
+    def test_a_rolled_back_joint_is_not_published_as_a_failed_compute(self, monkeypatch):
+        out = self._out(monkeypatch, joint_health=self._FHS.RolledBackFeatureHealthState)
+        assert out["healthy"] is True and out["health_state"] == "rolled_back"
+        assert "health_warning" not in out
+        assert "'rolled_back'" in out["note"] and "FAILED TO COMPUTE" not in out["note"]
+
+    def test_an_unknown_state_leaves_the_verdict_null(self, monkeypatch):
+        out = self._out(monkeypatch, joint_health=self._FHS.UnknownFeatureHealthState)
+        assert out["healthy"] is None and out["health_state"] is None
+        assert "UNVERIFIED" in out["health_warning"]
+        assert "FAILED TO COMPUTE" not in out["health_warning"]
+
+    def test_a_state_that_will_not_read_leaves_the_verdict_null(self, monkeypatch):
+        # An unreadable state is not a clean compute either - reading it as healthy publishes
+        # healthy=true for a joint nothing verified.
+        joints = self._cyl_pair(monkeypatch)
+
+        class _Blind:
+            name = "Joint1"
+            occurrenceOne = type("O", (), {"name": "Rod:1"})()
+            occurrenceTwo = type("O", (), {"name": "Crank:1"})()
+
+            @property
+            def healthState(self):
+                raise RuntimeError("health unreadable")
+
+        joints.add = lambda ji: _Blind()
+        out = _payload(jg.handler(handle_one="a", handle_two="b", motion="revolute"))
+        assert out["healthy"] is None and out["health_state"] is None
+        assert "UNVERIFIED" in out["health_warning"]
+
+    def test_the_wire_advertises_the_null_verdict(self, monkeypatch):
+        # 'healthy' is the flag the description calls authoritative, so a null it can return has to
+        # be on the wire - a caller treating null as falsey would read a rolled-back joint as broken.
+        assert "null" in jg.TOOL_DESCRIPTION and "healthy" in jg.TOOL_DESCRIPTION
 
 
 class TestAxisNote:

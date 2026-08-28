@@ -6,8 +6,8 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 184  |  **description breadcrumbs:** 679  |  **note/error breadcrumbs:** 475
-  |  **guidance smells flagged:** 6
+**Tools:** 184  |  **description breadcrumbs:** 680  |  **note/error breadcrumbs:** 483
+  |  **guidance smells flagged:** 4
 ## Blindspots to engineer
 
 ### Dead references (a tip names something that is not a tool - FIX THESE)
@@ -35,15 +35,15 @@ close orphans, factor duplicated guards into shared helpers.
 - `doc_new`  <- 95  (desc 10, note 85)
 - `find_geometry`  <- 87  (desc 61, note 26)
 - `view_screenshot`  <- 55  (desc 21, note 34)
-- `design_delete_feature`  <- 40  (desc 20, note 20)
+- `design_delete_feature`  <- 41  (desc 20, note 21)
 - `design_get`  <- 39  (desc 13, note 26)
 - `sketch_create`  <- 35  (desc 18, note 17)
 - `data_get`  <- 33  (desc 19, note 14)
 - `cam_get`  <- 31  (desc 20, note 11)
 - `sketch_get`  <- 31  (desc 14, note 17)
+- `model_inspect`  <- 25  (desc 8, note 17)
 - `assembly_get`  <- 24  (desc 12, note 12)
 - `doc_open`  <- 24  (desc 7, note 17)
-- `model_extrude`  <- 24  (desc 21, note 3)
 
 ## The guidance surface (every note the agent can be told)
 
@@ -55,15 +55,19 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 
 ### `appearance_set`
 - Appearance override applied. Set a new color anytime; to revert, the override is on the body/occurrence (.appearance). Pair with view_screenshot to see it.
+- ' into this document as '
+- ' - the base every color override here is copied from.
 - This write landed on the BODY, which is the component's NATIVE body - the color shows on EVERY instance of that component, not just one. To color one instance, target the OCCURRENCE (its fullPathNa...
 - Appearance applied to
 - failed - see 'failed'.
 - body(ies) of this occurrence do NOT carry the new appearance (
 - ) - each still reads the one named in 'bodies_not_reached'; color those directly (target = the body).
 - body(ies) could not be compared, so the color is UNCONFIRMED there - see 'unverified_bodies'.
-- 'opacity' must be 0-255.
+- cannot be delivered by this tool, so it is refused rather than reported as applied. Only opacity=
+- is accepted. This tool sets an appearance's COLOR, and a Fusion appearance's transparency is its Prism material class (interior_model plus transparent_color / transparent_distance / transparent_ior...
 - No active design with geometry.
-- 'opacity' must be an integer 0-255.
+- 'opacity' must be an integer, and only
+- (opaque) is accepted.
 - has no bodies to color.
 - Could not apply appearance to any body of
 - Assignment was accepted but
@@ -113,6 +117,9 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ' solved, but adding it left
 - existing timeline feature(s) unhealthy:
 - Deleting it does not restore them automatically - check them with assembly_get afterwards.
+- ' was created but holds only
+- relationship(s) submitted - the missing one(s) constrain nothing, so the parts are not located the way this call describes.
+- Then re-submit the relationships that must solve together.
 - 'relationships' must be a list of {snap_one, snap_two, flip?, offset?}.
 - No relationships to constrain. Provide 'relationships' or snap_one/snap_two.
 - Assembly constraint failed:
@@ -225,7 +232,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not set isReversed on motion link '
 
 ### `assembly_get`
-- Structured kinematic state. CHECK is_healthy FIRST - false means a joint/feature FAILED TO COMPUTE (the 'Compute Failed' a user sees in the timeline before any test; a wired-but-mis-axised joint ov...
+- Structured kinematic state. CHECK is_healthy FIRST - false means a joint, relation or feature FAILED TO COMPUTE (the 'Compute Failed' a user sees in the timeline before any test; a wired-but-mis-ax...
 - '. Use mm, cm, or in.
 - No active design. Open or create a document first (see doc_new).
 
@@ -249,6 +256,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - comparable solid entit
 - occurrence(s) at any depth,
 - root-level solid body(ies)), and interference needs at least two. No verdict was formed - this is NOT a pass.
+- Cannot certify interference-free:
+- root-level solid body(ies) WERE compared and none of them interfere, but that is not a verdict over the whole assembly - no pass was formed. Resolve the reference (see workspace_orient health.unres...
 - Interference analysis failed:
 
 ### `assembly_move`
@@ -481,7 +490,6 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 ### `cam_inspect_toolpaths`
 - The toolpath validity check returned
 - , not a true/false verdict - there is no verdict to report.
-- The toolpath validity check failed for
 
 ### `cam_post`
 - Post did not report clean success - review before running.
@@ -627,12 +635,14 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Delete failed for folder '
 - ' is not empty (immediate files:
 - ). Deleting it RECURSIVELY removes its ENTIRE subtree:
-- subfolder(s) total - and bypasses the per-file reference-orphan check. Pass force=true AND recursive_confirm='
+- subfolder(s) total - and bypasses the per-file reference-orphan check.
+- Pass force=true AND recursive_confirm='
 - ' to do this, or empty it first (data_delete_file for files).
 - ' (a deliberate second acknowledgment). Nothing was deleted.
 - RECURSIVE DELETE of '
 - ' would remove its ENTIRE subtree:
-- subfolder(s) - and bypasses the per-file reference-orphan check (nested referenced files would be orphaned). This is irreversible. To proceed, pass recursive_confirm='
+- subfolder(s) - and bypasses the per-file reference-orphan check (nested referenced files would be orphaned). This is irreversible.
+- To proceed, pass recursive_confirm='
 
 ### `data_download_file`
 - Downloaded synchronously (Fusion was frozen for the transfer) and gated on a non-empty file landing on disk - see size_bytes.
@@ -793,7 +803,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - The appearance table has no theme column (parentTableColumn) to link configurations.
 - Appearance theme column added and configurations linked to theme rows. Switch configurations to see the color change (design_configure(action='activate', name=...)).
 - No appearance named '
-- ' in the design. Copy it in first (design.appearances.addByCopy) - e.g. an opaque base like 'Powder Coat'.
+- ' in the design. Copy it in first (design.appearances.addByCopy) - appearance_set copies the Fusion Appearance Library's 'Paint - Enamel Glossy (White)' and keeps it in the document as 'MCP Neutral...
 - No appearance cell/row at theme index
 - Appearance cell at theme index
 - after the set - the assignment did not verifiably take.
@@ -835,6 +845,9 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 ### `design_delete_feature`
 - Timeline feature deleted. Geometry it produced is removed; instances it created (pattern/mirror copies) go with it. Pair with design_get(include=['timeline']) / workspace_orient to confirm.
 - Remove FEATURE deleted - the occurrence it had taken out is back in the assembly. Confirm with design_get(include=['tree']).
+- deleteMe() reported success for '
+- ', but its absence is UNVERIFIED:
+- , so the re-read cannot prove the object is gone - and a check that could not read is not a check that found nothing. Nothing was rolled back; re-read design_get(include=['timeline']) to see what i...
 - Provide 'feature' - the timeline object name to delete (see design_get(include=['timeline'])).
 - No active design (open a document with design geometry).
 - This design has no timeline (a direct-modelling design has no deletable timeline features). Delete bodies/occurrences directly instead.
@@ -842,14 +855,22 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ' has no associated entity to delete (it may be a group or an unsupported timeline object).
 - Fusion declined to delete '
 - ' (deleteMe returned false). It may be depended on in a way that blocks deletion.
+- deleteMe() reported success but the timeline still carries
+- ' - as many as before the delete (
+- ), so it was NOT removed. Nothing was rolled back; re-read design_get(include=['timeline']) to see what is actually there.
 - ' names a RemoveFeature in
 - ) - refusing to guess which one this timeline object belongs to.
 
 ### `design_delete_occurrence`
 - Occurrence deleted. If it was the last instance of its component, the component was removed too. Pair with workspace_orient / design_get(include=['tree']) to confirm the assembly.
+- deleteMe() reported success for '
+- ', but its absence is UNVERIFIED: the occurrence walk did not carry '
+- ' even before the delete, so the re-read cannot prove the instance is gone - and a check that could not read is not a check that found nothing. Nothing was rolled back; re-read design_get(include=[...
 - No active design with components.
 - Fusion refused to delete '
-- ' (deleteMe returned false). It is likely owned by a pattern/mirror feature - delete or reduce that feature's count instead.  **[cause-guess]**
+- ': deleteMe() returned false, which carries no reason. Read design_get(include=['timeline']) to see which feature built this instance - an instance a pattern/mirror feature owns is removed by editi...
+- deleteMe() reported success but '
+- ' is still in the assembly's occurrence walk - it was NOT deleted. Nothing was rolled back; re-read design_get(include=['tree']) to see what is actually there.
 
 ### `design_edit_timeline`
 - No active design (open a document with design geometry).
@@ -943,6 +964,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ' not found. Pass a body/component NAME, an occurrence fullPathName (e.g. Bracket:2 - the precise way to pick one instance), or omit 'target' to export the whole design.
 - export reported success but
 - . execute() returned true but produced nothing - treating this as a failure, not a false success. Check the target geometry and the output path are valid.
+- The root component's occurrences did not read, so which components this split would write one file each for is unknown - refusing rather than reporting a zero-file export. Export without split_by_c...
 - No top-level occurrences to split - the design has no component instances. Export without split_by_component to write the whole design as one file.
 - split export wrote NO files - all
 - occurrence(s) failed:
@@ -1005,11 +1027,13 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Remove failed (removeFeatures.add raised):
 
 ### `design_set_mode`
+- The design mode does not read back after the assignment, so the conversion is UNCONFIRMED - 'converted' and 'history_discarded' are null. Re-read with design_get(include=['mode']) to see what the d...
 - No active design. Create or open a document first (see doc_new).
 - 'target' must be one of: parametric, direct (got '
 - Converting to DIRECT destroys the timeline and all design history (irreversible). Re-call with confirm_history_loss=true to proceed.
 - Re-run design_get(include=['mode']) to see the updated capability map.
 - Assignment did not take - design is still
+- . Nothing was converted and no history was discarded.
 
 ### `design_set_name`
 - 'new_name' is required - a non-empty name to give the target.
@@ -1030,6 +1054,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Activate failed for '
 
 ### `doc_close`
+- No document was closed.
 - . Fusion keeps at least one document open.
 - discarding unsaved changes
 - No documents are open.
@@ -1075,7 +1100,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - No active document. Open or create one first (doc_open / doc_new).
 - Version metadata LAGS a just-completed save: measured, a fresh read shows the new tip at 2.9-4.4s, and after doc_save_milestone the milestone flag and the Milestones collection arrive TOGETHER at 1...
 - The active document has no cloud DataFile (never saved to the cloud); no version history exists. Save it first (doc_save_as).
-- Covers both link kinds: kind='xref' (referenced occurrences) and kind='derive' (derive features). all_current is authoritative ONLY on a complete walk; it is false whenever any ref is stale, any re...
+- Covers three link kinds: kind='xref' (referenced occurrences), kind='derive' (derive features) and kind='unresolved' (an occurrence whose referenced component could not be loaded). all_current is a...
 - No active Design (the active product is not a design); the xref walk needs a design document.
 - The active design has no root component.
 - references = documents that USE this one (drawings made from it, parent assemblies that insert it); the mirror of include=['xref_tree'] (what this design consumes). query_complete is authoritative ...
@@ -1145,7 +1170,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - addByInsert returned nothing (the insert did not produce an occurrence).
 - addByInsert returned an occurrence but it reads isValid=false - the insert did not land.
 - Insert landed but the occurrence is NOT an external reference (isReferencedComponent=false) - the associative link did not form. Confirm the source and host share a project, then retry.
-- Inserted at the requested placement. This is the source's last SAVED cloud version - unsaved in-session edits in the source are NOT reflected here (save the source, then doc_update_xref). Refine wi...
+- Inserted at the requested placement. This is the source's last SAVED cloud version - unsaved in-session edits in the source are NOT reflected here (save the source, then doc_update_xref). A joint p...
 - ' has no component to insert into.
 - Unknown rotate_axis '
 - ) was refused - the placement rotation could not be built, so nothing was inserted or removed.
@@ -1545,7 +1570,6 @@ A planar face's 'frame' is th...
 - joint_one and joint_two must be different joints.
 - ratio must be non-zero (a 0 ratio links no motion).
 - Motion link creation returned nothing - check that both joints permit motion (revolute/slider/cylindrical); a rigid joint cannot be linked.
-- Created the link but could not apply the ratio: the platform will not couple these two joints' motion. (Fusion:
 - ratio must be a number (got
 - . Link two joints that permit motion (revolute/slider/cylindrical).
 - Could not create the motion link:
@@ -1585,7 +1609,6 @@ A planar face's 'frame' is th...
 - Exported a MESH file to local disk (the design was not modified). To round-trip it into the cloud, upload it with data_upload_file; to re-import it as a mesh body, use mesh_insert.
 - component(s) to separate
 - mesh files - each top-level occurrence is one printable file.
-- ' did NOT land: the export options did not read back the value that was set, so 'refinement' is null and the density this file was written at is unconfirmed. 'refinement_requested' is what was aske...
 - Target was a MESH body, which ExportManager cannot write to a file on its own (it returns success but writes nothing). Exported its owning component instead - the file contains that component's mes...
 - Provide 'file_path' - the local output path (a file, or a DIRECTORY when split_by_component=true). The format extension is appended if missing.
 - No active design to export. Open or create a document first (see doc_new).
@@ -1598,6 +1621,7 @@ A planar face's 'frame' is th...
 - export returned false - nothing was written.
 - export reported success but
 - . execute() returned True but produced nothing - treating this as a FAILURE, not a false success. Check the target geometry and the output path are valid.
+- The root component's occurrences did not read, so which components this split would write one file each for is unknown - refusing rather than reporting a zero-file export. Export without split_by_c...
 - No top-level occurrences to split - the design has no component instances. Export without split_by_component to write the whole design as one file.
 - split export wrote NO files - all
 - occurrence(s) failed:
@@ -1793,12 +1817,13 @@ A planar face's 'frame' is th...
 - . Try solver='rectangular', or enable the extension.
 
 ### `model_base_feature`
+- No scope was open in this session to close.
+- captured open base-feature scope(s); design is now
+- scope(s) did NOT confirm closed (
+- ) - each may still be OPEN, which keeps the design reading direct and the timeline inaccessible. Their handles are KEPT (an open base feature can be reached no other way), so model_base_feature(act...
 - No active design. Create or open a document first (see doc_new).
 - 'action' must be one of: start, finish (got '
 - Base-feature edit OPEN - geometry from subsequent tool calls lands in this scope. While it is open the design READS as 'direct' and the timeline is inaccessible - that is the open scope, NOT a real...
-- No scope was open in this session to close.
-- Note: a scope opened by a DIFFERENT session/tool cannot be seen while it is open (the API hides an in-edit base feature) - only the session that opened it holds the object needed to close it.
-- captured open base-feature scope(s); design is now
 - This component has no baseFeatures collection - cannot create a base feature here.
 - BaseFeatures.add() returned nothing - could not create a base feature.
 - Could not enter base-feature edit (startEdit returned false).
@@ -2088,9 +2113,11 @@ A planar face's 'frame' is th...
 - Distance 0 with both closest points at (0,0,0): the targets touch or OVERLAP and this point pair is degenerate - it does NOT locate the contact. Use assembly_inspect_interference on the pair to get...
 - MeasureManager unavailable.
 - measureAngle returned nothing for these two targets.
-- measureAngle returned a result whose value could not be read, so the angle is UNKNOWN - reporting it as 0 would read as parallel.
+- measureAngle returned a result whose value read as
+- , not a number, so the angle is UNKNOWN - reporting it as 0 would read as parallel.
 - Angle between the two targets. Two planar faces give the angle between their planes; a face + an edge the angle between them.
-- measureMinimumDistance returned a result whose value could not be read, so the distance is UNKNOWN - reporting it as 0 would read as touching. Re-run find_geometry for fresh handles and retry.
+- measureMinimumDistance returned a result whose value read as
+- , not a number, so the distance is UNKNOWN - reporting it as 0 would read as touching. Re-run find_geometry for fresh handles and retry.
 - Angle measurement failed:
 - . (Angle needs two entities with a defined direction - two planar faces, or a face and an edge; a whole occurrence may be rejected. Use find_geometry face/edge handles.)
 
@@ -2257,8 +2284,8 @@ A planar face's 'frame' is th...
 - Body hollowed into a shell. Pair with view_section to inspect the wall thickness.
 - No active design. Create or open a document first (see doc_new).
 - (The body could not be hollowed at this thickness.)
-- Shell reported success but body '
-- ' is unchanged (volume and face count identical). The thickness is likely too large for the geometry - try a smaller value.  **[cause-guess]**
+- Shell reported success on body '
+- . Read the body back with model_inspect, or cut a cross-section with view_section, to see what the feature did.
 - . (The thickness may be too large for the geometry, or the removed faces span more than one body - try a smaller thickness.)
 
 ### `model_split`
@@ -2282,6 +2309,7 @@ A planar face's 'frame' is th...
 - '. Use mm, cm, or in.
 - No active design. Create or open a document first (see doc_new).
 - Stitch needs at least 2 surface bodies (got
+- Stitch reported success but the feature owns no result body - nothing was stitched.
 - Surfaces did NOT close into a solid within tolerance (
 - ). The result is still a surface - increase tolerance or check for gaps/overlaps.
 - The stitch ran, but at least one result body's isSolid flag could not be read back, so whether the surfaces closed into a SOLID is UNVERIFIED - check the body with model_inspect or design_get(inclu...
@@ -2596,7 +2624,8 @@ A planar face's 'frame' is th...
 - 'rotation_deg' must be a number, got
 
 ### `sketch_create`
-- Draw on it with sketch_add_geometry (target this sketch by name). 'frame' maps sketch coords to world: sketch (0,0) sits at frame.origin_mm, +X points along frame.x_world, +Y along frame.y_world, a...
+- On the xz origin plane in particular the frame is NOT world-aligned: local +Y maps to world -Z (read the frame's own +Y axis for the exact per-plane axis directions). sketch_get(sketch_name) return...
+- Draw on it with sketch_add_geometry (target this sketch by name).
 - No active design. Create or open a document first (see doc_new).
 - Sketch creation returned nothing on
 - Failed to create sketch on
@@ -2703,6 +2732,10 @@ A planar face's 'frame' is th...
 - Extrude a resulting profile via sketch_get -> model_extrude.
 - Projection created no sketch entities in '
 - '. The geometry may already be projected, or lies out of the sketch plane's projectable set. Nothing was added.
+- - delete them with sketch_delete_entity if that linkage is wrong for the job.
+- . The curves WERE created and remain in the sketch
+- was requested, but all
+- curve(s) project2 created in sketch '
 - Projection failed in sketch '
 - Curves projected onto the target face(s).
 - the source curve it came from
@@ -2757,8 +2790,6 @@ A planar face's 'frame' is th...
 
 ### `surface_create_ruled`
 - The result reads back SOLID (isSolid=true), not the open sheet a ruled surface makes - inspect it before building on it.
-- New open surface body (isSolid=false), separate from the body the edges came from. Join it with model_stitch, or thicken it with surface_thicken.
-- Not read back off the feature:
 - '. Use mm, cm, or in.
 - ruled_type='direction' needs a 'direction' entity - Fusion refuses to build the input without one (measured: "3 : invalid argument direction").
 - 'direction' was given with ruled_type='
@@ -2768,6 +2799,9 @@ A planar face's 'frame' is th...
 - 'edges' resolved to no edges. Pass find_geometry edge handles.
 - is not available on this Fusion version.
 - The ruled surface feature was created but added nothing: every body it reports was already in '
+- New open surface body (isSolid=false), separate from the body the edges came from. Join it with model_stitch, or thicken it with surface_thicken.
+- Not read back off the feature:
+- The ruled surface was created, but no result body's isSolid flag could be read back, so whether it is the open sheet a ruled surface makes or a SOLID is UNVERIFIED - check it with model_inspect.
 - 'angle_deg' must be a number of degrees, got '
 - Fusion built no ruled-surface input from those edges, so nothing was created. Confirm the handles still resolve with find_geometry.
 - Ruled surface failed:
@@ -2942,6 +2976,10 @@ A planar face's 'frame' is th...
 - Nothing is selected in Fusion. Ask the user to click an entity, then call sys_get_selection again (or re-run sys_request_selection).
 - Could not read the selection:
 
+### `sys_reload_addin`
+- ), so firing it would reach nothing and the add-in would keep running the code already in memory. Reload it from Fusion's Scripts and Add-Ins dialog (Shift+S) instead - stop the add-in, then run it.
+- Reload NOT scheduled: the deferred-reload event is not installed (
+
 ### `sys_request_selection`
 - No selection was made within
 - s. Nothing was picked - an expected outcome, not a tool defect. Do NOT re-fire this tool in a loop: an unanswered hold usually means the user is not at the Fusion window or never learned a pick was...
@@ -3068,7 +3106,7 @@ A planar face's 'frame' is th...
 
 ### `workspace_orient`
 - Document is UNSAVED - no URN/project yet; save before addressing it by id.
-- Use 'pointers' to drill down with scoped calls instead of whole-design dumps.
+- browser_digest is DEPTH-1: is_xref describes each top-level row ITSELF, so a reference nested below one leaves every flag false - doc_get(include=['xref_tree']) walks every depth. references.refere...
 - Design is LARGE - prefer scoped calls.
 - A document is open but no Design product is active. Switch to the Design workspace, or use the CAM tools if has_cam is true.
 - No active document. Open or create one first (see doc_new / doc_open).

@@ -285,26 +285,89 @@ def _world_axis_entity(design, axis_idx):
     return _inputs.world_construction_axis(root, "xyz"[axis_idx])
 
 
+# The band a limit's read-back may differ from the request by, expressed in the REQUEST'S OWN units
+# (degrees, or the caller's length unit). A limit makes a units round trip in each direction - degrees
+# to radians, display length to cm - so the read-back is converted back and compared there, against
+# the same display-unit band joint_drive's value_now gate holds its own round trip to.
+_LIMIT_BAND = 1e-3
+
+# native -> degrees, for the radians a rotation limit stores.
+_DEG_PER_RAD = 180.0 / math.pi
+
+# (payload key, enabled-flag property, value property) per limit, in the order they are applied.
+_ROT_LIMITS = (("min_deg", "isMinimumValueEnabled", "minimumValue"),
+               ("max_deg", "isMaximumValueEnabled", "maximumValue"),
+               ("rest_deg", "isRestValueEnabled", "restValue"))
+_LIN_LIMITS = (("min_mm", "isMinimumValueEnabled", "minimumValue"),
+               ("max_mm", "isMaximumValueEnabled", "maximumValue"),
+               ("rest_mm", "isRestValueEnabled", "restValue"))
+
+
+def _unverified_limits_note(keys):
+    """The one sentence a payload appends for limits whose read-back could not be taken - the ONE
+    home for that wording, shared by joint_create and joint_edit."""
+    return (f" Limits published null ({', '.join(keys)}) - each was assigned but could not be read "
+            "back off the joint, so whether it TOOK is UNKNOWN here (it is not a 'yes'). Read the "
+            "joint's limits with assembly_get before relying on them.")
+
+
+def _set_one_limit(limits, flag_prop, value_prop, key, wanted, native, unit_scale):
+    """Enable and assign ONE joint limit, then read BOTH back off the live JointLimits.
+
+    A JointLimits is a LIVE object, not a FeatureInput, so this is a direct re-read rather than
+    _common.set_verified (whose exact-equality compare suits a FeatureInput enum, not a float that
+    makes a units round trip). `native` is the value assigned in the API's own units (radians / cm)
+    and `unit_scale` converts a native read back into the caller's units, where the comparison
+    happens within _LIMIT_BAND.
+
+    Returns (published, error): `published` is the read-back in the caller's units, or None when the
+    re-read could not be taken - never the request echoed back; `error` names the limit that did not
+    take."""
+    try:
+        setattr(limits, flag_prop, True)
+        setattr(limits, value_prop, native)
+    except Exception as e:
+        return None, f"Setting {key} raised: {e}."
+    enabled = _common.read_flag(lambda: getattr(limits, flag_prop))
+    if enabled is False:
+        return None, (f"{key} did not take - the joint reads {flag_prop} back as false, so that "
+                      "limit is not in force.")
+    landed = _common.measured(lambda: getattr(limits, value_prop), scale=unit_scale, places=9)
+    if landed is None or enabled is None:
+        return None, None
+    if abs(landed - float(wanted)) > _LIMIT_BAND:
+        return None, (f"{key} did not take - {wanted} was requested and the joint reads back "
+                      f"{landed} in the same units.")
+    return landed, None
+
+
 def _apply_limits(motion, *, min_deg=None, max_deg=None, rest_deg=None,
                   min_mm=None, max_mm=None, rest_mm=None, cm_scale=0.1):
-    """Apply rotation and/or linear (slide) limits to a JointMotion. Returns (changed, error).
+    """Apply rotation and/or linear (slide) limits to a JointMotion, reading each one BACK off the
+    joint. Returns (changed, unverified, error).
 
     Angular limits go on motion.rotationLimits (radians); linear go on motion.slideLimits
     (centimeters). A revolute motion has no slideLimits and a slider has no rotationLimits, so
     asking for the wrong kind errors clearly instead of silently no-op'ing. 'rest' is the resting
-    value. cm_scale converts the caller's length units to cm."""
-    import math as _m
-    changed = {}
+    value. cm_scale converts the caller's length units to cm.
+
+    `changed` carries each limit as the JOINT READS IT BACK, never the request; `unverified` names
+    the limits whose read-back could not be taken (published null in `changed`); `error` names the
+    first limit whose value or enabled flag did not take, leaving `changed` holding the ones that
+    landed before it."""
+    changed, unverified = {}, []
 
     # Inverted-pair guard (the ONE home - joint_create and joint_edit both apply limits here): a
     # min above its max creates an EMPTY feasible range that silently makes the joint undrivable
     # while every health field keeps reading healthy (measured) - refuse it instead.
     if min_deg is not None and max_deg is not None and float(min_deg) > float(max_deg):
-        return changed, (f"Rotation limits are INVERTED: min_deg ({min_deg}) > max_deg ({max_deg}) "
-                         "- an empty feasible range silently makes the joint undrivable. Swap them.")
+        return changed, unverified, (
+            f"Rotation limits are INVERTED: min_deg ({min_deg}) > max_deg ({max_deg}) "
+            "- an empty feasible range silently makes the joint undrivable. Swap them.")
     if min_mm is not None and max_mm is not None and float(min_mm) > float(max_mm):
-        return changed, (f"Slide limits are INVERTED: min_mm ({min_mm}) > max_mm ({max_mm}) - an "
-                         "empty feasible range silently makes the joint undrivable. Swap them.")
+        return changed, unverified, (
+            f"Slide limits are INVERTED: min_mm ({min_mm}) > max_mm ({max_mm}) - an "
+            "empty feasible range silently makes the joint undrivable. Swap them.")
 
     want_rot = any(v is not None for v in (min_deg, max_deg, rest_deg))
     want_lin = any(v is not None for v in (min_mm, max_mm, rest_mm))
@@ -312,40 +375,37 @@ def _apply_limits(motion, *, min_deg=None, max_deg=None, rest_deg=None,
     if want_rot:
         rl = safe(lambda: motion.rotationLimits)
         if rl is None:
-            return changed, ("This joint's motion has no ROTATION limits "
+            return changed, unverified, ("This joint's motion has no ROTATION limits "
     "(min_deg/max_deg/rest_deg need a revolute or cylindrical joint).")
-        if min_deg is not None:
-            rl.isMinimumValueEnabled = True
-            rl.minimumValue = _m.radians(float(min_deg))
-            changed["min_deg"] = float(min_deg)
-        if max_deg is not None:
-            rl.isMaximumValueEnabled = True
-            rl.maximumValue = _m.radians(float(max_deg))
-            changed["max_deg"] = float(max_deg)
-        if rest_deg is not None:
-            rl.isRestValueEnabled = True
-            rl.restValue = _m.radians(float(rest_deg))
-            changed["rest_deg"] = float(rest_deg)
+        for (key, flag_prop, value_prop), wanted in zip(_ROT_LIMITS,
+                                                        (min_deg, max_deg, rest_deg)):
+            if wanted is None:
+                continue
+            published, lerr = _set_one_limit(rl, flag_prop, value_prop, key, wanted,
+                                             math.radians(float(wanted)), _DEG_PER_RAD)
+            if lerr:
+                return changed, unverified, lerr
+            changed[key] = published
+            if published is None:
+                unverified.append(key)
 
     if want_lin:
         sl = safe(lambda: motion.slideLimits)
         if sl is None:
-            return changed, ("This joint's motion has no LINEAR/slide limits "
+            return changed, unverified, ("This joint's motion has no LINEAR/slide limits "
     "(min_mm/max_mm/rest_mm need a slider or cylindrical joint).")
-        if min_mm is not None:
-            sl.isMinimumValueEnabled = True
-            sl.minimumValue = float(min_mm) * cm_scale
-            changed["min_mm"] = float(min_mm)
-        if max_mm is not None:
-            sl.isMaximumValueEnabled = True
-            sl.maximumValue = float(max_mm) * cm_scale
-            changed["max_mm"] = float(max_mm)
-        if rest_mm is not None:
-            sl.isRestValueEnabled = True
-            sl.restValue = float(rest_mm) * cm_scale
-            changed["rest_mm"] = float(rest_mm)
+        for (key, flag_prop, value_prop), wanted in zip(_LIN_LIMITS, (min_mm, max_mm, rest_mm)):
+            if wanted is None:
+                continue
+            published, lerr = _set_one_limit(sl, flag_prop, value_prop, key, wanted,
+                                             float(wanted) * cm_scale, 1.0 / cm_scale)
+            if lerr:
+                return changed, unverified, lerr
+            changed[key] = published
+            if published is None:
+                unverified.append(key)
 
-    return changed, None
+    return changed, unverified, None
 
 
 def _slide_index(slide_axis, ax_name):
@@ -462,13 +522,13 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str 
 
     # Optional limits (rotation and/or linear) - applied after the joint exists so its jointMotion
     # is established. Same routing as joint_edit.
-    limits_out = {}
+    limits_out, limits_unverified = {}, []
     if any(v is not None for v in (min_deg, max_deg, rest_deg, min_mm, max_mm, rest_mm)):
         jm = safe(lambda: joint.jointMotion)
         if jm is None:
             return error("Limits requested but this joint type has no motion to limit "
             "(rigid/inferred). Use revolute/slider/cylindrical.")
-        lim_changed, lim_err = _apply_limits(
+        lim_changed, limits_unverified, lim_err = _apply_limits(
             jm, min_deg=min_deg, max_deg=max_deg, rest_deg=rest_deg,
             min_mm=min_mm, max_mm=max_mm, rest_mm=rest_mm, cm_scale=scale)
         if lim_err:
@@ -538,6 +598,12 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str 
     # 180 deg, and the payload says so instead of leaving a coincident-looking embed unexplained.
     if opposing and not flip:
         payload["flip_hint"] = _joints.FLIP_HINT
+    # A limit whose read-back could not be taken is published NULL above (its key is in limits_out
+    # with a None value, never the request echoed back) and named here, so a caller cannot mistake
+    # the absence of a mismatch for a confirmed write.
+    if limits_unverified:
+        payload["limits_unverified"] = limits_unverified
+        payload["note"] += _unverified_limits_note(limits_unverified)
     if any(k in limits_out for k in ("rest_mm", "rest_deg")):
         payload["note"] += _REST_LIMIT_NOTE
     mp = _motion_param_names(joint)
@@ -556,7 +622,9 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
     design = _common.design()
     if not design:
         return error("No active design.")
-    joint = _find_joint(design, joint_name)
+    joint, ambiguous = _find_joint(design, joint_name)
+    if ambiguous:
+        return error(ambiguous)
     if not joint:
         return error(f"No joint named '{joint_name}'. Use design_get(include=['timeline']) or check the name.")
 
@@ -641,6 +709,7 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
                     "recreate it after the Joint Origin with joint_create.")
 
     changed = {}
+    limits_unverified = []
     rolled = False
     try:
         # The marker MUST be before the joint to edit geometry/flip/motion.
@@ -713,7 +782,7 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
             if jm is None:
                 return error("This joint has no editable motion (rigid/inferred has no limits).")
             lim_scale = _common.scale(units) or 0.1
-            lim_changed, lim_err = _apply_limits(
+            lim_changed, limits_unverified, lim_err = _apply_limits(
                 jm, min_deg=min_deg, max_deg=max_deg, rest_deg=rest_deg,
                 min_mm=min_mm, max_mm=max_mm, rest_mm=rest_mm, cm_scale=lim_scale)
             changed.update(lim_changed)
@@ -778,6 +847,11 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
         out["note"] = ("Joint edited in place, but the full recompute RAISED - downstream features "
                        "may be unsettled and their health unread. Run design_recompute and check "
                        "workspace_orient before trusting the model state.")
+    # A limit whose read-back could not be taken is published NULL in 'changes' (and at top level),
+    # never the request echoed back, and named here so the null is not read as a confirmed write.
+    if limits_unverified:
+        out["limits_unverified"] = limits_unverified
+        out["note"] += _unverified_limits_note(limits_unverified)
     if any(k in changed for k in ("rest_mm", "rest_deg")):
         out["note"] += _REST_LIMIT_NOTE
     mp = _motion_param_names(joint)

@@ -193,7 +193,9 @@ class FakeSketch:
 
 class FakeSketches:
     def __init__(self, sk_):
-        self._l = [sk_]
+        # sk_=None builds an EMPTY collection - the design where a blank sketch_name has no most
+        # recent sketch to fall back on, which is the only way to reach "No sketch to draw on".
+        self._l = [] if sk_ is None else [sk_]
         self.added = None          # the plane entity sketches.add() was handed
     @property
     def count(self):
@@ -1436,6 +1438,11 @@ class TestCreateFrameParity:
         s.origin = SimpleNamespace(x=0.0, y=0.0, z=z_cm)
         s.xDirection = SimpleNamespace(x=1.0, y=0.0, z=0.0)
         s.yDirection = SimpleNamespace(x=0.0, y=0.0, z=-1.0)
+        # Root-owned: local IS world. A sketch whose component is instanced several times gets the
+        # component-local frame instead (test__sketch_detail's TestFrameSpace).
+        root = SimpleNamespace(name="Root")
+        root.parentDesign = SimpleNamespace(rootComponent=root)
+        s.parentComponent = root
         return s
 
     def test_created_sketch_publishes_origin_axes_and_normal(self, monkeypatch):
@@ -1445,7 +1452,8 @@ class TestCreateFrameParity:
         assert out["frame"] == {"origin_mm": [0.0, 0.0, 15.0],
                                 "x_world": [1.0, 0.0, 0.0],
                                 "y_world": [0.0, 0.0, -1.0],
-                                "normal": [0.0, 1.0, 0.0]}
+                                "normal": [0.0, 1.0, 0.0],
+                                "space": "world"}
 
     def test_frame_comes_from_the_shared_helper(self):
         # one definition, imported - a second local copy is how create and read start disagreeing.
@@ -1466,7 +1474,11 @@ class TestCreateFrameNote:
         s = FakeSketch(); _install_draw(monkeypatch, s)
         out = _payload(sk.create_sketch_handler(plane="xz"))
         assert "local +Y maps to world -Z" in out["note"]
-        assert "frame.y_world" in out["note"]
+        # The sentence points at the frame's own +Y axis rather than naming a key: the axis key is
+        # y_world or y_local depending on frame.space, so a hard-coded name would send the caller
+        # to a key that is absent on a component-local frame.
+        assert "the frame's own +Y axis" in out["note"]
+        assert "frame.y_world" not in out["note"]
 
 
 class TestCreateRenameDisclosure:
@@ -1557,3 +1569,70 @@ class TestDraw3dLine:
         assert res["isError"] is True and "could not be marked construction" in res["message"]
 
 
+
+
+# ── a sketch name several sketches carry is REFUSED, never collapsed to "not found" ─────────────
+# Two components can each hold an "S". Answering "No sketch named 'S'" states the opposite of what
+# the design-wide walk actually read, so both draw paths hand the refusal back verbatim.
+
+class TestSharedSketchNameRefused:
+    _REFUSAL = "2 sketches are named 'S' ('S' in Root, 'S' in Frame)"
+
+    def test_add_geometry_refuses_with_its_owners(self, monkeypatch):
+        _install_draw(monkeypatch, FakeSketch("S"))
+        monkeypatch.setattr(sk._common, "find_or_recent_sketch",
+                            lambda d, n: (None, n, self._REFUSAL))
+        res = sk.add_sketch_geometry_handler(kind="circle", sketch_name="S", cx=0, cy=0, radius=5)
+        assert res["isError"] is True
+        assert res["message"] == self._REFUSAL and "No sketch named" not in res["message"]
+
+    def test_draw_3d_line_refuses_with_its_owners(self, monkeypatch):
+        _install_draw(monkeypatch, FakeSketch("S"))
+        monkeypatch.setattr(sk._common, "find_or_recent_sketch",
+                            lambda d, n: (None, n, self._REFUSAL))
+        res = sk.draw_3d_line_handler(sketch_name="S", x2=1, y2=1, z2=1)
+        assert res["isError"] is True
+        assert res["message"] == self._REFUSAL and "No sketch named" not in res["message"]
+
+    def test_a_name_no_sketch_carries_still_says_not_found(self, monkeypatch):
+        # The refusal must not swallow the ordinary miss - they are different readings.
+        _install_draw(monkeypatch, FakeSketch("S"))
+        monkeypatch.setattr(sk._common, "find_or_recent_sketch", lambda d, n: (None, n, None))
+        res = sk.add_sketch_geometry_handler(kind="circle", sketch_name="Nope", cx=0, cy=0, radius=5)
+        assert res["isError"] is True and "No sketch named 'Nope'" in res["message"]
+
+
+# ── which NAME the not-found message reports, and the blank-name branch ─────────────────────────
+# Both drive the REAL _common.find_or_recent_sketch: the class above monkeypatches the resolver,
+# and a fake handing the name back unstripped would let a padded-name assertion pass vacuously.
+
+class TestSketchNameReporting:
+    def test_a_padded_name_is_reported_as_the_name_that_was_SEARCHED(self, monkeypatch):
+        # The resolver strips before it walks, so reporting the raw argument would name a string
+        # nothing was ever looked up under.
+        _install_draw(monkeypatch, FakeSketch("Real"))
+        res = sk.add_sketch_geometry_handler(kind="circle", sketch_name="  Ghost  ",
+                                             cx=0, cy=0, radius=5)
+        assert res["isError"] is True
+        assert "No sketch named 'Ghost'" in res["message"]
+
+    def test_add_geometry_blank_name_with_no_sketch_says_nothing_to_draw_on(self, monkeypatch):
+        # 'requested' is None for a blank name, and that is the ONLY thing separating this message
+        # from the named one - without it the wire reads "No sketch named 'None'".
+        _install_draw(monkeypatch, None)
+        res = sk.add_sketch_geometry_handler(kind="circle", sketch_name="", cx=0, cy=0, radius=5)
+        assert res["isError"] is True
+        assert "No sketch to draw on" in res["message"] and "No sketch named" not in res["message"]
+
+    def test_draw_3d_line_blank_name_with_no_sketch_says_nothing_to_draw_on(self, monkeypatch):
+        _install_draw(monkeypatch, None)
+        res = sk.draw_3d_line_handler(sketch_name="", x2=1, y2=1, z2=1)
+        assert res["isError"] is True
+        assert "No sketch to draw on" in res["message"] and "No sketch named" not in res["message"]
+
+    def test_a_whitespace_only_name_falls_back_to_the_most_recent_sketch(self, monkeypatch):
+        # " " strips to empty, so it means "the most recent sketch", NOT a search for " ".
+        _install_draw(monkeypatch, FakeSketch("Only"))
+        out = _payload(sk.add_sketch_geometry_handler(kind="circle", sketch_name=" ",
+                                                      cx=0, cy=0, radius=5))
+        assert out["sketch_name"] == "Only"

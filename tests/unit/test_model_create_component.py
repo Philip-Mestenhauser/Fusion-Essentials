@@ -22,10 +22,14 @@ class FakeComponent:
 
 
 class FakeOcc:
-    def __init__(self):
+    def __init__(self, ground=None):
         self.name = "Component1:1"
         self.component = FakeComponent()
         self.activated = False
+        # ground=None leaves the property ABSENT, so reading it raises - an occurrence whose parent
+        # lock cannot be read, which must publish null rather than a coerced false.
+        if ground is not None:
+            self.isGroundToParent = ground
 
     def activate(self):
         self.activated = True
@@ -44,11 +48,12 @@ class FakeOccurrences:
     def __init__(self):
         self.last_transform = None
         self.count = 0
+        self.ground = None          # what isGroundToParent reads on the occurrence this creates
 
     def addNewComponent(self, transform):
         self.last_transform = transform
         self.count += 1
-        return FakeOcc()
+        return FakeOcc(self.ground)
 
 
 class FakeRoot:
@@ -354,3 +359,30 @@ class TestNestedParent:
         assert child.last_proxy is not None and child.last_proxy.activated is True
         assert child.activated is False
         assert out["activated"] is True
+
+
+class TestGroundToParentDisclosure:
+    """The parent lock the caller never asked for: a new occurrence can come back locked, and that
+    decides which member a later joint drive displaces - so the create reports it."""
+
+    def test_a_locked_new_occurrence_is_disclosed(self):
+        design = _install()
+        design.rootComponent.occurrences.ground = True
+        out = _payload(cc.handler(name="Base"))
+        assert out["ground_to_parent"] is True
+        assert "ground_to_parent reads TRUE" in out["note"]
+        assert "assembly_ground(ground_to_parent=false)" in out["note"]
+
+    def test_a_free_new_occurrence_carries_no_lock_clause(self):
+        design = _install()
+        design.rootComponent.occurrences.ground = False
+        out = _payload(cc.handler(name="Arm"))
+        assert out["ground_to_parent"] is False
+        assert "ground_to_parent reads TRUE" not in out["note"]
+
+    def test_an_unreadable_lock_publishes_null_not_false(self):
+        # false would claim the part is free to move; the read simply did not answer.
+        _install()
+        out = _payload(cc.handler(name="Arm"))
+        assert out["ground_to_parent"] is None
+        assert "ground_to_parent reads TRUE" not in out["note"]

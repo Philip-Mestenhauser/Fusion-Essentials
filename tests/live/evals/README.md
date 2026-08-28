@@ -12,19 +12,39 @@ user hits them.
 
 ## How to run one
 
-Scenarios embed an `AGENT PROMPT (verbatim)` block: stage the fixture per the frontmatter, then
-run the block through `tests/live/evals/run_eval.py` - a context-isolated headless executor
-(empty scratch cwd, sterile config, only the fusion-essentials MCP server on its wire, source
-tools hard-denied). The block reaches the executor BYTE-IDENTICAL - compose nothing around it, so
-every run of a scenario is the same experiment and runs compare cleanly. Declared {{placeholders}}
-in frontmatter are the only permitted substitution; everything outside the block is grader-only
-and never reaches the agent. Executor tool calls are audited from the transcript: the runner's
-count GOVERNS the budget; the executor's self-reported count is graded for honesty, not
-arithmetic. The ORCHESTRATOR grades by re-issuing every postcondition read itself - the
-executor's self-report is evidence, never the verdict. Budgets are set from each scenario's first
-measured run + 25% headroom. Staging, grading, and cleanup address documents BY URN (same-name
-lineages accumulate across runs), and run hygiene is scoped strictly to EVAL-CREATED documents -
-never close_all, never a user document.
+Every scenario embeds an `AGENT PROMPT (verbatim)` block. Stage the fixture named in the
+frontmatter, then run that block through `tests/live/evals/run_eval.py`. The runner spawns a
+context-isolated headless executor: empty scratch cwd, sterile config, only the fusion-essentials
+MCP server on its wire, source tools hard-denied.
+
+**The block reaches the executor BYTE-IDENTICAL.** Compose nothing around it, so every run of a
+scenario is the same experiment and runs compare cleanly. The runner makes exactly two additions,
+identically on every scenario:
+
+1. It substitutes the declared `{{placeholders}}`. The frontmatter's `{{RUN_FOLDER}}` is the
+   per-invocation cloud subfolder tag; it carries SECONDS and the scenario stem, so two runs can
+   never share one.
+2. It APPENDS one fixed paragraph, the MCP-connection-lost rule (`CONNECTION_LOST` in
+   `run_eval.py`): when the Fusion transport drops, stop and report BLOCKED instead of retrying a
+   dead connection or self-scheduling a resume.
+
+The run dir's `prompt.txt` records the exact bytes sent. Everything outside the block is grader-only
+and never reaches the agent.
+
+**The ORCHESTRATOR grades, not the executor.** It re-issues every postcondition read itself; the
+executor's self-report is evidence, never the verdict. Tool calls are audited from the transcript,
+where the runner's count GOVERNS the budget and the executor's self-reported count is graded for
+honesty rather than arithmetic. Budgets are set from each scenario's first measured run + 25%
+headroom.
+
+**The EXIT CODE reports harness integrity only**, not whether the scenario passed: 0 the run is
+gradeable, 2 no executor ever spawned, 3 credentials stayed rejected after the one relaunch, 4 a
+guarantee broke (blindness, or a denied tool in the transcript). A scenario FAIL or a budget overrun
+is an OUTCOME for the orchestrator to grade, so those still exit 0.
+
+Staging, grading and cleanup all address documents BY URN, since same-name lineages accumulate
+across runs. Run hygiene is scoped strictly to EVAL-CREATED documents: never `close_all`, never a
+user document.
 
 ## Recording results (the historical ledger lives in the hub)
 
@@ -80,7 +100,12 @@ tools; a weak agent is useful only as a "does the surface survive a poor driver"
 - `postconditions`: the agent's own direct reads match the expected state.
 - `report_truthful`: the final message matches machine state - verify-after-write, graded without
   scoring how it got there.
-- `within_budget`: calls / tokens under the cap.
+- `within_budget`: calls and tokens under the caps the frontmatter declares. The runner scores
+  both from the transcript and writes them to `audit.json` plus a `BUDGET:` line -
+  `within_call_budget` (audited MCP calls vs `max_tool_calls`) and `within_token_budget` (the
+  executor's OUTPUT tokens vs `max_tokens`; input and cache totals ride along in the raw usage but
+  track prompt caching, not the executor's work, so they are not scored). Both budgets are set
+  from a measured run of the same metric + 25%, and at the cap counts as within.
 
 A bingo-card mission must never become the target, or the eval calcifies one workflow.
 

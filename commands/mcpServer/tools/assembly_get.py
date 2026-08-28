@@ -15,6 +15,7 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, scale
+from . import _assert
 from . import _common
 from . import _contacts
 from . import _geom
@@ -57,28 +58,38 @@ def _occ_record(occ, inv_k, occ_joints, include_joints, full_path=False):
     return rec
 
 
-def _all_occurrence_rows(design, inv_k, cap, occ_joints, include_joints):
-    """The all_occurrences slice: the same row as above for EVERY occurrence in the design - nested
-    children included - over the ONE assembly-context walk (_common.all_occurrences, the only source
-    of true fullPathNames). Bounded by cap; returns (rows, total)."""
-    occs = _common.all_occurrences(design)
-    rows = [_occ_record(o, inv_k, occ_joints, include_joints, full_path=True) for o in occs[:cap]]
-    return rows, len(occs)
+def _unresolved_row(broken):
+    """One unresolved-reference row in the all_occurrences slice. It carries no placement, bodies or
+    joints because every one of those reads RAISES on such an occurrence - the row exists so the
+    instance is PRESENT in the list rather than silently missing from it."""
+    return {"name": broken["name"], "unresolved": True, "parent_path": broken["parent_path"],
+            "detail": broken["detail"]}
+
+
+def _all_occurrence_rows(walk, inv_k, cap, occ_joints, include_joints):
+    """The all_occurrences slice over the ONE design-wide census (_common.occurrence_walk). Rows for
+    the usable occurrences, then one flagged row per unresolved reference, so the list never omits an
+    instance the design holds. Bounded by cap; returns (rows, walk)."""
+    rows = [_occ_record(o, inv_k, occ_joints, include_joints, full_path=True)
+            for o in walk.occurrences[:cap]]
+    for b in walk.broken[:max(0, cap - len(rows))]:
+        rows.append(_unresolved_row(b))
+    return rows, walk
 
 
 def _health(obj):
-    """(healthy: bool, message) for an entity with a healthState. Only WarningHealthState (1) and
-    ErrorHealthState (2) are unhealthy - the SAME classification as _common.timeline_health, so the
-    probe and design_get agree on one design. Healthy (0), Suppressed (3), and any other rollup state
-    count as healthy: a collapsed TimelineGroup (Fusion wraps one around an inserted component)
-    reports an 'unknown' state that is not a compute failure - flagging it is a false alarm."""
-    hs = safe(lambda: obj.healthState)
-    if hs != 1 and hs != 2:                         # only warning / error are real problems
+    """(healthy: bool, message) for an entity with a healthState, over the shared classifier
+    (_assert.compute_failure): only the ERROR and WARNING states are unhealthy - the SAME
+    classification as _common.timeline_health, so the probe and design_get agree on one design.
+    Healthy, Suppressed, and any other rollup state count as healthy: a collapsed TimelineGroup
+    (Fusion wraps one around an inserted component) reports an 'unknown' state that is not a compute
+    failure - flagging it is a false alarm. The message is condensed by the same shared reader, so a
+    republished failure is a whole sentence rather than a raw prefix of Fusion's repeating blob."""
+    failure = _assert.compute_failure(obj)
+    if failure is None:
         return True, None
-    msg = safe(lambda: obj.errorOrWarningMessage) or ""
-    # Fusion sometimes repeats the message; keep just the first sentence-ish chunk.
-    msg = msg.split("Compute Failed")[0].strip() or msg.strip()
-    return False, (msg[:240] if msg else "compute failed / warning")
+    _label, msg = failure
+    return False, (msg or "compute failed / warning")
 
 
 def _limit_facts(lims, to_out):
@@ -192,7 +203,7 @@ def _joint_record(j, inv_k):
     return rec
 
 
-# ── joint_origins slice: each Joint Origin (a reusable WCS frame) as a referenceable, handle-bearing row ──
+# --- joint_origins slice: each Joint Origin (a reusable WCS frame) as a referenceable, handle-bearing row ---
 
 _SLICES = ("all_occurrences", "joint_origins", "relations", "contacts")
 
@@ -224,9 +235,11 @@ def _jo_instances(design, jo, comp):
     (its bare name is the reference); the assembly-context proxy per occurrence for a sub-component JO
     (its '<occurrence>:<name>' is the reference, and its world frame differs per instance)."""
     root = safe(lambda: design.rootComponent)
-    root_name = safe(lambda: root.name)
     nm = safe(lambda: jo.name) or "?"
-    if comp is root or (comp is not None and safe(lambda: comp.name) == root_name):
+    # same_component, not `is` or a name compare: component wrappers are never identity-stable, and
+    # a NAME test calls a sub-component that happens to share the root's name the root - which hands
+    # back a bare reference for a JO that needs its occurrence path to be addressable.
+    if _common.same_component(comp, root):
         yield nm, jo
         return
     occs = list(safe(lambda: root.allOccurrencesByComponent(comp)) or []) if root else []
@@ -296,7 +309,7 @@ def _joint_origin_rows(design, inv_k, cap):
     return rows, total
 
 
-# ── relations slice: the maintained assembly relationships, each editable by name ──────────────────
+# --- relations slice: the maintained assembly relationships, each editable by name ---
 #
 # Rigid groups, motion links and assembly constraints are three SEPARATE collections (they are not
 # joints, so the joint walk above never sees them). Rows carry what assembly_edit_relations needs to
@@ -358,7 +371,7 @@ def _relation_rows(design, cap):
     return rows, totals
 
 
-# ── contacts slice: the design's contact sets + the two flags that decide whether they do anything ──
+# --- contacts slice: the design's contact sets + the two flags that decide whether they do anything ---
 #
 # Contact sets hang off the DESIGN, not a component, so the relations walk above never sees them.
 # Rows carry what assembly_edit_contacts needs to act: the name it resolves by, the membership, and
@@ -459,6 +472,15 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
     occurrences = []
     grounded_names = []
     for occ in _common.iter_collection(safe(lambda: root.occurrences)):
+        # An occurrence whose component will not read answers NOTHING else either (placement, bodies
+        # and ground flags all raise), so it gets the flagged row rather than a full record built out
+        # of swallowed reads - which would publish a grounded:false, body_count:0 part at the origin.
+        is_broken, detail = _common.broken_reference(occ)
+        if is_broken:
+            occurrences.append(_unresolved_row({"name": safe(lambda o=occ: o.name) or "(unreadable name)",
+                                                "parent_path": safe(lambda: root.name),
+                                                "detail": detail}))
+            continue
         rec = _occ_record(occ, inv_k, occ_joints, include_joints)
         if rec["grounded"]:
             grounded_names.append(rec["name"])
@@ -508,8 +530,16 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
     marker_pos, marker_count = _common.timeline_marker(design)
     rolled_back = bool(marker_pos is not None and marker_count and marker_pos < marker_count)
 
+    # UNRESOLVED EXTERNAL REFERENCES are part of the headline verdict, not an opt-in slice: measured,
+    # a template holding an occurrence whose source component cannot be loaded read is_healthy:true
+    # under a note telling the agent to check that field FIRST. The census runs once here and feeds
+    # both the verdict and the all_occurrences slice below.
+    occ_walk = _common.occurrence_walk(design)
+    unresolved_references = [{"name": b["name"], "parent_path": b["parent_path"],
+                              "detail": b["detail"]} for b in occ_walk.broken]
+
     is_healthy = (not broken_joints and not timeline_problems and not rolled_back
-                  and not broken_relations)
+                  and not broken_relations and not unresolved_references)
 
     # STALENESS RECONCILIATION: the per-joint healthState can LAG the timeline after an in-place edit
     # (joint_edit/param change) that hasn't been recomputed - so broken_joints can disagree with the
@@ -522,6 +552,7 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
     "is_healthy": is_healthy,
     "broken_joints": broken_joints,
     "broken_relations": broken_relations,
+    "unresolved_references": unresolved_references,
     "suppressed_joints": suppressed_joints,
     "timeline_problems": timeline_problems,
     "timeline_rolled_back": rolled_back,
@@ -533,22 +564,51 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
     "root_bodies": root_bodies,   # bodies directly in root (NOT jointable; promote to a component to joint)
     "joints": joints_out if include_joints else None,
     "joints_truncated": joints_truncated,
-    "note": "Structured kinematic state. CHECK is_healthy FIRST - false means a joint/feature "
-    "FAILED TO COMPUTE (the 'Compute Failed' a user sees in the timeline before any "
-    "test; a wired-but-mis-axised joint over-constrains the assembly). broken_joints / "
-    "timeline_problems name them. Then reason about grounding/positions/joint-wiring from "
-    "these NUMBERS rather than a cluttered screenshot; pair with view_set(isolate).",
+    "note": "Structured kinematic state. CHECK is_healthy FIRST - false means a joint, relation or "
+    "feature FAILED TO COMPUTE (the 'Compute Failed' a user sees in the timeline before any "
+    "test; a wired-but-mis-axised joint over-constrains the assembly), or the design holds an "
+    "occurrence whose external reference does not resolve. broken_joints / broken_relations / "
+    "timeline_problems / unresolved_references name them. Then reason about "
+    "grounding/positions/joint-wiring from these NUMBERS rather than a cluttered screenshot; "
+    "pair with view_set(isolate).",
     }
+    if unresolved_references:
+        # The reference's own source document/project/hub is NOT readable: occ.component and
+        # occ.documentReference both raise and the ref is absent from Document.documentReferences,
+        # so this names what CAN be read - the occurrence and its parent - and stops there.
+        out["note"] += (
+            f" {len(unresolved_references)} occurrence(s) hold an UNRESOLVED external reference "
+            f"({', '.join(sorted({u['name'] for u in unresolved_references}))}): reading their "
+            "component raises, so they carry no readable geometry, placement or joints and are "
+            "excluded from every position/interference read. The API exposes no path from such an "
+            "occurrence to its source file, project or hub - open the browser tree in Fusion and "
+            "hover the flagged node for the reason.")
 
     # all_occurrences slice (opt-in): the same occurrence row for the NESTED instances too. The
     # 'occurrences' array above walks root.occurrences - top-level only - so a part sitting inside a
     # sub-assembly appears nowhere in it, and its position (drifted or not) is unreadable here.
     if "all_occurrences" in inc:
         cap_ao = max(1, int(max_all_occurrences))
-        ao_rows, ao_total = _all_occurrence_rows(design, inv_k, cap_ao, occ_joints, include_joints)
+        ao_rows, ao_walk = _all_occurrence_rows(occ_walk, inv_k, cap_ao, occ_joints, include_joints)
+        ao_total = ao_walk.total
         out["all_occurrences"] = ao_rows
+        # null, never 0: a census nothing could be read from is UNKNOWN, and publishing 0 beside
+        # all_occurrences_truncated:false is an active claim that the assembly is empty and nothing
+        # was lost - measured on a 55-occurrence assembly whose allOccurrences raised.
         out["all_occurrence_count"] = ao_total
-        out["all_occurrences_truncated"] = ao_total > len(ao_rows)
+        out["occurrences_walk"] = ao_walk.method
+        out["all_occurrences_truncated"] = bool(ao_total is not None and ao_total > len(ao_rows))
+        if ao_total is None:
+            out["note"] += (" all_occurrences could not be enumerated by EITHER walk "
+                            "(root.allOccurrences and the component.occurrences fallback both "
+                            "failed): all_occurrence_count is null - the census is UNKNOWN, not "
+                            "zero, and the rows listed are not a complete set.")
+        elif not ao_walk.complete:
+            out["note"] += (" The occurrence walk did not complete, so all_occurrence_count is a "
+                            "LOWER BOUND on what the design holds.")
+        if ao_walk.method == _common.WALK_RECURSED:
+            out["note"] += (" occurrences_walk='recursed': root.allOccurrences raised, so the census "
+                            "was rebuilt from component.occurrences.")
         if out["all_occurrences_truncated"]:
             out["note"] += (f" all_occurrences was capped at {cap_ao} of {ao_total}; raise "
                             "max_all_occurrences to see the rest.")

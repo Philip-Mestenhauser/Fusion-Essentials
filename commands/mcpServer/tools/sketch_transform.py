@@ -98,7 +98,9 @@ def _prepare(sketch_name, entities, units, dx, dy, rotation_deg, center_x, cente
     design = _common.design()
     if not design:
         return blank + (error("No active design. Create or open a document first (see doc_new)."),)
-    sketch, requested = _common.resolve_or_recent_sketch(design, sketch_name)
+    sketch, requested, ambiguous = _common.find_or_recent_sketch(design, sketch_name)
+    if ambiguous:
+        return blank + (error(ambiguous),)
     if not sketch:
         if requested:
             return blank + (error(f"No sketch named '{requested}'. Available: " + (
@@ -280,7 +282,9 @@ def copy_handler(sketch_name: str = "", entities: str = "", target_sketch: str =
     want_target = (target_sketch or "").strip()
     target = sketch
     if want_target:
-        target = _common.resolve_sketch(design, want_target)
+        target, ambiguous = _common.find_sketch(design, want_target)
+        if ambiguous:
+            return error(ambiguous)
         if target is None:
             return error(f"No sketch named '{want_target}' for 'target_sketch'. Available: " + (
                 ", ".join(n for n in _common.all_sketch_names(design) if n) or "(none)"))

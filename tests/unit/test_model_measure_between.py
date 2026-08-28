@@ -144,6 +144,47 @@ class TestEdgeTargets:
         assert "mesh" not in mb._A.allow and "design" not in mb._A.allow
 
 
+class TestValueMustBeARealNumber:
+    """A MeasureResults.value that is not a number is UNKNOWN, never a measurement. bool is the
+    dangerous case: it is an int subclass, so `isinstance(v, (int, float))` alone lets True through
+    as 1 cm and False through as 0 - and 0 is this payload's "touching" / "parallel"."""
+
+    @pytest.mark.parametrize("value", [False, True])
+    def test_a_bool_distance_is_refused_naming_the_value(self, monkeypatch, value):
+        _resolve_both()
+        _install_mgr(monkeypatch, _Res(value, _Pt(0, 0, 0), _Pt(0, 0, 0)))
+        res = mb.handler(a="A", b="B")
+        assert res["isError"] is True
+        msg = error_message(res)
+        assert repr(value) in msg and "UNKNOWN" in msg and "touching" in msg
+
+    def test_a_real_zero_distance_is_still_a_measurement(self, monkeypatch):
+        # the boundary the bool guard must not swallow: 0.0 IS an answer (touching), and 0 is the
+        # int form of the same answer.
+        _resolve_both()
+        _install_mgr(monkeypatch, _Res(0, _Pt(2, 0, 0), _Pt(2, 0, 0)))
+        assert _payload(mb.handler(a="A", b="B"))["distance"] == 0.0
+
+    def test_an_unreadable_distance_is_refused_too(self, monkeypatch):
+        _resolve_both()
+        _install_mgr(monkeypatch, _Res(None))
+        assert "UNKNOWN" in error_message(mb.handler(a="A", b="B"))
+
+    @pytest.mark.parametrize("value", [False, True])
+    def test_a_bool_angle_is_refused_naming_the_value(self, monkeypatch, value):
+        _resolve_both("face")
+        _install_mgr(monkeypatch, _Res(value))
+        res = mb.handler(a="A", b="B", mode="angle")
+        assert res["isError"] is True
+        msg = error_message(res)
+        assert repr(value) in msg and "parallel" in msg
+
+    def test_a_real_zero_angle_is_still_a_measurement(self, monkeypatch):
+        _resolve_both("face")
+        _install_mgr(monkeypatch, _Res(0.0))
+        assert _payload(mb.handler(a="A", b="B", mode="angle"))["angle_deg"] == 0.0
+
+
 class TestGuards:
     def test_unknown_mode_errors(self):
         _resolve_both()

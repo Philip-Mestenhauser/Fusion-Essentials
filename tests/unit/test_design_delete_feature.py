@@ -55,12 +55,34 @@ class FakeTLObject:
             self.entity = entity
 
 
+def _detaches(tl, obj):
+    """Wrap a timeline object's entity so a successful deleteMe takes that OBJECT out of the
+    timeline - what the live API does, and the absence the handler re-reads the name census for."""
+    ent = getattr(obj, "entity", None)
+    inner = getattr(ent, "deleteMe", None)
+    if inner is None:
+        return
+
+    def wrapped():
+        did = inner()
+        if did and obj in tl._items:
+            tl._items.remove(obj)
+        return did
+
+    ent.deleteMe = wrapped
+
+
 class FakeTimeline:
     def __init__(self, items):
         self._items = list(items)
+        self.blind = False        # when set, .count raises - an unreadable collection
+        for obj in self._items:
+            _detaches(self, obj)
 
     @property
     def count(self):
+        if self.blind:
+            raise RuntimeError("timeline unavailable")
         return len(self._items)
 
     def item(self, i):
@@ -82,10 +104,6 @@ def _install(items, has_timeline=True):
 def _payload(result):
     assert result["isError"] is False, result
     return json.loads(result["content"][0]["text"])
-
-
-def _obj(tl, name):
-    return next(o for o in tl._items if o.name == name)
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -193,19 +211,22 @@ class TestAtIndexForm:
 
 class TestDelete:
     def test_deletes_named_feature(self):
-        _, tl = _install([FakeTLObject("Rectangular Pattern1", 5, entity_type="RectangularPatternFeature")])
+        obj = FakeTLObject("Rectangular Pattern1", 5, entity_type="RectangularPatternFeature")
+        _, tl = _install([obj])
         out = _payload(df.handler(feature="Rectangular Pattern1"))
         assert out["deleted"] is True
         assert out["feature"] == "Rectangular Pattern1"
         assert out["index"] == 5
         assert out["entity_type"] == "RectangularPatternFeature"
-        assert _obj(tl, "Rectangular Pattern1").entity._deleted is True   # deleteMe actually called
+        assert obj.entity._deleted is True                # deleteMe actually called
+        assert tl._items == []                            # and the object left the timeline
 
     def test_a_name_matches_case_insensitively(self):
-        _, tl = _install([FakeTLObject("Mirror1", 3, entity_type="MirrorFeature")])
+        obj = FakeTLObject("Mirror1", 3, entity_type="MirrorFeature")
+        _install([obj])
         out = _payload(df.handler(feature="mirror1"))
         assert out["feature"] == "Mirror1"
-        assert tl._items[0].entity._deleted is True
+        assert obj.entity._deleted is True
 
     def test_a_substring_deletes_nothing(self):
         # the corrected contract: 'mirror' is not 'Mirror1'. A destructive tool never widens a name
@@ -214,6 +235,51 @@ class TestDelete:
         res = df.handler(feature="mirror")
         assert res["isError"] is True and "Mirror1" in res["message"]
         assert tl._items[0].entity._deleted is False
+
+
+# ── absence is proved, never assumed ─────────────────────────────────────────
+
+class TestAbsenceReRead:
+    """deleteMe()'s bool is the platform's claim; the name census re-read is the proof. A survivor
+    is an error, and a census that could not read is disclosed, never counted as absence."""
+
+    def test_a_survivor_is_an_error_not_a_false_ok(self):
+        # deleteMe reports success and the object is still in the timeline: the payload may not
+        # publish deleted:true off the bool alone.
+        obj = FakeTLObject("Extrude1", 0)
+        _install([obj])
+        obj.entity.deleteMe = lambda: True          # reports success, removes nothing
+        res = df.handler(feature="Extrude1")
+        assert res["isError"] is True
+        assert "NOT removed" in res["message"]
+        assert "Extrude1" in res["message"]
+
+    def test_one_of_two_same_named_leaving_is_proof_enough(self):
+        # the census counts the NAME, so the boundary is after < before, not after == 0: deleting
+        # 'Extrude1@2' leaves the other Extrude1 standing and that is still a proven removal.
+        _, tl = _install([FakeTLObject("Extrude1", 0), FakeTLObject("Extrude1", 2)])
+        out = _payload(df.handler(feature="Extrude1@2"))
+        assert out["deleted"] is True
+        assert [o.index for o in tl._items] == [0]
+
+    def test_a_census_that_stops_reading_is_unverified_not_absence(self):
+        # the timeline will not report a size after the delete. The object IS gone, but the check
+        # cannot show it - so the flag is null and the note says why, never deleted:true.
+        obj = FakeTLObject("Extrude1", 0)
+        _, tl = _install([obj])
+        inner = obj.entity.deleteMe
+
+        def blinding():
+            did = inner()
+            tl.blind = True                          # .count now raises: an unreadable collection
+            return did
+
+        obj.entity.deleteMe = blinding
+        out = _payload(df.handler(feature="Extrude1"))
+        assert out["deleted"] is None
+        assert "UNVERIFIED" in out["note"] and "could not be read back" in out["note"]
+        # the note may not carry the claim the null flag denies
+        assert "Timeline feature deleted" not in out["note"]
 
 
 # ── guards ───────────────────────────────────────────────────────────────────
@@ -288,9 +354,7 @@ class TestGuards:
         assert ent._deleted is True
 
     def test_downstream_error_after_delete_reported(self):
-        # deleting a feature whose geometry a later feature consumed leaves a new error: the delete
-        # stands, but it's surfaced.
-        breaks_into = FakeTimeline([])      # placeholder; replaced below
+        # a new timeline error after the delete is surfaced, naming the feature that carries it.
         ent = FakeEntity("ExtrudeFeature", delete_returns=True)
         obj = FakeTLObject("Extrude1", 0, entity=ent, health=0)
         _, tl = _install([obj])
@@ -299,6 +363,20 @@ class TestGuards:
         assert out["deleted"] is True
         assert "timeline_warning" in out
         assert "BrokenChild" in out["timeline_warning"]
+
+    def test_the_downstream_warning_states_only_what_was_read(self):
+        # Two claims this sentence may not make: WHY the error appeared (nothing here reads what the
+        # broken feature consumed) and that "the deletion stands" - 'deleted' is the absence verdict
+        # and it can be null on the very same call.
+        ent = FakeEntity("ExtrudeFeature", delete_returns=True)
+        obj = FakeTLObject("Extrude1", 0, entity=ent, health=0)
+        _, tl = _install([obj])
+        ent._breaks = tl
+        warning = _payload(df.handler(feature="Extrude1"))["timeline_warning"]
+        assert "the deletion stands" not in warning
+        assert "consumed the removed geometry" not in warning
+        assert "Nothing was rolled back" in warning
+        assert "'deleted'" in warning                 # where the caller reads the verified fact
 
 
 # ── the occurrence-remove reroute ────────────────────────────────────────────
@@ -351,8 +429,29 @@ class RemoveFeature:
     def deleteMe(self):
         self.deleted = True
         if self._delete_returns and self._restores_to is not None:
-            self._restores_to.append(types.SimpleNamespace(fullPathName=self._restored_path))
+            # component: a real Occurrence always answers it; the shared census reads it to tell an
+            # ordinary occurrence from one whose external reference will not resolve.
+            self._restores_to.append(types.SimpleNamespace(
+                fullPathName=self._restored_path,
+                component=types.SimpleNamespace(name=self._restored_path.split(":")[0])))
         return self._delete_returns
+
+
+def _remove_feature_detaches(tl, feat):
+    """Deleting a RemoveFeature takes its OWN timeline object - the one carrying its index - out of
+    the timeline. The reroute deletes the FEATURE, not the timeline object's .entity, so this is the
+    absence path the entity wrapper never sees."""
+    inner = feat.deleteMe
+
+    def wrapped():
+        did = inner()
+        if did:
+            for obj in list(tl._items):
+                if obj.index == feat.timelineObject.index:
+                    tl._items.remove(obj)
+        return did
+
+    feat.deleteMe = wrapped
 
 
 def _removes(*feats):
@@ -374,6 +473,11 @@ class TestOccurrenceRemoveReroute:
         design = make_design(comp=comps[0], all_components=comps)
         entity = _removed_occurrence() if entity is None else entity
         design.timeline = FakeTimeline([FakeTLObject(name, _TL_INDEX, entity=entity)])
+        for c in comps:
+            removes = getattr(getattr(c, "features", None), "removeFeatures", None)
+            feat = removes.itemByName(name) if removes is not None else None
+            if feat is not None:
+                _remove_feature_detaches(design.timeline, feat)
         monkeypatch.setattr(df._common, "design", lambda: design)
         return design
 

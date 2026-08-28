@@ -63,6 +63,9 @@ class FakeOcc:
         self.name = name
         self.fullPathName = name
         self.transform2 = SimpleNamespace(translation=_vec())
+        # A real Occurrence always answers `component`; a read that RAISES is the
+        # unresolved-external-reference signal the shared occurrence census filters on.
+        self.component = SimpleNamespace(name=name.split(":")[0])
 
 
 class FakeArrangeComponents:
@@ -188,6 +191,17 @@ class TestBoundary:
         _install([FakeSketch("Other")], ["A:1"])
         res = ar.handler(boundary_sketch="Nope", shapes="A:1")
         assert res["isError"] is True and "Nope" in res["message"]
+
+    def test_a_shared_boundary_sketch_name_is_refused_with_its_owners(self, monkeypatch):
+        # Two components can each hold a "Boundary". The refusal names them and no arrange feature
+        # is built; calling it "No sketch named 'Boundary'" says the opposite of what the walk read.
+        _design, af = _install([FakeSketch("Boundary")], ["A:1"])
+        refusal = "2 sketches are named 'Boundary' ('Boundary' in Root, 'Boundary' in Frame)"
+        monkeypatch.setattr(ar, "find_sketch", lambda design, name: (None, refusal))
+        res = ar.handler(boundary_sketch="Boundary", shapes="A:1")
+        assert res["isError"] is True
+        assert res["message"] == refusal and "No sketch named" not in res["message"]
+        assert af.last_input is None and af.added is False     # nothing was created
 
     def test_boundary_with_no_profile_errors(self):
         _install([FakeSketch("Empty", profile_count=0)], ["A:1"])

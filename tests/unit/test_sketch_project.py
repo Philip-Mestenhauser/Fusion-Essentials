@@ -179,9 +179,11 @@ def call(monkeypatch):
              raw=False, **kw):
         sk = sketch if sketch is not None else FakeSketch()
         if sketch_none:
-            monkeypatch.setattr(sp._common, "resolve_or_recent_sketch", lambda d, n: (None, n or None))
+            monkeypatch.setattr(sp._common, "find_or_recent_sketch",
+                                lambda d, n: (None, n or None, None))
         else:
-            monkeypatch.setattr(sp._common, "resolve_or_recent_sketch", lambda d, n: (sk, n or None))
+            monkeypatch.setattr(sp._common, "find_or_recent_sketch",
+                                lambda d, n: (sk, n or None, None))
         if resolve_err:
             monkeypatch.setattr(sp._ENTITIES, "resolve", lambda raw: (None, resolve_err))
         else:
@@ -206,8 +208,9 @@ def run(monkeypatch):
              entities_out=None, raw=False, **kw):
         """`*_out` are what each typed input kind RESOLVES to; **kw are the handler's own arguments."""
         sk = sketch if sketch is not None else FakeSketch()
-        monkeypatch.setattr(sp._common, "resolve_or_recent_sketch", lambda d, n: (sk, n or None))
-        monkeypatch.setattr(sp._common, "resolve_sketch", lambda d, n: source)
+        monkeypatch.setattr(sp._common, "find_or_recent_sketch",
+                            lambda d, n: (sk, n or None, None))
+        monkeypatch.setattr(sp._common, "find_sketch", lambda d, n: (source, None))
         monkeypatch.setattr(sp._common, "resolve_entity_ref",
                             lambda s, r: curve if r == "line:0" else None)
         _stub(monkeypatch, sp._TARGET_FACES, faces_out if faces_out is not None else ["FACE"])
@@ -280,10 +283,48 @@ class TestLinkReadBack:
         assert out["linked"] is True
         assert "read back as LINKED" in out["note"]
 
-    def test_curves_that_land_unlinked_against_the_request_are_disclosed(self, call):
-        out, sk = call(link=True, sketch=FakeSketch(creates={"line": 2}, link_pattern=(False,)))
-        assert out["linked"] is False and out["link_requested"] is True
-        assert "did not land the way the call asked for" in out["note"]
+    def test_curves_that_all_land_unlinked_against_the_request_are_an_error(self, call):
+        # project2 honours isLinked exactly, so a unanimous opposite read is a failed call
+        out, sk = call(link=True, sketch=FakeSketch(creates={"line": 2}, link_pattern=(False,)),
+                       raw=True)
+        assert out["isError"] is True
+        assert "link=true was requested" in out["message"]
+        assert "read back as NOT linked" in out["message"]
+
+    def test_curves_that_all_land_linked_against_link_false_are_an_error(self, call):
+        # the mirror direction: the error keys on the MISMATCH, not on one value of the flag
+        out, sk = call(link=False, sketch=FakeSketch(creates={"line": 2}, link_pattern=(True,)),
+                       raw=True)
+        assert out["isError"] is True
+        assert "link=false was requested" in out["message"]
+        assert "read back as LINKED" in out["message"]
+
+    def test_the_mismatch_error_names_the_curves_it_left_in_the_sketch(self, call):
+        # partial success: the curves exist, so the error says what landed and how to remove it
+        out, sk = call(link=True, sketch=FakeSketch(creates={"line": 2}, link_pattern=(False,)),
+                       raw=True)
+        assert "line:0, line:1" in out["message"]
+        assert "sketch_delete_entity" in out["message"]
+
+    def test_curves_matching_the_request_are_not_errored(self, call):
+        # the boundary the error must not overshoot: agreement is an ok, not a failure
+        out, sk = call(link=False, sketch=FakeSketch(creates={"line": 2}, link_pattern=(False,)),
+                       raw=True)
+        assert "isError" not in out or out["isError"] is False
+
+    def test_a_split_result_is_disclosed_not_errored(self, call):
+        # the other boundary: only a UNANIMOUS opposite read is a measured contradiction, so a
+        # partly-honoured result stays an ok whose note reports the split
+        out, sk = call(link=True,
+                       sketch=FakeSketch(creates={"line": 2}, link_pattern=(True, False)),
+                       raw=True)
+        assert "isError" not in out or out["isError"] is False
+
+    def test_unreadable_flags_are_disclosed_not_errored(self, call):
+        # an unread flag is evidence of neither state, so it can never raise the mismatch error
+        out, sk = call(link=True, sketch=FakeSketch(creates={"line": 2}, link_pattern=(None,)),
+                       raw=True)
+        assert "isError" not in out or out["isError"] is False
 
     def test_a_split_result_publishes_null_and_is_reported_as_a_split(self, call):
         out, sk = call(link=True,

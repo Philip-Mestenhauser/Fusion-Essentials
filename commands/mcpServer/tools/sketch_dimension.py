@@ -303,7 +303,9 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
     design = _common.design()
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")
-    sketch, requested = _common.resolve_or_recent_sketch(design, sketch_name)
+    sketch, requested, ambiguous = _common.find_or_recent_sketch(design, sketch_name)
+    if ambiguous:
+        return error(ambiguous)
     if not sketch:
         return error(f"No sketch named '{requested}'." if requested else
     "No sketch to dimension. Create one first with sketch_create.")

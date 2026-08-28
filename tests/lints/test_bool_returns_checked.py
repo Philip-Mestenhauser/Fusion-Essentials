@@ -18,6 +18,7 @@ EVERYWHERE in the API, so a hit is never a same-named method that returns someth
 
 import ast
 
+import _corpus
 import api_surface
 from _input_resolution import _bindings, _collection_vars, _iter_tool_files, _scopes
 
@@ -54,10 +55,11 @@ def _offenders_in(path):
 
     Scoped to resolved inputs deliberately. A viewport refresh() or fit() returning false is a
     cosmetic no-op; a SETTER on a FeatureInput returning false means the feature is about to be
-    built with settings the platform declined, and the handler runs straight on to add()."""
-    with open(path, encoding="utf-8") as fh:
-        tree = ast.parse(fh.read(), filename=path)
+    built with settings the platform declined, and the handler runs straight on to add().
+
+    The tree is _corpus's, shared with the other lints over this corpus; this walk only reads it."""
     out = []
+    tree = _corpus.tree(path)
     for nodes, enclosing in _scopes(tree):
         visible = enclosing + nodes
         bound = _bindings(visible, _collection_vars(visible))

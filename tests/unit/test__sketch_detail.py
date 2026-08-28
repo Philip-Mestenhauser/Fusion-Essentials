@@ -918,8 +918,13 @@ class TestSplineCounts:
 def _frame_sketch(name="Framed", origin=(0.0, 0.0, 0.0), x=(1.0, 0.0, 0.0), y=(0.0, 1.0, 0.0)):
     """A sketch answering only the three plane reads the world frame is built from - origin (a world
     Point3D in cm) and the xDirection/yDirection world vectors. Every other read this file's payload
-    makes degrades through safe(), so the frame can be exercised on its own."""
-    return SimpleNamespace(name=name, origin=_Pt(*origin), xDirection=_Pt(*x), yDirection=_Pt(*y))
+    makes degrades through safe(), so the frame can be exercised on its own. ROOT-owned, so it
+    exercises the common case where local IS world (see TestFrameSpace for the other two)."""
+    sk = SimpleNamespace(name=name, origin=_Pt(*origin), xDirection=_Pt(*x), yDirection=_Pt(*y))
+    root = SimpleNamespace(name="Root")
+    root.parentDesign = SimpleNamespace(rootComponent=root)
+    sk.parentComponent = root
+    return sk
 
 
 @pytest.fixture
@@ -937,9 +942,18 @@ class TestWorldFrameHelper:
     with world, so the helper reports where sketch (0,0) lands, where +X/+Y point, and the normal
     they span - the block sketch_create and sketch_get both publish."""
 
-    def _sk(self, origin, xdir, ydir):
+    @staticmethod
+    def _vecs(origin, xdir, ydir):
         P = lambda x, y, z: SimpleNamespace(x=x, y=y, z=z)
         return SimpleNamespace(origin=P(*origin), xDirection=P(*xdir), yDirection=P(*ydir))
+
+    def _sk(self, origin, xdir, ydir):
+        """A ROOT-owned sketch: its model space already IS world, so nothing is lifted."""
+        sk = self._vecs(origin, xdir, ydir)
+        root = SimpleNamespace(name="Root")
+        root.parentDesign = SimpleNamespace(rootComponent=root)
+        sk.parentComponent = root
+        return sk
 
     def test_origin_reported_in_mm(self):
         # origin is cm in the API -> reported x10 as mm
@@ -964,7 +978,128 @@ class TestWorldFrameHelper:
         # missing any of origin/x/y -> None (don't report a half-frame the caller would misread)
         s = SimpleNamespace(origin=SimpleNamespace(x=0, y=0, z=0), xDirection=None,
                             yDirection=SimpleNamespace(x=0, y=1, z=0))
+        s.parentComponent = None
         assert sd.sketch_world_frame(s) is None
+
+    def test_a_root_owned_sketch_is_labelled_world(self):
+        # Case 1: local IS world at the root, so the frame keeps its world claim and its numbers.
+        f = sd.sketch_world_frame(self._sk((-3.2, 0.8, 9.2), (1, 0, 0), (0, 1, 0)))
+        assert f["space"] == sd.WORLD_SPACE
+        assert f["origin_mm"] == [-32.0, 8.0, 92.0]
+
+
+class TestFrameSpace:
+    """The three placement cases, each pinned to a LIVE measurement. The failure this guards is
+    silent: a caller handed component-local numbers under a world key places geometry from them,
+    the write succeeds, and the shape is wrong with nothing to notice. So the axis KEY names the
+    space - a frame that did not resolve into the assembly carries no x_world at all."""
+
+    def _nested(self, native_vecs, proxies, placements=1):
+        """A sketch owned by a sub-component placed `placements` times. `proxies` maps an
+        occurrence fullPathName to the vectors its proxy reads."""
+        sub = SimpleNamespace(name="Blk")
+        root = SimpleNamespace(name="Root")
+        root.parentDesign = SimpleNamespace(rootComponent=root)
+        sub.parentDesign = root.parentDesign
+        occs = [SimpleNamespace(fullPathName=f"Blk:{i + 1}") for i in range(placements)]
+        root.allOccurrencesByComponent = lambda c, _o=occs: SimpleNamespace(
+            count=len(_o), item=lambda i, _oo=_o: _oo[i])
+        native = TestWorldFrameHelper._vecs(*native_vecs)
+        native.parentComponent = sub
+        native.createForAssemblyContext = lambda occ, _p=proxies: (
+            TestWorldFrameHelper._vecs(*_p[occ.fullPathName]))
+        return native
+
+    def test_one_occurrence_publishes_the_proxys_world_numbers(self):
+        # MEASURED: component 'Solo' at world (30,0,0) turned 90 deg about Z - the native sketch
+        # reads origin (0,0,0) / +X (1,0,0), its proxy reads (3,0,0) cm / +X (0,1,0) / +Y (-1,0,0).
+        sk = self._nested(native_vecs=((0, 0, 0), (1, 0, 0), (0, 1, 0)),
+                          proxies={"Blk:1": ((3.0, -0.0, 0), (-0.0, 1.0, 0), (-1.0, -0.0, 0))})
+        f = sd.sketch_world_frame(sk)
+        assert f["space"] == sd.WORLD_SPACE
+        assert f["origin_mm"] == [30.0, 0.0, 0.0]
+        assert f["x_world"] == [0.0, 1.0, 0.0]
+        assert f["y_world"] == [-1.0, 0.0, 0.0]
+        assert f["normal"] == [0.0, 0.0, 1.0]
+
+    def test_several_instances_publish_the_local_frame_labelled_local(self):
+        # MEASURED on component 'Multi' placed twice: the two proxies DISAGREE - Multi:1 reads
+        # origin (1.0,0.5,0) cm with unrotated axes, Multi:2 reads (-4.0,0,0) with axes turned
+        # 45 deg. No single world frame exists, so neither instance may be picked.
+        sk = self._nested(
+            native_vecs=((0, 0, 0), (1, 0, 0), (0, 1, 0)),
+            proxies={"Blk:1": ((1.0, 0.5, 0), (1, 0, 0), (0, 1, 0)),
+                     "Blk:2": ((-4.0, 0, 0), (0.707107, 0.707107, 0), (-0.707107, 0.707107, 0))},
+            placements=2)
+        f = sd.sketch_world_frame(sk)
+        assert f["space"] == sd.COMPONENT_LOCAL_SPACE
+        # the NATIVE numbers, not either instance's - under LOCAL key names
+        assert f["origin_mm"] == [0.0, 0.0, 0.0]
+        assert f["x_local"] == [1.0, 0.0, 0.0]
+        assert f["y_local"] == [0.0, 1.0, 0.0]
+
+    def test_a_local_frame_publishes_no_world_key_at_all(self):
+        # The whole point of the rename: a consumer keyed on x_world must get a MISSING KEY, not
+        # component-local numbers wearing a world name. Annotating the lie is what was rejected.
+        sk = self._nested(
+            native_vecs=((0, 0, 0), (1, 0, 0), (0, 1, 0)),
+            proxies={"Blk:1": ((1.0, 0.5, 0), (1, 0, 0), (0, 1, 0)),
+                     "Blk:2": ((-4.0, 0, 0), (0.707107, 0.707107, 0), (-0.707107, 0.707107, 0))},
+            placements=2)
+        f = sd.sketch_world_frame(sk)
+        assert "x_world" not in f and "y_world" not in f
+
+    def test_a_world_frame_publishes_no_local_key_either(self):
+        # The converse, so the two key sets cannot both appear and let a consumer pick whichever.
+        sk = self._nested(native_vecs=((0, 0, 0), (1, 0, 0), (0, 1, 0)),
+                          proxies={"Blk:1": ((3.0, 0, 0), (0, 1, 0), (-1, 0, 0))})
+        f = sd.sketch_world_frame(sk)
+        assert "x_local" not in f and "y_local" not in f
+
+    def test_neither_instances_numbers_are_published_when_there_are_several(self):
+        # The first-match sin, stated as an assertion: Multi:1's origin must not appear.
+        sk = self._nested(
+            native_vecs=((0, 0, 0), (1, 0, 0), (0, 1, 0)),
+            proxies={"Blk:1": ((1.0, 0.5, 0), (1, 0, 0), (0, 1, 0)),
+                     "Blk:2": ((-4.0, 0, 0), (0.707107, 0.707107, 0), (-0.707107, 0.707107, 0))},
+            placements=2)
+        f = sd.sketch_world_frame(sk)
+        assert f["origin_mm"] not in ([10.0, 5.0, 0.0], [-40.0, 0.0, 0.0])
+
+    def test_an_unplaced_component_is_local_not_world(self):
+        sk = self._nested(native_vecs=((0, 0, 0), (1, 0, 0), (0, 1, 0)), proxies={}, placements=0)
+        assert sd.sketch_world_frame(sk)["space"] == sd.COMPONENT_LOCAL_SPACE
+
+    def test_an_unreadable_design_understates_rather_than_claiming_world(self):
+        sk = TestWorldFrameHelper._vecs((0, 0, 0), (1, 0, 0), (0, 1, 0))
+        sk.parentComponent = SimpleNamespace(name="Blk")      # no parentDesign to read
+        assert sd.sketch_world_frame(sk)["space"] == sd.COMPONENT_LOCAL_SPACE
+
+    def test_the_note_never_says_world_for_a_local_frame(self):
+        local = sd.frame_space_note({"space": sd.COMPONENT_LOCAL_SPACE})
+        assert "COMPONENT-LOCAL" in local
+        assert "maps sketch coords to WORLD" not in local
+        assert "world" in sd.frame_space_note({"space": sd.WORLD_SPACE}).lower()
+
+    def test_an_absent_frame_gets_the_local_wording(self):
+        # frame:null must not inherit a world claim by default.
+        assert sd.frame_space_note(None) == sd.FRAME_SPACE_NOTE[sd.COMPONENT_LOCAL_SPACE]
+
+    def test_the_lift_does_not_put_negative_zero_on_the_wire(self):
+        # The RAW doubles a real proxy returns, not tidied ones: the lift is a matrix multiply, so a
+        # component that should be zero arrives as a tiny signed residue and round() collapses that
+        # to -0.0, keeping the sign. Feeding a literal -0.0 here would prove nothing - it is FALSY,
+        # so the `safe(...) or 0.0` ahead of round() coerces it to +0.0 and the normalization under
+        # test never runs.
+        sk = self._nested(
+            native_vecs=((0, 0, 0), (1, 0, 0), (0, 1, 0)),
+            proxies={"Blk:1": ((2.9999999999999996, -9.860761315262648e-32, 0.0),
+                               (-2.220446049250313e-16, 1.0000000000000002, 0.0),
+                               (-1.0000000000000002, -2.220446049250313e-16, 0.0))})
+        f = sd.sketch_world_frame(sk)
+        assert [repr(c) for c in f["x_world"]] == ["0.0", "1.0", "0.0"]
+        assert [repr(c) for c in f["origin_mm"]] == ["30.0", "0.0", "0.0"]
+        assert [repr(c) for c in f["normal"]] == ["0.0", "0.0", "1.0"]
 
 
 class TestWorldFrame:
@@ -1132,3 +1267,23 @@ class TestSketchTextRecords:
         out = _payload(sd.handler(sketch_name="S4", include_entities=True))
         assert out["counts"]["texts"] == 0
         assert [e for e in out["entities"] if e["type"] == "text"] == []
+
+
+# ── a sketch name several sketches carry is REFUSED, never collapsed to "not found" ─────────────
+
+class TestSharedSketchNameRefused:
+    _REFUSAL = "2 sketches are named 'S' ('S' in Root, 'S' in Frame)"
+
+    def test_overview_refuses_with_its_owners(self, monkeypatch):
+        _install(_rich_sketch())
+        monkeypatch.setattr(sd, "find_sketch", lambda d, n: (None, self._REFUSAL))
+        res = sd.handler(sketch_name="S")
+        assert res["isError"] is True
+        assert res["message"] == self._REFUSAL and "No sketch named" not in res["message"]
+
+    def test_a_name_no_sketch_carries_still_lists_available(self, monkeypatch):
+        _install(_rich_sketch())
+        monkeypatch.setattr(sd, "find_sketch", lambda d, n: (None, None))
+        res = sd.handler(sketch_name="Nope")
+        assert res["isError"] is True
+        assert "No sketch named 'Nope'" in res["message"] and "Available" in res["message"]

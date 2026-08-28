@@ -20,6 +20,7 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe, scale
 from . import _common
+from . import _geom
 from . import _inputs
 from ._joints import (find_joint as _find_joint, current_joint_type as _current_joint_type,
                       motion_link_partner as _motion_link_partner)
@@ -27,6 +28,14 @@ from ._joints import (find_joint as _find_joint, current_joint_type as _current_
 # joint_type -> which value(s) it drives.
 _DRIVES_ANGLE = {"revolute", "cylindrical"}
 _DRIVES_SLIDE = {"slider", "cylindrical"}
+
+# The bands a member's placement change must EXCEED to count as motion, one per quantity, because the
+# placement record publishes them at different resolutions: its origin carries 3 decimals of a
+# millimetre, its basis axes 4 decimals of a direction component. A basis quantized that way places
+# two orientations less than ~0.008 deg apart on the same reading, so a degree band below that would
+# report rounding as rotation.
+_MOVE_BAND_MM = 1e-3
+_MOVE_BAND_DEG = 0.01
 
 # (document identity, joint ENTITY TOKEN) pairs successfully driven this add-in session. Driving BOTH
 # members of a motion-linked pair can kill the Fusion process outright - observed live only in an
@@ -112,6 +121,78 @@ def _limit_refusal(limits, value, fmt):
     return None
 
 
+def _placement(occ):
+    """One member's placement sample in MILLIMETRES, through the shared occurrence-placement record:
+    'origin' is its transform2 translation, x_axis/y_axis/z_axis that transform's rotation basis.
+    None when the joint carries no occurrence on that side; an empty dict when nothing read."""
+    if occ is None:
+        return None
+    return _geom.occ_world_frame(occ, 10.0)      # cm -> mm
+
+
+def _delta_mm(before, after):
+    """[dx, dy, dz] in mm between two placement samples, or None when either origin is unreadable -
+    so an unread placement is never published as a zero move."""
+    a, b = (before or {}).get("origin"), (after or {}).get("origin")
+    if a is None or b is None:
+        return None
+    return [round(q - p, 4) for p, q in zip(a, b)]
+
+
+def _unit(v):
+    """A basis axis rescaled to length 1, or None when it has no length. The published axes are
+    ROUNDED to 4 decimals, which leaves them slightly off unit length (a 30 deg axis reads
+    [0.866, 0.5, 0.0], whose length is 0.999978) - and the angle read below turns that missing length
+    into rotation that never happened (measured: 0.5375 deg reported for a part that had not turned
+    at all), so every axis is rescaled before it is compared."""
+    n = math.sqrt(sum(c * c for c in v))
+    return [c / n for c in v] if n else None
+
+
+def _delta_deg(before, after):
+    """The angle in DEGREES between two samples' orientations, or None when either sample is missing
+    a basis axis. The rotation carrying the before basis onto the after basis has trace
+    1 + 2*cos(theta), and that trace is the sum of the corresponding axes' dot products. Magnitude
+    only - a sense would need a rotation axis this pair of samples does not establish."""
+    keys = ("x_axis", "y_axis", "z_axis")
+    if not before or not after or any(k not in before or k not in after for k in keys):
+        return None
+    trace = 0.0
+    for k in keys:
+        p, q = _unit(before[k]), _unit(after[k])
+        if p is None or q is None:
+            return None
+        trace += sum(a * b for a, b in zip(p, q))
+    return round(math.degrees(math.acos(max(-1.0, min(1.0, (trace - 1.0) / 2.0)))), 4)
+
+
+def _moved_rows(members):
+    """(rows, readable) over [(occurrence, before-sample)]: one row per member whose placement
+    changed by MORE than its band, ordered by how far it moved. `readable` says at least one
+    member's placement was readable at both ends - which is what tells 'nothing moved' apart from
+    'the move could not be measured'."""
+    rows, readable = [], False
+    for occ, before in members:
+        after = _placement(occ)
+        dmm, ddeg = _delta_mm(before, after), _delta_deg(before, after)
+        if dmm is None and ddeg is None:
+            continue
+        readable = True
+        span = math.sqrt(sum(c * c for c in dmm)) if dmm is not None else 0.0
+        turn = ddeg if ddeg is not None else 0.0
+        if span <= _MOVE_BAND_MM and turn <= _MOVE_BAND_DEG:
+            continue
+        row = {"occurrence": (safe(lambda o=occ: o.fullPathName)
+                              or safe(lambda o=occ: o.name))}
+        if dmm is not None:
+            row["delta_mm"] = dmm
+        if ddeg is not None:
+            row["delta_deg"] = ddeg
+        rows.append((span, turn, row))
+    rows.sort(key=lambda r: (r[0], r[1]), reverse=True)
+    return [r[2] for r in rows], readable
+
+
 def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "mm") -> dict:
     """See TOOL_DESCRIPTION."""
     if angle_deg is None and distance is None:
@@ -124,7 +205,9 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
     design = _common.design()
     if not design:
         return error("No active design with components.")
-    joint = _find_joint(design, joint_name)
+    joint, ambiguous = _find_joint(design, joint_name)
+    if ambiguous:
+        return error(ambiguous)
     if not joint:
         return error(f"No joint named '{joint_name}'. Use assembly_get or design_get(include=['timeline']) to list "
                      "joint names.")
@@ -154,7 +237,9 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
               or safe(lambda: app.activeDocument.name) or "")
     resolved_name = safe(lambda: joint.name) or joint_name
     partner = _motion_link_partner(joint)
-    partner_joint = _find_joint(design, partner) if partner else None
+    # A partner name SEVERAL joints carry resolves to None here (find_joint refuses it), so the
+    # already-driven check below simply has no partner to key on - it does not block this drive.
+    partner_joint = (_find_joint(design, partner)[0] if partner else None)
     partner_driven = bool(partner_joint and _reg_key(doc_id, partner_joint) in _driven_this_session)
     plain_pair = _pair_is_plain(joint, partner_joint) if partner_joint else True
     if partner_driven and not plain_pair:
@@ -190,11 +275,24 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
             + "; ".join(refusals) + ". Fusion IGNORES an out-of-range drive (the value stays "
             "where it was), so nothing would move. Command a value inside the limits (a command "
             "exactly AT a bound lands on it), or widen them with joint_edit.")
-    # The PRE-drive angle, for the equivalence gate below: a pose-equivalent command can either
-    # no-op (value unchanged) or move the mechanism BY the delta while landing pose-equivalent
-    # (measured live: commanding 90 at stored 2160 moved the mechanism and read back 2250) - only
-    # the before-value tells the two receipts apart.
+    # The PRE-drive angle, for the equivalence gate below: a read-back that only matches the command
+    # modulo 360 leaves two possible receipts - the mechanism sat there already, or it turned to get
+    # there - and only the before-value tells them apart.
     rv_before = safe(lambda: jm.rotationValue) if jtype in _DRIVES_ANGLE else None
+    # The pre-drive placement of BOTH members, plus the joint's own motion vector for each DOF being
+    # commanded: sampling the same placements again after the drive is what says WHICH member the
+    # mechanism displaced, rather than only that the joint value took.
+    occ_one, occ_two = safe(lambda: joint.occurrenceOne), safe(lambda: joint.occurrenceTwo)
+    before_one, before_two = _placement(occ_one), _placement(occ_two)
+    directions = {}
+    if cm is not None:
+        slide_dir = _geom.axis_vec(safe(lambda: jm.slideDirectionVector))
+        if slide_dir is not None:
+            directions["slide_direction"] = slide_dir
+    if rad is not None:
+        rot_axis = _geom.axis_vec(safe(lambda: jm.rotationAxisVector))
+        if rot_axis is not None:
+            directions["rotation_axis"] = rot_axis
     try:
         if rad is not None:
             jm.rotationValue = rad
@@ -220,10 +318,9 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
         if rv is not None:
             acc = round(math.degrees(rv), 4)
             read_back["angle_deg"] = acc
-            # A revolute's value ACCUMULATES across full turns rather than normalizing (measured
-            # live: a crank whose stored value read 2160 deg, commanded 90, moved and read back
-            # 2250), so a multi-turn history leaves an angle no view of the mechanism can
-            # distinguish from its mod-360 form. Publish both.
+            # A revolute keeps the full turns it was commanded rather than normalizing (measured on
+            # 2705.1.4: commanding 750 reads back 750, commanding 390 reads back 390), and no view
+            # of the mechanism can tell such an angle from its mod-360 form. Publish both.
             norm = round(acc % 360.0, 4)
             if abs(acc - norm) > 1e-9:
                 read_back["angle_deg_normalized"] = norm
@@ -259,22 +356,21 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
         angle_landed = True
         if abs(read_back["angle_deg"] - applied["angle_deg"]) > 1e-3:
             # 720 and 0 are the SAME physical pose: a command the read-back matches modulo 360 is
-            # an equivalent pose, not a failed drive - the accumulated stored value just kept its
-            # full-turn count. Only a mismatch that survives the mod-360 test is a genuine no-take.
+            # an equivalent pose, not a failed drive - the stored value kept a full-turn count the
+            # command did not. Only a mismatch that survives the mod-360 test is a genuine no-take.
             d = abs(read_back["angle_deg"] - applied["angle_deg"]) % 360.0
             if min(d, 360.0 - d) <= 1e-3:
                 before_deg = round(math.degrees(rv_before), 4) if rv_before is not None else None
-                acc_txt = (f"value_now reads {read_back['angle_deg']} deg accumulated"
+                acc_txt = (f"value_now reads {read_back['angle_deg']} deg"
                            + (f" (= {read_back['angle_deg_normalized']} deg normalized)"
                               if "angle_deg_normalized" in read_back else ""))
                 if before_deg is not None and abs(read_back["angle_deg"] - before_deg) > 1e-3:
                     # The value CHANGED: the drive moved the mechanism and landed pose-equivalent
-                    # to the command (the stored value accumulated the delta). A real move, not a
-                    # no-op - say so instead of claiming the pose was already there.
+                    # to the command. A real move, not a no-op - say so instead of claiming the
+                    # pose was already there.
                     result["note"] += (
                         f" NOTE: the drive moved the mechanism to the commanded pose; {acc_txt} - "
-                        "revolute values accumulate full turns rather than storing the bare "
-                        "command.")
+                        "the stored angle kept a full-turn count the command did not.")
                 elif before_deg is None:
                     result["equivalent_pose"] = True
                     result["note"] += (
@@ -326,6 +422,28 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
             + (f": ground_to_parent is SET on {', '.join(locked)} - release it with "
                "assembly_ground(ground_to_parent=false) and re-drive."
                if locked else " - check per-occurrence ground_to_parent with assembly_get."))
+    # WHICH member the drive displaced, from the placement samples taken either side of it. This is
+    # an observation, never a prediction: the rows name the occurrence that moved and its measured
+    # change, and a drive after which neither placement changed says exactly that.
+    rows, placement_readable = _moved_rows(((occ_one, before_one), (occ_two, before_two)))
+    if rows:
+        result["moved"] = rows[0]
+        if len(rows) > 1:
+            result["also_moved"] = rows[1]
+        result["note"] += (" 'moved' names the member whose placement changed across this drive: "
+                           "delta_mm is how far its origin moved (mm), delta_deg the angle between "
+                           "its before and after orientation (a magnitude, no sense).")
+    elif placement_readable:
+        result["moved"] = None
+        result["note"] += (f" 'moved' is null - neither member's placement changed by more than "
+                           f"{_MOVE_BAND_MM} mm or {_MOVE_BAND_DEG} deg across this drive.")
+    else:
+        result["note"] += (" No 'moved' key: neither member's placement could be read, so which "
+                           "part this drive displaced is not reported.")
+    if directions:
+        result.update(directions)
+        result["note"] += (" The joint's own motion vector, read before the drive: "
+                           + ", ".join(sorted(directions)) + ".")
     if partner:
         result["motion_link_partner"] = partner
         result["note"] += (f" NOTE: '{resolved_name}' is motion-linked to '{partner}' - the link "
@@ -344,16 +462,17 @@ TOOL_DESCRIPTION = (
     "joint's DOF. Give 'angle_deg' (revolute/cylindrical) and/or 'distance' in 'units' "
     "(slider/cylindrical); rigid has no value, and a ball joint is posed with assembly_move. "
     "An out-of-range command is REFUSED before anything moves - Fusion IGNORES a beyond-limit "
-    "drive rather than clamping (a command exactly AT a bound lands). A revolute's value "
-    "ACCUMULATES across full turns: value_now adds angle_deg_normalized ([0,360)) when it differs, "
-    "and a command equal to the current angle modulo 360 reports equivalent_pose=true - the same "
-    "physical pose, not a failed drive. A drive is TRANSIENT: it arms a pending snapshot; a "
+    "drive rather than clamping (a command exactly AT a bound lands). A revolute stores the angle "
+    "you command VERBATIM, full turns included - 750 reads back 750, and commanding 30 next reads "
+    "back 30 - so value_now adds angle_deg_normalized ([0,360)) whenever the stored angle leaves "
+    "that range, and a read-back matching the command only modulo 360 reports equivalent_pose=true "
+    "(the same physical pose, not a failed drive). 'moved' names the member the drive displaced. "
+    "A drive is TRANSIENT: it arms a pending snapshot; a "
     "recompute resets it unless captured - assembly_capture_position (action='capture') writes the "
-    "pose into the timeline. Re-driving after a capture arms a NEW pending snapshot. The 'offset' "
+    "pose into the timeline. The 'offset' "
     "param moves a DIFFERENT axis (frame Z) and cannot persist a drive. Motion-linked pairs: drive "
-    "one member and read the partner back (the link moves it). In an xref/referenced assembly, "
-    "driving the other member is refused for the session - it has killed the Fusion process; a "
-    "plain in-document assembly allows it with a warning. Rebuilding the partner clears the refusal."
+    "one member and read the partner back (the link moves it); in an xref/referenced assembly "
+    "driving the SECOND member is refused for the session - it has killed the Fusion process."
 )
 
 tool = (

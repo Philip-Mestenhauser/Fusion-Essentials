@@ -21,6 +21,9 @@ class FakeOcc:
         self.name = name
         self.fullPathName = name
         self.isLightBulbOn = on
+        # A real Occurrence always answers `component`; one whose read RAISES is an unresolved
+        # external reference, which the shared census keeps out of the isolation walk.
+        self.component = SimpleNamespace(name=name.split(":")[0])
 
 
 class FakeRoot:

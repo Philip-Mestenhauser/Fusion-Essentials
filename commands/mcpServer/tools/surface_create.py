@@ -139,7 +139,9 @@ def extrude_handler(sketch_name: str = "", curves=None, distance: float = 0.0,
         profile, perr = _open_profile_from_curves(host, ents)
         source = "curves"
     else:
-        sketch, requested = _common.resolve_or_recent_sketch(design, sketch_name)
+        sketch, requested, ambiguous = _common.find_or_recent_sketch(design, sketch_name)
+        if ambiguous:
+            return error(ambiguous)
         if not sketch:
             if requested:
                 return error(f"No sketch named '{requested}'. Use sketch_get or sketch_create.")
@@ -247,7 +249,9 @@ def revolve_handler(sketch_name: str = "", curves=None, axis: str = "z",
         profile, perr = _open_profile_from_curves(host, ents)
         source = "curves"
     else:
-        sketch, requested = _common.resolve_or_recent_sketch(design, sketch_name)
+        sketch, requested, ambiguous = _common.find_or_recent_sketch(design, sketch_name)
+        if ambiguous:
+            return error(ambiguous)
         if not sketch:
             if requested:
                 return error(f"No sketch named '{requested}'. Use sketch_get or sketch_create.")

@@ -33,10 +33,41 @@ class _Coll:
         return iter(self._i)
 
 
-class FakeOcc:
-    def __init__(self, name, comp=None, children=0, bodies=1, grounded=False, xref=False):
+UNAVAILABLE = ("3 : The occurrence's referenced component is unavailable (broken or missing "
+               "external reference).")
+
+
+class BrokenOcc:
+    """An occurrence whose referenced component will not load. Only `name` reads; component,
+    fullPathName and childOccurrences all RAISE, isReferencedComponent reads FALSE (a live xref
+    reads True) and isValid reads True - so occ.component raising is the only signal."""
+    def __init__(self, name="45740"):
         self.name = name
-        self.component = type("C", (), {"name": comp or name.split(":")[0]})()
+        self.isReferencedComponent = False
+        self.isValid = True
+
+    @property
+    def component(self):
+        raise RuntimeError(UNAVAILABLE)
+
+    @property
+    def fullPathName(self):
+        raise RuntimeError("2 : InternalValidationError : path.valid()")
+
+    @property
+    def childOccurrences(self):
+        raise RuntimeError("2 : InternalValidationError : path.valid()")
+
+
+class FakeOcc:
+    def __init__(self, name, comp=None, children=0, bodies=1, grounded=False, xref=False,
+                 broken_children=()):
+        self.name = name
+        # component.occurrences is the COMPONENT-LOCAL superset - the only collection an unresolved
+        # child appears in; childOccurrences (the assembly-context one) drops it.
+        self.component = type("C", (), {"name": comp or name.split(":")[0],
+                                        "occurrences": _Coll(list(broken_children)
+                                                             + [None] * children)})()
         self.childOccurrences = _Coll([None] * children)
         self.bRepBodies = _Coll([None] * bodies)
         self.isGrounded = grounded
@@ -65,11 +96,27 @@ class _BBox:
         self.maxPoint = _Pt(*mx)
 
 
+class _RaisingWalk:
+    """root.allOccurrences on a design holding an unresolved reference: the PROPERTY ACCESS itself
+    raises, so the census has to be rebuilt from component.occurrences."""
+    @property
+    def count(self):
+        raise RuntimeError("2 : InternalValidationError : occ")
+
+    def item(self, i):
+        raise RuntimeError("2 : InternalValidationError : occ")
+
+    def __iter__(self):
+        raise RuntimeError("2 : InternalValidationError : occ")
+
+
 class FakeRoot:
-    def __init__(self, top_occs=(), all_count=None, joints=(), bodies=0, sketches=0, bbox=None):
+    def __init__(self, top_occs=(), all_count=None, joints=(), bodies=0, sketches=0, bbox=None,
+                 walk_raises=False):
         self.name = "Root"
         self.occurrences = _Coll(top_occs)
-        self.allOccurrences = _Coll([None] * (all_count if all_count is not None else len(top_occs)))
+        self.allOccurrences = (_RaisingWalk() if walk_raises else
+                               _Coll([None] * (all_count if all_count is not None else len(top_occs))))
         self.joints = _Coll(joints)
         self.bRepBodies = _Coll([None] * bodies)
         self.sketches = _Coll([None] * sketches)
@@ -483,7 +530,9 @@ class TestExternalReferences:
     def test_no_references_is_clean(self):
         self._design_with_refs([])
         out = _payload(wo.handler())
-        assert out["references"]["count"] == 0
+        # the key names its noun: referenced DOCUMENTS, which is a different count from
+        # doc_get(xref_tree).reference_link_count (reference LINKS).
+        assert out["references"]["referenced_documents"] == 0
         assert out["references"]["out_of_date"] == []
         assert out["health"]["is_healthy"] is True
         assert "fix_references" not in out["pointers"]
@@ -491,7 +540,7 @@ class TestExternalReferences:
     def test_references_all_current_is_healthy(self):
         self._design_with_refs([FakeRef("PartA"), FakeRef("PartB")])
         out = _payload(wo.handler())
-        assert out["references"]["count"] == 2
+        assert out["references"]["referenced_documents"] == 2
         assert out["references"]["out_of_date"] == []
         assert out["health"]["is_healthy"] is True
         assert "fix_references" not in out["pointers"]
@@ -509,6 +558,94 @@ class TestExternalReferences:
         assert out["note"].startswith("Attention")
         assert "out-of-date reference" in out["note"]
         assert "intentional" in out["note"]                      # tells the agent to confirm, not assume
+
+    def test_a_healthy_design_publishes_no_unresolved_marker(self):
+        # the 0-broken boundary: the list is empty, is_healthy stays true, and the note keeps its
+        # clean verdict - no unresolved wording appears on a document that has none.
+        self._design_with_refs([FakeRef("PartA")])
+        out = _payload(wo.handler())
+        assert out["health"]["unresolved_references"] == []
+        assert out["health"]["is_healthy"] is True
+        assert "UNRESOLVED" not in out["note"]
+        assert "unresolved_references" not in out["pointers"]
+        assert out["design"]["occurrences_walk"] == "allOccurrences"
+
+    def test_one_unresolved_reference_makes_the_document_unhealthy_and_is_NAMED(self):
+        # the specimen: is_healthy read TRUE beside a note declaring the document clean while an
+        # occurrence's referenced component would not load.
+        container = FakeOcc("Op1 Workholding Container:1", broken_children=[BrokenOcc("45740")])
+        root = FakeRoot(top_occs=[container], walk_raises=True)
+        des = FakeDesign(root, timeline=[FakeTL(0)])
+        _install(active_product=des, doc=FakeDoc(design=des))
+        out = _payload(wo.handler())
+        h = out["health"]
+        assert h["is_healthy"] is False
+        assert [u["name"] for u in h["unresolved_references"]] == ["45740"]
+        assert h["unresolved_references"][0]["parent_path"] == "Op1 Workholding Container:1"
+        assert UNAVAILABLE in h["unresolved_references"][0]["detail"]
+        assert "45740" in out["note"] and "UNRESOLVED" in out["note"]
+        assert "No compute errors" not in out["note"]
+        assert "45740" in out["pointers"]["unresolved_references"]
+
+    def test_the_note_never_promises_a_source_file_or_hub(self):
+        # the API exposes NO path from a broken occurrence to its document/project/hub, so the note
+        # must not send the agent after one.
+        container = FakeOcc("Op1 Workholding Container:1", broken_children=[BrokenOcc("45740")])
+        des = FakeDesign(FakeRoot(top_occs=[container], walk_raises=True), timeline=[FakeTL(0)])
+        _install(active_product=des, doc=FakeDoc(design=des))
+        note = _payload(wo.handler())["note"]
+        assert "doc_update_xref" not in note        # cannot refresh a reference with no DocumentReference
+        assert "switch" not in note.lower()          # no hub advice is buildable
+        assert "browser tree" in note
+
+    def test_a_raising_walk_reports_the_recursed_marker_and_an_honest_total(self):
+        # the blast radius: total_occurrences read 0 beside top_level_occurrences 5.
+        container = FakeOcc("Op1:1", broken_children=[BrokenOcc("45740")])
+        des = FakeDesign(FakeRoot(top_occs=[container, FakeOcc("Stock:1")], walk_raises=True),
+                         timeline=[FakeTL(0)])
+        _install(active_product=des, doc=FakeDoc(design=des))
+        out = _payload(wo.handler())
+        assert out["design"]["occurrences_walk"] == "recursed"
+        assert out["design"]["total_occurrences"] == 3      # 2 readable + the unresolved one
+        assert "recursed" in out["note"]
+
+    def test_an_unreadable_census_publishes_null_not_zero(self):
+        # neither walk enumerated: the count is UNKNOWN. A 0 here is a read failure dressed as a fact.
+        root = FakeRoot(walk_raises=True)
+        root.occurrences = _RaisingWalk()
+        des = FakeDesign(root, timeline=[FakeTL(0)])
+        _install(active_product=des, doc=FakeDoc(design=des))
+        out = _payload(wo.handler())
+        assert out["design"]["total_occurrences"] is None
+        assert out["design"]["occurrences_walk"] == "unreadable"
+        assert "unknown rather than zero" in out["note"]
+
+    def test_a_broken_TOP_LEVEL_occurrence_gets_a_digest_row_instead_of_a_blank_one(self):
+        # a row built from swallowed reads would show it as an ordinary empty component - which is
+        # exactly how it stayed invisible.
+        des = FakeDesign(FakeRoot(top_occs=[BrokenOcc("45740"), FakeOcc("Stock:1")],
+                                  walk_raises=True), timeline=[FakeTL(0)])
+        _install(active_product=des, doc=FakeDoc(design=des))
+        rows = {r["name"]: r for r in _payload(wo.handler())["browser_digest"]}
+        assert rows["45740"]["unresolved"] is True
+        assert "bodies" not in rows["45740"]           # nothing readable is claimed about it
+        assert rows["Stock:1"].get("unresolved") is None
+
+    def test_a_container_row_counts_its_unresolved_descendants(self):
+        container = FakeOcc("Op1:1", children=2, broken_children=[BrokenOcc("45740")])
+        des = FakeDesign(FakeRoot(top_occs=[container], walk_raises=True), timeline=[FakeTL(0)])
+        _install(active_product=des, doc=FakeDoc(design=des))
+        row = _payload(wo.handler())["browser_digest"][0]
+        assert row["children"] == 2                  # childOccurrences, which DROPS the broken one
+        assert row["unresolved_descendants"] == 1     # so the subtree count is published beside it
+
+    def test_the_digest_names_its_own_depth_rather_than_overstating_is_xref(self):
+        # is_xref reads false on every row of a document whose references sit deeper; the note says
+        # which depth the flag describes instead of leaving the agent to conclude "no references".
+        self._design_with_refs([FakeRef("PartA")])
+        note = _payload(wo.handler())["note"]
+        assert "browser_digest is DEPTH-1" in note
+        assert "referenced_documents" in note and "reference_link_count" in note
 
     def test_ood_reported_even_without_an_active_design(self):
         # a non-Design doc (e.g. a drawing) that still has stale xrefs must surface them

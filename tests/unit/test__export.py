@@ -297,16 +297,52 @@ class TestTopLevelOccurrences:
         assert occs == [o1, o2]
 
     def test_no_occurrences_is_empty_list(self):
+        # A read that SUCCEEDED and found none - the answer a split export refuses on by name.
         assert ex.top_level_occurrences(_OccDesign(_Occs([]))) == []
 
-    def test_unreadable_occurrences_collection_is_empty_list(self):
+    def test_unreadable_occurrences_collection_is_none_not_empty(self):
+        # [] would say "this design has no components" about a census that never happened, and a
+        # split export over [] reports a clean zero-file result.
         class _BadRoot:
             @property
             def occurrences(self):
                 raise RuntimeError("boom")
         design = _OccDesign(_Occs([]))
         design.rootComponent = _BadRoot()
-        assert ex.top_level_occurrences(design) == []
+        assert ex.top_level_occurrences(design) is None
+
+    def test_an_unreadable_root_is_none(self):
+        class _BadDesign:
+            @property
+            def rootComponent(self):
+                raise RuntimeError("no design")
+        assert ex.top_level_occurrences(_BadDesign()) is None
+
+    def test_an_unreadable_count_is_none(self):
+        class _BadCount:
+            @property
+            def count(self):
+                raise RuntimeError("boom")
+            def item(self, i):
+                return object()
+        assert ex.top_level_occurrences(_OccDesign(_BadCount())) is None
+
+    def test_a_count_that_is_not_a_number_is_none(self):
+        # An unmodelled property hands back a truthy object, not a count; range() over it would
+        # raise, and treating it as 0 would report an empty design.
+        design = _OccDesign(_Occs([]))
+        design.rootComponent.occurrences.count = object()
+        assert ex.top_level_occurrences(design) is None
+
+    def test_one_unreadable_item_sinks_the_whole_census(self):
+        # N-1 occurrences would export as if they were the whole design, with no sign of the hole.
+        class _HoleyOccs:
+            count = 2
+            def item(self, i):
+                if i == 1:
+                    raise RuntimeError("boom")
+                return "o1"
+        assert ex.top_level_occurrences(_OccDesign(_HoleyOccs())) is None
 
 
 # ── split_by_occurrence ────────────────────────────────────────────────────────

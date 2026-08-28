@@ -540,3 +540,32 @@ class TestOccWorldFrameGuards:
         occ = types.SimpleNamespace(transform2=None, boundingBox2=lambda types_: _NoMin())
         out = geom.occ_world_frame(occ, 1.0)
         assert "bbox_center" not in out and "bbox_size" not in out
+
+    def test_a_corner_COORDINATE_that_will_not_read_omits_the_bbox_keys(self):
+        # The box and both corner POINTS read; one corner's .y does not. The centre/size arithmetic
+        # is a guarded read like every other coordinate here, so the two keys drop - unguarded, the
+        # raise leaves the occurrence row's caller with no row at all.
+        import types
+        box = FakeBoundingBox3D(_RaisingCoord(), FakePoint(2, 2, 2))
+        occ = types.SimpleNamespace(transform2=None, boundingBox2=lambda types_: box)
+        out = geom.occ_world_frame(occ, 1.0)
+        assert "bbox_center" not in out and "bbox_size" not in out
+
+    def test_a_non_numeric_corner_coordinate_omits_the_bbox_keys(self):
+        # adsk mocks answer a truthy Mock for anything unmodeled; multiplying one into bbox_size
+        # would publish a Mock as a measurement (or raise at json time).
+        import types
+        from unittest.mock import Mock
+        box = FakeBoundingBox3D(FakePoint(0, Mock(), 0), FakePoint(2, 2, 2))
+        occ = types.SimpleNamespace(transform2=None, boundingBox2=lambda types_: box)
+        assert geom.occ_world_frame(occ, 1.0) == {}
+
+    def test_a_fully_readable_box_still_reports_centre_and_size(self):
+        # The guard must not cost the normal reading: an occurrence spanning (0,0,0)-(2,4,6) cm in
+        # mm reads centre (10,20,30) and size (20,40,60).
+        import types
+        box = FakeBoundingBox3D(FakePoint(0, 0, 0), FakePoint(2, 4, 6))
+        occ = types.SimpleNamespace(transform2=None, boundingBox2=lambda types_: box)
+        out = geom.occ_world_frame(occ, 10.0)
+        assert out["bbox_center"] == [10.0, 20.0, 30.0]
+        assert out["bbox_size"] == [20.0, 40.0, 60.0]

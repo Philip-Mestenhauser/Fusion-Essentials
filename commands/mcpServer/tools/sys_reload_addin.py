@@ -18,10 +18,12 @@ import adsk.core
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
+from ._common import error
 
 # Intentionally does NOT use _common.ok(): this tool returns a human-readable status SENTENCE as the
 # content text, not a json.dumps'd payload (ok() would JSON-encode it into a blob). The deviation is
-# deliberate.
+# deliberate. The REFUSAL path has no such deviation - _common.error already builds exactly the
+# text-content + isError + mirrored message envelope every other tool refuses with.
 app = adsk.core.Application.get()
 
 # Dedicated custom event for the deferred reload (separate from TaskManager's).
@@ -199,11 +201,10 @@ def handler() -> dict:
     # caller on to test code that was never loaded.
     if _reload_event is None or _reload_handler is None:
         why = _install_error or 'the event is not registered on this server'
-        text = ("Reload NOT scheduled: the deferred-reload event is not installed (" + why + "), "
-                "so firing it would reach nothing and the add-in would keep running the code "
-                "already in memory. Reload it from Fusion's Scripts and Add-Ins dialog (Shift+S) "
-                "instead - stop the add-in, then run it.")
-        return {"content": [{"type": "text", "text": text}], "isError": True, "message": text}
+        return error("Reload NOT scheduled: the deferred-reload event is not installed (" + why
+                     + "), so firing it would reach nothing and the add-in would keep running the "
+                     "code already in memory. Reload it from Fusion's Scripts and Add-Ins dialog "
+                     "(Shift+S) instead - stop the add-in, then run it.")
 
     def _fire():
         try:

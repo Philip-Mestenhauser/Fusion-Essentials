@@ -36,6 +36,9 @@ class FakeOcc:
         self.name = name
         self.fullPathName = full_path or name
         self.boundingBox = bbox
+        # A real Occurrence always answers `component`; a read that RAISES is the
+        # unresolved-external-reference signal the shared occurrence census filters on.
+        self.component = type("C", (), {"name": name.split(":")[0]})()
 
 
 class FakeSectionInput:

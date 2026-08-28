@@ -1726,9 +1726,13 @@ def _install_ambiguous_bodies(*, handle_map=None, occ_bodies=()):
         def item(self, i): return list(self._m.values())[i]
 
     class _Occ:
-        def __init__(self, m): self.bRepBodies = _BColl(m)
+        # A real Occurrence always answers `component`; a read that RAISES is the unresolved-reference
+        # signal, and the shared census keeps such a row out of the body walk.
+        def __init__(self, m, i):
+            self.bRepBodies = _BColl(m)
+            self.component = types.SimpleNamespace(name=f"Sub-{i}")
 
-    occs = [_Occ(m) for m in occ_bodies]
+    occs = [_Occ(m, i) for i, m in enumerate(occ_bodies)]
 
     class _Root:
         bRepBodies = _BColl({})
@@ -1757,7 +1761,10 @@ def _install_native_and_proxy(comp_bodies=(), occ_bodies=(), comp_name="Probe"):
     comp = types.SimpleNamespace(name=comp_name, bRepBodies=_NamedCollection(comp_bodies))
     for b in comp_bodies:
         b.parentComponent = comp
-    occs = [types.SimpleNamespace(name=path, fullPathName=path, bRepBodies=_NamedCollection(bodies))
+    # component: a real Occurrence always answers it; a read that RAISES is the unresolved-reference
+    # signal the shared census filters on.
+    occs = [types.SimpleNamespace(name=path, fullPathName=path, bRepBodies=_NamedCollection(bodies),
+                                  component=types.SimpleNamespace(name=path.split(":")[0]))
             for path, bodies in occ_bodies]
     root = types.SimpleNamespace(name="Root", bRepBodies=_NamedCollection([]), allOccurrences=occs)
     design = types.SimpleNamespace(rootComponent=root, allComponents=None,
@@ -2192,6 +2199,17 @@ class TestProfileRef:
         _install_profiles(sketches=[("S", [FakeProfile("p0")])])
         val, err = inp.ProfileRef("profile").resolve({"sketch": "Nope", "profile_index": 0})
         assert val is None and "no sketch named" in err
+
+    def test_a_shared_sketch_name_is_refused_under_the_input_name(self, monkeypatch):
+        # The selector's sketch lookup states what the design-wide walk READ: a name SEVERAL
+        # sketches carry is the refusal naming each owner, never "no sketch named 'S'".
+        _install_profiles(sketches=[("S", [FakeProfile("p0")])])
+        refusal = "2 sketches are named 'S' ('S' in Root, 'S' in Frame)"
+        monkeypatch.setattr(inp._common, "find_or_recent_sketch", lambda d, n: (None, n, refusal))
+        val, err = inp.ProfileRef("profile").resolve({"sketch": "S", "profile_index": 0})
+        assert val is None
+        assert err == f"'profile': {refusal}"
+        assert "no sketch named" not in err
 
 
 class TestProfileRefSchema:
@@ -3356,36 +3374,64 @@ class TestTimelineNameWhitespace:
         assert obj is None and "matches 2 timeline objects" in err
 
 
-class TestSketchOwnersWalk:
-    """_sketch_owners is the census SketchRef/SketchRefList refuse an ambiguous name from."""
+class _SketchColl(_WalkColl):
+    """A component's sketches: the count/item(i) walk plus the EXACT itemByName the design-wide
+    sketch walk asks each component with."""
 
-    def _design(self, comps):
-        return types.SimpleNamespace(rootComponent=comps[0], activeComponent=comps[0],
-                                     allComponents=_WalkColl(comps))
+    def itemByName(self, name):
+        return next((s for s in self._items if s.name == name), None)
+
+
+class TestSketchRefListRunsTheOneSharedWalk:
+    """SketchRefList resolves through _common.find_sketch - the ONE design-wide sketch walk - so
+    its census and its resolution cannot disagree about which sketches a name names."""
 
     def _comp(self, name, sketch_names, **kw):
         sketches = [types.SimpleNamespace(name=n) for n in sketch_names]
-        return types.SimpleNamespace(name=name, sketches=_WalkColl(sketches, **kw))
+        return types.SimpleNamespace(name=name, sketches=_SketchColl(sketches, **kw))
 
-    def test_finds_the_name_in_every_component(self):
-        d = self._design([self._comp("Root", ["Profile"]), self._comp("Frame", ["Profile"])])
-        assert [c for c, _sk in inp._sketch_owners(d, "Profile")] == ["Root", "Frame"]
+    def _resolve(self, monkeypatch, comps, raw):
+        d = types.SimpleNamespace(rootComponent=comps[0], activeComponent=comps[0],
+                                  allComponents=_WalkColl(comps))
+        monkeypatch.setattr(inp._common, "design", lambda: d)
+        return inp.SketchRefList("sketches").resolve(raw)
 
-    def test_match_is_exact_and_case_insensitive(self):
-        d = self._design([self._comp("Root", ["Profile", "ProfileOuter"])])
-        assert [sk.name for _c, sk in inp._sketch_owners(d, "profile")] == ["Profile"]
+    def test_a_name_exactly_one_sketch_carries_resolves(self, monkeypatch):
+        comps = [self._comp("Root", ["Profile"]), self._comp("Frame", ["Other"])]
+        got, err = self._resolve(monkeypatch, comps, "Profile")
+        assert err is None
+        assert got == [comps[0].sketches.item(0)]
 
-    def test_an_unreadable_sketch_does_not_hide_the_rest_of_the_census(self):
-        # Losing a component's whole sketch list to one bad row would turn a genuine AMBIGUITY into
-        # a confident single hit - the resolver would then act on the wrong sketch.
-        bad = self._comp("Frame", [types.SimpleNamespace(name="Profile")], broken=(0,))
-        d = self._design([self._comp("Root", ["Profile"]), bad])
-        assert [c for c, _sk in inp._sketch_owners(d, "Profile")] == ["Root"]
+    def test_a_shared_name_is_refused_naming_every_owning_component(self, monkeypatch):
+        comps = [self._comp("Root", ["Profile"]), self._comp("Frame", ["Profile"])]
+        got, err = self._resolve(monkeypatch, comps, "Profile")
+        assert got is None
+        assert "2 sketches are named 'Profile'" in err
+        assert "Root" in err and "Frame" in err
+        assert "'sketches'[0]" in err        # the refusal still names the slot the name came from
 
-    def test_a_component_with_no_sketch_collection_is_skipped(self):
-        d = self._design([self._comp("Root", ["Profile"]),
-                          types.SimpleNamespace(name="Empty", sketches=None)])
-        assert [c for c, _sk in inp._sketch_owners(d, "Profile")] == ["Root"]
+    def test_the_match_is_exact_case_included(self, monkeypatch):
+        # The walk asks each component's sketches.itemByName, which is case-SENSITIVE. A census
+        # matching case-INSENSITIVELY beside it counted a hit the resolve could not hand back, so
+        # 'profile' dead-ended on "did not resolve to a live sketch" instead of the miss + names.
+        comps = [self._comp("Root", ["Profile"])]
+        got, err = self._resolve(monkeypatch, comps, "profile")
+        assert got is None
+        assert "no sketch named 'profile'" in err
+        assert "Available: Profile" in err
+
+    def test_each_list_entry_is_refused_under_its_own_index(self, monkeypatch):
+        comps = [self._comp("Root", ["Outline", "Profile"]), self._comp("Frame", ["Profile"])]
+        got, err = self._resolve(monkeypatch, comps, ["Outline", "Profile"])
+        assert got is None and "'sketches'[1]" in err
+
+    def test_a_component_whose_sketches_will_not_read_costs_only_its_own_row(self, monkeypatch):
+        # A component whose collection raises contributes nothing; the rest of the design still
+        # resolves, rather than the whole walk failing on one bad component.
+        comps = [self._comp("Root", ["Profile"]),
+                 types.SimpleNamespace(name="Empty", sketches=None)]
+        got, err = self._resolve(monkeypatch, comps, "Profile")
+        assert err is None and got == [comps[0].sketches.item(0)]
 
 
 class TestTargetRefMissHint:

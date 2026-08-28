@@ -375,11 +375,13 @@ def _min_distance_cm(ea, eb):
     # None, never 0.0: every caller compares this against a tolerance, and a fabricated 0 would
     # score an unreadable gap as CONTACT - the one answer a relation check must never invent.
     value = safe(lambda: mr.value)
-    if not isinstance(value, (int, float)):
+    # bool is excluded ahead of the number test - it is an int subclass, so False would be scored
+    # against the tolerance as a 0 cm gap and pass every caller's CONTACT test. The same deliberate
+    # exclusion _common.measured/counted make; the refusal names what was read instead.
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None, None, error(
-            "The minimum distance could not be read off the measurement result, so the relation is "
-            "UNKNOWN - it is not reported as touching. Re-run find_geometry for fresh handles and "
-            "retry.")
+            f"The minimum distance read as {value!r}, not a number, so the relation is UNKNOWN - it "
+            "is not reported as touching. Re-run find_geometry for fresh handles and retry.")
     return value, mr, None
 
 

@@ -66,13 +66,14 @@ def _occurrence_census(design, path):
     """How many occurrences currently carry `path` as their fullPathName, or None when the walk
     cannot be read. A COUNT, not a lookup: a bare name repeats across sub-assemblies and two siblings
     can even wear one path, so what the before/after diff needs is how many carry it."""
-    root = safe(lambda: design.rootComponent)
-    occs = safe(lambda: root.allOccurrences) if root is not None else None
-    if occs is None:
+    # The WALK itself is guarded, not just the per-item read: a census nothing could be read from is
+    # unanswerable (None), never an escaping exception or a short count. root.allOccurrences RAISES
+    # on a design holding an unresolved external reference, so the shared walk's component.occurrences
+    # fallback is what keeps a removal from this design VERIFIABLE instead of refused.
+    walk = _common.occurrence_walk(design)
+    if not walk.readable:
         return None
-    # The WALK itself is guarded, not just the per-item read: a raising allOccurrences iterator makes
-    # the census unanswerable (None), never an escaping exception or a short count.
-    return safe(lambda: sum(1 for o in occs if safe(lambda o=o: o.fullPathName) == path))
+    return safe(lambda: sum(1 for o in walk.occurrences if safe(lambda o=o: o.fullPathName) == path))
 
 
 def _census(design, host, kind, label):

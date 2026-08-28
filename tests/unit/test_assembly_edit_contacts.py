@@ -32,6 +32,9 @@ class _Occ:
         self.fullPathName = path
         self.name = path.split("+")[-1]
         self.entityToken = f"OCC:{path}"
+        # A real Occurrence always answers `component`; a read that RAISES is the
+        # unresolved-external-reference signal the shared occurrence census filters on.
+        self.component = type("C", (), {"name": self.name.split(":")[0]})()
 
 
 class _OccType:

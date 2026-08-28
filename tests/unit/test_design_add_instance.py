@@ -400,15 +400,39 @@ class TestUnreadableStructure:
     half-resolved target."""
 
     def test_an_occurrence_that_cannot_name_its_component_is_refused(self, wire):
+        # An occurrence whose `component` read RAISES is an unresolved external reference. The
+        # refusal must NOT read as "no such occurrence" / "did not resolve" - the instance exists and
+        # the browser tree shows it; what is missing is the component behind it.
         des = wire()
-        go_stale(des.tree[0], attrs=("component",))    # resolves by path, then answers no component
+        go_stale(des.tree[0], attrs=("component",))
         msg = error_message(ai.handler(component="Bolt:1"))
-        assert "Could not reach the component behind 'Bolt:1'" in msg
+        assert "referenced component could not be loaded" in msg
+        assert "Bolt:1" in msg
+        assert "did not resolve" not in msg
         assert getattr(des, "added", None) is None
 
     def test_a_host_occurrence_that_cannot_name_its_component_is_refused(self, wire):
         des = wire(names=("Outer", "Bolt"))
         go_stale(des.tree[0], attrs=("component",))
+        msg = error_message(ai.handler(component="Bolt", into_component="Outer:1"))
+        assert "referenced component could not be loaded" in msg
+        assert "Outer:1" in msg
+        assert "no occurrence matching" not in msg
+        assert getattr(des, "added", None) is None
+
+    def test_an_occurrence_whose_component_reads_NONE_is_refused_before_the_add(self, wire):
+        # Distinct from an unresolved external reference, where the read RAISES: here the read
+        # SUCCEEDS and answers None, so the occurrence resolves normally and this guard - not the
+        # resolver - is the only thing standing between a null component and addExistingComponent.
+        des = wire()
+        des.tree[0].component = None
+        msg = error_message(ai.handler(component="Bolt:1"))
+        assert "Could not reach the component behind 'Bolt:1'" in msg
+        assert getattr(des, "added", None) is None
+
+    def test_a_HOST_occurrence_whose_component_reads_NONE_is_refused(self, wire):
+        des = wire(names=("Outer", "Bolt"))
+        des.tree[0].component = None
         msg = error_message(ai.handler(component="Bolt", into_component="Outer:1"))
         assert "Occurrence 'Outer:1' has no component to instance into" in msg
         assert getattr(des, "added", None) is None
@@ -487,3 +511,20 @@ class TestPlacementCannotBeCaptured:
         out = payload(ai.handler(component="Bolt"))
         assert out["position"] == "origin"
         assert "cannot be captured" not in out["note"]
+
+
+class TestHostPrefixes:
+    """Which HOST instances received the new instance - the count the payload reports."""
+
+    def test_a_path_without_the_new_instance_contributes_no_host(self):
+        # the leftover paths (siblings, and the new instance own children) must not each add a
+        # host, or a one-host add would report itself as having landed in several places.
+        assert ai._host_prefixes(["Frame:1+Bolt:2", "Frame:1+Nut:1"], "Bolt:2") == {"Frame:1"}
+
+    def test_a_top_level_instance_reports_the_root_as_its_host(self):
+        assert ai._host_prefixes(["Bolt:2"], "Bolt:2") == {""}
+
+    def test_each_host_instance_is_counted_once(self):
+        assert ai._host_prefixes(
+            ["Frame:1+Bolt:2", "Frame:2+Bolt:2", "Frame:1+Bolt:2+Washer:1"], "Bolt:2") == {
+            "Frame:1", "Frame:2"}

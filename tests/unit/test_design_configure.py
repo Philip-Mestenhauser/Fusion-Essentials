@@ -1495,6 +1495,16 @@ class TestSetAppearanceRefusals:
         assert res["isError"] is True and "No appearance named 'Ghost'" in res["message"]
         assert _top(col_design).appearanceTable._columns_added == []
 
+    def test_the_missing_appearance_error_names_a_base_the_caller_can_reach(self, col_design):
+        # The example base has to be one this server actually produces: appearance_set copies the
+        # Fusion Appearance Library's 'Paint - Enamel Glossy (White)' into the document as
+        # 'MCP Neutral Base'. Naming a base the caller cannot find sends it looking for nothing.
+        col_design.appearances = SimpleNamespace(itemByName=lambda n: None)
+        msg = dc.handler(action="set_appearance", body="Body1",
+                         appearances={"Default": "Ghost"})["message"]
+        assert "Powder" not in msg
+        assert "Paint - Enamel Glossy (White)" in msg and "MCP Neutral Base" in msg
+
     def test_an_appearance_present_in_the_design_resolves(self, col_design):
         held = SimpleNamespace(name="Red")
         col_design.appearances = SimpleNamespace(

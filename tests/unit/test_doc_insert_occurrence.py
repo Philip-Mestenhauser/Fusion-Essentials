@@ -271,6 +271,24 @@ class TestRemoveExisting:
         assert old.deleted is True
         assert out["removed_occurrence"] == "OldPart:1"
 
+    def test_removal_note_carries_only_the_measured_side_effect(self, monkeypatch):
+        # a removal's blast radius is stated from measurement: a feature that referenced the
+        # occurrence's geometry STAYS in the timeline with reference failures. The CAM-selection
+        # claim was measured FALSE (the operation's selection survives valid and unwarned), so no
+        # wording may re-assert it.
+        old = FakeOcc("OldPart:1", component=FakeComp("OldPart"))
+        _install(monkeypatch, occurrences=[old])
+        out = _payload(io.handler(document_id="urn:x", remove_existing="OldPart:1"))
+        note = out["note"]
+        assert "REMAINS in the timeline carrying reference failures" in note
+        assert "CAM" not in note and "stripped" not in note
+
+    def test_no_removal_note_when_nothing_was_removed(self, monkeypatch):
+        # the sentence is about a removal; a plain insert must not claim one happened
+        _install(monkeypatch, occurrences=[])
+        out = _payload(io.handler(document_id="urn:x"))
+        assert out["removed_occurrence"] is None
+
     def test_delete_returns_false_errors(self, monkeypatch):
         old = FakeOcc("OldPart:1", component=FakeComp("OldPart"), delete_returns=False)
         _install(monkeypatch, occurrences=[old])

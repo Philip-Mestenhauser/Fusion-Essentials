@@ -183,6 +183,16 @@ class TestGuards:
         msg = error_message(mod.move_handler(entities="line:0,arc:7", dx=10))
         assert msg == load_tool("_common").resolve_entity_refs(plate, "line:0,arc:7")[2]
 
+    def test_a_shared_sketch_name_is_refused_in_the_multi_value_return_shape(
+            self, mod, sketches, monkeypatch):
+        # _prepare answers with 8 values, so the refusal has to travel in that same shape - a bare
+        # error() here unpacks into a ValueError instead of reaching the caller. And the message
+        # names the sketches that DO carry the name, never "No sketch named 'Plate'".
+        refusal = "2 sketches are named 'Plate' ('Plate' in Root, 'Plate' in Frame)"
+        monkeypatch.setattr(mod._common, "find_or_recent_sketch", lambda d, n: (None, n, refusal))
+        msg = error_message(mod.move_handler(sketch_name="Plate", entities="line:0", dx=10))
+        assert msg == refusal and "No sketch named" not in msg
+
     def test_a_transform_that_asks_for_nothing_is_refused(self, mod, sketches):
         msg = error_message(mod.move_handler(entities="line:0"))
         assert "Nothing to apply" in msg and "rotation_deg" in msg
@@ -344,6 +354,20 @@ class TestCopy:
     def test_an_unknown_target_sketch_lists_the_available_ones(self, mod, sketches):
         msg = error_message(mod.copy_handler(entities="line:0", target_sketch="Ghost", dx=10))
         assert "No sketch named 'Ghost'" in msg and "Other" in msg
+
+    def test_a_shared_target_sketch_name_is_refused_with_its_owners(self, mod, sketches,
+                                                                    monkeypatch):
+        # The target_sketch lookup is its own design-wide resolve: a name SEVERAL sketches carry is
+        # refused naming each owner, and nothing is copied - "No sketch named 'Other'" would state
+        # the opposite of what the walk read.
+        plate, _second = sketches
+        calls = []
+        plate.copy = _copier(calls, plate, made=[_boxed("L2", 9.0, 0.0)])
+        refusal = "2 sketches are named 'Other' ('Other' in Root, 'Other' in Frame)"
+        monkeypatch.setattr(mod._common, "find_sketch", lambda d, n: (None, refusal))
+        msg = error_message(mod.copy_handler(entities="line:0", target_sketch="Other", dx=10))
+        assert msg == refusal and "No sketch named" not in msg
+        assert calls == []          # nothing was copied
 
 
 class TestCopyRefsCrossTheProxySeam:

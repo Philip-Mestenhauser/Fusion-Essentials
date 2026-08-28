@@ -6,12 +6,16 @@ fixture: P7-Template (the S7 artifact) OPENED as the active document by the orch
   IN the template and saves it in place (this scenario advances P7-Template's version - by
   design; the template is the chain's second mutable artifact). Missing fixture = ask.
 budget:
-  max_tool_calls: 90
-  max_tokens: 200000
+  max_tool_calls: 110
+  max_tokens: 225000
 substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
 perturbations: none (baseline)
 expected_refusals: none
 ---
+
+> NEEDS-RUN - UNMEASURED WORDING: the material-engagement postcondition below has not been
+> exercised by a blind executor, so the budget is a provisional pin, not a measurement. This
+> banner stands until a blind run measures this wording.
 
 # S8 - CAM tooling: four tools, two setups, computing operations
 
@@ -67,6 +71,18 @@ POSTCONDITIONS - verify EACH with your own fresh read; report actual values.
   names the selected components); WCS on the stock-center origin.
 - four operations exist in the primary setup, one per tool; after generation a fresh status read
   shows every operation computed healthy (no errors).
+- EVERY OPERATION ENGAGES MATERIAL - a healthy compute is not this proof. For EACH of the four,
+  report from fresh reads: (a) the machining heights/depths it works between, against the numbers
+  you read for the material at that location (the stock's top and bottom, the placeholder's
+  surface), so the span where it removes material is a stated arithmetic, and (b) the
+  tool-to-feature arithmetic that makes it a cut rather than a pass through air - the drill's
+  diameter vs the existing through hole's diameter, the ball endmill's radius vs the curved
+  feature's radius, the facing pass's top height vs the stock top, the endmill pass against the
+  geometry it aims at. An operation whose span sits outside the material, or whose tool cannot
+  touch the feature it names, CUTS AIR: that is a FAIL of this postcondition even though the
+  operation computed healthy - fix it or report it as a FAIL, never pass it on the green compute.
+  Show it as well as counting it: isolate each operation's toolpath, screenshot it against the
+  part, and say in VISUAL_CHECK whether the picture agrees with the numbers.
 - the second-setup activation round-trip: fresh reads show it active, then the primary active
   again.
 - the CAM template artifact saved (report its library location/name from the save's read-back)
@@ -105,7 +121,16 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
   versions); everything P1-P5 stays untouched.
 - cam_save_template creates NEW library entries every run (re-run hygiene: address by the
   returned URL/name recorded in the run record; no tool deletes them).
+- THE ENGAGEMENT POSTCONDITION carries the "cuts real material" instruction the goal already
+  states: a healthy compute says the toolpath SOLVED, not that it touched material, and an
+  operation whose heights sit above the stock or whose drill re-drills an open hole computes green
+  and cuts air. Uphold it only from the per-operation parameter read (heights/depths) plus the
+  tool-vs-feature numbers, and re-issue those reads when grading; the isolated-toolpath
+  screenshots are the second channel, not the proof. An executor that cannot find a read for a
+  height or a tool diameter and says so under SURFACED is a WIRE finding, not a silent FAIL.
 - Budget: the last measured run (Agent-executor harness) was 58 calls, PASS incl. two
-  skeleton-defect repairs that S7's postconditions now prevent; 90 = 58 + 25% plus margin for
-  the cuts-real-material sanity pass. cam_get's setup rows read the WCS back (origin/orientation
+  skeleton-defect repairs that S7's postconditions now prevent; the four-operation engagement
+  reads (parameters + tool per op, the material numbers, the isolated screenshots) add to that, so
+  110 calls / 225k output tokens is a provisional pin - recalibrate at the first measured run of
+  this wording. cam_get's setup rows read the WCS back (origin/orientation
   mode + bound entities), so grade that postcondition from the typed read.

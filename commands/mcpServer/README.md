@@ -1,9 +1,15 @@
 # Fusion-Essentials MCP Server
 
-A local [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server that
-lets an AI agent (Claude, or any MCP client) interact with your live Fusion session —
-read what's in your projects, open files, screenshot the viewport, and (optionally)
-run Fusion API scripts.
+A local [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server that lets an AI agent
+(Claude, or any MCP client) work in your live Fusion session. It covers the design side (sketching,
+modelling, surfaces and meshes, joints and assembly), the manufacturing side (setups, toolpaths,
+posting), drawings and annotations, and the cloud data model, plus the reads and screenshots needed
+to check any of it.
+
+Every tool does one job and assumes nothing about your process. A procedure is something you build
+on top of these calls in your client, not something the server decides for you. Inputs are typed, so
+a vague reference is refused rather than guessed at, and a tool that writes checks its own effect
+before it reports success (see *What makes the tools trustworthy*).
 
 It is **off by default** and runs only on your own machine (loopback).
 
@@ -51,37 +57,58 @@ HTTP transport can connect directly — no `mcp-remote`/Node bridge needed.
 
 Approve the server when your client prompts you. (A `.mcp.json` is included in this
 repo.)
+## Why specific tools instead of "just let it write scripts"
 
-## How to drive Fusion well (read this first)
+Fusion has a Python API, and a capable model can write against it. Handing an assistant a single
+"run this script" endpoint is a fair design, and it covers a lot of ground fast. This server went
+the other way for one reason: writing the code was never the part that went wrong. Knowing whether
+it had done the right thing was.
 
-Fusion is many environments glued together (CAD, assemblies, the parametric timeline, CAM, the cloud
-data model). The biggest source of wasted/blind tool calls is acting before understanding the state.
-Token efficiency is a first-class constraint of this surface — light default reads, family gating,
-and pointer-bearing payloads exist so an agent spends context on decisions, not dumps. Work by
-**progressive disclosure**, not by dumping whole documents:
+Working without checks, an assistant gets caught out in a few recurring ways.
 
-1. **Orient** — `workspace_orient` first: one cheap read that reports the active document and
-   where it lives, its health, units/mode, the major pieces, whether CAM data exists, and
-   *pointers* to the right narrow tool for each area. The workspace/product decides
-   which environment you're in and which deep read is meaningful.
-2. **Read state with the right tool** before reasoning — `assembly_get` (kinematics: positions,
-   ground flags, joint wiring), `design_get` (mode/tree/timeline/health/configs in one read — default
-   for orientation, `include=['timeline']` for build intent), `cam_get` (CAM setups/operations/tools
-   in one read), `param_get` (the parametric skeleton), `sketch_get` (one sketch's
-   structure). These give STRUCTURED STATE.
-3. **Verify with numbers, not pixels.** A screenshot of an assembly is the least reliable input —
-   parts overlap at the origin and the active component greys the rest out. Reach for it last, and
-   only on a single **isolated, oriented** component (`view_set` snapshot → isolate → orient →
-   `view_screenshot` → restore). Re-read the state tool after any structural change.
+**It gets a convention wrong.** Sketch planes, hole directions and pattern axes do not always line
+up with the axes you would expect. A script built on the wrong assumption still runs, still reports
+success, and quietly builds the wrong shape. Nothing in the result says so.
 
-**Know the blind spots** — places a read looks authoritative but isn't, so you draw a silent wrong
-conclusion: CAM validity flags are stale until the Manufacture workspace has been entered;
-`is_fully_constrained` is sketch-only (assembly freedom comes from joint motion types); grounding
-is a two-flag trap (`isGrounded` vs `ground_to_parent`); the open-documents list is a superset of
-the visible tabs; a bounding-box center is not the modelling origin; saves and opens are
-asynchronous (confirm with a fresh read, never assume); names are never unique - when a tree read
-offers a `handle`, carry it into the next call instead of the name. When a read result is
-ambiguous, re-read with the narrower tool named in the payload's `pointers`.
+**It loses track of what it is pointing at.** References to faces and edges shift when a model
+rebuilds, and Fusion does not require names to be unique anywhere. A reference that finds
+*something* is not the same as a reference that finds the right thing.
+
+**It cannot check its own work.** "Success" on its own proves very little, and the obvious sanity
+checks (a count, a total volume) often cannot tell two quite different designs apart. An assistant
+can verify what it did and still be wrong about it.
+
+The tools are shaped around those three. Reads hand back the plane's orientation, the units and a
+durable reference before you act on anything. Inputs refuse a vague reference rather than guess at
+it. Anything that writes reads the model back afterwards and reports the change it measured. The
+mechanisms are in *What makes the tools trustworthy*, below.
+
+There is still a general script tool, `sys_execute_script`, for cases the others do not cover. It is
+off by default and gated separately from everything else (see *Security*). Most of the work here
+exists so that you rarely need to reach for it.
+
+Fusion ships an MCP server of its own as well. Run one or the other, since they compete for the same
+port (see *Port note*). The two rest on different bets: theirs buys breadth through scripting, this
+one buys a smaller set of operations that check themselves.
+
+
+
+## What the agent is told
+
+You do not have to coach the assistant on how to use this. When a client connects, the server sends
+an instruction block that routes it to two cheap orientation reads before it touches anything else,
+and each tool then carries its own contract, its next-step pointers, and whichever Fusion traps
+apply to it.
+
+Fusion is several environments glued together (CAD, assemblies, the parametric timeline, CAM, the
+cloud data model), and most wasted effort comes from acting before knowing which one you are in.
+The places a reading looks authoritative but isn't are stated by the tool that owns them, so they
+arrive when they are relevant rather than in a list nobody re-reads: CAM validity is untrustworthy
+until Manufacture has been opened, saves and exports complete asynchronously, Fusion enforces no
+name uniqueness anywhere.
+
+If you are writing tools rather than using them, that doctrine and the reasoning behind it live in
+the `CLAUDE.md` files beside the code.
 
 ## Tools
 
@@ -141,9 +168,23 @@ here when learning the surface:
 - `cam_generate` is fire-and-poll: it returns immediately with a handle; poll `cam_get_status`
   until done (it never blocks for the multi-minute compute).
 
-## Demonstrated workflows
+## What it gets used for
 
-Two kinds of runnable demonstration show the surface driving real work end-to-end:
+Three fairly different jobs, all built from the same calls, which is the test of whether the tools
+really are workflow-agnostic:
+
+- **A repeatable procedure.** A skill in your client runs a fixed sequence where the order matters
+  and you want the same result every time. The steps and the checks live with you, outside the
+  server, and the tools underneath stay general.
+- **Open-ended modelling.** The assistant gets its bearings, reads the state, does something, checks
+  what actually happened, and decides what to do next — closer to how a person works than one long
+  script that either succeeds or leaves you reading a stack trace.
+- **Reading, auditing and data work.** Checking a design's health, its parameters, its external
+  references or its CAM setup; walking the cloud project structure; answering questions across a
+  pile of files you would otherwise open one at a time. Much of this never writes anything, and it
+  is where an assistant tends to earn its keep first.
+
+Two runnable demonstrations show the surface driving real work end-to-end:
 
 - **A shipped procedure** (a Claude Code skill in `.claude/skills/`): `insert-into-template` stands
   up a CAM job for a part — saves the CAD, defines a part-space origin, places the shop template,
@@ -168,8 +209,8 @@ forking this as a pattern for your own MCP server:
   assertion read's verdict is a real boolean beside its measured evidence, never prose.
 - **Postconditions** ([`tools/_assert.py`](tools/_assert.py)) — a write tool declares
   verify-the-effect kinds; the kernel re-reads ground truth after the mutation and converts a
-  "success" that changed nothing into an error. The platform does return success while changing
-  nothing; the kernel exists because of it. Where the effect is material, the evidence is
+  "success" that changed nothing into an error. Fusion really does report success while changing
+  nothing, which is the whole reason this layer exists. Where the effect is material, the evidence is
   geometric: a cut that removed no volume, a mesh trim that moved neither count nor area, a delete
   whose target still resolves — each is an error carrying its measurements, never a false ok.
 
@@ -203,6 +244,18 @@ self-audit of the guidance strings). Authoring conventions live in
   execute arbitrary Fusion API scripts"** (then reload). A script's changes are grouped
   into ONE undo step, but a script that raises is **not** guaranteed to roll back —
   partial changes can commit, so verify state afterward and undo manually if needed.
+- **Two independent gates.** The add-in setting above decides whether the tool is *registered at
+  all*; your MCP client's own permissions decide what it may call without asking you. Every tool
+  declares whether it only reads, changes the design, or does something you cannot undo, and the
+  shipped client presets (`.claude/settings.json`, `.codex/config.toml`) follow that: they
+  pre-approve the read-only tools and nothing else, so anything that writes still asks you first,
+  and `sys_execute_script` is never pre-approved in any of them. A lint keeps those presets in step
+  with the registry's actual read set, and
+  [`PERMISSION_POSTURE.md`](../../tests/generated/PERMISSION_POSTURE.md) is the generated table of
+  where each tool currently sits. If the prompting gets tedious, do not widen the shipped file: put
+  a `.claude/settings.local.json` beside it listing the extra tools you want to run without being
+  asked. That file is per-machine and is not committed, so a choice you make for yourself does not
+  become everyone's default.
 
 ## Platform support
 

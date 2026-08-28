@@ -20,10 +20,14 @@ def _payload(result):
 class FakeOcc:
     """An occurrence in the analysis set: fullPathName names the INSTANCE, component holds the
     native bodies analyzeInterference hands back."""
-    def __init__(self, name, full_path=None, bodies=()):
+    def __init__(self, name, full_path=None, bodies=(), children=(), broken_children=()):
         self.name = name
         self.fullPathName = full_path or name
         self.component = FakeComp(name.split(":")[0], bodies)
+        # component.occurrences is the COMPONENT-LOCAL superset the fallback walk reads; the
+        # assembly-context childOccurrences drops an occurrence with an unresolved reference.
+        self.component.occurrences = _Coll(list(broken_children) + list(children))
+        self.childOccurrences = _Coll(list(children))
 
 
 class FakeComp:
@@ -85,10 +89,56 @@ class FakeOccColl:
         self.items.append(x)
 
 
+UNAVAILABLE = ("3 : The occurrence's referenced component is unavailable (broken or missing "
+               "external reference).")
+
+
+class BrokenOcc:
+    """An occurrence whose referenced component will not load - it carries NO geometry this analysis
+    could compare, and reading root.allOccurrences on a design holding one RAISES."""
+    def __init__(self, name="45740"):
+        self.name = name
+
+    @property
+    def component(self):
+        raise RuntimeError(UNAVAILABLE)
+
+    @property
+    def fullPathName(self):
+        raise RuntimeError("2 : InternalValidationError : path.valid()")
+
+
+class RaisingWalk:
+    @property
+    def count(self):
+        raise RuntimeError("2 : InternalValidationError : occ")
+
+    def item(self, i):
+        raise RuntimeError("2 : InternalValidationError : occ")
+
+    def __iter__(self):
+        raise RuntimeError("2 : InternalValidationError : occ")
+
+
+class _Coll:
+    def __init__(self, items):
+        self._i = list(items)
+
+    @property
+    def count(self):
+        return len(self._i)
+
+    def item(self, i):
+        return self._i[i]
+
+    def __iter__(self):
+        return iter(self._i)
+
+
 class FakeRoot:
     def __init__(self, occurrences):
         # allOccurrences is the analysis set (every depth); root-level solids join it too.
-        self.occurrences = occurrences
+        self.occurrences = _Coll(occurrences)
         self.allOccurrences = occurrences
         self.bRepBodies = []
 
@@ -320,3 +370,52 @@ class TestInterferenceHandler:
         res = ai.handler(include_coincident_faces=True)
         assert res["isError"] is True
         assert "areCoincidentFacesIncluded rejected" in res["message"]
+
+
+class TestUnresolvedReferences:
+    """The cardinal sin this tool was one raise away from: root.allOccurrences raising left the
+    analysis set EMPTY, and an empty set produces zero interferences - published as passed=true."""
+
+    def test_a_raising_walk_no_longer_analyses_an_empty_set(self, monkeypatch):
+        a = FakeOcc("A:1", bodies=[FakeBody("B1", "A:1")])
+        b = FakeOcc("B:1", bodies=[FakeBody("B2", "B:1")])
+        des = _install(monkeypatch, [a, b], [])
+        des.rootComponent.allOccurrences = RaisingWalk()
+        out = _payload(ai.handler())
+        assert out["measured"]["occurrences_checked"] == 2      # NOT 0, and NOT a refusal
+        assert out["measured"]["occurrences_walk"] == "recursed"
+        assert out["passed"] is True
+
+    def test_a_clean_verdict_is_REFUSED_while_an_unresolved_reference_is_excluded(self, monkeypatch):
+        # a pass is a claim about everything, and an unresolved occurrence was never in the set.
+        a = FakeOcc("A:1", bodies=[FakeBody("B1", "A:1")])
+        b = FakeOcc("B:1", bodies=[FakeBody("B2", "B:1")], broken_children=[BrokenOcc("45740")])
+        des = _install(monkeypatch, [a, b], [])
+        des.rootComponent.allOccurrences = RaisingWalk()
+        res = ai.handler()
+        assert res["isError"] is True
+        assert "Cannot certify interference-free" in res["message"]
+        assert "45740" in res["message"]
+        assert "NOT a pass" not in res["message"] and "no pass was formed" in res["message"]
+
+    def test_a_POSITIVE_finding_still_stands_over_an_incomplete_set(self, monkeypatch):
+        # finding one overlapping pair is proof on its own - it does not depend on completeness, so
+        # the refusal above must not swallow a real hit.
+        shared = FakeBody("x", "A:1")
+        a = FakeOcc("A:1", bodies=[shared])
+        b = FakeOcc("B:1", bodies=[FakeBody("y", "B:1")], broken_children=[BrokenOcc("45740")])
+        des = _install(monkeypatch, [a, b],
+                       [FakeResult(shared, FakeBody("y", "B:1"), 2.0)])
+        des.rootComponent.allOccurrences = RaisingWalk()
+        out = _payload(ai.handler())
+        assert out["passed"] is False
+        assert out["measured"]["unresolved_references"] == ["45740"]
+        assert "were NOT compared" in out["note"]
+
+    def test_zero_unresolved_leaves_the_pass_verdict_and_the_fast_walk(self, monkeypatch):
+        _install(monkeypatch, [FakeOcc("A:1"), FakeOcc("B:1")], [])
+        out = _payload(ai.handler())
+        assert out["passed"] is True
+        assert out["measured"]["occurrences_walk"] == "allOccurrences"
+        assert out["measured"]["unresolved_references"] == []
+        assert "were NOT compared" not in out["note"]

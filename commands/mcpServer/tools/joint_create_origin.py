@@ -18,7 +18,7 @@ app = adsk.core.Application.get()
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import apply_rename, error, ok, safe, resolve_sketch
+from ._common import apply_rename, error, ok, safe, find_sketch
 from . import _common
 from . import _inputs
 from . import _joints
@@ -177,12 +177,6 @@ def _anchor_direction_line(comp, center_cm, dir_vec, length=1.0):
     return line
 
 
-def _find_sketch(design, name):
-    # Whole-design resolve (active component first), so a JO can anchor on a sketch line/point drawn in
-    # an activated sub-component - not only one in the root component.
-    return resolve_sketch(design, name) if name else None
-
-
 def _geometry_from_args(design, comp, anchor, target, x_cm, y_cm, z_cm,
                         sketch_name, entity_index, keypoint, geometry_handle=None,
                         bbox_target=None, orient_axis="z", flip=False, meta=None):
@@ -273,7 +267,13 @@ def _geometry_from_args(design, comp, anchor, target, x_cm, y_cm, z_cm,
     if anchor in ("sketch_line", "sketch_point"):
         if not (sketch_name or "").strip():
             return None, None, f"anchor '{anchor}' needs 'sketch_name'."
-        sketch = _find_sketch(design, sketch_name.strip())
+        # Whole-design resolve (active component first), so a JO can anchor on a sketch line/point
+        # drawn in an activated sub-component - not only one in the root component. find_sketch, not
+        # resolve_sketch: a name SEVERAL sketches carry comes back with its owners named, so the
+        # refusal cannot read "No sketch named X" over sketches that exist.
+        sketch, ambiguous = find_sketch(design, sketch_name.strip())
+        if ambiguous:
+            return None, None, ambiguous
         if not sketch:
             return None, None, (f"No sketch named '{sketch_name}'. Use sketch_get to list "
     "them (draw a direction line first with sketch_add_3d_line).")
@@ -521,6 +521,18 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
         payload["note"] += (f" This origin lives in component '{payload['component']}' - its offsets "
                             "are measured from THAT component's origin, so it can serve as that "
                             "component's side of a joint.")
+    else:
+        # Omitting 'component' lands the origin on the ROOT component even while another component is
+        # the active edit target (measured) - unlike sketch/extrude, which build into the active one.
+        # Disclosed only when the two actually differ, naming both components as read.
+        active = _common.target_component(design)
+        if active is not None and not _common.same_component(active, design.rootComponent):
+            active_name = safe(lambda: active.name) or "?"
+            payload["active_component"] = active_name
+            payload["note"] += (f" Landed on the root component '{payload['component']}' while "
+                                f"component '{active_name}' is the active edit target - this tool "
+                                "does not follow the active component; pass 'component' to land the "
+                                "origin inside one.")
     if computed is not None:
         payload["computed_anchor"] = computed
         if readback is not None:

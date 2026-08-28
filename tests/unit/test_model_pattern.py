@@ -23,6 +23,9 @@ class FakeOcc:
     def __init__(self, name, full_path=None):
         self.name = name
         self.fullPathName = full_path or name
+        # A real Occurrence always answers `component`; a read that RAISES is the
+        # unresolved-external-reference signal the shared occurrence census filters on.
+        self.component = types.SimpleNamespace(name=name.split(":")[0])
 
 
 class FakeObjectCollection:

@@ -16,7 +16,7 @@ app = adsk.core.Application.get()
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import error, ok, safe, scale, resolve_sketch, all_sketch_names
+from ._common import error, ok, safe, scale, find_sketch, all_sketch_names
 from . import _common
 from . import _inputs
 # The SketchText readers live in _sketch_detail (the shared sketch X-ray helper) - a tool imports
@@ -55,11 +55,17 @@ _DEFINITION_READBACKS = {
     "fit_on_path": (("above_path", "isAbovePath"),),
 }
 
-# Inputs that only shape NEW text; passing one with create=false would silently do nothing. x/y
-# belong here because they default to None, so a supplied value is detectable; 'height' and 'units'
-# carry non-None defaults that a caller cannot be told apart from, so they stay exempt.
+# Inputs that only shape NEW text; passing one with create=false would silently do nothing. Each
+# defaults to None, so a supplied value is detectable and can be REFUSED. 'height' is one of them:
+# an edit writes textParameter.expression and fontName and nothing else, so a height passed with
+# create=false never reaches the text. 'units' stays exempt - it carries a non-None default a
+# caller cannot be told apart from, and it only scales 'height'.
 _CREATE_ONLY = ("mode", "path", "above_path", "align", "character_spacing", "angle_deg",
-                "flip_h", "flip_v", "x", "y")
+                "flip_h", "flip_v", "x", "y", "height")
+
+# The height a create uses when the caller names none, in 'units'. The input itself defaults to
+# None so a supplied height is detectable at edit time; the create path applies this instead.
+_DEFAULT_HEIGHT = 5.0
 
 # The read half of this tool: a written text is re-readable as its own entity record, so a caller
 # verifying a label does not have to fall back to a screenshot.
@@ -264,7 +270,9 @@ def _create_text(design, text, sketch_name, height, x, y, units, mode, path, abo
 
     # Resolve across the whole design (active component first) - a sketch created in an activated
     # sub-component must be a valid text target, not only one in the root component.
-    sk = resolve_sketch(design, sketch_name.strip())
+    sk, ambiguous = find_sketch(design, sketch_name.strip())
+    if ambiguous:
+        return error(ambiguous)
     if not sk:
         names = all_sketch_names(design)
         return error(f"No sketch named '{sketch_name}'. Available: "
@@ -427,7 +435,7 @@ def _iter_sketch_texts(design, sketch_name):
 
 
 def handler(text: str = "", sketch_name: str = "", index: int = -1,
-            create: bool = False, height: float = 5.0, x: float = None, y: float = None,
+            create: bool = False, height: float = None, x: float = None, y: float = None,
             units: str = "mm", mode: str = "", path: str = "", above_path: bool = None,
             align: str = "", character_spacing: float = None, angle_deg: float = None,
             flip_h: bool = None, flip_v: bool = None, font_name: str = "") -> dict:
@@ -443,13 +451,15 @@ def handler(text: str = "", sketch_name: str = "", index: int = -1,
         mode_key, merr = _MODE.resolve(mode)
         if merr:
             return error(merr)
-        return _create_text(design, text, sketch_name, height, x, y, units, mode_key, path,
+        return _create_text(design, text, sketch_name,
+                            _DEFAULT_HEIGHT if height is None else height,
+                            x, y, units, mode_key, path,
                             above_path, align, character_spacing, angle_deg, flip_h, flip_v,
                             font_name)
 
     cerr = _refuse_create_only(zip(_CREATE_ONLY, (mode, path, above_path, align,
                                                   character_spacing, angle_deg, flip_h, flip_v,
-                                                  x, y)))
+                                                  x, y, height)))
     if cerr:
         return error(cerr)
 
@@ -591,9 +601,10 @@ tool = (
             "description": "If a sketch has multiple texts, the 0-based one to update (default all)."})
     .add_input_property("create", {"type": "boolean",
             "description": "CREATE new text instead of editing: add it to 'sketch_name' at (x,y) with 'height'. Default false."})
-    .add_input_property("height", {"type": "number", "description": "Text height in 'units' (create only; default 5)."})
+    .add_input_property("height", {"type": "number",
+            "description": "Text height in 'units', for NEW text only (default 5). An edit changes the string and font and nothing else, so a height passed with create=false is REFUSED rather than ignored."})
     .add_input_property("x", {"type": "number", "description": "Text X in 'units' (multi_line only): with align left/center/right it is the text's left edge / center / right edge."})
-    .add_input_property("y", {"type": "number", "description": "Text Y position in 'units' (multi_line only)."})
+    .add_input_property("y", {"type": "number", "description": "Text Y in 'units' (multi_line only): the BOTTOM of the text box - extra lines stack upward from it."})
     .add_input_property(*_inputs.units_property(description="Units for text height (create only)."))
     .add_input_property(*_MODE.as_property())
     .add_input_property("path", {"type": "string",

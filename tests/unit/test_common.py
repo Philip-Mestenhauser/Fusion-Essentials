@@ -5,7 +5,10 @@ unit convention. If these drift, every tool drifts, so pin the contract explicit
 """
 
 import json
+import types
 from types import SimpleNamespace
+
+import pytest
 
 from conftest import MakeComp, entity_proxy, load_tool
 
@@ -319,13 +322,102 @@ class TestResolveSketchDesignWide:
         sk = common.resolve_sketch(_design_with(root, [sub]), "FrameSketch")
         assert sk is not None and sk.name == "FrameSketch"
 
-    def test_active_component_searched_first_for_a_shared_name(self):
-        # Two components each hold a "Profile" sketch; the ACTIVE component's instance must win -
-        # it is where sketch_create just put the caller's sketch in the assembly workflow.
+    def test_a_name_two_components_share_resolves_to_nothing(self):
+        # Two components each hold a "Profile" sketch. Neither is identified by that name, so the
+        # resolver hands back nothing rather than an arbitrary one to draw on or delete from.
         root = _comp_with_sketches("Root", ["Profile"])
         sub = _comp_with_sketches("Frame", ["Profile"])
+        assert common.resolve_sketch(_design_with(root, [sub], active=sub), "Profile") is None
+
+    def test_a_unique_name_still_resolves_beside_a_shared_one(self):
+        # The other side of the boundary: one hit resolves even while another name is shared.
+        root = _comp_with_sketches("Root", ["Profile", "Base"])
+        sub = _comp_with_sketches("Frame", ["Profile"])
         d = _design_with(root, [sub], active=sub)
-        assert common.resolve_sketch(d, "Profile") is sub.sketches.item(0)
+        assert common.resolve_sketch(d, "Base") is root.sketches.item(1)
+
+    def test_the_active_component_is_searched_first(self):
+        # The search ORDER is still active-component-first: the active component's uniquely named
+        # sketch is found without walking the root, which is what the assembly workflow means.
+        root = _comp_with_sketches("Root", ["RootOnly"])
+        sub = _comp_with_sketches("Frame", ["FrameOnly"])
+        d = _design_with(root, [sub], active=sub)
+        hits = common.find_sketches_by_name(d, "FrameOnly")
+        assert [c.name for _sk, c in hits] == ["Frame"]
+        assert common.resolve_sketch(d, "FrameOnly") is sub.sketches.item(0)
+
+    def test_one_sketch_reached_through_the_active_and_root_wrappers_is_not_shared(self):
+        # The active component IS the root here, so the same sketch is reached three times (active,
+        # root, allComponents). De-duplicated by the sketch itself, that stays ONE hit - otherwise
+        # every root sketch would refuse as a name several sketches carry.
+        root = _comp_with_sketches("Root", ["Profile"])
+        d = _design_with(root, [], active=root)
+        assert common.resolve_sketch(d, "Profile") is root.sketches.item(0)
+
+
+class TestFindSketch:
+    def test_a_shared_name_is_refused_naming_each_owning_component(self):
+        root = _comp_with_sketches("Root", ["Profile"])
+        sub = _comp_with_sketches("Frame", ["Profile"])
+        sk, err = common.find_sketch(_design_with(root, [sub]), "Profile")
+        assert sk is None
+        assert "2 sketches" in err and "Root" in err and "Frame" in err and "Profile" in err
+
+    def test_a_unique_name_resolves_with_no_error(self):
+        root = _comp_with_sketches("Root", ["Base"])
+        sub = _comp_with_sketches("Frame", ["FrameSketch"])
+        d = _design_with(root, [sub])
+        assert common.find_sketch(d, "Base") == (root.sketches.item(0), None)
+
+    def test_a_missing_name_carries_no_error_text(self):
+        # A miss is (None, None) - each caller words its own not-found error off all_sketch_names.
+        root = _comp_with_sketches("Root", ["Base"])
+        assert common.find_sketch(_design_with(root, []), "Ghost") == (None, None)
+
+    def test_a_blank_name_matches_nothing(self):
+        root = _comp_with_sketches("Root", ["Base"])
+        assert common.find_sketches_by_name(_design_with(root, []), "  ") == []
+
+
+class TestFindOrRecentSketch:
+    """The name-or-most-recent contract in its REFUSING form: the third value is what lets a caller
+    tell "no sketch carries this name" apart from "several do"."""
+
+    def test_a_shared_name_hands_back_the_refusal_not_a_bare_miss(self):
+        # The defect this third value removes: a caller seeing (None, name) worded it "No sketch
+        # named 'Profile'" while TWO sketches carried the name - the opposite of what was read.
+        root = _comp_with_sketches("Root", ["Profile"])
+        sub = _comp_with_sketches("Frame", ["Profile"])
+        sk, requested, ambiguous = common.find_or_recent_sketch(_design_with(root, [sub]), "Profile")
+        assert sk is None and requested == "Profile"
+        assert ambiguous and "2 sketches" in ambiguous and "Root" in ambiguous and "Frame" in ambiguous
+
+    def test_a_name_no_sketch_carries_has_no_refusal_text(self):
+        root = _comp_with_sketches("Root", ["Base"])
+        assert common.find_or_recent_sketch(_design_with(root, []), "Ghost") == (None, "Ghost", None)
+
+    def test_a_unique_name_resolves_with_neither_flag(self):
+        root = _comp_with_sketches("Root", ["Base"])
+        sub = _comp_with_sketches("Frame", ["Profile"])
+        d = _design_with(root, [sub])
+        assert common.find_or_recent_sketch(d, "Base") == (root.sketches.item(0), "Base", None)
+
+    def test_a_blank_name_takes_the_most_recent_sketch_in_the_active_component(self):
+        root = _comp_with_sketches("Root", ["Base"])
+        sub = _comp_with_sketches("Frame", ["First", "Last"])
+        d = _design_with(root, [sub], active=sub)
+        assert common.find_or_recent_sketch(d, "  ") == (sub.sketches.item(1), None, None)
+
+    def test_a_blank_name_with_no_sketches_is_a_plain_miss(self):
+        root = _comp_with_sketches("Root")
+        assert common.find_or_recent_sketch(_design_with(root, []), "") == (None, None, None)
+
+    def test_resolve_or_recent_sketch_drops_the_refusal_and_keeps_the_pair(self):
+        # The silent form stays the two-value contract its remaining callers (a postcondition
+        # fingerprint) read - a shared name answers None there, like a name none carries.
+        root = _comp_with_sketches("Root", ["Profile"])
+        sub = _comp_with_sketches("Frame", ["Profile"])
+        assert common.resolve_or_recent_sketch(_design_with(root, [sub]), "Profile") == (None, "Profile")
 
 
 class TestAllSketchNames:
@@ -333,6 +425,46 @@ class TestAllSketchNames:
         root = _comp_with_sketches("Root", ["Base"])
         sub = _comp_with_sketches("Frame", ["FrameSketch"])
         assert common.all_sketch_names(_design_with(root, [sub])) == ["Base", "FrameSketch"]
+
+    def test_a_repeated_name_is_qualified_by_its_owning_component(self):
+        # Bare, the list read "S, S" - one name printed twice, which reads as a duplicate entry
+        # rather than as two sketches in two components. The owner is what tells them apart.
+        root = _comp_with_sketches("Alpha", ["S"])
+        sub = _comp_with_sketches("Beta", ["S"])
+        assert common.all_sketch_names(_design_with(root, [sub])) == ["S (Alpha)", "S (Beta)"]
+
+    def test_a_unique_name_stays_bare_beside_a_repeated_one(self):
+        # Only the ambiguous name pays the qualifier; qualifying every row would make the common
+        # single-component list unreadable.
+        root = _comp_with_sketches("Alpha", ["S", "Profile"])
+        sub = _comp_with_sketches("Beta", ["S"])
+        names = common.all_sketch_names(_design_with(root, [sub]))
+        assert names == ["S (Alpha)", "Profile", "S (Beta)"]
+
+    def test_three_sketches_sharing_one_name_are_each_qualified(self):
+        root = _comp_with_sketches("Alpha", ["S"])
+        b = _comp_with_sketches("Beta", ["S"])
+        c = _comp_with_sketches("Gamma", ["S"])
+        assert common.all_sketch_names(_design_with(root, [b, c])) == [
+            "S (Alpha)", "S (Beta)", "S (Gamma)"]
+
+    def test_a_repeated_name_whose_owner_will_not_read_stays_bare(self):
+        # Nothing measured to qualify with - the honest form is the bare name, not "S (None)".
+        class _NamelessComp:
+            sketches = _Coll([type("Sk", (), {"name": "S"})()])
+
+            @property
+            def name(self):
+                raise RuntimeError("component name unreadable")
+
+        root = _comp_with_sketches("Alpha", ["S"])
+        names = common.all_sketch_names(_design_with(root, [_NamelessComp()]))
+        assert names == ["S (Alpha)", "S"]
+
+    def test_no_sketches_is_an_empty_list(self):
+        # The empty case every caller renders as "Available: (none)".
+        root = _comp_with_sketches("Root")
+        assert common.all_sketch_names(_design_with(root, [])) == []
 
 
 class TestResolveEntityRef:
@@ -647,6 +779,253 @@ class TestComponentContains:
 
     def test_none_contains_nothing(self):
         assert common.component_contains(None, _root()) is False
+
+
+# ── the unresolved-reference detector + the census that survives a raising allOccurrences ────────
+
+# The verbatim text the platform raises from occ.component on an occurrence whose source project is
+# archived. Held as a constant here because a test asserting the DETAIL must assert the real string.
+_UNAVAILABLE = ("3 : The occurrence's referenced component is unavailable (broken or missing "
+                "external reference).")
+_PATH_INVALID = "2 : InternalValidationError : path.valid()"
+_WALK_RAISE = "2 : InternalValidationError : occ"
+
+
+class _OccColl:
+    """The count/item collection protocol, also directly iterable (allOccurrences is list()ed)."""
+    def __init__(self, items):
+        self._i = list(items)
+
+    @property
+    def count(self):
+        return len(self._i)
+
+    def item(self, i):
+        return self._i[i]
+
+    def __iter__(self):
+        return iter(self._i)
+
+
+class _RaisingColl:
+    """A collection whose COUNT itself raises - unreadable, which is not the same as empty."""
+    @property
+    def count(self):
+        raise RuntimeError(_WALK_RAISE)
+
+    def item(self, i):
+        raise RuntimeError(_WALK_RAISE)
+
+    def __iter__(self):
+        raise RuntimeError(_WALK_RAISE)
+
+
+class _BrokenOcc:
+    """The measured specimen. Only `name` reads. Every other signal a walk might gate on LIES:
+    isReferencedComponent reads False where a LIVE xref reads True, isValid reads True, and
+    documentReference raises the SAME text an ordinary local occurrence gives."""
+    def __init__(self, name="45740", name_raises=False):
+        self._name = name
+        self._name_raises = name_raises
+        self.isReferencedComponent = False
+        self.isValid = True
+        self.isLightBulbOn = True
+
+    @property
+    def name(self):
+        if self._name_raises:
+            raise RuntimeError(_PATH_INVALID)
+        return self._name
+
+    @property
+    def component(self):
+        raise RuntimeError(_UNAVAILABLE)
+
+    @property
+    def fullPathName(self):
+        raise RuntimeError(_PATH_INVALID)
+
+    @property
+    def childOccurrences(self):
+        raise RuntimeError(_PATH_INVALID)
+
+    @property
+    def documentReference(self):
+        raise RuntimeError("3 : Occurrence is not referencing an external component")
+
+
+class _PlainOcc:
+    """An ORDINARY LOCAL occurrence - the trap. isReferencedComponent is False and
+    documentReference raises the same text the broken one gives, so only occ.component tells them
+    apart."""
+    def __init__(self, name, children=(), broken_children=()):
+        self.name = name
+        self.fullPathName = name
+        self.isReferencedComponent = False
+        # component.occurrences is the SUPERSET: it holds the unresolved child too.
+        self.component = types.SimpleNamespace(
+            name=name.split(":")[0],
+            occurrences=_OccColl(list(broken_children) + list(children)))
+        # childOccurrences DROPS an unresolved child - its assembly path is invalid.
+        self.childOccurrences = _OccColl(children)
+
+    @property
+    def documentReference(self):
+        raise RuntimeError("3 : Occurrence is not referencing an external component")
+
+
+def _walk_design(top=(), broken_top=(), fast=None):
+    """A design whose root.allOccurrences RAISES unless `fast` supplies a list, and whose
+    root.occurrences holds the component-local superset."""
+    class _Root:
+        name = "Root"
+        occurrences = _OccColl(list(broken_top) + list(top))
+
+        @property
+        def allOccurrences(self):
+            if fast is None:
+                raise RuntimeError(_WALK_RAISE)
+            return fast
+
+    return types.SimpleNamespace(rootComponent=_Root())
+
+
+class TestBrokenReference:
+    def test_a_raising_component_is_the_signal_and_the_text_is_verbatim(self):
+        is_broken, detail = common.broken_reference(_BrokenOcc())
+        assert is_broken is True
+        assert detail == _UNAVAILABLE
+
+    def test_an_ordinary_local_occurrence_is_NOT_broken(self):
+        # THE trap: this occurrence reads isReferencedComponent False and RAISES the same
+        # "not referencing an external component" text from documentReference that the broken one
+        # does. A detector keyed on either would call it broken.
+        occ = _PlainOcc("Root:1")
+        assert occ.isReferencedComponent is False
+        with pytest.raises(RuntimeError):
+            occ.documentReference
+        assert common.broken_reference(occ) == (False, None)
+
+    def test_a_live_xref_is_NOT_broken(self):
+        live = types.SimpleNamespace(name="48205-125 (1):2", isReferencedComponent=True,
+                                     component=types.SimpleNamespace(name="48205-125"))
+        assert common.broken_reference(live) == (False, None)
+
+    def test_the_gate_ignores_isReferencedComponent_entirely(self):
+        # the broken specimen reads FALSE and must still be caught; flipping the flag changes nothing.
+        occ = _BrokenOcc()
+        occ.isReferencedComponent = True
+        assert common.broken_reference(occ)[0] is True
+
+
+class TestOccurrenceWalk:
+    def test_zero_broken_on_the_fast_path_reports_the_fast_walk_and_no_broken_rows(self):
+        a, b = _PlainOcc("Frame:1"), _PlainOcc("Bolt:1")
+        walk = common.occurrence_walk(_walk_design(fast=[a, b]))
+        assert walk.method == "allOccurrences"
+        assert walk.broken == [] and walk.total == 2
+        assert walk.occurrences == [a, b] and walk.complete is True
+
+    def test_a_raising_walk_with_zero_broken_still_reports_the_honest_count(self):
+        # the boundary that matters most: the walk RAISED, nothing is broken, and the census must be
+        # the real number over the 'recursed' marker - never 0.
+        bolt = _PlainOcc("Bolt:1")
+        frame = _PlainOcc("Frame:1", children=[bolt])
+        walk = common.occurrence_walk(_walk_design(top=[frame]))
+        assert walk.method == "recursed"
+        assert walk.total == 2 and walk.broken == []
+        assert [o.name for o in walk.occurrences] == ["Frame:1", "Bolt:1"]
+
+    def test_one_broken_child_is_found_named_and_counted(self):
+        broken = _BrokenOcc("45740")
+        container = _PlainOcc("Op1 Workholding Container:1",
+                              children=[_PlainOcc("48205-125 (1):1")],
+                              broken_children=[broken])
+        walk = common.occurrence_walk(_walk_design(top=[container]))
+        assert walk.method == "recursed"
+        assert len(walk.broken) == 1
+        row = walk.broken[0]
+        assert row["name"] == "45740"
+        assert row["parent_path"] == "Op1 Workholding Container:1"
+        assert row["detail"] == _UNAVAILABLE
+        # counted, and kept OUT of the usable rows (every geometry read on it raises)
+        assert walk.total == 3
+        assert broken not in walk.occurrences
+        assert walk.broken_occurrences == [broken]
+
+    def test_a_broken_TOP_LEVEL_occurrence_is_found_too(self):
+        walk = common.occurrence_walk(
+            _walk_design(top=[_PlainOcc("Frame:1")], broken_top=[_BrokenOcc("45740")]))
+        assert walk.names() == ["45740"]
+        assert walk.broken[0]["parent_path"] == "Root"
+        assert walk.total == 2
+
+    def test_a_broken_occurrence_whose_NAME_raises_is_still_a_row(self):
+        walk = common.occurrence_walk(
+            _walk_design(broken_top=[_BrokenOcc(name_raises=True)]))
+        row = walk.broken[0]
+        assert row["name_readable"] is False
+        assert row["name"] == "(unreadable name)"
+        assert row["parent_path"] == "Root"
+
+    def test_a_nested_broken_row_carries_its_parent_PATH(self):
+        broken = _BrokenOcc("45740")
+        inner = _PlainOcc("Sub:1", broken_children=[broken])
+        outer = _PlainOcc("Op 2 Workholding:1", children=[inner])
+        walk = common.occurrence_walk(_walk_design(top=[outer]))
+        assert walk.broken[0]["parent_path"] == "Op 2 Workholding:1+Sub:1"
+
+    def test_BOTH_walks_unreadable_is_null_not_zero(self):
+        # the cardinal case: nothing enumerated. total is None so no caller can publish 0 with a
+        # truncation flag denying anything was lost.
+        class _Root:
+            name = "Root"
+            occurrences = _RaisingColl()
+
+            @property
+            def allOccurrences(self):
+                raise RuntimeError(_WALK_RAISE)
+
+        walk = common.occurrence_walk(types.SimpleNamespace(rootComponent=_Root()))
+        assert walk.method == "unreadable"
+        assert walk.total is None and walk.readable is False
+        assert walk.occurrences == [] and walk.broken == []
+
+    def test_an_unreadable_SUBTREE_marks_the_census_incomplete_not_short(self):
+        good = _PlainOcc("Frame:1")
+        good.childOccurrences = _RaisingColl()
+        walk = common.occurrence_walk(_walk_design(top=[good]))
+        assert walk.method == "recursed"
+        assert walk.complete is False        # a count from here is a LOWER BOUND, and says so
+        assert walk.total == 1
+
+    def test_no_design_and_no_root_are_unreadable_not_empty(self):
+        assert common.occurrence_walk(None).method == "unreadable"
+        assert common.occurrence_walk(None).total is None
+
+    def test_cap_bounds_the_rows_but_never_the_census(self):
+        occs = [_PlainOcc(f"P{i}:1") for i in range(5)]
+        walk = common.occurrence_walk(_walk_design(fast=occs), cap=2)
+        assert len(walk.occurrences) == 2
+        assert walk.total == 5
+
+    def test_all_occurrences_survives_a_raising_walk_instead_of_returning_empty(self):
+        # the defect this replaces: safe(root.allOccurrences) or [] published an empty assembly.
+        frame = _PlainOcc("Frame:1", children=[_PlainOcc("Bolt:1")])
+        assert [o.name for o in common.all_occurrences(_walk_design(top=[frame]))] == [
+            "Frame:1", "Bolt:1"]
+
+    def test_component_walk_runs_over_ANY_component_subtree(self):
+        class _Sub:
+            name = "Sub"
+            occurrences = _OccColl([_PlainOcc("Bolt:1")])
+
+            @property
+            def allOccurrences(self):
+                raise RuntimeError(_WALK_RAISE)
+
+        walk = common.component_walk(_Sub())
+        assert walk.method == "recursed" and walk.total == 1
 
 
 class TestRootBodyAdvisory:

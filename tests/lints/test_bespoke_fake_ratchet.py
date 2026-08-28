@@ -178,6 +178,13 @@ _RAISED = {
         "the three spline SketchCurves collections (fitted / cv / fixed), each carrying its own "
         "per-kind shape properties - the conftest solid-body fakes model no sketch-curve "
         "collection at all"),
+    "test_sys_execute_script.py": (
+        1,
+        "_FakeApp stands in for adsk.core.Application as a TEXT-COMMAND channel - it records every "
+        "executeTextCommand string and answers the MCP.Execute one from a canned reply, which is "
+        "how the read-only path's routing and its success/failure decoding are testable at all. "
+        "conftest's fakes model the Fusion OBJECT graph, not the command channel, so there is "
+        "nothing there to build this from"),
     "test_entry_lifecycle.py": (
         2,
         "_FakeTaskManager and _FakeServerModule stand in for the add-in's OWN TaskManager and "

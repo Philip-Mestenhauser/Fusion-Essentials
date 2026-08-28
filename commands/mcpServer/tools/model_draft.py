@@ -118,10 +118,13 @@ def handler(faces=None, pull_direction: str = "", angle_deg: float = 0.0,
                          "not already parallel to it. " + _common.failed_effect_remedy(design, feature))
 
     requested = len(face_list)
-    # The count the FEATURE reports (inputFaces reflects the faces it took, including any
-    # tangent-chain expansion), never the request echoed back: an unreadable read publishes null,
-    # with the requested number beside it in 'faces_requested'.
-    drafted = _common.counted(lambda: feature.inputFaces.count)
+    # The count the FEATURE reports - its own `faces`, the faces this draft created or modified -
+    # never the request echoed back; an unreadable read publishes null, with the requested number
+    # beside it in 'faces_requested'. NOT `inputFaces`: that property raises RuntimeError "Didn't
+    # roll editing feature back" here, and retrying it behind an adsk.doEvents pump took the whole
+    # call down instead of answering, while `faces` reads on the newest feature and on an earlier
+    # one alike (measured: 1 for a one-face draft, 2 for a two-face draft).
+    drafted = _common.counted(lambda: feature.faces.count)
     note = "Faces tapered to the pull direction. Pair with view_screenshot to view."
     if drafted is None:
         note += (f" 'faces_drafted' is null - the count could not be read off the feature, so how "

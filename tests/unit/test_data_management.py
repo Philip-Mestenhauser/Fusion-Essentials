@@ -559,6 +559,78 @@ class TestDeleteFolderGate:
         assert "at least" in res["message"]
 
 
+class TestDeleteFolderPreviewHoles:
+    """A folder deeper in the subtree that will not enumerate is a HOLE in the blast-radius preview,
+    never a zero: its files are as absent from the totals as the ones past the visit budget, so the
+    preview reads 'at least' and says how many folders it could not look inside."""
+
+    def _partly_blind(self, blind_files=True, blind_subs=True):
+        # Outer(files: a) / [Blind(unreadable), Inner(files: b, c)] - Outer itself READS, so the
+        # fully-blind refusal path is not what this exercises.
+        blind = _BlindDelFolder("blind", "Blind", files=["x", "y"], subs=[],
+                                blind_files=blind_files, blind_subs=blind_subs)
+        inner = FakeDelFolder("inner", "Inner", files=["b", "c"])
+        outer = FakeDelFolder("outer", "Outer", files=["a"], subs=[blind, inner])
+        return outer, blind
+
+    def test_an_unreadable_subtree_folder_is_tallied_as_a_hole_not_counted_as_empty(self):
+        outer, _blind = self._partly_blind()
+        state = {"visits": 0, "truncated": False, "unreadable": 0}
+        files, subs = dm._subtree_counts(outer, _state=state)
+        assert state["unreadable"] == 1
+        # a (Outer) + b, c (Inner); Blind's two files are UNKNOWN, so they are absent from the total
+        assert files == 3 and subs == 2
+        assert state["truncated"] is False        # no budget was spent - this is a hole, not a cut
+
+    def test_a_folder_blind_in_both_reads_is_one_hole_not_two(self):
+        # The disclosure counts FOLDERS it could not look inside; a folder whose file count AND its
+        # subfolder enumeration both failed is still one folder.
+        _outer_both, _b = self._partly_blind(blind_files=True, blind_subs=True)
+        both = {"visits": 0, "truncated": False, "unreadable": 0}
+        dm._subtree_counts(_outer_both, _state=both)
+        outer_one, _b2 = self._partly_blind(blind_files=True, blind_subs=False)
+        one = {"visits": 0, "truncated": False, "unreadable": 0}
+        dm._subtree_counts(outer_one, _state=one)
+        assert both["unreadable"] == 1 and one["unreadable"] == 1
+
+    def test_an_unreadable_subfolder_list_alone_is_a_hole(self):
+        # The other half of the pair: the file count answered, but whatever subtree hangs under it
+        # was never enumerated - still a hole, and its files are still missing from the totals.
+        outer, _blind = self._partly_blind(blind_files=False, blind_subs=True)
+        state = {"visits": 0, "truncated": False, "unreadable": 0}
+        files, _subs = dm._subtree_counts(outer, _state=state)
+        assert state["unreadable"] == 1
+        assert files == 5                      # a + b + c + Blind's own two readable files
+
+    def test_a_partly_blind_preview_says_at_least_and_names_the_hole_count(self):
+        outer, blind = self._partly_blind()
+        _install_folder_tree(outer)
+        res = _del("outer", confirm_name="Outer", force=True)   # non-empty, no recursive_confirm
+        assert res["isError"] is True and outer.deleted is False and blind.deleted is False
+        assert "at least 3 file(s)" in res["message"]
+        assert "1 folder(s) in the subtree would not enumerate" in res["message"]
+
+    def test_the_unforced_preview_discloses_the_holes_too(self):
+        # Both refusals show the blast radius, so both have to be honest about it.
+        outer, _blind = self._partly_blind()
+        _install_folder_tree(outer)
+        res = _del("outer", confirm_name="Outer")               # no force at all
+        assert res["isError"] is True
+        assert "at least 3 file(s)" in res["message"]
+        assert "would not enumerate" in res["message"]
+
+    def test_a_fully_readable_preview_reports_an_exact_total_and_claims_no_holes(self):
+        # The other side of the boundary: every folder read, so the totals are exact and the
+        # disclosure must not appear.
+        inner = FakeDelFolder("inner", "Inner", files=["b", "c"])
+        outer = FakeDelFolder("outer", "Outer", files=["a"], subs=[inner])
+        _install_folder_tree(outer)
+        res = _del("outer", confirm_name="Outer", force=True)
+        assert res["isError"] is True
+        assert "3 file(s)" in res["message"] and "at least" not in res["message"]
+        assert "would not enumerate" not in res["message"]
+
+
 class TestDeleteFolderUnreadableCensus:
     """The gate reads two counts to decide between 'delete this directly' and 'this is a subtree
     wipe - demand force AND a second acknowledgment'. A count that will not READ is not a zero: the

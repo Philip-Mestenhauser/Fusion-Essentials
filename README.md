@@ -1,37 +1,8 @@
 # Fusion-Essentials
 
-An essential toolkit for driving Autodesk Fusion with LLMs — a local MCP server whose typed tools
-let an AI agent read, model, assemble, verify, and machine in your live Fusion session — plus a
-small set of quality-of-life improvements for your own Fusion workflow.
-
-## The MCP server (the toolkit)
-
-Fusion-Essentials hosts a local [Model Context Protocol](https://modelcontextprotocol.io) server so
-an AI agent (Claude, or any MCP client) can drive your live Fusion session: orient, read the data
-model and design structure, sketch, model, joint, measure, screenshot, and set up CAM.
-
-Three enforced contracts make the tools trustworthy: typed inputs that refuse ambiguous references
-instead of guessing, declared outputs (real pass/fail verdicts beside their evidence), and
-postconditions that re-read ground truth after every write — a "success" that changed nothing
-becomes an error. The surface is built for token-efficient driving: one cheap orientation read
-(`workspace_orient`), progressive disclosure on every rich read, and result payloads that point to
-the right next tool instead of dumping depth unprompted.
-
-It is **off by default** and runs only on your own machine. Setup, client configuration, the
-how-to-drive-Fusion-well doctrine, demonstrated workflows, and security notes:
-[MCP Server README](commands/mcpServer/README.md). The authoritative per-tool inventory is
-generated from the live registry: [TOOL_MANIFEST.md](tests/generated/TOOL_MANIFEST.md).
-
-Permissions are first-class: every tool declares whether it reads, writes, or is destructive, and
-that machine-checked fact decides what an agent may run unattended. Claude Code's shared default
-(`.claude/settings.json`) is conservative. Codex's project default (`.codex/config.toml`) mirrors the
-existing local modeling convention: reads and local modeling writes run unattended, cloud/document
-and destructive writes prompt, and `sys_execute_script` is unavailable. Codex also loads the same
-root and nested `CLAUDE.md` files, so both clients receive the same operating conventions. The repo
-also ships a generated posture map with ready-to-paste presets:
-[PERMISSION_POSTURE.md](tests/generated/PERMISSION_POSTURE.md). A lint holds the shipped default
-equal to the registry's read set, and the arbitrary-code hatch (`sys_execute_script`) is never
-auto-approved in any preset.
+A set of quality-of-life improvements for your Fusion workflow, plus a local MCP server that lets an
+AI assistant work inside your open Fusion session. Both ship in the same add-in and run entirely on
+your own machine.
 
 ## Installation
 
@@ -46,14 +17,29 @@ install the add-in. If you are familiar with git, you can clone the repo into yo
 2. **Clean Chamfer** This command will take a set of surfaces that form an existing chamfer and turn them into a single freeform surface with the isocurves aligned to the original surfaces. This is useful for interpolating chamfers with a ball endmill, although it is made largely obsolete by the Pencil operation.
 3. **Automatically Enable Design History** This command will automatically enable design history for what it perceives to be a newly imported file.
 4. **Automatically Switch Units** This command will automatically switch the units of a newly imported file to the units of the current document.
-5. **Ability to Change Settings** You can enable/disable features or change the default units, and the settings persist between sessions.
+5. **Ability to Change Settings** You can enable/disable features or change the default units, and the settings persist between sessions. There is no guarantee that they will persist over updates of the add-in, until a 1.0 release is made.
 6. **Color Holes** This command will color all same-sized holes in a part and tell you what nominal size they might be based on the defaults in common CAD software.
 7. **Update Tools from Libraries** This command in the Manufacturing workspace will replace tools in your document with identical tools from the library they came from.
+
+## The MCP server
+
+[Model Context Protocol](https://modelcontextprotocol.io) is the standard way an AI assistant talks
+to software outside itself. Fusion-Essentials can run a small MCP server on your machine, and any
+MCP client (Claude, or another) can connect to it and work in whatever document you have open:
+reading a design, sketching, modelling, assembling, measuring, taking screenshots, setting up CAM.
+
+The tools are workflow-agnostic. Each does a single job and assumes nothing about how your shop
+works, so a repeatable procedure is something you assemble in your client out of whichever calls it
+needs.
+Anything that changes the model reads the design back afterwards, ensuring LLM tools can act more like an incrimental designer, than a script shotgun.
+
+The server is **off by default**. Setup, connecting a client, the full tool list, permissions, and
+why it is built the way it is: [MCP Server README](commands/mcpServer/README.md).
 
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the add-in conventions, the MCP tool-authoring recipe,
-and how to run the test suite (`py -3 -m pytest -q` — no Fusion session needed).
+and how to run the test suite (`py -3 -m pytest -q`, no Fusion session needed).
 
 ## License
 

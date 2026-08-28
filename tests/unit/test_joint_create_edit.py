@@ -202,7 +202,8 @@ class TestCreatePinSlot:
 class TestEditRotationRedirect:
     def test_rotation_deg_redirects_to_joint_drive(self, monkeypatch):
         monkeypatch.setattr(joint._common, "design", lambda: SimpleNamespace())
-        monkeypatch.setattr(joint, "_find_joint", lambda design, name: SimpleNamespace(name="J"))
+        # find_joint answers (joint, ambiguity_error_or_None) - a name several joints share refuses.
+        monkeypatch.setattr(joint, "_find_joint", lambda design, name: (SimpleNamespace(name="J"), None))
         out = joint.edit_handler(joint_name="J", rotation_deg=45)
         assert out["isError"] is True
         msg = out["content"][0]["text"]
@@ -240,8 +241,8 @@ class _SlideMotion:
 class TestApplyLimits:
     def test_rotation_in_radians(self):
         m = _RevMotion()
-        changed, err = joint._apply_limits(m, min_deg=-45, max_deg=90)
-        assert err is None
+        changed, unverified, err = joint._apply_limits(m, min_deg=-45, max_deg=90)
+        assert err is None and unverified == []
         assert m.rotationLimits.isMinimumValueEnabled and m.rotationLimits.isMaximumValueEnabled
         assert abs(m.rotationLimits.minimumValue - _math.radians(-45)) < 1e-9
         assert abs(m.rotationLimits.maximumValue - _math.radians(90)) < 1e-9
@@ -249,8 +250,8 @@ class TestApplyLimits:
 
     def test_linear_in_cm(self):
         m = _SlideMotion()
-        changed, err = joint._apply_limits(m, min_mm=0, max_mm=300, cm_scale=0.1)
-        assert err is None
+        changed, unverified, err = joint._apply_limits(m, min_mm=0, max_mm=300, cm_scale=0.1)
+        assert err is None and unverified == []
         assert abs(m.slideLimits.maximumValue - 30.0) < 1e-9   # 300 mm -> 30 cm
         assert changed["max_mm"] == 300
 
@@ -262,27 +263,177 @@ class TestApplyLimits:
 
     def test_rotation_on_slider_errors(self):
         m = _SlideMotion()
-        changed, err = joint._apply_limits(m, min_deg=10)
+        changed, unverified, err = joint._apply_limits(m, min_deg=10)
         assert err is not None and "rotation" in err.lower()
 
     def test_linear_on_revolute_errors(self):
         m = _RevMotion()
-        changed, err = joint._apply_limits(m, max_mm=100)
+        changed, unverified, err = joint._apply_limits(m, max_mm=100)
         assert err is not None and ("slide" in err.lower() or "linear" in err.lower())
 
     def test_inverted_rotation_pair_is_refused_before_any_write(self):
         # min > max is an EMPTY feasible range that silently makes the joint undrivable while every
         # health field reads healthy - refused, and nothing is enabled on the motion.
         m = _RevMotion()
-        changed, err = joint._apply_limits(m, min_deg=60, max_deg=-60)
+        changed, unverified, err = joint._apply_limits(m, min_deg=60, max_deg=-60)
         assert err is not None and "INVERTED" in err
         assert changed == {} and m.rotationLimits.isMinimumValueEnabled is False
 
     def test_inverted_slide_pair_is_refused_before_any_write(self):
         m = _SlideMotion()
-        changed, err = joint._apply_limits(m, min_mm=50, max_mm=10, cm_scale=0.1)
+        changed, unverified, err = joint._apply_limits(m, min_mm=50, max_mm=10, cm_scale=0.1)
         assert err is not None and "INVERTED" in err
         assert changed == {} and m.slideLimits.isMaximumValueEnabled is False
+
+
+class _DeafLim(_Lim):
+    """A JointLimits that ACCEPTS every assignment and keeps its own value (and optionally its own
+    enabled flag) - the platform shape a request-echoing payload cannot tell from a landed write."""
+    def __init__(self, held_value=0.0, hold_flag=None):
+        object.__setattr__(self, "_held", held_value)
+        object.__setattr__(self, "_hold_flag", hold_flag)
+        super().__init__()
+
+    def __setattr__(self, name, value):
+        if name in ("minimumValue", "maximumValue", "restValue"):
+            return object.__setattr__(self, name, object.__getattribute__(self, "_held"))
+        held_flag = object.__getattribute__(self, "_hold_flag")
+        if name.startswith("is") and held_flag is not None:
+            return object.__setattr__(self, name, held_flag)
+        return object.__setattr__(self, name, value)
+
+
+class _BlindLim(_Lim):
+    """A JointLimits whose value read RAISES after the assignment - the unreadable re-read."""
+    def __init__(self, blind_flag=False):
+        object.__setattr__(self, "_blind_flag", blind_flag)
+        super().__init__()
+
+    def __getattribute__(self, name):
+        if name in ("minimumValue", "maximumValue", "restValue"):
+            raise RuntimeError("limit value unreadable")
+        if (name.startswith("is") and name.endswith("Enabled")
+                and object.__getattribute__(self, "_blind_flag")):
+            raise RuntimeError("limit flag unreadable")
+        return object.__getattribute__(self, name)
+
+
+class _BandLim(_Lim):
+    """A JointLimits that lands every value OFF by a fixed amount, given in the caller's own units
+    (degrees) so a test can sit either side of the read-back band."""
+    def __init__(self, deg_error):
+        object.__setattr__(self, "_deg_error", deg_error)
+        super().__init__()
+
+    def __setattr__(self, name, value):
+        if name in ("minimumValue", "maximumValue", "restValue") and value is not None:
+            off = object.__getattribute__(self, "_deg_error")
+            return object.__setattr__(self, name, value + _math.radians(off))
+        return object.__setattr__(self, name, value)
+
+
+class TestLimitsAreReadBack:
+    """Every limit and its enabled flag is published as the JOINT READS IT BACK, never as the
+    request: a JointLimits assignment that the platform keeps at its own value leaves a payload
+    built from the request claiming a limit that is not in force."""
+
+    def test_a_landed_limit_publishes_the_read_back_value(self):
+        m = _RevMotion()
+        changed, unverified, err = joint._apply_limits(m, min_deg=-45)
+        assert err is None and unverified == []
+        assert changed["min_deg"] == -45.0
+
+    def test_the_published_number_is_the_read_back_not_the_request(self):
+        # the joint lands the limit slightly off (inside the band, so no refusal): the payload must
+        # carry what the JOINT holds, or a caller reading it back learns nothing it did not send
+        m = _RevMotion()
+        m.rotationLimits = _BandLim(joint._LIMIT_BAND * 0.5)
+        changed, unverified, err = joint._apply_limits(m, min_deg=-45)
+        assert err is None
+        assert changed["min_deg"] == -44.9995        # the read-back, not the requested -45
+
+    def test_a_rotation_limit_that_did_not_take_errors_naming_it(self):
+        m = _RevMotion()
+        m.rotationLimits = _DeafLim(held_value=0.0)
+        changed, unverified, err = joint._apply_limits(m, min_deg=-45)
+        assert err is not None
+        assert "min_deg did not take" in err
+        assert "-45" in err and "0.0" in err          # requested vs what the joint reads back
+        assert changed == {}                          # the failed limit is not published as applied
+
+    def test_a_slide_limit_that_did_not_take_errors_naming_it(self):
+        m = _SlideMotion()
+        m.slideLimits = _DeafLim(held_value=0.0)
+        changed, unverified, err = joint._apply_limits(m, max_mm=300, cm_scale=0.1)
+        assert err is not None and "max_mm did not take" in err
+        assert "300" in err
+
+    def test_an_enabled_flag_that_reads_back_false_errors(self):
+        # the value can land while the joint keeps the limit DISABLED - then it constrains nothing
+        m = _RevMotion()
+        m.rotationLimits = _DeafLim(held_value=_math.radians(-45), hold_flag=False)
+        changed, unverified, err = joint._apply_limits(m, min_deg=-45)
+        assert err is not None
+        assert "min_deg did not take" in err and "isMinimumValueEnabled" in err
+
+    def test_earlier_limits_that_landed_are_kept_in_changed(self):
+        # the partial-success disclosure both handlers build reads `changed` - a limit that landed
+        # before the failing one must still be named there
+        m = _RevMotion()
+        changed, unverified, err = joint._apply_limits(m, min_deg=-45, max_deg=90, rest_deg=10)
+        assert err is None and set(changed) == {"min_deg", "max_deg", "rest_deg"}
+        m2 = _RevMotion()
+        m2.rotationLimits = _DeafLim(held_value=_math.radians(-45))
+        changed2, _unv, err2 = joint._apply_limits(m2, min_deg=-45, max_deg=90)
+        assert err2 is not None and "max_deg did not take" in err2
+        assert changed2 == {"min_deg": -45.0}         # the one that landed, read back
+
+    def test_an_unreadable_read_back_publishes_null_and_a_marker(self):
+        # the value read RAISES: publishing the request would report a write nobody confirmed
+        m = _RevMotion()
+        m.rotationLimits = _BlindLim()
+        changed, unverified, err = joint._apply_limits(m, min_deg=-45)
+        assert err is None
+        assert changed == {"min_deg": None} and unverified == ["min_deg"]
+
+    def test_an_unreadable_enabled_flag_also_publishes_null(self):
+        # an unreadable FLAG is not a False - it is unknown, so the limit is unverified, not failed
+        m = _SlideMotion()
+        m.slideLimits = _BlindLim(blind_flag=True)
+        changed, unverified, err = joint._apply_limits(m, min_mm=5, cm_scale=0.1)
+        assert err is None
+        assert changed == {"min_mm": None} and unverified == ["min_mm"]
+
+
+class TestLimitReadBackBand:
+    """The read-back is compared in the REQUEST'S own units (a limit round-trips deg -> rad -> deg),
+    within _LIMIT_BAND. Both sides of that edge are pinned - a units round trip must not error, a
+    real miss must not slip under the band - and the edge itself: a difference EQUAL to the band is
+    inside it (the comparison is `>`, not `>=`)."""
+
+    def _apply(self, deg_error, wanted=-45):
+        m = _RevMotion()
+        m.rotationLimits = _BandLim(deg_error)
+        return joint._apply_limits(m, min_deg=wanted)
+
+    def test_a_difference_inside_the_band_lands(self):
+        changed, unverified, err = self._apply(joint._LIMIT_BAND * 0.5)
+        assert err is None and unverified == []
+
+    def test_a_difference_exactly_at_the_band_lands(self):
+        # min_deg=0 is the one request whose round trip lands the difference EXACTLY on the band
+        # (at -45 the float error puts it just under), so this is what separates `>` from `>=`.
+        changed, unverified, err = self._apply(joint._LIMIT_BAND, wanted=0)
+        assert err is None, "a difference equal to the band is inside it"
+        assert abs(changed["min_deg"] - 0.0) == joint._LIMIT_BAND, "the boundary case itself moved"
+
+    def test_a_difference_beyond_the_band_errors(self):
+        changed, unverified, err = self._apply(joint._LIMIT_BAND * 2.0)
+        assert err is not None and "min_deg did not take" in err
+
+    def test_the_band_is_small_enough_to_catch_a_real_miss(self):
+        # a limit that landed a whole degree off is a wrong limit, not round-trip noise
+        assert self._apply(1.0)[2] is not None
 
 
 # ── _resolve_input: the geometry-as-values HANDLE path ──────────
@@ -950,13 +1101,49 @@ class TestCreateFlipHint:
         assert "flip_hint" not in out
 
 
+class TestCreatePublishesLimitsItRead:
+    """joint_create's limit fields are the joint's own read-back or they are null - never the
+    request. A payload built from the request reports a limit that may never have been applied."""
+
+    def _with_motion(self, monkeypatch, limits):
+        _d, coll = _install_create(monkeypatch)
+        motion = SimpleNamespace(rotationLimits=limits, slideLimits=None)
+        coll.add = lambda ji: SimpleNamespace(name="Joint1", jointMotion=motion)
+        return coll
+
+    def test_a_landed_limit_is_published_from_the_joint(self, monkeypatch):
+        self._with_motion(monkeypatch, _BandLim(joint._LIMIT_BAND * 0.5))
+        out = _payload2(joint.handler(occurrence_one="JO_A", occurrence_two="JO_B",
+                                      joint_type="revolute", min_deg=-45))
+        assert out["created"] is True
+        assert out["min_deg"] == -44.9995        # what the joint holds, not the -45 requested
+        assert "limits_unverified" not in out
+
+    def test_a_limit_that_did_not_take_refuses_the_create_naming_it(self, monkeypatch):
+        self._with_motion(monkeypatch, _DeafLim(held_value=0.0))
+        res = joint.handler(occurrence_one="JO_A", occurrence_two="JO_B",
+                            joint_type="revolute", min_deg=-45)
+        assert res["isError"] is True
+        assert "min_deg did not take" in res["message"]
+        # the joint EXISTS - the partial-success disclosure has to say so and name the removal path
+        assert "WAS CREATED" in res["message"] and "design_delete_feature" in res["message"]
+
+    def test_an_unreadable_limit_publishes_null_and_the_marker(self, monkeypatch):
+        self._with_motion(monkeypatch, _BlindLim())
+        out = _payload2(joint.handler(occurrence_one="JO_A", occurrence_two="JO_B",
+                                      joint_type="revolute", min_deg=-45, max_deg=90))
+        assert out["min_deg"] is None and out["max_deg"] is None
+        assert out["limits_unverified"] == ["min_deg", "max_deg"]
+        assert "Limits published null" in out["note"] and "not a 'yes'" in out["note"]
+
+
 class TestSuppressedEditDisclosure:
     def _rig(self, monkeypatch, suppressed):
         j = SimpleNamespace(name="J", isFlipped=False, isSuppressed=suppressed,
                             motionLinks=[], jointMotion=None, timelineObject=None)
         design = SimpleNamespace(computeAll=lambda: None, timeline=None)
         monkeypatch.setattr(joint._common, "design", lambda: design)
-        monkeypatch.setattr(joint, "_find_joint", lambda d, n: j)
+        monkeypatch.setattr(joint, "_find_joint", lambda d, n: (j, None))
         return j
 
     def test_suppressed_joint_edit_is_disclosed_as_inert(self, monkeypatch):
@@ -1296,7 +1483,7 @@ def _edit_rig(monkeypatch, j, design=None):
     d = design if design is not None else SimpleNamespace(computeAll=lambda: None, timeline=None)
     monkeypatch.setattr(joint._common, "design", lambda: d)
     monkeypatch.setattr(joint._inputs._common, "design", lambda: d)
-    monkeypatch.setattr(joint, "_find_joint", lambda des, n: j)
+    monkeypatch.setattr(joint, "_find_joint", lambda des, n: (j, None))
     return d
 
 

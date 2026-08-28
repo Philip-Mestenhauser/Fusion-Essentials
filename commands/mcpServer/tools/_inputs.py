@@ -537,7 +537,10 @@ def _refind_by_locator(des, locator):
     for coll in (_common.safe(lambda: root.bRepBodies),):
         n = _common.safe(lambda: coll.count, 0) if coll else 0
         bodies += [coll.item(i) for i in range(n)]
-    for o in (_common.safe(lambda: root.allOccurrences) or []):
+    # The shared census, not a bare root.allOccurrences: that property RAISES on a design holding an
+    # unresolved external reference, and an empty walk would confine the self-heal to ROOT bodies -
+    # a stale handle on a nested face would come back "not found" rather than re-found.
+    for o in _common.all_occurrences(des):
         coll = _common.safe(lambda o=o: o.bRepBodies)
         n = _common.safe(lambda: coll.count, 0) if coll else 0
         bodies += [coll.item(i) for i in range(n)]
@@ -759,10 +762,12 @@ def _collect_bodies_by_name(des, comp, name):
         if scope is not None:
             for b in _bodies_named_in(scope, name):
                 add(b)
-    if root is not None:
-        for o in (_common.safe(lambda: root.allOccurrences) or []):
-            for b in _bodies_named_in(o, name):
-                add(b)
+    # The shared census, not a bare root.allOccurrences: that property RAISES on a design holding an
+    # unresolved external reference, and an empty walk would drop every NESTED placement of the named
+    # body - turning a real ambiguity into a single-match pick, or a hit into "no such body".
+    for o in _common.all_occurrences(des):
+        for b in _bodies_named_in(o, name):
+            add(b)
     # Reading meshBodies off an Occurrence proxy RAISES (measured; dir(occ) lists the member but the
     # read raises AttributeError, while occ.bRepBodies reads fine), so the occurrence pass above
     # contributes BReps only and can never find a mesh. _common.all_meshes is the ONE design-wide
@@ -2099,6 +2104,12 @@ def _occurrence_candidates(occs, cap=8):
 # the three refusals carries that word).
 OCCURRENCE_MISS = "no occurrence matching"
 
+# The refusal for an occurrence that EXISTS but whose external reference will not load. A distinct
+# refusal from OCCURRENCE_MISS, because "no such occurrence" would be false - the browser tree shows
+# it. Callers that propagate a hard refusal (TargetRef) match on this phrase rather than re-deriving
+# the condition, so the reason reaches the wire instead of a generic did-not-resolve.
+UNRESOLVED_REFERENCE_REFUSAL = "referenced component could not be loaded"
+
 
 def _resolve_occurrence(name, raw, candidates=None):
     """Resolve `raw` to a single live Occurrence. Returns (occurrence, error).
@@ -2129,7 +2140,8 @@ def _resolve_occurrence(name, raw, candidates=None):
             return ent, None
         return None, (f"'{name}': that handle points at a {type(ent).__name__}, not an occurrence. "
                       "design_get(include=['tree']) emits an occurrence handle.")
-    occs = _common.all_occurrences(des)
+    walk = _common.occurrence_walk(des)
+    occs = walk.occurrences
     paths = [(_common.safe(lambda o=o: o.fullPathName) or "") for o in occs]
     names = [(_common.safe(lambda o=o: o.name) or "") for o in occs]
     # 2) exact fullPathName - collect ALL hits, never the first. Two siblings CAN wear one path (the
@@ -2168,6 +2180,20 @@ def _resolve_occurrence(name, raw, candidates=None):
         return None, (f"'{name}': '{want}' is ambiguous - matches {len(hits)} occurrences "
                       f"({cands}). Pass the exact fullPathName, or a 'handle' "
                       "(design_get(include=['tree']) emits both).")
+    # 5) an UNRESOLVED reference: the occurrence EXISTS but its component will not load, so it was
+    # kept out of the lists above (every geometry read on it raises). Reporting the miss instead
+    # would tell the caller no such occurrence exists while the browser tree shows it.
+    # EXACT name, or the published '<parent path>+<name>' form - never a substring. This branch only
+    # ever produces a REFUSAL, but a loose match here would attribute the miss to the wrong row.
+    unresolved = [(o, b) for o, b in zip(walk.broken_occurrences, walk.broken)
+                  if b["name"] == want or want.endswith("+" + b["name"])]
+    if unresolved:
+        first = unresolved[0][1]
+        return None, (f"'{name}': '{want}' matches {len(unresolved)} occurrence(s) whose "
+                      f"{UNRESOLVED_REFERENCE_REFUSAL} ({first['detail']}), so there is nothing to "
+                      "act on - no geometry, placement or children are readable. The source file is "
+                      "not reachable through the API; open the browser tree in Fusion and hover the "
+                      "flagged node. workspace_orient health.unresolved_references lists them.")
     sample = ", ".join(p for p in paths[:12] if p)
     return None, (f"'{name}': {OCCURRENCE_MISS} '{want}'. Available (sample): {sample or '(none)'}. "
                   "Use design_get(include=['tree']) for the full list (each row carries its handle)."
@@ -2450,7 +2476,11 @@ class TargetRef(InputKind):
             if shared is not None and all(_common.same_component(
                     shared, _common.safe(lambda o=o: o.component)) for o in ambiguous[1:]):
                 return self._check(shared, "component")
-        if occ_err and "ambiguous" in occ_err.lower():
+        if occ_err and ("ambiguous" in occ_err.lower()
+                        or UNRESOLVED_REFERENCE_REFUSAL in occ_err):
+            # An unresolved reference propagates like an ambiguity: falling through to the
+            # component/body vocabularies would end in a generic "did not resolve", which denies
+            # that the occurrence exists at all.
             return None, occ_err
         # 3) a component by name
         comp = _component_by_name(des, s)
@@ -2554,14 +2584,16 @@ class TargetRefList(InputKind):
 
 def _profile_sketch(name, sketch_name):
     """The sketch a profile selector addresses: a NAME resolves DESIGN-WIDE (active component first)
-    via resolve_or_recent_sketch, blank means the most recent sketch in the active component. Returns
+    via find_or_recent_sketch, blank means the most recent sketch in the active component. Returns
     (sketch, error) - the one sketch lookup both the profile-index and the sketch-text address use."""
     des = _common.design()
     if not des:
         return None, "No active design to resolve the profile against."
-    sketch, sk_name = _common.resolve_or_recent_sketch(des, sketch_name)
+    sketch, sk_name, ambiguous = _common.find_or_recent_sketch(des, sketch_name)
     if sketch:
         return sketch, None
+    if ambiguous:
+        return None, f"'{name}': {ambiguous}"
     if sk_name:
         names = _common.all_sketch_names(des)
         return None, (f"'{name}': no sketch named '{sk_name}'. Available: "
@@ -2577,8 +2609,8 @@ def _text_count(sketch):
 
 def _resolve_profile_legacy(name, sketch_name, profile_index, allow_text=False):
     """Resolve a {sketch, profile_index} selector. A named sketch resolves DESIGN-WIDE (active
-    component first) via resolve_sketch; blank keeps model_extrude's most-recent-in-active-component
-    behavior. Bounds-checked index. Returns (profile, error)."""
+    component first) through _profile_sketch; blank keeps model_extrude's
+    most-recent-in-active-component behavior. Bounds-checked index. Returns (profile, error)."""
     sketch, serr = _profile_sketch(name, sketch_name)
     if serr:
         return None, serr
@@ -2800,28 +2832,15 @@ class ProfileRefList(ProfileRef):
 # ── sketch reference (a SKETCH by name, design-wide) ─────────────────────────────────────────────
 #
 # A sketch NAME can be carried by more than one sketch in a design, so this is the non-unique name
-# space: the census below counts every sketch the name matches (EXACT, case-insensitive) and a name
-# matching several is REFUSED with its owning components rather than resolved to the first hit.
-
-def _sketch_owners(d, name):
-    """Every (component name, sketch) pair whose sketch is named EXACTLY `name` (case-insensitive) -
-    the census a by-name sketch reference resolves through: exactly one hit resolves, several are
-    refused."""
-    want = (name or "").strip().lower()
-    owners = []
-    for comp in _common.all_components(d):
-        for sk in _common.iter_collection(_common.safe(lambda c=comp: c.sketches)):
-            nm = _common.safe(lambda s=sk: s.name)
-            if nm and nm.strip().lower() == want:
-                owners.append((_common.safe(lambda c=comp: c.name) or "(unnamed)", sk))
-    return owners
-
+# space. The census and the resolve are ONE walk - _common.find_sketch - which refuses a name
+# several sketches carry, naming each owning component, rather than taking the first hit.
 
 class SketchRefList(InputKind):
     """A LIST of SKETCHES by name - the reference an operation taking WHOLE sketches needs (a CAM
     SketchSelection's inputGeometry). A name carried by SEVERAL sketches is REFUSED, naming each
     owning component; a name carried by exactly one resolves design-wide through
-    ``_common.resolve_sketch`` (active component, then root, then the rest)."""
+    ``_common.find_sketch`` (active component, then root, then the rest). The match is EXACT: the
+    walk asks each component's ``sketches.itemByName``, so 'profile' does not answer 'Profile'."""
 
     json_type = "array"
     MAP_HINT = "several sketches by name (refuses a name several sketches share)"
@@ -2846,19 +2865,13 @@ class SketchRefList(InputKind):
             return None, "No active design to resolve the sketch names against."
         out = []
         for i, want in enumerate(items):
-            owners = _sketch_owners(d, want)
-            if not owners:
+            sk, ambiguous = _common.find_sketch(d, want)
+            if ambiguous:
+                return None, f"'{self.name}'[{i}]: {ambiguous}"
+            if sk is None:
                 names = ", ".join(_common.all_sketch_names(d))[:300]
                 return None, (f"'{self.name}'[{i}]: no sketch named '{want}'. Available: "
                               f"{names or '(none)'}.")
-            if len(owners) > 1:
-                where = ", ".join(f"'{c}'" for c, _ in owners[:8])
-                return None, (f"'{self.name}'[{i}]: {len(owners)} sketches are named '{want}' - in "
-                              f"{where}. Rename one so the name resolves to a single sketch, then "
-                              "retry.")
-            sk = _common.resolve_sketch(d, want)
-            if sk is None:
-                return None, f"'{self.name}'[{i}]: sketch '{want}' did not resolve to a live sketch."
             out.append(sk)
         return out, None
 

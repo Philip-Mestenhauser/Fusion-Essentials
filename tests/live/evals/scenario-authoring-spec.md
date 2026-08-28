@@ -15,13 +15,17 @@ runner/grader stops matching the docs.
 - `budget`: `max_tool_calls` = the last measured run + 25%. The RUNNER'S AUDIT count governs; the
   executor's TOOL_CALLS line is graded for honesty, not arithmetic. The runner derives its
   --max-turns backstop from this number (2x, floor 120), so an understated budget severs runs.
+  `max_tokens` = the last measured run's OUTPUT tokens + 25% - the runner scores it the same way
+  (audit.json's `within_token_budget`), so a postcondition change that adds reads re-pins BOTH.
 - `substitutions`: `{{RUN_FOLDER}}` is the one sanctioned token - the runner substitutes its
   per-invocation cloud subfolder tag so same-name artifact collisions across runs are impossible.
 - `perturbations` / `expected_refusals`: name them, or `none`.
 
 ## Prompt-block mechanics (every scenario)
 
-- The block is handed VERBATIM - write it for a blind, context-isolated executor: no repo access,
+- The block is handed VERBATIM except for the runner's two fixed additions - the declared
+  {{placeholders}} substituted, and the MCP-CONNECTION-LOST paragraph appended after it (README's
+  "How to run one"). Write it for a blind, context-isolated executor: no repo access,
   no harness utilities (the runner hard-denies them), MCP tools preloaded, so no ToolSearch step.
 - No AskUserQuestion, no human click: geometry picks go through find_geometry; ambiguity = report
   BLOCKED, never improvise a confirm.

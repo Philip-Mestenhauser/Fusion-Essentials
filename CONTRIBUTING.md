@@ -157,6 +157,12 @@ a primitive to its handler + execution metadata, the registry); and the tool mod
 
 ### The development loop (iterating without manual Fusion steps)
 
+The add-in can restart *itself*, and that is what makes agent-driven tool development possible: an
+agent can write a new tool, reload the server it is currently connected through, and exercise that
+tool against the live Fusion session — without a human ever opening the Add-Ins dialog. The loop
+closes. If you are building your own tools on top of this project, this is the loop to work in, and
+it is the reason a session can go from "this tool is missing" to "this tool works" unattended.
+
 The `sys_reload_addin` tool restarts the add-in so a connected agent can pick up code edits.
 Workflow: edit a `tools/*.py` file → call `sys_reload_addin` (deferred: it responds, then the
 server restarts in ~0.5s) → poll `GET http://127.0.0.1:27182/health` until it is back →
@@ -245,7 +251,10 @@ because mocks can't catch a wrong `adsk.*` signature, geometry-touching tools ar
 - **Changed tool source?** The receipt check goes red until the live suite has seen your code:
   run `py -3 tests/live/tool_verify.py` with Fusion up (a green run rewrites
   `tests/live/VERIFIED_TOOLS.md` - commit it with your change). Reload the add-in first so the live
-  session runs the code you just edited.
+  session runs the code you just edited. Read the receipt's buckets honestly: a `covered` tool had
+  a step whose predicate read a VALUE off the payload; a `called` tool only passed bare `ok` steps
+  (the call did not fail - nothing about its effect was read). A new step for an Edit tool should
+  read the effect back, not just `ok`.
 - **Regenerate the docs:** `py -3 tests/gen_all.py` rebuilds everything under `tests/generated/`
   (TOOL_MANIFEST + the CLAUDE.md maps from the registry, TOOL_POINTER_MAP from source,
   PERMISSION_POSTURE from the write annotations); run it whenever check_all says an artifact is stale.

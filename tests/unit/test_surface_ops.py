@@ -590,6 +590,28 @@ class TestStitch:
         assert "UNVERIFIED" in out["note"]
         assert "did NOT close" not in out["note"]
 
+    def test_an_empty_result_set_is_an_error_not_a_gap_diagnosis(self):
+        # 'stitched: true' with became_solid=false told the caller to increase the tolerance - a GAP
+        # diagnosis needing a body whose isSolid READ false. With no result body at all nothing was
+        # stitched, and the payload named neither a body nor a real verdict.
+        s1 = _FakeBRepBody("Srf1", is_solid=False)
+        s2 = _FakeBRepBody("Srf2", is_solid=False)
+        _install(_FakeFeatures(stitch=_FakeStitchFeatures([])),
+                 bodies_by_name={"Srf1": s1, "Srf2": s2})
+        res = so.stitch_handler(bodies=["Srf1", "Srf2"])
+        assert res["isError"] is True
+        assert "owns no result body" in res["message"]
+        assert "increase tolerance" not in res["message"]
+
+    def test_one_result_body_is_the_boundary_that_still_reports(self):
+        # the size boundary beside the empty set: ONE result body is a real verdict, not a failure.
+        s1 = _FakeBRepBody("Srf1", is_solid=False)
+        s2 = _FakeBRepBody("Srf2", is_solid=False)
+        _install(_FakeFeatures(stitch=_FakeStitchFeatures([_FakeBRepBody("Solid1", is_solid=True)])),
+                 bodies_by_name={"Srf1": s1, "Srf2": s2})
+        out = _payload(so.stitch_handler(bodies=["Srf1", "Srf2"]))
+        assert out["result_bodies"] == ["Solid1"] and out["became_solid"] is True
+
     def test_every_flag_readable_and_true_is_still_a_solid(self):
         # the boundary beside the null: with every flag READ, all() still decides - the tri-state
         # must not turn a genuine watertight stitch into an unverified one.

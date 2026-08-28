@@ -112,9 +112,15 @@ def handler(body_name: str = "", thickness: float = 1.0, units: str = "mm",
         changed = faces_after != faces_before
     if changed is False:
         # A no-op that the API still reported as success - surface it as failure, never a false ok.
-        return error(f"Shell reported success but body '{body_label}' is unchanged (volume and face "
-                     "count identical). The thickness is likely too large for the geometry - try a "
-                     "smaller value.")
+        # The message names the read that convicted, since only ONE of the two was compared.
+        if isinstance(vol_before, (int, float)) and isinstance(vol_after, (int, float)):
+            observed = (f"the read-back volume did not drop ({vol_before:.6g} cm3 before, "
+                        f"{vol_after:.6g} cm3 after)")
+        else:
+            observed = f"the face count read back identical ({faces_after} before and after)"
+        return error(f"Shell reported success on body '{body_label}' but {observed}. Read the body "
+                     "back with model_inspect, or cut a cross-section with view_section, to see "
+                     "what the feature did.")
 
     result_bodies = [f["name"] for f in _common.body_facts(_common.result_bodies(feature))]
 

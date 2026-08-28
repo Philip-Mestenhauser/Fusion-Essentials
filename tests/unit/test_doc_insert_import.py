@@ -374,6 +374,44 @@ class TestSvgImport:
         msg = error_message(mod.handler(file_path=cad("logo.svg"), sketch="Ghost"))
         assert "Ghost" in msg and "Logo" in msg
 
+    def test_a_padded_sketch_name_is_reported_stripped(self, wire, cad):
+        # the walk searches the STRIPPED name, so the miss must name that one - quoting the padded
+        # input sends the caller looking for a sketch whose name carries the spaces it typed.
+        wire(design=make_design(sketches=[_sketch("Logo")]))
+        msg = error_message(mod.handler(file_path=cad("logo.svg"), sketch="  Ghost  "))
+        assert "No sketch named 'Ghost'" in msg
+        assert "'  Ghost  '" not in msg
+
+    def test_a_blank_sketch_name_with_no_sketch_never_quotes_none(self, wire, cad):
+        # a blank name leaves the requested name None, so the named-miss wording would print
+        # "No sketch named 'None'" - a sketch nobody asked for. The blank branch words its own.
+        wire(design=make_design())
+        msg = error_message(mod.handler(file_path=cad("logo.svg"), sketch=""))
+        assert msg == ("No sketch to import the SVG into. SVG curves land in an EXISTING sketch - "
+                       "make one with sketch_create, then name it in 'sketch'.")
+        assert "'None'" not in msg
+
+    def test_a_whitespace_only_sketch_name_falls_back_to_the_most_recent_sketch(self, wire, cad):
+        # ' ' strips to blank, which is the most-recent-sketch request - not a search for a sketch
+        # named with a space.
+        recent = _sketch("Last")
+        wire(design=make_design(sketches=[_sketch("First"), recent]),
+             created=[types.SimpleNamespace(name="Curve")],
+             on_import=lambda: recent.sketchCurves._items.append(object()))
+        out = payload(mod.handler(file_path=cad("logo.svg"), sketch=" "))
+        assert out["into"] == "sketch 'Last'"
+
+    def test_a_shared_sketch_name_is_refused_with_its_owners(self, wire, cad, monkeypatch):
+        # Two components can each hold a "Logo". The refusal names them and nothing is imported;
+        # calling it "No sketch named 'Logo'" states the opposite of what the walk read.
+        design = make_design(sketches=[_sketch("Logo")])
+        _design, _mgr, calls = wire(design=design)
+        refusal = "2 sketches are named 'Logo' ('Logo' in Root, 'Logo' in Frame)"
+        monkeypatch.setattr(mod._common, "find_or_recent_sketch", lambda d, n: (None, n, refusal))
+        msg = error_message(mod.handler(file_path=cad("logo.svg"), sketch="Logo"))
+        assert msg == refusal and "No sketch named" not in msg
+        assert calls["targets"] == []          # nothing was imported
+
     def test_a_sketch_that_gained_no_curve_is_an_error(self, wire, cad):
         design = make_design(sketches=[_sketch("Logo")])
         wire(design=design, created=[])

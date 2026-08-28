@@ -24,7 +24,7 @@ import adsk.fusion
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe, resolve_sketch, all_sketch_names, resolve_entity_ref
+from ._common import ok, error, safe, find_sketch, all_sketch_names, resolve_entity_ref
 from . import _common
 # The readable handle on a SketchText's string is textParameter.expression, which holds it QUOTED -
 # _unquote is sketch_set_text's own reader for it, imported rather than re-rolled here.
@@ -93,8 +93,11 @@ def handler(sketch_name: str = "", target: str = "") -> dict:
         return error("No active design.")
 
     # Resolve across the whole design (active component first) so a sketch in an activated
-    # sub-component is reachable, matching sketch_constrain / the rest of the family.
-    sketch = resolve_sketch(design, (sketch_name or "").strip())
+    # sub-component is reachable, matching sketch_constrain / the rest of the family. A name SEVERAL
+    # components' sketches carry is refused with them named - a delete cannot pick one blind.
+    sketch, ambiguous = find_sketch(design, (sketch_name or "").strip())
+    if ambiguous:
+        return error(ambiguous)
     if not sketch:
         names = all_sketch_names(design)
         return error(f"No sketch named '{sketch_name}'. Available: "

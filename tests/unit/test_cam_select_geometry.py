@@ -627,7 +627,10 @@ class TestSketchSelection:
                          generate=False)
         assert res["isError"] is True
         assert "2 sketches are named 'Sketch1'" in res["message"]
-        assert "'Carrier'" in res["message"] and "'Bracket'" in res["message"]
+        # the shared refusal (_common.find_sketch) pairs each hit with its owning component
+        assert "'Sketch1' in Carrier" in res["message"]
+        assert "'Sketch1' in Bracket" in res["message"]
+        assert "'sketches'[0]" in res["message"]   # and still names the input slot it came from
         assert op.parameters.itemByName("contours").value.applied == 0   # nothing was applied
 
     def test_unknown_sketch_lists_the_available_names(self, monkeypatch):

@@ -153,6 +153,32 @@ class TestGuards:
         res = rv.handler(sketch_name="Nope")
         assert res["isError"] is True and "No sketch named 'Nope'" in res["message"]
 
+    def test_a_padded_name_reports_the_name_the_walk_searched_for(self):
+        # the resolver STRIPS the name before searching, so the miss quotes the stripped form -
+        # echoing the raw input names a sketch nothing ever looked for.
+        _install([FakeSketch("S")])
+        res = rv.handler(sketch_name="  Ghost  ")
+        assert res["isError"] is True
+        assert "No sketch named 'Ghost'" in res["message"]
+        assert "'  Ghost  '" not in res["message"]
+
+    def test_a_blank_name_with_no_sketch_in_the_design_never_quotes_None(self):
+        # a blank name asks for the MOST RECENT sketch, so there is no requested name to quote:
+        # the named-miss branch would render the absent name as the literal string 'None'.
+        _install([])
+        res = rv.handler()
+        assert res["isError"] is True
+        assert "'None'" not in res["message"]
+        assert res["message"] == "No sketch to revolve. Create one and draw a closed profile first."
+
+    def test_a_whitespace_only_name_takes_the_most_recent_sketch(self):
+        # ' ' strips to blank, which means the most recent sketch - searching for a space instead
+        # misses every sketch and reports a name no caller typed.
+        _install([FakeSketch("First"), FakeSketch("Last")])
+        res = rv.handler(sketch_name=" ")
+        assert "No sketch named" not in json.dumps(res)
+        assert _payload(res)["sketch"] == "Last"
+
     def test_profile_out_of_range(self):
         _install([FakeSketch("S", profile_count=1)])
         res = rv.handler(sketch_name="S", profile_index=5)

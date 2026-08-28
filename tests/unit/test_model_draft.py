@@ -16,7 +16,9 @@ dr = load_tool("model_draft")
 
 # ── fakes: the draftFeatures collection + input + created feature ───────────────────────────────
 
-class FakeInputFaces:
+class FakeFeatureFaces:
+    """The feature's own `faces` collection - the faces a draft created or modified, which is the
+    count the tool reads back (its `inputFaces` raises on this platform)."""
     def __init__(self, n):
         self._n = n
 
@@ -41,7 +43,7 @@ class FakeDraftInput:
 class FakeDraftFeature:
     def __init__(self, name="Draft1", n_faces=2, health=0):
         self.name = name
-        self.inputFaces = FakeInputFaces(n_faces)
+        self.faces = FakeFeatureFaces(n_faces)
         self.healthState = health
         self.errorOrWarningMessage = "geometry undercut"
 
@@ -113,7 +115,7 @@ class TestDraft:
         assert out["drafted"] is True
         assert out["feature"] == "Draft1"
         assert out["faces_requested"] == 2      # two handles resolved
-        assert out["faces_drafted"] == 3        # read from feature.inputFaces (tangent chain grew it)
+        assert out["faces_drafted"] == 3        # read off the feature's own faces, not the request
         assert out["angle_deg"] == 5
 
     def test_createinput_gets_faces_and_plane(self, monkeypatch):
@@ -218,7 +220,7 @@ class TestDraftedCountIsRead:
         # The bug this pins: falling back to len(faces) publishes the REQUEST as though the feature
         # had confirmed it, so a tangent-chain expansion (or a draft that took nothing) is invisible.
         feature = FakeDraftFeature(n_faces=1)
-        feature.inputFaces = None
+        feature.faces = None
         _wire(monkeypatch, feature=feature, faces=[object(), object()])
         out = payload(dr.handler(faces=["a", "b"], pull_direction="xy", angle_deg=5))
         assert out["faces_drafted"] is None

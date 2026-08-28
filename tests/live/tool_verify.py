@@ -36,9 +36,14 @@ deliberate refusal, with each fragment required IN the error text (a guard that 
 for a different reason is a FAIL, not a silent pass) - or a callable(payload) -> bool - a VALUE
 PREDICATE run on an ok result (falsy = FAIL); that is how grip contact and machine assignment
 are asserted, not just call success. Extend coverage by adding rows, not code.
+
+The expectation's SHAPE is also what buckets the tool in the receipt: a passing value predicate
+earns 'covered', a passing bare "ok" earns only 'called' (see ``predicate_kind``), so the count
+line separates the tools whose effect was read back from the tools that merely did not fail.
 """
 
 import argparse
+import dis
 import hashlib
 import json
 import os
@@ -116,7 +121,7 @@ def registered_tools():
     return sorted(t["name"] for t in out["result"]["tools"])
 
 
-# â”€â”€ the DAG â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# --- the DAG ----------------------------------------------------------------------------------
 # ctx keys written by steps (via "save") and read by later args-callables.
 
 def _ctx_get(ctx, key, what):
@@ -142,6 +147,139 @@ class _Refusal:
 
 def _refused(*fragments):
     return _Refusal(fragments)
+
+
+class Parked:
+    """expect=Parked("reason") - a step deliberately left at a bare "ok", with the reason rendered.
+
+    A parked row's reason otherwise lives only in a source comment, so the receipt shows a plain
+    'called' and the reader cannot tell a not-yet-written predicate from a deliberately held one.
+    Wrapping the expectation carries the reason onto the ledger ('called (reason)') while the
+    expectation itself is judged exactly as if it were passed bare. The wrapper is OPTIONAL: a step
+    that gains a real predicate drops it, and ``Parked(reason, predicate)`` keeps the reason on a
+    step whose expectation is something other than "ok"."""
+
+    def __init__(self, reason, expect="ok"):
+        self.reason = reason
+        self.expect = expect
+
+
+def _unparked(expect):
+    """The expectation a step is actually judged by - a Parked wrapper's inner expectation, or the
+    expectation itself."""
+    return expect.expect if isinstance(expect, Parked) else expect
+
+
+# Bytecode classes for the value-predicate guard below. A PUSH leaves the argument's fate to a later
+# instruction; an INSPECT reads INTO the argument (an attribute or a subscript); anything else
+# consumes it without looking inside - a truthiness test, an identity compare, a bare call.
+_PUSH_OPS = ("LOAD_CONST", "LOAD_SMALL_INT", "LOAD_GLOBAL", "LOAD_FAST", "LOAD_DEREF", "LOAD_NAME",
+             "LOAD_CLOSURE", "PUSH_NULL", "MAKE_FUNCTION", "COPY", "NOP", "RESUME", "CACHE",
+             "EXTENDED_ARG")
+_INSPECT_OPS = ("LOAD_ATTR", "LOAD_METHOD", "BINARY_SUBSCR")
+
+
+def _is_inspect(ins):
+    """True for an instruction that reads INTO the value on top of the stack. 3.11 emits
+    LOAD_METHOD where 3.12+ emits LOAD_ATTR, and 3.14 folds the subscript into BINARY_OP - dis
+    renders that oparg as '[]', which is what identifies it there."""
+    return (ins.opname.startswith(_INSPECT_OPS)
+            or (ins.opname == "BINARY_OP" and ins.argrepr == "[]"))
+
+
+_ARG_LOAD_OPS = ("LOAD_FAST", "LOAD_DEREF")
+
+
+def _arg_load_sites(instructions, arg):
+    """Indexes where `arg` is pushed and is the value left on top. LOAD_FAST carries the name in
+    argval; the fused 3.13+ forms (LOAD_FAST_LOAD_FAST) carry a TUPLE of names, and 3.14 renames
+    some to LOAD_FAST_BORROW - so the test is on the opname PREFIX and on either argval shape. A
+    predicate whose own inner comprehension closes over the payload makes the argument a CELL, and
+    every read of it then compiles to LOAD_DEREF, so that form counts too. A fused push that leaves
+    a DIFFERENT name on top is skipped: what the next instruction does describes that other value,
+    not this one."""
+    sites = []
+    for i, ins in enumerate(instructions):
+        if not ins.opname.startswith(_ARG_LOAD_OPS):
+            continue
+        val = ins.argval
+        if val == arg or (isinstance(val, tuple) and val and val[-1] == arg):
+            sites.append(i)
+    return sites
+
+
+# Calls that consume a value while reading only its TRUTHINESS - handing the payload to one of
+# these inspects no more of it than `if payload:` would, so it is not a content read.
+_TRUTHY_ONLY_CALLS = {"bool"}
+
+
+def _callee_name(instructions, i):
+    """The NAME a call consuming the argument loaded at `i` is calling - the nearest name pushed
+    before the argument - or None when the callee is not a plain name (a lambda built inline, a
+    subscripted callable)."""
+    for j in range(i - 1, -1, -1):
+        ins = instructions[j]
+        if ins.opname.startswith(("LOAD_GLOBAL", "LOAD_NAME", "LOAD_DEREF", "LOAD_CLOSURE",
+                                  "LOAD_ATTR", "LOAD_METHOD")):
+            return ins.argval
+        if not ins.opname.startswith(_PUSH_OPS):
+            return None
+    return None
+
+
+def _inspects_argument(code, arg):
+    """True when the bytecode reads the CONTENT of `arg`: the argument is pushed and the first
+    instruction that consumes it reads an attribute off it, subscripts it, or hands it to a call
+    that is not one of the truthiness-only builtins. Any one such load site is enough."""
+    instructions = list(dis.get_instructions(code))
+    for i in _arg_load_sites(instructions, arg):
+        for nxt in instructions[i + 1:]:
+            if nxt.opname.startswith(_PUSH_OPS):
+                continue
+            if _is_inspect(nxt):
+                return True
+            if (nxt.opname.startswith("CALL")
+                    and _callee_name(instructions, i) not in _TRUTHY_ONLY_CALLS):
+                return True
+            break
+    return False
+
+
+def _inspects_payload(expect):
+    """True when a callable expectation READS the payload it is handed.
+
+    LOADING the argument is not enough: ``lambda p: p and True``, ``bool(p)`` and
+    ``p is not None`` all touch the argument while reading NOTHING out of it, and each would
+    otherwise be counted 'covered' while proving no more than a bare "ok". So the argument must be
+    subscripted, have an attribute read off it, or be handed to a call that reads its content
+    (``str(p)``, ``_helper(p)`` - but not ``bool(p)``, which reads only truthiness). A callable
+    with no inspectable code object (a builtin, a C callable) is taken at its word."""
+    code = getattr(expect, "__code__", None)
+    if code is None:
+        return True
+    if code.co_argcount < 1:
+        return False
+    return _inspects_argument(code, code.co_varnames[0])
+
+
+def predicate_kind(expect):
+    """Which BUCKET a step's expectation earns its tool: 'value', 'call' or 'refusal'.
+
+    - 'value'   - a callable predicate that reads keys off the ok payload, so a pass is evidence
+                  the effect landed (the ledger's 'covered').
+    - 'call'    - the bare "ok" string (or a callable that ignores its payload): the call returned
+                  without isError and NOTHING in the payload was read (the ledger's 'called').
+    - 'refusal' - "refused" / ``_refused(...)``: a guard beat, which produces no effect to read.
+
+    This is what splits the receipt's two honest buckets apart, so it classifies the step's
+    expectation OBJECT - never the tool, the args or the run's outcome. A Parked wrapper is
+    transparent here: the reason it carries changes the ledger's wording, never the bucket."""
+    expect = _unparked(expect)
+    if isinstance(expect, _Refusal) or expect == "refused":
+        return "refusal"
+    if callable(expect):
+        return "value" if _inspects_payload(expect) else "call"
+    return "call"
 
 
 # A portable scratch dir for the export-to-disk tools (design_export/mesh_export/cam_post) so the
@@ -238,16 +376,740 @@ def _repair_no_op(p):
                      and "found nothing of its kind to fix" in (p.get("note") or ""))
 
 
+# --- model_* value predicates -----------------------------------------------------------------
+# Each reads keys the tool PUBLISHES on the call shape its step uses (taken from the tool source),
+# so a pass is evidence the effect landed rather than evidence the call returned. Where a step's
+# shape carries no honest value to read, the step stays a bare "ok" and its tool lands in the
+# receipt's 'called' bucket - the queue for the next tranche. Each check reports the values it read
+# through _measured, so a miss is diagnosable from the ledger line alone.
+
+def _made_component(p):
+    """model_create_component(activate=True): the new occurrence answers its own name and full path
+    back, and 'activated' is what Occurrence.activate() RETURNED, not what the step asked for."""
+    return _measured("component create read-back",
+                     {"occurrence": p.get("occurrence"), "full_path": p.get("full_path"),
+                      "activated": p.get("activated")},
+                     bool(p.get("occurrence")) and bool(p.get("full_path"))
+                     and p.get("activated") is True)
+
+
+def _made_component_inactive(p):
+    """model_create_component(activate=False): the same read-back, with activate() not called - so
+    'activated' must be False rather than merely falsy."""
+    return _measured("component create read-back (not activated)",
+                     {"occurrence": p.get("occurrence"), "full_path": p.get("full_path"),
+                      "activated": p.get("activated")},
+                     bool(p.get("occurrence")) and bool(p.get("full_path"))
+                     and p.get("activated") is False)
+
+
+# which component of a datum plane's normal must be the unit one, per base plane
+_PLANE_NORMAL_AXIS = {"xy": 2, "xz": 1, "yz": 0}
+
+
+def _datum_plane(base):
+    """model_construction(kind='plane', mode offset from a world plane): the CREATED datum's own
+    normal, read back off the object (not echoed), points along the base plane's axis. Sign is not
+    asserted - an offset plane's normal may face either way."""
+    i = _PLANE_NORMAL_AXIS[base]
+
+    def check(p):
+        n = (p.get("geometry") or {}).get("normal")
+        aligned = (isinstance(n, list) and len(n) == 3
+                   and abs(n[i]) > 0.999
+                   and all(abs(v) < 0.001 for j, v in enumerate(n) if j != i))
+        return _measured(f"datum plane normal along the {base} plane's axis",
+                         {"name": p.get("name"), "normal": n},
+                         bool(p.get("name")) and aligned)
+    return check
+
+
+def _result_bodies(label):
+    """The shared feature-landed read for the solid builders: the feature named itself and
+    'result_bodies' is the walk over the bodies that feature actually produced."""
+    def check(p):
+        return _measured(label + " result", {"feature": p.get("feature"),
+                                             "result_bodies": p.get("result_bodies")},
+                         bool(p.get("feature")) and bool(p.get("result_bodies")))
+    return check
+
+
+_extruded = _result_bodies("extrude")
+_revolved = _result_bodies("revolve")
+_swept = _result_bodies("sweep")
+_lofted = _result_bodies("loft")
+
+
+def _material_assigned(p):
+    """model_set_material: every applied row carries the material name READ BACK off the body after
+    the assignment (a silent no-op leaves a name that does not match and lands in 'failed')."""
+    rows = p.get("applied_to") or []
+    return _measured("material read-back per body",
+                     {"applied_to": rows[:3], "failed": p.get("failed")},
+                     bool(rows) and all(r.get("material") for r in rows) and not p.get("failed"))
+
+
+def _gap_measured(p):
+    """model_measure_between (distance mode): a real number came back off measureMinimumDistance -
+    the tool refuses a non-numeric value rather than publishing 0, so a number here is the
+    measurement. The VALUE is not asserted: the gap is whatever the model holds."""
+    d = p.get("distance")
+    return _measured("minimum distance",
+                     {"mode": p.get("mode"), "distance": d,
+                      "closest_point_on_a": p.get("closest_point_on_a")},
+                     p.get("mode") == "distance" and isinstance(d, (int, float))
+                     and not isinstance(d, bool))
+
+
+def _relation_measured(relation):
+    """model_measure_relation: the named relation's own measurement came back as a number and the
+    verdict as a boolean. The verdict VALUE is not asserted where the geometry decides it."""
+    def check(p):
+        ang = (p.get("measured") or {}).get("angle_deg")
+        return _measured(f"{relation} measurement",
+                         {"relation": p.get("relation"), "measured": p.get("measured"),
+                          "passed": p.get("passed")},
+                         p.get("relation") == relation and isinstance(p.get("passed"), bool)
+                         and isinstance(ang, (int, float)) and not isinstance(ang, bool))
+    return check
+
+
+def _relation_passes(relation):
+    """The same read where the step's own geometry settles the verdict (an entity compared with
+    ITSELF is parallel to itself), so the boolean is asserted too."""
+    inner = _relation_measured(relation)
+
+    def check(p):
+        return inner(p) and _measured(f"{relation} verdict", {"passed": p.get("passed"),
+                                                              "note": (p.get("note") or "")[:80]},
+                                      p.get("passed") is True)
+    return check
+
+
+def _extent_measured(p):
+    """model_inspect (default bbox): the three extents came back as POSITIVE numbers off the
+    target's bodies-only AABB - a target with no measurable solid reads null instead."""
+    x, y, z = p.get("x"), p.get("y"), p.get("z")
+    return _measured("bounding-box extents", {"x": x, "y": y, "z": z, "units": p.get("units")},
+                     all(isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
+                         for v in (x, y, z)))
+
+
+def _drafted(p):
+    """model_draft: 'faces_drafted' is feature.faces.count - the count the FEATURE reports, null
+    when it could not be read."""
+    n = p.get("faces_drafted")
+    return _measured("faces the draft feature took",
+                     {"faces_drafted": n, "faces_requested": p.get("faces_requested")},
+                     isinstance(n, int) and not isinstance(n, bool) and n >= 1)
+
+
+def _drilled(count):
+    """model_hole: 'holes_verified' says the DRILL AXES were counted off the created feature (the
+    read that catches a point which cut nothing), and 'holes' is that verified count."""
+    def check(p):
+        return _measured(f"holes drilled (want {count}, axis-verified)",
+                         {"holes": p.get("holes"), "holes_verified": p.get("holes_verified"),
+                          "points": p.get("points")},
+                         p.get("holes_verified") is True and p.get("holes") == count)
+    return check
+
+
+def _mirrored(p):
+    """model_mirror: the feature's own result bodies, plus the effect signal the tool measured -
+    a body added to the host census, or a volume that moved."""
+    return _measured("mirror effect",
+                     {"result_bodies": p.get("result_bodies"),
+                      "bodies_added": p.get("bodies_added"),
+                      "volume_change_cm3": p.get("volume_change_cm3")},
+                     bool(p.get("result_bodies"))
+                     and bool(p.get("bodies_added") or p.get("volume_change_cm3")))
+
+
+def _patterned(key, count):
+    """model_pattern_rectangular / _circular: the instance count the tool publishes, which is
+    feature.patternElements.count when that read answered."""
+    def check(p):
+        return _measured(f"pattern {key} (want {count})",
+                         {key: p.get(key), "feature": p.get("feature"), "type": p.get("type")},
+                         p.get(key) == count and bool(p.get("feature")))
+    return check
+
+
+def _joined(p):
+    """model_combine(join): the result body's lump count, read FRESH off the joined body - one lump
+    is what fusing two touching solids produces, and the tool flags a disjoint join instead."""
+    return _measured("join fused into one lump",
+                     {"lump_count": p.get("lump_count"), "disjoint_join": p.get("disjoint_join"),
+                      "bodies_remaining": p.get("bodies_remaining")},
+                     p.get("lump_count") == 1 and not p.get("disjoint_join"))
+
+
+def _edge_feature(kind):
+    """model_fillet / model_chamfer: 'faces_created' is read from the created feature (corner
+    patches count too, so it can exceed the edges requested)."""
+    def check(p):
+        n = p.get("faces_created")
+        return _measured(f"{kind} faces created",
+                         {"faces_created": n, "edges_requested": p.get("edges_requested"),
+                          "feature": p.get("feature")},
+                         isinstance(n, int) and not isinstance(n, bool) and n >= 1
+                         and bool(p.get("feature")))
+    return check
+
+
+_filleted = _edge_feature("fillet")
+_chamfered = _edge_feature("chamfer")
+
+
+def _shelled(p):
+    """model_shell: the before/after volume difference over the shelled body - a hollowing removes
+    material, and the key is published only where both reads answered."""
+    v = p.get("volume_removed_cm3")
+    return _measured("volume the shell removed",
+                     {"volume_removed_cm3": v, "faces_delta": p.get("faces_delta"),
+                      "result_bodies": p.get("result_bodies")},
+                     isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0)
+
+
+def _offset_faces(p):
+    """model_offset_face: the affected body's volume delta - the tool refuses an unchanged volume,
+    so a published non-zero delta is the push/pull that landed."""
+    v = p.get("volume_delta_cm3")
+    return _measured("volume the face offset moved",
+                     {"volume_delta_cm3": v, "bodies": p.get("bodies")},
+                     isinstance(v, (int, float)) and not isinstance(v, bool) and v != 0)
+
+
+def _moved(p):
+    """model_move: 'displacement' is measured from the bodies' own points before and after, not
+    from the request."""
+    d = p.get("displacement")
+    return _measured("measured displacement",
+                     {"displacement": d, "units": p.get("units"), "mode": p.get("mode")},
+                     isinstance(d, (int, float)) and not isinstance(d, bool) and d > 0)
+
+
+def _split_bodies(p):
+    """model_split(body): the piece count - the tool errors below 2, and this reads the number."""
+    n = p.get("result_count")
+    return _measured("pieces the split produced",
+                     {"result_count": n, "result_bodies": p.get("result_bodies")},
+                     isinstance(n, int) and not isinstance(n, bool) and n >= 2)
+
+
+def _unstitched(p):
+    """model_unstitch: the surface bodies the explode produced, counted off the feature's own
+    result, beside the host census before/after."""
+    n = p.get("surface_body_count")
+    return _measured("surface bodies the unstitch produced",
+                     {"surface_body_count": n, "bodies_before": p.get("bodies_before"),
+                      "bodies_after": p.get("bodies_after")},
+                     isinstance(n, int) and not isinstance(n, bool) and n >= 2)
+
+
+def _stitched(p):
+    """model_stitch: 'became_solid' is the isSolid read-back over the result bodies - a BOOLEAN
+    means it was read (null means it would not answer). Whether two faces close into a solid is
+    the geometry's business, so the value is not asserted."""
+    return _measured("stitch result read-back",
+                     {"became_solid": p.get("became_solid"), "is_solid": p.get("is_solid"),
+                      "result_bodies": p.get("result_bodies"),
+                      "input_body_count": p.get("input_body_count")},
+                     isinstance(p.get("became_solid"), bool) and bool(p.get("result_bodies")))
+
+
+def _base_feature_open(p):
+    """model_base_feature(start): the scope reports itself open and registered."""
+    return _measured("base-feature scope opened",
+                     {"editing": p.get("editing"), "open_scope_count": p.get("open_scope_count"),
+                      "base_feature": p.get("base_feature")},
+                     p.get("editing") is True and bool(p.get("base_feature"))
+                     and isinstance(p.get("open_scope_count"), int) and p["open_scope_count"] >= 1)
+
+
+def _base_feature_closed(p):
+    """model_base_feature(finish): the scope closed - 'editing' False (null is an UNCONFIRMED
+    close) and at least one scope named in 'closed_scopes'."""
+    return _measured("base-feature scope closed",
+                     {"editing": p.get("editing"), "closed_scopes": p.get("closed_scopes"),
+                      "open_scope_count": p.get("open_scope_count")},
+                     p.get("editing") is False and bool(p.get("closed_scopes")))
+
+
+def _arranged(count):
+    """model_arrange: the solver's effect read back - which named inputs MOVED, or the occurrences
+    it added (it restructures parts under Envelope occurrences and can mint copies)."""
+    def check(p):
+        return _measured(f"arrange effect (want {count} shapes)",
+                         {"arranged_count": p.get("arranged_count"), "moved": p.get("moved"),
+                          "new_occurrence_count": p.get("new_occurrence_count")},
+                         p.get("arranged_count") == count
+                         and bool(p.get("moved") or p.get("new_occurrences")))
+    return check
+
+
+def _holder_computed(p):
+    """model_compute_holder: the profile reduced to a stack of bands - the segment count and the
+    bands themselves."""
+    segs = p.get("segments_mm")
+    return _measured("holder profile segments",
+                     {"segment_count": p.get("segment_count"), "name": p.get("name")},
+                     isinstance(segs, list) and len(segs) >= 1
+                     and p.get("segment_count") == len(segs))
+
+
+def _piped(p):
+    """model_pipe: the bodies the pipe produced, plus the section size read back off the feature
+    (feature.sectionSize.value), not the request echoed."""
+    return _measured("pipe result",
+                     {"result_bodies": p.get("result_bodies"),
+                      "section_size_measured": p.get("section_size_measured"),
+                      "section_size": p.get("section_size")},
+                     bool(p.get("result_bodies"))
+                     and isinstance(p.get("section_size_measured"), (int, float))
+                     and not isinstance(p.get("section_size_measured"), bool))
+
+
+# --- joint_* / assembly_* / param_* / doc_* value predicates -----------------------------------
+# Same rule as the model_* block above: each reads keys the tool PUBLISHES on the call shape its
+# step uses, and each reports what it read through _measured so a miss is diagnosable from the
+# ledger line alone.
+
+def _num(v):
+    """True for a real number - a bool is an int in Python and is never a measurement."""
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _near(v, want, tol):
+    return _num(v) and abs(v - want) < tol
+
+
+def _mod360(a, b):
+    """The smaller of the two ways round between two angles in degrees - a revolute's stored value
+    ACCUMULATES full turns, so 720 and 0 are one pose (the same test joint_drive's own no-take gate
+    applies before it will call a drive landed)."""
+    d = abs(a - b) % 360.0
+    return min(d, 360.0 - d)
+
+
+def _jointed(name):
+    """joint_create: 'healthy' is the created joint's own compute state, read off the joint or its
+    timeline item - null when NEITHER answered, which is not a 'yes' - and 'joint_name' is what
+    apply_rename read BACK off the joint rather than the name requested."""
+    def check(p):
+        return _measured(f"joint create read-back ('{name}')",
+                         {"created": p.get("created"), "healthy": p.get("healthy"),
+                          "joint_name": p.get("joint_name"), "joint_type": p.get("joint_type"),
+                          "input_one": p.get("input_one"), "input_two": p.get("input_two")},
+                         p.get("created") is True and p.get("healthy") is True
+                         and p.get("joint_name") == name)
+    return check
+
+
+def _joint_origin_at(name, x=0.0, y=0.0, z=0.0):
+    """joint_create_origin(anchor='coordinates'): 'offset_parameters' holds the created JO's own
+    offsetX/Y/Z VALUES read back off it (the tool deletes the origin and errors when they differ
+    from what was asked), so this reads where the frame LANDED, not where it was aimed."""
+    def check(p):
+        loc = p.get("offset_parameters") or {}
+        vals = [loc.get(k) for k in ("x", "y", "z")]
+        return _measured(f"joint origin '{name}' offsets (want {[x, y, z]} mm)",
+                         {"created": p.get("created"),
+                          "joint_origin_name": p.get("joint_origin_name"),
+                          "offset_parameters": loc,
+                          "joint_origin_count": p.get("joint_origin_count")},
+                         p.get("created") is True and p.get("joint_origin_name") == name
+                         and loc.get("units") == "mm"
+                         and all(_near(v, w, 1e-4) for v, w in zip(vals, (x, y, z))))
+    return check
+
+
+def _joint_origin_computed(name):
+    """joint_create_origin(a COMPUTED anchor): 'origin_readback' is the created JO's own
+    geometry.origin read AFTER the fact, and 'computed_anchor' the point the tool derived from the
+    target's measured box - equal within the tool's own 0.01 mm band is the frame landing on the
+    anchor it computed. Both keys absent would mean that verification never ran."""
+    def check(p):
+        want, landed = p.get("computed_anchor") or {}, p.get("origin_readback") or {}
+        pairs = [(want.get(k), landed.get(k)) for k in ("x", "y", "z")]
+        return _measured(f"joint origin '{name}' landed on its computed anchor",
+                         {"computed_anchor": want, "origin_readback": landed,
+                          "frame_axes": p.get("frame_axes")},
+                         p.get("created") is True and p.get("joint_origin_name") == name
+                         and want.get("units") == landed.get("units")
+                         and all(_num(a) and _near(b, a, 0.01) for a, b in pairs))
+    return check
+
+
+def _joint_limits(name, **want):
+    """joint_edit(limits): every published limit is the value READ BACK off the live JointLimits in
+    the caller's own units - a limit whose read-back could not be taken publishes null and is named
+    in 'limits_unverified', so an empty 'limits_unverified' beside real numbers is the write
+    confirmed."""
+    def check(p):
+        good = (p.get("edited") is True and p.get("joint_name") == name
+                and p.get("recomputed") is True and not p.get("limits_unverified")
+                and all(_near(p.get(k), v, 1e-3) for k, v in want.items()))
+        return _measured(f"joint '{name}' limits read back {sorted(want)}",
+                         {"edited": p.get("edited"), "joint_name": p.get("joint_name"),
+                          "changes": p.get("changes"), "recomputed": p.get("recomputed"),
+                          "limits_unverified": p.get("limits_unverified")}, good)
+    return check
+
+
+def _motion_linked(one, two, reversed_):
+    """joint_motion_link: 'motion_link' is the name read off the CREATED link, 'ratio_applied' says
+    setMotionData answered true (a ratio that would not apply rolls the link back and errors), and
+    joint_one/joint_two are read off the two joints the names resolved to."""
+    def check(p):
+        return _measured(f"motion link '{one}' -> '{two}'",
+                         {"linked": p.get("linked"), "motion_link": p.get("motion_link"),
+                          "joint_one": p.get("joint_one"), "joint_two": p.get("joint_two"),
+                          "ratio": p.get("ratio"), "reversed": p.get("reversed")},
+                         p.get("linked") is True and p.get("ratio_applied") is True
+                         and bool(p.get("motion_link"))
+                         and p.get("joint_one") == one and p.get("joint_two") == two
+                         and p.get("reversed") is reversed_)
+    return check
+
+
+def _driven_angle(want_deg):
+    """joint_drive: 'value_now.angle_deg' is jointMotion.rotationValue read BACK off the joint after
+    the drive, compared the way the tool's own no-take gate compares it (modulo 360). 'moved' names
+    the member whose placement changed and is reported, not asserted - which member moves is the
+    mechanism's business."""
+    def check(p):
+        v = (p.get("value_now") or {}).get("angle_deg")
+        return _measured(f"drive read-back (want {want_deg} deg)",
+                         {"driven": p.get("driven"), "joint": p.get("joint"),
+                          "value_now": p.get("value_now"), "moved": p.get("moved"),
+                          "motion_link_partner": p.get("motion_link_partner")},
+                         p.get("driven") is True and _num(v) and _mod360(v, want_deg) < 0.5)
+    return check
+
+
+def _driven_slide(want_mm):
+    """joint_drive (a slider): 'value_now.distance_mm' is jointMotion.slideValue read back off the
+    joint in mm - the tool errors when it disagrees with the command, so the number here IS the
+    pose the slide took."""
+    def check(p):
+        v = (p.get("value_now") or {}).get("distance_mm")
+        return _measured(f"slide read-back (want {want_mm} mm)",
+                         {"driven": p.get("driven"), "joint": p.get("joint"),
+                          "value_now": p.get("value_now"), "moved": p.get("moved")},
+                         p.get("driven") is True and _near(v, want_mm, 1e-3))
+    return check
+
+
+def _as_built(p):
+    """joint_create_as_built: 'joint' is the name read off the CREATED AsBuiltJoint (a rename that
+    did not land is refused rather than published), and the two occurrence paths are read off the
+    occurrences the inputs resolved to."""
+    return _measured("as-built joint read-back",
+                     {"created": p.get("created"), "joint": p.get("joint"),
+                      "occurrence_one": p.get("occurrence_one"),
+                      "occurrence_two": p.get("occurrence_two"),
+                      "joint_type": p.get("joint_type"),
+                      "anchor_warning": p.get("anchor_warning")},
+                     p.get("created") is True and bool(p.get("joint"))
+                     and bool(p.get("occurrence_one")) and bool(p.get("occurrence_two")))
+
+
+def _jointed_at_geometry(p):
+    """joint_at_geometry: 'healthy' is the created joint's compute state - the payload's own
+    authoritative flag, false when the joint was added but could not solve - beside the key points
+    the two handles resolved to."""
+    return _measured("joint-at-geometry read-back",
+                     {"jointed": p.get("jointed"), "healthy": p.get("healthy"),
+                      "health_state": p.get("health_state"), "joint_name": p.get("joint_name"),
+                      "geometry_one": p.get("geometry_one"),
+                      "geometry_two": p.get("geometry_two")},
+                     p.get("jointed") is True and p.get("healthy") is True
+                     and bool(p.get("geometry_one")) and bool(p.get("geometry_two")))
+
+
+def _grounded(p):
+    """assembly_ground(ground_to_parent=true): 'isGroundToParent' is the flag READ BACK off the
+    occurrence after the set - the tool errors on a flag that will not read or does not match, so a
+    true here is the lock in force. 'isGrounded' is the separate UI flag this tool never writes
+    (read_flag: null means unread)."""
+    return _measured("parent lock read-back",
+                     {"occurrence": p.get("occurrence"),
+                      "isGroundToParent": p.get("isGroundToParent"),
+                      "isGrounded": p.get("isGrounded"),
+                      "position_reset": p.get("position_reset")},
+                     p.get("isGroundToParent") is True and bool(p.get("occurrence")))
+
+
+def _moved_occurrence(x_mm=None):
+    """assembly_move: 'position' is the occurrence's transform2 translation READ BACK after the
+    compose, in the caller's units - the tool errors when the transform reads unchanged or will not
+    read at all, so these are the coordinates the part actually holds. x is asserted only where the
+    step is the FIRST move of a fresh occurrence, whose transform starts at the identity."""
+    def check(p):
+        pos = p.get("position") or {}
+        vals = [pos.get(k) for k in ("x", "y", "z")]
+        good = (p.get("moved") is True and bool(p.get("occurrence"))
+                and all(_num(v) for v in vals))
+        if good and x_mm is not None:
+            good = _near(pos.get("x"), x_mm, 1e-3)
+        return _measured("moved occurrence position"
+                         + ("" if x_mm is None else f" (want x {x_mm})"),
+                         {"moved": p.get("moved"), "occurrence": p.get("occurrence"),
+                          "position": pos, "units": p.get("units")}, good)
+    return check
+
+
+def _rigid_grouped(count):
+    """assembly_rigid_group: 'member_count' is rigidGroup.occurrences.count read off the CREATED
+    group - the tool errors when it comes back short of the occurrences it resolved."""
+    def check(p):
+        return _measured(f"rigid group members (want {count})",
+                         {"assembly_rigid_group": p.get("assembly_rigid_group"),
+                          "member_count": p.get("member_count"), "grouped": p.get("grouped")},
+                         p.get("member_count") == count
+                         and bool(p.get("assembly_rigid_group"))
+                         and len(p.get("grouped") or []) == count)
+    return check
+
+
+def _constrained(p):
+    """assembly_constrain: 'relationship_count' is the count read off the CREATED constraint (null
+    when it would not read), 'constraint' its name read back, and 'moved' is the world-transform
+    diff sampled either side of the add - a LIST (empty is a real answer: nothing moved) when the
+    parts were sampled on both sides, null when whether anything moved is unknown."""
+    n = p.get("relationship_count")
+    return _measured("assembly constraint read-back",
+                     {"created": p.get("created"), "constraint": p.get("constraint"),
+                      "relationship_count": n,
+                      "relationships_submitted": p.get("relationships_submitted"),
+                      "moved": p.get("moved"), "occurrences": p.get("occurrences")},
+                     p.get("created") is True and bool(p.get("constraint"))
+                     and _num(n) and n >= 1 and isinstance(p.get("moved"), list))
+
+
+def _captured(p):
+    """assembly_capture_position(capture): 'snapshot_count' is the collection's own re-read (the
+    tool errors when it did not advance), 'snapshot' the marker's name, and 'pose_held' is True only
+    where a transform was sampled on BOTH sides of the add - a capture that REVERTED the pending
+    move instead of recording it is an error, and an unsampled one publishes null."""
+    n = p.get("snapshot_count")
+    return _measured("captured position read-back",
+                     {"captured": p.get("captured"), "snapshot": p.get("snapshot"),
+                      "snapshot_count": n, "pose_held": p.get("pose_held")},
+                     p.get("captured") is True and bool(p.get("snapshot"))
+                     and _num(n) and n >= 1 and p.get("pose_held") is True)
+
+
+def _joints_listed(minimum, poses=None):
+    """assembly_get (default read): 'joint_count' is the design-wide joint walk's own total, and a
+    named joint's 'value_now.angle_deg' is its jointMotion's current driven value read straight off
+    the joint - an INDEPENDENT witness to a pose joint_drive reported for itself."""
+    poses = poses or {}
+
+    def check(p):
+        rows = {j.get("name"): j for j in (p.get("joints") or [])}
+        angles = {n: (rows.get(n, {}).get("value_now") or {}).get("angle_deg") for n in poses}
+        good = (_num(p.get("joint_count")) and p.get("joint_count") >= minimum
+                and isinstance(p.get("is_healthy"), bool)
+                and all(_num(angles[n]) and _mod360(angles[n], w) < 0.5
+                        for n, w in poses.items()))
+        return _measured(f"assembly joints (want >= {minimum}, poses {poses})",
+                         {"joint_count": p.get("joint_count"), "is_healthy": p.get("is_healthy"),
+                          "value_now": angles, "broken_joints": p.get("broken_joints")}, good)
+    return check
+
+
+def _joint_origins_listed(*names):
+    """assembly_get(include=['joint_origins']): an INDEPENDENT read of the frames
+    joint_create_origin built - each named JO present in the design-wide JO walk, carrying the
+    handle that round-trips back into a joint or a CAM WCS input."""
+    def check(p):
+        rows = {r.get("name"): r for r in (p.get("joint_origins") or [])}
+        missing = [n for n in names if n not in rows]
+        return _measured("joint origins listed " + str(list(names)),
+                         {"joint_origin_count": p.get("joint_origin_count"),
+                          "names": sorted(n for n in rows if n)[:12], "missing": missing},
+                         _num(p.get("joint_origin_count"))
+                         and p.get("joint_origin_count") >= len(names) and not missing
+                         and all(rows[n].get("handle") for n in names))
+    return check
+
+
+def _interference_measured(p):
+    """assembly_inspect_interference: the census the check actually ran - how many occurrences and
+    root bodies it compared, and the rows it found, with the count agreeing with the list. The
+    VERDICT is not asserted: whether parts overlap is the model's business."""
+    m = p.get("measured") or {}
+    items = m.get("interferences")
+    return _measured("interference census",
+                     {"relation": p.get("relation"), "passed": p.get("passed"),
+                      "interference_count": m.get("interference_count"),
+                      "occurrences_checked": m.get("occurrences_checked"),
+                      "root_bodies_checked": m.get("root_bodies_checked")},
+                     p.get("relation") == "interference_free"
+                     and isinstance(p.get("passed"), bool) and isinstance(items, list)
+                     and m.get("interference_count") == len(items)
+                     and _num(m.get("occurrences_checked")) and m.get("occurrences_checked") >= 1)
+
+
+# A parameter's value read back through unitsManager.convert lands on the nominal to well within
+# this; the band is far too narrow to admit a different unit or a different expression's result.
+_PARAM_TOL = 1e-4
+
+
+def _param_added(name, value, units="mm"):
+    """param_add: 'parameter' is the created Parameter re-read - the name it answers to and the
+    value Fusion EVALUATED its expression to, in that parameter's own unit ('value_units'), never
+    the request echoed. A derived expression's value is therefore the design's own arithmetic."""
+    def check(p):
+        par = p.get("parameter") or {}
+        return _measured(f"param add read-back '{name}' (want {value} '{units}')",
+                         {"added": p.get("added"), "name": par.get("name"),
+                          "expression": par.get("expression"), "value": par.get("value"),
+                          "value_units": par.get("value_units"),
+                          "timeline_warnings": p.get("timeline_warnings")},
+                         p.get("added") is True and par.get("name") == name
+                         and par.get("value_units") == units
+                         and _near(par.get("value"), value, _PARAM_TOL))
+    return check
+
+
+def _param_set_to(name, value):
+    """param_set: 'before'/'after' are the SAME parameter read either side of the assignment (the
+    tool errors when the two are identical while the expression asked for a change), so the moved
+    value is the edit landing rather than the expression being accepted."""
+    def check(p):
+        before, after = p.get("before") or {}, p.get("after") or {}
+        return _measured(f"param set read-back '{name}' (want {value})",
+                         {"set": p.get("set"), "created": p.get("created"), "name": p.get("name"),
+                          "before": {"expression": before.get("expression"),
+                                     "value": before.get("value")},
+                          "after": {"expression": after.get("expression"),
+                                    "value": after.get("value")}},
+                         p.get("set") is True and p.get("created") is False
+                         and p.get("name") == name
+                         and _near(after.get("value"), value, _PARAM_TOL)
+                         and before.get("value") != after.get("value"))
+    return check
+
+
+def _param_deleted(name):
+    """param_delete: 'deleted' is what Parameter.deleteMe() RETURNED - the tool errors on a false
+    and on a delete that introduced a timeline error, so a true here is the parameter gone with the
+    timeline still walking clean."""
+    def check(p):
+        return _measured(f"param delete read-back '{name}'",
+                         {"deleted": p.get("deleted"), "name": p.get("name"),
+                          "note": (p.get("note") or "")[:60]},
+                         p.get("deleted") is True and p.get("name") == name)
+    return check
+
+
+def _params_listed(*names):
+    """param_get (collection): the user parameters the design answered with - the count is len()
+    over the rows actually read, so the two cannot disagree, and every named parameter is present
+    carrying the number Fusion evaluated for it."""
+    def check(p):
+        rows = p.get("user_parameters") or []
+        by_name = {r.get("name"): r for r in rows}
+        missing = [n for n in names if n not in by_name]
+        return _measured(f"user parameters listed (want {list(names)})",
+                         {"user_parameter_count": p.get("user_parameter_count"),
+                          "rows_read": len(rows), "missing": missing,
+                          "names": sorted(n for n in by_name if n)[:12]},
+                         p.get("user_parameter_count") == len(rows) and not missing
+                         and all(_num(by_name[n].get("value")) for n in names))
+    return check
+
+
+def _param_read(name, value, units="mm"):
+    """param_get (one name): the parameter's evaluated value in its own unit, read off the design
+    long after the add - the same number the adding step measured, now on the read side."""
+    def check(p):
+        par = p.get("parameter") or {}
+        return _measured(f"param read '{name}' (want {value} '{units}')",
+                         {"name": par.get("name"), "expression": par.get("expression"),
+                          "value": par.get("value"), "value_units": par.get("value_units")},
+                         par.get("name") == name and par.get("value_units") == units
+                         and _near(par.get("value"), value, _PARAM_TOL))
+    return check
+
+
+def _param_favorited(name, favorite=True):
+    """param_set_favorite: 'favorite' is Parameter.isFavorite READ BACK after the set (null when the
+    read declined), so it is the flag the parameter holds, not the flag requested."""
+    def check(p):
+        return _measured(f"favorite read-back '{name}' (want {favorite})",
+                         {"name": p.get("name"), "favorite": p.get("favorite")},
+                         p.get("name") == name and p.get("favorite") is favorite)
+    return check
+
+
+def _new_document(p):
+    """doc_new: 'is_active' compares app.activeDocument with the new document BY HANDLE after the
+    add, so it says the new document really took the foreground - not that documents.add returned
+    something."""
+    return _measured("new document read-back",
+                     {"created": p.get("created"), "document_name": p.get("document_name"),
+                      "is_active": p.get("is_active"), "is_saved": p.get("is_saved")},
+                     p.get("created") is True and p.get("is_active") is True
+                     and bool(p.get("document_name")))
+
+
+def _document_read(p):
+    """doc_get (default read): the ACTIVE document's own record, and the session list it has to
+    appear in. This sweep's document is created by doc_new and never saved, so 'has_data_file'
+    false is that state read back off the document."""
+    active = p.get("active") or {}
+    names = [r.get("name") for r in (p.get("open_documents") or [])]
+    return _measured("active document in the session list",
+                     {"name": active.get("name"), "has_data_file": active.get("has_data_file"),
+                      "is_modified": active.get("is_modified"), "open_count": p.get("open_count"),
+                      "open_documents": names[:6]},
+                     bool(active.get("name")) and active.get("has_data_file") is False
+                     and _num(p.get("open_count")) and p.get("open_count") >= 1
+                     and active.get("name") in names)
+
+
+def _document_closed(p):
+    """doc_close: 'closed' names the document Document.close() answered true for, 'acted_on' is the
+    identity read BEFORE the close (afterwards neither name nor URN reads back), and 'errors' holds
+    the targets that refused."""
+    return _measured("document closed",
+                     {"closed": p.get("closed"), "closed_count": p.get("closed_count"),
+                      "errors": p.get("errors"), "skipped_invalid": p.get("skipped_invalid"),
+                      "remaining_open": p.get("remaining_open"), "acted_on": p.get("acted_on")},
+                     p.get("closed_count") == 1 and bool(p.get("closed"))
+                     and not p.get("errors") and p.get("save_changes") is False
+                     and bool((p.get("acted_on") or {}).get("name")))
+
+
+def _imported(p):
+    """doc_insert_import (a solid format into a component): 'objects_created' counts what
+    importToTarget2 RETURNED, and bodies_added/occurrences_added are the target component's own
+    census differenced across the import."""
+    n = p.get("objects_created")
+    return _measured("import result",
+                     {"objects_created": n, "bodies_added": p.get("bodies_added"),
+                      "occurrences_added": p.get("occurrences_added"), "into": p.get("into"),
+                      "created": (p.get("created") or [])[:2]},
+                     p.get("imported") is True and _num(n) and n >= 1
+                     and bool(p.get("created")))
+
+
 def _box(name, ox=0, oy=0):
     """Four steps building a fresh free component 'name' holding one 20x20x10 solid box (offset
     ox/oy in the world grid - every cameo gets its own slot so nothing builds on top of the
     gyroscope or another cameo). The reusable free occurrence the joint/assembly steps mate."""
     return [
-        ("model_create_component", {"name": name, "activate": True}, "ok", None),
+        ("model_create_component", {"name": name, "activate": True}, _made_component, None),
         ("sketch_create", {"plane": "xy", "name": name + "S"}, "ok", None),
         ("sketch_add_geometry", {"kind": "rectangle", "x1": ox, "y1": oy, "x2": ox + 20, "y2": oy + 20,
                                  "sketch_name": name + "S"}, "ok", None),
-        ("model_extrude", {"sketch_name": name + "S", "profile_index": 0, "distance": 10}, "ok", None),
+        ("model_extrude", {"sketch_name": name + "S", "profile_index": 0, "distance": 10},
+         _extruded, None),
     ]
 
 
@@ -258,7 +1120,7 @@ def _watch(occurrence):
             "ok", None)
 
 
-# â”€â”€ the build, as ACTS: one recognizable gyroscope, end to end, in one unsaved document â”€â”€â”€â”€â”€â”€
+# --- the build, as ACTS: one recognizable gyroscope, end to end, in one unsaved document -------
 # The sweep is a STORY, not a scratch pile: a three-axis gyroscope is cast (skeleton + parameters),
 # turned solid (rings, rotor, frame, crank), jointed and DRIVEN on every axis, detailed, machined,
 # resized parametrically, and discarded. Every covered tool's receipt step is woven into that story
@@ -277,7 +1139,7 @@ def _watch(occurrence):
 
 # --- ACT 0: OVERTURE - orient, then open the one document the whole gyroscope lives in ---------
 _OVERTURE = [
-    ("doc_new", {}, "ok", None),
+    ("doc_new", {}, _new_document, None),
     ("workspace_orient", {}, "ok", ("fusion_version", lambda p: p["fusion_version"])),
     ("sys_capability_map", {}, "ok", None),
     # the read stamp is for DOCUMENT reads: a tool that answers off the registry rather than the
@@ -346,25 +1208,30 @@ _OVERTURE = [
 # --- ACT 1: SKELETON + PARAMETERS - parametric skeleton, sketch-only (mirrors scenario S1) -----
 _SKELETON = [
     # one driving diameter; every ring/rotor radius derives from it so ACT 6's resize propagates.
-    ("param_add", {"name": "GimbalDia", "expression": "120 mm"}, "ok", None),
-    ("param_add", {"name": "RotorR", "expression": "GimbalDia / 5"}, "ok", None),
-    ("param_add", {"name": "InnerBoreR", "expression": "GimbalDia / 4"}, "ok", None),
-    ("param_add", {"name": "InnerOD", "expression": "GimbalDia * 0.3"}, "ok", None),
-    ("param_add", {"name": "OuterBoreR", "expression": "GimbalDia * 0.35"}, "ok", None),
-    ("param_add", {"name": "OuterOD", "expression": "GimbalDia * 0.4"}, "ok", None),
-    ("param_add", {"name": "FrameOpenR", "expression": "GimbalDia * 0.45"}, "ok", None),
-    ("param_add", {"name": "FramePlateR", "expression": "GimbalDia * 0.55"}, "ok", None),
-    ("param_set_favorite", {"name": "GimbalDia", "favorite": True}, "ok", None),
-    ("param_get", {}, "ok", None),
+    # Each derived parameter's expected value is what the DESIGN evaluates the expression to off the
+    # 120 mm driver above it - so the read-back proves Fusion resolved the reference, not that the
+    # expression text was accepted (the CAM parameter store accepts a bogus name unevaluated).
+    ("param_add", {"name": "GimbalDia", "expression": "120 mm"}, _param_added("GimbalDia", 120), None),
+    ("param_add", {"name": "RotorR", "expression": "GimbalDia / 5"}, _param_added("RotorR", 24), None),
+    ("param_add", {"name": "InnerBoreR", "expression": "GimbalDia / 4"}, _param_added("InnerBoreR", 30), None),
+    ("param_add", {"name": "InnerOD", "expression": "GimbalDia * 0.3"}, _param_added("InnerOD", 36), None),
+    ("param_add", {"name": "OuterBoreR", "expression": "GimbalDia * 0.35"}, _param_added("OuterBoreR", 42), None),
+    ("param_add", {"name": "OuterOD", "expression": "GimbalDia * 0.4"}, _param_added("OuterOD", 48), None),
+    ("param_add", {"name": "FrameOpenR", "expression": "GimbalDia * 0.45"}, _param_added("FrameOpenR", 54), None),
+    ("param_add", {"name": "FramePlateR", "expression": "GimbalDia * 0.55"}, _param_added("FramePlateR", 66), None),
+    ("param_set_favorite", {"name": "GimbalDia", "favorite": True}, _param_favorited("GimbalDia"), None),
+    ("param_get", {}, _params_listed("GimbalDia", "RotorR", "InnerBoreR", "InnerOD", "OuterBoreR",
+                                     "OuterOD", "FrameOpenR", "FramePlateR"), None),
     # the eight-part cast, each its own component; Pedestal NESTED inside the Frame.
-    ("model_create_component", {"name": "Frame", "activate": True}, "ok", None),
-    ("model_create_component", {"name": "Pedestal", "parent": "Frame", "activate": True}, "ok", None),
-    ("model_create_component", {"name": "Carrier", "activate": True}, "ok", None),
-    ("model_create_component", {"name": "OuterRing", "activate": True}, "ok", None),
-    ("model_create_component", {"name": "InnerRing", "activate": True}, "ok", None),
-    ("model_create_component", {"name": "Rotor", "activate": True}, "ok", None),
-    ("model_create_component", {"name": "RotorShaft", "activate": True}, "ok", None),
-    ("model_create_component", {"name": "Crank", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "Frame", "activate": True}, _made_component, None),
+    ("model_create_component", {"name": "Pedestal", "parent": "Frame", "activate": True},
+     _made_component, None),
+    ("model_create_component", {"name": "Carrier", "activate": True}, _made_component, None),
+    ("model_create_component", {"name": "OuterRing", "activate": True}, _made_component, None),
+    ("model_create_component", {"name": "InnerRing", "activate": True}, _made_component, None),
+    ("model_create_component", {"name": "Rotor", "activate": True}, _made_component, None),
+    ("model_create_component", {"name": "RotorShaft", "activate": True}, _made_component, None),
+    ("model_create_component", {"name": "Crank", "activate": True}, _made_component, None),
     # the SHARED SKELETON on the root: two in-plane axes (construction) + the yaw axis as a 3D line.
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     ("sketch_create", {"plane": "xy", "name": "Skeleton"}, "ok", None),
@@ -385,7 +1252,8 @@ _SKELETON = [
     # draw a helper constraint then delete it - the count drop is the read-back.
     ("sketch_delete_entity", {"sketch_name": "Skeleton", "target": "constraint:0"}, "ok", None),
     # the carrier hub's plane sits BELOW the rotor sweep (vertical zoning) - construction proves here.
-    ("model_construction", {"kind": "plane", "plane": "xy", "offset": -40, "name": "CarrierHubPlane"}, "ok", None),
+    ("model_construction", {"kind": "plane", "plane": "xy", "offset": -40, "name": "CarrierHubPlane"},
+     _datum_plane("xy"), None),
     # concentric ring bands, each dimensioned to a PARAMETER so the resize walks them.
     ("design_activate_component", {"occurrence": "OuterRing:1"}, "ok", None),
     ("sketch_create", {"plane": "xy", "name": "OuterRingSketch"}, "ok", None),
@@ -419,7 +1287,8 @@ _SKELETON = [
     # hub that carries the machinable detail (center bore, bolt circle, end pivot bores - cut in
     # ACT 2). Sitting at z=-32..-26 it clears the rings (z=+/-2) and the spinning rotor.
     ("design_activate_component", {"occurrence": "Carrier:1"}, "ok", None),
-    ("model_construction", {"kind": "plane", "plane": "xy", "offset": -32, "name": "CarrierPlane"}, "ok", None),
+    ("model_construction", {"kind": "plane", "plane": "xy", "offset": -32, "name": "CarrierPlane"},
+     _datum_plane("xy"), None),
     ("sketch_create", {"plane": "CarrierPlane", "name": "CarrierSketch"}, "ok", None),
     # a rectangle is built BY a SketchLines factory, so its four sides are the delta counted.
     ("sketch_add_geometry", {"kind": "rectangle", "x1": -50, "y1": -8, "x2": 50, "y2": 8, "sketch_name": "CarrierSketch"},
@@ -428,10 +1297,12 @@ _SKELETON = [
     # the pedestal base + a smaller top profile on an offset plane, for a base-to-post LOFT -
     # entirely BELOW the carrier (top at z=-32 meets the carrier's underside).
     ("design_activate_component", {"occurrence": "Pedestal:1"}, "ok", None),
-    ("model_construction", {"kind": "plane", "plane": "xy", "offset": -60, "name": "PedBasePlane"}, "ok", None),
+    ("model_construction", {"kind": "plane", "plane": "xy", "offset": -60, "name": "PedBasePlane"},
+     _datum_plane("xy"), None),
     ("sketch_create", {"plane": "PedBasePlane", "name": "PedBase"}, "ok", None),
     ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 15, "sketch_name": "PedBase"}, "ok", None),
-    ("model_construction", {"kind": "plane", "plane": "xy", "offset": -32, "name": "PedTopPlane"}, "ok", None),
+    ("model_construction", {"kind": "plane", "plane": "xy", "offset": -32, "name": "PedTopPlane"},
+     _datum_plane("xy"), None),
     ("sketch_create", {"plane": "PedTopPlane", "name": "PedTop"}, "ok", None),
     ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 8, "sketch_name": "PedTop"}, "ok", None),
     # the crank: a path + a profile for a swept handle.
@@ -454,22 +1325,25 @@ _SKELETON = [
 _SOLIDS = [
     # ring bands: extrude the ANNULUS profile (smallest-area region) symmetric about the ring plane.
     ("sketch_get", {"sketch_name": "OuterRingSketch"}, "ok", ("or_ring", lambda p: p["profiles"][-1]["handle"])),
-    ("model_extrude", lambda c: {"sketch_name": "OuterRingSketch", "profile_index": _ctx_get(c, "or_ring", "outer ring annulus"), "distance": 4, "symmetric": True}, "ok", None),
+    ("model_extrude", lambda c: {"sketch_name": "OuterRingSketch", "profile_index": _ctx_get(c, "or_ring", "outer ring annulus"), "distance": 4, "symmetric": True}, _extruded, None),
     ("sketch_get", {"sketch_name": "InnerRingSketch"}, "ok", ("ir_ring", lambda p: p["profiles"][-1]["handle"])),
-    ("model_extrude", lambda c: {"sketch_name": "InnerRingSketch", "profile_index": _ctx_get(c, "ir_ring", "inner ring annulus"), "distance": 4, "symmetric": True}, "ok", None),
+    ("model_extrude", lambda c: {"sketch_name": "InnerRingSketch", "profile_index": _ctx_get(c, "ir_ring", "inner ring annulus"), "distance": 4, "symmetric": True}, _extruded, None),
     ("sketch_get", {"sketch_name": "FrameSketch"}, "ok", ("fr_ring", lambda p: p["profiles"][-1]["handle"])),
-    ("model_extrude", lambda c: {"sketch_name": "FrameSketch", "profile_index": _ctx_get(c, "fr_ring", "frame plate ring"), "distance": 4, "symmetric": True}, "ok", None),
+    ("model_extrude", lambda c: {"sketch_name": "FrameSketch", "profile_index": _ctx_get(c, "fr_ring", "frame plate ring"), "distance": 4, "symmetric": True}, _extruded, None),
     # the rotor disc, REVOLVED about the spin axis; the shaft and carrier extruded.
-    ("model_revolve", {"sketch_name": "RotorSketch", "profile_index": 0, "axis": "x", "angle_deg": 360}, "ok", None),
+    ("model_revolve", {"sketch_name": "RotorSketch", "profile_index": 0, "axis": "x", "angle_deg": 360},
+     _revolved, None),
     # symmetric extrudes 'distance' EACH WAY, so this is a 56 mm shaft reaching |x| = 28. It must
     # stop SHORT of InnerBoreR (30): a 3 mm-radius shaft ending exactly on the bore reaches
     # sqrt(30^2 + 3^2) at its corners and bites 2.1 mm3 into the inner ring - a journal that
     # interferes with the ring it is meant to turn inside.
-    ("model_extrude", {"sketch_name": "ShaftSketch", "profile_index": 0, "distance": 28, "symmetric": True}, "ok", None),
+    ("model_extrude", {"sketch_name": "ShaftSketch", "profile_index": 0, "distance": 28, "symmetric": True},
+     _extruded, None),
     # the carrier: bar + hub in one extrude (all regions), then the machinable detail cut
     # through - a 5mm center bore, a 6x 3mm bolt circle on R9, and 4mm pivot bores at the ends.
     ("design_activate_component", {"occurrence": "Carrier:1"}, "ok", None),
-    ("model_extrude", {"sketch_name": "CarrierSketch", "profile_index": "all", "distance": 6}, "ok", None),
+    ("model_extrude", {"sketch_name": "CarrierSketch", "profile_index": "all", "distance": 6},
+     _extruded, None),
     ("sketch_create", {"plane": "CarrierPlane", "name": "CarrierHoles"}, "ok", None),
     ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 2.5, "sketch_name": "CarrierHoles"}, "ok", None),
     ("sketch_add_geometry", {"kind": "circle", "cx": 9, "cy": 0, "radius": 1.5, "sketch_name": "CarrierHoles"}, "ok", None),
@@ -480,17 +1354,19 @@ _SOLIDS = [
     ("sketch_add_geometry", {"kind": "circle", "cx": 4.5, "cy": -7.794, "radius": 1.5, "sketch_name": "CarrierHoles"}, "ok", None),
     ("sketch_add_geometry", {"kind": "circle", "cx": 45, "cy": 0, "radius": 2, "sketch_name": "CarrierHoles"}, "ok", None),
     ("sketch_add_geometry", {"kind": "circle", "cx": -45, "cy": 0, "radius": 2, "sketch_name": "CarrierHoles"}, "ok", None),
-    ("model_extrude", {"sketch_name": "CarrierHoles", "profile_index": "all", "distance": 6, "operation": "cut"}, "ok", None),
+    ("model_extrude", {"sketch_name": "CarrierHoles", "profile_index": "all", "distance": 6, "operation": "cut"},
+     _extruded, None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     # the pedestal base-to-post transition, LOFTED between the two profiles - built INTO the
     # Pedestal component (the loft lands in the ACTIVE component, not the profiles' owner).
     ("design_activate_component", {"occurrence": "Pedestal:1"}, "ok", None),
     ("sketch_get", {"sketch_name": "PedBase"}, "ok", ("ped_base", lambda p: p["profiles"][0]["handle"])),
     ("sketch_get", {"sketch_name": "PedTop"}, "ok", ("ped_top", lambda p: p["profiles"][0]["handle"])),
-    ("model_loft", lambda c: {"profiles": [_ctx_get(c, "ped_base", "pedestal base"), _ctx_get(c, "ped_top", "pedestal top")]}, "ok", None),
+    ("model_loft", lambda c: {"profiles": [_ctx_get(c, "ped_base", "pedestal base"), _ctx_get(c, "ped_top", "pedestal top")]}, _lofted, None),
     # the crank handle, SWEPT along its path - into the Crank component for the same reason.
     ("design_activate_component", {"occurrence": "Crank:1"}, "ok", None),
-    ("model_sweep", {"profile": {"sketch": "CrankProf", "profile_index": 0}, "path": "sketch:CrankPath"}, "ok", None),
+    ("model_sweep", {"profile": {"sketch": "CrankProf", "profile_index": 0}, "path": "sketch:CrankPath"},
+     _swept, None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     ("view_set", {"action": "orient", "orientation": "iso-top-right"}, "ok", None),
     # EACH PART ITS OWN COLOR - the recording's signature look - and a physical material on the rotor.
@@ -502,14 +1378,14 @@ _SOLIDS = [
     ("appearance_set", {"target": "Rotor:1", "color": "#2FB170"}, "ok", None),
     ("appearance_set", {"target": "RotorShaft:1", "color": "#B0BEC5"}, "ok", None),
     ("appearance_set", {"target": "Crank:1", "color": "#9C27B0"}, "ok", None),
-    ("model_set_material", {"target": "Rotor:1", "material": "Steel"}, "ok", None),
+    ("model_set_material", {"target": "Rotor:1", "material": "Steel"}, _material_assigned, None),
     # honest reads on the real mechanism: ring-to-ring gap, rotor/shaft coaxiality, rotor volume.
     ("find_geometry", {"target": "OuterRing", "kind": "cylinder_face", "max_results": 1}, "ok", _fg("or_cyl")),
-    ("model_measure_between", lambda c: {"a": _ctx_get(c, "or_cyl", "outer ring face"), "b": "InnerRing"}, "ok", None),
+    ("model_measure_between", lambda c: {"a": _ctx_get(c, "or_cyl", "outer ring face"), "b": "InnerRing"}, _gap_measured, None),
     ("find_geometry", {"target": "Rotor:1", "kind": "cylinder_face", "max_results": 1}, "ok", _fg("rotor_cyl")),
     ("find_geometry", {"target": "RotorShaft", "kind": "cylinder_face", "max_results": 1}, "ok", _fg("shaft_cyl")),
-    ("model_measure_relation", lambda c: {"relation": "coaxial", "entity_a": _ctx_get(c, "rotor_cyl", "rotor face"), "entity_b": _ctx_get(c, "shaft_cyl", "shaft face")}, "ok", None),
-    ("model_inspect", {"target": "Rotor:1"}, "ok", None),
+    ("model_measure_relation", lambda c: {"relation": "coaxial", "entity_a": _ctx_get(c, "rotor_cyl", "rotor face"), "entity_b": _ctx_get(c, "shaft_cyl", "shaft face")}, _relation_measured("coaxial"), None),
+    ("model_inspect", {"target": "Rotor:1"}, _extent_measured, None),
     # PMI: authoring is EXTENSION-GATED on this build - pmi_create raises "Manufacturing or Design
     # Extension is required" on a session without one, so the two create beats assert THAT refusal
     # (the deterministic live behavior) on the real geometry a note would carry: the frame's flat
@@ -531,19 +1407,20 @@ _SOLIDS = [
     ("pmi_delete", {"annotation": "PmiFlat"}, "refused", None),
     # feature cameos on same-doc scratch bodies (no single natural gyroscope home for these verbs).
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    ("model_create_component", {"name": "FeatureCameo", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "FeatureCameo", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "FCPad"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 200, "y1": 0, "x2": 240, "y2": 40, "sketch_name": "FCPad"}, "ok", None),
-    ("model_extrude", {"sketch_name": "FCPad", "profile_index": 0, "distance": 20}, "ok", None),
+    ("model_extrude", {"sketch_name": "FCPad", "profile_index": 0, "distance": 20}, _extruded, None),
     _watch("FeatureCameo:1"),
     ("find_geometry", {"target": "FeatureCameo", "kind": "planar_face", "nearest_to": [200, 20, 10], "max_results": 1}, "ok", _fg("fc_side")),
-    ("model_draft", lambda c: {"faces": [_ctx_get(c, "fc_side", "cameo side face")], "pull_direction": "xy", "angle_deg": 3}, "ok", None),
+    ("model_draft", lambda c: {"faces": [_ctx_get(c, "fc_side", "cameo side face")], "pull_direction": "xy", "angle_deg": 3},
+     _drafted, None),
     ("find_geometry", {"target": "FeatureCameo", "kind": "planar_face", "nearest_to": [220, 20, 20], "max_results": 1}, "ok", _fg("fc_top")),
     # hole points are in the FACE'S LOCAL frame, whose origin for this face is the MODEL origin
     # projected onto its plane - so on-pad coordinates are the world x,y. ([5,5] here drilled at
     # world (5,5), a point off this pad entirely: the hole silently cut whatever body sat near
     # the origin, and the axis-count read-back cannot see a wrong-body cut. Measured live.)
-    ("model_hole", lambda c: {"face": _ctx_get(c, "fc_top", "cameo top face"), "hole_type": "simple", "diameter": "4 mm", "extent": "blind", "depth": "8 mm", "points": [[220, 20, 0]]}, "ok", None),
+    ("model_hole", lambda c: {"face": _ctx_get(c, "fc_top", "cameo top face"), "hole_type": "simple", "diameter": "4 mm", "extent": "blind", "depth": "8 mm", "points": [[220, 20, 0]]}, _drilled(1), None),
     # the three additive placement modes. Each act re-acquires its own edge: the center act below
     # consumes the 4 mm rim by drilling an 8 mm bore concentric with it, so a handle captured once
     # and reused would be pointing at geometry that no longer exists.
@@ -568,7 +1445,7 @@ _SOLIDS = [
     ("model_hole", lambda c: {"face": _ctx_get(c, "fc_top", "cameo top face"),
                               "placement": "on_edge", "edge": _ctx_get(c, "fc_edge2", "pad edge"),
                               "edge_position": "start", "diameter": "3 mm",
-                              "extent": "blind", "depth": "3 mm"}, "ok", None),
+                              "extent": "blind", "depth": "3 mm"}, _drilled(1), None),
     # plane_offsets measures from STRAIGHT edges - a circular one is refused by name
     ("find_geometry", {"target": "FeatureCameo", "kind": "circular_edge",
                        "nearest_to": [220, 20, 20], "max_results": 1}, "ok", _fg("fc_rim2")),
@@ -590,9 +1467,9 @@ _SOLIDS = [
                               "depth": "3 mm"},
      lambda p: p.get("placement") == "plane_offsets", None),
     ("find_geometry", {"target": "FeatureCameo", "kind": "planar_face", "nearest_to": [220, 20, 20], "max_results": 1}, "ok", _fg("fc_body")),
-    ("model_mirror", lambda c: {"bodies": [_ctx_get(c, "fc_body", "cameo body")], "plane": "yz"}, "ok", None),
-    ("model_pattern_rectangular", lambda c: {"bodies": [_ctx_get(c, "fc_body", "cameo body")], "quantity_one": 2, "spacing_one": 60, "direction_one": "y"}, "ok", None),
-    ("model_pattern_circular", lambda c: {"bodies": [_ctx_get(c, "fc_body", "cameo body")], "quantity": 3, "total_angle_deg": 360, "axis": "z"}, "ok", None),
+    ("model_mirror", lambda c: {"bodies": [_ctx_get(c, "fc_body", "cameo body")], "plane": "yz"}, _mirrored, None),
+    ("model_pattern_rectangular", lambda c: {"bodies": [_ctx_get(c, "fc_body", "cameo body")], "quantity_one": 2, "spacing_one": 60, "direction_one": "y"}, _patterned("total_instances", 2), None),
+    ("model_pattern_circular", lambda c: {"bodies": [_ctx_get(c, "fc_body", "cameo body")], "quantity": 3, "total_angle_deg": 360, "axis": "z"}, _patterned("quantity", 3), None),
     # pattern the cameo along one of its own line edges - the count is a read-back, never an echo.
     ("find_geometry", {"target": "FeatureCameo", "kind": "line_edge", "max_results": 1}, "ok", _fg("dc_edge")),
     ("model_pattern_path", lambda c: {"bodies": [_ctx_get(c, "fc_body", "cameo body")], "path": [_ctx_get(c, "dc_edge", "path edge")], "quantity": 3, "distance": 12, "distance_type": "spacing"},
@@ -629,13 +1506,13 @@ _SOLIDS = [
                                           "quantity": 3, "axis": "CameoSpin"}, "refused", None),
     ("design_activate_component", {"occurrence": "FeatureCameo:1"}, "ok", None),
     # a join cameo: two overlapping pads become one body.
-    ("model_create_component", {"name": "CombineCameo", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "CombineCameo", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "CC1"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 200, "y1": 100, "x2": 230, "y2": 130, "sketch_name": "CC1"}, "ok", None),
-    ("model_extrude", {"sketch_name": "CC1", "profile_index": 0, "distance": 10}, "ok", None),
+    ("model_extrude", {"sketch_name": "CC1", "profile_index": 0, "distance": 10}, _extruded, None),
     ("sketch_create", {"plane": "xy", "name": "CC2"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 220, "y1": 120, "x2": 250, "y2": 150, "sketch_name": "CC2"}, "ok", None),
-    ("model_extrude", {"sketch_name": "CC2", "profile_index": 0, "distance": 10}, "ok", None),
+    ("model_extrude", {"sketch_name": "CC2", "profile_index": 0, "distance": 10}, _extruded, None),
     _watch("CombineCameo:1"),
     ("find_geometry", {"target": "CombineCameo", "kind": "planar_face", "nearest_to": [215, 115, 10], "max_results": 1}, "ok", _fg("cc_a")),
     ("find_geometry", {"target": "CombineCameo", "kind": "planar_face", "nearest_to": [235, 135, 10], "max_results": 1}, "ok", _fg("cc_b")),
@@ -646,18 +1523,19 @@ _SOLIDS = [
     ("model_combine", lambda c: {"target": _ctx_get(c, "cc_a", "combine target"),
                                  "tools": [_ctx_get(c, "cc_a2", "the same body again")],
                                  "operation": "join"}, "refused", None),
-    ("model_combine", lambda c: {"target": _ctx_get(c, "cc_a", "combine target"), "tools": [_ctx_get(c, "cc_b", "combine tool")], "operation": "join"}, "ok", None),
+    ("model_combine", lambda c: {"target": _ctx_get(c, "cc_a", "combine target"), "tools": [_ctx_get(c, "cc_b", "combine tool")], "operation": "join"}, _joined, None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     # the revolve axis as a CYLINDRICAL FACE, off the origin - the case a world key cannot express.
     # A face mapped to a direction VECTOR keeps the direction and DROPS the location, so the ring is
     # turned about the world axis through the ORIGIN and reported as success: the label is checked
     # AND the geometry measured. Live: a cylinder at x=30, a 2x3 mm profile at x 36-38 on the XZ
     # plane, ring bbox x 22..38. The cameo sits at z=100, clear of the gyroscope and the other cameos.
-    ("model_create_component", {"name": "RevolveCameo", "activate": True}, "ok", None),
-    ("model_construction", {"kind": "plane", "plane": "xy", "offset": 100, "name": "RevAxisPlane"}, "ok", None),
+    ("model_create_component", {"name": "RevolveCameo", "activate": True}, _made_component, None),
+    ("model_construction", {"kind": "plane", "plane": "xy", "offset": 100, "name": "RevAxisPlane"},
+     _datum_plane("xy"), None),
     ("sketch_create", {"plane": "RevAxisPlane", "name": "RevAxisS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "circle", "cx": 30, "cy": 0, "radius": 5, "sketch_name": "RevAxisS"}, "ok", None),
-    ("model_extrude", {"sketch_name": "RevAxisS", "profile_index": 0, "distance": 20}, "ok", None),
+    ("model_extrude", {"sketch_name": "RevAxisS", "profile_index": 0, "distance": 20}, _extruded, None),
     ("find_geometry", {"target": "RevolveCameo", "kind": "cylinder_face", "radius": 5, "max_results": 1}, "ok", _fg("rv_cyl")),
     ("sketch_create", {"plane": "xz", "name": "RevRingS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 36, "y1": 100, "x2": 38, "y2": 103,
@@ -682,7 +1560,7 @@ _SOLIDS = [
     # 'all' takes EVERY closed region, and the bays inside a frame outline are closed regions too -
     # so this extrude fills them with material. The payload cannot show a solid bay, so the enclosed
     # regions are NAMED: an outer rectangle plus three bays reports the three that sit inside another.
-    ("model_create_component", {"name": "BayCameo", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "BayCameo", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "BayS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 200, "y1": 900, "x2": 290, "y2": 960, "sketch_name": "BayS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 210, "y1": 910, "x2": 230, "y2": 950, "sketch_name": "BayS"}, "ok", None),
@@ -699,38 +1577,41 @@ _SOLIDS = [
 # Joints on the real gyroscope parts via origin snaps (no teleport). assembly_move/capture/constrain
 # pose scratch cameos so the mechanism itself is not disturbed.
 _MOTION = [
-    ("assembly_ground", {"occurrence": "Frame:1", "ground_to_parent": True}, "ok", None),
-    ("assembly_rigid_group", {"occurrences": ["Frame:1", "Carrier:1"]}, "ok", None),
+    ("assembly_ground", {"occurrence": "Frame:1", "ground_to_parent": True}, _grounded, None),
+    ("assembly_rigid_group", {"occurrences": ["Frame:1", "Carrier:1"]}, _rigid_grouped(2), None),
     # a coordinate Joint Origin the crank mounts on, and the stock-center JO CAM binds its WCS to.
-    ("joint_create_origin", {"anchor": "coordinates", "x": 60, "y": 0, "z": 0, "name": "CrankMount"}, "ok", None),
-    ("joint_create_origin", {"anchor": "coordinates", "target": "origin", "name": "StockCenter"}, "ok", None),
+    ("joint_create_origin", {"anchor": "coordinates", "x": 60, "y": 0, "z": 0, "name": "CrankMount"},
+     _joint_origin_at("CrankMount", 60, 0, 0), None),
+    ("joint_create_origin", {"anchor": "coordinates", "target": "origin", "name": "StockCenter"},
+     _joint_origin_at("StockCenter", 0, 0, 0), None),
     # the four gimbal revolutes, each origin-snapped so parts stay seated.
-    ("joint_create", {"occurrence_one": "Carrier:1:origin", "occurrence_two": "Pedestal:1:origin", "joint_type": "revolute", "axis": "z", "name": "Yaw"}, "ok", None),
-    ("joint_create", {"occurrence_one": "OuterRing:1:origin", "occurrence_two": "Carrier:1:origin", "joint_type": "revolute", "axis": "x", "name": "PivotOuter"}, "ok", None),
+    ("joint_create", {"occurrence_one": "Carrier:1:origin", "occurrence_two": "Pedestal:1:origin", "joint_type": "revolute", "axis": "z", "name": "Yaw"}, _jointed("Yaw"), None),
+    ("joint_create", {"occurrence_one": "OuterRing:1:origin", "occurrence_two": "Carrier:1:origin", "joint_type": "revolute", "axis": "x", "name": "PivotOuter"}, _jointed("PivotOuter"), None),
     # the OTHER ring pivot via a joint origin snap on the inner ring (the second creation path).
-    ("joint_create", {"occurrence_one": "InnerRing:1:origin", "occurrence_two": "OuterRing:1:origin", "joint_type": "revolute", "axis": "y", "name": "PivotInner"}, "ok", None),
-    ("joint_create", {"occurrence_one": "Rotor:1:origin", "occurrence_two": "RotorShaft:1:origin", "joint_type": "revolute", "axis": "x", "name": "Spin"}, "ok", None),
+    ("joint_create", {"occurrence_one": "InnerRing:1:origin", "occurrence_two": "OuterRing:1:origin", "joint_type": "revolute", "axis": "y", "name": "PivotInner"}, _jointed("PivotInner"), None),
+    ("joint_create", {"occurrence_one": "Rotor:1:origin", "occurrence_two": "RotorShaft:1:origin", "joint_type": "revolute", "axis": "x", "name": "Spin"}, _jointed("Spin"), None),
     # the shaft rides in the inner ring as-built (its current seated position).
-    ("joint_create_as_built", {"occurrence_one": "RotorShaft:1", "occurrence_two": "InnerRing:1"}, "ok", None),
+    ("joint_create_as_built", {"occurrence_one": "RotorShaft:1", "occurrence_two": "InnerRing:1"}, _as_built, None),
     # the crank on its frame mount, then LIMITS on the yaw.
-    ("joint_create", {"occurrence_one": "Crank:1:origin", "occurrence_two": "CrankMount", "joint_type": "revolute", "axis": "z", "name": "CrankAxis"}, "ok", None),
-    ("joint_edit", {"joint_name": "Yaw", "min_deg": -45, "max_deg": 45}, "ok", None),
+    ("joint_create", {"occurrence_one": "Crank:1:origin", "occurrence_two": "CrankMount", "joint_type": "revolute", "axis": "z", "name": "CrankAxis"}, _jointed("CrankAxis"), None),
+    ("joint_edit", {"joint_name": "Yaw", "min_deg": -45, "max_deg": 45},
+     _joint_limits("Yaw", min_deg=-45, max_deg=45), None),
     # a SECOND creation path AND a real cylinder-face joint on a scratch pin/bore cameo pair.
-    ("model_create_component", {"name": "PinCameo", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "PinCameo", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "PinS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "circle", "cx": 300, "cy": 0, "radius": 5, "sketch_name": "PinS"}, "ok", None),
-    ("model_extrude", {"sketch_name": "PinS", "profile_index": 0, "distance": 20}, "ok", None),
-    ("model_create_component", {"name": "BoreCameo", "activate": True}, "ok", None),
+    ("model_extrude", {"sketch_name": "PinS", "profile_index": 0, "distance": 20}, _extruded, None),
+    ("model_create_component", {"name": "BoreCameo", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "BoreS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "circle", "cx": 300, "cy": 0, "radius": 8, "sketch_name": "BoreS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "circle", "cx": 300, "cy": 0, "radius": 5.5, "sketch_name": "BoreS"}, "ok", None),
     ("sketch_get", {"sketch_name": "BoreS"}, "ok", ("bore_ring", lambda p: p["profiles"][-1]["handle"])),
-    ("model_extrude", lambda c: {"sketch_name": "BoreS", "profile_index": _ctx_get(c, "bore_ring", "bore ring"), "distance": 20}, "ok", None),
+    ("model_extrude", lambda c: {"sketch_name": "BoreS", "profile_index": _ctx_get(c, "bore_ring", "bore ring"), "distance": 20}, _extruded, None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     _watch("BoreCameo:1"),
     ("find_geometry", {"target": "PinCameo", "kind": "cylinder_face", "max_results": 1}, "ok", _fg("pin_cyl")),
     ("find_geometry", {"target": "BoreCameo", "kind": "cylinder_face", "radius": 5.5, "max_results": 1}, "ok", _fg("bore_cyl")),
-    ("joint_at_geometry", lambda c: {"handle_one": _ctx_get(c, "pin_cyl", "pin face"), "handle_two": _ctx_get(c, "bore_cyl", "bore face"), "motion": "revolute"}, "ok", None),
+    ("joint_at_geometry", lambda c: {"handle_one": _ctx_get(c, "pin_cyl", "pin face"), "handle_two": _ctx_get(c, "bore_cyl", "bore face"), "motion": "revolute"}, _jointed_at_geometry, None),
     # THE MOTION VOCABULARY at the geometry seam - a ball on a real SPHERE face, an explicit frame
     # axis, and rigid. Each beat takes its own free cameo pair, chained as a TREE (sphere - post -
     # post), so no beat closes a loop on another's joint. The sphere is built through the surface
@@ -738,7 +1619,7 @@ _MOTION = [
     # sealed solid, which is what gives this beat a genuine SphereSurfaceType face to joint at (a
     # sphere face takes ONLY CenterKeyPoint - the rule inside _joints.build_joint_geometry).
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    ("model_create_component", {"name": "BallSphere", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "BallSphere", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xz", "name": "BallProf"}, "ok", None),
     # the arc's endpoints must sit ON the revolve axis (x=0) or the revolved surface is an open tube
     # enclosing nothing; on an xz sketch +Y maps to world -Z, so this sphere sits alone at z=+300.
@@ -748,23 +1629,23 @@ _MOTION = [
     ("surface_fill", {"tools": ["BallSphere"], "operation": "new"},
      lambda p: p.get("all_solid") is True, None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    ("model_create_component", {"name": "BallPost", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "BallPost", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "BallPostS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "circle", "cx": 1700, "cy": 0, "radius": 5,
                              "sketch_name": "BallPostS"}, "ok", None),
-    ("model_extrude", {"sketch_name": "BallPostS", "profile_index": 0, "distance": 20}, "ok", None),
+    ("model_extrude", {"sketch_name": "BallPostS", "profile_index": 0, "distance": 20}, _extruded, None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    ("model_create_component", {"name": "AxisPost", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "AxisPost", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "AxisPostS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "circle", "cx": 1700, "cy": 60, "radius": 5,
                              "sketch_name": "AxisPostS"}, "ok", None),
-    ("model_extrude", {"sketch_name": "AxisPostS", "profile_index": 0, "distance": 20}, "ok", None),
+    ("model_extrude", {"sketch_name": "AxisPostS", "profile_index": 0, "distance": 20}, _extruded, None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    ("model_create_component", {"name": "RigidPost", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "RigidPost", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "RigidPostS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "circle", "cx": 1700, "cy": 120, "radius": 5,
                              "sketch_name": "RigidPostS"}, "ok", None),
-    ("model_extrude", {"sketch_name": "RigidPostS", "profile_index": 0, "distance": 20}, "ok", None),
+    ("model_extrude", {"sketch_name": "RigidPostS", "profile_index": 0, "distance": 20}, _extruded, None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     _watch("BallPost:1"),
     ("find_geometry", {"target": "BallSphere", "kind": "sphere_face", "max_results": 1}, "ok",
@@ -810,20 +1691,20 @@ _MOTION = [
     # and the payload names the key point it resolved to. (The two base-feature halves need a torus
     # built INSIDE a base feature; no tool on this surface builds one unattended - see STORY.)
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    ("model_create_component", {"name": "TorusRing", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "TorusRing", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xz", "name": "TorusProf"}, "ok", None),
     # on an xz sketch +Y maps to world -Z: this circle sits at world (40, 0, 400) and revolving it
     # about z sweeps a torus of major radius 40 centred on the z axis at z=400, alone up there.
     ("sketch_add_geometry", {"kind": "circle", "cx": 40, "cy": -400, "radius": 6,
                              "sketch_name": "TorusProf"}, "ok", None),
     ("model_revolve", {"sketch_name": "TorusProf", "profile_index": 0, "axis": "z",
-                       "angle_deg": 360}, "ok", None),
+                       "angle_deg": 360}, _revolved, None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    ("model_create_component", {"name": "TorusPost", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "TorusPost", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "TorusPostS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "circle", "cx": 1700, "cy": 180, "radius": 5,
                              "sketch_name": "TorusPostS"}, "ok", None),
-    ("model_extrude", {"sketch_name": "TorusPostS", "profile_index": 0, "distance": 20}, "ok", None),
+    ("model_extrude", {"sketch_name": "TorusPostS", "profile_index": 0, "distance": 20}, _extruded, None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     ("find_geometry", {"target": "TorusRing", "kind": "torus_face", "max_results": 1}, "ok",
      _fg("torus_face")),
@@ -837,18 +1718,19 @@ _MOTION = [
     # A NON-RIGID as-built joint, on its own far-grid pair: an as-built joint moves nothing, so the
     # plate is built already seated on the pin's top face (z=20) and jointed where it stands. The
     # anchor is that shared face, reached by the pin's 'top' snap.
-    ("model_create_component", {"name": "AsbPin", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "AsbPin", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "AsbPinS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 800, "y1": 300, "x2": 820, "y2": 320,
                              "sketch_name": "AsbPinS"}, "ok", None),
-    ("model_extrude", {"sketch_name": "AsbPinS", "profile_index": 0, "distance": 20}, "ok", None),
+    ("model_extrude", {"sketch_name": "AsbPinS", "profile_index": 0, "distance": 20}, _extruded, None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    ("model_create_component", {"name": "AsbPlate", "activate": True}, "ok", None),
-    ("model_construction", {"kind": "plane", "plane": "xy", "offset": 20, "name": "AsbSeat"}, "ok", None),
+    ("model_create_component", {"name": "AsbPlate", "activate": True}, _made_component, None),
+    ("model_construction", {"kind": "plane", "plane": "xy", "offset": 20, "name": "AsbSeat"},
+     _datum_plane("xy"), None),
     ("sketch_create", {"plane": "AsbSeat", "name": "AsbPlateS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 790, "y1": 290, "x2": 830, "y2": 330,
                              "sketch_name": "AsbPlateS"}, "ok", None),
-    ("model_extrude", {"sketch_name": "AsbPlateS", "profile_index": 0, "distance": 10}, "ok", None),
+    ("model_extrude", {"sketch_name": "AsbPlateS", "profile_index": 0, "distance": 10}, _extruded, None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     _watch("AsbPlate:1"),
     # the motion is read back off the CREATED joint, and the resolved anchor is named in the payload.
@@ -870,7 +1752,7 @@ _MOTION = [
                                "angle_deg": 30},
      lambda p: abs(p.get("value_now", {}).get("angle_deg", 0) - 30) < 0.5, None),
     ("joint_drive", lambda c: {"joint_name": _ctx_get(c, "asb_joint", "the as-built revolute"),
-                               "angle_deg": 0}, "ok", None),
+                               "angle_deg": 0}, _driven_angle(0), None),
     # Fusion refuses a non-rigid as-built joint with a null geometry, so the tool names the missing
     # anchor instead of letting add() raise.
     ("joint_create_as_built", {"occurrence_one": "AsbPin:1", "occurrence_two": "AsbPlate:1",
@@ -891,8 +1773,10 @@ _MOTION = [
                                "joint_type": "rigid"},
      _refused("over constrained"), None),
     # COUPLE the crank to the rotor spin at ratio 2 - the DOF-fix step - across independent chains.
-    ("joint_motion_link", {"joint_one": "CrankAxis", "joint_two": "Spin", "ratio": 2}, "ok", None),
-    ("assembly_get", {}, "ok", None),
+    ("joint_motion_link", {"joint_one": "CrankAxis", "joint_two": "Spin", "ratio": 2},
+     _motion_linked("CrankAxis", "Spin", False), None),
+    # every joint built above, counted off the design-wide walk by an independent read.
+    ("assembly_get", {}, _joints_listed(10), None),
     # the relations LIFECYCLE on the story's own relations: list, suppress round-trip, re-value the
     # crank link (was_reversed disclosed), the measured set_occurrences refusal, and a delete with
     # the survivor re-list - on a scratch group so the story keeps its Frame/Carrier lock.
@@ -909,7 +1793,9 @@ _MOTION = [
      lambda p: p.get("is_suppressed") is False, None),
     ("assembly_edit_relations", lambda c: {"kind": "motion_link", "name": _ctx_get(c, "rel_names", "relation names")["ml"], "action": "set_values", "ratio": 3},
      lambda p: p.get("ratio") == 3.0 and "was_reversed" in p, None),
-    ("assembly_edit_relations", lambda c: {"kind": "motion_link", "name": _ctx_get(c, "rel_names", "relation names")["ml"], "action": "set_values", "ratio": 2}, "ok", None),
+    # back to the 2:1 the story drives on, read back the same way the re-value above was.
+    ("assembly_edit_relations", lambda c: {"kind": "motion_link", "name": _ctx_get(c, "rel_names", "relation names")["ml"], "action": "set_values", "ratio": 2},
+     lambda p: p.get("ratio") == 2.0 and "was_reversed" in p, None),
     # the measured set_occurrences refusal, asserted in the WORDS that make it a fact: the build it
     # was measured on and the platform sentence it would raise. Nothing is written, so the group
     # still holds the two members assembly_rigid_group gave it - read back on the next row.
@@ -960,28 +1846,35 @@ _MOTION = [
     # it stays 0 even with Frame:1's parent lock released) - so its drive must REFUSE as a
     # no-take.
     ("joint_drive", {"joint_name": "Yaw", "angle_deg": 30}, "refused", None),
-    ("joint_drive", {"joint_name": "PivotOuter", "angle_deg": 20}, "ok", None),
-    ("joint_drive", {"joint_name": "PivotInner", "angle_deg": 25}, "ok", None),
-    ("joint_drive", {"joint_name": "CrankAxis", "angle_deg": 30}, "ok", None),
+    ("joint_drive", {"joint_name": "PivotOuter", "angle_deg": 20}, _driven_angle(20), None),
+    ("joint_drive", {"joint_name": "PivotInner", "angle_deg": 25}, _driven_angle(25), None),
+    ("joint_drive", {"joint_name": "CrankAxis", "angle_deg": 30}, _driven_angle(30), None),
     # CrankAxis (a link member) is now in the session drive registry, so driving its partner Spin
     # must REFUSE (the second-member guard). This is also the live proof that
     # MotionLink.jointOne/jointTwo resolve: a wrong property name would leave the partner lookup
     # blind and this drive would wrongly succeed, failing the row.
     ("joint_drive", {"joint_name": "Spin", "angle_deg": 5}, "refused", None),
-    ("assembly_get", {}, "ok", None),   # the crank->rotor 2:1 link read (Spin should read 60 deg)
-    ("assembly_inspect_interference", {}, "ok", None),   # driven pose
-    ("joint_drive", {"joint_name": "Yaw", "angle_deg": 0}, "ok", None),
-    ("joint_drive", {"joint_name": "PivotOuter", "angle_deg": 0}, "ok", None),
-    ("joint_drive", {"joint_name": "PivotInner", "angle_deg": 0}, "ok", None),
-    ("joint_drive", {"joint_name": "CrankAxis", "angle_deg": 0}, "ok", None),
-    ("assembly_inspect_interference", {}, "ok", None),   # rest pose
+    # the driven pose read back off the JOINTS themselves - the three drives above reported their
+    # own value_now, and this is the second witness to the same three. Spin (the crank's 2:1 link
+    # partner) is REPORTED in the ledger line, not asserted: this run is the first read of what the
+    # link leaves in the partner's stored value.
+    ("assembly_get", {},
+     _joints_listed(10, {"PivotOuter": 20, "PivotInner": 25, "CrankAxis": 30, "Yaw": 0}), None),
+    ("assembly_inspect_interference", {}, _interference_measured, None),   # driven pose
+    ("joint_drive", {"joint_name": "Yaw", "angle_deg": 0}, _driven_angle(0), None),
+    ("joint_drive", {"joint_name": "PivotOuter", "angle_deg": 0}, _driven_angle(0), None),
+    ("joint_drive", {"joint_name": "PivotInner", "angle_deg": 0}, _driven_angle(0), None),
+    ("joint_drive", {"joint_name": "CrankAxis", "angle_deg": 0}, _driven_angle(0), None),
+    ("assembly_inspect_interference", {}, _interference_measured, None),   # rest pose
     # pose + constrain cameos (do not disturb the jointed mechanism).
-    ("model_create_component", {"name": "PoseCameo", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "PoseCameo", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "PoseS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 300, "y1": 100, "x2": 320, "y2": 120, "sketch_name": "PoseS"}, "ok", None),
-    ("model_extrude", {"sketch_name": "PoseS", "profile_index": 0, "distance": 10}, "ok", None),
+    ("model_extrude", {"sketch_name": "PoseS", "profile_index": 0, "distance": 10}, _extruded, None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    ("assembly_move", {"occurrence": "PoseCameo:1", "dx": 40}, "ok", None),
+    # the cameo's first move, off a fresh occurrence still at the identity transform - so the
+    # position read back off transform2 is the 40 mm this call composed onto it.
+    ("assembly_move", {"occurrence": "PoseCameo:1", "dx": 40}, _moved_occurrence(40), None),
     # the pending pose is transient until captured: status sees it armed with no captured markers
     # yet (this document has captured none), and discard_pending throws it away - the pending flag
     # clears while the captured-marker collection is left exactly as it was.
@@ -990,13 +1883,14 @@ _MOTION = [
     ("assembly_capture_position", {"action": "discard_pending"},
      lambda p: p.get("discarded") is True and p.get("has_pending") is False
      and p.get("snapshot_count") == 0, None),
-    # re-arm the move the capture below records - the discard consumed the first one.
-    ("assembly_move", {"occurrence": "PoseCameo:1", "dx": 40}, "ok", None),
-    ("assembly_capture_position", {"action": "capture"}, "ok", None),
+    # re-arm the move the capture below records - the discard consumed the first one. Where the
+    # discard left the part is what this run measures, so only the read-back itself is asserted.
+    ("assembly_move", {"occurrence": "PoseCameo:1", "dx": 40}, _moved_occurrence(), None),
+    ("assembly_capture_position", {"action": "capture"}, _captured, None),
 ]
 _MOTION += _box("ConA", ox=360) + _box("ConB", ox=360) + [
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    ("assembly_constrain", {"snap_one": "ConA:1:bottom", "snap_two": "ConB:1:top", "flipped": True}, "ok", None),
+    ("assembly_constrain", {"snap_one": "ConA:1:bottom", "snap_two": "ConB:1:top", "flipped": True}, _constrained, None),
     ("design_recompute", {}, "ok", None),
     # RESTRUCTURE: two more crank instances (they share the Crank component's geometry), one of them
     # re-parented under the frame, then both removed so the mechanism is left as it was found. Fusion
@@ -1034,9 +1928,9 @@ _MOTION += _box("ConA", ox=360) + _box("ConB", ox=360) + [
 # --- ACT 4: DETAILS - fillet/chamfer the rings, section through the gimbal center (mirrors S4) -
 _DETAILS = [
     ("find_geometry", {"target": "OuterRing", "kind": "circular_edge", "max_results": 1}, "ok", _fg("or_edge")),
-    ("model_fillet", lambda c: {"edges": [_ctx_get(c, "or_edge", "outer ring edge")], "radius": 1}, "ok", None),
+    ("model_fillet", lambda c: {"edges": [_ctx_get(c, "or_edge", "outer ring edge")], "radius": 1}, _filleted, None),
     ("find_geometry", {"target": "Frame", "kind": "circular_edge", "max_results": 1}, "ok", _fg("fr_edge")),
-    ("model_chamfer", lambda c: {"edges": [_ctx_get(c, "fr_edge", "frame edge")], "distance": 1}, "ok", None),
+    ("model_chamfer", lambda c: {"edges": [_ctx_get(c, "fr_edge", "frame edge")], "distance": 1}, _chamfered, None),
     # the distance-and-angle definition with an explicit corner type. Both assertions are on values
     # READ BACK off the created feature - a corner type the platform silently ignored builds an
     # identical face count, so an echoed payload would sail through this predicate.
@@ -1047,13 +1941,13 @@ _DETAILS = [
      lambda p: p.get("corner_type") == "miter" and abs((p.get("angle_deg") or 0) - 30) < 1e-6
      and not p.get("corner_type_unverified") and not p.get("angle_deg_unverified") and not p.get("chamfer_type_unverified"), None),
     # a shell cameo cap, a wart feature added and deleted (timeline health diff), a scratch occurrence.
-    ("model_create_component", {"name": "ShellCap", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "ShellCap", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "ShellS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 400, "y1": 0, "x2": 430, "y2": 30, "sketch_name": "ShellS"}, "ok", None),
-    ("model_extrude", {"sketch_name": "ShellS", "profile_index": 0, "distance": 20}, "ok", None),
+    ("model_extrude", {"sketch_name": "ShellS", "profile_index": 0, "distance": 20}, _extruded, None),
     _watch("ShellCap:1"),
     ("find_geometry", {"target": "ShellCap", "kind": "planar_face", "nearest_to": [415, 15, 20], "max_results": 1}, "ok", _fg("shell_top")),
-    ("model_shell", lambda c: {"body_name": "ShellCap", "remove_faces": [_ctx_get(c, "shell_top", "shell top")], "thickness": 2}, "ok", None),
+    ("model_shell", lambda c: {"body_name": "ShellCap", "remove_faces": [_ctx_get(c, "shell_top", "shell top")], "thickness": 2}, _shelled, None),
     # THE WartPlane ROW carries the offset_from predicate - the sweep's only offset-plane call, so
     # it is where 'offset_from' gets read once against a real resolved origin plane: the payload
     # must name the PLANE ('XY'), never echo the 'xy' request token. The unit fake spells the name
@@ -1230,23 +2124,27 @@ _DETAILS = [
                                   "target_faces": [_ctx_get(c, "sp_top", "cap top face")],
                                   "source_sketch": "ShellS", "curve_refs": ["line:0"],
                                   "project_type": "along_vector"}, "refused", None),
-    ("model_create_component", {"name": "ScratchOcc", "activate": False}, "ok", None),
+    ("model_create_component", {"name": "ScratchOcc", "activate": False}, _made_component_inactive, None),
     ("design_delete_occurrence", {"occurrence": "ScratchOcc:1"}, "ok", None),
     # scale + offset-face beats on a scratch block: push a face and read the volume move, then the
     # scale contract - uniform f^3, per-axis x*y*z, the three refusal shapes (unresolvable /
     # length-carrying / angle-carrying expression), a bare unitless parameter accepted, and a
     # vertex-anchored scale.
-    ("model_create_component", {"name": "ScaleBlock", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "ScaleBlock", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "ScaleS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 470, "y1": 0, "x2": 490, "y2": 20,
                              "sketch_name": "ScaleS"}, "ok", None),
-    ("model_extrude", {"sketch_name": "ScaleS", "profile_index": 0, "distance": 20}, "ok", None),
+    ("model_extrude", {"sketch_name": "ScaleS", "profile_index": 0, "distance": 20}, _extruded, None),
     ("find_geometry", {"target": "ScaleBlock", "kind": "planar_face", "nearest_to": [480, 10, 20],
                        "max_results": 1}, "ok", _fg("scale_top")),
     ("model_offset_face", lambda c: {"faces": [_ctx_get(c, "scale_top", "block top")],
-                                     "distance": 2}, "ok", None),
-    ("param_add", {"name": "ShrinkProbe", "expression": "0.5", "unit": ""}, "ok", None),
-    ("param_add", {"name": "TiltProbe", "expression": "30 deg", "unit": "deg"}, "ok", None),
+                                     "distance": 2}, _offset_faces, None),
+    # a UNITLESS and an ANGLE parameter: 'value_units' is the parameter's OWN unit read back, which
+    # is what says the angle came out of the internal radians into degrees.
+    ("param_add", {"name": "ShrinkProbe", "expression": "0.5", "unit": ""},
+     _param_added("ShrinkProbe", 0.5, units=""), None),
+    ("param_add", {"name": "TiltProbe", "expression": "30 deg", "unit": "deg"},
+     _param_added("TiltProbe", 30, units="deg"), None),
     # a solid body's volume IS readable, so the verdict is the measured ratio and the skip flag is
     # absent - its presence would mean the check fell back to "the geometry moved".
     ("model_scale", {"bodies": ["ScaleBlock"], "factor": 2},
@@ -1264,14 +2162,14 @@ _DETAILS = [
     ("model_scale", lambda c: {"bodies": ["ScaleBlock"], "factor": 1.5,
                                "anchor": _ctx_get(c, "scale_vtx", "block vertex")},
      lambda p: abs(p.get("volume_ratio", 0) - 3.375) < 1e-6, None),
-    ("param_delete", {"name": "ShrinkProbe"}, "ok", None),
-    ("param_delete", {"name": "TiltProbe"}, "ok", None),
+    ("param_delete", {"name": "ShrinkProbe"}, _param_deleted("ShrinkProbe"), None),
+    ("param_delete", {"name": "TiltProbe"}, _param_deleted("TiltProbe"), None),
     ("model_move", {"bodies": ["ScaleBlock"], "dx": 10},
      lambda p: abs(p.get("displacement", 0) - 10.0) < 1e-3, None),
     ("model_move", {"mode": "along_entity", "bodies": ["ScaleBlock"], "axis": "y",
                     "distance": 5}, lambda p: abs(p.get("displacement", 0) - 5.0) < 1e-3, None),
     ("model_move", {"mode": "rotate", "bodies": ["ScaleBlock"], "axis": "z", "angle_deg": 15},
-     "ok", None),
+     _moved, None),
     ("model_move", lambda c: {"mode": "along_entity", "bodies": ["ScaleBlock"],
                               "axis": _ctx_get(c, "scale_top", "block top"), "distance": 5},
      "refused", None),
@@ -1283,12 +2181,12 @@ _DETAILS = [
     # must refuse naming BOTH paths - each instance holds that body somewhere else, and the
     # displacement read-back cannot tell a right instance from a wrong one.
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    ("model_create_component", {"name": "TwicePlaced", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "TwicePlaced", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "TwicePlacedS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 1900, "y1": 200, "x2": 1920, "y2": 220,
                              "sketch_name": "TwicePlacedS"}, "ok", None),
     ("model_extrude", {"sketch_name": "TwicePlacedS", "profile_index": 0, "distance": 10},
-     "ok", None),
+     _extruded, None),
     # [F75]/NEW-16: name the body uniquely, then resolve it BARE while the component is still the
     # ACTIVE component and placed ONCE - the walk reaches it both natively (active-comp scope) and
     # as the occurrence proxy, whose entityTokens DIFFER; grouping by native token collapses the
@@ -1299,7 +2197,7 @@ _DETAILS = [
     ("design_set_name", lambda c: {"target": _ctx_get(c, "twice_face", "the TwicePlaced body"),
                                    "new_name": "TwiceBody"},
      lambda p: p.get("name") == "TwiceBody", None),
-    ("model_inspect", {"target": "TwiceBody"}, "ok", None),
+    ("model_inspect", {"target": "TwiceBody"}, _extent_measured, None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     ("design_add_instance", {"component": "TwicePlaced", "x": 1960, "y": 200, "units": "mm"},
      lambda p: p.get("created") is True, ("twice_b", lambda p: p["full_path"])),
@@ -1310,7 +2208,7 @@ _DETAILS = [
     # form is the way out.
     ("model_inspect", {"target": "TwiceBody"},
      _refused("TwicePlaced:1", "TwicePlaced:2"), None),
-    ("model_inspect", {"target": "TwicePlaced:2:TwiceBody"}, "ok", None),
+    ("model_inspect", {"target": "TwicePlaced:2:TwiceBody"}, _extent_measured, None),
     # back to the component that was active before this cameo, so the ones after it nest as before.
     ("design_activate_component", {"occurrence": "ScaleBlock:1"}, "ok", None),
     # point_to_point: the tool refuses a travel that does not equal the two vertices' own
@@ -1321,11 +2219,11 @@ _DETAILS = [
                               "from_point": _ctx_get(c, "mv_verts", "block vertices")[0],
                               "to_point": _ctx_get(c, "mv_verts", "block vertices")[1]},
      lambda p: p.get("moved") is True and p.get("displacement", 0) > 0, None),
-    ("model_create_component", {"name": "ThreadPost", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "ThreadPost", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "ThreadS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "circle", "cx": 530, "cy": 10, "radius": 5,
                              "sketch_name": "ThreadS"}, "ok", None),
-    ("model_extrude", {"sketch_name": "ThreadS", "profile_index": 0, "distance": 25}, "ok", None),
+    ("model_extrude", {"sketch_name": "ThreadS", "profile_index": 0, "distance": 25}, _extruded, None),
     ("find_geometry", {"target": "ThreadPost", "kind": "cylinder_face", "max_results": 1}, "ok",
      _fg("post_wall")),
     ("model_thread", lambda c: {"faces": [_ctx_get(c, "post_wall", "post wall")],
@@ -1347,11 +2245,11 @@ _DETAILS = [
     ("model_thread", lambda c: {"faces": [_ctx_get(c, "post_wall", "post wall")],
                                 "designation": "M30x3.5", "modeled": True}, "refused", None),
     # a modeled thread that FITS must cut real material - the rung-4 gate's own regression net
-    ("model_create_component", {"name": "ThreadPost2", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "ThreadPost2", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "ThreadS2"}, "ok", None),
     ("sketch_add_geometry", {"kind": "circle", "cx": 570, "cy": 10, "radius": 5,
                              "sketch_name": "ThreadS2"}, "ok", None),
-    ("model_extrude", {"sketch_name": "ThreadS2", "profile_index": 0, "distance": 25}, "ok", None),
+    ("model_extrude", {"sketch_name": "ThreadS2", "profile_index": 0, "distance": 25}, _extruded, None),
     ("find_geometry", {"target": "ThreadPost2", "kind": "cylinder_face", "max_results": 1}, "ok",
      _fg("post2_wall")),
     ("model_thread", lambda c: {"faces": [_ctx_get(c, "post2_wall", "second post wall")],
@@ -1362,7 +2260,7 @@ _DETAILS = [
     # at add() - so an 'internal' that disagreed with the geometry would have raised. Then a PARTIAL
     # thread measured from the LOW end, with the end it was measured from read back off the feature.
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    ("model_create_component", {"name": "ThreadBore", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "ThreadBore", "activate": True}, _made_component, None),
     # the bore is CUT, not left as the inner loop of a two-circle profile: which region a
     # multi-profile sketch calls its last one is the platform's to decide, and picking the disc
     # there builds a plain rod whose radius-4 wall is EXTERNAL - the thread then lands external and
@@ -1371,12 +2269,12 @@ _DETAILS = [
     ("sketch_add_geometry", {"kind": "circle", "cx": 610, "cy": 10, "radius": 12,
                              "sketch_name": "ThreadBoreS"}, "ok", None),
     ("model_extrude", {"sketch_name": "ThreadBoreS", "profile_index": 0, "distance": 25},
-     "ok", None),
+     _extruded, None),
     ("sketch_create", {"plane": "xy", "name": "ThreadBoreCut"}, "ok", None),
     ("sketch_add_geometry", {"kind": "circle", "cx": 610, "cy": 10, "radius": 4,
                              "sketch_name": "ThreadBoreCut"}, "ok", None),
     ("model_extrude", {"sketch_name": "ThreadBoreCut", "profile_index": 0, "distance": 25,
-                       "operation": "cut"}, "ok", None),
+                       "operation": "cut"}, _extruded, None),
     ("find_geometry", {"target": "ThreadBore", "kind": "cylinder_face", "radius": 4,
                        "max_results": 1}, "ok", _fg("bore_wall")),
     ("model_thread", lambda c: {"faces": [_ctx_get(c, "bore_wall", "the bore wall")],
@@ -1496,7 +2394,7 @@ _DETAILS = [
     # named through each proxy's native entity: an empty 'new_curves' beside a count that rose is
     # the seam breaking, and 'new_curves_complete' appears only when refs went missing.
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    ("model_create_component", {"name": "CopyComp", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "CopyComp", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "CompCopyS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "line", "x1": 1400, "y1": 0, "x2": 1450, "y2": 0,
                              "sketch_name": "CompCopyS"}, "ok", None),
@@ -1621,13 +2519,13 @@ _DETAILS = [
                              "cx": 760, "cy": 90, "rho": 0.6, "sketch_name": "W3Conic"}, "ok", None),
     ("sketch_add_geometry", {"kind": "line", "x1": 740, "y1": 60, "x2": 780, "y2": 60,
                              "sketch_name": "W3Conic"}, "ok", None),
-    ("model_extrude", {"sketch_name": "W3Conic", "profile_index": 0, "distance": 5}, "ok", None),
+    ("model_extrude", {"sketch_name": "W3Conic", "profile_index": 0, "distance": 5}, _extruded, None),
     ("sketch_create", {"plane": "xy", "name": "W3Earc"}, "ok", None),
     ("sketch_add_geometry", {"kind": "elliptical_arc", "cx": 840, "cy": 80, "radius": 30,
                              "minor": 15, "sweep_deg": 180, "sketch_name": "W3Earc"}, "ok", None),
     ("sketch_add_geometry", {"kind": "line", "x1": 870, "y1": 80, "x2": 810, "y2": 80,
                              "sketch_name": "W3Earc"}, "ok", None),
-    ("model_extrude", {"sketch_name": "W3Earc", "profile_index": 0, "distance": 5}, "ok", None),
+    ("model_extrude", {"sketch_name": "W3Earc", "profile_index": 0, "distance": 5}, _extruded, None),
     # the angular wedge rule: a horizontal and a 60 deg line crossing far from the origin. The
     # measured contract dims the wedge FACING THE SKETCH ORIGIN - 60 deg, not the 120 supplement.
     ("sketch_create", {"plane": "xy", "name": "W3Dims"}, "ok", None),
@@ -1963,11 +2861,11 @@ _DETAILS = [
      lambda p: p.get("curves_added") == 6, None),
     # design_remove_feature: cast a scratch body, remove it (the census is the verdict), then
     # delete the Remove feature - the body comes back, which is the reversibility the note claims.
-    ("model_create_component", {"name": "RmScratch", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "RmScratch", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "RmS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 1100, "y1": 0, "x2": 1120, "y2": 20,
                              "sketch_name": "RmS"}, "ok", None),
-    ("model_extrude", {"sketch_name": "RmS", "profile_index": 0, "distance": 5}, "ok", None),
+    ("model_extrude", {"sketch_name": "RmS", "profile_index": 0, "distance": 5}, _extruded, None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     ("design_remove_feature", {"body": "RmScratch"},
      lambda p: p.get("target_kind") == "body" and p.get("feature_read_back") is True,
@@ -1983,7 +2881,7 @@ _DETAILS = [
      ("rm_feat2", lambda p: p["feature"])),
     ("design_delete_feature", lambda c: {"feature": _ctx_get(c, "rm_feat2", "remove feature")},
      "ok", None),
-    ("model_inspect", {"target": "RmScratch:1"}, "ok", None),
+    ("model_inspect", {"target": "RmScratch:1"}, _extent_measured, None),
     # model_emboss: a raise then an engrave on one scratch block's top face. The profiles are drawn
     # on a datum plane COINCIDENT with that face, so each sketch holds exactly one profile (an
     # on-face sketch auto-projects the face boundary and would offer two). The verdict is the
@@ -1992,7 +2890,7 @@ _DETAILS = [
     *_box("EmbossBlock", ox=600, oy=100),
     _watch("EmbossBlock:1"),
     ("model_construction", {"kind": "plane", "plane": "xy", "offset": 10, "name": "EmbPlane"},
-     "ok", None),
+     _datum_plane("xy"), None),
     ("find_geometry", {"target": "EmbossBlock", "kind": "planar_face", "nearest_to": [610, 110, 10],
                        "max_results": 1}, "ok", _fg("emb_top")),
     ("sketch_create", {"plane": "EmbPlane", "name": "EmbRaise"}, "ok", None),
@@ -2021,7 +2919,7 @@ _DETAILS = [
     # middle so the mirrored emboss lands back ON the block; the body/volume census is the verdict,
     # since MirrorFeature.resultFeatures.count reads None even when the mirror mints geometry.
     ("model_construction", {"kind": "plane", "plane": "yz", "offset": 610, "name": "EmbMirrorPlane"},
-     "ok", None),
+     _datum_plane("yz"), None),
     ("model_mirror", lambda c: {"features": [_ctx_get(c, "emb_feat", "the emboss feature")],
                                 "plane": "EmbMirrorPlane"},
      lambda p: p.get("mode") == "features"
@@ -2039,16 +2937,16 @@ _DETAILS = [
     # it. The sheet is sloped, so the body's measured volume has to move - a replace that changed
     # nothing is an error, not a quiet ok.
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    ("model_create_component", {"name": "ReplBlock", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "ReplBlock", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "ReplS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 660, "y1": 0, "x2": 690, "y2": 30,
                              "sketch_name": "ReplS"}, "ok", None),
-    ("model_extrude", {"sketch_name": "ReplS", "profile_index": 0, "distance": 20}, "ok", None),
+    ("model_extrude", {"sketch_name": "ReplS", "profile_index": 0, "distance": 20}, _extruded, None),
     _watch("ReplBlock:1"),
     # the replacement rides its own component so one find_geometry names it without ambiguity, and
     # surface_extrude reads is_solid=false back off the result - which is what makes it a legal
     # target. Symmetric, so the sheet spans the block whichever way the extrude runs.
-    ("model_create_component", {"name": "ReplRoof", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "ReplRoof", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xz", "name": "ReplRoofS"}, "ok", None),
     # on the xz plane sketch +Y maps to world -Z, so y=-26 puts the sheet at world z=+26 - a FLAT
     # plane ABOVE the z0-20 block, the measured-computable replace shape (a tilted or below-the-
@@ -2082,7 +2980,7 @@ _DETAILS = [
     # a 40 mm path, not 0.5 mm - and finally the reverse extent refused on an OPEN path, which the
     # platform would otherwise swallow in silence.
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    ("model_create_component", {"name": "PipeRun", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "PipeRun", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xz", "name": "PipeRunPath"}, "ok", None),
     ("sketch_add_geometry", {"kind": "line", "x1": 720, "y1": 0, "x2": 720, "y2": 40,
                              "sketch_name": "PipeRunPath"}, "ok", None),
@@ -2093,12 +2991,12 @@ _DETAILS = [
      lambda p: p.get("hollow") is True and abs((p.get("wall_thickness") or 0) - 1.5) < 1e-6
      and "capped_ends" not in p, None),
     _watch("PipeRun:1"),
-    ("model_create_component", {"name": "PipeHalf", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "PipeHalf", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xz", "name": "PipeHalfPath"}, "ok", None),
     ("sketch_add_geometry", {"kind": "line", "x1": 760, "y1": 0, "x2": 760, "y2": 40,
                              "sketch_name": "PipeHalfPath"}, "ok", None),
     ("model_pipe", {"path": "sketch:PipeHalfPath", "section_size": 6, "section_type": "square",
-                    "path_fraction": 0.5}, "ok", None),
+                    "path_fraction": 0.5}, _piped, None),
     # the occurrence bounding box counts BODIES only, so the path sketch cannot inflate this read.
     ("model_inspect", {"target": "PipeHalf:1"}, lambda p: abs(p.get("z", 0) - 20.0) < 1.0, None),
     ("model_pipe", {"path": "sketch:PipeRunPath", "section_size": 6, "path_fraction": 0.5,
@@ -2107,11 +3005,11 @@ _DETAILS = [
     # scope cannot be read back - the note says the list is what was REQUESTED rather than dressing
     # an echo up as a read-back. The block is built around the path so the cut has material to take.
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    ("model_create_component", {"name": "PipeCut", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "PipeCut", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "PipeCutS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 800, "y1": -20, "x2": 840, "y2": 20,
                              "sketch_name": "PipeCutS"}, "ok", None),
-    ("model_extrude", {"sketch_name": "PipeCutS", "profile_index": 0, "distance": 20}, "ok", None),
+    ("model_extrude", {"sketch_name": "PipeCutS", "profile_index": 0, "distance": 20}, _extruded, None),
     ("sketch_create", {"plane": "xz", "name": "PipeCutPath"}, "ok", None),
     # on an xz sketch +Y maps to world -Z, so this line runs through the block at world z=10, y=0,
     # entering and leaving it - a cut that removes real material.
@@ -2129,17 +3027,17 @@ _DETAILS = [
     # beats are what keep the wording honest for every consumer of the shared resolver (sweep /
     # pipe / path pattern / on-path datum).
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    ("model_create_component", {"name": "TangentRun", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "TangentRun", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "TangentRunS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 1900, "y1": 0, "x2": 1960, "y2": 60,
                              "sketch_name": "TangentRunS"}, "ok", None),
     ("model_extrude", {"sketch_name": "TangentRunS", "profile_index": 0, "distance": 20},
-     "ok", None),
+     _extruded, None),
     # ONE vertical edge rounded: the top rim reads line - arc - line, bounded by sharp corners.
     ("find_geometry", {"target": "TangentRun", "kind": "line_edge", "nearest_to": [1900, 0, 10],
                        "max_results": 1}, "ok", _fg("tr_corner")),
     ("model_fillet", lambda c: {"edges": [_ctx_get(c, "tr_corner", "the box corner edge")],
-                                "radius": 8}, "ok", None),
+                                "radius": 8}, _filleted, None),
     # a fillet's rim is an ARC (Arc3D), not a full circle - find_geometry keys its edge kinds off
     # the curve type, so 'circular_edge' does not match it and 'arc_edge' is the pick.
     ("find_geometry", {"target": "TangentRun", "kind": "arc_edge", "nearest_to": [1900, 0, 20],
@@ -2164,12 +3062,12 @@ _DETAILS = [
     # itself closed. Rounding the VERTICALS is what makes the junctions tangent: rounding the top
     # edges instead puts a corner patch at each junction and the chain stops there ([F68]).
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    ("model_create_component", {"name": "TangentLoop", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "TangentLoop", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "TangentLoopS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 2000, "y1": 0, "x2": 2060, "y2": 60,
                              "sketch_name": "TangentLoopS"}, "ok", None),
     ("model_extrude", {"sketch_name": "TangentLoopS", "profile_index": 0, "distance": 20},
-     "ok", None),
+     _extruded, None),
     # each vertical edge is the nearest line edge to its own corner at mid-height (10 mm away from
     # the two horizontals meeting there), so the four picks are unambiguous.
     ("find_geometry", {"target": "TangentLoop", "kind": "line_edge", "nearest_to": [2000, 0, 10],
@@ -2184,7 +3082,7 @@ _DETAILS = [
                                           _ctx_get(c, "tl_e2", "loop corner 2"),
                                           _ctx_get(c, "tl_e3", "loop corner 3"),
                                           _ctx_get(c, "tl_e4", "loop corner 4")],
-                                "radius": 8}, "ok", None),
+                                "radius": 8}, _filleted, None),
     ("find_geometry", {"target": "TangentLoop", "kind": "arc_edge",
                        "nearest_to": [2000, 0, 20], "max_results": 1}, "ok", _fg("tl_arc")),
     ("model_pipe", lambda c: {"path": _ctx_get(c, "tl_arc", "one arc of the closed tangent loop"),
@@ -2223,19 +3121,22 @@ _DETAILS = [
 _RESIZE = [
     ("view_screenshot", {"view": "iso-top-right", "width": 400, "height": 300}, "ok", None),
     ("sketch_get", {"sketch_name": "OuterRingSketch"}, "ok", None),   # before
-    ("param_set", {"name": "GimbalDia", "expression": "160 mm"}, "ok", None),
+    ("param_set", {"name": "GimbalDia", "expression": "160 mm"},
+     _param_set_to("GimbalDia", 160), None),
     ("design_recompute", {}, "ok", None),
     ("sketch_get", {"sketch_name": "OuterRingSketch"}, "ok", None),   # after - rings grew
     ("sketch_get", {"sketch_name": "InnerRingSketch"}, "ok", None),
     # the StockCenter JO (ACT 3, the CAM WCS anchor) read back after the resize: parametrically
     # anchored at the shared center, it HOLDS position through the recompute - the anchor CAM binds.
-    ("assembly_get", {"include": ["joint_origins"]}, "ok", None),
+    # Either ACT 3 path (narrative or scratch fallback) builds a JO by that name.
+    ("assembly_get", {"include": ["joint_origins"]}, _joint_origins_listed("StockCenter"), None),
     ("view_screenshot", {"view": "iso-top-right", "width": 400, "height": 300}, "ok", None),
-    ("param_set", {"name": "GimbalDia", "expression": "120 mm"}, "ok", None),   # restore
+    ("param_set", {"name": "GimbalDia", "expression": "120 mm"},
+     _param_set_to("GimbalDia", 120), None),   # restore
     ("design_recompute", {}, "ok", None),
     ("sketch_get", {"sketch_name": "OuterRingSketch"}, "ok", None),   # restored
-    ("param_add", {"name": "ScratchDim", "expression": "5 mm"}, "ok", None),
-    ("param_delete", {"name": "ScratchDim"}, "ok", None),
+    ("param_add", {"name": "ScratchDim", "expression": "5 mm"}, _param_added("ScratchDim", 5), None),
+    ("param_delete", {"name": "ScratchDim"}, _param_deleted("ScratchDim"), None),
     # REST-POSE HONESTY over the gyroscope parts: only the intended shaft-in-rotor press fit may
     # overlap; any other gyro-pair collision fails the story (cameo snap-fits are out of scope).
     ("assembly_inspect_interference", {}, lambda p: _gyro_rest_clean(p), None),
@@ -2322,15 +3223,15 @@ _FINALE = [
     # build is done. A two-body cameo carries the dedupe beat - it needs a SIBLING pair, and the
     # machined part is a component of one body.
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    ("model_create_component", {"name": "TwinCameo", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "TwinCameo", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "TwinA"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 1400, "y1": 200, "x2": 1430, "y2": 230,
                              "sketch_name": "TwinA"}, "ok", None),
-    ("model_extrude", {"sketch_name": "TwinA", "profile_index": 0, "distance": 10}, "ok", None),
+    ("model_extrude", {"sketch_name": "TwinA", "profile_index": 0, "distance": 10}, _extruded, None),
     ("sketch_create", {"plane": "xy", "name": "TwinB"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 1450, "y1": 200, "x2": 1480, "y2": 230,
                              "sketch_name": "TwinB"}, "ok", None),
-    ("model_extrude", {"sketch_name": "TwinB", "profile_index": 0, "distance": 10}, "ok", None),
+    ("model_extrude", {"sketch_name": "TwinB", "profile_index": 0, "distance": 10}, _extruded, None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     ("find_geometry", {"target": "TwinCameo", "kind": "planar_face", "nearest_to": [1415, 215, 10],
                        "max_results": 1}, "ok", _fg("twin_a")),
@@ -2364,11 +3265,11 @@ _FINALE = [
     # the same shape where the overridden body is the occurrence's ONLY one: nothing was reached, so
     # the call is a refusal naming the body to colour directly - never an ok on the occurrence's own
     # agreeable read-back.
-    ("model_create_component", {"name": "SoloColor", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "SoloColor", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "SoloS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 1500, "y1": 200, "x2": 1530, "y2": 230,
                              "sketch_name": "SoloS"}, "ok", None),
-    ("model_extrude", {"sketch_name": "SoloS", "profile_index": 0, "distance": 10}, "ok", None),
+    ("model_extrude", {"sketch_name": "SoloS", "profile_index": 0, "distance": 10}, _extruded, None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     ("find_geometry", {"target": "SoloColor", "kind": "planar_face", "nearest_to": [1515, 215, 10],
                        "max_results": 1}, "ok", _fg("solo_face")),
@@ -2427,11 +3328,11 @@ _FINALE = [
     ("workspace_orient", {}, "ok", None),
     # the API silently IGNORES a sheet size from the other standard, so the pairing is guarded here.
     ("drawing_create", {"standard": "asme", "sheet_size": "a2"}, "refused", None),
-    ("doc_get", {}, "ok", None),
-    ("doc_close", {"save_changes": False}, "ok", None),
+    ("doc_get", {}, _document_read, None),
+    ("doc_close", {"save_changes": False}, _document_closed, None),
 ]
 
-# â”€â”€ the retained SCRATCH fixtures - the precondition fallbacks (today's proven step bodies) â”€â”€â”€â”€â”€
+# --- the retained SCRATCH fixtures - the precondition fallbacks (today's proven step bodies) ---
 # When an act's precondition read fails (an upstream act could not build the geometry it consumes),
 # the act runs one of these instead, so its tools are still covered - each row marked "(fallback
 # fixture)". These are the minimal self-contained scratch fixtures the sweep has always used.
@@ -2441,46 +3342,49 @@ _SOLIDS_FB = (
     + [
         ("find_geometry", {"target": "FbSolid", "kind": "planar_face", "nearest_to": [10, 10, 10], "max_results": 1}, "ok", _fg("fb_body")),
         ("appearance_set", {"target": "FbSolid", "color": "#1E8E3E"}, "ok", None),
-        ("model_set_material", {"target": "FbSolid", "material": "Steel"}, "ok", None),
-        ("model_mirror", lambda c: {"bodies": [_ctx_get(c, "fb_body", "body handle")], "plane": "yz"}, "ok", None),
-        ("model_pattern_rectangular", lambda c: {"bodies": [_ctx_get(c, "fb_body", "body handle")], "quantity_one": 2, "spacing_one": 60, "direction_one": "y"}, "ok", None),
-        ("model_pattern_circular", lambda c: {"bodies": [_ctx_get(c, "fb_body", "body handle")], "quantity": 3, "total_angle_deg": 360, "axis": "z"}, "ok", None),
+        ("model_set_material", {"target": "FbSolid", "material": "Steel"}, _material_assigned, None),
+        ("model_mirror", lambda c: {"bodies": [_ctx_get(c, "fb_body", "body handle")], "plane": "yz"}, _mirrored, None),
+        ("model_pattern_rectangular", lambda c: {"bodies": [_ctx_get(c, "fb_body", "body handle")], "quantity_one": 2, "spacing_one": 60, "direction_one": "y"}, _patterned("total_instances", 2), None),
+        ("model_pattern_circular", lambda c: {"bodies": [_ctx_get(c, "fb_body", "body handle")], "quantity": 3, "total_angle_deg": 360, "axis": "z"}, _patterned("quantity", 3), None),
         ("find_geometry", {"target": "FbSolid", "kind": "planar_face", "nearest_to": [10, 10, 10], "max_results": 1}, "ok", _fg("fb_top")),
-        ("model_hole", lambda c: {"face": _ctx_get(c, "fb_top", "top face"), "hole_type": "simple", "diameter": "4 mm", "extent": "blind", "depth": "8 mm", "points": [[5, 5, 0]]}, "ok", None),
+        ("model_hole", lambda c: {"face": _ctx_get(c, "fb_top", "top face"), "hole_type": "simple", "diameter": "4 mm", "extent": "blind", "depth": "8 mm", "points": [[5, 5, 0]]}, _drilled(1), None),
         ("find_geometry", {"target": "FbSolid", "kind": "planar_face", "nearest_to": [0, 10, 5], "max_results": 1}, "ok", _fg("fb_side")),
-        ("model_draft", lambda c: {"faces": [_ctx_get(c, "fb_side", "side face")], "pull_direction": "xy", "angle_deg": 3}, "ok", None),
-        ("model_measure_between", lambda c: {"a": _ctx_get(c, "fb_body", "body"), "b": "FbSolid"}, "ok", None),
-        ("model_measure_relation", lambda c: {"relation": "parallel", "entity_a": _ctx_get(c, "fb_top", "top face"), "entity_b": _ctx_get(c, "fb_top", "top face")}, "ok", None),
-        ("model_inspect", {"target": "FbSolid"}, "ok", None),
-        ("model_create_component", {"name": "FbRev", "activate": True}, "ok", None),
+        ("model_draft", lambda c: {"faces": [_ctx_get(c, "fb_side", "side face")], "pull_direction": "xy", "angle_deg": 3},
+         _drafted, None),
+        ("model_measure_between", lambda c: {"a": _ctx_get(c, "fb_body", "body"), "b": "FbSolid"}, _gap_measured, None),
+        # a face compared with ITSELF is parallel to itself, so this beat asserts the verdict too.
+        ("model_measure_relation", lambda c: {"relation": "parallel", "entity_a": _ctx_get(c, "fb_top", "top face"), "entity_b": _ctx_get(c, "fb_top", "top face")}, _relation_passes("parallel"), None),
+        ("model_inspect", {"target": "FbSolid"}, _extent_measured, None),
+        ("model_create_component", {"name": "FbRev", "activate": True}, _made_component, None),
         ("sketch_create", {"plane": "xz", "name": "FbRevS"}, "ok", None),
         ("sketch_add_geometry", {"kind": "rectangle", "x1": 10, "y1": 0, "x2": 20, "y2": 30, "sketch_name": "FbRevS"}, "ok", None),
-        ("model_revolve", {"sketch_name": "FbRevS", "profile_index": 0, "axis": "z", "angle_deg": 360}, "ok", None),
-        ("model_create_component", {"name": "FbSwp", "activate": True}, "ok", None),
+        ("model_revolve", {"sketch_name": "FbRevS", "profile_index": 0, "axis": "z", "angle_deg": 360}, _revolved, None),
+        ("model_create_component", {"name": "FbSwp", "activate": True}, _made_component, None),
         ("sketch_create", {"plane": "xz", "name": "FbPath"}, "ok", None),
         ("sketch_add_geometry", {"kind": "line", "x1": 0, "y1": 0, "x2": 0, "y2": 40, "sketch_name": "FbPath"}, "ok", None),
         ("sketch_create", {"plane": "xy", "name": "FbProf"}, "ok", None),
         ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 5, "sketch_name": "FbProf"}, "ok", None),
-        ("model_sweep", {"profile": {"sketch": "FbProf", "profile_index": 0}, "path": "sketch:FbPath"}, "ok", None),
-        ("model_create_component", {"name": "FbLft", "activate": True}, "ok", None),
+        ("model_sweep", {"profile": {"sketch": "FbProf", "profile_index": 0}, "path": "sketch:FbPath"}, _swept, None),
+        ("model_create_component", {"name": "FbLft", "activate": True}, _made_component, None),
         ("sketch_create", {"plane": "xy", "name": "FbLb"}, "ok", None),
         ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 10, "sketch_name": "FbLb"}, "ok", None),
         ("sketch_get", {"sketch_name": "FbLb"}, "ok", _prof("fb_lb")),
-        ("model_construction", {"kind": "plane", "plane": "xy", "offset": 40, "name": "FbTop"}, "ok", None),
+        ("model_construction", {"kind": "plane", "plane": "xy", "offset": 40, "name": "FbTop"},
+         _datum_plane("xy"), None),
         ("sketch_create", {"plane": "FbTop", "name": "FbLt"}, "ok", None),
         ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 5, "sketch_name": "FbLt"}, "ok", None),
         ("sketch_get", {"sketch_name": "FbLt"}, "ok", _prof("fb_lt")),
-        ("model_loft", lambda c: {"profiles": [_ctx_get(c, "fb_lb", "loft bottom"), _ctx_get(c, "fb_lt", "loft top")]}, "ok", None),
-        ("model_create_component", {"name": "FbCmb", "activate": True}, "ok", None),
+        ("model_loft", lambda c: {"profiles": [_ctx_get(c, "fb_lb", "loft bottom"), _ctx_get(c, "fb_lt", "loft top")]}, _lofted, None),
+        ("model_create_component", {"name": "FbCmb", "activate": True}, _made_component, None),
         ("sketch_create", {"plane": "xy", "name": "FbCb1"}, "ok", None),
         ("sketch_add_geometry", {"kind": "rectangle", "x1": 0, "y1": 0, "x2": 30, "y2": 30, "sketch_name": "FbCb1"}, "ok", None),
-        ("model_extrude", {"sketch_name": "FbCb1", "profile_index": 0, "distance": 10}, "ok", None),
+        ("model_extrude", {"sketch_name": "FbCb1", "profile_index": 0, "distance": 10}, _extruded, None),
         ("sketch_create", {"plane": "xy", "name": "FbCb2"}, "ok", None),
         ("sketch_add_geometry", {"kind": "rectangle", "x1": 20, "y1": 20, "x2": 50, "y2": 50, "sketch_name": "FbCb2"}, "ok", None),
-        ("model_extrude", {"sketch_name": "FbCb2", "profile_index": 0, "distance": 10}, "ok", None),
+        ("model_extrude", {"sketch_name": "FbCb2", "profile_index": 0, "distance": 10}, _extruded, None),
         ("find_geometry", {"target": "FbCmb", "kind": "planar_face", "nearest_to": [5, 5, 10], "max_results": 1}, "ok", _fg("fb_c1")),
         ("find_geometry", {"target": "FbCmb", "kind": "planar_face", "nearest_to": [45, 45, 10], "max_results": 1}, "ok", _fg("fb_c2")),
-        ("model_combine", lambda c: {"target": _ctx_get(c, "fb_c1", "combine target"), "tools": [_ctx_get(c, "fb_c2", "combine tool")], "operation": "join"}, "ok", None),
+        ("model_combine", lambda c: {"target": _ctx_get(c, "fb_c1", "combine target"), "tools": [_ctx_get(c, "fb_c2", "combine tool")], "operation": "join"}, _joined, None),
         ("design_activate_component", {"occurrence": "root"}, "ok", None),
     ]
 )
@@ -2493,32 +3397,39 @@ _MOTION_FB = (
     + _box("JP") + _box("JQ")
     + [
         ("design_activate_component", {"occurrence": "root"}, "ok", None),
-        ("assembly_ground", {"occurrence": "JB:1", "ground_to_parent": True}, "ok", None),
-        ("assembly_ground", {"occurrence": "JD:1", "ground_to_parent": True}, "ok", None),
-        ("assembly_ground", {"occurrence": "JN:1", "ground_to_parent": True}, "ok", None),
-        ("joint_create_origin", {"anchor": "coordinates", "x": 10, "y": 0, "z": 0, "name": "JOc"}, "ok", None),
-        ("joint_create_origin", {"anchor": "coordinates", "target": "origin", "name": "StockCenter"}, "ok", None),
-        ("joint_create", {"occurrence_one": "JA:1:top", "occurrence_two": "JB:1:top", "joint_type": "revolute", "axis": "z", "name": "RevJoint"}, "ok", None),
-        ("joint_create", {"occurrence_one": "JC:1:top", "occurrence_two": "JD:1:top", "joint_type": "slider", "axis": "x", "name": "SlideJoint"}, "ok", None),
-        ("joint_drive", {"joint_name": "RevJoint", "angle_deg": 30}, "ok", None),
-        ("joint_drive", {"joint_name": "RevJoint", "angle_deg": 0}, "ok", None),
-        ("joint_edit", {"joint_name": "RevJoint", "min_deg": -45, "max_deg": 45}, "ok", None),
-        ("joint_create", {"occurrence_one": "JM:1:top", "occurrence_two": "JN:1:top", "joint_type": "revolute", "axis": "z", "name": "RevJoint2"}, "ok", None),
-        ("joint_motion_link", {"joint_one": "RevJoint", "joint_two": "RevJoint2", "ratio": 2}, "ok", None),
+        ("assembly_ground", {"occurrence": "JB:1", "ground_to_parent": True}, _grounded, None),
+        ("assembly_ground", {"occurrence": "JD:1", "ground_to_parent": True}, _grounded, None),
+        ("assembly_ground", {"occurrence": "JN:1", "ground_to_parent": True}, _grounded, None),
+        ("joint_create_origin", {"anchor": "coordinates", "x": 10, "y": 0, "z": 0, "name": "JOc"},
+         _joint_origin_at("JOc", 10, 0, 0), None),
+        ("joint_create_origin", {"anchor": "coordinates", "target": "origin", "name": "StockCenter"},
+         _joint_origin_at("StockCenter", 0, 0, 0), None),
+        ("joint_create", {"occurrence_one": "JA:1:top", "occurrence_two": "JB:1:top", "joint_type": "revolute", "axis": "z", "name": "RevJoint"}, _jointed("RevJoint"), None),
+        ("joint_create", {"occurrence_one": "JC:1:top", "occurrence_two": "JD:1:top", "joint_type": "slider", "axis": "x", "name": "SlideJoint"}, _jointed("SlideJoint"), None),
+        ("joint_drive", {"joint_name": "RevJoint", "angle_deg": 30}, _driven_angle(30), None),
+        ("joint_drive", {"joint_name": "RevJoint", "angle_deg": 0}, _driven_angle(0), None),
+        ("joint_edit", {"joint_name": "RevJoint", "min_deg": -45, "max_deg": 45},
+         _joint_limits("RevJoint", min_deg=-45, max_deg=45), None),
+        ("joint_create", {"occurrence_one": "JM:1:top", "occurrence_two": "JN:1:top", "joint_type": "revolute", "axis": "z", "name": "RevJoint2"}, _jointed("RevJoint2"), None),
+        ("joint_motion_link", {"joint_one": "RevJoint", "joint_two": "RevJoint2", "ratio": 2},
+         _motion_linked("RevJoint", "RevJoint2", False), None),
         # RevJoint was driven above, so driving its NEW link partner must refuse (the second-member
         # guard). This row also proves MotionLink.jointOne/jointTwo resolve live: a wrong property
         # name would make the partner lookup blind and this drive would wrongly succeed.
         ("joint_drive", {"joint_name": "RevJoint2", "angle_deg": 10}, "refused", None),
-        ("joint_create_as_built", {"occurrence_one": "JE:1", "occurrence_two": "JF:1"}, "ok", None),
+        ("joint_create_as_built", {"occurrence_one": "JE:1", "occurrence_two": "JF:1"}, _as_built, None),
         ("find_geometry", {"target": "JG", "kind": "planar_face", "nearest_to": [10, 10, 10], "max_results": 1}, "ok", _fg("jg_face")),
         ("find_geometry", {"target": "JH", "kind": "planar_face", "nearest_to": [10, 10, 10], "max_results": 1}, "ok", _fg("jh_face")),
-        ("joint_at_geometry", lambda c: {"handle_one": _ctx_get(c, "jg_face", "joint face a"), "handle_two": _ctx_get(c, "jh_face", "joint face b"), "motion": "rigid"}, "ok", None),
-        ("assembly_get", {}, "ok", None),
-        ("assembly_move", {"occurrence": "JK:1", "dx": 80}, "ok", None),
-        ("assembly_capture_position", {"action": "capture"}, "ok", None),
-        ("assembly_rigid_group", {"occurrences": ["JP:1", "JQ:1"]}, "ok", None),
-        ("assembly_constrain", {"snap_one": "JK:1:bottom", "snap_two": "JL:1:top", "flipped": True}, "ok", None),
-        ("assembly_inspect_interference", {}, "ok", None),
+        ("joint_at_geometry", lambda c: {"handle_one": _ctx_get(c, "jg_face", "joint face a"), "handle_two": _ctx_get(c, "jh_face", "joint face b"), "motion": "rigid"}, _jointed_at_geometry, None),
+        # the five joints this fixture built (three parametric, one as-built, one at geometry).
+        ("assembly_get", {}, _joints_listed(5, {"RevJoint": 0}), None),
+        # JK:1 is a fresh box occurrence at the identity transform, so its read-back position IS the
+        # 80 mm this move composed.
+        ("assembly_move", {"occurrence": "JK:1", "dx": 80}, _moved_occurrence(80), None),
+        ("assembly_capture_position", {"action": "capture"}, _captured, None),
+        ("assembly_rigid_group", {"occurrences": ["JP:1", "JQ:1"]}, _rigid_grouped(2), None),
+        ("assembly_constrain", {"snap_one": "JK:1:bottom", "snap_two": "JL:1:top", "flipped": True}, _constrained, None),
+        ("assembly_inspect_interference", {}, _interference_measured, None),
         ("design_recompute", {}, "ok", None),
     ]
 )
@@ -2528,14 +3439,15 @@ _DETAILS_FB = (
     _box("FbDet")
     + [
         ("find_geometry", {"target": "FbDet", "kind": "line_edge", "max_results": 1}, "ok", _fg("fd_edge")),
-        ("model_fillet", lambda c: {"edges": [_ctx_get(c, "fd_edge", "edge")], "radius": 1}, "ok", None),
+        ("model_fillet", lambda c: {"edges": [_ctx_get(c, "fd_edge", "edge")], "radius": 1}, _filleted, None),
         ("find_geometry", {"target": "FbDet", "kind": "line_edge", "max_results": 1}, "ok", _fg("fd_edge2")),
-        ("model_chamfer", lambda c: {"edges": [_ctx_get(c, "fd_edge2", "edge")], "distance": 0.5}, "ok", None),
+        ("model_chamfer", lambda c: {"edges": [_ctx_get(c, "fd_edge2", "edge")], "distance": 0.5}, _chamfered, None),
         ("find_geometry", {"target": "FbDet", "kind": "planar_face", "nearest_to": [10, 10, 10], "max_results": 1}, "ok", _fg("fd_top")),
-        ("model_shell", lambda c: {"body_name": "FbDet", "remove_faces": [_ctx_get(c, "fd_top", "top")], "thickness": 2}, "ok", None),
-        ("model_construction", {"kind": "plane", "plane": "xy", "offset": 5, "name": "FbWart"}, "ok", None),
+        ("model_shell", lambda c: {"body_name": "FbDet", "remove_faces": [_ctx_get(c, "fd_top", "top")], "thickness": 2}, _shelled, None),
+        ("model_construction", {"kind": "plane", "plane": "xy", "offset": 5, "name": "FbWart"},
+         _datum_plane("xy"), None),
         ("design_delete_feature", {"feature": "FbWart"}, "ok", None),
-        ("model_create_component", {"name": "FbJunk", "activate": False}, "ok", None),
+        ("model_create_component", {"name": "FbJunk", "activate": False}, _made_component_inactive, None),
         ("design_delete_occurrence", {"occurrence": "FbJunk:1"}, "ok", None),
         ("design_activate_component", {"occurrence": "root"}, "ok", None),
         ("view_section", {"action": "cut", "plane": "xy", "offset": 5}, "ok", None),
@@ -2547,26 +3459,26 @@ _DETAILS_FB = (
 
 # ACT 6 fallback: a scratch parameter set/delete.
 _RESIZE_FB = [
-    ("param_add", {"name": "FbParam", "expression": "12 mm"}, "ok", None),
-    ("param_set", {"name": "FbParam", "expression": "14 mm"}, "ok", None),
+    ("param_add", {"name": "FbParam", "expression": "12 mm"}, _param_added("FbParam", 12), None),
+    ("param_set", {"name": "FbParam", "expression": "14 mm"}, _param_set_to("FbParam", 14), None),
     ("design_recompute", {}, "ok", None),
-    ("param_delete", {"name": "FbParam"}, "ok", None),
+    ("param_delete", {"name": "FbParam"}, _param_deleted("FbParam"), None),
 ]
 
-# â”€â”€ the CAMEO acts: surface-prep, mesh, and CAM families ride scratch fixtures in the SAME doc â”€â”€
+# --- the CAMEO acts: surface-prep, mesh, and CAM families ride scratch fixtures in the SAME doc -
 # These families have no natural home on the mechanism itself, so the spec places them as cameos.
 
 # ACT 5: MACHINING PREP - surfaces, sheet ops, split/stitch/arrange/base-feature, holder read.
 _MACHINING = [
     # the surface/split/stitch cameos live on a GRID (y=200 row, plus a z-lifted revolve) so each
     # builds in clear space a viewer can see, never on top of the gyroscope or another cameo.
-    ("model_create_component", {"name": "SRev", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "SRev", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xz", "name": "SRevS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "line", "x1": 10, "y1": 60, "x2": 10, "y2": 90, "sketch_name": "SRevS"}, "ok", None),
     ("surface_revolve", {"sketch_name": "SRevS", "axis": "z", "angle_deg": 360}, "ok", None),
     # a CLOSED revolved sphere surface encloses one cell; surface_fill must seal it to a SOLID at
     # the enclosed volume (r=6mm -> 904.78 mm3) MEASURED off the result, never predicted.
-    ("model_create_component", {"name": "FillDemo", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "FillDemo", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xz", "name": "FillProf"}, "ok", None),
     # the arc's endpoints must sit ON the revolve axis (x=0) or the revolved surface is an open
     # tube enclosing nothing, and surface_fill refuses it (live-measured).
@@ -2587,7 +3499,7 @@ _MACHINING = [
     ("find_geometry", {"target": "SRev", "kind": "cylinder_face", "max_results": 1}, "ok", _fg("srev_face")),
     ("surface_thicken", lambda c: {"faces": [_ctx_get(c, "srev_face", "surface face")], "thickness": 2}, "ok", None),
     _watch("SRev:1"),
-    ("model_create_component", {"name": "Surf", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "Surf", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "SurfS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 200, "y1": 200, "x2": 240, "y2": 230, "sketch_name": "SurfS"}, "ok", None),
     ("surface_extrude", {"sketch_name": "SurfS", "distance": 15}, "ok", None),
@@ -2607,13 +3519,16 @@ _MACHINING = [
      # the API's own default stands - an echoed key here would be a claim about an unwritten value.
      lambda p: p.get("body_count", 1) == 1 and "extend_alignment" not in p, None),
     ("find_geometry", {"target": "Surf", "kind": "planar_face", "max_results": 1}, "ok", _fg("surf_body")),
-    ("surface_reverse_normal", lambda c: {"bodies": [_ctx_get(c, "surf_body", "surface body")]}, "ok", None),
+    # the flip is invisible in every other read, so the row asserts the tool's own isParamReversed
+    # read-back: 'reversed_confirmed' is false whenever the after-count does not match the flip.
+    ("surface_reverse_normal", lambda c: {"bodies": [_ctx_get(c, "surf_body", "surface body")]},
+     lambda p: p.get("reversed_confirmed") is True and p.get("faces_total", 0) > 0, None),
     # extend_alignment + thicken_type, on their own sheet so the read-backs never ride on edges an
     # earlier extend already moved. Both properties are written through set_verified, so a value the
     # platform drops comes back as an error rather than an echoed success. A rectangle extruded as a
     # surface gives a four-walled sheet, which is the convex corner set 'rounded' needs to mean
     # anything - a single flat face has no corner to round.
-    ("model_create_component", {"name": "SAlign", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "SAlign", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "SAlignS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 700, "y1": 200, "x2": 740, "y2": 230,
                              "sketch_name": "SAlignS"}, "ok", None),
@@ -2631,10 +3546,10 @@ _MACHINING = [
      lambda p: p.get("thicken_type") == "rounded", None),
     # back to the component that was active before this cameo, so the ones after it nest as before.
     ("design_activate_component", {"occurrence": "Surf:1"}, "ok", None),
-    ("model_create_component", {"name": "SDel", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "SDel", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "SD1"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 300, "y1": 200, "x2": 320, "y2": 220, "sketch_name": "SD1"}, "ok", None),
-    ("model_extrude", {"sketch_name": "SD1", "profile_index": 0, "distance": 10}, "ok", None),
+    ("model_extrude", {"sketch_name": "SD1", "profile_index": 0, "distance": 10}, _extruded, None),
     _watch("SDel:1"),
     ("find_geometry", {"target": "SDel", "kind": "planar_face", "nearest_to": [310, 210, 10], "max_results": 1}, "ok", _fg("sdel_top")),
     ("surface_delete_face", lambda c: {"faces": [_ctx_get(c, "sdel_top", "top face")], "heal": False}, "ok", None),
@@ -2650,7 +3565,7 @@ _MACHINING = [
     # top edge crosses it end to end with both ends landing on the rim. 'interior_rail_count' is the
     # count PatchFeatureInput.interiorRailsAndPoints reads back, not the number of handles passed.
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    ("model_create_component", {"name": "PatchRail", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "PatchRail", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "PatchRailS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "line", "x1": 300, "y1": 210, "x2": 320, "y2": 210,
                              "sketch_name": "PatchRailS"}, "ok", None),
@@ -2673,7 +3588,7 @@ _MACHINING = [
     # surface_trim + surface_untrim on an intersecting-sheet topology. Staged in clear space (X=600)
     # so no other body's surface intersects the sheet - only its own cutter divides it, keeping the
     # trim deterministic (a coincident surface adds phantom cells and the trim keeps the wrong one).
-    ("model_create_component", {"name": "SHole", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "SHole", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "SH1"}, "ok", None),
     ("sketch_add_geometry", {"kind": "line", "x1": 600, "y1": 0, "x2": 640, "y2": 0, "sketch_name": "SH1"}, "ok", None),
     ("surface_extrude", {"sketch_name": "SH1", "distance": 40}, "ok", None),
@@ -2682,14 +3597,22 @@ _MACHINING = [
     ("surface_extrude", {"sketch_name": "SH2", "distance": 10, "symmetric": True}, "ok", None),
     ("find_geometry", {"target": "SHole", "kind": "planar_face", "nearest_to": [620, 0, 20], "max_results": 1}, "ok", _fg("sh_sheet")),
     ("find_geometry", {"target": "SHole", "kind": "cylinder_face", "nearest_to": [620, 0, 20], "max_results": 1}, "ok", _fg("sh_cutter")),
-    ("surface_trim", lambda c: {"surface": _ctx_get(c, "sh_sheet", "sheet face"), "trim_tool": _ctx_get(c, "sh_cutter", "cylinder cutter")}, "ok", None),
+    # the cell bookkeeping is the read-back: at least one cell REMOVED (a trim that removed none
+    # kept the whole sheet) and a kept area the phantom-cell gate could measure.
+    ("surface_trim", lambda c: {"surface": _ctx_get(c, "sh_sheet", "sheet face"), "trim_tool": _ctx_get(c, "sh_cutter", "cylinder cutter")},
+     lambda p: len(p.get("cells_removed") or []) >= 1 and (p.get("kept_area") or 0) > 0
+     and bool(p.get("result_bodies")), None),
     ("find_geometry", {"target": "SHole", "kind": "planar_face", "nearest_to": [620, 0, 20], "max_results": 1}, "ok", _fg("sh_trimmed")),
-    ("surface_untrim", lambda c: {"faces": [_ctx_get(c, "sh_trimmed", "trimmed sheet face")], "loop_type": "internal"}, "ok", None),
+    # removing the hole loop FILLS it, so the created faces' area sum is the read-back that the
+    # extent grew; an untrim that created nothing leaves area_after at or below area_before.
+    ("surface_untrim", lambda c: {"faces": [_ctx_get(c, "sh_trimmed", "trimmed sheet face")], "loop_type": "internal"},
+     lambda p: p.get("extent_grew") is True and p.get("faces_created", 0) >= 1
+     and p["area_after"] > p["area_before"], None),
     # RULED surfaces off a rim edge. A line extruded as a surface gives a vertical sheet whose top
     # rim (z=30) is the seed every ruled beat leaves from; each type builds a DIFFERENT surface off
     # that same edge, so the payload's own ruled_type/direction is what separates them.
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    ("model_create_component", {"name": "Ruled", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "Ruled", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "RuledS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "line", "x1": 900, "y1": 0, "x2": 940, "y2": 0,
                              "sketch_name": "RuledS"}, "ok", None),
@@ -2727,11 +3650,11 @@ _MACHINING = [
     # box AND the new sheet, so a handler publishing that collection raw would report the box as
     # created and read is_solid=true off it: the new sheet alone is the result.
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    ("model_create_component", {"name": "RuledSolid", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "RuledSolid", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "RuledSolidS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 980, "y1": 200, "x2": 1020, "y2": 240,
                              "sketch_name": "RuledSolidS"}, "ok", None),
-    ("model_extrude", {"sketch_name": "RuledSolidS", "profile_index": 0, "distance": 20}, "ok", None),
+    ("model_extrude", {"sketch_name": "RuledSolidS", "profile_index": 0, "distance": 20}, _extruded, None),
     _watch("RuledSolid:1"),
     ("find_geometry", {"target": "RuledSolid", "kind": "line_edge", "nearest_to": [1000, 200, 20],
                        "max_results": 1}, "ok", _fg("ruled_solid_edge")),
@@ -2742,60 +3665,62 @@ _MACHINING = [
     # back to the component that was active before this cameo, so the ones after it nest as before.
     ("design_activate_component", {"occurrence": "SHole:1"}, "ok", None),
     # split / unstitch / stitch / base-feature / arrange / compute-holder.
-    ("model_create_component", {"name": "Spl", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "Spl", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "Sp1"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 400, "y1": 200, "x2": 440, "y2": 240, "sketch_name": "Sp1"}, "ok", None),
-    ("model_extrude", {"sketch_name": "Sp1", "profile_index": 0, "distance": 20}, "ok", None),
+    ("model_extrude", {"sketch_name": "Sp1", "profile_index": 0, "distance": 20}, _extruded, None),
     _watch("Spl:1"),
-    ("model_construction", {"kind": "plane", "plane": "xz", "offset": 220, "name": "SplMid"}, "ok", None),
+    ("model_construction", {"kind": "plane", "plane": "xz", "offset": 220, "name": "SplMid"},
+     _datum_plane("xz"), None),
     ("find_geometry", {"target": "Spl", "kind": "planar_face", "nearest_to": [420, 220, 20], "max_results": 1}, "ok", _fg("spl_body")),
-    ("model_split", lambda c: {"split": "body", "target": _ctx_get(c, "spl_body", "split body"), "split_plane": "SplMid"}, "ok", None),
-    ("model_create_component", {"name": "Stc", "activate": True}, "ok", None),
+    ("model_split", lambda c: {"split": "body", "target": _ctx_get(c, "spl_body", "split body"), "split_plane": "SplMid"}, _split_bodies, None),
+    ("model_create_component", {"name": "Stc", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "St1"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 500, "y1": 200, "x2": 520, "y2": 220, "sketch_name": "St1"}, "ok", None),
-    ("model_extrude", {"sketch_name": "St1", "profile_index": 0, "distance": 10}, "ok", None),
+    ("model_extrude", {"sketch_name": "St1", "profile_index": 0, "distance": 10}, _extruded, None),
     _watch("Stc:1"),
     ("find_geometry", {"target": "Stc", "kind": "planar_face", "nearest_to": [510, 210, 10], "max_results": 1}, "ok", _fg("stc_body")),
-    ("model_unstitch", lambda c: {"target": _ctx_get(c, "stc_body", "unstitch body"), "chain": False}, "ok", None),
+    ("model_unstitch", lambda c: {"target": _ctx_get(c, "stc_body", "unstitch body"), "chain": False}, _unstitched, None),
     ("find_geometry", {"target": "Stc", "kind": "planar_face", "nearest_to": [510, 210, 0], "max_results": 1}, "ok", _fg("stc_f1")),
     ("find_geometry", {"target": "Stc", "kind": "planar_face", "nearest_to": [500, 210, 5], "max_results": 1}, "ok", _fg("stc_f2")),
-    ("model_stitch", lambda c: {"bodies": [_ctx_get(c, "stc_f1", "stitch a"), _ctx_get(c, "stc_f2", "stitch b")]}, "ok", None),
-    ("model_base_feature", {"action": "start", "base_feature": "BF1"}, "ok", None),
-    ("model_base_feature", {"action": "finish", "base_feature": "BF1"}, "ok", None),
+    ("model_stitch", lambda c: {"bodies": [_ctx_get(c, "stc_f1", "stitch a"), _ctx_get(c, "stc_f2", "stitch b")]}, _stitched, None),
+    ("model_base_feature", {"action": "start", "base_feature": "BF1"}, _base_feature_open, None),
+    ("model_base_feature", {"action": "finish", "base_feature": "BF1"}, _base_feature_closed, None),
 ] + _box("ArrP1", ox=200, oy=350) + _box("ArrP2", ox=260, oy=350) + [
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     ("sketch_create", {"plane": "xy", "name": "ArrB"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 100, "y1": 400, "x2": 500, "y2": 600, "sketch_name": "ArrB"}, "ok", None),
-    ("model_arrange", {"boundary_sketch": "ArrB", "shapes": ["ArrP1:1", "ArrP2:1"], "solver": "rectangular", "spacing": 5}, "ok", None),
+    ("model_arrange", {"boundary_sketch": "ArrB", "shapes": ["ArrP1:1", "ArrP2:1"], "solver": "rectangular", "spacing": 5}, _arranged(2), None),
     # compute_holder needs a body + a cyl-face axis + a planar end-datum.
-    ("model_create_component", {"name": "HolderPart", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "HolderPart", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "HP1"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 600, "y1": 200, "x2": 640, "y2": 220, "sketch_name": "HP1"}, "ok", None),
-    ("model_extrude", {"sketch_name": "HP1", "profile_index": 0, "distance": 10}, "ok", None),
+    ("model_extrude", {"sketch_name": "HP1", "profile_index": 0, "distance": 10}, _extruded, None),
     _watch("HolderPart:1"),
     ("find_geometry", {"target": "HolderPart", "kind": "planar_face", "nearest_to": [620, 210, 10], "max_results": 1}, "ok", _fg("hp_top")),
     # hole points ride the face's LOCAL frame = the model origin projected onto the face, so
     # on-pad coordinates are the world x,y (same measured fact as the FeatureCameo hole).
-    ("model_hole", lambda c: {"face": _ctx_get(c, "hp_top", "holder top"), "hole_type": "simple", "diameter": "4 mm", "extent": "blind", "depth": "8 mm", "points": [[605, 205, 0]]}, "ok", None),
+    ("model_hole", lambda c: {"face": _ctx_get(c, "hp_top", "holder top"), "hole_type": "simple", "diameter": "4 mm", "extent": "blind", "depth": "8 mm", "points": [[605, 205, 0]]}, _drilled(1), None),
     ("find_geometry", {"target": "HolderPart", "kind": "planar_face", "max_results": 1}, "ok", _fg("hp_body")),
     ("find_geometry", {"target": "HolderPart", "kind": "cylinder_face", "radius": 2, "max_results": 1}, "ok", _fg("hp_axis")),
     ("find_geometry", {"target": "HolderPart", "kind": "planar_face", "nearest_to": [620, 210, 10], "max_results": 1}, "ok", _fg("hp_datum")),
-    ("model_compute_holder", lambda c: {"body": _ctx_get(c, "hp_body", "holder body"), "axis": _ctx_get(c, "hp_axis", "holder axis"), "end_datum": _ctx_get(c, "hp_datum", "holder datum")}, "ok", None),
+    ("model_compute_holder", lambda c: {"body": _ctx_get(c, "hp_body", "holder body"), "axis": _ctx_get(c, "hp_axis", "holder axis"), "end_datum": _ctx_get(c, "hp_datum", "holder datum")}, _holder_computed, None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
 ]
 
 # ACT 7: MESH - a scratch solid becomes a mesh, then the mesh family works it (one mesh per op).
 _MESH = [
-    ("model_create_component", {"name": "Msh", "activate": True}, "ok", None),
+    ("model_create_component", {"name": "Msh", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "MshS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 200, "y1": 300, "x2": 220, "y2": 320, "sketch_name": "MshS"}, "ok", None),
-    ("model_extrude", {"sketch_name": "MshS", "profile_index": 0, "distance": 10}, "ok", None),
+    ("model_extrude", {"sketch_name": "MshS", "profile_index": 0, "distance": 10}, _extruded, None),
     _watch("Msh:1"),
     ("find_geometry", {"target": "Msh", "kind": "planar_face", "nearest_to": [210, 310, 10], "max_results": 1}, "ok", _fg("msh_body")),
-    ("model_construction", {"kind": "plane", "plane": "xy", "offset": 5, "name": "MshMid"}, "ok", None),
+    ("model_construction", {"kind": "plane", "plane": "xy", "offset": 5, "name": "MshMid"},
+     _datum_plane("xy"), None),
     ("sketch_create", {"plane": "xy", "name": "MshCyl"}, "ok", None),
     ("sketch_add_geometry", {"kind": "circle", "cx": 260, "cy": 360, "radius": 15, "sketch_name": "MshCyl"}, "ok", None),
-    ("model_extrude", {"sketch_name": "MshCyl", "profile_index": 0, "distance": 20}, "ok", None),
+    ("model_extrude", {"sketch_name": "MshCyl", "profile_index": 0, "distance": 20}, _extruded, None),
     ("find_geometry", {"target": "Msh", "kind": "cylinder_face", "nearest_to": [260, 360, 10], "max_results": 1}, "ok", _fg("cyl_body")),
     ("save_as_mesh", lambda c: {"body": _ctx_get(c, "cyl_body", "cyl body"), "name": "MRED", "quality": "high"}, "ok", None),
     ("save_as_mesh", lambda c: {"body": _ctx_get(c, "msh_body", "box body"), "name": "MA", "quality": "low"}, "ok", None),
@@ -2807,8 +3732,18 @@ _MESH = [
     ("mesh_generate_face_groups", {"mesh": "MA", "method": "fast"}, "ok", None),
     ("mesh_to_brep", {"mesh": "MA", "method": "faceted", "operation": "base_feature"}, "ok", None),
     ("mesh_reduce", {"mesh": "MRED", "target": "proportion", "value": 50}, "ok", None),
-    ("mesh_remesh", {"mesh": "MC", "density": 1}, "ok", None),
-    ("mesh_plane_cut", {"mesh": "MD", "plane": "MshMid", "cut_type": "trim"}, "ok", None),
+    # 'density' is set-then-read-back off the input (a build that drops it refuses), and the
+    # before/after triangle counts are read off the model - 'changed' is null when either count
+    # could not be read at all, which is a remesh nothing was measured about.
+    ("mesh_remesh", {"mesh": "MC", "density": 1},
+     lambda p: p.get("density_applied") == 1 and (p["after"]["triangle_count"] or 0) > 0
+     and p.get("changed") is not None, None),
+    # the cut's own effect evidence, mirrored into the receipt: the triangle count moved, or (a
+    # fill that replaces as many triangles as it removed) the mesh's area/volume did.
+    ("mesh_plane_cut", {"mesh": "MD", "plane": "MshMid", "cut_type": "trim"},
+     lambda p: p.get("fill") == "minimal" and p.get("triangles_before") and p.get("triangles_after")
+     and (p["triangles_after"] != p["triangles_before"]
+          or p.get("volume_after_cm3") != p.get("volume_before_cm3")), None),
     # a parametric mesh write reports the MODE it ran in and the base feature it opened to run
     # there: the scope is what a parametric design requires, and the payload names both.
     ("mesh_combine", {"target": "ME", "tools": ["MF"], "operation": "join"},
@@ -2819,7 +3754,10 @@ _MESH = [
     ("save_as_mesh", lambda c: {"body": _ctx_get(c, "msh_body", "box body"), "name": "MDEL",
                                 "quality": "low"}, "ok", None),
     ("mesh_delete", {"mesh": "MDEL"}, "ok", None),
-    ("mesh_export", {"target": "MA", "file_path": EXPORT_DIR + "/eval_mesh", "format": "stl"}, "ok", None),
+    # execute() answers true while writing nothing, so the file's own size is the read-back - and
+    # it is the same file the mesh_insert beat below re-imports.
+    ("mesh_export", {"target": "MA", "file_path": EXPORT_DIR + "/eval_mesh", "format": "stl"},
+     lambda p: (p.get("size_bytes") or 0) > 0 and p.get("file_exists") is True, None),
     ("mesh_insert", {"file_path": EXPORT_DIR + "/eval_mesh.stl", "name": "MshIns"}, "ok", None),
     # repair on a HEALTHY mesh: nothing of that kind to fix is an honest success, not a failure, and
     # the payload must say so rather than claim a repair. Then a rebuild, whose density is read back
@@ -2926,7 +3864,7 @@ _REDUCE = [
     # shows the PART, not the build scaffolding.
     ("design_delete_feature", {"feature": "Skeleton"}, "ok", None),
     # the survivor, alone and still parametric.
-    ("model_inspect", {"target": "Carrier:1"}, "ok", None),
+    ("model_inspect", {"target": "Carrier:1"}, _extent_measured, None),
     ("workspace_orient", {}, "ok", None),
     _watch("Carrier:1"),
 ]
@@ -2946,14 +3884,14 @@ def _plate(comp, sketch, z_offset, x1, y1, x2, y2, height):
     the ACTIVE component, so a root-level plane is invisible after activate."""
     plane = comp + "Floor"
     return [
-        ("model_create_component", {"name": comp, "activate": True}, "ok", None),
+        ("model_create_component", {"name": comp, "activate": True}, _made_component, None),
         ("model_construction", {"kind": "plane", "plane": "xy", "offset": z_offset,
-                                "name": plane}, "ok", None),
+                                "name": plane}, _datum_plane("xy"), None),
         ("sketch_create", {"plane": plane, "name": sketch}, "ok", None),
         ("sketch_add_geometry", {"kind": "rectangle", "x1": x1, "y1": y1, "x2": x2, "y2": y2,
                                  "sketch_name": sketch}, "ok", None),
         ("model_extrude", {"sketch_name": sketch, "profile_index": 0, "distance": height},
-         "ok", None),
+         _extruded, None),
     ]
 
 
@@ -2962,12 +3900,12 @@ def _second_plate(comp, sketch, z_offset, x1, y1, x2, y2, height):
     plane = comp + "LipPlane"
     return [
         ("model_construction", {"kind": "plane", "plane": "xy", "offset": z_offset,
-                                "name": plane}, "ok", None),
+                                "name": plane}, _datum_plane("xy"), None),
         ("sketch_create", {"plane": plane, "name": sketch}, "ok", None),
         ("sketch_add_geometry", {"kind": "rectangle", "x1": x1, "y1": y1, "x2": x2, "y2": y2,
                                  "sketch_name": sketch}, "ok", None),
         ("model_extrude", {"sketch_name": sketch, "profile_index": 0, "distance": height},
-         "ok", None),
+         _extruded, None),
     ]
 
 
@@ -2989,19 +3927,21 @@ _VISE = (
     # here has its origin at the WORLD origin (geometry is drawn in world coordinates), so the
     # ':origin' snap aligns already-aligned frames - a positional no-op, no teleport - and the
     # slider axis 'y' rides the world-aligned frame.
-    ("assembly_ground", {"occurrence": "ViseBase:1", "ground_to_parent": True}, "ok", None),
+    ("assembly_ground", {"occurrence": "ViseBase:1", "ground_to_parent": True}, _grounded, None),
     ("joint_create", {"occurrence_one": "JawL:1:origin", "occurrence_two": "ViseBase:1:origin",
-                      "joint_type": "slider", "axis": "y", "name": "SlideL"}, "ok", None),
+                      "joint_type": "slider", "axis": "y", "name": "SlideL"}, _jointed("SlideL"), None),
     ("joint_create", {"occurrence_one": "JawR:1:origin", "occurrence_two": "ViseBase:1:origin",
-                      "joint_type": "slider", "axis": "y", "name": "SlideR"}, "ok", None),
+                      "joint_type": "slider", "axis": "y", "name": "SlideR"}, _jointed("SlideR"), None),
     # the stock in the vise, the part in the stock - both as-built rigid (no motion).
-    ("joint_create_as_built", {"occurrence_one": "STOCK:1", "occurrence_two": "ViseBase:1"}, "ok", None),
-    ("joint_create_as_built", {"occurrence_one": "Carrier:1", "occurrence_two": "STOCK:1"}, "ok", None),
+    ("joint_create_as_built", {"occurrence_one": "STOCK:1", "occurrence_two": "ViseBase:1"}, _as_built, None),
+    ("joint_create_as_built", {"occurrence_one": "Carrier:1", "occurrence_two": "STOCK:1"}, _as_built, None),
     # SELF-CENTERING: couple the two sliders at ratio -1 (on real sliders the platform accepts
-    # slider-slider links - live-verified).
-    ("joint_motion_link", {"joint_one": "SlideL", "joint_two": "SlideR", "ratio": -1}, "ok", None),
+    # slider-slider links - live-verified). A negative ratio is applied as a REVERSED coupling of
+    # magnitude 1, which is what 'reversed' reads back.
+    ("joint_motion_link", {"joint_one": "SlideL", "joint_two": "SlideR", "ratio": -1},
+     _motion_linked("SlideL", "SlideR", True), None),
     # drive ONE jaw closed by its 3mm approach; the link must bring the OTHER jaw in too.
-    ("joint_drive", {"joint_name": "SlideL", "distance": 3}, "ok", None),
+    ("joint_drive", {"joint_name": "SlideL", "distance": 3}, _driven_slide(3), None),
     # GRIP VERIFIED BY MEASURE, not by trust: each jaw's gripping face touches its stock side.
     ("find_geometry", {"target": "JawL", "kind": "planar_face", "nearest_to": [0, -18, -31],
                        "max_results": 1}, "ok", _fg("jawL_grip")),
@@ -3013,7 +3953,7 @@ _VISE = (
     ("model_measure_between", lambda c: {"a": _ctx_get(c, "jawR_grip", "JawR grip face"),
                                          "b": "STOCK"},
      lambda p: p.get("distance", 99) <= 0.1, None),
-    ("assembly_inspect_interference", {}, "ok", None),
+    ("assembly_inspect_interference", {}, _interference_measured, None),
     ("view_set", {"action": "orient", "orientation": "iso-top-right"}, "ok", None),
     ("view_screenshot", {"view": "iso-top-right", "width": 500, "height": 400}, "ok", None),
 ]
@@ -3081,7 +4021,8 @@ _CAM_STORY = [
     # THE ASSOCIATIVE SEAM ON CAMERA: a Joint Origin at the real stock's center becomes the
     # setup WCS; the bound_entities read-back lands in ctx as the receipt's evidence.
     ("joint_create_origin", {"anchor": "bbox_center", "bbox_target": "STOCK:1",
-                             "orient_axis": "z", "name": "StockWCS"}, "ok", None),
+                             "orient_axis": "z", "name": "StockWCS"},
+     _joint_origin_computed("StockWCS"), None),
     ("cam_edit_setup", {"setup": "DemoSetup", "wcs": {"origin": "StockWCS"}}, "ok",
      ("wcs_bound_entities", lambda p: p["wcs_set"]["origin"]["bound_entities"])),
     # A MACHINE OF OUR OWN before the library one: built from a template into the Local library and
@@ -3244,21 +4185,28 @@ _CAM_DELIVER = [
     ("design_export", {"format": "step", "file_path": EXPORT_DIR + "/gyro_export",
                        "target": "Carrier"}, "ok", None),
     # the SPLIT path writes one file per top-level occurrence, each through its OWN options object -
-    # so the format knob has to be read back per file and published, not dropped because the export
-    # took a different branch. 'options_applied' is the value that LANDED on the first file.
+    # so the format knob is read back PER FILE: every files[] record carries its own
+    # 'options_applied' (the value that LANDED on that file, null when it did not), beside the
+    # top-level 'options_requested'. Every file must read the knob back true, not just the first.
     ("design_export", {"format": "stl", "file_path": EXPORT_DIR + "/gyro_split",
                        "split_by_component": True, "stl_binary": True},
      lambda p: p.get("exported") is True and p.get("split_by_component") is True
-     and p.get("options_applied", {}).get("stl_binary") is True, None),
-    ("doc_insert_import", {"file_path": EXPORT_DIR + "/gyro_export.step"}, "ok", None),
+     and p.get("options_requested", {}).get("stl_binary") is True
+     and bool(p.get("files")) and all((f.get("options_applied") or {}).get("stl_binary") is True
+                                      for f in p["files"]), None),
+    ("doc_insert_import", {"file_path": EXPORT_DIR + "/gyro_export.step"}, _imported, None),
 ]
 
 
-def poll_generation(rows, notes, setup, max_polls=40):
+def poll_generation(rows, notes, setup, max_polls=40, valued=None):
     """Read cam_get_status until completed (bounded). Generation free-runs in the background and a
     status read returns immediately, so real wall-clock sits between reads. An errored op, an EMPTY
     toolpath (a 'valid' op that cuts nothing - the silent version of wrong), or an exhausted budget
-    FAILs."""
+    FAILs.
+
+    Its pass reads VALUES off the payload (completed, live_states, empty_toolpaths) rather than call
+    success, so the passing row registers cam_get_status in 'valued' - the receipt's covered bucket -
+    the same way a STEPS value predicate does."""
     for i in range(max_polls):
         if i:
             time.sleep(5)
@@ -3280,6 +4228,8 @@ def poll_generation(rows, notes, setup, max_polls=40):
                 rows.append(("cam_get_status", "pass",
                              f"{states.get('valid', '?')} valid, non-empty toolpaths"))
                 notes["cam_get_status"] = STORY.get("cam_get_status", "")
+                if valued is not None:
+                    valued.add("cam_get_status")
             return
     rows.append(("cam_get_status", "FAIL", f"not complete after {max_polls} polls"))
 
@@ -3304,8 +4254,12 @@ _CAM = (
         # Computed-numbers-from-a-fresh-read is the verifiable shape: the CAM parameter store accepts
         # any expression TEXT unevaluated (a bogus name stores fine), so a CAD-param expression string
         # cannot be trusted to evaluate - a live-probed fact.
-        ("param_get", {"name": "GimbalDia"}, "ok",
-         ("gimbal_mm", lambda p: p["parameter"]["value"] * 10)),
+        # GimbalDia is created at 120 mm in ACT 1 (which always runs its narrative) and the resize
+        # act puts it back to 120 - so this reads the driver at the value the story left it.
+        # param_get publishes 'value' already in the parameter's own unit (mm here: 120, not 12 cm),
+        # so it is read as-is - a x10 would size the stock at 300 mm for a 30 mm box.
+        ("param_get", {"name": "GimbalDia"}, _param_read("GimbalDia", 120),
+         ("gimbal_mm", lambda p: p["parameter"]["value"])),
         ("cam_edit_setup", lambda c: {"setup": "Setup1", "parameters": {
             "job_stockMode": "'fixedbox'",
             "job_stockFixedX": "{0} mm".format(_ctx_get(c, "gimbal_mm", "GimbalDia in mm") / 4),
@@ -3347,10 +4301,10 @@ _CAM_FB_DELIVER = [
     ("cam_delete", lambda c: {"entity": _ctx_get(c, "adaptive_op", "the created adaptive op")},
      "ok", None),
     ("design_export", {"format": "step", "file_path": EXPORT_DIR + "/gyro_export", "target": "GyroStock"}, "ok", None),
-    ("doc_insert_import", {"file_path": EXPORT_DIR + "/gyro_export.step"}, "ok", None),
+    ("doc_insert_import", {"file_path": EXPORT_DIR + "/gyro_export.step"}, _imported, None),
 ]
 
-# â”€â”€ the ACT program â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# --- the ACT program --------------------------------------------------------------------------
 # (name, precondition, narrative, fallback). A precondition read that ERRORS routes the act to its
 # fallback (its tools are still covered, each marked "(fallback fixture)"). None precondition = an
 # opening/cameo act that always runs its narrative.
@@ -3817,23 +4771,34 @@ _STAMP_RE = re.compile(r"^Stamp: source ([0-9a-f]{64}) \| Fusion (\S+) \| verifi
 def write_verified(ledger, fusion_version, stamp_date, src_hash, path=None, notes=None,
                    act_modes=None):
     """Write the tracked receipt. Called only on a run with zero FAIL/blocked/pass* steps. 'notes'
-    maps a covered tool to its shot-list step text (the ledger doubles as the demo's shot list) - a
+    maps a driven tool to its shot-list step text (the ledger doubles as the demo's shot list) - a
     third column, empty when absent so the two-column stamp/count contract is unchanged.
     'act_modes' lists (act, narrative|fallback) - a machine-readable column, so a fallback-heavy
     run is visible without reading prose."""
     notes = notes or {}
     n_cov = sum(1 for _, s in ledger if s == "covered")
+    # 'called' and 'called (<parked reason>)' are the SAME bucket - the reason is rendering, not a
+    # third state, so the count line cannot drift from the table when a step is parked.
+    n_called = sum(1 for _, s in ledger if s == "called" or s.startswith("called ("))
     n_pend = sum(1 for _, s in ledger if s.startswith("PENDING"))
     n_ref = sum(1 for _, s in ledger if s.startswith("refusals-only"))
-    n_skip = len(ledger) - n_cov - n_pend - n_ref
+    n_skip = len(ledger) - n_cov - n_called - n_pend - n_ref
     lines = [
         "# Live tool verification (generated by tool_verify.py - do not edit)",
         "",
-        "This is a FOUR-BUCKET ledger, not a clean bill of health. It does NOT claim every tool",
+        "This is a FIVE-BUCKET ledger, not a clean bill of health. It does NOT claim every tool",
         "is verified - the count line below is authoritative, and the per-tool table says which",
         "bucket each tool is in:",
         "",
-        "- covered: a live step drove the tool this run and its effect was read back.",
+        "- covered: a live step drove the tool this run and its expectation was a VALUE PREDICATE -",
+        "  the step read keys off the ok payload (a delta, a count read back off the feature, a",
+        "  verified flag) and those values held. This is the bucket that carries evidence.",
+        "- called: every passing step for this tool was a bare 'ok' expectation - the call came back",
+        "  without an error and NOTHING in the payload was read. What that proves is whatever the",
+        "  tool's own post-write verification refuses on, and no more. Read a called row as",
+        "  'called, and did not fail' - it is the queue for the next predicate tranche. A",
+        "  'called (reason)' row is PARKED: a step deliberately held at a bare 'ok', the reason",
+        "  naming what blocks its value predicate.",
         "- refusals-only: every step that ran was a deliberate guard refusal - the guards are",
         "  proven, but NO effect was produced or read back. Not covered; the create/act path",
         "  still needs a real step or a recorded gate reason.",
@@ -3850,8 +4815,8 @@ def write_verified(ledger, fusion_version, stamp_date, src_hash, path=None, note
         "",
         "Stamp: source {0} | Fusion {1} | verified {2}".format(src_hash, fusion_version, stamp_date),
         "",
-        "{0} covered / {1} refusals-only / {2} skipped(reason) / {3} pending".format(
-            n_cov, n_ref, n_skip, n_pend),
+        "{0} covered / {1} called / {2} refusals-only / {3} skipped(reason) / {4} pending".format(
+            n_cov, n_called, n_ref, n_skip, n_pend),
     ]
     if act_modes:
         lines += ["", "| act | mode |", "|---|---|"]
@@ -3904,6 +4869,9 @@ def run_steps(steps, ctx, trace=False, sleep_s=0.1, on_result=None):
     that prints as it goes."""
     rows = []
     for tool, args, expect, save in steps:
+        # A Parked wrapper carries a ledger reason, never a judgement: the step is judged by the
+        # expectation inside it exactly as if that expectation had been passed bare.
+        expect = _unparked(expect)
         try:
             arguments = args(ctx) if callable(args) else dict(args)
         except KeyError as e:
@@ -3970,6 +4938,11 @@ def run(write_json, keep_open=False, trace=False):
     all_tools = registered_tools()
 
     ctx, rows, notes, act_modes = {}, [], {}, []
+    # the tools whose PASSING step read a value off the payload - run_steps returns exactly one row
+    # per step, in order, so a row is paired back with the expectation that judged it.
+    valued = set()
+    # tool -> the reason a Parked step held it at a bare "ok", for the ledger's status column.
+    parked = {}
     for name, pre, narrative, fallback in ACTS:
         mode, steps = "narrative", narrative
         if pre is not None and fallback is not None and not _precondition_holds(pre):
@@ -3978,25 +4951,35 @@ def run(write_json, keep_open=False, trace=False):
         print(f"\n-- {name} [{mode}] --")
         if keep_open and name == "FINALE":
             steps = [s for s in steps if s[0] != "doc_close"]
-        for tool, status, note in run_steps(steps, ctx, trace=trace):
+        for step, (tool, status, note) in zip(steps, run_steps(steps, ctx, trace=trace)):
             rows.append((tool, status, note))
+            if status in ("pass", "pass*") and predicate_kind(step[2]) == "value":
+                valued.add(tool)
+            if status in ("pass", "pass*") and isinstance(step[2], Parked):
+                parked[tool] = step[2].reason
             if status in ("pass", "pass*", "expected-refusal"):
                 story = STORY.get(tool, "")
                 notes[tool] = (story + " (fallback fixture)").strip() if mode == "fallback" else story
         if name in POLL_AFTER:
-            poll_generation(rows, notes, POLL_AFTER[name][mode])
+            poll_generation(rows, notes, POLL_AFTER[name][mode], valued=valued)
     if keep_open:
         print("\n--keep-open: the story document is left open for inspection.")
 
     # covered demands at least one step that PRODUCED something (pass/pass*): a tool whose every
     # step is an expected-refusal exercised only its guards - no effect existed to read back, so
     # calling that "covered" would let the legend lie. Those rows get their own bucket.
+    # covered vs called splits the produced-something set again: covered means a value predicate
+    # read the effect off the payload, called means every passing step was a bare "ok".
     passed = {t for t, s, _ in rows if s in ("pass", "pass*")}
     refused_only = {t for t, s, _ in rows if s == "expected-refusal"} - passed
     ledger = []
     for tool in all_tools:
-        if tool in passed:
+        if tool in valued:
             ledger.append((tool, "covered"))
+        elif tool in passed:
+            # a parked tool stays in the CALLED bucket and carries why it was held there, so the
+            # reason is on the receipt instead of in a source comment only.
+            ledger.append((tool, "called ({0})".format(parked[tool]) if tool in parked else "called"))
         elif tool in refused_only:
             ledger.append((tool, "refusals-only: every step is a guard refusal - no effect was "
                                  "produced or read back this run"))
@@ -4009,11 +4992,12 @@ def run(write_json, keep_open=False, trace=False):
     for tool, status, note in rows:
         print(f"  {status:18} {tool:28} {note}")
     n_cov = sum(1 for _, s in ledger if s == "covered")
+    n_called = sum(1 for _, s in ledger if s == "called" or s.startswith("called ("))
     n_pend = sum(1 for _, s in ledger if s.startswith("PENDING"))
     n_ref = sum(1 for _, s in ledger if s.startswith("refusals-only"))
-    n_skip = len(ledger) - n_cov - n_pend - n_ref
-    print(f"\n== ledger: {n_cov}/{len(ledger)} covered, {n_ref} refusals-only, "
-          f"{n_skip} skipped(reason), {n_pend} pending")
+    n_skip = len(ledger) - n_cov - n_called - n_pend - n_ref
+    print(f"\n== ledger: {n_cov}/{len(ledger)} covered, {n_called} called (bare ok), "
+          f"{n_ref} refusals-only, {n_skip} skipped(reason), {n_pend} pending")
     for tool, s in ledger:
         if s != "covered":
             print(f"  {tool:32} {s}")

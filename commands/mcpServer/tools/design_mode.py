@@ -131,15 +131,29 @@ def set_mode_handler(target: str = "", confirm_history_loss: bool = False) -> di
         return error(f"Could not convert to {tgt}: {e}")
 
     # Verify against the SAME reader the report/guards use, so the result can't disagree with them.
+    # Both published flags ride on THIS read-back, never on the request: the timeline is discarded by
+    # the conversion, so an assignment that did not take discarded nothing, and a mode that does not
+    # read back ('unknown') settles neither flag - it publishes null with the reason in the note.
     now = _inputs.current_design_type(design)
+    if now == "unknown":
+        converted, discarded = None, None
+        note = ("The design mode does not read back after the assignment, so the conversion is "
+                "UNCONFIRMED - 'converted' and 'history_discarded' are null. Re-read with "
+                "design_get(include=['mode']) to see what the design actually is.")
+    elif now == tgt:
+        converted, discarded = True, going_to_direct
+        note = "Re-run design_get(include=['mode']) to see the updated capability map."
+    else:
+        converted, discarded = False, False
+        note = (f"Assignment did not take - design is still {now}. Nothing was converted and no "
+                "history was discarded.")
     return ok({
-        "converted": now == tgt,
+        "converted": converted,
         "from": current,
     "to": tgt,
     "now": now,
-    "history_discarded": going_to_direct,
-    "note": ("Re-run design_get(include=['mode']) to see the updated capability map." if now == tgt
-                 else "Assignment did not take - design is still " + str(now) + "."),
+    "history_discarded": discarded,
+    "note": note,
     })
 
 
@@ -208,6 +222,8 @@ def base_feature_handler(action: str = "start", base_feature: str = "") -> dict:
                      is invisible to lookup, so it cannot be re-found by name). A name additionally
                      finishes any enumerable base feature of that name (a no-op when not editing).
                      Not mode-gated - it must close a scope while the design reads direct. Idempotent.
+                     A finishEdit that raises or returns false leaves the scope unconfirmed: its
+                     handle is KEPT for a retry and the result publishes it under unclosed_scopes.
 
     Base features exist only in a parametric design, so 'start' is mode-guarded; startEdit()'s bool
     return is checked explicitly. WRITES.
@@ -281,40 +297,74 @@ def base_feature_handler(action: str = "start", base_feature: str = "") -> dict:
     nm = (base_feature or "").strip()
 
     # 1) Close every captured open scope (LIFO). This is the path that actually un-wedges a session.
-    closed = []
-    while _OPEN_BASE_FEATURES:
-        bf = _OPEN_BASE_FEATURES.pop()
-        finished = safe(lambda b=bf: b.finishEdit())
-        closed.append({"name": safe(lambda b=bf: b.name), "finished": finished is not False})
+    #
+    # A finishEdit() that RAISES, and one that returns False, both leave the scope NOT PROVEN closed -
+    # and this object is the only handle to it (an open base feature is invisible to enumeration and
+    # lookup, so a dropped handle strands the scope open for the rest of the session). Such a handle
+    # is KEPT in _OPEN_BASE_FEATURES so a later finish can retry; only a scope whose finishEdit came
+    # back without raising and without False is published as closed.
+    pending = list(_OPEN_BASE_FEATURES)
+    _OPEN_BASE_FEATURES.clear()
+    closed, unclosed, kept = [], [], []
+    for bf in reversed(pending):
+        try:
+            finished = bf.finishEdit()
+        except Exception as e:
+            kept.append(bf)
+            unclosed.append({"name": safe(lambda b=bf: b.name), "finished": None, "error": str(e)})
+            continue
+        if finished is False:
+            kept.append(bf)
+            unclosed.append({"name": safe(lambda b=bf: b.name), "finished": False})
+        else:
+            closed.append({"name": safe(lambda b=bf: b.name), "finished": True})
+    # kept is LIFO order; restore the append order the pop-from-the-end discipline reads back.
+    _OPEN_BASE_FEATURES.extend(reversed(kept))
 
     # 2) If a name was given, ALSO finish any now-enumerable base feature by that name (a no-op on one
     # not in edit) - covers a scope opened outside this tool, now that it is closeable. Harmless.
-    named = None
+    named, named_error = None, None
     if nm:
         bf = _resolve_base_feature(design, comp, nm)
         if bf is not None:
-            safe(lambda b=bf: b.finishEdit())
-            named = safe(lambda b=bf: b.name)
+            try:
+                bf.finishEdit()
+            except Exception as e:
+                named_error = str(e)
+            else:
+                named = safe(lambda b=bf: b.name)
 
     # Report the post-state via the SAME readers the rest of the suite uses, so the result can't
     # disagree with the mode read.
     now_mode = _inputs.current_design_type(design)
-    return ok({
+    note = (f"Closed {len(closed)} captured open base-feature scope(s); design is now {now_mode}."
+            if closed else "No scope was open in this session to close.")
+    if unclosed:
+        names = ", ".join(str(u["name"] or "?") for u in unclosed)
+        note = (f"{len(unclosed)} scope(s) did NOT confirm closed ({names}) - each may still be "
+                "OPEN, which keeps the design reading direct and the timeline inaccessible. Their "
+                "handles are KEPT (an open base feature can be reached no other way), so "
+                "model_base_feature(action='finish') retries them. " + note)
+    elif not closed and now_mode == _inputs.MODE_DIRECT:
+        note += (" Note: a scope opened by a DIFFERENT session/tool cannot be seen while it is open "
+                 "(the API hides an in-edit base feature) - only the session that opened it holds "
+                 "the object needed to close it.")
+    out = {
         "action": "finish",
-        "editing": False,
+        # null, not False: with a scope left unconfirmed the edit state is unknown, and False here
+        # would be the same false all-clear the unclosed handle exists to deny.
+        "editing": None if unclosed else False,
         "closed_scopes": closed,
         "named_finished": named,
         "design_mode_now": now_mode,
         "open_scope_count": len(_OPEN_BASE_FEATURES),
-        "note": (
-            (f"Closed {len(closed)} captured open base-feature scope(s); design is now {now_mode}."
-             if closed else
-             "No scope was open in this session to close.")
-            + (" Note: a scope opened by a DIFFERENT session/tool cannot be seen while it is open "
-             "(the API hides an in-edit base feature) - only the session that opened it holds the "
-             "object needed to close it."
-               if not closed and now_mode == _inputs.MODE_DIRECT else "")),
-    })
+        "note": note,
+    }
+    if unclosed:
+        out["unclosed_scopes"] = unclosed
+    if named_error:
+        out["named_finish_error"] = named_error
+    return ok(out)
 
 
 # ── design_activate_component (WRITES - changes the active edit target) ──────
@@ -382,8 +432,10 @@ def activate_component_handler(occurrence: str = "") -> dict:
 
 def _active_occurrence(design):
     """The currently active-edit occurrence, if any (isActive == True). None if root is active."""
-    root = safe(lambda: design.rootComponent)
-    for o in _common.iter_collection(safe(lambda: root.allOccurrences) if root else None):
+    # The shared census, not a bare root.allOccurrences: that property RAISES on a design holding an
+    # unresolved external reference, and an empty walk would report "root is active" - a wrong answer,
+    # not a missing one.
+    for o in _common.all_occurrences(design):
         if safe(lambda o=o: o.isActive, False):
             return o
     return None

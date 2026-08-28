@@ -137,6 +137,32 @@ def _resolve_target(design, target):
     return None, None, None
 
 
+def _option_spec(fmt, incl_bodies, incl_comps, stl_binary, stl_unit_key):
+    """[(knob name, options property, value to ASSIGN, value to REPORT)] for every option THIS call
+    asked for - the one table both the set-and-read-back pass and the requested-values payload read,
+    so a knob can never be applied under one name and requested under another. stl_units resolves its
+    enum here: a build carrying no member for it yields a None assign value, which the caller records
+    as a refusal instead of assigning None."""
+    spec = []
+    if incl_bodies:
+        spec.append(("invisible_bodies", "isIncludingInvisibleBodies", True, True))
+    if incl_comps:
+        spec.append(("invisible_components", "isIncludingInvisibleComponents", True, True))
+    if fmt == "stl":
+        if stl_binary is not None:
+            spec.append(("stl_binary", "isBinaryFormat", bool(stl_binary), bool(stl_binary)))
+        if stl_unit_key:
+            spec.append(("stl_units", "unitType", _stl_unit_enum(stl_unit_key), stl_unit_key))
+    return spec
+
+
+def _requested_options(fmt, incl_bodies, incl_comps, stl_binary, stl_unit_key):
+    """{knob name: the value REQUESTED for it} over the same spec - what was asked for, never what
+    landed. Empty when the call asked for no option at all."""
+    return {name: report for name, _prop, _want, report in
+            _option_spec(fmt, incl_bodies, incl_comps, stl_binary, stl_unit_key)}
+
+
 def _configure_export_options(fmt, opts, incl_bodies, incl_comps, stl_binary, stl_unit_key):
     """Best-effort per-format option knobs on a freshly-created *ExportOptions object, each applied
     and read back so the payload can report what actually took. Never fails the export over a missing
@@ -144,32 +170,21 @@ def _configure_export_options(fmt, opts, incl_bodies, incl_comps, stl_binary, st
     verified separately by verify_written/_assert.DeliverablesExist) - mirrors mesh_export.py's
     _apply_refinement. Returns (applied, refused): applied maps each knob that LANDED to the value
     read back off the options object, refused lists the knob names that did not.
+
+    The VALUE that landed is recorded, not whether it stuck: a did-it-stick boolean under the knob's
+    own name reads exactly like the value it is not ('stl_binary': true on an ASCII file).
     """
     applied, refused = {}, []
-
-    def knob(name, prop, want, report):
-        """Set `prop`, read it back, and record the VALUE that landed - not whether it stuck. A
-        did-it-stick boolean under the knob's own name reads exactly like the value it is not
-        ('stl_binary': true on an ASCII file), which is the whole point of reporting it."""
-        safe(lambda: setattr(opts, prop, want))
-        if safe(lambda: getattr(opts, prop)) == want:
+    for name, prop, want, report in _option_spec(fmt, incl_bodies, incl_comps,
+                                                 stl_binary, stl_unit_key):
+        if want is None:
+            refused.append(name)          # this build carries no enum member to assign
+            continue
+        safe(lambda p=prop, w=want: setattr(opts, p, w))
+        if safe(lambda p=prop: getattr(opts, p)) == want:
             applied[name] = report
         else:
             refused.append(name)
-
-    if incl_bodies:
-        knob("invisible_bodies", "isIncludingInvisibleBodies", True, True)
-    if incl_comps:
-        knob("invisible_components", "isIncludingInvisibleComponents", True, True)
-    if fmt == "stl":
-        if stl_binary is not None:
-            knob("stl_binary", "isBinaryFormat", bool(stl_binary), bool(stl_binary))
-        if stl_unit_key:
-            val = _stl_unit_enum(stl_unit_key)
-            if val is None:
-                refused.append("stl_units")
-            else:
-                knob("stl_units", "unitType", val, stl_unit_key)
     return applied, refused
 
 
@@ -273,7 +288,9 @@ def _export_dxf(dxf_sketch, dxf_face, file_path,
 
 def _export_dxf_sketch(design, sketch_name, path,
                        want_construction, want_points, want_projected):
-    sk = _common.resolve_sketch(design, sketch_name)
+    sk, ambiguous = _common.find_sketch(design, sketch_name)
+    if ambiguous:
+        return error(ambiguous)
     if not sk:
         names = _common.all_sketch_names(design)
         return error(f"No sketch named '{sketch_name}'. Available: "
@@ -409,14 +426,21 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
         except Exception as e:
             return error(f"Could not create output directory '{out_dir}': {e}")
         occs = _export.top_level_occurrences(design)
+        if occs is None:
+            return error("The root component's occurrences did not read, so which components this "
+                         "split would write one file each for is unknown - refusing rather than "
+                         "reporting a zero-file export. Export without split_by_component to write "
+                         "the whole design as one file.")
         if not occs:
             return error("No top-level occurrences to split - the design has no component instances. "
                          "Export without split_by_component to write the whole design as one file.")
 
         # Each file gets its OWN freshly-created options object, so each one has its own knob
-        # read-back. Both are collected: dropping them would let the split path report a clean
-        # export while Fusion silently refused an option the single-file path would have disclosed.
-        applied_seen, refused_union = [], []
+        # read-back, keyed by the path it belongs to. split_by_occurrence's per-file record carries
+        # (occurrence, file_path, size_bytes) only, so what each file's options object read back is
+        # collected here and folded into that record below - the same per-file applied/requested
+        # pair mesh_export publishes, rather than one file's read-back standing in for the rest.
+        applied_by_path = {}
 
         def _write_one(occ, fpath):
             before = _export.snapshot(fpath)     # the baseline this file's landed check is proven on
@@ -428,12 +452,7 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
             size, verr = _export.verify_written(fpath, before)
             if verr:
                 return None, f"{fmt.upper()} export reported success but {verr}"
-            file_applied, file_refused = knobs
-            if file_applied not in applied_seen:
-                applied_seen.append(file_applied)
-            for name in file_refused:
-                if name not in refused_union:
-                    refused_union.append(name)
+            applied_by_path[fpath] = knobs[0]
             return size, None
 
         files, errors = _export.split_by_occurrence(occs, out_dir, ext, _write_one)
@@ -443,6 +462,16 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
             return error(f"{fmt.upper()} split export wrote NO files - all "
                          f"{len(errors)} occurrence(s) failed: "
                          + _export.failure_detail(errors))
+        requested = _requested_options(fmt, include_invisible_bodies,
+                                       include_invisible_components, stl_binary, stl_unit_key)
+        if requested:
+            for rec in files:
+                # What LANDED for THIS file: the value its own options object read back, and null for
+                # a requested knob that did not read back - never the request echoed.
+                landed = applied_by_path.get(rec.get("file_path")) or {}
+                rec["options_applied"] = {name: landed.get(name) for name in requested}
+        unlanded = [rec for rec in files if any(v is None for v in
+                                                rec.get("options_applied", {}).values())]
         out = {
             "exported": True,
             "format": fmt,
@@ -453,6 +482,8 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
             "note": f"Exported {len(files)} component(s) to separate {fmt.upper()} files. Each "
             "top-level occurrence is one file - ready to print/assemble individually.",
         }
+        if requested:
+            out["options_requested"] = requested
         if errors:
             # PARTIAL success: the shortfall is its own flag plus the per-occurrence reasons, so a
             # caller reading file_count alone cannot miss the occurrences that produced no file.
@@ -461,18 +492,17 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
             out["note"] = (f"PARTIAL: {len(files)} of {len(files) + len(errors)} top-level "
                            f"occurrence(s) exported to separate {fmt.upper()} files; "
                            f"{len(errors)} produced NO file - see 'failed'.")
-        if applied_seen and applied_seen[0]:
-            out["options_applied"] = applied_seen[0]
-            if len(applied_seen) > 1:
-                # The knobs are format-level, so files landing DIFFERENT values is the platform
-                # disagreeing with itself - reported, never averaged away.
-                out["options_applied_consistent"] = False
-                out["note"] += (" The option values read back differ between files; "
-                                "'options_applied' is the first file's read-back.")
-        if refused_union:
-            out["options_refused"] = refused_union
-            out["note"] += (" The files landed, but Fusion did not take these options on at least "
-                            "one of them: " + ", ".join(refused_union) + ".")
+        if unlanded:
+            # ONE fact was observed per null: that file's export options did not read back the value
+            # set on them. WHY, and what the writer then used instead, is not readable from here, so
+            # the sentence names neither - it points at the per-file key and the request.
+            names = sorted({name for rec in unlanded
+                            for name, v in rec["options_applied"].items() if v is None})
+            out["note"] += (f" {', '.join(names)} did NOT land for {len(unlanded)} of the "
+                            f"{len(files)} exported file(s): those files' export options did not "
+                            "read back the value that was set, so each such file's "
+                            "'options_applied' carries null for it. 'options_requested' is what was "
+                            "asked for.")
         return ok(out)
 
     # ---- single-target export ----

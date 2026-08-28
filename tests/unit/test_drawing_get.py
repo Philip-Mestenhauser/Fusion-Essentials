@@ -3,7 +3,8 @@
 What is pinned: the not-a-drawing refusal, the sheet rows (1-based export_index, is_active,
 width/height in mm), the custom-size disclosure (sheet_size null + custom_size only when the
 build's customSize property answers - an earlier build RAISED on it), the per-view rows carrying
-ONLY index + type (all the platform exposes), the view cap, and the include/scope plumbing.
+ONLY index + type, the wire's account of what else a View carries, the view cap, and the
+include/scope plumbing.
 """
 
 from types import SimpleNamespace
@@ -160,6 +161,20 @@ class TestViewsSlice:
         install(_drawing([_Sheet("S", views=_Views([base, proj]))]))
         rows = payload(dg.handler(include=["views"]))["sheets"][0]["view_rows"]
         assert rows == [{"index": 0, "type": "base"}, {"index": 1, "type": "projected"}]
+
+    def test_the_note_says_what_a_view_carries_beyond_its_type(self, install):
+        # A View also carries a POPULATED viewCurves collection whose ViewCurve items expose no
+        # readable geometry - a different fact from the member not being there, and the one a
+        # caller needs to stop hunting for a geometry read that will never answer.
+        base, _proj = self._typed()
+        install(_drawing([_Sheet("S", views=_Views([base]))]))
+        note = payload(dg.handler(include=["views"]))["note"]
+        assert "viewCurves" in note and "no readable geometry" in note
+        assert "ALL a view exposes" not in note and "ONLY its type" not in note
+
+    def test_the_description_does_not_claim_type_is_all_a_view_exposes(self):
+        assert "ALL a view exposes" not in dg.TOOL_DESCRIPTION
+        assert "viewCurves" in dg.TOOL_DESCRIPTION
 
     def test_the_view_walk_is_capped_and_says_so(self, install):
         base, _ = self._typed()

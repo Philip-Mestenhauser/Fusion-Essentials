@@ -36,6 +36,17 @@ def _find_object(timeline, want):
                                            "the feature to delete")
 
 
+def _name_hits(timeline, name):
+    """How many timeline objects carry `name` right now - through the SAME shared matcher the
+    resolver targeted the delete with, so the before/after census and the resolution can never
+    disagree about what the name means. None when the timeline itself cannot be read, which is not
+    a count of zero: the walk under _timeline_objects degrades an unreadable collection to an EMPTY
+    one, so its size is only evidence once the collection has reported a size of its own."""
+    if timeline is None or _common.counted(lambda: timeline.count) is None:
+        return None
+    return len(_inputs._match_timeline_objects(_inputs._timeline_objects(timeline), name))
+
+
 def _remove_features_named(design, name):
     """Every RemoveFeature named `name`, as (feature, component_name) - itemByName over each
     component's features.removeFeatures, across the shared design-wide component walk. A list, so
@@ -123,6 +134,10 @@ def handler(feature: str = "") -> dict:
     entity_type = safe(lambda: type(entity).__name__)
 
     err_before, _, _ = _timeline_health(design)
+    # The name census BEFORE the delete is what makes the one after it mean something: a census that
+    # already fails to see this object (an unreadable name, a timeline the walk cannot read) proves
+    # nothing by not seeing it afterwards either.
+    hits_before = _name_hits(timeline, name)
     try:
         did = entity.deleteMe()
     except Exception as e:
@@ -131,10 +146,20 @@ def handler(feature: str = "") -> dict:
         return error(f"Fusion declined to delete '{name}' (deleteMe returned false). It may be "
                      "depended on in a way that blocks deletion.")
 
+    hits_after = _name_hits(_timeline(design), name)
+    if hits_before and hits_after is not None and hits_after >= hits_before:
+        return error(f"deleteMe() reported success but the timeline still carries {hits_after} "
+                     f"object(s) named '{name}' - as many as before the delete ({hits_before}), so "
+                     "it was NOT removed. Nothing was rolled back; re-read "
+                     "design_get(include=['timeline']) to see what is actually there.")
+    # True only when the re-read PROVED one object of this name left the timeline; null when the
+    # census could not settle it. An unreadable check is never counted as absence.
+    gone = True if (hits_before and hits_after is not None) else None
+
     err_after, warn_after, _ = _timeline_health(design)
 
     out = {
-        "deleted": True,
+        "deleted": gone,
         "feature": name,
         "index": index,
         "entity_type": entity_type,
@@ -151,10 +176,18 @@ def handler(feature: str = "") -> dict:
         # published as "it did not come back".
         if removed_path and _occurrence_present(design, removed_path):
             out["occurrence_restored"] = removed_path
+    if gone is None:
+        why = ("the timeline could not be read back after the delete" if hits_after is None else
+               f"the timeline census could not see any object named '{name}' before the delete")
+        out["note"] = (f"deleteMe() reported success for '{name}', but its absence is UNVERIFIED: "
+                       f"{why}, so the re-read cannot prove the object is gone - and a check that "
+                       "could not read is not a check that found nothing. Nothing was rolled back; "
+                       "re-read design_get(include=['timeline']) to see what is actually there.")
     if len(err_after) > len(err_before):
         out["timeline_warning"] = (
-            f"The delete left the timeline with a new error ({err_after}). A downstream feature "
-            "consumed the removed geometry - the deletion stands; undo in Fusion if unintended.")
+            f"The timeline carries a new error after this call ({err_after}) that it did not carry "
+            "before. Nothing was rolled back; 'deleted' says whether the object's absence was "
+            "verified (null = it was not). Undo in Fusion if this was not wanted.")
     elif warn_after:
         out["timeline_warnings"] = warn_after
     return ok(out)

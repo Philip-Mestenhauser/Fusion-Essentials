@@ -500,6 +500,29 @@ class TestPerOccurrenceReachesEveryDepth:
         assert "aggregates_children" not in out["note"]
 
 
+def _walkable_occ(path):
+    """An occurrence the shared census can classify and descend: `component` READS (a real
+    Occurrence always answers it - one that raises is an unresolved external reference) and both
+    child collections are empty."""
+    return SimpleNamespace(
+        name=path.split("+")[-1], fullPathName=path,
+        component=SimpleNamespace(name=path.split(":")[0], occurrences=_NamedCollection([])),
+        childOccurrences=_NamedCollection([]))
+
+
+class _RaisingSubtree:
+    """A COMPONENT whose allOccurrences RAISES - one unresolved reference anywhere in the subtree
+    takes the whole flattened walk out - and which has no childOccurrences at all, as a Component
+    does not. Its own `occurrences` collection is what the census rebuilds from."""
+    def __init__(self, kids):
+        self.name = "Sub"
+        self.occurrences = _NamedCollection(list(kids))
+
+    @property
+    def allOccurrences(self):
+        raise RuntimeError("2 : InternalValidationError : occ")
+
+
 class TestSubtreeOccurrences:
     def test_a_deep_occurrence_chain_is_walked_to_the_bottom(self):
         deep = _occ_row("A:1+B:1+C:1")
@@ -518,6 +541,19 @@ class TestSubtreeOccurrences:
 
     def test_an_entity_with_neither_collection_walks_nothing(self):
         assert mi._subtree_occurrences(SimpleNamespace(), 10) == []
+
+    def test_a_COMPONENT_whose_flattened_walk_RAISES_is_rebuilt_from_its_own_occurrences(self):
+        # allOccurrences RAISES on a component whose subtree holds an unresolved external reference,
+        # and a Component carries no childOccurrences to fall back to - so a swallowed raise reported
+        # the component as holding NOTHING, and every per-occurrence measurement went missing.
+        kids = [_walkable_occ(f"P{i}:1") for i in range(3)]
+        assert [o.fullPathName for o in mi._subtree_occurrences(_RaisingSubtree(kids), 10)] == [
+            "P0:1", "P1:1", "P2:1"]
+
+    def test_the_rebuilt_subtree_still_stops_one_past_the_limit(self):
+        # the cap is the caller's truncation evidence and must survive the fallback path too.
+        kids = [_walkable_occ(f"P{i}:1") for i in range(10)]
+        assert len(mi._subtree_occurrences(_RaisingSubtree(kids), 4)) == 5
 
 
 class TestRouterErrorPropagation:

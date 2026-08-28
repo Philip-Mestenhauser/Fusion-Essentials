@@ -88,9 +88,14 @@ def handler(include_coincident_faces: bool = False) -> dict:
     # root owns directly. root.occurrences is the TOP LEVEL only: an assembly wrapped in a single
     # occurrence - the ordinary shape for an imported or grouped design - presents there as one
     # entity, leaving nothing to compare.
+    # The shared census, not a bare root.allOccurrences: that property RAISES on a design holding an
+    # unresolved external reference, and `safe(read) or []` there hands this tool an EMPTY analysis
+    # set - from which it would report a clean pass over nothing. The walk survives that raise; when
+    # even it cannot enumerate, the refusal below fires on the honest count.
+    walk = _common.occurrence_walk(design)
     occs = adsk.core.ObjectCollection.create()
     occ_list = []
-    for o in (safe(lambda: root.allOccurrences, None) or []):
+    for o in walk.occurrences:
         occs.add(o)
         occ_list.append(o)
     n_occ = len(occ_list)
@@ -146,6 +151,23 @@ def handler(include_coincident_faces: bool = False) -> dict:
         items.append(row)
 
     clear = len(items) == 0
+    # A CLEAN verdict is a claim about everything; a positive finding is not. So an incomplete
+    # analysis set refuses only when it would otherwise report a pass - one interfering pair that WAS
+    # found stays true whatever the walk missed. An unresolved reference contributes no readable
+    # geometry, so it was never in the set that produced this verdict.
+    if clear and (walk.broken or not walk.complete):
+        if walk.broken:
+            missing = (f"{len(walk.broken)} occurrence(s) hold an unresolved external reference "
+                       f"({', '.join(sorted({b['name'] for b in walk.broken}))}) - their component "
+                       "could not be read, so they carry no geometry this analysis could compare")
+        else:
+            missing = ("the design-wide occurrence walk did not complete, so the analysis set is a "
+                       "subset of the assembly")
+        return error(
+            f"Cannot certify interference-free: {missing}. {n_occ} occurrence(s) and "
+            f"{n_root_bodies} root-level solid body(ies) WERE compared and none of them interfere, "
+            "but that is not a verdict over the whole assembly - no pass was formed. "
+            "Resolve the reference (see workspace_orient health.unresolved_references) and re-run.")
     note = ("No interference - every part fits." if clear else
             f"{len(items)} interfering pair(s) - parts overlap in space. Each lists the two "
             "occurrences and their total overlap volume; fix positioning/sizing/joints. (A "
@@ -157,11 +179,20 @@ def handler(include_coincident_faces: bool = False) -> dict:
                  "flag marks an incomplete list, and the side's label carries the true instance "
                  "count). Discriminate by position (assembly_get occurrence origins) or move one "
                  "instance and re-check.")
+    if walk.broken:
+        note += (f" {len(walk.broken)} occurrence(s) with an unresolved external reference were NOT "
+                 "compared - their component could not be read, so they carry no geometry for this "
+                 "analysis; measured.unresolved_references names them.")
     return ok({
         "relation": "interference_free",
         "passed": clear,
         "measured": {"interference_count": len(items), "occurrences_checked": n_occ,
-                     "root_bodies_checked": n_root_bodies, "interferences": items},
+                     "root_bodies_checked": n_root_bodies,
+                     # WHICH walk produced the analysis set, so a caller can tell a design-wide
+                     # comparison from one rebuilt around an unreadable allOccurrences.
+                     "occurrences_walk": walk.method,
+                     "unresolved_references": walk.names(),
+                     "interferences": items},
         "tolerance_used": {"coincident_faces_included": bool(include_coincident_faces)},
         "note": note,
     })

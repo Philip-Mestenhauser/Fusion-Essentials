@@ -4,8 +4,8 @@
 from these values, so the mocks carry measured data, not hand-typed claims. Each value is
 owned by the measurement row of the same name in tests/live/VERIFIED_API_FACTS.md."""
 
-FUSION_VERSION = "2705.0.108"
-VERIFIED_ON = "2026-08-14"
+FUSION_VERSION = "2705.1.4"
+VERIFIED_ON = "2026-08-28"
 
 # '<adsk namespace>.<Class>' -> {member: int} - seeded onto the mock adsk modules.
 ENUMS = {
@@ -480,9 +480,14 @@ BEHAVIOR = {
     "collection_item_out_of_range_raises": True,
     "fillet_feature_has_edges": False,
     "find_entity_token_empty_on_miss": True,
+    "find_entity_token_multi_after_face_split": True,
     "internal_length_unit_is_cm": True,
     "item_by_name_none_on_miss": True,
+    "joint_drive_anchored_side_flips_mover": True,
+    "joint_drive_moves_occurrence_one": True,
+    "joint_drive_sign_follows_slide_direction_vector": True,
     "joint_limit_out_of_range_ignored": True,
+    "joint_revolute_value_stored_verbatim": True,
     "machining_time_args_inert": True,
     "mesh_repair_density_default": 128.0,
     "mesh_repair_feature_has_parameters": False,
@@ -604,8 +609,8 @@ SHAPES = {
         "isRootComponentActive", "isValid", "libraryPlasticRules", "librarySheetMetalRules", "materials", "modifyParameters",
         "namedViews", "objectType", "objectVisibility", "parentDocument", "physicalProperties", "pmiSettings",
         "productType", "renderManager", "rootComponent", "rootDataComponent", "selectionSets", "setGroundPlaneOffset",
-        "snapshots", "this", "thisown", "timeline", "unitsManager", "userParameters",
-        "workspaces",
+        "setLightBulbOn", "setSuppressed", "snapshots", "this", "thisown", "timeline",
+        "unitsManager", "userParameters", "workspaces",
     ],
     "Line3D": [
         "asInfiniteLine", "asNurbsCurve", "cast", "classType", "copy", "create",

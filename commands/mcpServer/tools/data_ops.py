@@ -17,7 +17,7 @@ import time
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe
+from ._common import ok, error, safe, counted
 from ._data_common import (
     _data, _find_project, _split_path, _child_folder_by_name,
     _resolve_folder_path, _ensure_folder_path, _folder_path_string,
@@ -404,6 +404,8 @@ def _unreadable_counts(file_count, sub_count):
 # ['truncated']=True), reported as "at least N" - honest, and never a hang.
 _SUBTREE_VISIT_BUDGET = 60
 
+_UNREADABLE = object()      # a dataFolders enumeration that RAISED - distinct from one that is empty
+
 
 def _subtree_counts(folder, _depth=0, _state=None):
     """(total_file_count, total_subfolder_count) for the WHOLE subtree under 'folder' (recursive,
@@ -411,13 +413,26 @@ def _subtree_counts(folder, _depth=0, _state=None):
     counts hide nested files that force=true would also wipe (and whose xrefs would be orphaned).
     Bounded by _SUBTREE_VISIT_BUDGET folder visits; on a bigger subtree the walk stops and
     _state['truncated'] is set, so the returned counts are a lower bound rather than a main-thread
-    hang."""
+    hang.
+
+    A folder whose file count or subfolder enumeration will not READ is a HOLE, never a zero: its
+    files are missing from these totals exactly like the ones past the visit budget. It is tallied in
+    _state['unreadable'] (once per folder, however many of its two reads failed) so the preview can
+    say the totals are a lower bound and how many folders it could not look inside."""
     if _state is None:
-        _state = {"visits": 0, "truncated": False}
-    files = safe(lambda: folder.dataFiles.count, 0) or 0
+        _state = {"visits": 0, "truncated": False, "unreadable": 0}
+    hole = False
+    files = counted(lambda: folder.dataFiles.count)
+    if files is None:
+        hole = True
+        files = 0           # contributes nothing it can prove; the hole is disclosed, not counted as 0
     subs = 0
     if _depth < 32:
-        for sub in safe(lambda: folder.dataFolders.asArray(), []) or []:
+        children = safe(lambda: folder.dataFolders.asArray(), _UNREADABLE)
+        if children is _UNREADABLE:
+            hole = True
+            children = []
+        for sub in children or []:
             if _state["visits"] >= _SUBTREE_VISIT_BUDGET:
                 _state["truncated"] = True
                 break
@@ -426,6 +441,8 @@ def _subtree_counts(folder, _depth=0, _state=None):
             f, s = _subtree_counts(sub, _depth + 1, _state)
             files += f
             subs += s
+    if hole:
+        _state["unreadable"] = _state.get("unreadable", 0) + 1
     return files, subs
 
 
@@ -486,28 +503,40 @@ def delete_folder_handler(folder_id: str = "", confirm_name: str = "",
     elif non_empty:
         # NON-EMPTY = a recursive subtree wipe. Compute the full blast radius (nested files too),
         # bounded by a folder-visit budget so a huge subtree can't hang the preview.
-        subtree_state = {"visits": 0, "truncated": False}
+        subtree_state = {"visits": 0, "truncated": False, "unreadable": 0}
         total_files, total_subs = _subtree_counts(folder, _state=subtree_state)
+        blind_folders = subtree_state.get("unreadable", 0)
 
         def _n(count):
-            # a budget-truncated walk under-counts; say so instead of implying an exact total.
-            return f"at least {count}" if subtree_state["truncated"] else str(count)
+            # a walk cut by the budget - or one that could not look inside a folder - under-counts;
+            # say so instead of implying an exact total.
+            return (f"at least {count}"
+                    if (subtree_state["truncated"] or blind_folders) else str(count))
+
+        def _holes():
+            # The blast radius of what those folders hold is UNKNOWN, so it is named rather than
+            # folded into the totals as nothing.
+            if not blind_folders:
+                return ""
+            return (f" {blind_folders} folder(s) in the subtree would not enumerate, so whatever "
+                    "they hold is NOT in those totals - the real blast radius is larger.")
 
         if not force:
             return error(
                 f"'{actual_name}' is not empty (immediate files: {file_count}, subfolders: "
                 f"{sub_count}). Deleting it RECURSIVELY removes its ENTIRE subtree: "
                 f"{_n(total_files)} file(s) and {_n(total_subs)} subfolder(s) total - and bypasses "
-                "the per-file reference-orphan check. Pass force=true AND recursive_confirm="
-                f"'{actual_name}' to do this, or empty it first (data_delete_file for files).")
+                f"the per-file reference-orphan check.{_holes()} Pass force=true AND "
+                f"recursive_confirm='{actual_name}' to do this, or empty it first (data_delete_file "
+                "for files).")
         # force is set but require the explicit recursive acknowledgment matching the name.
         if recursive_confirm != actual_name:
             return error(
                 f"RECURSIVE DELETE of '{actual_name}' would remove its ENTIRE subtree: "
                 f"{_n(total_files)} file(s) and {_n(total_subs)} subfolder(s) - and bypasses the "
                 "per-file reference-orphan check (nested referenced files would be orphaned). This "
-                "is irreversible. To proceed, pass recursive_confirm='" + actual_name + "' "
-                "(a deliberate second acknowledgment). Nothing was deleted.")
+                f"is irreversible.{_holes()} To proceed, pass recursive_confirm='" + actual_name
+                + "' (a deliberate second acknowledgment). Nothing was deleted.")
 
     try:
         did = folder.deleteMe()  # adsk.core: DataFolder.deleteMe() -> bool

@@ -206,3 +206,21 @@ class TestGuards:
         res = drv.handler(version_number=2)
         assert res["isError"] is True
         assert "no cloud DataFile" in error_message(res)
+
+
+class TestPendingDescribedByWhatWasRead:
+    """'pending' is set by ONE observation: the tip had not advanced by the time the pumped re-read
+    gave up. What the cloud was doing meanwhile is not readable from here, so the wire may not name
+    it as the cause."""
+
+    def test_the_description_states_the_observation_not_a_cause(self):
+        desc = drv.TOOL_DESCRIPTION
+        assert "the tip had not advanced" in desc
+        assert "cloud is still processing" not in desc
+
+    def test_the_pending_note_states_the_same_observation(self, monkeypatch):
+        df = _DF(latest=5, others=[_VerR(2)])
+        _use(monkeypatch, _Doc(df), fresh_latest=5)      # the tip never advances past latest_before
+        note = _payload(drv.handler(version_number=2))["note"]
+        assert "NOT advanced" in note
+        assert "still processing" not in note

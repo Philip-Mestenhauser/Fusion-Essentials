@@ -415,6 +415,21 @@ class TestUnreadableDistance:
         res = mr.handler(relation="clearance")
         assert res["isError"] is True and "UNKNOWN" in error_message(res)
 
+    def test_a_bool_distance_is_refused_naming_the_value(self, monkeypatch):
+        # bool is an int subclass, so `isinstance(v, (int, float))` alone lets False through as a
+        # 0 cm gap - which every caller here scores against the tolerance as CONTACT.
+        self._blind_measure(monkeypatch, False)
+        res = mr.handler(relation="touching")
+        assert res["isError"] is True
+        msg = error_message(res)
+        assert "False" in msg and "not reported as touching" in msg
+
+    def test_a_real_zero_distance_is_still_a_measurement(self, monkeypatch):
+        # the boundary the bool guard must not swallow: 0.0 IS the touching answer.
+        self._blind_measure(monkeypatch, 0.0)
+        res = mr.handler(relation="touching")
+        assert res["isError"] is False, res
+
     def test_touching_surfaces_it_as_a_normal_error_rather_than_claiming_contact(self, monkeypatch):
         # the dangerous direction: an unreadable gap must never be scored against the tolerance,
         # which would report the parts as touching

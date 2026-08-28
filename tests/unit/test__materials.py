@@ -140,6 +140,16 @@ class TestFindLibrary:
         _lib, err = mat.find_library("Anything")
         assert "none" in err
 
+    def test_an_unreadable_catalog_is_not_reported_as_no_libraries_loaded(self, libs, monkeypatch):
+        # the same hole catalog_census publishes as readable=false. "Loaded libraries: none" asserts
+        # the catalog is EMPTY - which sends a caller off to install a library already installed.
+        libs()
+        monkeypatch.setattr(mat, "app", SimpleNamespace())   # no materialLibraries at all
+        lib, err = mat.find_library("Fusion Material Library")
+        assert lib is None
+        assert "UNKNOWN" in err and "could not be read" in err
+        assert "Loaded libraries: none" not in err
+
 
 # ── entries: filter, cap, true total, and id on every row ──────────────────────────────────────────
 

@@ -36,6 +36,9 @@ class FakeOcc:
     def __init__(self, name, full_path=None):
         self.name = name
         self.fullPathName = full_path or name
+        # A real Occurrence always answers `component`; a read that RAISES is the
+        # unresolved-external-reference signal the shared occurrence census filters on.
+        self.component = type("C", (), {"name": name.split(":")[0]})()
 
 
 class FakeOccs:
@@ -469,7 +472,7 @@ class TestDxfExport:
     def test_sketch_happy_path(self, tmp_path, monkeypatch):
         _, em, _ = _install(monkeypatch)
         sk = FakeSketch(lines=2)
-        monkeypatch.setattr(dx._common, "resolve_sketch", lambda design, name: sk)
+        monkeypatch.setattr(dx._common, "find_sketch", lambda design, name: (sk, None))
         out = _payload(dx.handler(format="dxf", dxf_sketch="Profile1",
                                    file_path=str(tmp_path / "p")))
         assert out["exported"] is True
@@ -484,7 +487,7 @@ class TestDxfExport:
         # export must reproduce that by defaulting all three content flags to True.
         _, em, _ = _install(monkeypatch)
         sk = FakeSketch(lines=2)
-        monkeypatch.setattr(dx._common, "resolve_sketch", lambda design, name: sk)
+        monkeypatch.setattr(dx._common, "find_sketch", lambda design, name: (sk, None))
         _payload(dx.handler(format="dxf", dxf_sketch="Profile1", file_path=str(tmp_path / "p.dxf")))
         opts = em.calls[-1]
         assert opts.isConstructionExported is True
@@ -494,7 +497,7 @@ class TestDxfExport:
     def test_sketch_export_flags_can_be_narrowed(self, tmp_path, monkeypatch):
         _, em, _ = _install(monkeypatch)
         sk = FakeSketch(lines=2)
-        monkeypatch.setattr(dx._common, "resolve_sketch", lambda design, name: sk)
+        monkeypatch.setattr(dx._common, "find_sketch", lambda design, name: (sk, None))
         _payload(dx.handler(format="dxf", dxf_sketch="Profile1", file_path=str(tmp_path / "p.dxf"),
                             dxf_export_construction=False, dxf_export_points=False))
         opts = em.calls[-1]
@@ -508,7 +511,7 @@ class TestDxfExport:
         # handler leaves it alone entirely. There is deliberately no dxf_units input.
         _, em, _ = _install(monkeypatch)
         sk = FakeSketch(lines=1)
-        monkeypatch.setattr(dx._common, "resolve_sketch", lambda design, name: sk)
+        monkeypatch.setattr(dx._common, "find_sketch", lambda design, name: (sk, None))
         out = _payload(dx.handler(format="dxf", dxf_sketch="Profile1",
                                   file_path=str(tmp_path / "p.dxf")))
         assert out["exported"] is True
@@ -528,21 +531,33 @@ class TestDxfExport:
     def test_empty_sketch_errors(self, tmp_path, monkeypatch):
         _install(monkeypatch)
         sk = FakeSketch(lines=0, arcs=0, circles=0, points=0)
-        monkeypatch.setattr(dx._common, "resolve_sketch", lambda design, name: sk)
+        monkeypatch.setattr(dx._common, "find_sketch", lambda design, name: (sk, None))
         res = dx.handler(format="dxf", dxf_sketch="Empty", file_path=str(tmp_path / "p.dxf"))
         assert res["isError"] is True and "empty" in res["message"].lower()
 
     def test_sketch_not_found_errors(self, tmp_path, monkeypatch):
         _install(monkeypatch)
-        monkeypatch.setattr(dx._common, "resolve_sketch", lambda design, name: None)
+        monkeypatch.setattr(dx._common, "find_sketch", lambda design, name: (None, None))
         monkeypatch.setattr(dx._common, "all_sketch_names", lambda design: ["Sketch1"])
         res = dx.handler(format="dxf", dxf_sketch="Nope", file_path=str(tmp_path / "p.dxf"))
         assert res["isError"] is True and "Nope" in res["message"]
 
+    def test_a_shared_sketch_name_is_refused_with_its_owners_not_called_missing(
+            self, tmp_path, monkeypatch):
+        # Two components each holding a 'Profile1' is a REFUSAL naming both, never "No sketch
+        # named 'Profile1'" - that sentence states the opposite of what the walk read.
+        _install(monkeypatch)
+        refusal = "2 sketches are named 'Profile1' ('Profile1' in Root, 'Profile1' in Frame)"
+        monkeypatch.setattr(dx._common, "find_sketch", lambda design, name: (None, refusal))
+        res = dx.handler(format="dxf", dxf_sketch="Profile1", file_path=str(tmp_path / "p.dxf"))
+        assert res["isError"] is True
+        assert res["message"] == refusal
+        assert "No sketch named" not in res["message"]
+
     def test_execute_false_is_reported_as_failure(self, tmp_path, monkeypatch):
         _, em, _ = _install(monkeypatch)
         sk = FakeSketch(lines=1)
-        monkeypatch.setattr(dx._common, "resolve_sketch", lambda design, name: sk)
+        monkeypatch.setattr(dx._common, "find_sketch", lambda design, name: (sk, None))
         em.execute = lambda opts: False
         res = dx.handler(format="dxf", dxf_sketch="Profile1", file_path=str(tmp_path / "p.dxf"))
         assert res["isError"] is True
@@ -577,7 +592,7 @@ class TestDxfExport:
     def test_extension_auto_appended(self, tmp_path, monkeypatch):
         _install(monkeypatch)
         sk = FakeSketch(lines=1)
-        monkeypatch.setattr(dx._common, "resolve_sketch", lambda design, name: sk)
+        monkeypatch.setattr(dx._common, "find_sketch", lambda design, name: (sk, None))
         out = _payload(dx.handler(format="dxf", dxf_sketch="Profile1",
                                    file_path=str(tmp_path / "noext")))
         assert out["file_path"].lower().endswith(".dxf")
@@ -589,8 +604,8 @@ class TestDxfWriterGuards:
 
     def _sketch_export(self, tmp_path, monkeypatch, sketch=None):
         design, em, _ = _install(monkeypatch)
-        monkeypatch.setattr(dx._common, "resolve_sketch",
-                            lambda d, name: sketch or FakeSketch(lines=1))
+        monkeypatch.setattr(dx._common, "find_sketch",
+                            lambda d, name: (sketch or FakeSketch(lines=1), None))
         return design, em
 
     def test_a_design_with_no_export_manager_is_named(self, tmp_path, monkeypatch):
@@ -663,21 +678,25 @@ class TestSplitByComponent:
         geoms = [c["geom"].name for c in em.calls]
         assert set(geoms) == {"Body:1", "Cab:1", "Wheels:1"}
 
-    def test_split_publishes_the_option_knobs_the_files_landed(self, tmp_path, monkeypatch):
-        # The split path configures its own options object PER FILE. Dropping the read-back would
-        # let it report a clean export while the caller's opt-in option was never applied - the
-        # single-file path discloses exactly this, and the split path must not be quieter.
+    def test_split_publishes_the_option_knobs_PER_FILE(self, tmp_path, monkeypatch):
+        # The split path configures its own options object PER FILE, so the read-back is per file
+        # too - the same applied/requested shape mesh_export publishes. One file's read-back
+        # standing in for the rest would report a knob as landed on a file that never read it back.
         occs = [FakeOcc("Body:1"), FakeOcc("Cab:1")]
         _, _em, _ = _install(monkeypatch, occurrences=occs)
         out = _payload(dx.handler(format="stl", file_path=str(tmp_path), split_by_component=True,
                                   stl_binary=True))
         assert out["file_count"] == 2
-        assert out["options_applied"]["stl_binary"] is True
-        assert "options_refused" not in out
+        assert out["options_requested"] == {"stl_binary": True}
+        assert [f["options_applied"] for f in out["files"]] == [{"stl_binary": True},
+                                                                {"stl_binary": True}]
+        # the first-file-representative key and its consistency flag are gone with the shape
+        assert "options_applied" not in out and "options_applied_consistent" not in out
 
-    def test_split_names_an_option_fusion_refused_on_any_file(self, tmp_path, monkeypatch):
-        # One refusal anywhere in the batch is a refusal the caller must see - an export that
-        # silently wrote ASCII while 'stl_binary' was asked for is the false success this catches.
+    def test_a_knob_that_did_not_read_back_is_null_on_that_files_record(self, tmp_path, monkeypatch):
+        # An option Fusion ignored must show as null on the FILE it did not land on - an export
+        # that silently wrote ASCII while 'stl_binary' was asked for is the false success this
+        # catches, and 'options_requested' keeps the request readable beside it.
         occs = [FakeOcc("Body:1"), FakeOcc("Cab:1")]
         _, em, _ = _install(monkeypatch, occurrences=occs)
 
@@ -692,9 +711,50 @@ class TestSplitByComponent:
         em.options_class = Stubborn
         out = _payload(dx.handler(format="stl", file_path=str(tmp_path), split_by_component=True,
                                   stl_binary=False))
-        assert out["options_refused"] == ["stl_binary"]
-        assert "did not take these options" in out["note"]
-        assert out.get("options_applied", {}).get("stl_binary") is None
+        assert out["options_requested"] == {"stl_binary": False}
+        assert [f["options_applied"] for f in out["files"]] == [{"stl_binary": None},
+                                                                {"stl_binary": None}]
+        assert "stl_binary did NOT land for 2 of the 2 exported file(s)" in out["note"]
+        assert "options_refused" not in out
+
+    def test_one_file_refusing_leaves_the_other_files_read_back_intact(self, tmp_path, monkeypatch):
+        # The per-file shape exists for exactly this case: a knob that lands on one file and not on
+        # another. A single representative value would report ONE of the two states for both.
+        occs = [FakeOcc("Body:1"), FakeOcc("Cab:1")]
+        _, em, _ = _install(monkeypatch, occurrences=occs)
+
+        class Stubborn(FakeOptions):
+            @property
+            def isBinaryFormat(self):
+                return False
+            @isBinaryFormat.setter
+            def isBinaryFormat(self, value):
+                pass
+
+        made = {"n": 0}
+
+        def _opt(kind, path, geom=None):
+            made["n"] += 1
+            cls = Stubborn if made["n"] == 2 else FakeOptions   # the SECOND file ignores the set
+            rec = cls(kind, path, geom)
+            em.calls.append(rec)
+            return rec
+
+        monkeypatch.setattr(em, "_opt", _opt)
+        out = _payload(dx.handler(format="stl", file_path=str(tmp_path),
+                                  split_by_component=True, stl_binary=True))
+        assert [f["options_applied"] for f in out["files"]] == [{"stl_binary": True},
+                                                                {"stl_binary": None}]
+        assert "stl_binary did NOT land for 1 of the 2 exported file(s)" in out["note"]
+
+    def test_no_option_requested_publishes_neither_key(self, tmp_path, monkeypatch):
+        # Nothing was asked for, so there is nothing to state - an empty applied/requested pair on
+        # every file record would be noise a caller has to read past.
+        _install(monkeypatch, occurrences=[FakeOcc("Body:1")])
+        out = _payload(dx.handler(format="stl", file_path=str(tmp_path), split_by_component=True))
+        assert "options_requested" not in out
+        assert "options_applied" not in out["files"][0]
+        assert "did NOT land" not in out["note"]
 
     def test_filenames_sanitized_and_extensioned(self, tmp_path, monkeypatch):
         _, _, _ = _install(monkeypatch, occurrences=[FakeOcc("Loader Arm:1")])
@@ -716,6 +776,27 @@ class TestSplitByComponent:
         _install(monkeypatch, occurrences=[])
         res = dx.handler(format="stl", file_path=str(tmp_path), split_by_component=True)
         assert res["isError"] is True and "no top-level occurrences" in res["message"].lower()
+
+    def test_an_unreadable_occurrence_collection_refuses_as_unread_not_as_empty(
+            self, tmp_path, monkeypatch):
+        # The census never happened, so the design's components are unknown. Reporting "no
+        # top-level occurrences" would state a fact about the design that was never read, and
+        # writing zero files would look like a clean export of nothing.
+        _design, _em, comp = _install(monkeypatch, occurrences=[FakeOcc("Body:1")])
+
+        class _Blind:
+            @property
+            def count(self):
+                raise RuntimeError("boom")
+            def item(self, i):
+                raise RuntimeError("boom")
+
+        comp.occurrences = _Blind()
+        res = dx.handler(format="stl", file_path=str(tmp_path), split_by_component=True)
+        assert res["isError"] is True
+        assert "did not read" in res["message"]
+        assert "no top-level occurrences" not in res["message"].lower()
+        assert list(tmp_path.iterdir()) == []               # and nothing was written
 
     def test_partial_failure_records_failed_list(self, tmp_path, monkeypatch):
         # one occurrence exports, one fails -> exported=true, file_count counts only the good one,

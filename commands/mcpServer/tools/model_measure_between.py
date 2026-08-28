@@ -64,10 +64,14 @@ def handler(a: str = "", b: str = "", mode: str = "distance", units: str = "mm")
         # No numeric fallback: 0 is a MEANING in this payload ("touching/overlapping"), so an
         # unreadable distance published as 0.0 is a false measurement, not a missing one.
         dist_cm = safe(lambda: mr.value)
-        if not isinstance(dist_cm, (int, float)):
-            return error("measureMinimumDistance returned a result whose value could not be read, "
-                         "so the distance is UNKNOWN - reporting it as 0 would read as touching. "
-                         "Re-run find_geometry for fresh handles and retry.")
+        # bool is excluded ahead of the number test - it is an int subclass, so True would pass as
+        # the distance 1 cm and False as 0 cm, which reads as TOUCHING. The same deliberate
+        # exclusion _common.measured/counted make; the refusal names what was read instead.
+        if isinstance(dist_cm, bool) or not isinstance(dist_cm, (int, float)):
+            return error("measureMinimumDistance returned a result whose value read as "
+                         f"{dist_cm!r}, not a number, so the distance is UNKNOWN - reporting it as "
+                         "0 would read as touching. Re-run find_geometry for fresh handles and "
+                         "retry.")
         pa = safe(lambda: mr.positionOne)
         pb = safe(lambda: mr.positionTwo)
         out = {
@@ -110,9 +114,11 @@ def handler(a: str = "", b: str = "", mode: str = "distance", units: str = "mm")
         return error("measureAngle returned nothing for these two targets.")
     # 0 radians is "parallel" to a caller, so an unreadable angle must not be published as 0.
     rad = safe(lambda: mr.value)
-    if not isinstance(rad, (int, float)):
-        return error("measureAngle returned a result whose value could not be read, so the angle is "
-                     "UNKNOWN - reporting it as 0 would read as parallel.")
+    # bool excluded ahead of the number test, as for the distance above: False is 0 radians, which
+    # this payload publishes as 0 deg - "parallel".
+    if isinstance(rad, bool) or not isinstance(rad, (int, float)):
+        return error(f"measureAngle returned a result whose value read as {rad!r}, not a number, so "
+                     "the angle is UNKNOWN - reporting it as 0 would read as parallel.")
     return ok({
         "mode": "angle",
         "a": f"{kind_a} '{safe(lambda: ent_a.name) or a}'",

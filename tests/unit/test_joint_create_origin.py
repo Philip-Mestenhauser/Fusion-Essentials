@@ -72,10 +72,19 @@ class TestGeometryFromArgsValidation:
 
     def test_sketch_line_missing_sketch_errors(self, monkeypatch):
         # sketch_name given, but no such sketch exists -> clear "no sketch named" error.
-        monkeypatch.setattr(jo, "_find_sketch", lambda design, name: None)
+        monkeypatch.setattr(jo, "find_sketch", lambda design, name: (None, None))
         g, desc, err = _call(anchor="sketch_line", sketch_name="Ghost")
         assert g is None
         assert "Ghost" in err
+
+    def test_a_shared_sketch_name_is_refused_with_its_owners(self, monkeypatch):
+        # Several sketches carrying the name is a REFUSAL naming each owning component - calling
+        # that "No sketch named 'Shared'" would state the opposite of what the walk read.
+        refusal = "2 sketches are named 'Shared' ('Shared' in Root, 'Shared' in Frame)"
+        monkeypatch.setattr(jo, "find_sketch", lambda design, name: (None, refusal))
+        g, desc, err = _call(anchor="sketch_line", sketch_name="Shared")
+        assert g is None
+        assert err == refusal and "No sketch named" not in err
 
     def test_sketch_line_index_out_of_range_errors(self, monkeypatch):
         # A sketch exists with 1 line; asking for index 5 must be rejected.
@@ -84,7 +93,7 @@ class TestGeometryFromArgsValidation:
                 sketchLines=SimpleNamespace(count=1)
             )
         )
-        monkeypatch.setattr(jo, "_find_sketch", lambda design, name: one_line)
+        monkeypatch.setattr(jo, "find_sketch", lambda design, name: (one_line, None))
         g, desc, err = _call(anchor="sketch_line", sketch_name="S", entity_index=5)
         assert g is None
         assert "out of range" in err
@@ -648,8 +657,12 @@ class TestBboxCenterHandler:
 
 class TestBboxCenterAmbiguousTarget:
     def test_ambiguous_name_is_refused(self, monkeypatch):
-        occ1 = SimpleNamespace(fullPathName="root+Bolt:1", name="Bolt:1")
-        occ2 = SimpleNamespace(fullPathName="root+Bolt:2", name="Bolt:2")
+        # component: a real Occurrence always answers it, and the shared census reads it to tell an
+        # ordinary occurrence from one whose external reference will not resolve.
+        occ1 = SimpleNamespace(fullPathName="root+Bolt:1", name="Bolt:1",
+                               component=SimpleNamespace(name="Bolt"))
+        occ2 = SimpleNamespace(fullPathName="root+Bolt:2", name="Bolt:2",
+                               component=SimpleNamespace(name="Bolt"))
         root = SimpleNamespace(allOccurrences=[occ1, occ2])
         design = SimpleNamespace(rootComponent=root, findEntityByToken=lambda t: [])
         monkeypatch.setattr(jo._common, "design", lambda: design)
@@ -778,12 +791,41 @@ class TestLandingComponent:
         assert res["isError"] is True and "could not be read" in res["message"]
         assert sub.jointOrigins.count == 0
 
+
+class TestActiveComponentDisclosure:
+    # Omitting 'component' lands the origin on the ROOT even while another component is the active
+    # edit target - unlike sketch/extrude, which build into the active one. The divergence is
+    # disclosed in the payload, naming both components.
+
+    def test_active_sub_component_landing_on_root_is_disclosed(self, monkeypatch):
+        design, sub, _ = _install_with_sub(monkeypatch)
+        design.activeComponent = sub                # the edit target is the sub-component
+        out = _payload(jo.handler(anchor="coordinates", target="origin"))
+        assert design.rootComponent.jointOrigins.count == 1 and sub.jointOrigins.count == 0
+        assert out["active_component"] == "Sub"
+        assert "'Comp1'" in out["note"] and "'Sub' is the active edit target" in out["note"]
+
+    def test_no_disclosure_when_the_root_is_the_active_component(self, monkeypatch):
+        design, sub, _ = _install_with_sub(monkeypatch)
+        design.activeComponent = design.rootComponent
+        out = _payload(jo.handler(anchor="coordinates", target="origin"))
+        assert "active_component" not in out
+        assert "active edit target" not in out["note"]
+
+    def test_no_disclosure_when_the_origin_landed_where_asked(self, monkeypatch):
+        # 'component' was given, so there is no divergence to report even with a sub active.
+        design, sub, _ = _install_with_sub(monkeypatch)
+        design.activeComponent = sub
+        out = _payload(jo.handler(anchor="coordinates", target="origin", component="Sub:1"))
+        assert "active_component" not in out
+        assert "active edit target" not in out["note"]
+
     def test_an_entity_anchor_is_not_gated_by_the_placement_transform(self, monkeypatch):
         # the guard covers coordinates the tool computes; a sketch/geometry anchor carries none, so a
         # moved component still gets its joint origin (the platform decides a cross-component anchor).
         _, sub, _ = _install_with_sub(monkeypatch, transform=_moved(5.0))
-        monkeypatch.setattr(jo, "_find_sketch", lambda design, name: SimpleNamespace(
-            sketchPoints=SimpleNamespace(count=1, item=lambda i: "PT")))
+        monkeypatch.setattr(jo, "find_sketch", lambda design, name: (SimpleNamespace(
+            sketchPoints=SimpleNamespace(count=1, item=lambda i: "PT")), None))
         out = _payload(jo.handler(anchor="sketch_point", sketch_name="S", entity_index=0,
                                   component="Sub:1"))
         assert sub.jointOrigins.count == 1

@@ -152,6 +152,9 @@ class FakeOcc:
         self.transform_applied = None
         # the occurrence's joints collection (what the move-guard inspects)
         self.joints = _FakeJointColl(joints)
+        # A real Occurrence always answers `component`; a read that RAISES is the
+        # unresolved-external-reference signal the shared occurrence census filters on.
+        self.component = type("C", (), {"name": name.split(":")[0]})()
 
     # transform is settable
     def __setattr__(self, k, v):

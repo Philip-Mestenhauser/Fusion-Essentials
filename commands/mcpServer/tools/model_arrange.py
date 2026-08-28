@@ -16,7 +16,7 @@ import adsk.fusion
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import error, ok, safe, scale, resolve_sketch
+from ._common import error, ok, safe, scale, find_sketch
 from . import _common
 from . import _inputs
 from . import _assert
@@ -33,12 +33,6 @@ _SOLVERS = {
 
 _SOLVER = _inputs.Choice("solver", list(_SOLVERS), default="true_shape",
                         description="true_shape nests actual outlines (tightest); rectangular nests bounding boxes.")
-
-
-def _find_sketch(design, name):
-    # Whole-design resolve (active component first) so the boundary sketch can live in an activated
-    # sub-component, not only the root component.
-    return resolve_sketch(design, (name or "").strip())
 
 
 # Occurrences to arrange, via the shared OccurrenceRefList kind (fullPathName-preferring,
@@ -61,7 +55,12 @@ def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_sha
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")
 
-    sketch = _find_sketch(design, boundary_sketch)
+    # Whole-design resolve (active component first) so the boundary sketch can live in an activated
+    # sub-component, not only the root component; a name SEVERAL sketches carry is refused naming
+    # each owning component rather than reported as missing.
+    sketch, ambiguous = find_sketch(design, (boundary_sketch or "").strip())
+    if ambiguous:
+        return error(ambiguous)
     if not sketch:
         return error(f"No sketch named '{boundary_sketch}' for the boundary. Use sketch_get.")
     profiles = safe(lambda: sketch.profiles)

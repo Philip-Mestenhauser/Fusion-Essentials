@@ -876,8 +876,9 @@ def close_document_handler(name: str = "", save_changes: bool = False,
         detail = "; ".join(f"{nm}: {msg}" for e in errors for nm, msg in e.items())
         return error(f"Close failed: {detail}. No document was closed.")
 
-    note = ("Closed " + ("with save" if save_changes else "discarding unsaved changes") +
-            ". Fusion keeps at least one document open.")
+    note = (("Closed " + ("with save" if save_changes else "discarding unsaved changes") +
+             ". Fusion keeps at least one document open.") if closed else
+            "No document was closed.")
     if skipped_invalid:
         note += f" Skipped {skipped_invalid} already-invalidated reference doc(s)."
     if errors:
@@ -893,11 +894,23 @@ def close_document_handler(name: str = "", save_changes: bool = False,
     # The write guard stamps acted_on from the POST-call ACTIVE document, which a close never leaves
     # pointing at the document it closed (measured live: closing an INACTIVE document names the
     # untouched active one; closing the ACTIVE document names the fallback Fusion brought forward).
-    # This handler holds the true identity, so it publishes acted_on itself for a ONE-document close
-    # and the guard's fill-if-absent stamp stands aside. A multi-document close_all acted on several
-    # documents, which the single-identity acted_on shape cannot state - 'closed' lists them there.
+    # This handler holds the true identity, so it publishes acted_on itself for a ONE-document close.
+    # A close that took SEVERAL documents - or NONE - publishes an explicit null: the single-identity
+    # acted_on shape cannot name several, and no document at all was acted on. The guard's stamp is
+    # fill-if-absent, so only an explicit None keeps it from filling in a document this call did not
+    # close.
     if len(closed_identities) == 1:
         payload["acted_on"] = closed_identities[0]
+    elif len(closed_identities) > 1:
+        payload["acted_on"] = None
+        payload["note"] += (f" acted_on is null: {len(closed_identities)} documents were closed and "
+                            "one identity cannot name them - 'closed' (with 'closed_count') is the "
+                            "record of which documents closed.")
+    else:
+        payload["acted_on"] = None
+        payload["note"] += (f" acted_on is null: none of the {len(targets)} target(s) closed, so no "
+                            "document was acted on - 'skipped_invalid' counts the targets skipped "
+                            "as already invalidated.")
     return ok(payload)
 
 

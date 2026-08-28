@@ -458,6 +458,28 @@ class TestGuards:
         res = sd.handler(sketch_name="Nope", target="line:0")
         assert res["isError"] is True and "Nope" in res["message"]
 
+    def test_a_sketch_name_two_components_share_is_refused_with_nothing_deleted(self):
+        # A delete cannot pick between two components' 'S' sketches: taking either one destroys
+        # geometry the caller never named. Both owners are named so the caller can rename one.
+        mine, theirs = _sketch(), _sketch()
+        design = _install(mine)
+        design.rootComponent.name = "Root"
+        other = FakeRoot([theirs])
+        other.name = "Frame"
+
+        class _Comps:
+            _c = [design.rootComponent, other]
+            count = 2
+            def item(self, i):
+                return _Comps._c[i]
+
+        design.allComponents = _Comps()
+        res = sd.handler(sketch_name="S", target="line:0")
+        assert res["isError"] is True
+        assert "2 sketches" in res["message"] and "Root" in res["message"] and "Frame" in res["message"]
+        assert mine.sketchCurves.sketchLines.count == 2       # nothing was deleted
+        assert theirs.sketchCurves.sketchLines.count == 2
+
     def test_malformed_target(self):
         s = _sketch(); _install(s)
         res = sd.handler(sketch_name="S", target="line")     # no ':<index>'

@@ -9,6 +9,8 @@ classes capture what was passed in.
 import json
 import types
 
+import pytest
+
 from conftest import load_tool
 
 sc = load_tool("surface_create")
@@ -489,6 +491,48 @@ class TestSurfaceExtrude:
         assert out["created"] is True
         assert owner_ef.last_input is not None      # the OWNER built the surface extrude
         assert active_ef.last_input is None         # NOT the active component (the bSet trap)
+
+
+class TestSketchNameResolution:
+    """The name-or-most-recent sketch branch, which surface_extrude and surface_revolve each carry
+    (both taken only when 'curves' is empty)."""
+
+    @staticmethod
+    def _call(which, sketches, **kwargs):
+        if which == "extrude":
+            ef = FakeExtrudeFeatures(result_bodies=[FakeBody("Surf1", is_solid=False)])
+            _install(FakeComp(FakeFeatures(ef=ef), sketches=sketches))
+            return sc.extrude_handler(distance=5, **kwargs)
+        rf = FakeRevolveFeatures(result_bodies=[FakeBody("Surf1", is_solid=False)])
+        _install(FakeComp(FakeFeatures(rf=rf), sketches=sketches))
+        return sc.revolve_handler(angle_deg=180, **kwargs)
+
+    @pytest.mark.parametrize("which", ["extrude", "revolve"])
+    def test_a_padded_sketch_name_is_reported_stripped(self, which):
+        # the walk searches the STRIPPED name, so the miss must name that one - quoting the padded
+        # input sends the caller looking for a sketch whose name carries the spaces it typed.
+        res = self._call(which, [FakeSketch("S")], sketch_name="  Ghost  ")
+        assert res["isError"] is True
+        assert "No sketch named 'Ghost'" in res["message"]
+        assert "'  Ghost  '" not in res["message"]
+
+    @pytest.mark.parametrize("which,verb", [("extrude", "extrude"), ("revolve", "revolve")])
+    def test_a_blank_sketch_name_with_no_sketch_never_quotes_none(self, which, verb):
+        # a blank name leaves the requested name None, so the named-miss wording would print
+        # "No sketch named 'None'" - a sketch nobody asked for. The blank branch words its own.
+        res = self._call(which, [], sketch_name="")
+        assert res["isError"] is True
+        assert res["message"] == (f"No sketch or 'curves' to {verb}. Draw an OPEN chain first, or "
+                                  "pass curves.")
+        assert "'None'" not in res["message"]
+
+    @pytest.mark.parametrize("which", ["extrude", "revolve"])
+    def test_a_whitespace_only_sketch_name_uses_the_most_recent_sketch(self, which):
+        # ' ' strips to blank, which is the most-recent-sketch request - not a search for a sketch
+        # named with a space.
+        out = _payload(self._call(which, [FakeSketch("First"), FakeSketch("Last")],
+                                  sketch_name=" "))
+        assert out["source"] == "Last"
 
 
 class TestEmptyResultSetIsAnError:

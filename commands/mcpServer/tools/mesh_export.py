@@ -135,6 +135,17 @@ def _apply_refinement(opts, refine_key):
     return refine_key if safe(lambda: opts.meshRefinement) == val else None
 
 
+def _refinement_not_landed(ref, subject):
+    """The ONE sentence both export paths append when _apply_refinement's read-back did not equal the
+    value assigned. ONE fact was observed: the read-back disagreed. WHY it did not is not readable
+    from here, so the sentence names no cause - and what density the writer then used is equally
+    unobserved. 'subject' names what it happened to ('this file', '2 of the 3 exported file(s)') and
+    is the only part that differs between the single-target and the split path."""
+    return (f"Refinement '{ref}' did NOT land for {subject}: the export options did not read back "
+            "the value that was set, so 'refinement' is null and the density it was written at is "
+            "unconfirmed. 'refinement_requested' is what was asked for.")
+
+
 def _write_mesh_file(em, factory_name, fmt, geom, path, ref):
     """Create options, apply refinement, execute, and VERIFY a non-empty file THIS call wrote landed
     (execute() can return True while writing nothing, and a stale file from an earlier export can sit
@@ -195,12 +206,24 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
         except Exception as e:
             return error(f"Could not create output directory '{out_dir}': {e}")
         occs = _export.top_level_occurrences(design)
+        if occs is None:
+            return error("The root component's occurrences did not read, so which components this "
+                         "split would write one file each for is unknown - refusing rather than "
+                         "reporting a zero-file export. Export without split_by_component to write "
+                         "the whole design as one file.")
         if not occs:
             return error("No top-level occurrences to split - the design has no component instances. "
                          "Export without split_by_component to write the whole design as one file.")
 
+        # The applied refinement per output path. split_by_occurrence's per-file record carries
+        # (occurrence, file_path, size_bytes) only, so the value _write_mesh_file read back is
+        # collected here and folded into each record below - the same applied/requested pair the
+        # single-target path publishes, rather than dropped.
+        applied_by_path = {}
+
         def _write_one(occ, fpath):
-            size, _, eerr = _write_mesh_file(em, factory_name, fmt, occ, fpath, ref)
+            size, applied, eerr = _write_mesh_file(em, factory_name, fmt, occ, fpath, ref)
+            applied_by_path[fpath] = applied
             return size, eerr
 
         files, errors = _export.split_by_occurrence(occs, out_dir, ext, _write_one)
@@ -211,6 +234,10 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
             return error(f"{fmt.upper()} split export wrote NO files - all "
                          f"{len(errors)} occurrence(s) failed: "
                          + _export.failure_detail(errors))
+        for rec in files:
+            # what LANDED for THIS file; null when the set did not take (never the request echoed).
+            rec["refinement"] = applied_by_path.get(rec.get("file_path"))
+        unlanded = [rec for rec in files if rec["refinement"] is None]
         note = (f"Exported {len(files)} component(s) to separate {fmt.upper()} mesh files - each "
                 "top-level occurrence is one printable file.")
         out = {
@@ -218,6 +245,7 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
             "format": fmt,
             "split_by_component": True,
             "directory": out_dir,
+            "refinement_requested": ref,
             "file_count": len(files),
             "files": files,
         }
@@ -229,6 +257,9 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
             note = (f"PARTIAL: {len(files)} of {len(files) + len(errors)} top-level occurrence(s) "
                     f"exported to separate {fmt.upper()} mesh files; {len(errors)} produced NO file "
                     "- see 'failed'.")
+        if unlanded:
+            note += " " + _refinement_not_landed(
+                ref, f"{len(unlanded)} of the {len(files)} exported file(s)")
         out["note"] = note
         return ok(out)
 
@@ -299,13 +330,9 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
             "into the cloud, upload it with data_upload_file; to re-import it as a mesh body, use "
             "mesh_insert.")
     if applied_refinement is None:
-        # ONE fact was observed: _apply_refinement's read-back did not equal the value assigned. WHY it
-        # did not is not readable from here, so neither the comment nor the note names a cause - and
-        # what density the writer then used is equally unobserved. The request is NOT the effect:
-        # 'refinement' is null and only the request is echoed, under its own key.
-        note = (f"Refinement '{ref}' did NOT land: the export options did not read back the value "
-                "that was set, so 'refinement' is null and the density this file was written at is "
-                "unconfirmed. 'refinement_requested' is what was asked for. " + note)
+        # The request is NOT the effect: 'refinement' is null and only the request is echoed, under
+        # its own key. The sentence is the shared one the split path also appends.
+        note = _refinement_not_landed(ref, "this file") + " " + note
     if redirected_from_mesh:
         note = ("Target was a MESH body, which ExportManager cannot write to a file on its own (it "
             "returns success but writes nothing). Exported its owning component instead - the "

@@ -23,7 +23,7 @@ _LINT_TESTS = frozenset({
     "test_assert_strength", "test_axis_vectors_shared", "test_banned_vocabulary",
     "test_bespoke_fake_ratchet", "test_dead_code",
     "test_doc_citations", "test_docstring_restatement", "test_enum_families_measured",
-    "test_evergreen_no_baggage", "test_fake_shapes_exist",
+    "test_evergreen_no_baggage", "test_fake_shapes_exist", "test_frame_disclosure",
     "test_generated_docs_current", "test_generators", "test_helper_duplication", "test_layout",
     "test_bool_returns_checked",
     "test_material_effect_verified",

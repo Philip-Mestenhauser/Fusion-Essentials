@@ -28,6 +28,7 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import (ok, error, safe, iter_collection, measured, design as _active_design,
                       design_wide_counts)
+from . import _common
 from ._cam_common import clamp_rows
 from . import _geom
 from . import _inputs
@@ -335,8 +336,13 @@ def _pickable_counts():
     if d is None:
         return None
     bodies, sketches = design_wide_counts(d)
-    occs = safe(lambda: d.rootComponent.allOccurrences.count, 0) or 0
-    return bodies, sketches, occs
+    # The shared census, not a bare root.allOccurrences.count: that property RAISES on a design
+    # holding an unresolved external reference, and a coerced 0 there would refuse the pick with
+    # "nothing to select" on an assembly full of clickable components. An unreadable census counts
+    # as 0 pickables only alongside 0 bodies and 0 sketches, which the caller already treats as
+    # "nothing found" rather than a claim about the design.
+    walk = _common.occurrence_walk(d)
+    return bodies, sketches, (walk.total or 0)
 
 
 def _on_selection_changed(args, box, done):
@@ -490,7 +496,20 @@ def _begin_request(kind, clear_current, wait_seconds, expect_document):
     box, done = {}, threading.Event()
     handler = _PickHandler(box, done)
     box["handler"] = handler        # the handler each detach is keyed to (see _detach_pick_handler)
-    ui.activeSelectionChanged.add(handler)
+    # Measured on Fusion 2705.1.4: activeSelectionChanged.add() answered True for a fresh
+    # registration AND for a second add of the same handler, so True is what a working registration
+    # looks like and a False is worth acting on rather than discarding. The wait below is woken only
+    # by that handler, so a hold started on a false answer could only run out the clock.
+    # The matching remove() answered True for a handler that was never registered, so ITS return
+    # says nothing about what was removed - _detach_pick_handler never gates on it.
+    if ui.activeSelectionChanged.add(handler) is False:
+        _detach_pick_handler(handler)   # best-effort: leave nothing registered behind the refusal
+        out["refused"] = error(
+            "The selection listener did not register - ui.activeSelectionChanged.add() returned "
+            "false. Only that listener wakes this call, so no hold was started and nothing is "
+            "waiting on a pick. Retry, or call again with wait_seconds=0 and read the pick back "
+            "with sys_get_selection.")
+        return out
     _pending["handler"] = handler
     out["box"], out["done"] = box, done
     return out

@@ -219,7 +219,9 @@ def _import_dxf(mgr, design, path, into_component, plane):
 
 
 def _import_svg(mgr, design, path, sketch):
-    target, requested = _common.resolve_or_recent_sketch(design, sketch)
+    target, requested, ambiguous = _common.find_or_recent_sketch(design, sketch)
+    if ambiguous:
+        return error(ambiguous)
     if target is None:
         if requested:
             names = _common.all_sketch_names(design)

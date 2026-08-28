@@ -37,6 +37,15 @@ _DENYLIST = {
     # the not-a-number fallback and the 1..ceiling hold cannot be right in one read and stale in the
     # next (each read still passes its OWN default/ceiling pair).
     "clamp_rows": ("_cam_common", "def"),
+    # The ONE compute-failure read (healthState classed error/warning + the condensed one-sentence
+    # message before the 'Compute Failed' marker) - assembly_get still carries a third re-roll
+    # (EC-2c); this entry stops a fourth.
+    "compute_failure": ("_assert", "def"),
+    "compute_failure_message": ("_assert", "def"),
+    # The ONE any-True / False-if-any-False / else-None collapse over per-body is_solid flags -
+    # home is surface_edit (its first consumer); a re-roll is how one surface tool reads an
+    # unreadable flag as an open sheet while its sibling says unknown.
+    "_solid_verdict": ("surface_edit", "def"),
     # The ONE identical-open-documents test (a visible tab and its dependency instance share the
     # name AND the lineage URN - that is ONE document, not an ambiguity; measured live). The write
     # guard's expect_document check and doc_lifecycle's URN resolver both answer through it - a
@@ -114,6 +123,14 @@ _DENYLIST = {
     "DOCUMENT_UNIT": ("_drawing_common", "assign"),
     "ptxyz": ("_common", "def"),
     "target_sketch": ("_common", "def"),
+    # The ONE design-wide by-name sketch walk and the three contracts over it (collect-all,
+    # resolve-one-or-refuse, name-or-most-recent in both its refusing and its silent form). A second
+    # walk is how one tool's census matched case-insensitively while the resolve beside it asked
+    # itemByName - the name that "exists" in the census then resolves to nothing.
+    "find_sketches_by_name": ("_common", "def"),
+    "find_sketch": ("_common", "def"),
+    "resolve_sketch": ("_common", "def"),
+    "find_or_recent_sketch": ("_common", "def"),
     "resolve_or_recent_sketch": ("_common", "def"),
     "timeline_health": ("_common", "def"),
     "result_bodies": ("_common", "def"),
@@ -166,6 +183,12 @@ _DENYLIST = {
     # placing its owner - and REFUSES a component placed several times. A copy is how one consumer
     # starts proxying into an arbitrary instance.
     "single_placement": ("_inputs", "def"),
+    # The ONE occurrence census and the ONE unresolved-reference detector. A local
+    # `safe(root.allOccurrences) or []` is the exact re-roll this owns: that property RAISES on a
+    # design holding an unresolved reference, and the empty list is then published as fact.
+    "occurrence_walk": ("_common", "def"),
+    "component_walk": ("_common", "def"),
+    "broken_reference": ("_common", "def"),
     "all_occurrences": ("_common", "def"),
     "occurrence_paths": ("_common", "def"),
     "component_contains": ("_common", "def"),
