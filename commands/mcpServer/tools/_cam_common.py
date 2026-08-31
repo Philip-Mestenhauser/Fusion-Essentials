@@ -21,82 +21,51 @@ from ._write_guard import (_active_identity, document_key,   # the one active-do
                                                              # remembers a document by, and the
                                                              # announcement when that key changes
 
-# One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
-MAP_BLURB = ("get_cam (the shared CAM-product resolver every CAM tool calls) + walk_cam_tree / "
-             "resolve_cam_node (the ONE CAM tree traversal + by-name resolver every CAM tool targets "
-             "through: case-insensitive EXACT, a miss lists the available names, a DUPLICATED name is "
-             "REFUSED naming each hit's '<name>#<n>' address - the form the SAME input takes to pick "
-             "one, since a setup's path is its own bare name and discriminates nothing - beside the "
-             "path that tells an operation apart or the operation count that tells a setup apart; "
-             "kinds=/setup= scope it) + owning_setup (the "
-             "Setup OBJECT one CamNode sits under, climbed through the walk's own parent links - "
-             "never by re-resolving node.setup by NAME, since setup names can collide) + "
-             "operations_under (the "
-             "ops nested under one setup/folder/pattern) + find_setup (a (setup, available_names, "
-             "error) wrapper handing back the resolver's refusal verbatim) + operation_nodes_under "
-             "(the operations under ONE setup/folder/pattern node as CamNodes, walked from that "
-             "node's own path - the form a caller that NAMES its operations on the wire takes, "
-             "since the object-only operations_under drops the breadcrumb that tells two "
-             "same-named operations apart) + operation_nodes (the "
-             "ONE operation pool every by-name operation resolve and available-name listing reads "
-             "off) + find_operation (the "
-             "(obj, available_names) wrapper over the same resolver) + resolve_operation (the "
-             "unscoped resolve handing back the refusal AND that same available list off ONE walk, "
-             "for a caller wording a narrower remedy of its own) + expression_error (the post-set "
-             "CAMParameter evaluation read-back every CAM param editor gates on) + live_readiness "
-             "(the one CAM job-health signal) + setup_blockers / blocked_setup_records (the ONE read "
-             "of a setup's OWN post prerequisites - today no_machine_selected, when Setup.machine "
-             "reads no label - and its [{name, blocked_by}] projection over a list of setups; "
-             "cam_get's setups slice, its machine slice and every readiness verdict consume this "
-             "one read, so they cannot answer 'is this postable' off different inputs) + "
-             "ready_verdict / first_line (the ONE postable-verdict "
-             "sentence every readiness surface emits - it demotes 'ready to post' whenever active-op "
-             "warnings > 0, naming the first warning op and line, and WITHHOLDS it entirely while "
-             "any setup in scope carries a blocked_by, naming that setup and the remedy on file for "
-             "its code, so no scoped or summary re-roll "
-             "can overstate) + op_state_facts / op_primary_state / validity_basis "
-             "(the shared per-op lifecycle read, its one mutually-exclusive bucket classifier, and "
-             "the Manufacture-workspace trust gate every op-state rollup reads) + clamp_rows (the "
-             "ONE 'max_results' clamp - a non-numeric request falls back to the read's default, the "
-             "result is held inside 1..ceiling, so no caller can lift a wire cap) + register_future "
-             "(the ONE async-generation registration - it mints the handle cam_get_status reads and "
-             "keeps the GenerateToolpathFuture referenced, which is what stops Fusion abandoning the "
-             "background work, and stamps the launch document's _write_guard.document_key so a status "
-             "read can tell the generating document from the active one even when neither was ever "
-             "saved; every launch path registers here) + machine_catalog / resolve_machine "
-             "/ machine_label / machine_ident / machine_kinds / query_machines (the ONE "
-             "machine-library catalog read and the ONE by-name machine resolver - exact LABEL match "
-             "first, ambiguity REFUSED - that an assignment and a machine create both run through; "
-             "machine_kinds is the per-machine capabilities read, the expensive part of a catalog "
-             "row, for a caller that needs ONE machine's kinds without a 46s unfiltered walk) + "
-             "machine_library / machine_location (the ONE MachineLibrary handle - it hangs off "
-             "CAMManager.libraryManager, so no open CAM job is needed - and the ONE 'which location "
-             "holds this machine' read, a single FILTERED Local query answering local / fusion360, "
-             "or 'local or fusion360' when that query itself failed and the two cannot be told "
-             "apart; the create's clash report and the delete's local-only gate read the same "
-             "answer) + "
-             "parse_parameters (the ONE "
-             "{name: expression} / 'name=value, ...' parameter-request parser both CAM parameter "
-             "editors validate their request through) + walk_library_folders / library_assets / "
-             "library_children (the ONE CAM library folder-tree walk - tool, post and template "
-             "libraries all nest folders under a location root, so every walk is bounded on depth "
-             "AND folder count and each site passes its own leaf op; library_assets is the "
-             "collect-the-child-asset-urls projection over it) + asset_leaf / asset_key / "
-             "asset_leaf_keys / assets_named (the ONE 'which asset answers to this name' matcher "
-             "every library DELETE resolves its target on: a stored leafName carries the file "
-             "EXTENSION the object's own name does not, so an asset answers to its whole leafName "
-             "AND to its stem - the part before the LAST dot - both compared EXACTLY, since a "
-             "substring match here deletes the neighbour whose name merely starts the same; "
-             "assets_named is the deduped-by-url hit list over a wanted-name set) + "
-             "is_empty_toolpath (the ONE "
-             "'generated but cut nothing' test over op_state_facts - has_toolpath read False AND "
-             "is_toolpath_valid read True on a valid op; an UNREADABLE flag answers False, never "
-             "'empty') + kinematics_parts / machine_limits / machine_spindle_max (the ONE "
-             "Machine.elements -> kinematics -> parts walk and the spindle-max / axis-travel / "
-             "tool-station projections over it - never Machine.kinematics, never the -1 "
-             "machine_dimension_x/y/z setup parameters; a 0 or infinite field is omitted, never a "
-             "limit of 0) + spindle_check (the ONE op-asks vs machine-allows rpm comparison: True "
-             "only when the op asks for MORE, None with a marker naming the unreadable side)")
+# The "what to reuse from here" catalog line for the generated CLAUDE.md helper map (see
+# tests/gen_manifest.py): each symbol with the one clause that says WHEN to reach for it. The
+# mechanism behind a clause lives at the symbol itself, in its test, or in VERIFIED_API_FACTS.md.
+MAP_BLURB = (
+    "get_cam - the active document's CAM product, the read every CAM tool opens with; "
+    "walk_cam_tree + resolve_cam_node - the ONE CAM tree walk and the by-name resolver every CAM "
+    "tool targets a setup/operation/folder/pattern through: case-insensitive EXACT, a miss lists "
+    "the available names, a DUPLICATED name is REFUSED naming each hit's '<name>#<n>' address to "
+    "retry with (kinds= / setup= scope it); tree_nodes + operation_nodes + operation_nodes_under - "
+    "the setup-scoped, operation-only and under-one-node slices of that walk, for a caller that "
+    "NAMES its results on the wire: a node carries the 'Setup / ... / op' breadcrumb two "
+    "same-named operations are told apart by; operations_under + walk_operations - the bare-Operation "
+    "projections of those slices, where no breadcrumb is published; owning_setup - the Setup a node "
+    "sits under, for a caller holding the node; find_setup + find_operation + resolve_operation - "
+    "the by-name wrappers that hand back an available-name list too (find_setup and "
+    "resolve_operation add the resolver's refusal verbatim), for a caller wording a narrower remedy "
+    "of its own; expression_error - whether a just-set CAM parameter "
+    "EVALUATED, the read-back every CAM param editor gates on; parse_parameters - the ONE "
+    "{name: expression} / 'name=value, ...' request parser both param editors validate through; "
+    "op_state_facts + op_primary_state + op_state_tally + counts_as_warning + is_empty_toolpath - "
+    "the per-op lifecycle read and the classifiers over it, for any surface tallying op state: one "
+    "mutually-exclusive bucket per op, the warning OVERLAY on top of that bucket, and the "
+    "generated-but-cut-nothing test; validity_basis - the Manufacture-workspace trust gate every "
+    "op-state rollup reads, since op validity is only trustworthy there; setup_blockers + "
+    "blocked_setup_records - a setup's OWN post prerequisites and their [{name, blocked_by}] "
+    "projection, the one read every 'is this postable' answer takes them from; ready_verdict + "
+    "first_line - the ONE postable-verdict sentence every readiness surface emits (it demotes "
+    "'ready to post' over a warned op and WITHHOLDS it over a blocked setup) and the one-line trim "
+    "a disclosure SAMPLE takes; live_readiness - the whole active document's job-health signal, "
+    "for a health read or a generation poller; clamp_rows - the ONE 'max_results' clamp a capped "
+    "read holds its row count in; register_future - the ONE async-generation registration every "
+    "launch path mints its handle through: it keeps the Future referenced and stamps the launch "
+    "document, so a status read taken while another document is active still answers for that "
+    "generation; machine_library + machine_location + machine_catalog + query_machines + "
+    "resolve_machine + machine_label + machine_ident + machine_kinds - the library handle, the "
+    "which-location read, the catalog the 'machine' input resolves from and the by-name resolver "
+    "an assignment or a machine create runs through (exact LABEL match first, ambiguity REFUSED), "
+    "plus the label / ident / kinds projections a catalog row is built from; kinematics_parts + "
+    "machine_limits + machine_spindle_max - what the MACHINE allows: its spindle maximum and axis "
+    "travels, off its kinematics tree; op_spindle_speed + spindle_check - what ONE operation asks "
+    "for and the comparison against that maximum; walk_library_folders + library_assets + "
+    "library_children - the ONE bounded CAM library folder-tree walk (tool, post and template "
+    "libraries alike) and its collect-the-asset-urls projection, each caller passing its own leaf "
+    "op; asset_leaf + asset_key + asset_leaf_keys + assets_named - the 'which asset answers to "
+    "this name' matcher every library DELETE resolves its target on")
 
 app = adsk.core.Application.get()
 
@@ -220,11 +189,9 @@ CamNode = collections.namedtuple("CamNode", ["obj", "kind", "name", "setup", "pa
                                  defaults=(None,))
 
 
-# The segment a breadcrumb carries for a level whose own name did NOT read. The walk joins whatever
-# each level answered, and a None joined into an f-string prints the literal 'None' - a segment
-# nothing tells apart from a container actually NAMED that, so the path reads as a complete address
-# to a container that was never identified. This marker is the disclosure instead: the path states
-# that a level did not read rather than naming one.
+# The segment a breadcrumb carries for a level whose own name did NOT read. A None joined into an
+# f-string prints the literal 'None', which reads as a complete address to a container actually
+# NAMED that; this marker discloses the unread level instead.
 #
 # The decision is made on the READ answering None - never on a string match against the joined path -
 # so a container whose real name is the string 'None' keeps its own segment untouched.
@@ -461,8 +428,7 @@ def operation_nodes_under(node):
 
     That breadcrumb is the only thing separating two operations of one name, and the object-only
     projection below drops it: a scoped listing built from bare Operations prints the shared name
-    twice. A caller that only needs the objects calls operations_under; a caller that NAMES the
-    operations on the wire takes this."""
+    twice."""
     nodes = []
     _walk_children(node.obj, node.setup, node.path, nodes, node)
     return [n for n in nodes if n.kind == "operation"]
@@ -500,12 +466,12 @@ def owning_setup(node):
 def find_setup(cam, name):
     """The unique Setup named `name` (case-INSENSITIVE exact) as (setup, available_names, error).
 
-    On a miss `setup` is None and `error` is resolve_cam_node's ready-to-return refusal - a plain
-    absence lists the available names, a DUPLICATED name is REFUSED as ambiguous (never resolved to
-    the first hit). Callers return that text verbatim: the resolver is the one place that knows
-    WHICH of the two happened, so a caller wrapping it in its own 'not found' prefix would assert
-    absence about a name that was found twice. `available_names` stays the plain name list it has
-    always been, for callers that offer the choices elsewhere in their payload."""
+    On a miss `setup` is None and `error` is resolve_cam_node's ready-to-return refusal, where a
+    plain absence and a DUPLICATED name read differently. Callers return that text verbatim: the
+    resolver is the one place that knows WHICH of the two happened, so a caller wrapping it in its
+    own 'not found' prefix would assert absence about a name that was found twice.
+    `available_names` is the plain name list, for callers that offer the choices elsewhere in their
+    payload."""
     node, err = resolve_cam_node(cam, name, kinds=("setup",), label="setup")
     return (node.obj if node else None), setup_names(cam), err
 
@@ -753,9 +719,9 @@ def ready_verdict(measure: str, warned: int, warning_sample, blocked=None) -> st
     blocker and withholds the claim rather than asserting the job will fail.
 
     A WARNED op does NOT block: the job is still postable, so this is never demoted to a blocker.
-    But an op can bucket as valid and carry a warning meaning it cut nothing (measured: a
-    geometry-less 2D Contour reads isToolpathValid True with hasToolpath False), which a plain
-    'ready to post' hides - so the count is stated and the first warning named instead."""
+    But an op can bucket as valid and carry a warning meaning it cut nothing (measured - see
+    op_state_tally for the specimen), which a plain 'ready to post' hides - so the count is stated
+    and the first warning named instead."""
     if blocked:
         named = list(blocked)[:_BLOCKED_ROWS_NAMED]     # the rows the sentence actually prints
         also = f" {warned} active op(s) also carry warnings." if warned else ""
@@ -784,11 +750,9 @@ def live_readiness():
     input set.
     Each level carries ONE sample (name + first error line) - the disclosure signal; the full per-item
     texture is cam_get(include=['operations'/'nc_programs']). 'active' is the op currently computing.
-    An ERRORED op is its OWN bucket: it has a parameter/geometry fault and will NEVER finish generating,
-    so counting it as out_of_date/generating would make a poller wait forever. A WARNED op does NOT
-    block - it can be posted - but it never reads as a plain 'ready to post' either: the verdict states
-    the warning count and names the first one, because an op can carry a warning and still bucket as
-    valid (measured: a 2D Contour with no geometry selected reads valid with no toolpath).
+    The op buckets are op_state_tally's (see there for why an ERRORED op is its OWN bucket); the
+    all-valid branch words its verdict through ready_verdict (see there for why a warned job never
+    reads plainly ready).
     """
     cam, err = get_cam()
     if err:
@@ -1051,9 +1015,8 @@ def op_primary_state(facts: dict) -> str:
     return "valid"
 
 
-# Reason-code vocabulary. Each MUST be a state the code can VERIFY and
-# that Fusion actually refuses on - never an invented or intent-guessed block. A SUPPRESSED op blocks
-# nothing (it's excluded from posting by design), so its blocked_by is always [].
+# Reason-code vocabulary. Each MUST be a state the code can VERIFY and that Fusion actually refuses
+# on - never an invented or intent-guessed block.
 _GENERATE_REQUIRES = {"tool": "cam_generate", "workspace": "Manufacture"}
 
 
@@ -1265,12 +1228,11 @@ def _operations_in(setup_obj, machine_max=None) -> tuple:
     """(ops, truncated) - summarize the operations under a setup with their folder breadcrumb,
     capped at _MAX_ITEMS. truncated means INCOMPLETE: the cap was hit OR the walk raised.
 
-    Drives the shared _walk_children (what tree_nodes is built on) rather than setup.allOperations:
-    allOperations flattens the folder-nested ops and DROPS the folder objects, so the breadcrumb
-    every row publishes as 'path' and the folder each row names exist only in the
-    container-preserving walk. It calls _walk_children directly rather than tree_nodes because a
-    walk that dies part-way has to leave its partial rows behind, which needs the caller to own the
-    output list."""
+    Drives the shared _walk_children (what tree_nodes is built on) rather than setup.allOperations,
+    which DROPS the folder objects (see _walk_children): the breadcrumb every row publishes as 'path' and the
+    folder each row names exist only in the container-preserving walk. It calls _walk_children
+    directly rather than tree_nodes because a walk that dies part-way has to leave its partial rows
+    behind, which needs the caller to own the output list."""
     ops = []
     truncated = False
     root = _setup_node(setup_obj)
@@ -1309,8 +1271,8 @@ def _operations_in(setup_obj, machine_max=None) -> tuple:
 
 def _folder_of(node):
     """The name of the folder/pattern an operation sits IN, or None for an op parked directly under
-    the setup. Read from the walk's own PARENT NODE, never by splitting the breadcrumb: a setup or
-    folder whose name contains ' / ' would split into a folder that does not exist."""
+    the setup. Read from the walk's own PARENT NODE, never by splitting the breadcrumb - see
+    CamNode for why the joined path cannot answer this."""
     if node is None or node.parent is None:
         return None
     return node.parent.name if node.parent.kind in ("folder", "pattern") else None
@@ -1387,9 +1349,9 @@ def _operation_summary(op, machine_max=None, node=None) -> dict:
     summary["preset"] = safe(lambda preset=preset: preset.name) if preset is not None else None
     # Does the op ask its spindle for more than the machine allows? Both numbers ride along on the
     # rows where the answer is not a plain 'no', so the comparison is checkable, not just asserted.
-    # A SUPPRESSED op is excluded from posting, so what it asks for never reaches the machine: its
-    # comparison is WITHHELD rather than answered, and the marker says that is why - the same
-    # active-ops scoping the readiness rollups apply, in the one place the flag is built.
+    # A SUPPRESSED op is excluded from posting, so its comparison is WITHHELD rather than answered
+    # (_SUPPRESSED_NOT_COMPARED) - the same active-ops scoping the readiness rollups apply, in the
+    # one place the flag is built.
     if summary["is_suppressed"]:
         summary["spindle_check"] = _SUPPRESSED_NOT_COMPARED
         return summary
@@ -1848,10 +1810,7 @@ def get_nc_programs_handler() -> dict:
     return ok({"nc_program_count": len(programs), "nc_programs": programs,
                "note": _NC_PROGRAM_NOTE})
 
-# ---------------------------------------------------------------------------
-# Inspection results - the recorded surface-inspection (probing) measurements read by
-# cam_get(include=['inspection']).
-# ---------------------------------------------------------------------------
+# ── inspection results - the recorded probing measurements cam_get(include=['inspection']) reads ──
 
 # Nothing in the API bounds the point count on a path, so the per-point read is capped.
 _INSPECTION_ROW_DEFAULT = 50
@@ -2096,9 +2055,7 @@ def get_inspection_results_handler(measure: str = "", max_results: int = 0,
     return ok(out)
 
 
-# ---------------------------------------------------------------------------
-# Async generation registry - where every launch path parks its live GenerateToolpathFuture.
-# ---------------------------------------------------------------------------
+# ── async generation registry - where every launch path parks its live GenerateToolpathFuture ─────
 
 # Live generations, keyed by a short handle. Each entry holds the Future plus launch metadata.
 # Persists across MCP calls for the life of the add-in session.
@@ -2137,28 +2094,21 @@ def register_future(future, target, scope, skip_valid, target_name=""):
 
     That record is document_key, not the lineage urn alone: a never-saved document HAS no urn, so a
     urn-only record leaves every launch from a scratch document unidentifiable and its status read
-    falls back to the Future alone rather than the per-op tallies it could read. The key answers for
-    a never-saved document too (a per-instance token matched by document handle). doc_name /
-    doc_urn stay beside it because the payload NAMES the generating document from them. All three
-    launch sites register here, so all three are bound the same way.
+    falls back to the Future alone rather than the per-op tallies it could read. doc_name / doc_urn
+    stay beside it because the payload NAMES the generating document from them.
 
     target_name is the RAW setup/folder/operation name a scoped launch resolved to (omit it for a
     whole-document launch): a status read settles this handle's completion on THAT target's own
     operations, so a second generation running beside it cannot keep this handle incomplete.
 
     'doc' is the launch document itself, kept beside that key because the key is derived from what
-    reads on the document and the DOCUMENT outlives the derivation. document_key prefers a readable
-    data-file id, and that id does not arrive settled: dataFile.id may answer a path-form string
-    before the lineage urn resolves, so ONE launch document saved mid-generation can answer a
-    different key MORE THAN ONCE - the minted per-instance token, then whatever the id reads first,
-    then the urn. Each of those flips is announced (_carry_generation_keys below re-stamps this
-    entry), and through every one of them the same open document still compares equal by HANDLE -
-    the comparison document_key already matches a never-saved document on - so _same_document
-    answers on the re-stamped key from the call after a flip, and on the handle during the call
-    that detected it.
-
-    PROBE NEEDED (KEY-2): the transient path-form id is stated here as the MECHANISM this fallback
-    covers, not as a ledger fact - no measure_api row records it yet."""
+    reads on the document and the DOCUMENT outlives the derivation: ONE launch document saved
+    mid-generation can answer a different key MORE THAN ONCE - those flips, and the PROBE NEEDED
+    (KEY-2) on the transient path-form id behind them, are _write_guard.document_key's. Each flip is
+    announced (_carry_generation_keys above re-stamps this entry), and through every one of them the
+    same open document still compares equal by HANDLE - the comparison document_key already matches
+    a never-saved document on - so _same_document answers on the re-stamped key from the call after
+    a flip, and on the handle during the call that detected it."""
     _HANDLE_SEQ[0] += 1
     handle = f"gen{_HANDLE_SEQ[0]}"
     total = safe(lambda: future.numberOfOperations, None)
@@ -2179,9 +2129,7 @@ def register_future(future, target, scope, skip_valid, target_name=""):
     return handle, total
 
 
-# ---------------------------------------------------------------------------
-# Machine library - the catalog cam_get publishes and the resolver an assignment runs through.
-# ---------------------------------------------------------------------------
+# ── machine library: the locations, the catalog, and the by-name resolver ───────────────────────
 
 # Non-network machine library locations searched for a machine by vendor/model (Fusion360 = the
 # bundled sample machines; Local = the user's saved ones). The cloud/network locations are skipped so
@@ -2361,7 +2309,7 @@ def _axis_record(axis, factor, unit):
         rec["range_deg"] = [round(math.degrees(lo), 6), round(math.degrees(hi), 6)]
     else:
         # No decodable axis type: the range is published as the API returned it, with no unit
-        # claimed - MachineAxis documents cm for a linear axis and radians for a rotary one.
+        # claimed (see _AXIS_KINDS).
         rec["range_raw"] = [lo, hi]
     return rec
 
@@ -2620,14 +2568,12 @@ def resolve_machine(machine):
     return cands[0][0], cands[0][1], None
 
 
-# ---------------------------------------------------------------------------
-# CAM LIBRARY folder walks - the ONE traversal the tool / post / template libraries share.
+# ── CAM LIBRARY folder walks - the ONE traversal the tool / post / template libraries share ──────
+#
 # All three expose the same shape off a LibraryLocations root url: childFolderURLs nests, and the
-# leaves are read per library kind (childAssetURLs for a tool library or a post config, childTemplates
-# for a template). Cloud/Hub locations NEST and are network-slow, and an unbounded enumeration of a
-# cloud tree is a measured way to hang the add-in, so the walk is bounded on BOTH axes here and each
-# site supplies only its own leaf op.
-# ---------------------------------------------------------------------------
+# leaves are read per library kind (childAssetURLs for a tool library or a post config,
+# childTemplates for a template). What the bounds below are for: a cloud/Hub tree NESTS and is
+# network-slow, and enumerating one unbounded is a measured way to hang the add-in.
 
 _LIBRARY_MAX_DEPTH = 6
 _LIBRARY_MAX_FOLDERS = 1500
