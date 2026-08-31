@@ -180,9 +180,10 @@ _CAM_STORY = [
     # the name is now how the library reaches a machine, so a second create is refused naming the
     # machine it collides with and the library holding it.
     ("cam_create_machine", {"name": MACHINE_NAME, "template": "generic_3_axis"}, "refused", None),
-    # a real machine, and the assignment the post and setup sheet run on: simulation-ready machines
-    # refuse direct assignment (API limitation); machine_strip_simulation is the one working path.
-    # Asserted by read-back, not call success.
+    # a real machine, and the assignment the post and setup sheet run on: assigning a
+    # simulation-ready machine can be REFUSED - measured on the library machine the measuring run
+    # picks, when that machine carries a simulation model - so this step assigns through
+    # machine_strip_simulation. Asserted by read-back, not call success.
     ("cam_edit_setup", {"setup": "DemoSetup", "machine": "Haas VF-2",
                         "machine_strip_simulation": True},
      lambda p: p.get("machine_set") == "Haas VF-2", None),

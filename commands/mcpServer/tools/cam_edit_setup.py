@@ -63,9 +63,10 @@ def read_machines(vendor: str = "", machine_type: str = "", max_results: int = 1
     return ok({
         "machines": rows, "count": len(rows), "truncated": truncated,
         "note": ("Pass a machine's exact 'name' to cam_edit_setup(machine=...); "
-                 "machine_type='milling' narrows past the additive printers. The API refuses "
-                 "assigning any simulation_ready machine - machine_strip_simulation=true "
-                 "assigns it without its simulation model (posting/kinematics unaffected).")})
+                 "machine_type='milling' narrows past the additive printers. Assigning a "
+                 "simulation_ready machine can be REFUSED - machine_strip_simulation=true "
+                 "assigns it without its simulation model, and the stripped copy's spindle "
+                 "maximum and axis ranges read back unchanged through Setup.machine.")})
 
 
 def _resolve_bodies(names):
@@ -271,11 +272,19 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
     if resolved_machine is not None:
         m_obj, m_label = resolved_machine
         if machine_strip_simulation:
-            # Setup.machine refuses ANY machine whose hasSimulationModel is True ('currently not
-            # supported'), regardless of library location - verified live, including a Local
-            # createFromFile-loaded copy; the platform error's copy-to-local advice does not work
-            # via the API. Stripping the simulation model from the TRANSIENT resolved copy (the
-            # library asset is untouched) is the one working assignment path.
+            # Setup.machine REFUSES a machine whose hasSimulationModel is True ('currently not
+            # supported') - measured (measure_api
+            # cam-machine-uncleared-simulation-assignment-refused) on the library machine the
+            # measuring run picks, and only when that machine carries a simulation model.
+            # Stripping it from the TRANSIENT resolved copy (the library asset is untouched) then
+            # lets the assignment land, with the spindle maximum and every axis range reading back
+            # identically through Setup.machine (measure_api cam-machine-spindle-max-readable).
+            # Whether EVERY simulation-ready machine is
+            # refused, from every library location, and whether the platform error's copy-to-local
+            # advice works through the API, are NOT measured (PROBE NEEDED: assign an uncleared
+            # simulation-ready machine from the Local library and one from the Fusion360 library,
+            # recording whether both raise; then copy one to Local as that error advises and assign
+            # the copy uncleared).
             try:
                 m_obj.clearSimulationModel()
             except Exception as e:
@@ -285,11 +294,11 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
             target.machine = m_obj                       # Setup.machine takes a transient copy
         except Exception as e:
             hint = ("" if machine_strip_simulation or "simulation" not in str(e).lower() else
-                    " The API refuses ANY simulation-ready machine (this platform error's "
-                    "copy-to-local advice does not work via the API). Pass "
-                    "machine_strip_simulation=true to assign it without its simulation model "
-                    "(posting and kinematics unaffected), or pick a simulation_ready=false "
-                    "machine from cam_get(include=['machines']).")
+                    " That refusal names the simulation model: pass "
+                    "machine_strip_simulation=true to assign this machine without its simulation "
+                    "model - the spindle maximum and every axis range read back unchanged through "
+                    "Setup.machine - or pick a simulation_ready=false machine from "
+                    "cam_get(include=['machines']).")
             return error(f"Could not assign machine '{want_machine}' to setup '{setup}': {e}.{hint}")
         # Read Setup.machine back to CONFIRM the assignment took - a swallowed no-op must not report ok.
         applied = machine_label(safe(lambda: target.machine))
@@ -360,7 +369,7 @@ tool = (
     .add_input_property("machine", {"type": "string",
             "description": "Machine to assign: 'vendor|model' (or a bare model) from the machine library (browse: cam_get include=['machines'])."})
     .add_input_property("machine_strip_simulation", {"type": "boolean",
-            "description": "With 'machine': assign a simulation-ready machine by stripping the simulation model from the assigned copy - the API refuses simulation-ready machines outright. The library asset is untouched; posting and kinematics keep working; in-Fusion machine simulation stays unavailable for this setup."})
+            "description": "With 'machine': assign a simulation_ready machine by stripping the simulation model from the resolved copy first - assigning one can be REFUSED. The assigned copy then carries no simulation model, and its spindle maximum and axis ranges read back unchanged through the setup."})
     .add_input_property("wcs", {"type": "object",
             "description": "Bind the WCS: {origin/z_axis/x_axis: a find_geometry handle OR a Joint Origin (handle/name from assembly_get)}. Binds as a live reference (bound_entities read back); the WCS re-derives from it (associative)."})
     .strict_schema()

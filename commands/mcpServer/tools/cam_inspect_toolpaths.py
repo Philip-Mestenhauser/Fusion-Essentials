@@ -32,13 +32,19 @@ _EMPTY_NAMES_CAP = 5     # how many empty-setup names the note spells out; the c
 def _split_suppressed(ops):
     """(active, suppressed_count) over a walked operation list.
 
-    A SUPPRESSED operation is excluded from the post, so it holds no toolpath the job depends on -
-    counting it drives the tally and the rows off operations nobody will cut. This is the ONE split
-    the tally, the rows and the per-operation fallback verdict all read, so the count reported as
-    excluded and the set actually counted can never describe different operations. The bucket is
-    op_primary_state's own 'suppressed', the same classifier _classify tallies with, rather than a
-    second isSuppressed read. A node that does not cast to an Operation stays in the list for
-    _classify's cast gate to drop, so this split cannot change what that gate sees."""
+    Suppressing an operation DISCARDS its toolpath - measured (measure_api
+    cam-suppress-discards-toolpath): hasToolpath reads True before the flag is set, False after it,
+    and still False once the flag is cleared without a regeneration. So a suppressed operation
+    carries no toolpath for the tally or the rows to describe. What a POST does with one is NOT
+    measured (PROBE NEEDED: post a program whose setup holds one suppressed operation beside valid
+    ones - does the NC output omit that operation's moves, or does postProcess refuse the job?).
+
+    This is the ONE split the tally, the rows and the per-operation fallback verdict all read, so
+    the count reported as excluded and the set actually counted can never describe different
+    operations. The bucket is op_primary_state's own 'suppressed', the same classifier _classify
+    tallies with, rather than a second isSuppressed read. A node that does not cast to an Operation
+    stays in the list for _classify's cast gate to drop, so this split cannot change what that gate
+    sees."""
     active, suppressed = [], 0
     for raw in ops or []:
         op = adsk.cam.Operation.cast(raw)
@@ -206,8 +212,8 @@ def _counted_sentence(states, suppressed_excluded, include_suppressed):
     if suppressed_excluded:
         return (f"Counted {total} ACTIVE operation(s); {suppressed_excluded} suppressed "
                 "operation(s) were excluded (measured.suppressed_excluded) - suppressing an "
-                "operation discards its toolpath, and only valid toolpaths post. "
-                "include_suppressed=true counts them.")
+                "operation discards its toolpath, and the operation carries none until "
+                "cam_generate regenerates it. include_suppressed=true counts them.")
     return f"Counted {total} ACTIVE operation(s); no suppressed operation(s) were in scope."
 
 

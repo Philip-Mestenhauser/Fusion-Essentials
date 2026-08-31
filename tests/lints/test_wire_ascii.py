@@ -16,10 +16,22 @@ Both sweep the same three places a wire string is authored, which is why they sh
 below:
   1. the LIVE registry - every registered tool's description and every input property's
      description (recursively, for nested array/object schemas);
-  2. the SOURCE - any module-level ``*_DESCRIPTION`` constant, whether or not it ends up wired to a
-     tool today (catching a dead-but-about-to-be-reused constant before it goes non-ASCII);
+  2. the SOURCE constants - a module-level constant in the tool sources, whether or not it ends up
+     wired to a tool today (catching a dead-but-about-to-be-reused constant before it goes
+     non-ASCII);
   3. the RUNTIME payloads - every string literal inside an ``ok(...)`` / ``error(...)`` call in
      the tool sources (notes, error text, payload keys/values - all of it crosses the wire).
+
+The two rules read surface 2 at different widths, and that asymmetry is deliberate. ASCII takes
+EVERY module-level constant, because a payload can carry its sentence by NAME - ``ok({"note":
+_OPERATIONS_NOTE})``, or a dict of notes keyed by mode - which puts that text out of reach of
+surfaces 1 and 3, and whether a given constant reaches an agent is not decidable from its
+assignment. Scanning them all is what makes that judgment unnecessary. The price is that a constant
+which never crosses the wire (an internal marker, a regex source, an abstraction-map blurb) is held
+to the same ASCII spelling: that costs nothing while those constants spell their text in ASCII, and
+one that genuinely needs a non-ASCII character takes an ``_ASCII_EXEMPT`` entry with a reason.
+VOCABULARY stays on the ``*_DESCRIPTION`` constants, because it judges the words chosen for a
+reader - an internal marker or a Fusion API name is not prose this repo wrote for one.
 
 Comments and internal identifiers are outside both sweeps on purpose (box-drawing dividers in ``#``
 comments and module docstrings included): a comment never serializes onto the wire. The vocabulary
@@ -35,6 +47,7 @@ current wire string uses Fusion's own vocabulary.
 import ast
 import os
 import re
+import sys
 
 import _corpus
 from conftest import TOOLS_DIR, register_all_tools
@@ -77,20 +90,37 @@ def _input_descriptions(d):
 _DESCRIPTION_NAME = re.compile(r".*DESCRIPTION$")
 
 
-def _description_constant_strings(path):
-    """(constant_name, [string literals in its assigned value]) for every module-level `*_DESCRIPTION =
-    ...` assignment in the file at `path` - walking the assigned expression instead of literal_eval'ing
-    it, so an f-string/`.format()`/`+`-built description is still checked piece by piece."""
+def _module_constant_strings(tree):
+    """(constant_name, [string literals in its assigned value]) for every module-level assignment in
+    a parsed module - one row per assigned NAME, so ``A = B = ...`` and a tuple unpack each name
+    themselves. The assigned expression is WALKED instead of literal_eval'd, so an
+    f-string/`.format()`/`+`-built value, a dict of notes keyed by mode, and a description handed
+    straight to an inline ``Tool(...)`` are all checked piece by piece."""
     out = []
-    for node in _corpus.tree(path).body:
-        if not isinstance(node, ast.Assign):
+    for node in tree.body:
+        targets = (node.targets if isinstance(node, ast.Assign) else
+                   [node.target] if isinstance(node, ast.AnnAssign) else [])
+        if not targets or node.value is None:
             continue
-        for target in node.targets:
-            if isinstance(target, ast.Name) and _DESCRIPTION_NAME.match(target.id):
-                strings = [n.value for n in ast.walk(node.value)
-                           if isinstance(n, ast.Constant) and isinstance(n.value, str)]
-                out.append((target.id, strings))
+        strings = [n.value for n in ast.walk(node.value)
+                   if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+        if not strings:
+            continue
+        for target in targets:
+            out += [(n.id, strings) for n in ast.walk(target) if isinstance(n, ast.Name)]
     return out
+
+
+def _constant_strings(src):
+    """The same collection over a source STRING - what the bite tests below plant their shapes in."""
+    return _module_constant_strings(ast.parse(src))
+
+
+def _description_constant_strings(tree):
+    """The ``*_DESCRIPTION`` rows of _module_constant_strings - the narrower surface the vocabulary
+    rule reads (see the module docstring)."""
+    return [(name, strings) for name, strings in _module_constant_strings(tree)
+            if _DESCRIPTION_NAME.match(name)]
 
 
 def _ok_error_call_strings(tree):
@@ -125,6 +155,46 @@ def _non_ascii(text):
     return [(c, hex(ord(c))) for c in text if ord(c) > 127]
 
 
+# A constant that must hold a non-ASCII character: {(file, CONSTANT): reason}. Keyed by BOTH, so an
+# entry covers the one constant that earned it and no same-named constant in another file. An entry
+# states why the character is load-bearing (a Fusion string this repo has to match byte for byte,
+# say), never a preference for the prettier glyph - and _stale_exemptions keeps the table
+# shrink-only. EMPTY today: every constant under tools/ spells its text in ASCII.
+_ASCII_EXEMPT = {}
+
+
+def _ascii_report(fn, const_name, strings):
+    """An offender line for each string in `strings` carrying a non-ASCII character, unless
+    (fn, const_name) is exempt."""
+    if (fn, const_name) in _ASCII_EXEMPT:
+        return []
+    return [f"{fn}: {const_name} has {bad} - "
+            f"replace with a plain-ASCII spelling (' - ', '...', '->')"
+            for bad in (_non_ascii(s) for s in strings) if bad]
+
+
+def _stale_exemptions():
+    """Entries in _ASCII_EXEMPT that no longer earn their place: no reason, no such file, no such
+    constant, or a constant whose text is ASCII again. Each one is an entry to delete - which is
+    what makes the table shrink-only rather than a place non-ASCII text accumulates."""
+    stale = []
+    for (fn, const_name), reason in _ASCII_EXEMPT.items():
+        if not (reason or "").strip():
+            stale.append(f"{fn}:{const_name}: needs a plain-English reason")
+            continue
+        path = os.path.join(TOOLS_DIR, fn)
+        if not os.path.exists(path):
+            stale.append(f"{fn}:{const_name}: no such file - drop the entry")
+            continue
+        strings = [s for name, ss in _module_constant_strings(_corpus.tree(path))
+                   if name == const_name for s in ss]
+        if not strings:
+            stale.append(f"{fn}:{const_name}: no such module-level constant - drop the entry")
+        elif not any(_non_ascii(s) for s in strings):
+            stale.append(f"{fn}:{const_name}: the constant is ASCII again - drop the entry")
+    return stale
+
+
 class TestToolDescriptionsAreAscii:
     def test_every_tool_description_is_ascii(self):
         offenders = []
@@ -148,17 +218,91 @@ class TestToolDescriptionsAreAscii:
         assert not offenders, "non-ASCII input description(s):\n  " + "\n  ".join(offenders)
 
 
-class TestDescriptionConstantsAreAscii:
-    def test_every_description_constant_is_ascii(self):
+class TestModuleConstantsAreAscii:
+    @staticmethod
+    def _flagged(src):
+        """The constant names one source's module-level constants are reported under."""
+        return [name for name, strings in _constant_strings(src)
+                if _ascii_report("probe.py", name, strings)]
+
+    def test_every_module_constant_is_ascii(self):
         offenders = []
         for fn, path in _tool_files():
-            for const_name, strings in _description_constant_strings(path):
-                for s in strings:
-                    bad = _non_ascii(s)
-                    if bad:
-                        offenders.append(f"{fn}: {const_name} has {bad} - "
-                                          f"replace with a plain-ASCII spelling (' - ', '...', '->')")
-        assert not offenders, "non-ASCII description constant(s):\n  " + "\n  ".join(offenders)
+            for const_name, strings in _module_constant_strings(_corpus.tree(path)):
+                offenders += _ascii_report(fn, const_name, strings)
+        assert not offenders, "non-ASCII module constant(s):\n  " + "\n  ".join(offenders)
+
+    def test_the_constant_sweep_bites(self):
+        # A note constant a payload carries by NAME - the shape surfaces 1 and 3 never see - MUST be
+        # flagged however it is written: an implicit concatenation...
+        assert self._flagged('_OPERATIONS_NOTE = (\n    "the op sits "\n'
+                             '    "5° over")\n') == ["_OPERATIONS_NOTE"]
+        # ...a dict of notes keyed by mode...
+        assert self._flagged('_NOTES = {"world": "a → b"}\n') == ["_NOTES"]
+        # ...an f-string piece...
+        assert self._flagged('_DESC = f"bad °: {x}"\n') == ["_DESC"]
+        # ...a description handed straight to an inline Tool(...)...
+        assert self._flagged('tool = Tool("m", "5° of tilt")\n') == ["tool"]
+        # ...and each name of a multi-name assignment.
+        assert self._flagged('_A = _B = "5° off"\n') == ["_A", "_B"]
+        # The other two assignment shapes the walker takes: an annotated constant, and a tuple
+        # unpack - whose names each answer for the whole assignment's text.
+        assert self._flagged('_NOTE: str = "5° off"\n') == ["_NOTE"]
+        assert self._flagged('_C, _D = "5° off", "x"\n') == ["_C", "_D"]
+        # A constant inside a function is not module-level, and an ASCII constant is collected with
+        # nothing to report.
+        assert _constant_strings('def h():\n    N = "5° off"\n') == []
+        assert _constant_strings('_NOTE = "5 deg off"\n') == [("_NOTE", ["5 deg off"])]
+        assert self._flagged('_NOTE = "5 deg off"\n') == []
+
+    def test_the_reported_boundary_is_the_last_ascii_code_point(self):
+        # the line the check draws: U+007F is the last code point it passes, U+0080 the first it
+        # reports.
+        assert _ascii_report("probe.py", "_C", ["\x7f"]) == []
+        assert _ascii_report("probe.py", "_C", ["\x80"])
+
+    def test_an_exemption_excuses_one_constant_in_one_file(self, monkeypatch):
+        monkeypatch.setitem(_ASCII_EXEMPT, ("probe.py", "_GLYPH"), "a stated reason")
+        assert _ascii_report("probe.py", "_GLYPH", ["5°"]) == []
+        # the key is the PAIR: the same name in another file, and another name in the same file,
+        # both still trip.
+        assert _ascii_report("other.py", "_GLYPH", ["5°"])
+        assert _ascii_report("probe.py", "_OTHER", ["5°"])
+
+    def test_the_exemption_table_only_shrinks(self, monkeypatch):
+        assert _stale_exemptions() == []
+        # one entry per branch, driven off constants that really exist so a rename in tools/ cannot
+        # turn this into a test of its own fixture. What is pinned is each branch's MESSAGE - the
+        # repair the maintainer is told to make - and not the count: an entry any branch rejects is
+        # rejected by the branches below it too, so a count alone stays green while a branch that
+        # stopped firing hides behind the next one reporting the same entry for the wrong reason.
+        real = list(dict.fromkeys(
+            name for name, _ in
+            _module_constant_strings(_corpus.tree(os.path.join(TOOLS_DIR, "_common.py")))))
+        monkeypatch.setitem(_ASCII_EXEMPT, ("_common.py", real[0]), "a stated reason")
+        monkeypatch.setitem(_ASCII_EXEMPT, ("_common.py", "_NO_SUCH_CONSTANT"), "a stated reason")
+        monkeypatch.setitem(_ASCII_EXEMPT, ("_common.py", real[1]), "  ")
+        monkeypatch.setitem(_ASCII_EXEMPT, ("no_such_file.py", "_X"), "a stated reason")
+        assert _stale_exemptions() == [
+            f"_common.py:{real[0]}: the constant is ASCII again - drop the entry",
+            "_common.py:_NO_SUCH_CONSTANT: no such module-level constant - drop the entry",
+            f"_common.py:{real[1]}: needs a plain-English reason",
+            "no_such_file.py:_X: no such file - drop the entry",
+        ]
+
+    def test_only_the_reason_is_missing_when_the_glyph_is_real(self, monkeypatch, tmp_path):
+        # the one state where the reason branch decides alone: the constant really does carry the
+        # character, so the exemption is live and no other branch has anything to report - a
+        # wordless entry is stale here or nowhere. It reads a probe file because the lint's own
+        # guarantee is that no constant under tools/ is non-ASCII.
+        (tmp_path / "probe.py").write_text('_GLYPH = "5° off"\n', encoding="utf-8")
+        monkeypatch.setattr(sys.modules[__name__], "TOOLS_DIR", str(tmp_path))
+        monkeypatch.setitem(_ASCII_EXEMPT, ("probe.py", "_GLYPH"), "a stated reason")
+        assert _stale_exemptions() == []
+        # every wordless shape a reason can be written as, the missing value included.
+        for wordless in ("  ", "", None):
+            monkeypatch.setitem(_ASCII_EXEMPT, ("probe.py", "_GLYPH"), wordless)
+            assert _stale_exemptions() == ["probe.py:_GLYPH: needs a plain-English reason"]
 
 
 class TestRuntimePayloadStringsAreAscii:
@@ -237,7 +381,7 @@ class TestNoBannedVocabularyInDescriptionConstants:
     def test_no_description_constant_uses_a_banned_word(self):
         offenders = []
         for fn, path in _tool_files():
-            for const_name, strings in _description_constant_strings(path):
+            for const_name, strings in _description_constant_strings(_corpus.tree(path)):
                 for s in strings:
                     offenders += _report(f"{fn}:{const_name}", _banned_hits(s))
         assert not offenders, "banned wire word in description constant(s):\n  " + "\n  ".join(offenders)

@@ -34,8 +34,8 @@ MAP_BLURB = (
     "feature input will not take a vector; axis_line_of - the world line behind an AxisRef "
     "('edge', entity) value, for a consumer needing a numeric axis; single_placement - the "
     "assembly-context walk to run before using a possibly-foreign entity: nothing to lift, the ONE "
-    "occurrence to proxy into, or a refusal; entity_component - the owning component of an "
-    "axis/direction entity (edge, sketch line, or construction datum); resolve_surface + "
+    "occurrence to proxy into, or a refusal; entity_component - the owning component of a "
+    "geometric entity (face, edge, sketch line, or construction datum); resolve_surface + "
     "surface_ref_label - the plane-then-face resolve every *_to_surface operand takes (see the "
     "SurfaceRef kind), and the resolved-entity label its payload publishes instead of the raw "
     "input")
@@ -1819,7 +1819,7 @@ def _axis_from_face(name, face):
 
 
 def entity_component(ent):
-    """The component an axis/direction ENTITY belongs to: an edge's body's parent, a sketch line's
+    """The component an ENTITY belongs to: a face's or an edge's body's parent, a sketch line's
     sketch's parent, or a construction datum's own component. None when none of those read.
 
     A datum is read through `.component` before `.parent`: per the API's own doc, `.component` always
@@ -1857,8 +1857,8 @@ def single_placement(label, ent, comp, design):
     legal reference."""
     if _common.safe(lambda: ent.assemblyContext) is not None:
         return None, None
-    # entity_component covers an edge/sketch-line/datum; a BODY answers its own parentComponent and
-    # nothing else in that chain, and a body is what a move feature's host walk carries here.
+    # entity_component covers a face/edge/sketch-line/datum; a BODY answers its own parentComponent
+    # and nothing else in that chain, and a body is what a move feature's host walk carries here.
     owner = entity_component(ent) or _common.safe(lambda: ent.parentComponent)
     if owner is None:
         return None, None
@@ -2315,10 +2315,16 @@ def _occurrence_discriminator(occ) -> str:
     return f"component '{comp}', {ref_label}, handle '{token}'"
 
 
-def _occurrence_candidates(occs, cap=8):
+def _occurrence_candidates(occs):
     """The candidate list the PATH-collision refusal names - one discriminator per hit, since the
-    path they share is already quoted in the sentence and repeating it per row says nothing."""
-    return "; ".join(_occurrence_discriminator(o) for o in occs[:cap])
+    path they share is already quoted in the sentence and repeating it per row says nothing.
+
+    Rendered through ``_common.named_with_remainder``, the one place a capped wire list is built, so
+    a hit past the cap is COUNTED rather than dropped: the caller picks the handle it retries with
+    out of this list, and a silently truncated one reads as every instance wearing that path. Each
+    row is parenthesised because a discriminator carries commas of its own, which that renderer's
+    ``, `` join would otherwise blur into the next row."""
+    return _common.named_with_remainder([f"({_occurrence_discriminator(o)})" for o in occs])
 
 
 def _occurrence_path_candidates(occs):

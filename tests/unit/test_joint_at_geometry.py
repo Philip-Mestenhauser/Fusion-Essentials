@@ -16,7 +16,7 @@ import adsk.core
 import adsk.fusion
 import pytest
 
-from conftest import load_tool
+from conftest import load_tool, FakeMatrix3D, FakePoint
 
 jg = load_tool("joint_at_geometry")
 
@@ -54,37 +54,24 @@ class _RaisingRecorder(_Recorder):
         raise RuntimeError(_KEYPOINT_RAISE)
 
 
+# The rigs place their components with conftest's shared FakeMatrix3D: a rotation of N degrees about
+# Z followed by a translation - the composed component-to-world matrix Occurrence.transform2 reads.
+# 90 degrees about Z is the rotation the measured nested rig places its parent with.
+_ROT90Z_DEG = 90.0
+
+
+class _LiftablePoint(FakePoint):
+    """conftest's shared Point3D fake, plus the ``copy()`` the measured Point3D shape carries
+    (live_api_facts.SHAPES) and the shared fake does not define. The world lift copies a face's own
+    geometry.origin before transforming it, so the face keeps its untouched reading; transformBy
+    comes from the shared fake and takes the matrix's rotation AND its translation - the POINT half
+    of the live point/vector split."""
+    def copy(self):
+        return type(self)(self.x, self.y, self.z)
+
+
 # entity-kind fakes — must pass the isinstance() checks in the handler, so we monkeypatch the
 # adsk.fusion class symbols the handler tests against to these fakes.
-class _Matrix:
-    """A component-to-world placement, as Occurrence.transform2 reads: a rotation applied to the
-    point plus a translation. `rotate` defaults to identity."""
-    def __init__(self, rotate=None, translate=(0.0, 0.0, 0.0)):
-        self.rotate = rotate or (lambda x, y, z: (x, y, z))
-        self.translate = translate
-
-
-def _rot90z(x, y, z):
-    """90 degrees about Z - the rotation the measured nested rig places its parent with."""
-    return (-y, x, z)
-
-
-class _Point:
-    """Point3D: copy() then transformBy(matrix) is how a component-local point is lifted to world."""
-    def __init__(self, xyz):
-        self.x, self.y, self.z = xyz
-
-    def copy(self):
-        return _Point((self.x, self.y, self.z))
-
-    def transformBy(self, m):
-        rx, ry, rz = m.rotate(self.x, self.y, self.z)
-        self.x = rx + m.translate[0]
-        self.y = ry + m.translate[1]
-        self.z = rz + m.translate[2]
-        return True
-
-
 class _OriginRecorder(_Recorder):
     """createByNonPlanarFace hands back a JointGeometry carrying an ORIGIN - the only signal the
     torus base-feature trap gives (the call itself reports success). The origin is WORLD-framed,
@@ -94,7 +81,7 @@ class _OriginRecorder(_Recorder):
         self._origin = origin
     def createByNonPlanarFace(self, face, kp):
         self.calls.append(("nonplanar", kp))
-        return type("JG", (), {"origin": _Point(self._origin)})()
+        return type("JG", (), {"origin": _LiftablePoint(*self._origin)})()
 
 
 class FakeBRepFace:
@@ -106,7 +93,7 @@ class FakeBRepFace:
     def __init__(self, surface_type, origin=None, context=None, component=None):
         members = {"surfaceType": surface_type}
         if origin is not None:
-            members["origin"] = _Point(origin)
+            members["origin"] = _LiftablePoint(*origin)
         self.geometry = type("G", (), members)()
         if context is not None:
             self.assemblyContext = context
@@ -131,7 +118,7 @@ def _placed(matrix, component=None):
     """An occurrence: transform2 is the composed component-to-world matrix, and `component` is what
     it places - the ladder matches an entity's owning component against that, not against the first
     occurrence it meets."""
-    return SimpleNamespace(transform2=matrix, transform=_Matrix(), component=component,
+    return SimpleNamespace(transform2=matrix, transform=FakeMatrix3D(), component=component,
                            assemblyContext=None)
 
 
@@ -158,7 +145,7 @@ def world_frames(monkeypatch):
     stub = SimpleNamespace(design=lambda: design,
                            same_component=globs["_common"].same_component)
     monkeypatch.setitem(globs, "_common", stub)
-    monkeypatch.setattr(adsk.core.Matrix3D, "create", staticmethod(_Matrix), raising=False)
+    monkeypatch.setattr(adsk.core.Matrix3D, "create", staticmethod(FakeMatrix3D), raising=False)
     return root_comp
 
 
@@ -288,7 +275,7 @@ class TestJointGeometryRules:
         # as the CHILD ORIGIN (50,6,0) - a plausible nonzero point that is still wrong.
         _install(monkeypatch, _OriginRecorder((50.0, 6.0, 0.0)))
         face = _proxy_face(_ST.TorusSurfaceType, (50.0, 8.0, 0.0),
-                           _Matrix(rotate=_rot90z, translate=(50.0, 6.0, 0.0)))
+                           FakeMatrix3D(_ROT90Z_DEG, (50.0, 6.0, 0.0)))
         g, _label, err = jg._joint_geometry_for(face)
         assert g is None
         assert "(50.0000, 6.0000, 0.0000) cm in WORLD space" in err       # the keypoint
@@ -303,7 +290,7 @@ class TestJointGeometryRules:
         # origin, so the keypoint is accidentally RIGHT. There is nothing wrong to report.
         _install(monkeypatch, _OriginRecorder((50.0, 6.0, 0.0)))
         face = _proxy_face(_ST.TorusSurfaceType, (50.0, 6.0, 0.0),
-                           _Matrix(rotate=_rot90z, translate=(50.0, 6.0, 0.0)))
+                           FakeMatrix3D(_ROT90Z_DEG, (50.0, 6.0, 0.0)))
         g, _label, err = jg._joint_geometry_for(face)
         assert err is None and g is not None
 
@@ -314,7 +301,7 @@ class TestJointGeometryRules:
         # already is.
         _install(monkeypatch, _OriginRecorder((50.0, 8.0, 1.0)))
         face = _proxy_face(_ST.TorusSurfaceType, (50.0, 8.0, 1.0),
-                           _Matrix(rotate=_rot90z, translate=(50.0, 6.0, 0.0)))
+                           FakeMatrix3D(_ROT90Z_DEG, (50.0, 6.0, 0.0)))
         g, _label, err = jg._joint_geometry_for(face)
         assert err is None and g is not None
 
@@ -335,7 +322,7 @@ class TestJointGeometryRules:
         _install(monkeypatch, _OriginRecorder(keypoint))
         # Distinct placements with DIFFERENT transforms, so "several" is a real ambiguity and not
         # one occurrence listed twice.
-        occs = [_placed(_Matrix(rotate=_rot90z, translate=(50.0 + 20.0 * i, 6.0, 0.0)),
+        occs = [_placed(FakeMatrix3D(_ROT90Z_DEG, (50.0 + 20.0 * i, 6.0, 0.0)),
                         component=_comp("Child", "CHILD")) for i in range(placements)]
         world_frames.allOccurrencesByComponent = lambda c, o=occs: o
         face = FakeBRepFace(_ST.TorusSurfaceType, origin=local_origin,

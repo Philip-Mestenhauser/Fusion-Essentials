@@ -514,13 +514,27 @@ class TestReadMachines:
         res = ces.read_machines()
         assert res["isError"] is True and "machine library" in res["message"]
 
+    def test_note_carries_the_measured_strip_clause(self, monkeypatch):
+        # The note's strip advice states what the strip is MEASURED to preserve - the spindle
+        # maximum and axis ranges reading back through Setup.machine. The two absent phrases are
+        # the blanket claims no measurement backs: that the API refuses EVERY simulation_ready
+        # machine, and that posting/kinematics are unaffected.
+        _install_machine_lib(monkeypatch, [_machine("Haas", "VF-2")])
+        note = _payload(ces.read_machines())["note"]
+        assert "read back unchanged through Setup.machine" in note
+        assert "refuses assigning any" not in note
+        assert "posting/kinematics" not in note
+
 
 # ── machine_strip_simulation: the ONE assignment path for simulation-ready machines ─────────────────
 #
-# Setup.machine refuses ANY machine with hasSimulationModel=True regardless of library location
-# (verified live - a Local createFromFile-loaded copy refuses identically; the platform error's
-# copy-to-local advice does not work via the API). Stripping the simulation model from the
-# TRANSIENT resolved copy is what unlocks assignment.
+# Setup.machine REFUSES a machine whose hasSimulationModel is True - measured (measure_api
+# cam-machine-uncleared-simulation-assignment-refused) on the library machine that run picks, and
+# only when that machine carries a simulation model. Stripping the simulation model from the
+# TRANSIENT resolved copy is what unlocks the assignment, with the spindle maximum and every axis
+# range reading back identically through Setup.machine (measure_api
+# cam-machine-spindle-max-readable). Whether EVERY simulation-ready machine is refused, and whether
+# the platform error's copy-to-local advice works through the API, are NOT measured.
 
 class TestMachineStripSimulation:
     def _setup_with_sim_machine(self, monkeypatch):
@@ -557,7 +571,9 @@ class TestMachineStripSimulation:
         assert src.hasSimulationModel is True            # never silently stripped
 
     def test_sim_ready_refusal_error_names_the_flag(self, monkeypatch):
-        # Without the flag, the platform's refusal must TEACH the working escape at failure time.
+        # Without the flag, the platform's refusal must TEACH the working escape at failure time -
+        # THIS refusal plus the remedy, without generalizing to every simulation-ready machine or
+        # claiming what the copy-to-local advice does.
         cam, src = self._setup_with_sim_machine(monkeypatch)
         def _refuse(self, m):
             raise RuntimeError("Setting a simulation ready machine from an external library is "
@@ -566,6 +582,21 @@ class TestMachineStripSimulation:
         monkeypatch.setattr(_Setup, "machine", property(lambda self: None, _refuse))
         res = ces.handler(setup="Setup1", machine="Haas VF-2")
         assert res["isError"] is True and "machine_strip_simulation=true" in res["message"]
+        # the hint carries what the strip is MEASURED to preserve - the spindle maximum and axis
+        # ranges reading back through Setup.machine - and no blanket claim about every machine.
+        assert "read back unchanged through Setup.machine" in res["message"]
+        assert "ANY simulation-ready machine" not in res["message"]
+
+    def test_flag_description_carries_the_measured_clause(self):
+        # The input's own prose says the same measured thing as the failure-time hint: the refusal
+        # is one that CAN happen, and the strip's cost is the read that was taken. The absent
+        # phrases are the blanket claims no measurement backs - every simulation-ready machine
+        # refused outright, posting and kinematics unaffected.
+        props = ces.tool.to_dict()["inputSchema"]["properties"]
+        desc = props["machine_strip_simulation"]["description"]
+        assert "read back unchanged through the setup" in desc
+        assert "refuses simulation-ready machines outright" not in desc
+        assert "posting and kinematics" not in desc
 
     def test_non_sim_assignment_error_has_no_flag_hint(self, monkeypatch):
         # An unrelated assignment failure must not advertise the strip flag as a cure.

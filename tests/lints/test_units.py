@@ -13,8 +13,10 @@ while its owning tool exposes no 'units' selector is a unit fact stranded in pro
 learned "pass units=cm" from a sibling tool gets a silently wrong-by-a-factor result with no
 feedback. The remedy is to pair the number with the Distance + UnitField kinds from _inputs.py
 (which add the 'units' selector), so the unit is declared and resolved rather than asserted. The
-shrink-only _EXEMPT table carries any input where a fixed, non-agent-selectable unit is deliberate,
-each with a one-line reason.
+sweep reaches a number at any nesting depth - an object's own properties and the properties of an
+array's ITEMS alike (the same descent test_wire_ascii.py walks) - so a number buried in a list of
+objects is checked like a top-level one. The shrink-only _EXEMPT table carries any input where a
+fixed, non-agent-selectable unit is deliberate, each with a one-line reason.
 
 READ-SIDE MIRROR (test_units_reporting_read_wires_the_units_kind): a tool that REPORTS a 'units'
 field in its result payload must let the agent CHOOSE those units through the shared _inputs.UNITS
@@ -44,9 +46,17 @@ from conftest import load_tool, register_all_tools, TOOLS_DIR
 _UNIT = re.compile(r"(?<![A-Za-z])(mm|cm|inch(?:es)?|millimet\w*|centimet\w*)(?![A-Za-z])", re.I)
 
 # "tool.input" paths where a bare unit in prose is deliberate (a fixed unit the agent cannot select).
+# A nested path reads "tool.object.field", and one inside an array's items "tool.array[].field".
 # Shrink-only; each entry needs a reason.
 _EXEMPT = {
     # "some_tool.some_input": "reason a fixed unit is correct here",
+    "joint_motion_link.ratio": "a motion-link ratio's unit is a PAIR fixed by the two joints' own "
+                               "DOF kinds (deg for a rotation, mm for a slide) - one 'units' "
+                               "selector cannot name a deg-per-mm ratio, and _joints."
+                               "link_ratio_values converts the number to Fusion's native rad/cm "
+                               "before it is written",
+    "assembly_edit_relations.ratio": "the re-value half of joint_motion_link.ratio - the same "
+                                     "per-DOF pair of fixed units through the same codec",
 }
 
 # Tools that REPORT a 'units' field yet legitimately do NOT wire the shared UNITS kind. Shrink-only;
@@ -118,6 +128,11 @@ def _is_numeric(schema):
 
 
 def _numeric_unit_props(props, path, out):
+    """Collect (path, unit, description) for every numeric input naming a unit in prose, at ANY
+    nesting depth: an object's own `properties` and the `properties` of an array's `items` both get
+    descended (an item path carries a `[]` segment). Same walk as test_wire_ascii's
+    _walk_property_descriptions - a unit stranded in prose is no less stranded for sitting inside a
+    list of objects, and the two lints police the same authored strings."""
     for name, schema in props.items():
         if not isinstance(schema, dict):
             continue
@@ -128,6 +143,9 @@ def _numeric_unit_props(props, path, out):
         nested = schema.get("properties")
         if isinstance(nested, dict):
             _numeric_unit_props(nested, f"{path}.{name}", out)
+        items = schema.get("items")
+        if isinstance(items, dict) and isinstance(items.get("properties"), dict):
+            _numeric_unit_props(items["properties"], f"{path}.{name}[]", out)
 
 
 class TestUnitsAreTyped:
@@ -169,6 +187,33 @@ class TestUnitsAreTyped:
         assert not offenders, (
             "A units-reporting read must let the agent choose those units via the shared UNITS kind:\n  "
             + "\n  ".join(offenders))
+
+    def test_the_input_walker_reaches_every_nesting_level(self):
+        # The synthetic schema is what proves the descent: whether a registered tool happens to
+        # nest a unit-naming number inside an array of objects varies with the tool surface, while
+        # the walker must reach one wherever it sits. Covered here: a top-level number, an array OF
+        # numbers, a number under a nested object, a number inside an array's items, and one under
+        # an object inside those items - plus the two shapes that must NOT be collected (a numeric
+        # input naming no unit, a STRING input that does).
+        props = {
+            "depth": {"type": "number", "description": "cut depth in mm"},
+            "count": {"type": "integer", "description": "how many passes"},
+            "label": {"type": "string", "description": "text to stamp, e.g. '5 mm'"},
+            "offsets": {"type": "array", "items": {"type": "number"},
+                        "description": "offsets in mm"},
+            "fixture": {"type": "object", "properties": {
+                "height": {"type": "number", "description": "riser height in cm"}}},
+            "passes": {"type": "array", "items": {"type": "object", "properties": {
+                "stepover": {"type": "number", "description": "stepover in mm"},
+                "tool": {"type": "object", "properties": {
+                    "stickout": {"type": "number", "description": "stickout in mm"}}}}}},
+        }
+        found = []
+        _numeric_unit_props(props, "t", found)
+        assert sorted(p for p, _, _ in found) == [
+            "t.depth", "t.fixture.height", "t.offsets",
+            "t.passes[].stepover", "t.passes[].tool.stickout"]
+        assert [u for p, u, _ in found if p == "t.passes[].stepover"] == ["mm"]
 
     def test_the_reporting_lint_bites(self):
         # The discriminator the read-side lint hangs on: the shared enum kind passes, a hand-rolled

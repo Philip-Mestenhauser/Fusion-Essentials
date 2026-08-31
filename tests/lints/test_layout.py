@@ -21,13 +21,14 @@ TESTS = Path(__file__).resolve().parent.parent
 # The convention-enforcing tests (this file included). Shrink/grow deliberately, never by accident.
 _LINT_TESTS = frozenset({
     "test_assert_strength", "test_axis_vectors_shared",
-    "test_bespoke_fake_ratchet", "test_choice_coverage", "test_dead_code",
+    "test_bespoke_fake_ratchet", "test_blurb_budget", "test_choice_coverage", "test_dead_code",
     "test_doc_citations", "test_enum_families_measured",
     "test_evergreen_no_baggage", "test_export_knob_preread",
     "test_fake_shapes_exist", "test_frame_disclosure",
     "test_generated_docs_current", "test_generators", "test_helper_duplication", "test_layout",
     "test_bool_returns_checked",
     "test_material_effect_verified",
+    "test_measured_words_cited",
     "test_native_identity_keys",
     "test_no_duplicate_defs", "test_no_fabricated_fallbacks",
     "test_input_property_names", "test_rename_adoption",

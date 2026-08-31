@@ -65,9 +65,14 @@ _PUBLISHES_A_FRAME_BLOCK = {
 
 # module -> the audited reason its frame is NOT a block of an origin plus three axes.
 _PUBLISHES_OTHERWISE = {
-    "assembly_get": "three row-local shapes: an occurrence's placement basis is merged FLAT into "
+    "assembly_get": "four row-local shapes: an occurrence's placement basis is merged FLAT into "
                     "the row (origin/x_axis/y_axis/z_axis, no wrapper), a joint row carries its own "
-                    "frame, and a joint-origin row's frame holds axes only with the origin "
+                    "frame, that same joint row carries the motion's headings as BARE directions "
+                    "beside it (rotation_axis / slide_direction - single vectors, not a basis, "
+                    "published as the JointMotion member answers, with no placement lift: "
+                    "rotation_axis read world on a top-level joint (measured), while "
+                    "slide_direction's space and either heading through a nested instance are "
+                    "unmeasured), and a joint-origin row's frame holds axes only with the origin "
                     "published beside it as world_position",
     "model_inspect": "its 'frame' is a prose LABEL naming which frame the extents were measured in "
                      "('world axes (axis-aligned)', or the joint origin's part space) and sits "
@@ -89,30 +94,33 @@ def _source(name):
     return _corpus.text(os.path.join(TOOLS_DIR, f"{name}.py"))
 
 
-def _package_source():
-    """Every tools/*.py, helpers included - a module may publish its frame through a shared helper
-    (sketch_core's block is built in _sketch_detail), so the keys live one file over."""
-    return "\n".join(_corpus.text(os.path.join(TOOLS_DIR, fn))
-                     for fn in sorted(os.listdir(TOOLS_DIR)) if fn.endswith(".py"))
+def _keys_in(tree):
+    """Every string standing in KEY position in one parsed module - a dict-literal key, or a
+    subscript like frame["x_world"]. Nothing else: the same word in a comment, a docstring or a wire
+    sentence is a MENTION. That distinction is the scan: 'space' is an ordinary word in this
+    package's prose, and a substring search finds it in a COMMENT (`keyed by frame['space']`) long
+    after the payload has stopped publishing it, which is why key position and not text is what
+    this reads."""
+    found = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict):
+            found.update(k.value for k in node.keys
+                         if isinstance(k, ast.Constant) and isinstance(k.value, str))
+        elif isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant):
+            if isinstance(node.slice.value, str):
+                found.add(node.slice.value)
+    return found
 
 
 @functools.lru_cache(maxsize=1)
 def _minted_keys():
-    """Every string used as a payload KEY anywhere in tools/ - a dict-literal key, or a subscript
-    like frame["x_world"]. Read from the AST rather than the text: 'space' is an ordinary word in
-    this package's prose, and a substring search finds it in a COMMENT (`keyed by frame['space']`)
-    long after the payload has stopped publishing it, which is how the honesty flag went unpinned."""
+    """Every string used as a payload KEY anywhere in tools/, helpers included - a module may
+    publish its frame through a shared helper (sketch_core's block is built in _sketch_detail), so
+    the keys live one file over."""
     found = set()
     for fn in sorted(os.listdir(TOOLS_DIR)):
-        if not fn.endswith(".py"):
-            continue
-        for node in ast.walk(_corpus.tree(os.path.join(TOOLS_DIR, fn))):
-            if isinstance(node, ast.Dict):
-                found.update(k.value for k in node.keys
-                             if isinstance(k, ast.Constant) and isinstance(k.value, str))
-            elif isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant):
-                if isinstance(node.slice.value, str):
-                    found.add(node.slice.value)
+        if fn.endswith(".py"):
+            found |= _keys_in(_corpus.tree(os.path.join(TOOLS_DIR, fn)))
     return frozenset(found)
 
 
@@ -157,13 +165,29 @@ class TestFrameBlocksMintTheKeysTheyClaim:
         assert not _minted_as_key("origin_in_parent_space")    # a rename nothing mints
 
     def test_the_check_matches_KEY_POSITION_not_a_bare_mention(self):
-        # 'space' is an ordinary English word that appears all over this package's prose, so a bare
-        # substring search would report it minted even after the payload dropped it - which is
-        # exactly how the honesty flag went unpinned. Only an assignment or a dict entry counts.
-        blob = _package_source()
-        assert "somewhere different" in blob          # the word is really there, in prose
-        assert not _minted_as_key("somewhere")        # but prose alone is not minting
-        assert _minted_as_key("space")                # the flag itself IS a payload key
+        # The discrimination the key checks rest on, read on a parsed snippet: a dict entry and a
+        # string subscript are minting, and a string carrying the same word - a note, a dict VALUE -
+        # is not. (A comment is the third mention shape, and no snippet can show it: ast.parse
+        # discards comments, so _keys_in never sees one. The corpus assertion below is what covers
+        # that shape.)
+        #
+        # The snippet is written here rather than scavenged from tools/. Key position is what this
+        # test pins, so key position is what it feeds in: pinning it to a phrase pins it to whoever
+        # writes that phrase instead. The wording a scan like that reaches for - one frame landing
+        # somewhere different per instance - is carried by _inputs.py's placement refusals, which
+        # mint no frame key and answer to no entry in either table above, so a reword there that
+        # changes nothing about any frame key would fail a test about frame keys.
+        snippet = ast.parse("note = 'each instance holds the sketch somewhere different'\n"
+                            "frame = {'space': 'world', 'origin_mm': origin}\n"
+                            "frame['x_world'] = axis\n")
+        assert _keys_in(snippet) == {"space", "origin_mm", "x_world"}
+        # and against the real package, both directions of the same discrimination: the honesty
+        # flag IS a payload key here, and a word this package's prose carries in comments,
+        # docstrings and refusal sentences, while minting it as a key nowhere, is not one. The
+        # negative is what a corpus read scanning text instead of key position fails, and it
+        # reaches that without naming any file or any sentence.
+        assert _minted_as_key("space")
+        assert not _minted_as_key("somewhere")
 
 
 class TestEveryPublishedFrameIsClassified:

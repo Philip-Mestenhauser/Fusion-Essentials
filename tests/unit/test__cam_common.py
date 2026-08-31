@@ -573,6 +573,19 @@ class TestOperationsSummaryErrorGate:
         drill = next(e for e in summary["exceptions"] if e["name"] == "Drill1")
         assert "operation_error" in drill["blocked_by"]
 
+    def test_the_errored_op_is_not_counted_among_the_valid_toolpaths(self, monkeypatch):
+        # The COUNT the verdict quotes, not just its wording. The errored op reads toolpath_valid
+        # True, so a tally taken off that flag alone says "2 of 2 active ops have valid toolpaths"
+        # in the very sentence that sends the reader to resolve an exception - the two halves of
+        # one string disagreeing about the same job. Pinned as the whole sentence: the demoted
+        # wording is identical either way, so only the number separates them.
+        monkeypatch.setattr(cr, "validity_basis", lambda: "manufacture_verified")
+        summary = cr._operations_summary([self._rec("Face1"),
+                                          self._rec("Drill1", has_error=True)])
+        assert summary["readiness"] == ("1 of 2 active ops have valid toolpaths - resolve the "
+                                        "exceptions (run cam_generate) before posting.")
+        assert summary["active_count"] == 2          # the errored op is still ACTIVE, just not valid
+
     def test_all_valid_no_errors_is_ready(self, monkeypatch):
         monkeypatch.setattr(cr, "validity_basis", lambda: "manufacture_verified")
         summary = cr._operations_summary([self._rec("Face1"), self._rec("Adaptive1")])
@@ -1780,7 +1793,8 @@ class TestWarningOverlayTally:
         assert t["errored"] == 1 and t["warnings"] == 0 and t["warning_sample"] is None
 
     def test_a_suppressed_ops_warning_is_not_counted(self, operation_cast_passthrough):
-        # a suppressed op is excluded from the post by design, so it can block or demote nothing.
+        # a suppressed op carries no toolpath - measured: setting isSuppressed True discards it -
+        # so its warning demotes nothing in this tally.
         t = cc.op_state_tally([_tally_op("Off1", state=2, suppressed=True, warning=True)])
         assert t["suppressed"] == 1 and t["warnings"] == 0 and t["warning_sample"] is None
 
@@ -2437,6 +2451,23 @@ class TestOperationSummaryDisclosure:
         assert rec["blocked_by"] == ["toolpath_out_of_date"]
         assert rec["requires"] == {"tool": "cam_generate", "workspace": "Manufacture"}
 
+    def test_an_op_that_never_generated_is_out_of_date_beside_its_own_state_bucket(
+            self, install, operation_cast_passthrough):
+        # NoToolpath (operationState 3) and IsInvalid (1) are DIFFERENT buckets - the row publishes
+        # 'no_toolpath' - and both are what cam_generate(skip_valid=true) redoes, so is_out_of_date
+        # covers both. A no_toolpath row reading is_out_of_date false tells an agent looking for
+        # work that an operation holding no toolpath at all needs no generating.
+        op = SimpleNamespace(
+            name="Rough", tool=SimpleNamespace(description="flat 10mm"), strategy="adaptive",
+            operationState=adsk.cam.OperationStates.NoToolpathOperationState,
+            hasWarning=False, hasError=False, hasToolpath=False, isToolpathValid=False,
+            isGenerating=False, isSuppressed=False, isOptional=False, messageLog="")
+        install(FakeCAM([_OpSetup("S1", [op])]))
+        row = _payload(cr.get_cam_operations_handler())["setups"][0]["operations"][0]
+        assert row["state"] == "no_toolpath"                    # its own bucket, not 'out_of_date'
+        assert row["is_out_of_date"] is True                    # and still work cam_generate redoes
+        assert row["blocked_by"] == ["toolpath_out_of_date"]
+
     def test_the_distinct_tools_are_tallied_across_the_returned_ops(self, install,
                                                                     operation_cast_passthrough):
         flat = SimpleNamespace(description="flat 10mm")
@@ -2611,6 +2642,17 @@ class TestSpindleScopedToActiveOps:
         rec = self._rows(install, setup)
         assert rec["operations"][0]["spindle_over_machine_max"] is None
         assert "spindle_over_machine_max_count" not in rec["summary"]
+
+    def test_a_truthy_non_true_flag_is_not_counted_as_over(self):
+        # The count is over the flag as the BOOLEAN the row publishes - true, false, or null where
+        # the comparison could not be made - never "anything truthy". A marker string, a number or
+        # a list in that slot is none of those three answers, so none of them may raise a count a
+        # reader takes as ops asking the spindle for more than the machine allows.
+        for flag in ("suppressed_not_compared", 1, [24999.0]):
+            summary = cr._operations_summary([
+                {"name": "Cut", "state": "valid", "toolpath_valid": True, "is_suppressed": False,
+                 "has_error": False, "blocked_by": [], "spindle_over_machine_max": flag}])
+            assert "spindle_over_machine_max_count" not in summary
 
     def test_the_note_states_the_scoping_it_applies(self, install, operation_cast_passthrough):
         # the rule is invisible to a caller unless the payload says it: an absent flag otherwise
@@ -3084,13 +3126,15 @@ class TestMachiningTimeScope:
         assert res["isError"] is True and "furlongs" in res["message"]
 
 
-# --- CAM-13: the SUPPRESSED operations are what breaks getMachiningTime, so they never go in ---
+# --- CAM-13: SUPPRESSED operations are held out of the timed collection, and the note says so ---
 
 class TestMachiningTimeExcludesSuppressed:
-    """Measured: the call fails ('Machining time could not be calculated') whenever a suppressed op
-    is in the target, while the same valid ops - with or without EMPTY-toolpath ops beside them -
-    return a time. So the timed target is a collection of the non-suppressed ops, and what was left
-    out is published rather than silently dropped."""
+    """The timed target is a collection of the non-suppressed ops, and what was left out is
+    published rather than silently dropped. The exclusion is a CONSTRUCTION, not an API need:
+    measured (measure_api cam-machining-time-suppressed-op-contributes-nothing), a suppressed op
+    in the collection contributes nothing to the figure and the call succeeds - so leaving it out
+    changes no number, keeps excluded_suppressed honest, and stays robust on a collection whose
+    other members' states this handler never reads."""
 
     def _cam(self, install, ops):
         cam = _MTCam([_MTSetup("S1", ops=ops)])

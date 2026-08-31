@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import load_tool, FakeMatrix3D, FakePoint, FakeVector3D
+from conftest import load_tool, FakeMatrix3D, FakePoint, FakeVector3D, _NamedCollection
 
 ap = load_tool("assembly_get")
 ad = load_tool("_assembly_detail")      # the row serializers assembly_get's handler publishes
@@ -140,6 +140,34 @@ class _UnreadableMotion(_Motion):
     @property
     def rotationValue(self):
         raise RuntimeError("3 : the value cannot be read")
+
+
+class _UnreadableAxisMotion(_Motion):
+    """A motion whose HEADING read raises - the direction is unknown, which is neither a zero vector
+    nor an axis to guess."""
+
+    @property
+    def rotationAxisVector(self):
+        raise RuntimeError("3 : the vector cannot be read")
+
+
+class _MotionUnreadableJoint:
+    """A joint whose jointMotion READ raises: the object every motion read goes through answers
+    nothing at all, so a row's type, driven value and headings all have to survive it. Distinct from
+    a joint carrying a motion that answers None to one member - here the chain fails at its first
+    link, which is the read that has to be guarded or the whole payload sinks with it."""
+    def __init__(self, name, occ1, occ2):
+        self.name = name
+        self.occurrenceOne = _joint_occ(occ1)
+        self.occurrenceTwo = _joint_occ(occ2)
+        self.healthState = 0
+        self.errorOrWarningMessage = ""
+        self.geometryOrOriginOne = None
+        self.geometryOrOriginTwo = None
+
+    @property
+    def jointMotion(self):
+        raise RuntimeError("3 : the motion cannot be read")
 
 
 class _JointFrame:
@@ -880,7 +908,9 @@ class _SliceDesign:
 
     @property
     def allComponents(self):
-        return [self.rootComponent] + self._subs
+        # counted AND iterable, like the live collection (measure_api allcomponents-design-only) -
+        # _common.all_components reads .count/.item while _joints.all_joints iterates.
+        return _NamedCollection([self.rootComponent] + self._subs)
 
 
 def _install_slice(design):
@@ -1403,6 +1433,10 @@ class TestContactsSlice:
         row = _payload(ap.handler(include=["contacts"]))["contacts"][0]
         assert row["member_count"] == 2
         assert row["members"] == ["A:1"] and row["members_unreadable"] == 1
+        # the unnamed member is DISCLOSED, not cut: names plus unreadable already account for the
+        # whole membership, so nothing was truncated away - a flag counting only the named ones
+        # would report this row as a preview.
+        assert row["members_truncated"] is False
 
     def test_members_are_previewed_but_the_count_is_honest(self, contacts_design):
         contacts_design(sets=[_ContactSetRow("Big", members=[_MemberOcc(f"P{i}:1") for i in range(30)])])
@@ -1585,6 +1619,164 @@ class TestJointValueNow:
         rec = _payload(ap.handler())["joints"][0]
         assert rec["value_now"] == {"angle_deg": 30.0}
         assert rec["rotation_limits_deg"] == {"min": -60.0, "max": 60.0}
+
+
+# ── rotation_axis / slide_direction: the heading the MOTION reports for the joint's DOF ──────────
+#
+# The frame below carries the OFFSET direction as its z_axis; the motion carries the heading of the
+# DOF the joint turns or slides on. They are separate reads - whether the two coincide depends on
+# the direction the joint was built on, and is not established here - so each row states the
+# headings for the DOF its kind has, and states none it could not read. The note beside them
+# carries the two claims a bare vector cannot: which SPACE the numbers are in and how far that is
+# measured, and which kinds are not read at all - a planar row publishes three DOF while carrying
+# no heading, so an unscoped "the read answered nothing" would report a deliberate silence as a
+# failure.
+
+class TestJointMotionAxes:
+    _BOTH = {"rotationAxisVector": _Vec(0.0, 1.0, 0.0),
+             "slideDirectionVector": _Vec(0.0, 0.0, 1.0)}
+
+    def test_a_revolute_carries_the_rotation_axis_and_no_slide_direction(self, kin_design):
+        # The motion carries BOTH vectors, so the absent key is the KIND gate and not an absent
+        # member: a revolute has no slide DOF, and a slide_direction on its row is a heading the
+        # joint cannot move along.
+        kin_design(joints=[FakeJoint("Hinge", 1, "A:1", "B:1", motion_values=dict(self._BOTH))])
+        rec = _payload(ap.handler())["joints"][0]
+        assert rec["rotation_axis"] == [0.0, 1.0, 0.0]
+        assert "slide_direction" not in rec
+
+    def test_a_slider_carries_the_slide_direction_and_no_rotation_axis(self, kin_design):
+        kin_design(joints=[FakeJoint("Travel", 2, "A:1", "B:1", motion_values=dict(self._BOTH))])
+        rec = _payload(ap.handler())["joints"][0]
+        assert rec["slide_direction"] == [0.0, 0.0, 1.0]
+        assert "rotation_axis" not in rec
+
+    def test_a_cylindrical_carries_both_headings(self, kin_design):
+        # two DOF, two headings - and they are separate reads, so the row must not publish one twice.
+        kin_design(joints=[FakeJoint("Spin", 3, "A:1", "B:1", motion_values=dict(self._BOTH))])
+        rec = _payload(ap.handler())["joints"][0]
+        assert rec["rotation_axis"] == [0.0, 1.0, 0.0]
+        assert rec["slide_direction"] == [0.0, 0.0, 1.0]
+
+    def test_a_rigid_joint_carries_neither_heading(self, kin_design):
+        # a rigid joint moves along nothing; publishing a vector it exposed would name a DOF it has
+        # not got.
+        kin_design(joints=[FakeJoint("Locked", 0, "A:1", "B:1", motion_values=dict(self._BOTH))])
+        rec = _payload(ap.handler())["joints"][0]
+        assert "rotation_axis" not in rec and "slide_direction" not in rec
+
+    def test_a_motion_carrying_no_such_member_publishes_no_key(self, kin_design):
+        # the value reads fine and the vector member is simply not there - the key is WITHHELD
+        # rather than filled with a zero vector, which would read as an axis pointing nowhere.
+        kin_design(joints=[FakeJoint("Hinge", 1, "A:1", "B:1",
+                                     motion_values={"rotationValue": math.radians(15)})])
+        rec = _payload(ap.handler())["joints"][0]
+        assert rec["value_now"] == {"angle_deg": 15.0}
+        assert "rotation_axis" not in rec
+
+    def test_an_unreadable_heading_is_omitted_not_reported_as_an_axis(self, kin_design):
+        # the member is there and RAISES: no key - and the rest of the row still reads, so one
+        # unreadable heading costs its own key and not the call it sits in.
+        kin_design(joints=[FakeJoint("Hinge", 1, "A:1", "B:1", motion_cls=_UnreadableAxisMotion)])
+        rec = _payload(ap.handler())["joints"][0]
+        assert "rotation_axis" not in rec
+        assert rec["name"] == "Hinge" and rec["type"] == "revolute"
+
+    def test_a_joint_whose_MOTION_READ_RAISES_still_publishes_a_row_with_no_heading(self,
+                                                                                   kin_design):
+        # the object every heading read goes through answers nothing at all. The row is still
+        # emitted - name and occurrences intact - and carries no direction, which holds only while
+        # the read of jointMotion is itself guarded: unguarded, the traceback runs from the read
+        # straight out of handler(), so the call returns no payload at all rather than one
+        # headingless row.
+        kin_design(joints=[_MotionUnreadableJoint("Hinge", "A:1", "B:1")])
+        rec = _payload(ap.handler())["joints"][0]
+        assert rec["name"] == "Hinge" and rec["occurrence_one"] == "A:1"
+        assert "rotation_axis" not in rec and "slide_direction" not in rec
+
+    def test_an_UNKNOWN_joint_kind_is_published_with_no_heading_at_all(self, kin_design):
+        # the motion carries both vectors but its jointType maps to no kind, so which DOF it has is
+        # unknown - the unknown kind takes the withholding branch, never the permissive one.
+        kin_design(joints=[FakeJoint("Odd", 99, "A:1", "B:1", motion_values=dict(self._BOTH))])
+        rec = _payload(ap.handler())["joints"][0]
+        assert rec["type"] == "?"
+        assert "rotation_axis" not in rec and "slide_direction" not in rec
+
+    def test_the_headings_are_dimensionless_and_do_NOT_follow_the_units(self, kin_design):
+        # a direction is not a length: the same row's frame origin scales with 'units' and these
+        # must not, or a caller reading them in inches steers by a vector 25.4x off.
+        kin_design(joints=[FakeJoint("Travel", 2, "A:1", "B:1",
+                                     motion_values={"slideDirectionVector": _Vec(0.0, 0.6, 0.8)})])
+        for units in ("mm", "cm", "in"):
+            rec = _payload(ap.handler(units=units))["joints"][0]
+            assert rec["slide_direction"] == [0.0, 0.6, 0.8]
+
+    def test_an_as_built_joint_reports_its_heading_too(self, kin_design):
+        # an AsBuiltJoint carries the same jointMotion, and it is the class the as-built rig builds
+        # its hinges from - a read wired only to `Joint` would leave those rows headingless.
+        kin_design(asbuilt=[FakeAsBuiltJoint("Spin", 1, "A:1", "B:1",
+                                             motion_values=dict(self._BOTH))])
+        assert _payload(ap.handler())["joints"][0]["rotation_axis"] == [0.0, 1.0, 0.0]
+
+    def test_the_heading_sits_beside_the_frame_and_the_value_without_replacing_either(
+            self, kin_design):
+        # the three are separate reads of one joint: the motion's axis, the driven value, and the
+        # frame whose z_axis is the OFFSET direction - here deliberately a DIFFERENT vector.
+        kin_design(joints=[FakeJoint("Hinge", 1, _FrameOcc("A:1"), "B:1",
+                                     motion_values={"rotationValue": math.radians(90),
+                                                    "rotationAxisVector": _Vec(0.0, 1.0, 0.0)},
+                                     frame_one=_JointFrame(origin=(1.0, 0.0, 0.0)))])
+        rec = _payload(ap.handler(units="cm"))["joints"][0]
+        assert rec["rotation_axis"] == [0.0, 1.0, 0.0]
+        assert rec["value_now"] == {"angle_deg": 90.0}
+        assert rec["frame"]["z_axis"] == [0.0, 0.0, 1.0]
+        assert rec["frame"]["origin"] == [1.0, 0.0, 0.0]
+
+    def test_the_note_names_both_headings_and_what_an_ABSENT_key_means(self, kin_design):
+        kin_design(joints=[FakeJoint("Hinge", 1, "A:1", "B:1", motion_values=dict(self._BOTH))])
+        note = _payload(ap.handler())["note"]
+        assert "rotation_axis (revolute/cylindrical)" in note
+        assert "slide_direction (slider/cylindrical)" in note
+        # the clause that gives a MISSING key its meaning. Drop it and the two vectors still cross
+        # the wire, with nothing saying whether a row without one was asked and answered nothing.
+        assert "an absent key is a read that answered nothing" in note
+
+    def test_the_note_states_the_SPACE_the_headings_are_published_in(self, kin_design):
+        # the same row publishes frame in WORLD coordinates. Two bare direction keys beside it
+        # invite a comparison against frame.z_axis, and numbers in two frames never disagree out
+        # loud - so the note states the space, scoped to the ONE key a read backs. The rest is
+        # hedged by name: a heading the note called measured over an unmeasured case is the
+        # silent-90-degrees failure the scoping exists to prevent.
+        kin_design(joints=[FakeJoint("Hinge", 1, "A:1", "B:1", motion_values=dict(self._BOTH))])
+        note = _payload(ap.handler())["note"]
+        assert "SPACE: rotation_axis read WORLD on a top-level joint (measured)" in note
+        assert ("slide_direction's space is UNMEASURED, as is either heading on a joint reached "
+                "through a nested instance") in note
+        # the claim and its scope, not the experiment behind it: the two rigs are cited at
+        # _assembly_detail._motion_axes, where the code depends on them, and cross no wire.
+        assert "turned 90 deg about Z" not in note
+
+    def test_a_PLANAR_row_shows_its_DOF_and_the_note_scopes_the_unread_kinds(self, kin_design):
+        # a planar motion is deliberately not read for a heading, and the row itself proves the DOF
+        # are there (dof 3, three driven values). An unscoped "the read answered nothing" would
+        # describe a read that was never attempted as one that failed.
+        kin_design(joints=[FakeJoint("Slide", 5, "A:1", "B:1",
+                                     motion_values=dict(self._BOTH, rotationValue=0.0,
+                                                        primarySlideValue=1.0,
+                                                        secondarySlideValue=2.0))])
+        out = _payload(ap.handler())
+        rec = out["joints"][0]
+        assert rec["type"] == "planar" and rec["dof"] == 3
+        assert rec["value_now"] == {"angle_deg": 0.0, "slide_primary_mm": 10.0,
+                                    "slide_secondary_mm": 20.0}
+        assert "rotation_axis" not in rec and "slide_direction" not in rec
+        assert ("a pin_slot / planar / ball row states none because none is read, not because a "
+                "read failed") in out["note"]
+
+    def test_no_heading_teaching_when_joints_are_not_emitted(self, kin_design):
+        kin_design(occs=[FakeOcc("A:1", "A")],
+                   joints=[FakeJoint("Hinge", 1, "A:1", "B:1", motion_values=dict(self._BOTH))])
+        assert "rotation_axis" not in _payload(ap.handler(include_joints=False))["note"]
 
 
 # ── frame: the joint's own frame in WORLD coordinates ────────────────────────────────────────────

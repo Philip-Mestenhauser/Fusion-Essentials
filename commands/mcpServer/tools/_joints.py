@@ -7,9 +7,12 @@ true world axis or a geometry's own axis), and the Joint/AsBuiltJoint-by-name lo
 that edits, drives, or links an existing joint resolves through.
 """
 
+import math
+
 import adsk.core
 import adsk.fusion
 
+from . import _assert
 from . import _common
 from . import _geom
 from ._common import safe
@@ -42,8 +45,15 @@ MAP_BLURB = (
     "(joints AND asBuiltJoints, root and every sub-component) the health rollups count broken "
     "joints over; find_joints_by_name / find_joint - the list form over those same scopes and the "
     "resolve-one over it, which REFUSES a name SEVERAL joints carry, since a joint name is only "
-    "component-locally unique; motion_link_partner - a joint's own MotionLink membership -> "
-    "linked-partner name, which joint_drive's second-member refusal gates on; all_joint_origins - "
+    "component-locally unique; motion_link_record - a joint's own MotionLink membership as ONE "
+    "TRI-STATE record (partner, link, suppressed, broken, the two coupled values, reversed), which "
+    "joint_drive's coupling claim and its second-member refusal gate on, with "
+    "motion_link_partner its NAME projection; link_ratio_values/dof_motion_kind - the ONE "
+    "motion-link ratio codec both link writers send through: a ratio in DISPLAY units per DOF (deg "
+    "for a rotation, mm for a slide) becomes the native rad/cm pair setMotionData takes (unchanged "
+    "for a same-kind pair; UNCONVERTED, and saying so, for a DOF answering neither kind), plus the "
+    "three wire facts naming both unit systems, with link_ratio_mismatch the gate both writers read "
+    "the link's own valueOne/valueTwo back through afterwards; all_joint_origins - "
     "the ONE JointOrigin walk the collect-names / read-axes / resolve-one leaf ops sit on, with "
     "find_joint_origins_by_name the resolve-one over it and jo_assembly_proxy the same JO in "
     "ASSEMBLY CONTEXT, which a native sub-component JO must become before a joint accepts it; "
@@ -474,6 +484,124 @@ def motion_link_dof(joint):
                   "(revolute, slider, or cylindrical)")
 
 
+# The DISPLAY unit a motion-link ratio is stated in, per DOF kind, beside Fusion's NATIVE unit for
+# the same DOF and the native-per-display factor between them.
+_DOF_UNITS = {
+    "rotation": ("deg", "rad", math.pi / 180.0),      # rad-per-deg; no repo constant carries it
+    "slide": ("mm", "cm", _common.scale("mm")),       # cm-per-mm, from the one unit table
+}
+
+# JointMotionTypes members per kind, addressed BY NAME: a member a build does not carry leaves the
+# table rather than raising, and its DOF then classifies as unknown.
+_ROTATION_DOF_NAMES = ("RevoluteJointRotateMotionType", "CylindricalJointRotateMotionType",
+                       "PinSlotJointRotateMotionType", "PlanarJointRotateMotionType",
+                       "BallJointPitchMotionType", "BallJointRollMotionType",
+                       "BallJointYawMotionType")
+_SLIDE_DOF_NAMES = ("SliderJointSlideMotionType", "CylindricalJointSlideMotionType",
+                    "PinSlotJointSlideMotionType", "PlanarJointSlideOneMotionType",
+                    "PlanarJointSlideTwoMotionType")
+
+
+def dof_motion_kind(dof):
+    """'rotation' or 'slide' for a JointMotionTypes DOF value, else None - None meaning the value
+    answers to neither table, which is what keeps a ratio across it UNCONVERTED instead of scaled by
+    a guessed unit."""
+    if dof is None:
+        return None
+    JMT = adsk.fusion.JointMotionTypes
+    for kind, names in (("rotation", _ROTATION_DOF_NAMES), ("slide", _SLIDE_DOF_NAMES)):
+        for nm in names:
+            member = safe(lambda nm=nm: getattr(JMT, nm))
+            if member is not None and member == dof:
+                return kind
+    return None
+
+
+def _ratio_text(value):
+    """A ratio number as a wire sentence states it: rounded to 12 significant digits, so a caller's
+    own number of no more digits than that reads back unchanged and a converted one carries no float
+    tail."""
+    return "%.12g" % value
+
+
+# MEASURED on a rack-and-pinion rig: the two values are in Fusion's NATIVE units, not the display
+# units a caller states a ratio in. value_two = 0.5 (rad per cm) turns the pinion 28.6479 deg over
+# 10 mm of rack; the same coupling stated as the caller's 2.8647889757 deg per mm and sent RAW turns
+# it 82.0701 deg over 5 mm. So a ratio across two DIFFERENT DOF kinds converts by both factors.
+def link_ratio_values(dof_one, dof_two, ratio):
+    """The (value_one, value_two, facts) MotionLink.setMotionData is given for a caller's `ratio` -
+    the ONE codec both motion-link writers (the create and the re-value) convert through.
+
+    `ratio` is joint_two's motion per ONE unit of joint_one in DISPLAY units - degrees for a rotation
+    DOF, millimetres for a slide DOF - while setMotionData takes Fusion's native radians and
+    centimetres. value_one is always 1, so value_two carries the whole coupling: |ratio| for two DOF
+    of the SAME kind (the display factors cancel, so the number is passed through untouched) and
+    |ratio| * f2 / f1 across kinds, f being each DOF's native-per-display factor. Both are
+    MAGNITUDES - the sign travels to setMotionData as isReversed, which the caller passes itself.
+
+    `facts` is the three wire keys both writers publish beside their own 'ratio': 'ratio_units' (the
+    display units the number was read in), 'value_units' (the native units the pair was sent in) and
+    'interpreted' (the one sentence stating both). A DOF answering neither unit table leaves all
+    three unconvertible: the magnitude goes out unchanged, the two unit keys are None, and the
+    sentence says the number was sent unconverted. The sentence names the sent pair per JOINT rather
+    than as 'value_one'/'value_two': both writers publish those two keys as the link's own parameters
+    READ BACK, and one payload cannot spell one name two ways.
+
+    This encodes the WRITE only. Whether the platform's coupling follows the pair is not read here,
+    so every sentence states what was SENT, never what will move."""
+    r = float(ratio)
+    mag = abs(r)
+    k1, k2 = dof_motion_kind(dof_one), dof_motion_kind(dof_two)
+    if k1 is None or k2 is None:
+        return 1.0, mag, {
+            "ratio_units": None, "value_units": None,
+            "interpreted": (
+                f"Sent to setMotionData as 1 for joint_one and {_ratio_text(mag)} for joint_two, "
+                "with NO unit conversion: one of the two coupled degrees of freedom does not answer "
+                "as a rotation or a slide here, so no display unit is established for it.")}
+    d1, n1, f1 = _DOF_UNITS[k1]
+    d2, n2, f2 = _DOF_UNITS[k2]
+    value_two = mag if k1 == k2 else mag * (f2 / f1)
+    sign = "" if r >= 0 else " The sign is carried by isReversed, not by these two values."
+    return 1.0, value_two, {
+        "ratio_units": f"{d2} of joint_two per {d1} of joint_one",
+        "value_units": f"value_one in {n1}, value_two in {n2}",
+        "interpreted": (
+            f"Ratio read in DISPLAY units: {_ratio_text(mag)} {d2} of joint_two per 1 {d1} of "
+            f"joint_one. Sent to setMotionData as 1 {n1} for joint_one and "
+            f"{_ratio_text(value_two)} {n2} for joint_two - Fusion's native units." + sign)}
+
+
+# Two link parameters whose RATIO agrees with the sent value_two to this relative band express the
+# same coupling: a converted value carries a float tail (0.5000000000080081 for the rig ratio) that
+# a platform storing the clean 0.5 does not.
+RATIO_READ_TOLERANCE = 1e-6
+
+
+def link_ratio_mismatch(value_two, read_one, read_two):
+    """Why a link's own valueOne/valueTwo do NOT express `value_two` - the codec's second value - as
+    a clause naming the numbers, or None when they do. The read-back gate BOTH motion-link writers
+    apply after setMotionData, which answers a boolean: a link left holding a different coupling is
+    the wrong ratio this codec exists to keep off the model, and no other field in either result
+    would reveal it.
+
+    The comparison is the RATIO read_two / read_one rather than the two numbers apart: a platform
+    storing the coupling scaled (2:8 for a sent 4) still expresses the sent ratio. A pair that did
+    not READ as two numbers is no evidence either way and answers None - each caller says what an
+    unconfirmed pair means for the write it just made, since one has a fresh link to speak for and
+    the other a link that was already there."""
+    for v in (read_one, read_two):
+        if not isinstance(v, (int, float)) or isinstance(v, bool):
+            return None
+    if not read_one:
+        return f"its valueOne parameter reads {read_one} - a zero first value is no coupling at all"
+    got = read_two / read_one
+    if abs(got - value_two) > max(RATIO_READ_TOLERANCE, RATIO_READ_TOLERANCE * value_two):
+        return (f"its parameters read {read_one}:{read_two} (a ratio of {got}), not the {value_two} "
+                "this ratio converts to - the ratio did not take")
+    return None
+
+
 def all_joints(design):
     """Every Joint AND AsBuiltJoint in the design, as a flat list of the joint objects: the root
     component plus every sub-component (both are SEPARATE collections, and a joint internal to a
@@ -549,28 +677,118 @@ def find_joint(design, name):
                   "(assembly_get lists every joint in the design).")
 
 
-def motion_link_partner(joint):
-    """The name of the joint motion-linked to `joint`, or None when it is in no link. Read off the
-    joint's OWN membership (Joint/AsBuiltJoint.motionLinks - 'the MotionLink objects that this joint
-    is involved in'), so a pair linked inside an xref'd sub-assembly is seen through the same joint
-    find_joint resolved - no component walk. Joint.motionLinks returns a MotionLinkVector - a plain
-    SEQUENCE (len/index/iterate; it has NO .count/.item, so a collection-style read finds nothing,
-    verified live) - unlike Component.motionLinks which is a MotionLinks collection. The partner is
-    whichever of MotionLink.jointOne/jointTwo is not this joint (jointTwo is null for a same-joint
-    two-DOF link - no partner to report)."""
+def _link_partner_name(ml, my_name):
+    """The name of the joint in `ml` that is NOT `my_name`, or None when the link names no partner -
+    jointTwo is null for a link between two DOF of the SAME joint."""
+    one = safe(lambda: ml.jointOne.name)
+    two = safe(lambda: ml.jointTwo.name)
+    if one == my_name and two:
+        return two
+    if two == my_name and one:
+        return one
+    return None
+
+
+def _suppression_state(entity):
+    """`entity`'s suppression as a TRI-STATE over BOTH sources it can carry one on - its own
+    ``isSuppressed`` and its ``timelineObject``'s: True when EITHER reads True, False when at least
+    one read and neither is True, None when NEITHER read.
+
+    The pairing is the one assembly_get makes for a Joint, where it is live-verified: Joint's own
+    flag keeps reading False when the suppression was set on the TIMELINE item, so the entity flag
+    alone reports a suppressed joint as active. A bare ``a or b`` over the two collapses an unread
+    pair into False - a confident "not suppressed" from two flags that never answered - so the
+    unknown is kept apart here for a caller that branches with ``is``."""
+    own = _common.read_flag(lambda: entity.isSuppressed)
+    timeline = _common.read_flag(lambda: entity.timelineObject.isSuppressed)
+    if own is True or timeline is True:
+        return True
+    return None if own is None and timeline is None else False
+
+
+def _blank_link(linked):
+    """The record shape for a joint carrying no partner link: `linked` False when the membership READ
+    and named none, None when the membership itself could not be read. Every state key is present and
+    unknown, so a consumer reads the same keys whichever answer it got."""
+    return {"linked": linked, "partner": None, "link": None, "suppressed": None, "broken": None,
+            "value_self": None, "value_partner": None, "reversed": None}
+
+
+def motion_link_record(joint):
+    """`joint`'s own MotionLink membership as ONE record - always a dict, every state a TRI-STATE a
+    consumer branches on with ``is True`` / ``is False`` / ``is None``, never on truthiness.
+
+    Read off the joint's OWN membership (Joint/AsBuiltJoint.motionLinks - 'the MotionLink objects
+    that this joint is involved in'), so a pair linked inside an xref'd sub-assembly is seen through
+    the same joint find_joint resolved - no component walk. Joint.motionLinks returns a
+    MotionLinkVector - a plain SEQUENCE (len/index/iterate; it has NO .count/.item, so a
+    collection-style read finds nothing, verified live) - unlike Component.motionLinks, which is a
+    MotionLinks collection. The partner is whichever of MotionLink.jointOne/jointTwo is not this
+    joint (jointTwo is null for a same-joint two-DOF link - no partner to report).
+
+    Keys:
+      ``linked``      True when a link naming a PARTNER was found, False when the membership read and
+                      named none, None when the membership itself did not read - so "in no link"
+                      stays distinguishable from "could not be asked".
+      ``partner``     the partner joint's name.
+      ``link``        the MotionLink's own name.
+      ``suppressed``  BOTH suppression flags paired (_suppression_state): the link's own
+                      isSuppressed and its timelineObject's, True when either reads True. That
+                      pairing is live-verified for a Joint, whose own flag keeps reading False for a
+                      suppression set on the timeline item; here it answers None when neither source
+                      reads, so a pair that never answered is never published as "not suppressed".
+      ``broken``      the shared compute-state verdict (_assert.compute_state), which asks the entity
+                      AND its timelineObject. MotionLink declares healthState and
+                      errorOrWarningMessage in the bindings, and the paired read also answers for a
+                      class that raises on both - measured for an AsBuiltJoint and a RigidGroup,
+                      whose TimelineObject answers what they will not. True = error/warning,
+                      False = a state that is no failure, None = neither source answered.
+      ``value_self`` / ``value_partner``  the link's own ModelParameter values (valueOne/valueTwo) on
+                      this joint's side and on the partner's, in Fusion's internal units (radians /
+                      cm) - the two numbers joint_motion_link writes a ratio as. What a live link
+                      does with them is a read this record does not make: a consumer scaling by them
+                      says so in what it publishes.
+      ``reversed``    MotionLink.isReversed.
+
+    A link's STATE is what says whether it couples at all, so a caller claiming that driving this
+    joint moved the partner reads these rather than the partner name alone.
+    """
     my_name = safe(lambda: joint.name)
     if not my_name:
-        return None
-    for ml in safe(lambda: list(joint.motionLinks), []) or []:
+        return _blank_link(None)
+    links = safe(lambda: list(joint.motionLinks))
+    if links is None:                       # the membership read RAISED - not an empty membership
+        return _blank_link(None)
+    for ml in links:
         if ml is None:
             continue
-        one = safe(lambda: ml.jointOne.name)
-        two = safe(lambda: ml.jointTwo.name)
-        if one == my_name and two:
-            return two
-        if two == my_name and one:
-            return one
-    return None
+        partner = _link_partner_name(ml, my_name)
+        if not partner:
+            continue
+        one_is_self = safe(lambda: ml.jointOne.name) == my_name
+        state, _failure = _assert.compute_state(ml)
+        return {
+            "linked": True,
+            "partner": partner,
+            "link": safe(lambda: ml.name),
+            "suppressed": _suppression_state(ml),
+            "broken": None if state == "unknown" else (state == "broken"),
+            "value_self": _common.measured(
+                lambda: (ml.valueOne if one_is_self else ml.valueTwo).value),
+            "value_partner": _common.measured(
+                lambda: (ml.valueTwo if one_is_self else ml.valueOne).value),
+            "reversed": _common.read_flag(lambda: ml.isReversed),
+        }
+    return _blank_link(False)
+
+
+def motion_link_partner(joint):
+    """The name of the joint motion-linked to `joint`, or None when it is in no link - the NAME
+    projection of motion_link_record, for a caller that needs only the partner. A caller that
+    BRANCHES on whether the link actually couples reads the record instead: this projection cannot
+    tell a suppressed or broken link from a working one, and it answers None for a membership that
+    did not read as well as for one that named nobody."""
+    return motion_link_record(joint)["partner"]
 
 
 def all_joint_origins(design):

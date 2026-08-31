@@ -1,3 +1,6 @@
+# Copyright (c) Fusion-Essentials contributors
+# Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
+
 """Shared substrate for the drawing (2D document) tool family."""
 
 import adsk.core

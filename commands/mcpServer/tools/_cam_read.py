@@ -287,7 +287,7 @@ def _attach_setup_invalidation(rec, setup):
 _SUPPRESSED_NOT_COMPARED = "suppressed_not_compared"
 
 _OPERATIONS_NOTE = (
-    "Per row: 'path' is the Setup / Folder / Operation breadcrumb and 'folder' the container the op "
+    "Per row: 'path' is the Setup / Folder / Operation breadcrumb and 'folder' the CAM folder the op "
     "sits in, which reads beside is_suppressed; 'preset' is the tool preset this op uses, which two "
     "ops sharing one tool can differ on. 'spindle_over_machine_max' compares the op's "
     "tool_spindleSpeed against the setup's machine_spindle_max_rpm: true is over it, false is at or "
@@ -711,11 +711,15 @@ def get_tool_list_handler() -> dict:
 def _timeable_ops(setup_obj) -> tuple:
     """(ops, suppressed_count) - the setup's operations with the SUPPRESSED ones held back.
 
-    getMachiningTime fails with "Machining time could not be calculated" whenever a suppressed
-    operation is inside the target: measured on one job with three targets - the Setup object
-    (17 active + 35 suppressed) failed, a collection of 21 valid ops returned 5700.6 s, the same
-    21 plus the 65 suppressed ones failed again, and the 21 plus 13 EMPTY-toolpath ops returned
-    5700.6 s. So the suppressed ops are what breaks the call and the empty ones are harmless."""
+    Recorded on one production job with three targets: the Setup object (17 active + 35
+    suppressed) failed getMachiningTime with "Machining time could not be calculated", a
+    collection of 21 valid ops returned 5700.6 s, the same 21 plus the 65 suppressed ones failed
+    again, and the 21 plus 13 EMPTY-toolpath ops returned 5700.6 s. Those failing collections' op
+    STATES were never read, and the flag-alone attribution is REFUTED on 2705.1.4: a
+    freshly-suppressed generated op in a small collection times fine and contributes nothing
+    (measure_api cam-machining-time-suppressed-op-contributes-nothing), while an op left FAULTED
+    fails the whole call (cam-errored-op-state-pair). The exclusion stands as a deterministic
+    construction - the excluded op would add nothing to the figure - not as an API necessity."""
     ops, suppressed = [], 0
     for raw in operations_under(setup_obj):
         op = adsk.cam.Operation.cast(raw)
@@ -754,7 +758,8 @@ _TIME_OP_CAP = 200    # one getMachiningTime call per op; bound the per-turn cos
 _TIME_NOTE = (
     "Estimate at 100% feed, ~250 in/min (10.58 cm/s) rapid, 1.5s tool changes. Rapid feed is the "
     "machine's traverse rate, not the cutting feed. SUPPRESSED operations are left out of the "
-    "timed collection - the call fails outright when one is in the target (measured) - and "
+    "timed collection - measured, a suppressed op contributes nothing to the figure, so leaving "
+    "it out changes no number - and "
     "excluded_suppressed counts what each setup left out. Per-operation figures do NOT sum to "
     "their setup total (measured on a 34-operation job: 5445.6 s summed against a 5700.6 s "
     "aggregate, each per-op call reporting 0 tool changes against the aggregate's 17). BOTH "
@@ -831,8 +836,9 @@ def get_machining_time_handler(setup: str = "", units: str = "mm") -> dict:
     grand = 0.0
     for label, obj in targets:
         ops, suppressed = _timeable_ops(obj)
-        # PRECONDITIONS, both measured: getMachiningTime needs at least one VALID toolpath in the
-        # target, and the target must hold no SUPPRESSED operation (_timeable_ops holds those back).
+        # PRECONDITION, measured: getMachiningTime needs at least one VALID toolpath in the
+        # target. _timeable_ops holds SUPPRESSED ops back as a construction - measured, one
+        # contributes nothing to the figure - not because the call needs it.
         # Inside this handler the failure DOES raise catchably - measured, 13 per-op calls on one
         # job raised '3 : Machining time could not be calculated.' and the call carried on - but
         # through sys_execute_script the same failure took the whole invocation down, so the

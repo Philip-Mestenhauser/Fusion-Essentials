@@ -1366,6 +1366,36 @@ class TestAxisLineOfWorldSpace:
         assert (point.x, point.y, point.z) == (1, 0, 0)
         assert (direction.x, direction.y, direction.z) == (1.0, 0.0, 0.0)   # normalized
 
+    def test_a_line_whose_endpoints_coincide_is_refused_as_degenerate(self, axis_env):
+        # The derived direction is the zero vector, and normalize() reports success while leaving it
+        # zero (the measured behaviour the shared vector fake carries), so nothing downstream tells
+        # this from a real axis: the consumer would pivot about a direction pointing nowhere and
+        # report success. Only this guard refuses it, and the refusal says WHY.
+        axis_env()
+        edge = _FakeLinearEdge()
+        edge.worldGeometry = types.SimpleNamespace(startPoint=FakePoint(2, 3, 4),
+                                                   endPoint=FakePoint(2, 3, 4))
+        pair, err = inp.axis_line_of("rotate_axis", edge)
+        assert pair is None
+        assert "degenerate (zero length)" in err and "rotate_axis" in err
+
+    def test_the_degeneracy_band_is_a_tolerance_and_both_of_its_sides_hold(self, axis_env):
+        # The guard is a tolerance, not an equality on 0.0: a length AT 1e-12 cm is refused and one
+        # just past it resolves and normalizes. Pinning only an exact zero leaves the comparison
+        # free to be an '==' or a '<' and stay green.
+        axis_env()
+        at = _FakeLinearEdge()
+        at.worldGeometry = types.SimpleNamespace(startPoint=FakePoint(0, 0, 0),
+                                                 endPoint=FakePoint(1e-12, 0, 0))
+        pair, err = inp.axis_line_of("rotate_axis", at)
+        assert pair is None and "degenerate (zero length)" in err
+        above = _FakeLinearEdge()
+        above.worldGeometry = types.SimpleNamespace(startPoint=FakePoint(0, 0, 0),
+                                                    endPoint=FakePoint(2e-12, 0, 0))
+        pair, err = inp.axis_line_of("rotate_axis", above)
+        assert err is None
+        assert (pair[1].x, pair[1].y, pair[1].z) == (1.0, 0.0, 0.0)
+
 
 # ── Distance + UnitField scaling chain ──────────────────────────────────────
 
@@ -3694,6 +3724,58 @@ class TestNameAmbiguityCandidatesDiscriminate:
         assert "Sub-7:1+Bolt:1" in err and "Sub-8:1+Bolt:1" not in err
 
 
+# ── the by-PATH candidate list is its own rendering, and needs its own pins ──────────────────────
+# The exact-fullPathName branch lists ONLY discriminators - the path is already quoted in the
+# sentence, so repeating it per row separates nothing. That makes it a second renderer with a second
+# set of promises: every row addresses its own instance, and the cap discloses what it cut. The
+# by-NAME pins above cannot see either, because they never reach this branch.
+
+class TestPathCollisionCandidates:
+    def test_each_row_is_pinned_to_ITS_OWN_occurrence(self):
+        # asserting the fields separately cannot see a swap: with one referenced and one local hit,
+        # both words appear whichever occurrence carries which. Each row is pinned whole, so the
+        # component, the reference state and the handle have to agree about the SAME instance.
+        _collided_pair()
+        occ, err = inp._resolve_occurrence("t", "Assy:1+CMG-050:1")
+        assert occ is None
+        assert "is worn by 2 occurrences" in err
+        assert "component 'CMG-050', referenced, handle 'tok-xref'" in err
+        assert "component 'SourcePart', local, handle 'tok-import'" in err
+
+    def test_an_unreadable_reference_state_is_never_rendered_as_a_definite_one(self):
+        # read_flag answers None when the property raises, and None is not "local". Both hits are
+        # unreadable, so a fixture where the OTHER row supplies the word cannot mask it.
+        one = _FakeOcc("CMG-050:1", "Assy:1+CMG-050:1", token="tok-a", component="CMG-050",
+                       is_reference=_REF_UNREADABLE)
+        two = _FakeOcc("CMG-050:1", "Assy:1+CMG-050:1", token="tok-b", component="SourcePart",
+                       is_reference=_REF_UNREADABLE)
+        _install_occurrences(one, two)
+        occ, err = inp._resolve_occurrence("t", "Assy:1+CMG-050:1")
+        assert occ is None
+        assert "component 'CMG-050', reference state unreadable, handle 'tok-a'" in err
+        assert "local" not in err and "referenced," not in err
+
+    def test_the_candidate_list_counts_what_the_cap_left_out(self):
+        # a silently truncated list reads as EVERY instance wearing that path, and the handle the
+        # caller retries with is picked out of it - so a hit that was cut is one it never learns of.
+        occs = [_FakeOcc("Bolt:1", "Sub:1+Bolt:1", token=f"tok-{i}") for i in range(11)]
+        _install_occurrences(*occs)
+        occ, err = inp._resolve_occurrence("t", "Sub:1+Bolt:1")
+        assert occ is None
+        assert "is worn by 11 occurrences" in err
+        assert "+3 more not listed" in err
+        assert "tok-7" in err and "tok-8" not in err
+
+    def test_the_rows_stay_separable_where_a_discriminator_carries_commas(self):
+        # the shared renderer joins on ', ' and a discriminator holds two commas of its own, so an
+        # unbracketed join prints six comma-separated fragments for two hits and no row boundary.
+        _collided_pair()
+        occ, err = inp._resolve_occurrence("t", "Assy:1+CMG-050:1")
+        assert occ is None
+        assert err.count("(component ") == 2
+        assert "handle 'tok-xref'), (component 'SourcePart'" in err
+
+
 # ── TargetRef (the polymorphic measure/colour target) ───────────────────────
 
 def _install_target(*, handle_map=None, occurrences=(), components=(), brep_named=None, mesh_named=None):
@@ -4667,3 +4749,33 @@ class TestTargetRefMissHint:
         _, err_without = inp.TargetRef(
             "target", allow=("body", "mesh", "occurrence", "component")).resolve("Nope")
         assert "whole design" not in err_without
+
+
+class TestEntityComponent:
+    """The ONE owning-component chain every reference entity is resolved through. A FACE answers on
+    the same first link an edge does - api_surface gives fusion.BRepFace a `body` and none of
+    `parentSketch` / `component` / `parent` - which is what lets model_hole host a hole in the
+    component that owns the drilled face without re-rolling the read."""
+
+    def test_a_face_answers_its_bodys_component(self):
+        owner = MakeComp(name="Chassis")
+        face = types.SimpleNamespace(body=types.SimpleNamespace(parentComponent=owner))
+        assert inp.entity_component(face) is owner
+
+    def test_a_face_whose_body_owner_will_not_read_answers_None(self):
+        # the fallback branch its consumers stand in for the active component on: nothing was read,
+        # so nothing is returned - never the body or the entity itself
+        class _Body:
+            @property
+            def parentComponent(self):
+                raise RuntimeError("owner unavailable")
+
+        assert inp.entity_component(types.SimpleNamespace(body=_Body())) is None
+
+    def test_an_entity_with_none_of_the_chain_answers_None(self):
+        assert inp.entity_component(types.SimpleNamespace()) is None
+
+    def test_a_sketch_line_answers_its_sketchs_component(self):
+        owner = MakeComp(name="Plate")
+        line = types.SimpleNamespace(parentSketch=types.SimpleNamespace(parentComponent=owner))
+        assert inp.entity_component(line) is owner

@@ -14,7 +14,8 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe
 from . import _common
-from ._joints import find_joint, all_joints, motion_link_dof
+from ._joints import (find_joint, all_joints, motion_link_dof, link_ratio_values,
+                      link_ratio_mismatch)
 
 app = adsk.core.Application.get()
 
@@ -72,7 +73,6 @@ def handler(joint_one: str = "", joint_two: str = "", ratio: float = 1.0) -> dic
     if r == 0:
         return error("ratio must be non-zero (a 0 ratio links no motion).")
     reversed_link = r < 0
-    mag = abs(r)
 
     # setMotionData couples ONE JointMotionTypes DOF per joint (RevoluteJointRotateMotionType, ...) -
     # resolve each joint's linkable DOF BEFORE creating anything, so an unlinkable joint (rigid, or a
@@ -96,16 +96,17 @@ def handler(joint_one: str = "", joint_two: str = "", ratio: float = 1.0) -> dic
         return error("Motion link creation returned nothing - check that both joints permit motion "
     "(revolute/slider/cylindrical); a rigid joint cannot be linked.")
 
-    # Apply the ratio AFTER add, on the MotionLink, via setMotionData. The ratio is joint_two units
-    # per unit of joint_one, so valueOne=1, valueTwo=|ratio|; a negative ratio reverses the coupling.
-    # If this fails the link still exists at the API's default (1:1) - report that honestly rather
-    # than claim a ratio we didn't set.
+    # Apply the ratio AFTER add, on the MotionLink, via setMotionData. The ratio is joint_two's
+    # DISPLAY-unit motion per unit of joint_one, so the shared codec turns it into the native pair
+    # the API takes; a negative ratio reverses the coupling. If this fails the link still exists at
+    # the API's default (1:1) - report that honestly rather than claim a ratio we didn't set.
+    value_one, value_two, ratio_facts = link_ratio_values(m1, m2, r)
     ratio_error = None
     try:
         # setMotionData wants a JointMotionTypes DOF per joint (from motion_link_dof), NOT the joint's
         # JointTypes value that jointMotion.jointType returns - passing that raises BAD_JOINT_DOF.
-        v1 = adsk.core.ValueInput.createByReal(1.0)
-        v2 = adsk.core.ValueInput.createByReal(mag)
+        v1 = adsk.core.ValueInput.createByReal(value_one)
+        v2 = adsk.core.ValueInput.createByReal(value_two)
         ok_set = ml.setMotionData(m1, v1, m2, v2, reversed_link)
         if not ok_set:
             ratio_error = "setMotionData returned False"
@@ -137,19 +138,57 @@ def handler(joint_one: str = "", joint_two: str = "", ratio: float = 1.0) -> dic
                       "action='delete'); assembly_get(include=['relations']) names it.")
         return error(msg)
 
+    # The link's OWN parameters, read back off the object setMotionData answered for, in Fusion's
+    # native cm/rad - the same read the re-value path (assembly_edit_relations set_values) and
+    # assembly_get's relations row (_assembly_detail) take on these two properties. THESE are what
+    # 'value_one'/'value_two' publish, not the pair handed to createByReal: those two key names mean
+    # a read of the link's parameters everywhere else on this surface, and the pair that was SENT is
+    # named in 'interpreted'.
+    read_one = safe(lambda: ml.valueOne.value)
+    read_two = safe(lambda: ml.valueTwo.value)
+    mismatch = link_ratio_mismatch(value_two, read_one, read_two)
+    if mismatch:
+        # setMotionData answered True and the link is holding a DIFFERENT coupling - the wrong-ratio
+        # failure nothing else in this result would show. The link is not rolled back: it computed,
+        # and a deleteMe on a pair that read is a second mutation this call cannot justify - so the
+        # error names it and the two ways out.
+        link_name = safe(lambda: ml.name)
+        return error(
+            f"setMotionData reported success but {mismatch}. The motion link "
+            + (f"'{link_name}' " if link_name else "(its name could not be read) ")
+            + "REMAINS in the design holding the pair its parameters read. "
+              "Re-value it with assembly_edit_relations(kind='motion_link', name=..., "
+              "action='set_values'), or remove it with action='delete'; "
+              "assembly_get(include=['relations']) names it.")
+
     out = {
                 "linked": True,
     "motion_link": safe(lambda: ml.name),
     "joint_one": safe(lambda: j1.name),
     "joint_two": safe(lambda: j2.name),
     "ratio": r,
+    "value_one": read_one,
+    "value_two": read_two,
     "ratio_applied": True,
     "reversed": reversed_link,
-    "note": ("Joints linked - drive ONE member (joint_drive) and the link moves the other "
-        "proportionally; read the partner's position back instead of driving it too (joint_drive "
-        "REFUSES the second member for the session - driving both has killed the Fusion process). "
-        "Verify with assembly_get."),
+    "note": ("Joints linked - value_one/value_two are the link's own parameters READ BACK after the "
+        "set, and 'interpreted' states how the ratio was read and the native pair sent to the API. "
+        "Whether the link moves the partner is not claimed here: drive ONE member "
+        "(joint_drive) and its receipt answers whether the link couples, then read the partner back "
+        "with assembly_get instead of driving it too (joint_drive REFUSES the second member for the "
+        "session on an xref/referenced pair - driving both has killed the Fusion process)."),
     }
+    if read_one is None or read_two is None:
+        # The pair did not read as TWO numbers, which is no evidence the ratio failed - and no
+        # evidence it took either. A side that read is published as read; the silent side stays
+        # null rather than echoing what was sent.
+        out["note"] += (" The link's valueOne/valueTwo did not both read back here, so the "
+                        "published pair is incomplete and the coupling this call applied is "
+                        "UNCONFIRMED - assembly_get(include=['relations']) reads the pair off "
+                        "the link.")
+    # The codec's three keys, published identically by the re-value path (assembly_edit_relations
+    # set_values), so one ratio reads the same whichever writer applied it.
+    out.update(ratio_facts)
 
     # Two sliders: teach the travel-direction check. Never a computed verdict - see the measured
     # fact at _SLIDER_PAIR_NOTE.
@@ -162,7 +201,8 @@ TOOL_DESCRIPTION = (
     "Link two EXISTING joints' motion with a ratio (the Motion Link command) so driving one drives "
     "the other proportionally - a gear pair, belt/chain drive, or coupled rotation. joint_one/"
     "joint_two are joint names (see assembly_get); ratio is joint_two's motion per unit of "
-    "joint_one (2 = twice as fast). Both joints must permit motion (revolute/slider/cylindrical)."
+    "joint_one, each in its own display unit. Both joints must permit motion "
+    "(revolute/slider/cylindrical)."
 )
 
 motion_link_tool = (
@@ -170,7 +210,7 @@ motion_link_tool = (
     .add_input_property("joint_one", {"type": "string", "description": "Name of the first joint to link."})
     .add_input_property("joint_two", {"type": "string", "description": "Name of the second joint to link."})
     .add_input_property("ratio", {"type": "number",
-            "description": "joint_two motion per unit of joint_one (e.g. 2 = twice as fast; default 1)."})
+            "description": "joint_two motion per ONE unit of joint_one, in each joint's DISPLAY unit - deg for a rotating DOF, mm for a sliding one (so a slider-to-revolute pair is deg per mm; default 1)."})
     .strict_schema()
 )
 motion_link_item = Item.create_tool_item(tool=motion_link_tool, write="write", handler=handler, run_on_main_thread=True)

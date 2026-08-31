@@ -1202,6 +1202,12 @@ class TestPresetParamOf:
         p, avail = _feed_param(_preset_with(["tool_spindleSpeed", "tool_feedPlunge"]))
         assert p is not None and p.name == "tool_feedPlunge"
 
+    def test_a_preset_carrying_two_feeds_takes_the_cutting_one(self):
+        # the candidates are a priority ORDER, not a set: with more than one of them present the
+        # {feed} value drives the CUTTING feed, never whichever feed the preset lists first
+        p, avail = _feed_param(_preset_with(["tool_feedPlunge", "tool_feedCutting"]))
+        assert p is not None and p.name == "tool_feedCutting" and avail is None
+
     def test_no_known_feed_names_what_exists(self):
         # nothing from the candidate list -> refuse, naming the feed-ish params actually present
         p, avail = _feed_param(_preset_with(["tool_spindleSpeed", "tool_feedGizmo"]))
@@ -2396,7 +2402,8 @@ class TestPresetValuePlumbing:
         assert p is None and avail == []
 
     def test_a_boolean_is_never_a_plain_number(self):
-        # True would otherwise float() to 1.0 and pass a value check it has to fail
+        # the isinstance guard refuses a bool outright; float('True') raises rather than reaching
+        # 1.0, and _set_preset_param checks a read-back against whatever number this returns
         assert cp._plain_number(True) is None and cp._plain_number(False) is None
         assert cp._plain_number("900") == 900.0
         assert cp._plain_number("35in/min") is None      # units carried, not a plain number

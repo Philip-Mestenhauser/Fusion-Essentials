@@ -17,8 +17,8 @@ from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, scale
 from ._assembly_detail import (_MEMBER_CAP, _all_occurrence_rows, _contact_analysis, _contact_rows,
                                _health, _health_fields, _joint_frame, _joint_origin_rows,
-                               _limit_facts, _occ_record, _relation_rows, _unresolved_row,
-                               _value_now)
+                               _limit_facts, _motion_axes, _occ_record, _relation_rows,
+                               _unresolved_row, _value_now)
 from . import _common
 from . import _inputs
 from . import _joints
@@ -78,6 +78,9 @@ def _joint_record(design, j, inv_k):
     now = _value_now(j)
     if now:
         rec["value_now"] = now
+    # The heading the motion itself reports for this joint's DOF - a separate read from the frame
+    # below, whose z_axis states the direction a joint OFFSET drives along.
+    rec.update(_motion_axes(j, friendly))
     frame = _joint_frame(design, j, inv_k)
     if frame:
         rec["frame"] = frame
@@ -385,7 +388,17 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
                         "off its motion (angle_deg / slide_mm), so it never has to be derived from "
                         "the parts' basis vectors - and frame, that joint's frame in WORLD "
                         "coordinates, whose z_axis is the direction a joint OFFSET drives along "
-                        "(param_set on the joint's offset parameter, or joint_edit offset).")
+                        "(param_set on the joint's offset parameter, or joint_edit offset). Where "
+                        "the joint's DOF has a heading, the row adds the vector its MOTION "
+                        "reports - rotation_axis (revolute/cylindrical), the axis that DOF turns "
+                        "about, and slide_direction (slider/cylindrical), the direction it slides "
+                        "along - a separate read from frame.z_axis. SPACE: rotation_axis read "
+                        "WORLD on a top-level joint (measured); slide_direction's space is "
+                        "UNMEASURED, as is either heading on a joint reached through a nested "
+                        "instance. No OTHER joint kind carries a heading here: a pin_slot / "
+                        "planar / ball row states none because none is read, not because a read "
+                        "failed. On the kinds that do, an absent key is a read that answered "
+                        "nothing.")
     if root_bodies:
         out["note"] += (" NOTE: root_bodies lists geometry directly in the root component - these are "
                         "NOT occurrences and can't be jointed/grounded; promote one to a component "

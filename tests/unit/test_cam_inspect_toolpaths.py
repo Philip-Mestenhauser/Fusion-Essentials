@@ -484,10 +484,11 @@ class TestSuppressedScoping:
         note = _payload(mod.handler())["note"]
         assert "Counted 2 ACTIVE operation(s); 3 suppressed operation(s) were excluded" in note
         # WHY those three are left out, measured: setting isSuppressed True flips hasToolpath True
-        # -> False, so a suppressed operation has no toolpath to post. Pinned beside the count: a
-        # description slim that drops the measured clause goes red here.
-        assert ("suppressing an operation discards its toolpath, and only valid toolpaths post"
-                in note)
+        # -> False and clearing the flag leaves it False, so a suppressed operation carries no
+        # toolpath until it is regenerated. Pinned beside the count: a slim that drops the measured
+        # clause - or restates it as an unmeasured claim about the post - goes red here.
+        assert ("suppressing an operation discards its toolpath, and the operation carries none "
+                "until cam_generate regenerates it" in note)
         assert "include_suppressed=true counts them" in note
 
     def test_the_note_says_so_when_suppressed_are_counted(self, wire):

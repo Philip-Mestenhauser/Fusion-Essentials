@@ -64,13 +64,14 @@ def _suppression_note(rec, name):
     if rec["is_suppressed"]:
         if had is True and has is False:
             return (lead + "; hasToolpath read True before the set and False after - the suppression "
-                    "DISCARDED the toolpath, and only valid toolpaths post. Restore it with "
-                    "suppressed=false, then regenerate with cam_generate before posting.")
+                    "DISCARDED the toolpath, and the operation carries none until it is "
+                    "regenerated. Restore it with suppressed=false, then regenerate with "
+                    "cam_generate.")
         return (lead + f"; hasToolpath read {_flag_word(had)} before the set and "
                 f"{_flag_word(has)} after.")
     if has is False:
-        return (lead + "; hasToolpath reads False, so there is no toolpath to post - regenerate "
-                "with cam_generate.")
+        return (lead + "; hasToolpath reads False - the operation carries no toolpath. Regenerate "
+                "it with cam_generate.")
     return lead + f"; hasToolpath reads {_flag_word(has)}."
 
 

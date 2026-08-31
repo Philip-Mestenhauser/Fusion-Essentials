@@ -8,9 +8,12 @@ set-then-read-back.
 whenever the requested value can already be sitting there, and on an export-options object it
 always can. MEASURED live on three separate properties, each colliding on the MOST LIKELY request:
 
-  * ``STLExportOptions.unitType`` reads 0 unset, and ``MillimeterDistanceUnits`` IS 0 - so the
-    property reads 0 both when untouched (which writes INCHES) and when explicitly mm (which writes
-    MM): one read, two different files;
+  * ``STLExportOptions.unitType`` reads 0 unset, and ``MillimeterDistanceUnits`` IS 0 - so an mm
+    request reads back 0 whether the assignment took or was dropped, and WHICH unit the dropped leg
+    then writes is session state no read exposes: an untouched export lands in the unit of the LAST
+    EXPLICIT unitType assignment made anywhere in the Fusion session, carried across documents, so
+    it matches the mm request after an mm export and misses it by 25.4x after an inch one
+    (measure_api ``stl-export-unittype-is-sticky-session-state``);
   * ``meshRefinement`` reads 1 unset, and ``MeshRefinementMedium`` IS 1 - and medium is the default;
   * ``isBinaryFormat`` reads True unset, and True is the common request.
 

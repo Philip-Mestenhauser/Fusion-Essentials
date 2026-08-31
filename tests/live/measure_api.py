@@ -206,11 +206,17 @@ ROWS = [
     rz = z.normalize()
     print("FACT behavior.vector3d_normalize_true_on_zero " + ("true" if rz else "false"))
     untouched = (z.x == 0.0 and z.y == 0.0 and z.z == 0.0)
+    # The NEAR-zero vector is read back after ITS OWN normalize(): the fake leaves the components
+    # alone for every vector under its tolerance, so the band is measured, not the exact zero alone.
     t = adsk.core.Vector3D.create(1e-15, 0.0, 0.0)
+    tiny_before = (t.x, t.y, t.z)
     rt = t.normalize()
-    emit(bool(rz) and untouched and bool(rt),
+    tiny_after = (t.x, t.y, t.z)
+    tiny_untouched = tiny_after == tiny_before
+    emit(bool(rz) and untouched and bool(rt) and tiny_untouched,
          "vector3d-normalize-zero: zero->" + repr(rz) + " untouched=" + repr(untouched)
-         + " tiny->" + repr(rt))
+         + " tiny->" + repr(rt) + " tiny " + repr(tiny_before) + "->" + repr(tiny_after)
+         + " untouched=" + repr(tiny_untouched))
 """,
     },
     {
@@ -690,7 +696,7 @@ ROWS = [
     },
     {
         "id": "item-oor-brepbodies",
-        "claim": "BRepBodies.item(out-of-range) never returns None - it raises RuntimeError, and the raise can escape try/except and abort the script (catchability varies by session)",
+        "claim": "BRepBodies.item(out-of-range) never returns None - it raises RuntimeError. This row's body catches the raise and gates on its type; the expect also accepts a script-level abort, so a PASS does not say which of the two the run saw. The abort half is not this row's measurement either way: it is the live observation the module docstring records, that an out-of-range item() raise escaped try/except and killed a whole script invocation",
         "encoded_in": "tests/conftest.py _NamedCollection.item",
         "need_box": True,
         "expect": "raise_or_abort",
@@ -706,7 +712,7 @@ ROWS = [
     },
     {
         "id": "item-oor-sketches",
-        "claim": "Sketches.item(out-of-range) never returns None - it raises, and the raise can escape try/except and abort the script (catchability varies by session)",
+        "claim": "Sketches.item(out-of-range) never returns None - it raises. This row's body catches the raise and gates on its type; the expect also accepts a script-level abort, so a PASS does not say which of the two the run saw. The abort half is not this row's measurement either way: it is the live observation the module docstring records, that an out-of-range item() raise escaped try/except and killed a whole script invocation",
         "encoded_in": "tests/conftest.py _NamedCollection.item",
         "expect": "raise_or_abort",
         "facts_on_pass": {"behavior.collection_item_out_of_range_raises": True},
@@ -815,39 +821,56 @@ ROWS = [
     },
     {
         "id": "camera-viewextents-follows-limiting-axis",
-        "claim": "Camera.viewExtents after a fit tracks whichever SCREEN AXIS limited that fit - the height for a tall model, the width for a wide one - so it is not the view width and a framing ratio cannot be taken against a world box's own spans",
+        "claim": "Camera.viewExtents after a fit tracks whichever SCREEN AXIS limited that fit - measured on two models on one front camera: a TALL post fits to its height, a WIDE slab to its width - so it is neither the view width nor the view height, and a framing ratio cannot be taken against a world box's own spans",
         "encoded_in": "view_set.py _frame_ratio, which reconstructs the FRAME from the viewport aspect (vp.width/vp.height) instead of dividing by the world box; test_view_set.py test_a_flat_world_is_measured_against_the_frame_not_its_own_height",
         "facts_on_pass": {"behavior.camera_view_extents_follows_limiting_axis": True},
         "body": """
-    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
-    try:
-        des = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
-        root = des.rootComponent
-        vp = app.activeViewport
-        # a tall, thin post: 1 cm across, 10 cm up - so the FIT is limited by the height, and a
-        # value that tracked the width could not possibly hold the model
-        sk = root.sketches.add(root.xYConstructionPlane)
-        sk.sketchCurves.sketchLines.addTwoPointRectangle(
-            adsk.core.Point3D.create(0.0, 0.0, 0.0), adsk.core.Point3D.create(1.0, 1.0, 0.0))
-        root.features.extrudeFeatures.addSimple(
-            sk.profiles.item(0), adsk.core.ValueInput.createByReal(10.0),
-            adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
-        cam = vp.camera                       # front: x runs across the screen, z up it
-        cam.eye = adsk.core.Point3D.create(0.5, -50.0, 5.0)
-        cam.target = adsk.core.Point3D.create(0.5, 0.0, 5.0)
-        cam.upVector = adsk.core.Vector3D.create(0.0, 0.0, 1.0)
-        cam.isFitView = True
-        vp.camera = cam
-        ext = vp.camera.viewExtents
-        bb = root.boundingBox
-        across = bb.maxPoint.x - bb.minPoint.x
-        up = bb.maxPoint.z - bb.minPoint.z
-        emit(abs(ext - up) < up * 0.3 and ext > across * 2.0,
-             "camera-viewextents-follows-limiting-axis: across=" + ("%.3f" % across)
-             + " up=" + ("%.3f" % up) + " extents=" + ("%.3f" % ext)
-             + " (tracks the taller axis, not the width)")
-    finally:
-        tmp.close(False)
+    def fit_front(across_cm, up_cm):
+        # One temp document per shape: a second body in the same root would sit inside the fit and
+        # both models would be framed at once.
+        tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+        try:
+            d = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+            root = d.rootComponent
+            sk = root.sketches.add(root.xYConstructionPlane)
+            sk.sketchCurves.sketchLines.addTwoPointRectangle(
+                adsk.core.Point3D.create(0.0, 0.0, 0.0),
+                adsk.core.Point3D.create(across_cm, 1.0, 0.0))
+            root.features.extrudeFeatures.addSimple(
+                sk.profiles.item(0), adsk.core.ValueInput.createByReal(up_cm),
+                adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+            vp = app.activeViewport
+            cam = vp.camera                   # front: x runs across the screen, z up it
+            cam.eye = adsk.core.Point3D.create(across_cm / 2.0, -50.0, up_cm / 2.0)
+            cam.target = adsk.core.Point3D.create(across_cm / 2.0, 0.0, up_cm / 2.0)
+            cam.upVector = adsk.core.Vector3D.create(0.0, 0.0, 1.0)
+            cam.isFitView = True
+            vp.camera = cam
+            bb = root.boundingBox
+            return (bb.maxPoint.x - bb.minPoint.x, bb.maxPoint.z - bb.minPoint.z,
+                    vp.camera.viewExtents, float(vp.width) / vp.height)
+        finally:
+            tmp.close(False)
+
+    # A TALL post (1 cm across, 10 cm up) and a WIDE slab (10 across, 1 up) on the same front
+    # camera. The two fits are limited by DIFFERENT screen axes, which is what tells a value that
+    # follows the limiting axis apart from one that always reports the same axis - one model
+    # cannot: a height-limited fit reads the same either way.
+    across_t, up_t, ext_t, aspect = fit_front(1.0, 10.0)
+    across_w, up_w, ext_w, _aspect2 = fit_front(10.0, 1.0)
+    # the limiting axis is asserted, not assumed: a model narrower than the frame is height-limited
+    tall_by_height = (across_t / up_t) < aspect
+    wide_by_width = (across_w / up_w) > aspect
+    tracks_up = abs(ext_t - up_t) < up_t * 0.3 and ext_t > across_t * 2.0
+    tracks_across = abs(ext_w - across_w) < across_w * 0.3 and ext_w > up_w * 2.0
+    emit(tall_by_height and wide_by_width and tracks_up and tracks_across,
+         "camera-viewextents-follows-limiting-axis: aspect=" + ("%.3f" % aspect)
+         + " tall across=" + ("%.2f" % across_t) + " up=" + ("%.2f" % up_t)
+         + " extents=" + ("%.3f" % ext_t)
+         + "; wide across=" + ("%.2f" % across_w) + " up=" + ("%.2f" % up_w)
+         + " extents=" + ("%.3f" % ext_w)
+         + "; tall_by_height=" + repr(tall_by_height) + " wide_by_width=" + repr(wide_by_width)
+         + " tracks_up=" + repr(tracks_up) + " tracks_across=" + repr(tracks_across))
 """,
     },
     {
@@ -884,11 +907,15 @@ ROWS = [
         n_body = dump_shape("MeshBody", mb)
         n_poly = dump_shape("PolygonMesh", mb.mesh)
         n_tri = dump_shape("TriangleMesh", mb.displayMesh)
+        # The SHAPES key is the LABEL passed above, and the fake-shape lint maps a fake onto it by
+        # name - so the type displayMesh actually answers is read, not assumed.
+        tri_type = type(mb.displayMesh).__name__
         arrays = [n for n in dir(mb.mesh) if not n.startswith("_")]
-        emit(n_body > 0 and n_poly > 0 and n_tri > 0
+        emit(n_body > 0 and n_poly > 0 and n_tri > 0 and tri_type == "TriangleMesh"
              and "nodeCoordinatesAsDouble" in arrays and "normalVectorsAsDouble" in arrays,
              "shape-dump-mesh-world: MeshBody " + str(n_body) + " PolygonMesh " + str(n_poly)
-             + " TriangleMesh " + str(n_tri) + " arrays_present="
+             + " TriangleMesh " + str(n_tri) + " displayMesh type=" + tri_type
+             + " arrays_present="
              + str("nodeCoordinatesAsDouble" in arrays and "normalVectorsAsDouble" in arrays))
     finally:
         tmp.close(False)
@@ -1002,7 +1029,7 @@ ROWS = [
     },
     {
         "id": "enum-mesh-refinement-collides-with-factory",
-        "claim": "MeshRefinementSettings.MeshRefinementMedium == 1 AND a freshly created STLExportOptions reads meshRefinement == 1 - the MEDIUM member is the factory value, and medium is mesh_export's DEFAULT refinement, so a set-then-read-back cannot bite on the most-travelled request. MeshRefinementHigh == 0 is a FALSY member, so a `not member` guard rejects the highest density. Unlike unitType this read DOES determine the written file (measured on STL and OBJ: untouched and explicit-medium byte-identical and reproducible, high and low each distinct), which is why refinement publishes no verification flag. The automatic enum sweep cannot see this family - its name ends in none of the suffixes the scrape matches - so it is pinned here or nowhere",
+        "claim": "MeshRefinementSettings.MeshRefinementMedium == 1 AND a freshly created STLExportOptions reads meshRefinement == 1 - the MEDIUM member is the factory value, and medium is mesh_export's DEFAULT refinement, so a set-then-read-back cannot bite on the most-travelled request. MeshRefinementHigh == 0 is a FALSY member, so a `not member` guard rejects the highest density. This read DOES determine the written file, measured here on a CURVED body exported both ways: on STL as BYTES (untouched, explicit-MEDIUM and a second medium export are byte-identical; high and low each differ from medium and from each other), and on OBJ as the TESSELLATION - vertex and face line counts - because the OBJ text embeds its own output filename in an mtllib line, so byte-identity cannot hold across differently-named files (measured: the only bytes separating two medium exports are that line): untouched, medium and medium-again tessellate identically, high and low each differently - which is why refinement publishes no verification flag. (unitType is the opposite case and is measured by stl-export-unittype-is-sticky-session-state; this row reads no unitType.) The automatic enum sweep cannot see this family - its name ends in none of the suffixes the scrape matches - so it is pinned here or nowhere",
         "encoded_in": "mesh_export.py _REFINEMENTS + _apply_refinement (which drops the pair's 'changed' half on the strength of this); _export.py applied_pair's per-knob note; tests/unit/test_mesh_export.py _refine_member",
         "body": """
     tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
@@ -1011,22 +1038,71 @@ ROWS = [
         root = des.rootComponent
         R = adsk.fusion.MeshRefinementSettings
         dump_enum("fusion.MeshRefinementSettings", R)
+        # A CURVED body: refinement drives a TESSELLATION, so a flat-faced box writes the same
+        # triangles at every setting and could not tell the settings apart.
         sk = root.sketches.add(root.xYConstructionPlane)
-        sk.sketchCurves.sketchLines.addTwoPointRectangle(
-            adsk.core.Point3D.create(0.0, 0.0, 0.0), adsk.core.Point3D.create(1.0, 1.0, 0.0))
-        root.features.extrudeFeatures.addSimple(
+        sk.sketchCurves.sketchCircles.addByCenterRadius(
+            adsk.core.Point3D.create(0.0, 0.0, 0.0), 1.0)
+        solid = root.features.extrudeFeatures.addSimple(
             sk.profiles.item(0), adsk.core.ValueInput.createByReal(1.0),
-            adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+            adsk.fusion.FeatureOperations.NewBodyFeatureOperation).bodies.item(0)
         import os, tempfile
-        opts = des.exportManager.createSTLExportOptions(
+        em = des.exportManager
+        opts = em.createSTLExportOptions(
             root, os.path.join(tempfile.gettempdir(), "unused_measure_refinement.stl"))
         factory = opts.meshRefinement
+
+        # unitType is left alone here: assigning it hands every later STL export in the session a
+        # different unit (stl-export-unittype-is-sticky-session-state measures that), and these
+        # comparisons only need the legs to share whatever unit the session already carries.
+        def written(fmt, refine, tag):
+            p = os.path.join(tempfile.gettempdir(), "measure_refine_" + tag + "." + fmt)
+            o = (em.createSTLExportOptions(solid, p) if fmt == "stl"
+                 else em.createOBJExportOptions(solid, p))
+            if refine is not None:
+                o.meshRefinement = refine
+            if not em.execute(o):
+                return b""
+            raw = open(p, "rb").read()
+            os.remove(p)
+            return raw
+
+        def key(fmt, raw):
+            # What one export is COMPARED as. STL: the bytes themselves (measured reproducible).
+            # OBJ: the tessellation - vertex/face line counts - because the OBJ text embeds its own
+            # output filename in an mtllib line, so two differently-named files can never be
+            # byte-identical however identically they tessellate.
+            if fmt == "stl":
+                return raw
+            return (raw.count(b"\\nv "), raw.count(b"\\nf "))
+
+        determines = {}
+        sizes = {}
+        obj_counts = None
+        for fmt in ("stl", "obj"):
+            untouched = written(fmt, None, fmt + "_untouched")
+            medium = written(fmt, R.MeshRefinementMedium, fmt + "_medium")
+            again = written(fmt, R.MeshRefinementMedium, fmt + "_medium_again")
+            high = written(fmt, R.MeshRefinementHigh, fmt + "_high")
+            low = written(fmt, R.MeshRefinementLow, fmt + "_low")
+            sizes[fmt] = (len(untouched), len(medium), len(again), len(high), len(low))
+            ku, km, ka = key(fmt, untouched), key(fmt, medium), key(fmt, again)
+            kh, kl = key(fmt, high), key(fmt, low)
+            if fmt == "obj":
+                obj_counts = (ku, km, ka, kh, kl)
+            determines[fmt] = (min(sizes[fmt]) > 0 and ku == km and km == ka
+                               and kh != km and kl != km and kh != kl)
         emit(R.MeshRefinementMedium == 1 and R.MeshRefinementHigh == 0
-             and factory == R.MeshRefinementMedium,
+             and factory == R.MeshRefinementMedium
+             and determines["stl"] and determines["obj"],
              "enum-mesh-refinement-collides-with-factory: medium="
              + str(R.MeshRefinementMedium) + " high=" + str(R.MeshRefinementHigh)
              + " low=" + str(R.MeshRefinementLow)
-             + " factory meshRefinement=" + str(factory))
+             + " factory meshRefinement=" + str(factory)
+             + " read_determines_file stl=" + str(determines["stl"])
+             + " obj=" + str(determines["obj"])
+             + " bytes(untouched,medium,medium-again,high,low) stl=" + str(sizes["stl"])
+             + " obj=" + str(sizes["obj"]))
     finally:
         tmp.close(False)
 """,
@@ -1059,17 +1135,132 @@ ROWS = [
     },
     {
         "id": "enum-joint-motion-types",
-        "claim": "JointMotionTypes (the per-DOF motion enum setMotionData wants, DISTINCT from JointTypes) ints: RevoluteJointRotateMotionType=10, SliderJointSlideMotionType=11, CylindricalJointRotateMotionType=3, CylindricalJointSlideMotionType=4 - jointMotion.jointType returns a JointTypes value (Revolute==1), which setMotionData REJECTS as BAD_JOINT_DOF",
+        "claim": "JointMotionTypes (the per-DOF motion enum setMotionData wants, DISTINCT from JointTypes) ints: RevoluteJointRotateMotionType=10, SliderJointSlideMotionType=11, CylindricalJointRotateMotionType=3, CylindricalJointSlideMotionType=4 - and on a live MotionLink between two revolute joints, setMotionData ACCEPTS the JointMotionTypes DOF value and returns True. That the JointTypes value jointMotion.jointType returns (RevoluteJointType==1) is REJECTED instead is the paired motion-link-setmotiondata-rejects-jointtypes-value row, which provokes that raise in a script of its own",
         "encoded_in": "tests/unit/test_joint_motion_link.py; _joints.py motion_link_dof map; joint_motion_link.py",
         "body": """
     M = adsk.fusion.JointMotionTypes
+    J = adsk.fusion.JointTypes
     dump_enum("fusion.JointMotionTypes", M)
-    emit(M.RevoluteJointRotateMotionType == 10 and M.SliderJointSlideMotionType == 11
-         and M.CylindricalJointRotateMotionType == 3 and M.CylindricalJointSlideMotionType == 4,
-         "enum-joint-motion-types: revolute_rotate=" + str(M.RevoluteJointRotateMotionType)
-         + " slider_slide=" + str(M.SliderJointSlideMotionType)
-         + " cyl_rotate=" + str(M.CylindricalJointRotateMotionType)
-         + " cyl_slide=" + str(M.CylindricalJointSlideMotionType))
+    ints_ok = (M.RevoluteJointRotateMotionType == 10 and M.SliderJointSlideMotionType == 11
+               and M.CylindricalJointRotateMotionType == 3
+               and M.CylindricalJointSlideMotionType == 4 and J.RevoluteJointType == 1)
+    # The accepted call runs on a rig in its OWN document: two revolute joints on a common base,
+    # linked, then handed the DOF value. 'stage' names the step in the receipt, so a rig that could
+    # not be built reads differently from a call that answered.
+    stage = "document"
+    accepted = None
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        d = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        root = d.rootComponent
+        tr = adsk.core.Matrix3D.create()
+        stage = "components"
+        occs = []
+        for nm in ("LinkBase", "LinkA", "LinkB"):
+            occ = root.occurrences.addNewComponent(tr)
+            c = occ.component
+            c.name = nm
+            sk = c.sketches.add(c.xYConstructionPlane)
+            sk.sketchCurves.sketchCircles.addByCenterRadius(
+                adsk.core.Point3D.create(0.0, 0.0, 0.0), 0.5)
+            c.features.extrudeFeatures.addSimple(
+                sk.profiles.item(0), adsk.core.ValueInput.createByReal(0.5),
+                adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+            occs.append(occ)
+        stage = "joints"
+        joints = []
+        for i in (1, 2):
+            geo = adsk.fusion.JointGeometry.createByPoint(
+                occs[i].component.originConstructionPoint.createForAssemblyContext(occs[i]))
+            ji = root.asBuiltJoints.createInput(occs[0], occs[i], geo)
+            ji.setAsRevoluteJointMotion(adsk.fusion.JointDirections.ZAxisJointDirection)
+            joints.append(root.asBuiltJoints.add(ji))
+        stage = "motion link"
+        ml = root.motionLinks.add(root.motionLinks.createInput(joints[0], joints[1]))
+        v = adsk.core.ValueInput.createByReal(1.0)
+        stage = "setMotionData with the JointMotionTypes DOF"
+        jt = joints[0].jointMotion.jointType
+        accepted = ml.setMotionData(M.RevoluteJointRotateMotionType, v,
+                                    M.RevoluteJointRotateMotionType, v, False)
+        emit(ints_ok and jt == J.RevoluteJointType and accepted is True,
+             "enum-joint-motion-types: revolute_rotate=" + str(M.RevoluteJointRotateMotionType)
+             + " slider_slide=" + str(M.SliderJointSlideMotionType)
+             + " cyl_rotate=" + str(M.CylindricalJointRotateMotionType)
+             + " cyl_slide=" + str(M.CylindricalJointSlideMotionType)
+             + "; jointMotion.jointType=" + str(jt) + " (JointTypes.Revolute="
+             + str(J.RevoluteJointType) + "); the DOF value -> " + repr(accepted))
+    except Exception as exc:
+        emit(False, "enum-joint-motion-types: RAISED at stage '" + stage + "': "
+             + type(exc).__name__ + ": " + str(exc)[:120])
+    finally:
+        tmp.close(False)
+""",
+    },
+    {
+        "id": "motion-link-setmotiondata-rejects-jointtypes-value",
+        "claim": ("On a live MotionLink between two revolute joints, MotionLink.setMotionData "
+                  "REJECTS the JointTypes value jointMotion.jointType returns "
+                  "(RevoluteJointType==1) where it wants a JointMotionTypes DOF: the call raises "
+                  "and the message names BAD_JOINT_DOF. The raise is provoked, so it sits in its "
+                  "OWN row - this row catches it and gates on the message, and no expect is "
+                  "declared, so a script-level abort is an ERROR here rather than a verdict. That "
+                  "the DOF value IS accepted is the paired enum-joint-motion-types row"),
+        "encoded_in": "tests/unit/test_joint_motion_link.py; _joints.py motion_link_dof map; joint_motion_link.py",
+        "body": """
+    M = adsk.fusion.JointMotionTypes
+    J = adsk.fusion.JointTypes
+    # The same rig as enum-joint-motion-types, in its OWN document: two revolute joints on a common
+    # base, linked, then handed the JointTypes value instead of the DOF. 'stage' names the step in
+    # the receipt, so a rig that could not be built reads differently from a call that answered.
+    stage = "document"
+    rejected = ""
+    jt = None
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        d = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        root = d.rootComponent
+        tr = adsk.core.Matrix3D.create()
+        stage = "components"
+        occs = []
+        for nm in ("LinkBase", "LinkA", "LinkB"):
+            occ = root.occurrences.addNewComponent(tr)
+            c = occ.component
+            c.name = nm
+            sk = c.sketches.add(c.xYConstructionPlane)
+            sk.sketchCurves.sketchCircles.addByCenterRadius(
+                adsk.core.Point3D.create(0.0, 0.0, 0.0), 0.5)
+            c.features.extrudeFeatures.addSimple(
+                sk.profiles.item(0), adsk.core.ValueInput.createByReal(0.5),
+                adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+            occs.append(occ)
+        stage = "joints"
+        joints = []
+        for i in (1, 2):
+            geo = adsk.fusion.JointGeometry.createByPoint(
+                occs[i].component.originConstructionPoint.createForAssemblyContext(occs[i]))
+            ji = root.asBuiltJoints.createInput(occs[0], occs[i], geo)
+            ji.setAsRevoluteJointMotion(adsk.fusion.JointDirections.ZAxisJointDirection)
+            joints.append(root.asBuiltJoints.add(ji))
+        stage = "motion link"
+        ml = root.motionLinks.add(root.motionLinks.createInput(joints[0], joints[1]))
+        v = adsk.core.ValueInput.createByReal(1.0)
+        stage = "setMotionData with the JointTypes value"
+        jt = joints[0].jointMotion.jointType
+        try:
+            r = ml.setMotionData(jt, v, jt, v, False)
+            rejected = "returned " + repr(r)
+        except Exception as exc:
+            rejected = type(exc).__name__ + ": " + (str(exc).strip().splitlines() or [""])[0][:70]
+        emit(jt == J.RevoluteJointType and "BAD_JOINT_DOF" in rejected,
+             "motion-link-setmotiondata-rejects-jointtypes-value: jointMotion.jointType="
+             + str(jt) + " (JointTypes.Revolute=" + str(J.RevoluteJointType)
+             + ", JointMotionTypes.RevoluteRotate="
+             + str(M.RevoluteJointRotateMotionType) + ") -> " + rejected)
+    except Exception as exc:
+        emit(False, "motion-link-setmotiondata-rejects-jointtypes-value: RAISED at stage '"
+             + stage + "': " + type(exc).__name__ + ": " + str(exc)[:120])
+    finally:
+        tmp.close(False)
 """,
     },
     {
@@ -1231,7 +1422,7 @@ ROWS = [
     },
     {
         "id": "shape-dump-design-world",
-        "claim": "Every design-side adsk type a SHARED fake impersonates exposes its live public attribute set (dir() membership) - the fake-shape lint checks fakes against these",
+        "claim": "Each of the 21 design-side adsk types this row DUMPS exposes a non-empty live public attribute set (dir() membership) - the set the fake-shape lint sweeps the shared fakes against. A shared fake whose live type is NOT dumped here is outside that sweep: the lint's own unmapped list carries those, and this row measures nothing about them",
         "encoded_in": "tests/conftest.py shared fakes (BRepBody/BRepFace/BRepEdge/MakeComp/MakeDesign/FakeVector3D/FakePoint/...)",
         "need_box": True,
         "body": """
@@ -1324,15 +1515,18 @@ ROWS = [
     d1 = app.documents.add(DT)
     d2 = app.documents.add(DT)
     try:
-        same_name = (d1.name == d2.name)
+        n1, n2 = d1.name, d2.name
+        same_name = (n1 == n2)
+        untitled = (n1 == "Untitled")
         t1 = adsk.fusion.FusionDocument.cast(d1).design.rootComponent.entityToken
         t2 = adsk.fusion.FusionDocument.cast(d2).design.rootComponent.entityToken
         no_ent = not hasattr(d1, "entityToken")
         d1.close(False)
         v = d1.isValid
         eq = (d1 == app.activeDocument)
-        emit(same_name and t1 == t2 and no_ent and v is False and eq is False,
-             "closed-document-wrapper-reads: names_same=" + str(same_name)
+        emit(same_name and untitled and t1 == t2 and no_ent and v is False and eq is False,
+             "closed-document-wrapper-reads: names=" + repr(n1) + "/" + repr(n2)
+             + " names_same=" + str(same_name)
              + " root_tokens_identical=" + str(t1 == t2) + " token=" + repr(t1)
              + " document_has_entityToken=" + str(not no_ent)
              + " closed_isValid=" + repr(v) + " closed_eq_active=" + repr(eq))
@@ -1346,8 +1540,9 @@ ROWS = [
     {
         "id": "closed-document-name-raises",
         "claim": ("Reading .name on a CLOSED document's held wrapper raises RuntimeError "
-                  "'An API Object refers to a deleted Object' - and the raise can escape "
-                  "try/except and abort the script (catchability varies by session)"),
+                  "'An API Object refers to a deleted Object'. This row catches the raise and "
+                  "gates on its message; the expect also accepts a script-level abort, so a PASS "
+                  "does not say which of the two the run saw"),
         "encoded_in": ("_write_guard.py name-read comment in document_key; "
                        "tests/unit/test_view_set.py _DocWrapper raises contract"),
         "expect": "raise_or_abort",
@@ -1398,22 +1593,25 @@ ROWS = [
         "claim": ("The unit an STL export lands in is STICKY SESSION STATE, not a property of the "
                   "document and not readable anywhere: an export that leaves unitType UNTOUCHED "
                   "writes the unit of the LAST EXPLICIT unitType assignment made in the Fusion "
-                  "session, and that carries ACROSS DOCUMENTS (a brand-new document inherits it). "
-                  "unitType reads 0 BEFORE every assignment regardless of what the file will be "
-                  "written in, so no read of a fresh options object names the unit. The read-BACK "
-                  "after an assignment is a different read and it DOES return the assigned member "
-                  "(inch reads 3, cm reads 1), which is what makes applied_pair's post-read gate "
-                  "able to confirm a non-mm request - only the mm member collides with the "
-                  "factory 0. NOT measured by this row's legs, and recorded as an OBSERVATION "
-                  "rather than an assertion, because a script cannot restart Fusion to test it: "
-                  "the value read mm on the first export after a restart, which is how this "
-                  "masquerades as 'the document's units' or as a fixed inch default depending on "
-                  "what ran earlier in the session. Measured on a 1 cm cube: explicit "
-                  "mm -> 10.0, untouched after it -> 10.0, explicit inch -> 0.393701, untouched "
-                  "after it -> 0.393701. Both files are the same BYTE LENGTH (a binary STL of a "
-                  "fixed triangle count always is), so a size comparison cannot tell them apart "
-                  "while every coordinate differs by 25.4x. Consequence: a writer that does not "
-                  "SET unitType inherits the unit from an unrelated earlier export"),
+                  "session, and that carries ACROSS DOCUMENTS - a BRAND-NEW document, exported "
+                  "untouched, writes the unit an export in another document assigned. unitType "
+                  "reads 0 BEFORE every assignment regardless of what the file will be written in "
+                  "- the new document's own fresh options object included - so no read of a fresh "
+                  "options object names the unit. The read-BACK after an assignment is a different "
+                  "read and it DOES return the assigned member (inch reads 3, cm reads 1), which "
+                  "is what makes applied_pair's post-read gate able to confirm a non-mm request - "
+                  "only the mm member collides with the factory 0. Measured on a 1 cm cube: "
+                  "explicit mm -> 10.0, untouched after it -> 10.0, explicit inch -> 0.393701, "
+                  "untouched after it -> 0.393701, a NEW DOCUMENT untouched after it -> 0.393701, "
+                  "explicit cm -> 1.0. The mm and inch files are the same BYTE LENGTH (a binary "
+                  "STL of a fixed triangle count always is), so a size comparison cannot tell them "
+                  "apart, while EVERY vertex coordinate differs by 25.4x. ONE clause here is an "
+                  "OBSERVATION rather than a measurement, because a script cannot restart Fusion "
+                  "to test it - the POST-RESTART default: the value read mm on the first export "
+                  "after a restart, which is how this masquerades as 'the document's units' or as "
+                  "a fixed inch default depending on what ran earlier in the session. "
+                  "Consequence: a writer that does not SET unitType inherits the unit from an "
+                  "unrelated earlier export"),
         "encoded_in": ("_export.STL_UNIT_MEMBERS / stl_unit_enum and every STL writer that bakes "
                        "unitType; mesh_export's stl_units note"),
         "need_box": True,
@@ -1433,6 +1631,21 @@ ROWS = [
     # non-mm request. Reporting only the first would read as a claim about both.
     backreads = []
 
+    # (largest absolute vertex coordinate, byte length, every vertex coordinate) of a binary STL,
+    # consumed and deleted.
+    def read_stl(p):
+        raw = open(p, "rb").read()
+        os.remove(p)
+        tris = struct.unpack("<I", raw[80:84])[0]
+        coords = []
+        pos = 84
+        for _ in range(tris):
+            vals = struct.unpack("<12fH", raw[pos:pos+50])
+            pos += 50
+            coords.extend(vals[3:12])       # the 9 vertex floats; vals[0:3] is the facet normal
+        big = max(abs(v) for v in coords) if coords else 0.0
+        return big, len(raw), coords
+
     def leg(label, unit_member):
         p = os.path.join(tempfile.gettempdir(), "measure_sticky_" + label + ".stl")
         o = em.createSTLExportOptions(body, p)
@@ -1444,18 +1657,7 @@ ROWS = [
             o.unitType = unit_member
             backreads.append((label, unit_member, safe_read(o)))
         em.execute(o)
-        raw = open(p, "rb").read()
-        os.remove(p)
-        tris = struct.unpack("<I", raw[80:84])[0]
-        big = 0.0
-        pos = 84
-        for _ in range(tris):
-            vals = struct.unpack("<12fH", raw[pos:pos+50])
-            pos += 50
-            for v in vals[3:12]:
-                if abs(v) > big:
-                    big = abs(v)
-        return r, big, len(raw)
+        return (r,) + read_stl(p)
 
     def safe_read(o):
         try:
@@ -1464,31 +1666,60 @@ ROWS = [
             return "unreadable(" + type(exc).__name__ + ")"
 
     U = adsk.fusion.DistanceUnits
-    r1, set_mm, size_mm = leg("set-mm", U.MillimeterDistanceUnits)
-    r2, after_mm, _ = leg("untouched-after-mm", None)
-    r3, set_in, size_in = leg("set-inch", U.InchDistanceUnits)
-    r4, after_in, _ = leg("untouched-after-inch", None)
+    r1, set_mm, size_mm, coords_mm = leg("set-mm", U.MillimeterDistanceUnits)
+    r2, after_mm, _s2, _c2 = leg("untouched-after-mm", None)
+    r3, set_in, size_in, coords_in = leg("set-inch", U.InchDistanceUnits)
+    r4, after_in, _s4, _c4 = leg("untouched-after-inch", None)
+    # A BRAND-NEW document, exported UNTOUCHED: nothing in it has ever seen a unitType assignment,
+    # so what it writes is what the SESSION carries - the inch leg above.
+    doc2 = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        d2 = adsk.fusion.Design.cast(doc2.products.itemByProductType("DesignProductType"))
+        b2 = make_box(d2, "StickyCarry")
+        p2 = os.path.join(tempfile.gettempdir(), "measure_sticky_new_document.stl")
+        o2 = d2.exportManager.createSTLExportOptions(b2, p2)
+        r5 = safe_read(o2)
+        wrote = d2.exportManager.execute(o2)
+        carried, _s5, _c5 = read_stl(p2) if wrote else (0.0, 0, [])
+    finally:
+        doc2.close(False)
+    r6, set_cm, _s6, _c6 = leg("set-cm", U.CentimeterDistanceUnits)
     # Left at mm deliberately: this row MUTATES session state every other STL export inherits, so
-    # it restores the post-restart default rather than leaving the session on inches.
+    # it restores the post-restart default rather than leaving the session on another unit.
     leg("restore-mm", U.MillimeterDistanceUnits)
 
     follows = abs(after_mm - mm) < 1e-3 and abs(after_in - inch) < 1e-3
     assigns = abs(set_mm - mm) < 1e-3 and abs(set_in - inch) < 1e-3
-    reads_zero = r1 == 0 and r2 == 0 and r3 == 0 and r4 == 0
-    # The read-BACK returns what was assigned - the inch leg is the one that matters, since mm
-    # collides with the factory 0 and so proves nothing on its own.
+    # the box is a 1 cm cube, so a file written in cm carries 1.0 where the mm one carries 10.0
+    assigns_cm = abs(set_cm - 1.0) < 1e-3
+    carries = abs(carried - inch) < 1e-3
+    reads_zero = r1 == 0 and r2 == 0 and r3 == 0 and r4 == 0 and r5 == 0 and r6 == 0
+    # EVERY coordinate, not just the largest: the two files carry the same triangles in the same
+    # order, so the pairs line up and a single scale factor either holds across all of them or not.
+    per_coord = (len(coords_mm) == len(coords_in) and bool(coords_mm)
+                 and all(abs(a - b * 25.4) < 1e-2 for a, b in zip(coords_mm, coords_in)))
+    # The read-BACK returns what was assigned - the inch and cm legs are the ones that matter, since
+    # mm collides with the factory 0 and so proves nothing on its own.
     backs_match = all(got == want for _lbl, want, got in backreads)
     inch_back = [got for lbl, _w, got in backreads if lbl == "set-inch"]
-    emit(follows and assigns and reads_zero and backs_match and size_mm == size_in,
-         "stl-export-unittype-is-sticky-session-state:"
-         + " set_mm=" + str(round(set_mm, 6)) + " untouched_after_mm=" + str(round(after_mm, 6))
-         + " (both expect " + str(round(mm, 6)) + ")"
+    cm_back = [got for lbl, _w, got in backreads if lbl == "set-cm"]
+    emit(follows and assigns and assigns_cm and carries and reads_zero and backs_match
+         and per_coord and size_mm == size_in,
+         "stl-export-unittype-is-sticky-session-state: follows=" + str(follows)
+         + " assigns=" + str(assigns) + " cm=" + str(assigns_cm)
+         + " carries_into_a_new_document=" + str(carries)
+         + " reads0=" + str(reads_zero) + " backs_match=" + str(backs_match)
+         + " every_coord_25.4x=" + str(per_coord)
+         + " same_byte_length=" + str(size_mm == size_in)
+         + "; set_mm=" + str(round(set_mm, 6)) + " untouched_after_mm=" + str(round(after_mm, 6))
+         + " (expect " + str(round(mm, 6)) + ")"
          + " set_inch=" + str(round(set_in, 6)) + " untouched_after_inch=" + str(round(after_in, 6))
-         + " (both expect " + str(round(inch, 6)) + ")"
-         + " reads_before_assign=" + str([r1, r2, r3, r4]) + " (all expect 0)"
-         + " read_back_after_assign_matches=" + str(backs_match)
-         + " inch_reads_back=" + str(inch_back) + " (expect [3], NOT 0)"
-         + " same_byte_length=" + str(size_mm == size_in) + " at " + str(size_mm))
+         + " new_document_untouched=" + str(round(carried, 6))
+         + " (expect " + str(round(inch, 6)) + ")"
+         + " set_cm=" + str(round(set_cm, 6)) + " (expect 1.0)"
+         + " reads_before_assign=" + str([r1, r2, r3, r4, r5, r6])
+         + " inch_reads_back=" + str(inch_back) + " cm_reads_back=" + str(cm_back)
+         + " bytes=" + str(size_mm))
 """,
     },
     {
@@ -1539,8 +1770,10 @@ ROWS = [
         "claim": ("machineLibrary.importMachine stores a loaded machine into the Local location "
                   "under a new name and machineAtURL loads it back; the stored asset's "
                   "URL.leafName carries the FILE EXTENSION ('MeasureDeleteMe.mch') while the "
-                  "machine name does not - the shape the delete matcher's stem compare exists "
-                  "for; deleteAsset(url) then returns True and a re-walk of childAssetURLs no "
+                  "machine's own catalog label - its description; Machine exposes NO 'name' "
+                  "attribute at all (measured: reading .name raises AttributeError) - carries no "
+                  "extension, the shape the delete matcher's stem compare exists for; "
+                  "deleteAsset(url) then returns True and a re-walk of childAssetURLs no "
                   "longer lists the asset. Self-cleaning: the machine this row imports is the "
                   "one it deletes"),
         "encoded_in": ("cam_create_machine.py handler importMachine/machineAtURL gates + "
@@ -1558,14 +1791,25 @@ ROWS = [
     url = lib.importMachine(src, local, "MeasureDeleteMe")
     stored = bool(url)
     leaf = url.leafName if stored else ""
-    leaf_has_ext = leaf == "MeasureDeleteMe.mch"
-    loaded = stored and (lib.machineAtURL(url) is not None)
+    # startswith/endswith, not equality: the library DEDUPES a colliding import name (measured:
+    # with a stray asset already wearing the name, this import lands as 'MeasureDeleteMe 3.mch'),
+    # and the claim is the extension contrast, not the exact stem.
+    leaf_has_ext = leaf.startswith("MeasureDeleteMe") and leaf.endswith(".mch")
+    back = lib.machineAtURL(url) if stored else None
+    loaded = back is not None
+    # The machine's DESCRIPTION is the catalog label read for the no-extension contrast - Machine
+    # exposes no 'name' attribute at all (measured: reading .name raises AttributeError), so the
+    # label the delete matcher's stem compare runs against is the description.
+    desc = back.description if loaded else ""
+    desc_has_ext = desc.endswith(".mch")
     ok = stored and lib.deleteAsset(url)
     still = stored and any(
         u.leafName == leaf for u in lib.childAssetURLs(local))
-    emit(stored and leaf_has_ext and loaded and ok is True and not still,
+    emit(stored and leaf_has_ext and loaded and desc != "" and not desc_has_ext
+         and desc != leaf and ok is True and not still,
          "cam-machine-library-deleteasset: stored=" + str(stored) + " leafName=" + repr(leaf)
-         + " (expect the .mch extension) loaded_back=" + str(loaded)
+         + " (expect the .mch extension) machine.description=" + repr(desc)
+         + " description_has_extension=" + str(desc_has_ext) + " loaded_back=" + str(loaded)
          + " deleteAsset=" + str(ok) + " still_listed=" + str(still))
 """,
     },
@@ -1630,19 +1874,68 @@ ROWS = [
     },
     {
         "id": "shape-dump-torus",
-        "claim": "core.Torus - the surface a toroidal BRepFace carries - exposes origin (the torus CENTRE), axis, majorRadius, minorRadius and copy(). origin is the point the torus keypoint gate transforms into world and compares a JointGeometry against, and copy() is what lets it do that without moving the live surface",
+        "claim": "core.Torus - the surface a toroidal BRepFace carries, measured on the fillet of a cylinder's circular edge - exposes origin (the torus CENTRE: a torus created centred at (2, 3, -1) reads that point back), axis, majorRadius, minorRadius and copy(). origin is the point the torus keypoint gate lifts into world and compares a JointGeometry against: it transforms a COPY of that point, and the live surface's own origin reads unchanged after that transform",
         "encoded_in": "tests/unit/test_joint_at_geometry.py's torus-face fakes (face.geometry.origin); _joints.py's torus keypoint gate; _holder.py's Torus.cast reads",
         "body": """
+    # Centred AWAY from the world origin: a torus created at (0,0,0) reads (0,0,0) back under any
+    # origin convention, so that rig cannot tell a centre from anything else.
     t = adsk.core.Torus.create(
-        adsk.core.Point3D.create(0.0, 0.0, 0.0), adsk.core.Vector3D.create(0.0, 0.0, 1.0),
+        adsk.core.Point3D.create(2.0, 3.0, -1.0), adsk.core.Vector3D.create(0.0, 0.0, 1.0),
         1.0, 0.25)
     n = dump_shape("Torus", t)
     names = [x for x in dir(t) if not x.startswith("_")]
-    emit(n > 0 and "origin" in names and "axis" in names and "majorRadius" in names
-         and "minorRadius" in names and "copy" in names,
-         "shape-dump-torus: " + str(n) + " attrs origin="
-         + repr((t.origin.x, t.origin.y, t.origin.z))
-         + " major=" + repr(t.majorRadius) + " minor=" + repr(t.minorRadius))
+    members = ("origin" in names and "axis" in names and "majorRadius" in names
+               and "minorRadius" in names and "copy" in names)
+    o = t.origin
+    at_centre = (abs(o.x - 2.0) < 1e-9 and abs(o.y - 3.0) < 1e-9 and abs(o.z + 1.0) < 1e-9)
+    # The keypoint gate lifts a COPY of that point into world; the surface must read the same
+    # centre afterwards, which is what makes the lift safe to take on a live face.
+    m = adsk.core.Matrix3D.create()
+    m.translation = adsk.core.Vector3D.create(5.0, 0.0, 0.0)
+    moved = t.origin.copy()
+    moved_ok = bool(moved.transformBy(m)) and abs(moved.x - 7.0) < 1e-9
+    after = t.origin
+    surface_still = (abs(after.x - 2.0) < 1e-9 and abs(after.y - 3.0) < 1e-9
+                     and abs(after.z + 1.0) < 1e-9)
+    # A REAL toroidal face: a constant-radius fillet on a cylinder's circular edge, in its own
+    # document so the shared scratch keeps the geometry the other rows measure.
+    face_types = []
+    carried = False
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        d = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        r2 = d.rootComponent
+        sk = r2.sketches.add(r2.xYConstructionPlane)
+        sk.sketchCurves.sketchCircles.addByCenterRadius(
+            adsk.core.Point3D.create(0.0, 0.0, 0.0), 1.0)
+        cyl = r2.features.extrudeFeatures.addSimple(
+            sk.profiles.item(0), adsk.core.ValueInput.createByReal(1.0),
+            adsk.fusion.FeatureOperations.NewBodyFeatureOperation).bodies.item(0)
+        bname = cyl.name
+        seed = adsk.core.ObjectCollection.create()
+        for i in range(cyl.edges.count):
+            if type(cyl.edges.item(i).geometry).__name__ == "Circle3D":
+                seed.add(cyl.edges.item(i))
+                break
+        kinds = set()
+        if seed.count:
+            fi = r2.features.filletFeatures.createInput()
+            fi.addConstantRadiusEdgeSet(seed, adsk.core.ValueInput.createByReal(0.2), False)
+            r2.features.filletFeatures.add(fi)
+            filleted = r2.bRepBodies.itemByName(bname)   # the fillet re-issues the body
+            for i in range(filleted.faces.count if filleted is not None else 0):
+                kinds.add(type(filleted.faces.item(i).geometry).__name__)
+        face_types = sorted(kinds)
+        carried = "Torus" in kinds
+    finally:
+        tmp.close(False)
+    emit(n > 0 and members and at_centre and moved_ok and surface_still and carried,
+         "shape-dump-torus: " + str(n) + " attrs origin=" + repr((o.x, o.y, o.z))
+         + " (created at (2.0, 3.0, -1.0)) major=" + repr(t.majorRadius)
+         + " minor=" + repr(t.minorRadius) + " origin-copy transformed to x="
+         + repr(round(moved.x, 6)) + " surface origin still "
+         + repr((after.x, after.y, after.z))
+         + " filleted-cylinder face geometry types=" + str(face_types))
 """,
     },
     {
@@ -1732,10 +2025,18 @@ ROWS = [
                 round(ti.pitchDiameter, 6), round(ti.threadPitch, 6),
                 round(ti.threadAngle, 6))
 
+    # The three library thread types the claim names, compared as VALUES rather than counted: a
+    # different trio of three carriers would pass a count on its own.
+    WANT = set(("ANSI Metric M Profile", "GB Metric profile", "ISO Metric profile"))
     same = True
+    named_trio = True
+    seen_types = set()
     detail = []
     for desig in ("M5x0.8", "M10x1.5", "M6x1"):
         hits = carriers(desig)
+        seen_types.update(hits)
+        if set(hits) != WANT:
+            named_trio = False
         shared = set()
         for t in hits:
             cls = set(tdq.allClasses(False, t, desig))
@@ -1753,8 +2054,9 @@ ROWS = [
         detail.append(desig + ": 3 types class=" + pick + " distinct scalar sets="
                       + str(len(vals)))
     unc = carriers("1/4-20 UNC")
-    emit(same and len(unc) == 1,
+    emit(same and named_trio and len(unc) == 1,
          "thread-designation-multi-type-identity: " + "; ".join(detail)
+         + "; named_trio=" + str(named_trio) + " carriers=" + "|".join(sorted(seen_types))
          + "; 1/4-20 UNC carriers=" + str(len(unc)))
 """,
     },
@@ -1888,9 +2190,10 @@ ROWS = [
                   "box, a = top (z=1) and b = bottom (z=0) reads positionOne z=0 and positionTwo "
                   "z=1, and swapping the two arguments swaps the pair with them. A NON-PARALLEL "
                   "pair that is APART keeps the documented order in BOTH argument orders, so the "
-                  "order alone cannot carry the labels. The non-parallel leg is what discriminates: "
-                  "a perpendicular pair of ONE body TOUCHES, and a 0-distance pair returns the same "
-                  "point twice, which agrees with either order and proves nothing"),
+                  "order alone cannot carry the labels. Why the non-parallel leg needs a SECOND "
+                  "body to discriminate is measured on the same box: a perpendicular pair of ONE "
+                  "body TOUCHES - top vs the +x side reads 0 in both argument orders and returns "
+                  "the SAME POINT twice, which agrees with either order and proves nothing"),
         "encoded_in": ("model_measure_between._points_on, which labels the pair by MEASURING each "
                        "point against 'a' instead of trusting positionOne/positionTwo order; "
                        "test_model_measure_between.py TestClosestPointLabelBinding"),
@@ -1953,8 +2256,29 @@ ROWS = [
              "non-parallel a=side b=top: positionOne x=" + str(s.positionOne.x)
              + " (expect 4.0, on a) positionTwo x=" + str(s.positionTwo.x) + " (expect 1.0, on b)")
         emit(r.value > 1e-6 and s.value > 1e-6,
-             "non-parallel pair is APART: " + str(r.value) + " - a 0-distance pair returns one "
-             "point twice and would agree with either order")
+             "non-parallel pair is APART: " + str(r.value) + " - a 0-distance pair agrees with "
+             "either order, which the touching leg below measures")
+        # The TOUCHING case the discriminator rests on, measured rather than described: two
+        # perpendicular faces of ONE body meet, so the result carries no order to read.
+        adj = face_where(body, "x", 1.0)
+        if adj is None:
+            emit(False, "face pick failed: the box's +x side")
+        else:
+            u = mm.measureMinimumDistance(top, adj)
+            w = mm.measureMinimumDistance(adj, top)
+
+            def same_point(r):
+                # the claim is about BOTH argument orders, so each result is gated on its own
+                return (abs(r.positionOne.x - r.positionTwo.x) < 1e-6
+                        and abs(r.positionOne.y - r.positionTwo.y) < 1e-6
+                        and abs(r.positionOne.z - r.positionTwo.z) < 1e-6)
+
+            one_point_u, one_point_w = same_point(u), same_point(w)
+            emit(u.value < 1e-6 and w.value < 1e-6 and one_point_u and one_point_w,
+                 "perpendicular pair of ONE body: distance " + str(u.value) + "/" + str(w.value)
+                 + " positionOne=" + str((u.positionOne.x, u.positionOne.y, u.positionOne.z))
+                 + " positionTwo=" + str((u.positionTwo.x, u.positionTwo.y, u.positionTwo.z))
+                 + " same_point_twice=" + str(one_point_u) + "/" + str(one_point_w))
 """,
     },
     {
@@ -2075,15 +2399,23 @@ ROWS = [
     parts = m.totalFeedTime + m.totalRapidTime + m.totalToolChangeTime
     t50 = cam.getMachiningTime(op, 50.0, 10.58, 1.5).machiningTime
     t_slow_rapid = cam.getMachiningTime(op, 100.0, 0.1, 1.5).machiningTime
-    inert = (abs(t50 - t100) < 1e-6 and abs(t_slow_rapid - t100) < 1e-6)
+    # the THIRD argument gets its own variation: the claim covers all three, and two of them moving
+    # nothing says nothing about the one never varied
+    t_long_change = cam.getMachiningTime(op, 100.0, 10.58, 90.0).machiningTime
+    inert = (abs(t50 - t100) < 1e-6 and abs(t_slow_rapid - t100) < 1e-6
+             and abs(t_long_change - t100) < 1e-6)
     emit(t100 > 0 and abs(t100 - parts) < 0.1 and inert,
          "cam-machining-time-knobs: t=" + str(round(t100, 2)) + "s parts-sum="
-         + str(round(parts, 2)) + "s knobs-inert=" + str(inert))
+         + str(round(parts, 2)) + "s (totalToolChangeTime="
+         + str(round(m.totalToolChangeTime, 2)) + "s) knobs-inert=" + str(inert)
+         + " (feedScale 50 -> " + str(round(t50, 2)) + "s, rapidFeed 0.1 -> "
+         + str(round(t_slow_rapid, 2)) + "s, toolChangeTime 90 -> "
+         + str(round(t_long_change, 2)) + "s)")
 """,
     },
     {
         "id": "shape-dump-cam-world",
-        "claim": "Every CAM-side adsk type a fake impersonates exposes its live public attribute set (dir() membership)",
+        "claim": "Each of the 4 CAM-side adsk types this row DUMPS (CAM, Setup, Operation, CAMFolder) exposes a non-empty live public attribute set (dir() membership) - the set the fake-shape lint sweeps the shared CAM fakes against. A shared fake whose live type is NOT dumped here is outside that sweep: the lint's own unmapped list carries those, and this row measures nothing about them",
         "encoded_in": "tests/unit CAM fakes (FakeSetup/CAMFolder/op fakes) via the fake-shape lint's shared-fake scope",
         "needs": "cam",
         "body": """
@@ -2198,11 +2530,13 @@ ROWS = [
     {
         "id": "cam-suppress-discards-toolpath",
         "claim": ("Setting Operation.isSuppressed True flips hasToolpath True -> False on a "
-                  "generated op - suppressing DISCARDS the toolpath rather than hiding it, which is "
-                  "why a suppressed op cannot post"),
+                  "generated op, and clearing the flag again leaves hasToolpath False - suppressing "
+                  "DISCARDS the toolpath rather than hiding it, and the op carries none until it is "
+                  "regenerated"),
         "encoded_in": "cam_inspect_toolpaths.py _split_suppressed + the three wire sentences on the ACTIVE default",
         "needs": "cam",
         "body": """
+    import time as _t
     cam = adsk.cam.CAM.cast(app.activeDocument.products.itemByProductType("CAMProductType"))
     op = None
     for i in range(cam.setups.count):
@@ -2211,6 +2545,20 @@ ROWS = [
                 o = adsk.cam.Operation.cast(x)
                 if o is not None and o.name == "Face2":
                     op = o
+    if op.hasToolpath is False:
+        # the world builder creates its ops UNGENERATED (generate=False), so a --only run reaches
+        # here before any row has generated Face2 - the row primes its own subject rather than
+        # reading a discard off an op that never held a toolpath
+        f = cam.generateToolpath(op)
+        n = 0
+        while not f.isGenerationCompleted and n < 600:
+            adsk.doEvents()
+            _t.sleep(0.1)
+            n += 1
+        if not f.isGenerationCompleted:
+            emit(False, "cam-suppress-discards-toolpath: priming generation did not complete in"
+                 " 60s - inconclusive, rerun")
+            return
     before = op.hasToolpath
     op.isSuppressed = True
     try:
@@ -2218,18 +2566,25 @@ ROWS = [
     finally:
         op.isSuppressed = False
     after_flag = op.isSuppressed
-    emit(before is True and during is False and after_flag is False,
+    # The read that tells DISCARDED from HIDDEN: with the flag cleared and no regeneration, a
+    # hidden toolpath would come back and a discarded one cannot.
+    after_toolpath = op.hasToolpath
+    emit(before is True and during is False and after_flag is False and after_toolpath is False,
          "cam-suppress-discards-toolpath: hasToolpath before=" + str(before)
          + " suppressed=" + str(during) + " unsuppressed_flag_restored=" + str(after_flag)
-         + " (the toolpath itself may need regeneration after unsuppression - not asserted)")
+         + " hasToolpath after unsuppression, no regeneration=" + str(after_toolpath))
 """,
     },
     {
         "id": "cam-errored-op-state-pair",
         "claim": ("An op whose generation FAULTS (top height below bottom height) reads hasError "
                   "True with operationState NoToolpath (3), hasToolpath False and isValid True - "
-                  "hasError True beside operationState 0 was NOT observed; the same op regenerated "
-                  "clean reads hasError False, operationState IsValid (0) and a toolpath"),
+                  "hasError True beside operationState 0 was NOT observed; correcting the fault "
+                  "and regenerating reads the clean triple again (hasError False, operationState "
+                  "IsValid (0), a toolpath) - measured on the RECOVERY as well as the baseline, "
+                  "and the row leaves the op clean: an op left faulted poisons every later "
+                  "getMachiningTime over its collection with 'Machining time could not be "
+                  "calculated' (measured)"),
         "encoded_in": ("tests/unit/test__cam_common.py TestErroredOpNeverReadsValid, whose fake "
                        "carries hasError True with operationState 0; _cam_common.op_primary_state, "
                        "which classifies an errored op before it reads operationState"),
@@ -2265,27 +2620,125 @@ ROWS = [
     # A bottom offset ABOVE the top height is a parameter fault the generator rejects.
     op.parameters.itemByName("bottomHeight_offset").expression = "50 mm"
     if not _generate(op):
+        # restore the fault before leaving: an op left faulted regenerates ERRORED forever after,
+        # and every later getMachiningTime over its collection raises (measured)
+        op.parameters.itemByName("bottomHeight_offset").expression = "0 mm"
+        _generate(op)
         emit(False, "cam-errored-op-state-pair: fault generation did not complete in 60s"
-             " - inconclusive, rerun")
+             " - inconclusive (fault restored), rerun")
         return
     lines = (op.error or "").strip().splitlines()
     ok_err = (op.hasError is True and op.operationState == 3 and op.hasToolpath is False)
-    emit(ok_base and ok_err,
-         "cam-errored-op-state-pair: " + base + " errored=(hasError " + repr(op.hasError)
-         + ", operationState " + str(op.operationState) + ", hasToolpath " + repr(op.hasToolpath)
-         + ", isValid " + repr(op.isValid) + ") error=" + repr(lines[0] if lines else ""))
+    errored = ("errored=(hasError " + repr(op.hasError) + ", operationState "
+               + str(op.operationState) + ", hasToolpath " + repr(op.hasToolpath)
+               + ", isValid " + repr(op.isValid) + ")")
+    # THE RECOVERY, measured rather than assumed - and the self-cleaning the world depends on:
+    # correct the fault, regenerate, and the clean triple must read again.
+    op.parameters.itemByName("bottomHeight_offset").expression = "0 mm"
+    if not _generate(op):
+        emit(False, "cam-errored-op-state-pair: restore generation did not complete in 60s -"
+             " Face1 LEFT ERRORED, rerun before any machining-time row")
+        return
+    ok_clean = (op.hasError is False and op.operationState == 0 and op.hasToolpath is True)
+    emit(ok_base and ok_err and ok_clean,
+         "cam-errored-op-state-pair: " + base + " " + errored
+         + " restored_clean=" + str(ok_clean) + " error=" + repr(lines[0] if lines else ""))
+""",
+    },
+    {
+        "id": "cam-machine-uncleared-simulation-assignment-refused",
+        "claim": ("Assigning a library machine that STILL carries its simulation model to "
+                  "Setup.machine is REFUSED: the assignment raises instead of taking. The leg runs "
+                  "only when the machine this run picks (the first library machine whose "
+                  "kinematics carries a spindle) has a simulation model - when it does not, the "
+                  "receipt records the leg as not exercised rather than claiming a refusal. The "
+                  "raise is provoked, so it sits in its OWN row: an abort or a rolled-back "
+                  "transaction costs this measurement and no other"),
+        "encoded_in": ("cam_edit_setup's machine_strip_simulation path (the strip-before-assign "
+                       "and the refusal hint) and tests/unit/test_cam_edit_setup.py "
+                       "TestMachineStripSimulation"),
+        "needs": "cam",
+        "body": """
+    cam = adsk.cam.CAM.cast(app.activeDocument.products.itemByProductType("CAMProductType"))
+    lib = adsk.cam.CAMManager.get().libraryManager.machineLibrary
+    type_id = adsk.cam.KinematicsMachineElement.staticTypeId()
+
+    def spindle_max(m):
+        # the supported route only - Machine.kinematics is flagged not officially supported
+        el = m.elements.defaultItemByType(type_id)
+        if el is None:
+            found = m.elements.itemsByType(type_id)
+            el = found[0] if found else None
+        if el is None:
+            return None
+        rpm, stack = None, [(el.parts, 0)]
+        while stack:
+            coll, depth = stack.pop()
+            for i in range(coll.count):
+                p = coll.item(i)
+                if p.spindle is not None and p.spindle.maxSpeed > 0:
+                    rpm = p.spindle.maxSpeed if rpm is None else max(rpm, p.spindle.maxSpeed)
+                if depth < 8:
+                    stack.append((p.children, depth + 1))
+        return rpm
+
+    candidates = []
+    for loc in (adsk.cam.LibraryLocations.LocalLibraryLocation,
+                adsk.cam.LibraryLocations.Fusion360LibraryLocation):
+        for vendor in ("Haas", ""):
+            try:
+                candidates.extend(lib.createQuery(loc, vendor, "").execute() or [])
+            except Exception:
+                pass
+        if candidates:
+            break
+    picked = None
+    for m in candidates[:250]:
+        if spindle_max(m):
+            picked = m
+            break
+    if picked is None:
+        emit(False, "cam-machine-uncleared-simulation-assignment-refused: no library machine in "
+             + str(len(candidates)) + " carried a kinematics spindle - inconclusive")
+        return
+    setup = None
+    for i in range(cam.setups.count):
+        if cam.setups.item(i).name == "MeasureSetup":
+            setup = cam.setups.item(i)
+    # The assignment is ATTEMPTED with the simulation model still attached: that is what says the
+    # clearing cam_edit_setup does is needed rather than merely done.
+    sim = picked.hasSimulationModel
+    refused, why = None, ""
+    if sim:
+        try:
+            setup.machine = picked
+            refused = False
+        except Exception as exc:
+            refused = True
+            why = type(exc).__name__ + ": " + (str(exc).strip().splitlines() or [""])[0][:80]
+    emit(refused is not False,
+         "cam-machine-uncleared-simulation-assignment-refused: " + str(picked.description)
+         + " hasSimulationModel=" + repr(sim) + " uncleared assignment="
+         + ("refused: " + why if refused else
+            "not exercised (the machine this run picked carries no simulation model)"
+            if refused is None else "SUCCEEDED - the clearing is not needed"))
 """,
     },
     {
         "id": "cam-machine-spindle-max-readable",
         "claim": ("A machine's spindle maximum and axis travels are readable through the SUPPORTED "
                   "route Machine.elements -> defaultItemByType(KinematicsMachineElement."
-                  "staticTypeId()) -> parts (a tree of MachinePart, each with an optional .axis / "
-                  ".spindle / .toolStation): part.spindle.maxSpeed is rpm, and "
-                  "part.axis.physicalRange.min/.max is CM on a LinearMachineAxisType axis. "
-                  "Assigning that machine to Setup.machine needs clearSimulationModel() on the "
-                  "resolved copy first whenever its hasSimulationModel reads True, and the same "
-                  "numbers then read back through Setup.machine"),
+                  "staticTypeId()) -> parts (a tree of MachinePart, EVERY part carrying .axis / "
+                  ".spindle / .toolStation members, any of them null): part.spindle.maxSpeed is "
+                  "rpm, and part.axis.physicalRange.min/.max are the travel of a "
+                  "LinearMachineAxisType axis - what UNIT those two numbers are in is NOT measured "
+                  "here, so this row reports them raw. clearSimulationModel() strips the resolved "
+                  "copy (the refusal that makes stripping necessary is the paired "
+                  "cam-machine-uncleared-simulation-assignment-refused row), the stripped copy "
+                  "assigns, and the spindle number and every axis range then read back IDENTICALLY "
+                  "through Setup.machine - a read that only discriminates when Setup.machine "
+                  "answers an object OTHER than the one just assigned, so the receipt records "
+                  "through_is_assigned for the case this run got"),
         "encoded_in": ("_cam_common.kinematics_parts / machine_limits / machine_spindle_max and "
                        "tests/unit/test__cam_common.py TestMachineLimits, whose fake machine "
                        "carries 12000 rpm and 762/406/508 mm travels; the strip-then-assign path "
@@ -2304,7 +2757,7 @@ ROWS = [
             found = m.elements.itemsByType(type_id)
             el = found[0] if found else None
         if el is None:
-            return None, []
+            return None, [], (False, 0)
         parts, stack = [], [(el.parts, 0)]
         while stack:
             coll, depth = stack.pop()
@@ -2313,7 +2766,7 @@ ROWS = [
                 parts.append(p)
                 if depth < 8:
                     stack.append((p.children, depth + 1))
-        rpm, axes = None, []
+        rpm, axes, every_part, stations = None, [], bool(parts), 0
         for p in parts:
             if p.spindle is not None and p.spindle.maxSpeed > 0:
                 rpm = p.spindle.maxSpeed if rpm is None else max(rpm, p.spindle.maxSpeed)
@@ -2322,7 +2775,14 @@ ROWS = [
                 axes.append((p.axis.name,
                              p.axis.axisType == adsk.cam.MachineAxisTypes.LinearMachineAxisType,
                              r.isInfinite, r.min, r.max))
-        return rpm, axes
+            # the third member of the trio: read on EVERY part, so "each carries one" is measured
+            # rather than named
+            if "toolStation" in dir(p):
+                if p.toolStation is not None:
+                    stations += 1
+            else:
+                every_part = False
+        return rpm, axes, (every_part, stations)
 
     candidates = []
     for loc in (adsk.cam.LibraryLocations.LocalLibraryLocation,
@@ -2334,9 +2794,9 @@ ROWS = [
                 pass
         if candidates:
             break
-    picked, rpm, axes = None, None, []
+    picked, rpm, axes, stations = None, None, [], (False, 0)
     for m in candidates[:250]:
-        rpm, axes = limits(m)
+        rpm, axes, stations = limits(m)
         if rpm:
             picked = m
             break
@@ -2349,25 +2809,36 @@ ROWS = [
     for i in range(cam.setups.count):
         if cam.setups.item(i).name == "MeasureSetup":
             setup = cam.setups.item(i)
-    # Setup.machine refuses a machine that still carries a simulation model, so the model is
-    # cleared from the RESOLVED COPY first - the one assignment path cam_edit_setup drives. The
-    # kinematics comparison below is what says whether clearing it costs the numbers.
+    # The strip runs before the assignment; provoking the UNCLEARED refusal is the paired row's
+    # job, so nothing here is attempted with the simulation model still attached.
     sim = picked.hasSimulationModel
     if sim:
         picked.clearSimulationModel()
     stripped = picked.hasSimulationModel
     setup.machine = picked
-    through = setup.machine        # a TRANSIENT COPY per the API doc, not the object just set
+    # The API doc calls this a transient copy. Whether THIS run got one is recorded rather than
+    # assumed: when Setup.machine answers the very object assigned, the read-back below compares a
+    # machine against itself and settles nothing, so through_is_assigned goes in the receipt.
+    through = setup.machine
+    through_is_assigned = through is picked
     assigned = through is not None and through.description == picked.description
-    rpm2, axes2 = limits(through)
-    emit(rpm > 0 and len(linear) >= 1 and stripped is False and assigned and rpm2 == rpm
-         and len(axes2) == len(axes),
+    rpm2, axes2, stations2 = limits(through)
+    # every axis NUMBER, not just how many axes there are: the count survives any read that
+    # answers the same shape, the ranges only survive one that answers the same machine
+    same_ranges = (len(axes2) == len(axes)
+                   and [repr(a) for a in sorted(axes)] == [repr(b) for b in sorted(axes2)])
+    emit(rpm > 0 and len(linear) >= 1 and stations[0] and stripped is False and assigned
+         and rpm2 == rpm and same_ranges,
          "cam-machine-spindle-max-readable: " + str(picked.description) + " maxSpeed=" + str(rpm)
-         + " rpm, axes=" + ", ".join(a[0] + ("(linear " + str(round((a[4] - a[3]) * 10.0, 1))
-                                             + "mm)" if a[1] and not a[2] else
+         + " rpm, axes=" + ", ".join(a[0] + ("(linear " + str(round(a[4] - a[3], 4))
+                                             + ")" if a[1] and not a[2] else
                                              "(infinite)" if a[2] else "(rotary)") for a in axes)
-         + " hasSimulationModel " + repr(sim) + " -> " + repr(stripped)
-         + " assigned=" + repr(assigned) + " through-setup maxSpeed=" + str(rpm2))
+         + " toolStation on every part=" + str(stations[0]) + " (" + str(stations[1])
+         + " non-null) hasSimulationModel " + repr(sim) + " -> " + repr(stripped)
+         + " assigned=" + repr(assigned) + " through_is_assigned="
+         + str(through_is_assigned) + " through-setup maxSpeed=" + str(rpm2)
+         + " same_axis_ranges=" + str(same_ranges) + " (" + str(stations2[1])
+         + " non-null toolStations through the setup)")
 """,
     },
     {
@@ -2489,15 +2960,20 @@ ROWS = [
 """,
     },
     {
-        "id": "cam-machining-time-excludes-suppressed",
+        "id": "cam-machining-time-toolpathless-op-times",
         "claim": ("CAM.getMachiningTime over an ObjectCollection of NON-suppressed generated "
-                  "operations returns a time, and the SAME collection with a suppressed operation "
-                  "added fails ('Machining time could not be calculated') - the suppressed "
-                  "operation, not an empty toolpath, is what breaks the call"),
+                  "operations returns a time, and it STILL returns one when one of those "
+                  "operations carries no toolpath but is NOT suppressed (suppressing an op "
+                  "discards its toolpath, so clearing the flag again leaves exactly that state). "
+                  "Both legs are POSITIVE measurements and this row declares no expect, so a "
+                  "script-level abort is an ERROR here. Paired with "
+                  "cam-machining-time-suppressed-op-contributes-nothing, the two rows separate "
+                  "the two properties a suppressed op carries: the missing toolpath (times fine, "
+                  "contributes nothing) and the flag itself (also times fine, contributes "
+                  "nothing) - neither breaks the call"),
         "encoded_in": ("_cam_read._timeable_ops / get_machining_time_handler and "
                        "tests/unit/test__cam_common.py TestMachiningTimeExcludesSuppressed"),
         "needs": "cam",
-        "expect": "raise_or_abort",
         "body": """
     import time as _t
     cam = adsk.cam.CAM.cast(app.activeDocument.products.itemByProductType("CAMProductType"))
@@ -2521,34 +2997,93 @@ ROWS = [
     for o in ops:
         o.isSuppressed = False
         if not _generate(o):
-            emit(False, "cam-machining-time-excludes-suppressed: generation did not complete in"
+            emit(False, "cam-machining-time-toolpathless-op-times: generation did not complete in"
                  " 60s - inconclusive, rerun")
             return
     clean = adsk.core.ObjectCollection.create()
     for o in ops:
         clean.add(o)
     good = cam.getMachiningTime(clean, 100.0, 10.58, 1.5).machiningTime
-    emit(good > 0, "cam-machining-time-excludes-suppressed: " + str(len(ops))
+    emit(good > 0, "cam-machining-time-toolpathless-op-times: " + str(len(ops))
          + " unsuppressed ops timed at " + str(round(good, 2)) + "s")
-    # Now the misuse: the SAME operations with one suppressed. The failure arrives through
-    # Fusion's text-command channel and can take the whole script invocation down, so the
-    # verdict above is printed first and a script-level abort confirms the claim too. The
-    # unsuppress runs in a finally: a raise from the call must not leave a parked operation
-    # behind for the rest of the sweep, and neither must an abort that unwinds through here.
+    # A suppressed op is ALSO toolpath-less (cam-suppress-discards-toolpath), so the suppressed
+    # collection the paired row measures cannot tell the two candidate causes apart on its own.
+    # Suppressing and un-suppressing leaves this same collection holding an UNSUPPRESSED op with no
+    # toolpath: a time here rules the empty toolpath out as the cause.
+    ops[-1].isSuppressed = True
+    ops[-1].isSuppressed = False
+    toolpath_gone = ops[-1].hasToolpath is False
+    control, control_err = None, ""
+    try:
+        control = cam.getMachiningTime(clean, 100.0, 10.58, 1.5).machiningTime
+    except Exception as exc:
+        control_err = type(exc).__name__ + ": " + (str(exc).strip().splitlines() or [""])[0][:60]
+    emit(toolpath_gone and control is not None and control > 0,
+         "cam-machining-time-toolpathless-op-times: unsuppressed op with NO toolpath in the same"
+         " collection -> " + (str(round(control, 2)) + "s" if control is not None else control_err)
+         + " (its toolpath is gone=" + str(toolpath_gone) + ")")
+""",
+    },
+    {
+        "id": "cam-machining-time-suppressed-op-contributes-nothing",
+        "claim": ("CAM.getMachiningTime over an ObjectCollection SUCCEEDS with a suppressed "
+                  "operation in it, and the suppressed op CONTRIBUTES NOTHING: the collection with "
+                  "one op suppressed times at the unsuppressed ops' own total (measured against "
+                  "the same collection fully unsuppressed and against the suppressed op's own "
+                  "per-op figure). This REFUTES the flag-breaks-the-call reading of the recorded "
+                  "production-job failures beside _timeable_ops: those collections' op STATES were "
+                  "never read, and one confound is now measured - an op left FAULTED regenerates "
+                  "errored and fails the whole call (cam-errored-op-state-pair's recovery leg). "
+                  "_timeable_ops' suppressed exclusion stands as a deterministic construction - "
+                  "the excluded op would add nothing - not as an API necessity"),
+        "encoded_in": ("_cam_read._timeable_ops / get_machining_time_handler and "
+                       "tests/unit/test__cam_common.py TestMachiningTimeExcludesSuppressed"),
+        "needs": "cam",
+        "body": """
+    import time as _t
+    cam = adsk.cam.CAM.cast(app.activeDocument.products.itemByProductType("CAMProductType"))
+    ops = []
+    for i in range(cam.setups.count):
+        if cam.setups.item(i).name == "MeasureSetup":
+            for x in cam.setups.item(i).allOperations:
+                o = adsk.cam.Operation.cast(x)
+                if o is not None:
+                    ops.append(o)
+
+    def _generate(o):
+        f = cam.generateToolpath(o)
+        n = 0
+        while not f.isGenerationCompleted and n < 600:
+            adsk.doEvents()
+            _t.sleep(0.1)
+            n += 1
+        return f.isGenerationCompleted
+
+    for o in ops:
+        o.isSuppressed = False
+        if not _generate(o):
+            emit(False, "cam-machining-time-suppressed-op-contributes-nothing: generation did not"
+                 " complete in 60s - inconclusive, rerun")
+            return
+    args = (100.0, 10.58, 1.5)
+    coll = adsk.core.ObjectCollection.create()
+    for o in ops:
+        coll.add(o)
+    t_all = cam.getMachiningTime(coll, *args).machiningTime
+    t_last = cam.getMachiningTime(ops[-1], *args).machiningTime
+    # The discriminating leg: the SAME collection, its last op suppressed. The unsuppress runs in
+    # a finally so no exit leaves a parked operation behind for the rest of the sweep.
     ops[-1].isSuppressed = True
     try:
-        mixed = adsk.core.ObjectCollection.create()
-        for o in ops:
-            mixed.add(o)
-        try:
-            bad = cam.getMachiningTime(mixed, 100.0, 10.58, 1.5).machiningTime
-            emit(False, "cam-machining-time-excludes-suppressed: a suppressed op in the collection"
-                 " still returned " + str(round(bad, 2)) + "s - the exclusion is unnecessary")
-        except Exception as exc:
-            emit(True, "cam-machining-time-excludes-suppressed: suppressed op in the collection ->"
-                 " " + str(exc).strip().splitlines()[0])
+        t_mixed = cam.getMachiningTime(coll, *args).machiningTime
     finally:
         ops[-1].isSuppressed = False
+    contributes_nothing = abs(t_mixed - (t_all - t_last)) < 0.05
+    emit(t_all > 0 and t_last > 0 and t_mixed > 0 and t_mixed < t_all and contributes_nothing,
+         "cam-machining-time-suppressed-op-contributes-nothing: all ops "
+         + str(round(t_all, 2)) + "s, last op alone " + str(round(t_last, 2))
+         + "s, with last SUPPRESSED " + str(round(t_mixed, 2))
+         + "s (the call SUCCEEDS and reads all-minus-last)")
 """,
     },
     {
@@ -2615,9 +3150,10 @@ ROWS = [
         stage = "re-walk"
         still = stored and any(u.leafName == leaf for u in lib.childAssetURLs(local))
         # templateAtURL is NOT called on the deleted url here: it raises rather than answering
-        # null, and that raise aborts the whole invocation - the separate
-        # cam-templateaturl-raises-on-deleted-url row proves it. The asset WALK is the read this
-        # delete is confirmed by, which is the same read cam_delete_template rests its claim on.
+        # null - the separate cam-templateaturl-raises-on-deleted-url row measures that raise, in
+        # its own script, where a raise that escapes costs one row's output instead of this one's.
+        # The asset WALK is the read this delete is confirmed by, which is the same read
+        # cam_delete_template rests its claim on.
         emit(stored and stem_matches and loaded and ok is True and not still,
              "cam-template-library-deleteasset: stored=" + str(stored) + " leaf=" + repr(leaf)
              + " stem_matches_name=" + str(stem_matches) + " loaded_back=" + str(loaded)
@@ -2631,10 +3167,11 @@ ROWS = [
         "id": "cam-templateaturl-raises-on-deleted-url",
         "claim": ("CAMTemplateLibrary.templateAtURL does NOT honour its own docstring's 'Returns "
                   "null if the specified template does not exist' for a url whose asset was just "
-                  "deleted: it raises RuntimeError '3 : Given URL does not point to a template', "
-                  "and the raise can escape try/except and abort the script. So a delete's "
-                  "read-back cannot ask this to confirm absence - the asset WALK must - and any "
-                  "caller reading it needs safe()"),
+                  "deleted: it raises RuntimeError, and the message names '3 : Given URL does not "
+                  "point to a template'. So a delete's read-back cannot ask this to confirm "
+                  "absence - the asset WALK must - and any caller reading it needs safe(). This "
+                  "row catches the raise and gates on its message; the expect also accepts a "
+                  "script-level abort, so a PASS does not say which of the two the run saw"),
         "encoded_in": ("cam_templates.py delete_template_handler's safe()-wrapped loads_after "
                        "read and the comment naming the asset walk as the load-bearing leg"),
         "needs": "cam",
@@ -2667,9 +3204,10 @@ ROWS = [
         emit(False, "cam-templateaturl-raises-on-deleted-url: returned " + repr(r)
              + " with no raise - the docstring's null contract holds after all")
     except Exception as e:
-        emit(type(e).__name__ == "RuntimeError",
+        msg = str(e).strip().splitlines()[0]
+        emit(type(e).__name__ == "RuntimeError" and "does not point to a template" in msg,
              "cam-templateaturl-raises-on-deleted-url: raised catchably "
-             + type(e).__name__ + ": " + str(e)[:80])
+             + type(e).__name__ + ": " + msg[:80])
 """,
     },
     {

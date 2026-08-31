@@ -40,11 +40,11 @@ _FLOORS = {
     "tools/_geom.py": 100,
     "tools/_holder.py": 77,
     "tools/_inputs.py": 86,
-    "tools/_joints.py": 90,
+    "tools/_joints.py": 94,   # was 90
     "tools/_materials.py": 96,
     "tools/_outputs.py": 96,
     "tools/_pmi.py": 89,
-    "tools/_relations.py": 90,
+    "tools/_relations.py": 95,   # was 90
     "tools/_sketch_detail.py": 96,
     "tools/_threads.py": 90,
     "tools/_view_common.py": 97,
@@ -115,7 +115,7 @@ _FLOORS = {
     "tools/joint_at_geometry.py": 94,
     "tools/joint_create_edit.py": 99,
     "tools/joint_create_origin.py": 84,
-    "tools/joint_drive.py": 89,
+    "tools/joint_drive.py": 94,   # was 89
     "tools/joint_motion_link.py": 95,
     "tools/mesh_combine.py": 96,
     "tools/mesh_delete.py": 97,

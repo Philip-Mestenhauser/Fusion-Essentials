@@ -159,7 +159,7 @@ def restore_message(restore, label, purpose):
             "The document is left with those hidden - view_set(action='show', target=...) "
             "restores them.")
 
-# eye - target direction per named view. Not pre-normalized (the iso corners are (+-1,+-1,+-1));
+# eye - target direction per named view. Not pre-normalized (the iso corners are (+-1, -1, +-1));
 # view_direction()/look_direction() normalize on read. An iso-bottom-* entry's z is NEGATIVE - the
 # camera sits UNDER the model and mirrors its iso-top-* twin across z. Fusion is Z-up, so a positive
 # z there aims the camera down at the TOP face: measured on 2705.1.4 against a plate carrying a

@@ -26,9 +26,11 @@ MAP_BLURB = (
     "and world placement, plus the stand-in row an unresolved reference gets, since every one of "
     "those reads RAISES on such an occurrence; _health + _health_fields - the compute-state "
     "verdict every row states, which WITHHOLDS the healthy key where neither the entity nor its "
-    "timeline item answered a state; _joint_frame + _limit_facts + _value_now - one joint's WORLD "
-    "frame (whose z_axis is the direction its offset drives along), its ENABLED limits and its "
-    "current driven value; _joint_origin_rows + _jo_row + _jo_world_origin + _jo_consumers - the "
+    "timeline item answered a state; _joint_frame + _limit_facts + _value_now + _motion_axes - one "
+    "joint's WORLD frame (whose z_axis is the direction its offset drives along), its ENABLED "
+    "limits, its current driven value, and the heading its MOTION reports for each DOF "
+    "(rotation_axis / slide_direction, as the member answers - no placement lift); "
+    "_joint_origin_rows + _jo_row + _jo_world_origin + _jo_consumers - the "
     "per-INSTANCE Joint Origin rows: the qualified reference, the world position built from the "
     "base geometry origin PLUS the offsetX/Y/Z projected on the frame axes, the handle, and which "
     "joints consume it; _world_axes - the placement lift both frame kinds take, since a "
@@ -157,6 +159,50 @@ def _value_now(j):
         if v is not None:
             out[key] = round(conv(v), 4)
     return out or None
+
+
+# Wire key -> (the JointMotion member holding that heading, the joint kinds whose DOF has it). A
+# revolute and a cylindrical TURN, a slider and a cylindrical SLIDE. The kinds NOT in this table -
+# pin_slot, planar, ball - are deliberately unread: which heading members those motion classes
+# expose is unmeasured, so their rows carry no direction rather than a guessed one.
+_MOTION_AXES = (("rotation_axis", "rotationAxisVector", ("revolute", "cylindrical")),
+                ("slide_direction", "slideDirectionVector", ("slider", "cylindrical")))
+
+
+def _motion_axes(j, kind):
+    """The joint motion's own heading(s) for the DOF `kind` has: {'rotation_axis': [x,y,z]} on a
+    revolute, {'slide_direction': [x,y,z]} on a slider, both on a cylindrical, {} on a kind with
+    neither (and on a kind that did not resolve).
+
+    The direction the MOTION reports for that DOF - a separate read from the row's frame, whose
+    z_axis is the direction the joint's OFFSET drives along. Published exactly as the member
+    answers, with NO placement lift, and the space that was read covers one of the two members.
+    rotationAxisVector: on a top-level as-built joint between BlkA:1 (identity) and BlkB:1 (turned
+    90 deg about Z) it read the WORLD axis (0, 1, 0), not the component-local (1, 0, 0) - the
+    observation recorded in _as_built_source, which names the members read and not the joint's
+    kind - so lifting that one through the component's placement would turn a world vector a
+    second time. slideDirectionVector has no such reading: the three measure_api rows that
+    exercise it - joint-drive-moves-occurrence-one, joint-drive-anchored-side-flips-mover and
+    joint-drive-sign-follows-slide-direction-vector - place every component with a
+    translation-only matrix, where the component axes stand parallel to world and a DIRECTION is
+    unchanged by a translation, so they measure that the member travels along the vector, not
+    which space the vector is stated in. That space, and either heading through a nested instance,
+    is UNMEASURED - and an unmeasured space earns no lift: turning a member that already answers
+    in world would apply the placement a second time.
+
+    A heading that answers nothing - the motion not reading, carrying no such member, or the vector
+    read failing - leaves its key OFF the row, so the row states no direction that was not read.
+    Every read goes through safe(), including the motion object itself: this serializer is one of
+    several reads of one joint, and an unguarded chain here sinks the whole payload, not a key."""
+    jm = safe(lambda: j.jointMotion)
+    out = {}
+    for key, attr, kinds in _MOTION_AXES:
+        if kind not in kinds:
+            continue
+        v = _geom.axis_vec(safe(lambda a=attr: getattr(jm, a)))
+        if v is not None:
+            out[key] = v
+    return out
 
 
 def _jo_in_context(jo, occ):

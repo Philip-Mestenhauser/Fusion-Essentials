@@ -19,7 +19,7 @@ from . import _geom
 from . import _inputs
 from . import _write_guard
 from ._joints import (find_joint as _find_joint, current_joint_type as _current_joint_type,
-                      motion_link_partner as _motion_link_partner)
+                      motion_link_record as _motion_link_record)
 
 # joint_type -> which value(s) it drives.
 _DRIVES_ANGLE = {"revolute", "cylindrical"}
@@ -135,6 +135,105 @@ def _current_value_text(jm, jtype):
     return ", ".join(parts) or "unknown"
 
 
+# joint type -> (the JointMotion property holding its driven value, the JointLimits property bounding
+# it, the display formatter for a native value). Only the ONE-DOF types are here: a cylindrical joint
+# drives two values, so which one a motion link couples is not established by the joint's type alone,
+# and every scaled claim below is withheld for it rather than guessed.
+_ONE_DOF = {
+    "revolute": ("rotationValue", "rotationLimits", lambda v: f"{round(math.degrees(v), 4)} deg"),
+    "slider": ("slideValue", "slideLimits", lambda v: f"{round(v * 10.0, 4)} mm"),
+}
+
+
+def _link_couples(link):
+    """Whether a motion_link_record describes a link that TRANSMITS motion, as a TRI-STATE.
+
+    False when it names no partner, or reads SUPPRESSED or BROKEN; True when a partner is named and
+    both states read clean; None when a state could not be read at all. A caller branches with
+    ``is``: an unread state is not a working link (so no coupling is claimed on it) and it is not a
+    dead one either (so a guard that fails toward refusal stays armed)."""
+    if link["linked"] is not True:
+        return False if link["linked"] is False else None
+    if link["suppressed"] is True or link["broken"] is True:
+        return False
+    if link["suppressed"] is None or link["broken"] is None:
+        return None
+    return True
+
+
+def _link_state_text(link):
+    """What a link's OWN state read, as a VERB clause the wire strings slot behind 'the link' or
+    'which': the flagged states when any is set, else the ones that gave no answer, else '' for a
+    link that read clean on both."""
+    flagged = ((["SUPPRESSED"] if link["suppressed"] is True else [])
+               + (["carrying a compute failure"] if link["broken"] is True else []))
+    if flagged:
+        return "reads " + " and ".join(flagged)
+    unread = ((["suppression"] if link["suppressed"] is None else [])
+              + (["compute state"] if link["broken"] is None else []))
+    if not unread:
+        return ""
+    if len(unread) == 2:
+        return "answered neither its suppression nor its compute state"
+    return f"did not answer its {unread[0]}"
+
+
+def _enabled_bounds(limits, fmt):
+    """['min X', 'max Y'] for the ENABLED bounds of one JointLimits, rendered by fmt. A DISABLED
+    bound is left out - it constrains no value. Empty when the object is absent or nothing reads."""
+    if limits is None:
+        return []
+    out = []
+    if bool(safe(lambda: limits.isMinimumValueEnabled, False)):
+        lo = safe(lambda: limits.minimumValue)
+        if lo is not None:
+            out.append(f"min {fmt(lo)}")
+    if bool(safe(lambda: limits.isMaximumValueEnabled, False)):
+        hi = safe(lambda: limits.maximumValue)
+        if hi is not None:
+            out.append(f"max {fmt(hi)}")
+    return out
+
+
+def _limits_text(jm, jtype):
+    """One joint's ENABLED limits as display text ('min 0.0 deg, max 120.0 deg'), or None when none
+    are enabled or nothing read - the read-side twin of _current_value_text, over the same per-type
+    DOF split."""
+    parts = []
+    if jtype in _DRIVES_ANGLE:
+        parts += _enabled_bounds(safe(lambda: jm.rotationLimits),
+                                 lambda v: f"{round(math.degrees(v), 4)} deg")
+    if jtype in _DRIVES_SLIDE:
+        parts += _enabled_bounds(safe(lambda: jm.slideLimits),
+                                 lambda v: f"{round(v * 10.0, 4)} mm")
+    return ", ".join(parts) or None
+
+
+def _ground_lock_census(design):
+    """The top-level ground_to_parent census as (locked names, unanswered, total).
+
+    `total` is how many occurrences the ROOT component's collection handed over, or None when the
+    collection itself did not read - which is a different answer from a design whose members are all
+    free, and the one an empty `locked` list would otherwise publish as "nothing is locked".
+    `unanswered` counts the rows whose flag gave no answer (``read_flag``, never
+    ``safe(read, False)``), so a census that saw the occurrences but not their flags says so instead
+    of reading silence as freedom. A row the collection would not hand over answers nothing either,
+    and is counted the same way."""
+    occs = safe(lambda: design.rootComponent.occurrences)
+    total = _common.counted(lambda: occs.count) if occs is not None else None
+    if total is None:
+        return [], 0, None
+    locked, unanswered = [], 0
+    for i in range(total):
+        o = safe(lambda i=i: occs.item(i))
+        flag = _common.read_flag(lambda o=o: o.isGroundToParent)
+        if flag is None:
+            unanswered += 1
+        elif flag:
+            locked.append(safe(lambda o=o: o.name) or "(unnamed occurrence)")
+    return locked, unanswered, total
+
+
 def _limit_refusal(limits, value, fmt):
     """The refusal when 'value' (native units: rad / cm) lies STRICTLY beyond an enabled limit.
     Fusion IGNORES an out-of-range drive rather than clamping (measured live on 2705.0.108: at
@@ -152,6 +251,57 @@ def _limit_refusal(limits, value, fmt):
     if hi_on and hi is not None and value > hi + 1e-9:
         return f"{fmt(value)} is above the enabled maximum {fmt(hi)}"
     return None
+
+
+def _partner_limit_cause(link, partner_joint, jtype, jm, rad, cm):
+    """The clause reporting that the link's RECORDED ratio puts the partner beyond an enabled bound
+    of its own, or None when the reads do not establish that.
+
+    ARITHMETIC ON READ VALUES, not an observed coupling. What the clause states is what this
+    function computes: implied = the partner's current value + this joint's commanded CHANGE scaled
+    by value_partner / value_self and signed by isReversed. Those three terms are the link's own
+    recorded parameters (the same ones joint_motion_link WRITES); nothing here compares the
+    partner's value BEFORE and AFTER this drive - p_now is a SINGLE read of the partner's current
+    value, taken as this clause is built - so no coupling is observed here, and the wire sentence
+    names the arithmetic and the read-back that checks it rather than a cause the receipt observed.
+
+    Emitted only from facts that all READ, and any unread one withholds it: the link must couple
+    (_link_couples True), THIS joint and the partner must each drive exactly one value (_ONE_DOF -
+    a cylindrical joint on either side leaves the coupled quantity unestablished), the link's two
+    values and its reversed flag must read, both current values must read, and value_self must be
+    non-zero (a zero first value is no ratio at all, and dividing by it raises). The clause lands
+    only when the implied value is STRICTLY beyond an ENABLED bound - the same comparison
+    _limit_refusal makes for a value commanded directly - and it publishes every number it used, so
+    the arithmetic can be checked against assembly_get."""
+    if partner_joint is None or _link_couples(link) is not True:
+        return None
+    spec, p_spec = _ONE_DOF.get(jtype), _ONE_DOF.get(_current_joint_type(partner_joint))
+    if spec is None or p_spec is None:
+        return None
+    p_jm = safe(lambda: partner_joint.jointMotion)
+    if p_jm is None:
+        return None
+    v_self, v_partner, rev = link["value_self"], link["value_partner"], link["reversed"]
+    if not v_self or v_partner is None or rev is None:
+        return None
+    commanded = rad if jtype == "revolute" else cm
+    now = _common.measured(lambda: getattr(jm, spec[0]))
+    p_now = _common.measured(lambda: getattr(p_jm, p_spec[0]))
+    if commanded is None or now is None or p_now is None:
+        return None
+    implied = p_now + (commanded - now) * (v_partner / v_self) * (-1.0 if rev else 1.0)
+    beyond = _limit_refusal(safe(lambda: getattr(p_jm, p_spec[1])), implied, p_spec[2])
+    if not beyond:
+        return None
+    return (f"'{link['partner']}' is coupled to it by motion link "
+            f"'{link['link'] or '(unnamed link)'}', whose recorded values are {v_self} : "
+            f"{v_partner} in Fusion's internal units (radians / cm)"
+            f"{', reversed' if rev else ''}. Applying that RATIO to this command implies a value "
+            f"for '{link['partner']}' its own enabled limits exclude - {beyond}. That is "
+            f"arithmetic on the values the link records, not a coupling this receipt observed - "
+            f"what the link did to '{link['partner']}' was not read here. Read "
+            f"'{link['partner']}' back with assembly_get to check it; if that limit is the bound "
+            f"in the way, widen it with joint_edit or command a value the ratio keeps inside it.")
 
 
 def _placement(occ):
@@ -263,24 +413,37 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
 
     # Second-member refusal, scoped to XREF context: if this joint's motion-link partner was already
     # driven this session AND the pair is not provably plain (native, no xref), refuse BEFORE mutating -
-    # the link already moved this joint when the partner was driven, and driving both members of a
-    # linked pair in an xref assembly has killed the Fusion process. A plain in-document pair falls
-    # through (allowed) and gets a warning below. Keyed on the lineage URN + entity token.
+    # driving both members of a linked pair in an xref assembly has killed the Fusion process. A plain
+    # in-document pair falls through (allowed) and gets a warning below. Keyed on the lineage URN +
+    # entity token. A link that reads SUPPRESSED or BROKEN transmits nothing, so it arms no refusal
+    # (measured: both members of a suppressed rack/pinion link drove independently); an unread state
+    # DOES arm it - the guard fails toward refusal - and what is dropped there is the claim about the
+    # partner, which no read backs.
     doc_id = _doc_key()
     resolved_name = safe(lambda: joint.name) or joint_name
-    partner = _motion_link_partner(joint)
+    link = _motion_link_record(joint)
+    partner = link["partner"]
+    couples = _link_couples(link)
     # A partner name SEVERAL joints carry resolves to None here (find_joint refuses it), so the
     # already-driven check below simply has no partner to key on - it does not block this drive.
     partner_joint = (_find_joint(design, partner)[0] if partner else None)
     partner_driven = bool(partner_joint and _reg_key(doc_id, partner_joint) in _driven_this_session)
     plain_pair = _pair_is_plain(joint, partner_joint) if partner_joint else True
-    if partner_driven and not plain_pair:
+    if partner_driven and not plain_pair and couples is not False:
+        moved_claim = (f"The link ALREADY moved '{resolved_name}' (current value: "
+                       f"{_current_value_text(jm, jtype)}) - read it back with assembly_get; do not "
+                       f"re-drive it. ")
+        if couples is None:
+            moved_claim = (f"The link {_link_state_text(link)}, so whether it moved "
+                           f"'{resolved_name}' is not known here - the value now reads "
+                           f"{_current_value_text(jm, jtype)}; read it back with assembly_get. The "
+                           f"refusal stands on that unread state, not on a coupling that was "
+                           f"observed. ")
         return error(
             f"Refused: '{resolved_name}' is motion-linked to '{partner}', which was already driven "
             f"this session, and the pair is in an XREF/referenced context where driving BOTH members "
-            f"has killed the Fusion process. The link ALREADY moved '{resolved_name}' (current value: "
-            f"{_current_value_text(jm, jtype)}) - read it back with assembly_get; do not re-drive it. "
-            f"Rebuilding '{partner}' (delete+recreate, a new token) clears this refusal.")
+            f"has killed the Fusion process. " + moved_claim
+            + f"Rebuilding '{partner}' (delete+recreate, a new token) clears this refusal.")
 
     applied = {}
     # Out-of-range commands are REFUSED before ANY assignment: Fusion IGNORES a beyond-limit
@@ -443,17 +606,50 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
                 f"PARTIAL drive of '{resolved_name}': " + ", ".join(landed_bits) + "; "
                 + "; ".join(mismatched) + " DID NOT TAKE. The mechanism has moved (and any "
                 "motion-linked partner with it) - read the pose back with assembly_get.")
-        locked = [safe(lambda o=o: o.name) for o in
-                  _common.iter_collection(safe(lambda: design.rootComponent.occurrences))
-                  if safe(lambda o=o: o.isGroundToParent)]
-        locked = [n for n in locked if n]
+        # A total no-take publishes OBSERVATIONS and elects a cause only where the reads prove one.
+        # A parent-locked occurrence EXISTING is no proof it held this drive: measured on a rack
+        # whose command was held by its linked pinion's enabled limit, parent-locked members were
+        # present and releasing them changed nothing.
+        locked, unanswered, census = _ground_lock_census(design)
+        if census is None:
+            seen = ["the top-level occurrence census did not read, so no ground_to_parent state "
+                    "was seen"]
+        else:
+            seen = [f"ground_to_parent is SET on {', '.join(locked)}" if locked
+                    else "no top-level occurrence reads ground_to_parent set"]
+            if unanswered:
+                seen.append(f"{unanswered} of {census} top-level occurrences did not answer "
+                            "ground_to_parent")
+        if link["linked"] is True:
+            state = _link_state_text(link)
+            seen.append(f"'{resolved_name}' is motion-linked to '{partner}' by "
+                        f"'{link['link'] or '(unnamed link)'}'"
+                        + (f", which {state}" if state else ""))
+            p_jm = safe(lambda: partner_joint.jointMotion) if partner_joint else None
+            if p_jm is not None:
+                p_type = _current_joint_type(partner_joint)
+                p_limits = _limits_text(p_jm, p_type)
+                seen.append(f"'{partner}' reads {_current_value_text(p_jm, p_type)}, "
+                            + (f"enabled limits {p_limits}" if p_limits
+                               else "with no enabled limits"))
+        elif link["linked"] is False:
+            seen.append(f"'{resolved_name}' is in no motion link")
+        else:
+            seen.append(f"the motion-link membership of '{resolved_name}' did not read")
+        cause = _partner_limit_cause(link, partner_joint, jtype, jm, rad, cm)
+        if cause:
+            verdict = " " + cause
+        elif link["linked"] is False and locked:
+            verdict = (" With no motion link on this joint, a parent-locked member is the CANDIDATE "
+                       "cause - release it with assembly_ground(ground_to_parent=false) and re-drive "
+                       "to test it.")
+        else:
+            verdict = (" These observations do not single out a cause. Read the mechanism with "
+                       "assembly_get (per-occurrence ground_to_parent, and the joint limits of every "
+                       "joint in the chain), then re-drive.")
         return error(
             f"Drive of '{resolved_name}' DID NOT TAKE - value_now reads "
-            + "; ".join(mismatched) +
-            ". A parent-locked member freezes the whole chain"
-            + (f": ground_to_parent is SET on {', '.join(locked)} - release it with "
-               "assembly_ground(ground_to_parent=false) and re-drive."
-               if locked else " - check per-occurrence ground_to_parent with assembly_get."))
+            + "; ".join(mismatched) + ". Observed: " + "; ".join(seen) + "." + verdict)
     # WHICH member the drive displaced, from the placement samples taken either side of it. This is
     # an observation, never a prediction: the rows name the occurrence that moved and its measured
     # change, and a drive after which neither placement changed says exactly that.
@@ -478,11 +674,34 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
                            + ", ".join(sorted(directions)) + ".")
     if partner:
         result["motion_link_partner"] = partner
-        result["note"] += (f" NOTE: '{resolved_name}' is motion-linked to '{partner}' - the link "
-                           "moved the partner too; read it back with assembly_get, do not drive it. "
-                           "In xref assemblies, drive/edit cycles on a linked pair have killed the "
-                           "Fusion process.")
-        if partner_driven and plain_pair:
+        # The link's own STATE, beside the partner name - not keyed 'motion_link', which
+        # joint_motion_link already publishes as the created link's NAME.
+        result["motion_link_state"] = {k: link[k] for k in
+                                       ("link", "suppressed", "broken", "value_self",
+                                        "value_partner", "reversed")}
+        link_ref = f"'{link['link'] or '(unnamed link)'}'"
+        if couples is True:
+            result["note"] += (f" NOTE: '{resolved_name}' is motion-linked to '{partner}' by "
+                               f"{link_ref}, which reads neither suppressed nor compute-failed - the "
+                               "link couples the two joints, so read the partner back with "
+                               "assembly_get rather than driving it. In xref assemblies, drive/edit "
+                               "cycles on a linked pair have killed the Fusion process.")
+        elif couples is False:
+            result["note"] += (f" NOTE: '{resolved_name}' is motion-linked to '{partner}' by "
+                               f"{link_ref}, which {_link_state_text(link)} - this receipt makes NO "
+                               "claim that the partner moved with it, and the second-member refusal "
+                               f"is not armed for this pair. Read '{partner}' back with assembly_get "
+                               "to see where it stands.")
+        else:
+            result["note"] += (f" NOTE: '{resolved_name}' is motion-linked to '{partner}' by "
+                               f"{link_ref}, which {_link_state_text(link)} - whether the link moved "
+                               "the partner is not known from this receipt. Read "
+                               f"'{partner}' back with assembly_get, and do not drive it: the "
+                               "second-member refusal stays armed on that unread state.")
+        if partner_driven and couples is False:
+            result["note"] += (" Both members have now been driven this session; nothing refused "
+                               "the second, because the link does not read as one that couples.")
+        elif partner_driven and plain_pair:
             result["note"] += (" Both members have now been driven; allowed in this plain (non-xref) "
                                "assembly, but avoid it in an xref assembly.")
     _driven_this_session.add(_reg_key(doc_id, joint))
@@ -502,9 +721,10 @@ TOOL_DESCRIPTION = (
     "A drive is TRANSIENT: it arms a pending snapshot; a "
     "recompute resets it unless captured - assembly_capture_position (action='capture') writes the "
     "pose into the timeline. The 'offset' "
-    "param moves a DIFFERENT axis (frame Z) and cannot persist a drive. Motion-linked pairs: drive "
-    "one member and read the partner back (the link moves it); in an xref/referenced assembly "
-    "driving the SECOND member is refused for the session - it has killed the Fusion process."
+    "param moves a DIFFERENT axis (frame Z) and cannot persist a drive. Motion-linked pairs: the "
+    "receipt says whether the link couples. Where it may, read the partner back rather than driving "
+    "it, and an xref/referenced pair refuses the SECOND member for the session - it has killed the "
+    "Fusion process."
 )
 
 tool = (

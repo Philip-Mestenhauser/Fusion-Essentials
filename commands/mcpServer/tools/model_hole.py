@@ -247,24 +247,73 @@ def _world_lift(design, sketch, context_occ):
     return inverse, ""
 
 
-def _foreign_face_clause(comp, face_ent):
-    """The clause naming a 'face' whose OWN component is not the one the hole was built in, or ''.
+def _feature_host(face_ent, active):
+    """(the component this hole is built in, whether the FACE is what named it).
 
-    Both sides are READ (the face's body's parent, and the component the feature was added to); the
-    clause states that they differ and names the call that makes the face's component the build
-    target. It claims nothing about why the drill found no body."""
-    owner = safe(lambda: face_ent.body.parentComponent)
-    # `is not False`: the clause STATES that the two components differ, so it is emitted only on a
-    # proven difference - an identity that did not read is evidence of nothing and says nothing.
-    if owner is None or _common.same_component(owner, comp) is not False:
-        return ""
-    face_name = safe(lambda: owner.name)
-    built_in = safe(lambda: comp.name)
-    if not face_name or not built_in:
-        return ""
-    return (f" The drilled 'face' belongs to component '{face_name}', while this hole was built in "
-            f"'{built_in}'. Activate '{face_name}' with design_activate_component and retry, or "
-            + _PROFILE_CUT_REMEDY)
+    The component that owns the drilled body hosts both the HoleFeature and its placement sketch.
+    `active` stands in only when the face's owner does not read at all, and the payload publishes
+    which of the two answered."""
+    owner = _inputs.entity_component(face_ent)
+    if owner is None:
+        return active, False
+    return owner, True
+
+
+def _active_host_clause(host_named):
+    """The disclosure for a hole hosted on the ACTIVE component: which read did not answer, and
+    where the hole was built instead."""
+    return (" The component that owns 'face' did not read, so the hole was built in the active "
+            f"component{host_named}.")
+
+
+def _no_placement_sketch_error(comp, active, detail, host_from_face):
+    """The refusal for a build host that will not take 'face' as a placement sketch's plane.
+
+    It names the component the sketch was attempted through and, where that host and the ACTIVE
+    component are PROVEN to be different components, the active one the hole was not built in -
+    nothing else on the wire shows that the host came from 'face' rather than from the active pick.
+    `same_component` is tri-state, so the divergence clause is emitted on `is False` alone: an
+    identity that did not read supports no claim that the two components differ.
+
+    The activate-the-host step needs a name to quote AND a host the FACE named: on the fallback the
+    host IS the component `active` stands for, so activating it moves the caller nowhere. That gate
+    is `host_from_face`, not the divergence: the fallback returns the active component itself, whose
+    identity may not read at all, and `same_component` would then answer None rather than True."""
+    host = safe(lambda: comp.name)
+    named = f" '{host}'" if host else ""
+    msg = f"Could not create a placement sketch on the face in the host component{named}{detail}."
+    if _common.same_component(comp, active) is False:
+        other = safe(lambda: active.name)
+        msg += (" The host is the component that owns 'face', not the active component"
+                + (f" '{other}'" if other else "") + ".")
+    if host and host_from_face:
+        msg += (f" Activate '{host}' with design_activate_component and take 'face' from "
+                "find_geometry there.")
+    return msg + " " + _PROFILE_CUT_REMEDY
+
+
+def _ownership_readback(host, feature, sketch):
+    """(the sides that read back as a DIFFERENT component, the sides whose owner would not read) for
+    the hole feature and its placement sketch, against the component they were built through.
+
+    Every comparison is the TRI-STATE one: only a PROVEN difference is a mismatch, and an identity
+    that did not read is carried out as unreadable rather than counted as agreement - the payload
+    discloses it instead of claiming a host it never confirmed."""
+    mismatched, unreadable = [], []
+    for label, entity in (("the hole feature", feature), ("its placement sketch", sketch)):
+        if entity is None:
+            continue
+        got = safe(lambda e=entity: e.parentComponent)
+        verdict = _common.same_component(got, host)
+        if verdict is False:
+            # the OTHER component is named only when its name reads: a difference was proven, so an
+            # unreadable name is stated as one rather than interpolated as the literal None.
+            got_name = safe(lambda g=got: g.name)
+            mismatched.append(f"{label} sits in '{got_name}'" if got_name
+                              else f"{label} sits in another component")
+        elif verdict is not True:
+            unreadable.append(label)
+    return mismatched, unreadable
 
 
 def _sketch_space_point(sketch, x, y, z, to_model=None):
@@ -452,8 +501,8 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
     design = _common.design()
     if not design:
         return error("No active design.")
-    comp = _target_component(design)
-    if not comp:
+    active = _target_component(design)
+    if not active:
         return error("No target component.")
 
     # every placement mode below takes this as its planarEntity.
@@ -462,6 +511,11 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
         return error(ferr)
     if not face_ent:
         return error("Could not resolve 'face' to a planar face. Pass a find_geometry face handle.")
+
+    # 'face' is resolved first because the face names the component this hole is built in.
+    comp, host_from_face = _feature_host(face_ent, active)
+    host_name = safe(lambda: comp.name)
+    host_named = f" '{host_name}'" if host_name else ""
 
     edge_ent = None
     offset_edge_one_ent = None
@@ -527,20 +581,40 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
     scaled_pts = []            # the raw scaled (cm) coords, for best-effort naming of failed points
     world_lift = None          # the component whose placement carried the world points, if any
 
+    def _rollback_sketch():
+        """Roll the placement sketch back and answer the clause disclosing a rollback that did NOT
+        report success - '' when there is no sketch, or deleteMe answered true.
+
+        deleteMe's answer is the only thing read, so it is the only thing the clause states: a
+        delete that answers TRUE over a sketch that stayed is disclosed to nobody, and nothing here
+        re-reads the component for a survivor (that read's answer is unmeasured)."""
+        # a placement that never made a sketch has none to roll back, and the clause would then
+        # state an effect this call never had - about a sketch that does not exist.
+        if sketch is None:
+            return ""
+        name = safe(lambda: sketch.name)
+        if bool(safe(lambda: sketch.deleteMe(), False)):
+            return ""
+        named = f" '{name}'" if name else ""
+        return (f" Rolling the placement sketch{named} back did not report success, so it may "
+                "still sit on the face - remove it from the timeline with design_delete_feature.")
+
     def _abandon(msg):
         """Error exit AFTER the placement sketch exists: roll the sketch back first, so a refused
         or failed hole never leaves an orphaned placement sketch on the face."""
-        if sketch is not None:
-            safe(lambda: sketch.deleteMe())
-        return error(msg)
+        return error(msg + _rollback_sketch())
 
     if placement == "sketch_points":
+        # The sketch is created THROUGH the host, so a host the platform will not take the face in
+        # refuses here rather than being silently swapped for one that would.
         try:
             sketch = comp.sketches.add(face_ent)
         except Exception as e:
-            return error(f"Could not create a placement sketch on the face: {e}")
+            return error(_no_placement_sketch_error(comp, active, f": {e}", host_from_face))
         if not sketch:
-            return error("Could not create a placement sketch on the face (sketches.add returned nothing).")
+            return error(_no_placement_sketch_error(comp, active,
+                                                    " (sketches.add returned nothing)",
+                                                    host_from_face))
         # The sketch's OWNER decides the space modelToSketchSpace converts from, so outside the root
         # a 'world' point is carried into that component's frame first - the leg that lets a hole in
         # a NESTED component be placed by world coordinates at all.
@@ -579,15 +653,20 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
                 return _abandon(f"Could not add a sketch point at {xyz!r}.")
             sketch_pts.append(sp)
             scaled_pts.append((sx, sy, sz))
-        if len(sketch_pts) == 1:
-            setter = "setPositionBySketchPoint"
-            placed = hin.setPositionBySketchPoint(sketch_pts[0])
-        else:
-            coll = _object_collection()
-            for sp in sketch_pts:
-                coll.add(sp)
-            setter = "setPositionBySketchPoints"
-            placed = hin.setPositionBySketchPoints(coll)
+        # These setters run with the placement sketch already on the face, so a raise leaves through
+        # _abandon - an escaping one orphans the sketch.
+        try:
+            if len(sketch_pts) == 1:
+                setter = "setPositionBySketchPoint"
+                placed = hin.setPositionBySketchPoint(sketch_pts[0])
+            else:
+                coll = _object_collection()
+                for sp in sketch_pts:
+                    coll.add(sp)
+                setter = "setPositionBySketchPoints"
+                placed = hin.setPositionBySketchPoints(coll)
+        except Exception as e:
+            return _abandon(f"Could not collect or position the placement sketch point(s): {e}")
         if placed is False:
             return _abandon(f"Fusion refused the sketch-point placement ({setter} returned false), "
                             "so nothing was drilled.")
@@ -705,17 +784,32 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
         warn = _feature_warning(feature)
         removed = bool(safe(lambda: feature.deleteMe(), False))
         if removed:
-            if sketch is not None:
-                safe(lambda: sketch.deleteMe())
-            tail = "The partial feature was rolled back; nothing was drilled."
+            # the sketch goes only once the feature it placed is gone, and a rollback that did not
+            # report success is disclosed here too
+            tail = ("The partial feature was rolled back; nothing was drilled."
+                    + _rollback_sketch())
         else:
             tail = (f"Rollback FAILED - the {len(axes)} drilled hole(s) remain "
                     f"(feature '{safe(lambda: feature.name)}').")
         return error(
             f"{n_missing} of {n_pts} hole point(s) cut NOTHING - the feature created {len(axes)} "
             f"hole(s).{named} {where_msg} {tail}"
-            + (f" Fusion reported: {warn}" if warn else "")
-            + _foreign_face_clause(comp, face_ent))
+            + ("" if host_from_face else _active_host_clause(host_named))
+            + (f" Fusion reported: {warn}" if warn else ""))
+
+    # Read the ownership back off the feature and the placement sketch and compare it with the
+    # component they were built through; only a PROVEN difference is an error.
+    mismatched, unreadable = _ownership_readback(comp, feature, sketch)
+    if mismatched:
+        feature_name = safe(lambda: feature.name)
+        sketch_name = safe(lambda: sketch.name) if sketch is not None else None
+        # the placement sketch positioned the feature, so removing one strands the other
+        removable = f"'{feature_name}'" if feature_name else "the hole feature"
+        if sketch_name:
+            removable += f" and the placement sketch '{sketch_name}' it was positioned by"
+        return error(f"The hole was created through the host component{host_named}, but "
+                     f"{' and '.join(mismatched)}. Remove {removable} with design_delete_feature, "
+                     "then retry with 'face' taken from find_geometry on the instance you mean.")
 
     result = {
         "holes": min(len(axes), n_pts) if verified else n_pts,
@@ -726,10 +820,20 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
         "placement": placement,
         "points_space": points_space,
         "feature": safe(lambda: feature.name),
+        "host_from_face": host_from_face,
+        "host_verified": not unreadable,
         "note": "Hole feature added (a real Hole, with hole/thread metadata - not an extrude-cut). "
                 "For a bolt circle, pass every position in 'points' in ONE call - the pattern tools "
                 "take bodies/occurrences, not hole features.",
     }
+    if host_name:
+        # withheld rather than published as a null - a name that did not read is not a component name
+        result["host_component"] = host_name
+    if not host_from_face:
+        result["note"] += _active_host_clause(host_named)
+    if unreadable:
+        result["note"] += (f" The owning component of {' and '.join(unreadable)} did not read back, "
+                           f"so nothing here proves it landed in the host component{host_named}.")
     if world_lift:
         # Disclose the extra step the points took: nothing else in the payload shows that they were
         # carried through a placement rather than handed straight to the sketch's converter.

@@ -29,8 +29,8 @@ close orphans, factor duplicated guards into shared helpers.
 - **5x** across 4 module(s): "'. Use: new, join, cut, intersect."
 - **5x** across 5 module(s): "Fusion declined to delete '"
 - **5x** across 5 module(s): "is not available on this Fusion version."
-- **5x** across 1 module(s): "setMotionData reported success on '"
 - **4x** across 3 module(s): "No active design (open a document with design geometry)."
+- **4x** across 1 module(s): "setMotionData reported success on '"
 
 ### Hubs (most breadcrumbs lead here - the connective tissue)
 - `doc_new`  <- 95  (desc 10, note 85)
@@ -194,21 +194,17 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 ### `assembly_edit_relations`
 - ' does not apply to a
 - No active design with components.
+- Coupling re-valued - 'interpreted' states how the ratio was read and the native pair sent to the API, and value_one/value_two are the link's own parameters READ BACK after the set. The SIGN of rati...
 - 'ratio' must be non-zero (a 0 ratio links no motion).
 - ' does not report both coupled motions (motionOne/motionTwo), so its values cannot be re-set without guessing which degrees of freedom it links.
 - Fusion declined to re-value motion link '
 - ' (setMotionData returned false) - its ratio is unchanged.
 - setMotionData reported success on '
 - ' but its valueOne/valueTwo parameters cannot be read back, so nothing confirms the new ratio.
-- ' but its valueOne parameter reads
-- - a zero first value is no coupling at all.
-- ' but its parameters read
-- - the ratio did not take.
 - ' and its parameters read
 - , but isReversed cannot be read back, so the direction the SIGN of ratio sets is UNCONFIRMED. Re-read the link with assembly_get(include=['relations']).
 - ' but it reads isReversed=
 - - the direction did not take.
-- Coupling re-valued: joint_two moves |ratio| per unit of joint_one, and the SIGN of ratio SETS the direction - so a positive ratio CLEARS an existing reversal (was_reversed reports what it overwrote...
 - 'ratio' must be a number (got
 - setMotionData on motion link '
 - . (The platform refuses a coupling it cannot solve; the link is unchanged.)
@@ -1031,6 +1027,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 
 ### `design_export`
 - Exported to local disk. To round-trip into the cloud, upload it with data_upload_file (STEP/IGES are translated to a Fusion design on the cloud).
+- ') applies to format=stl only, and this call asked for format=
+- - refusing rather than dropping it. Export as stl to bake the unit into the file, or omit 'stl_units'.
 - Provide 'file_path' - the local output path (a file, or a DIRECTORY when split_by_component=true). The format extension is appended if missing.
 - No active design to export. Open or create a document first (see doc_new).
 - component(s) to separate
@@ -1605,16 +1603,11 @@ A planar face's 'frame' is th...
 - ' is a slider - it has no rotation. Use 'distance', not 'angle_deg'.
 - ' is a revolute - it has no slide. Use 'angle_deg', not 'distance'.
 - Could not read the motion of joint '
-- ' is motion-linked to '
-- ', which was already driven this session, and the pair is in an XREF/referenced context where driving BOTH members has killed the Fusion process. The link ALREADY moved '
-- ) - read it back with assembly_get; do not re-drive it. Rebuilding '
 - ' (delete+recreate, a new token) clears this refusal.
+- ' is motion-linked to '
+- ', which was already driven this session, and the pair is in an XREF/referenced context where driving BOTH members has killed the Fusion process.
 - . Fusion IGNORES an out-of-range drive (the value stays where it was), so nothing would move. Command a value inside the limits (a command exactly AT a bound lands on it), or widen them with joint_...
 - Refused: the command lies beyond the enabled joint limits of '
-- . A parent-locked member freezes the whole chain
-- - check per-occurrence ground_to_parent with assembly_get.
-- : ground_to_parent is SET on
-- - release it with assembly_ground(ground_to_parent=false) and re-drive.
 - ' DID NOT TAKE - value_now reads
 - Could not drive joint '
 - DID NOT TAKE. The mechanism has moved (and any motion-linked partner with it) - read the pose back with assembly_get.
@@ -1645,11 +1638,14 @@ A planar face's 'frame' is th...
 - ' is an AS-BUILT joint, which exposes no offset/angle ModelParameter for ANY motion type - no expression can drive it. Delete it (design_delete_feature) and build the pair with joint_create instead.
 
 ### `joint_motion_link`
-- Joints linked - drive ONE member (joint_drive) and the link moves the other proportionally; read the partner's position back instead of driving it too (joint_drive REFUSES the second member for the...
+- Joints linked - value_one/value_two are the link's own parameters READ BACK after the set, and 'interpreted' states how the ratio was read and the native pair sent to the API. Whether the link move...
 - Provide 'joint_one' and 'joint_two' - the two joints to link.
 - joint_one and joint_two must be different joints.
 - ratio must be non-zero (a 0 ratio links no motion).
 - Motion link creation returned nothing - check that both joints permit motion (revolute/slider/cylindrical); a rigid joint cannot be linked.
+- REMAINS in the design holding the pair its parameters read. Re-value it with assembly_edit_relations(kind='motion_link', name=..., action='set_values'), or remove it with action='delete'; assembly_...
+- setMotionData reported success but
+- (its name could not be read)
 - ratio must be a number (got
 - . Link two joints that permit motion (revolute/slider/cylindrical).
 - Could not create the motion link:
@@ -2127,10 +2123,12 @@ A planar face's 'frame' is th...
 - This component does not support hole features.
 - '. Use mm, cm, or in.
 - hole point(s) cut NOTHING - the feature created
+- The hole was created through the host component
+- with design_delete_feature, then retry with 'face' taken from find_geometry on the instance you mean.
 - Provide 'points' - a list of [x, y, z] positions on the face to drill at.
 - ' is not a drillable hole - a blind hole needs a POSITIVE depth (e.g. '10 mm'), or use extent='through'.
 - Could not resolve 'edge' to an edge. Pass a find_geometry edge handle.
-- Could not create a placement sketch on the face (sketches.add returned nothing).
+- (sketches.add returned nothing)
 - The hole was drilled but carries no tap, so '
 - ' did not take. Remove '
 - ' with design_delete_feature.
@@ -2138,7 +2136,6 @@ A planar face's 'frame' is th...
 - ', not the requested '
 - placement='center' needs 'edge' - a find_geometry handle at the circular/elliptical edge to center the hole on.
 - Could not resolve 'offset_edge_one' to an edge.
-- Could not create a placement sketch on the face:
 - Fusion refused to centre the hole on that edge, so nothing was placed. Check that 'edge' is a circular/elliptical edge ON 'face'.
 - A modeled thread was requested, but the hole's thread feature could not be read back, so there is no proof the helix was cut. Remove '
 - The tap was requested

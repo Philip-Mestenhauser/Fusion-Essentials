@@ -4,14 +4,22 @@
 """Shared assembly-relations substrate: the ONE walk over the three relation kinds an assembly
 carries - rigid groups, motion links and assembly constraints - plus the resolve-one-by-name every
 lifecycle op targets through. Each kind is its own Component collection (rigidGroups / motionLinks /
-assemblyConstraints), so the walk is per kind; all three carry a name, an entityToken and deleteMe.
+assemblyConstraints), so the walk is per kind; all three carry a name and deleteMe, and the walk
+de-duplicates on entityToken: a token that yields no value - one that raises, answers None, or
+answers the empty string - keys on ``id()`` rather than on a value substituted for it.
+
+PROBE NEEDED - which relations answer an entityToken, and whether two wrappers of one relation
+answer the same value. Two rows survive the de-dup below in two cases - a token that yields no
+value, and two wrappers of one relation answering two different values - and the walk reads nothing
+that tells those apart, so nothing here branches on the difference.
 """
 
-from ._common import safe
+from ._common import all_components, safe
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
 MAP_BLURB = ("all_relations (the ONE walk over a design's rigid groups / motion links / assembly "
-             "constraints - root and every sub-component, de-duplicated by entityToken) + "
+             "constraints - every component once over _common.all_components, never a prepended "
+             "rootComponent, then de-duplicated by entityToken) + "
              "relation_names / find_relation (the names for an error message, and the resolve-one "
              "by case-insensitive EXACT name that REFUSES a duplicate instead of taking the first) "
              "+ rigid_group_members (a rigid group's member fullPathNames) - the substrate "
@@ -36,19 +44,31 @@ def kind_label(kind):
 def all_relations(design, kind):
     """Every relation of `kind` in the design as a flat list of (object, owning_component): the root
     component plus every sub-component (a relation created inside a sub-assembly lives on THAT
-    component, so a root-only walk under-reports it). De-duplicated by entityToken - design
-    .allComponents includes the root as a proxy DISTINCT from design.rootComponent, so a root
-    relation is reached twice (the same trap _joints.all_joints documents); id() falls back for
-    an object with no readable token."""
+    component, so a root-only walk under-reports it).
+
+    The component walk is ``_common.all_components`` and nothing else - the ONE design-wide
+    component walk, which holds the contract for how ``design.allComponents`` reaches the root and
+    for what it answers when that collection does not read. That collection already carries the
+    root, so prepending ``design.rootComponent`` to it reads every root relation twice: the root
+    arrives a second time as a distinct wrapper, and a row whose token yields no value keys on
+    ``id()``, which two wrappers never share - so the de-dup below cannot collapse the pair. Each
+    doubled row then makes its own name ambiguous to find_relation, which leaves the failed relation
+    a caller most needs to suppress or delete the one it cannot address.
+
+    The entityToken de-dup is a SECOND line, over the relation objects themselves: two readings that
+    answer ONE token collapse to one row, and a reading whose token yields no value - it raises,
+    answers None, or answers the empty string - keys on ``id()`` instead, standing as its own row.
+    That trade is deliberate: an empty reading is no evidence of identity (``_common.native_identity``
+    refuses it too), so keying on it would MERGE distinct relations out of the walk, where ``id()``
+    only over-counts one. A token is document-local (see ``_common.native_identity``), so two
+    relations that answer one token would collapse here; whether one walk reaches such a pair is
+    unmeasured."""
     entry = _KINDS.get(kind)
     if entry is None:
         return []
     attr = entry[0]
     out, seen = [], set()
-    scopes = [safe(lambda: design.rootComponent)] + list(safe(lambda: design.allComponents, []) or [])
-    for c in scopes:
-        if c is None:
-            continue
+    for c in all_components(design):
         coll = safe(lambda c=c: getattr(c, attr))
         if coll is None:
             continue
@@ -57,7 +77,10 @@ def all_relations(design, kind):
             if obj is None:
                 continue
             token = safe(lambda obj=obj: obj.entityToken)
-            key = token if token is not None else id(obj)
+            # An EMPTY reading takes the id() fallback with an unreadable one: a token that carries
+            # no value is no evidence two rows are one relation, and _common.native_identity refuses
+            # the same reading. Keyed on "" every relation answering it collapses onto one row.
+            key = token or id(obj)
             if key in seen:
                 continue
             seen.add(key)

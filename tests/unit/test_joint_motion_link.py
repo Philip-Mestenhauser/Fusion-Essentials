@@ -5,17 +5,25 @@ input guards (both names required, distinct, must resolve) plus the ratio plumbi
 """
 
 import json
+import types
+
+import pytest
 
 import adsk.fusion
 
 from conftest import FakeVector3D, load_tool
 
 jml = load_tool("joint_motion_link")
+jt = load_tool("_joints")          # the ratio codec, to pin the payload against its own output
 
 # The DOF values setMotionData actually wants, straight from the measured enum (never hand-typed).
 JMT = adsk.fusion.JointMotionTypes
 REVOLUTE_DOF = JMT.RevoluteJointRotateMotionType
 SLIDER_DOF = JMT.SliderJointSlideMotionType
+
+# The rack-and-pinion ratio the unit conversion is measured on: this many degrees of pinion per
+# millimetre of rack is 0.5 rad per cm, the pair Fusion actually couples on.
+RIG_RATIO_DEG_PER_MM = 2.8647889757
 
 
 def _payload(result):
@@ -49,8 +57,16 @@ class FakeMotionLink:
     def __init__(self):
         self.motion_data = None      # captures the setMotionData call
         self.deleted = False
+        # The link's own ModelParameters, in Fusion's native rad/cm - absent until setMotionData
+        # parks the pair on them, which is what the tool reads back to publish value_one/value_two.
+        self.valueOne = None
+        self.valueTwo = None
     def setMotionData(self, m1, v1, m2, v2, reversed_):
         self.motion_data = {"m1": m1, "v1": v1, "m2": m2, "v2": v2, "reversed": reversed_}
+        # ValueInput.createByReal is patched to echo ('real', number), so the parameters hold the
+        # number the platform was handed.
+        self.valueOne = types.SimpleNamespace(value=v1[1])
+        self.valueTwo = types.SimpleNamespace(value=v2[1])
         return True
     def deleteMe(self):
         self.deleted = True
@@ -427,6 +443,206 @@ class TestMirrorOrTranslateTeaching:
         _slider(des, 0, (1, 0, 0))
         out = _payload(jml.handler(joint_one="Slide", joint_two="Spin", ratio=-1))
         assert "MIRROR OR TRANSLATE" not in out["note"]
+
+
+class TestRatioUnits:
+    """The ratio crosses the wire in DISPLAY units per DOF (deg for a rotation, mm for a slide) and
+    reaches setMotionData in Fusion's native rad/cm. A same-kind pair's factors cancel; a mixed pair
+    converts by both. The codec is shared with the re-value path (assembly_edit_relations
+    set_values), and both publish its three facts."""
+
+    def test_a_revolute_pair_still_sends_the_bare_ratio(self, monkeypatch):
+        # BACK-COMPAT: deg-to-deg cancels, so a rev/rev caller sends the number itself, not a
+        # scaled one.
+        des = _install(monkeypatch, ["A", "B"])
+        out = _payload(jml.handler(joint_one="A", joint_two="B", ratio=2.0))
+        assert des.rootComponent.motionLinks.last_link.motion_data["v2"] == ("real", 2.0)
+        assert out["value_one"] == 1.0 and out["value_two"] == 2.0
+        assert out["ratio_units"] == "deg of joint_two per deg of joint_one"
+        assert out["value_units"] == "value_one in rad, value_two in rad"
+
+    def test_a_slider_pair_still_sends_the_bare_ratio(self, monkeypatch):
+        # the other same-kind pair: mm-to-mm cancels the same way.
+        des = _install(monkeypatch, ["SlideL", "SlideR"])
+        _slider(des, 0, (1, 0, 0))
+        _slider(des, 1, (1, 0, 0))
+        out = _payload(jml.handler(joint_one="SlideL", joint_two="SlideR", ratio=-3.0))
+        assert des.rootComponent.motionLinks.last_link.motion_data["v2"] == ("real", 3.0)
+        assert out["value_two"] == 3.0
+        assert out["ratio_units"] == "mm of joint_two per mm of joint_one"
+
+    def test_the_rack_and_pinion_ratio_reaches_the_api_in_native_units(self, monkeypatch):
+        # THE MEASURED PAIR: 2.8647889757 deg of pinion per mm of rack IS 0.5 rad per cm. Sending
+        # the display number raw couples 5.7x too fast.
+        des = _install(monkeypatch, ["Rack", "Pinion"])
+        _slider(des, 0, (1, 0, 0))
+        out = _payload(jml.handler(joint_one="Rack", joint_two="Pinion", ratio=-RIG_RATIO_DEG_PER_MM))
+        md = des.rootComponent.motionLinks.last_link.motion_data
+        assert md["v1"] == ("real", 1.0)
+        assert md["v2"][0] == "real" and md["v2"][1] == pytest.approx(0.5, abs=1e-9)
+        assert md["v2"][1] != pytest.approx(RIG_RATIO_DEG_PER_MM, abs=1e-6)
+        assert md["reversed"] is True                       # the sign is still the reversal flag
+        assert out["ratio"] == -RIG_RATIO_DEG_PER_MM        # the caller's own number, unscaled
+        assert out["value_two"] == pytest.approx(0.5, abs=1e-9)
+        assert out["ratio_units"] == "deg of joint_two per mm of joint_one"
+        assert out["value_units"] == "value_one in cm, value_two in rad"
+        assert "2.8647889757 deg of joint_two per 1 mm of joint_one" in out["interpreted"]
+
+    def test_a_revolute_to_slider_ratio_converts_the_other_way(self, monkeypatch):
+        des = _install(monkeypatch, ["Spin", "Slide"])
+        _slider(des, 1, (1, 0, 0))
+        out = _payload(jml.handler(joint_one="Spin", joint_two="Slide", ratio=2.0))
+        md = des.rootComponent.motionLinks.last_link.motion_data
+        assert md["v2"][1] == pytest.approx(11.4591559026, abs=1e-9)
+        assert out["ratio_units"] == "mm of joint_two per deg of joint_one"
+
+    def test_the_published_facts_are_the_codecs_own(self, monkeypatch):
+        # PARITY with the re-value path: both writers publish exactly what the one codec returned for
+        # the same DOF pair and ratio, so a divergence between them reds here.
+        des = _install(monkeypatch, ["Rack", "Pinion"])
+        _slider(des, 0, (1, 0, 0))
+        out = _payload(jml.handler(joint_one="Rack", joint_two="Pinion", ratio=RIG_RATIO_DEG_PER_MM))
+        facts = jt.link_ratio_values(SLIDER_DOF, REVOLUTE_DOF, RIG_RATIO_DEG_PER_MM)[2]
+        assert {k: out[k] for k in facts} == facts
+
+    def test_a_dof_that_answers_no_unit_is_sent_unconverted_and_says_so(self, monkeypatch):
+        # a DOF outside the rotate/slide tables establishes no display unit, so scaling it would be
+        # a guess: the magnitude goes out as given and the payload withholds both unit names.
+        des = _install(monkeypatch, ["A", "B"])
+        monkeypatch.setattr(jml, "motion_link_dof", lambda j: (object(), None))
+        out = _payload(jml.handler(joint_one="A", joint_two="B", ratio=RIG_RATIO_DEG_PER_MM))
+        assert des.rootComponent.motionLinks.last_link.motion_data["v2"] == (
+            "real", RIG_RATIO_DEG_PER_MM)
+        assert out["ratio_units"] is None and out["value_units"] is None
+        assert "NO unit conversion" in out["interpreted"]
+
+    def test_the_note_does_not_promise_the_partner_moves(self, monkeypatch):
+        # joint_drive's receipt is what answers whether the link couples; this create reads nothing
+        # about the coupling, so it points at that read instead of asserting proportional motion.
+        _install(monkeypatch, ["A", "B"])
+        out = _payload(jml.handler(joint_one="A", joint_two="B", ratio=2.0))
+        assert "not claimed here" in out["note"] and "joint_drive" in out["note"]
+        assert "moves the other proportionally" not in out["note"]
+        assert "REFUSES the second member" in out["note"]      # the measured warning stays
+
+
+class TestValueReadBack:
+    """value_one/value_two are the link's OWN parameters read back off the MotionLink after
+    setMotionData - the same pair assembly_get's relations row and the re-value path publish under
+    those names. The numbers HANDED to the API are stated in 'interpreted' instead, so no key on
+    this payload lets a sent number be read as a measured one."""
+
+    def _parks(self, monkeypatch, one, two):
+        """A design whose link parks (one, two) on its parameters whatever it is sent - None for a
+        parameter that does not read at all."""
+        des = _install(monkeypatch, ["A", "B"])
+        link = FakeMotionLink()
+
+        def park(m1, v1, m2, v2, reversed_):
+            link.motion_data = {"m1": m1, "v1": v1, "m2": m2, "v2": v2, "reversed": reversed_}
+            link.valueOne = None if one is None else types.SimpleNamespace(value=one)
+            link.valueTwo = None if two is None else types.SimpleNamespace(value=two)
+            return True
+        link.setMotionData = park
+        des.rootComponent.motionLinks.add = _bind_link(des.rootComponent.motionLinks, link)
+        return link
+
+    def test_the_published_pair_is_the_one_the_link_holds_not_the_one_sent(self, monkeypatch):
+        # the discriminating pair: the platform stores 2:4 for a sent 1:2 - the same coupling in
+        # different numbers - so a payload echoing what createByReal was given reads 1.0/2.0 here.
+        link = self._parks(monkeypatch, 2.0, 4.0)
+        out = _payload(jml.handler(joint_one="A", joint_two="B", ratio=2.0))
+        assert link.motion_data["v1"] == ("real", 1.0) and link.motion_data["v2"] == ("real", 2.0)
+        assert out["value_one"] == 2.0 and out["value_two"] == 4.0
+        assert "READ BACK" in out["note"]
+
+    def test_the_mixed_pair_publishes_the_native_number_the_link_holds(self, monkeypatch):
+        # the rack-and-pinion create: the link holds 0.5 rad per cm, never the caller's display
+        # number, and 'ratio' beside it is still the caller's own.
+        des = _install(monkeypatch, ["Rack", "Pinion"])
+        _slider(des, 0, (1, 0, 0))
+        out = _payload(jml.handler(joint_one="Rack", joint_two="Pinion",
+                                   ratio=RIG_RATIO_DEG_PER_MM))
+        assert out["value_one"] == 1.0
+        assert out["value_two"] == pytest.approx(0.5, abs=1e-9)
+        assert out["value_two"] != pytest.approx(RIG_RATIO_DEG_PER_MM, abs=1e-6)
+        assert out["ratio"] == RIG_RATIO_DEG_PER_MM
+
+    def test_a_link_left_holding_a_different_coupling_is_an_error(self, monkeypatch):
+        # setMotionData answers True while the parameters read 1:1 - the wrong-ratio failure no
+        # other field in this result reveals. The link COMPUTED, so it is reported, not deleted.
+        link = self._parks(monkeypatch, 1.0, 1.0)
+        res = jml.handler(joint_one="A", joint_two="B", ratio=4.0)
+        assert res["isError"] is True
+        assert "did not take" in res["message"] and "1.0:1.0" in res["message"]
+        assert "MotionLink1" in res["message"] and "REMAINS" in res["message"]
+        assert "action='set_values'" in res["message"] and "action='delete'" in res["message"]
+        assert link.deleted is False
+
+    def test_a_read_back_off_the_converted_value_by_float_noise_still_passes(self, monkeypatch):
+        # the converted number carries a float tail (0.5000000000080081 for the rig ratio); a
+        # platform storing the clean 0.5 differs only in that tail and has taken the ratio.
+        des = _install(monkeypatch, ["Rack", "Pinion"])
+        _slider(des, 0, (1, 0, 0))
+        link = FakeMotionLink()
+
+        def rounded(m1, v1, m2, v2, reversed_):
+            link.motion_data = {"m1": m1, "v1": v1, "m2": m2, "v2": v2, "reversed": reversed_}
+            link.valueOne = types.SimpleNamespace(value=1.0)
+            link.valueTwo = types.SimpleNamespace(value=0.5)
+            return True
+        link.setMotionData = rounded
+        des.rootComponent.motionLinks.add = _bind_link(des.rootComponent.motionLinks, link)
+        out = _payload(jml.handler(joint_one="Rack", joint_two="Pinion",
+                                   ratio=RIG_RATIO_DEG_PER_MM))
+        assert out["value_two"] == 0.5
+
+    def test_unreadable_parameters_publish_nulls_and_say_the_pair_is_unconfirmed(self, monkeypatch):
+        # a pair that did not read is no evidence the ratio failed - and none that it took, so both
+        # numbers are withheld rather than filled in with what was sent.
+        self._parks(monkeypatch, None, None)
+        out = _payload(jml.handler(joint_one="A", joint_two="B", ratio=2.0))
+        assert out["value_one"] is None and out["value_two"] is None
+        assert "UNCONFIRMED" in out["note"] and "assembly_get" in out["note"]
+        assert out["linked"] is True and out["ratio_applied"] is True and out["ratio"] == 2.0
+
+    def test_a_HALF_read_pair_is_unconfirmed_too_when_only_valueTwo_is_unreadable(self, monkeypatch):
+        # ONE parameter reading is not a confirmed coupling: the ratio gate compares read_two /
+        # read_one, so a pair holding a null cannot be compared at all and answers "no mismatch" -
+        # silence that is no evidence the ratio took. The clause must fire on EITHER null, not only
+        # on both (an `and` here ships a lone null under the unqualified READ BACK sentence).
+        link = self._parks(monkeypatch, 2.0, None)
+        out = _payload(jml.handler(joint_one="A", joint_two="B", ratio=2.0))
+        assert "UNCONFIRMED" in out["note"] and "assembly_get" in out["note"]
+        # the shipped shape: the readable parameter is published as READ (2.0, not the sent 1.0) and
+        # the unreadable one stays null - the sent 2.0 is never poured into the gap.
+        assert out["value_one"] == 2.0
+        assert out["value_two"] is None
+        assert link.motion_data["v1"] == ("real", 1.0) and link.motion_data["v2"] == ("real", 2.0)
+        # _payload already asserted isError is False: an uncomparable pair is NOT the wrong-ratio
+        # error, and the link that computed is left alone.
+        assert link.deleted is False
+        assert out["linked"] is True and out["ratio_applied"] is True and out["ratio"] == 2.0
+
+    def test_the_mirror_HALF_read_pair_is_unconfirmed_when_only_valueOne_is_unreadable(self, monkeypatch):
+        # the other half: valueOne is the null. Same verdict, and value_two publishes the number the
+        # link holds (4.0) rather than the 2.0 that was sent.
+        link = self._parks(monkeypatch, None, 4.0)
+        out = _payload(jml.handler(joint_one="A", joint_two="B", ratio=2.0))
+        assert "UNCONFIRMED" in out["note"] and "assembly_get" in out["note"]
+        assert out["value_one"] is None
+        assert out["value_two"] == 4.0
+        assert link.deleted is False
+        assert out["linked"] is True and out["ratio_applied"] is True
+
+    def test_a_fully_read_pair_carries_NO_unconfirmed_clause(self, monkeypatch):
+        # the other side of the same boundary: two numbers that read and agree are confirmed, so the
+        # clause must NOT fire - a payload that always appends it would report every good link as
+        # unconfirmed and its two published numbers as null.
+        self._parks(monkeypatch, 2.0, 4.0)
+        out = _payload(jml.handler(joint_one="A", joint_two="B", ratio=2.0))
+        assert "UNCONFIRMED" not in out["note"]
+        assert out["value_one"] == 2.0 and out["value_two"] == 4.0
 
 
 class _NamelessMotionLink(FakeMotionLink):

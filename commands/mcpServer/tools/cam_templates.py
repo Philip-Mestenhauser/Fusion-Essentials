@@ -645,10 +645,11 @@ def delete_template_handler(name: str = "", confirm_name: str = "") -> dict:
     # The read MUST be safe()-wrapped: templateAtURL does not honour its own docstring's "Returns
     # null if the specified template does not exist" - on a url whose asset was just deleted it
     # RAISES RuntimeError '3 : Given URL does not point to a template' (measure_api
-    # cam-templateaturl-raises-on-deleted-url), so safe() contains that raise where it is catchable
-    # at all - the row measured it escaping try/except and aborting the script. That raise cannot
-    # tell absence from a url the library will not answer for, which is why the asset walk, not
-    # this, is what the claim rests on.
+    # cam-templateaturl-raises-on-deleted-url, which catches the raise and gates on its message;
+    # that row's expectation also accepts a script-level abort, so a PASS does not say which of the
+    # two the run saw). safe() contains that raise wherever it is catchable. The raise cannot tell
+    # absence from a url the library will not answer for, which is why the asset walk, not this, is
+    # what the claim rests on.
     loads_after = safe(lambda: lib.templateAtURL(url)) is not None
     if loads_after:
         return error(f"deleteAsset returned true and '{label}' is gone from the Local template "

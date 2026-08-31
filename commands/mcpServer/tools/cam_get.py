@@ -130,7 +130,7 @@ _REFERENCE_CENSUS = (
     "in selected_models / fixtures / stock_solids - and only an entry that is ITSELF a referenced "
     "component is counted. A reference nested INSIDE a selected entry is not examined, so 0 here is "
     "not 'this document has no external references': measured on a job whose setups each select "
-    "three local container occurrences, this read counted 0 while three referenced components sat "
+    "three local parent occurrences, this read counted 0 while three referenced components sat "
     "one level below them. doc_get(include=['xref_tree']) walks every depth.")
 
 

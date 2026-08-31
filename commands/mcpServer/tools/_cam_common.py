@@ -532,9 +532,11 @@ def first_warning_line(obj):
 
 def counts_as_warning(facts: dict) -> bool:
     """Whether an op's warning counts toward the readiness overlay. A warning on an ERRORED op says
-    nothing beyond its error (which already blocks), and a SUPPRESSED op is excluded from the post,
-    so neither demotes a verdict. The ONE predicate every readiness surface counts AND samples
-    through, so the count and the named sample can never describe different sets.
+    nothing beyond its error (which already demotes the verdict), and a SUPPRESSED op carries no
+    toolpath - suppression DISCARDS it (measured, measure_api cam-suppress-discards-toolpath) - so
+    neither demotes a verdict here. What a POST does with a suppressed op is not measured and is not
+    claimed. The ONE predicate every readiness surface counts AND samples through, so the count and
+    the named sample can never describe different sets.
 
     Read by key so BOTH shapes carrying these facts answer it: op_state_facts (the live per-op read
     op_state_tally walks) and cam_get's per-op RECORD, which carries has_warning/has_error/
@@ -976,8 +978,9 @@ def machine_ident(m):
 # The route is Machine.elements -> the KinematicsMachineElement -> .parts (a TREE: each MachinePart
 # carries .children plus an optional .axis / .spindle / .toolStation). Machine.kinematics reaches
 # the same tree in one step and the bindings flag it "not officially supported", so it is never read
-# here. Measured on a library Haas A-axis machine: 7 parts, spindle maxSpeed 12000 rpm, X/Y/Z ranges
-# 76.2/40.6/50.8 cm and an A axis whose range reads isInfinite.
+# here. Measured on a library Haas A-axis machine: 7 parts, spindle maxSpeed 12000 rpm, X/Y/Z
+# physicalRange spans of 76.2/40.6/50.8 as the API reports them (the unit is the documented one
+# below, not a measured one) and an A axis whose range reads isInfinite.
 _MACHINE_PART_DEPTH = 8       # the kinematics tree nests one part per axis; bound the recursion
 _MACHINE_PART_CAP = 200
 
@@ -1112,9 +1115,15 @@ def machine_limits(machine, factor, unit) -> dict:
             row = {}
             # A zero on a tool station is what an UNSET field reads as on a library machine
             # definition (measured: maxToolDiameter and maxToolLength both 0.0 on a machine whose
-            # spindle maxSpeed read 12000), so a zero is never published as a limit of zero. The cm
-            # scale below follows the axis ranges, which ARE measured cm on the same machine; no
-            # machine reading a NON-zero station has been found to exercise it (PROBE NEEDED).
+            # spindle maxSpeed read 12000), so a zero is never published as a limit of zero. The
+            # `factor` scale below converts a station value as if it were cm - the unit the linear
+            # axis ranges are converted from, which is the unit the BINDINGS DOCUMENT for
+            # physicalRange (see _AXIS_KINDS): the live row reports those range numbers raw and
+            # does not measure the unit. No machine reading a NON-zero station has been found to exercise these two
+            # fields either (PROBE NEEDED, one probe for both halves: on a machine whose station
+            # reads NON-zero and whose X travel is known from its published spec, compare
+            # maxToolDiameter/maxToolLength and physicalRange.max-min against that spec - do the
+            # raw numbers come back in cm?).
             for key, getter in (("max_tool_diameter", lambda st=st: st.maxToolDiameter),
                                 ("max_tool_length", lambda st=st: st.maxToolLength)):
                 value = measured(getter, factor)

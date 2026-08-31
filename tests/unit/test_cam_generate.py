@@ -180,7 +180,8 @@ class TestCollectOpHealth:
         assert out["errors"][0]["name"] == "Contour20"
 
     def test_a_suppressed_warned_op_is_not_a_warning_row(self):
-        # a parked op is excluded from the post, so its warning never reaches a readiness surface.
+        # a parked op carries no toolpath - measured: setting isSuppressed True discards it - so
+        # its warning never reaches a readiness surface.
         out = gen._collect_op_health([_op("Parked drill", warning="Parked and warned",
                                           has_toolpath=False, toolpath_valid=False,
                                           suppressed=True, state=2)])

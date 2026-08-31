@@ -70,9 +70,9 @@ class FakeOp:
     @isSuppressed.setter
     def isSuppressed(self, value):
         self._suppressed = bool(value)
-        # Suppressing DISCARDS the toolpath: hasToolpath reads True before the set and False after
-        # (ledger row cam-suppress-discards-toolpath). What UNsuppressing does to the toolpath is
-        # not measured, so this fake leaves the flag where the suppression put it.
+        # Suppressing DISCARDS the toolpath: hasToolpath reads True before the set and False after,
+        # and clearing the flag again leaves hasToolpath False - both measured (ledger row
+        # cam-suppress-discards-toolpath) - so this fake leaves it where the suppression put it.
         if self._suppressed:
             self._has_toolpath = False
 
@@ -296,7 +296,9 @@ class TestSuppression:
         assert out["is_suppressed"] is True and out["was_suppressed"] is False
         assert out["had_toolpath"] is True and out["has_toolpath"] is False
         assert "DISCARDED the toolpath" in out["note"]
-        assert "only valid toolpaths post" in out["note"]
+        # the measured consequence, not a claim about what the post does: the op carries no
+        # toolpath until it is regenerated (clearing isSuppressed does not bring it back).
+        assert "the operation carries none until it is regenerated" in out["note"]
         assert out["updated_count"] == 0 and out["changed"] == []
 
     def test_suppressing_an_op_with_no_toolpath_claims_no_discard(self, monkeypatch):
@@ -328,18 +330,18 @@ class TestSuppression:
         assert op.isSuppressed is False
         assert out["is_suppressed"] is False and out["was_suppressed"] is True
         assert out["has_toolpath"] is False
-        assert "there is no toolpath to post" in out["note"]
+        assert "the operation carries no toolpath" in out["note"]
         assert "DISCARDED" not in out["note"]
 
     def test_unsuppressing_an_op_that_still_reads_a_toolpath_says_so(self, monkeypatch):
         # The other side of the unsuppress branch: the note reports the read, and the regenerate
-        # remedy belongs only to the op that has no toolpath to post.
+        # remedy belongs only to the op whose hasToolpath read False.
         _install_op(monkeypatch,
                     FakeOp("Drill1", {"tool_stepover": "2."}, suppressed=True, has_toolpath=True))
         out = _payload(ce.handler(operation="Drill1", suppressed=False))
         assert out["is_suppressed"] is False and out["has_toolpath"] is True
         assert "hasToolpath reads True." in out["note"]
-        assert "no toolpath to post" not in out["note"]
+        assert "carries no toolpath" not in out["note"]
 
     def test_a_dropped_flag_write_is_an_error_not_a_false_ok(self, monkeypatch):
         _install_op(monkeypatch, DroppedFlagOp("Drill1", {"tool_stepover": "2."}))

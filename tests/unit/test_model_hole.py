@@ -52,8 +52,12 @@ class FakeHoleInput:
         self.tipAngle = None
     def _answer(self, setter):
         """The setter's bool. A False means it DECLINED, so the caller skips its side effect; any
-        other answer (True, or a None that read as nothing) means the setting landed."""
-        return self.refusals.get(setter, True)
+        other answer (True, or a None that read as nothing) means the setting landed. An Exception
+        RAISES instead of answering."""
+        answer = self.refusals.get(setter, True)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
     def setPositionBySketchPoint(self, sp):
         answer = self._answer("setPositionBySketchPoint")
         if answer is False:
@@ -149,11 +153,14 @@ class _UnreadableFaceColl:
 class FakeHoleFeature:
     """Mirrors the live partial-failure shape: a point that misses the body creates NO faces, yet
     add() still returns the feature with only a warning ('N Reference Failures' - live-verified)."""
-    def __init__(self, inp, miss_indices=(), modeled_readback=True):
+    def __init__(self, inp, miss_indices=(), modeled_readback=True, parent=None):
         modeled_readback = inp.isModeled if modeled_readback is True else modeled_readback
         self.name = "Hole1"
         self._inp = inp
         self.deleted = False
+        # The component a live HoleFeature reports as its own owner - the read the host check
+        # compares against the component the hole was created through.
+        self.parentComponent = parent
         # A live HoleFeature reports these back, and each lives on a DIFFERENT object: the tap
         # designation on tappedHoleInfo, the helix flag on the thread feature a tapped hole also
         # creates, and the tip angle as a ModelParameter carrying RADIANS.
@@ -183,8 +190,12 @@ class FakeHoleFeature:
 
 
 class FakeHoleFeatures:
-    def __init__(self):
+    def __init__(self, parent=None):
         self.added = []
+        # the component every feature added here reports as its parent - the component that owns
+        # this collection, unless a test points it somewhere else to model a feature that landed
+        # in another one
+        self.parent = parent
         self.miss_indices = ()       # placement-point indices that MISS the body (cut nothing)
         self.refuse_placement = False   # the setPosition* setters answer False
         self.refuse_extent = False      # setAllExtent answers False (the through-all extent declined)
@@ -211,7 +222,7 @@ class FakeHoleFeatures:
         if inp.placed is None or inp.extent is None:
             raise RuntimeError("InternalValidationError : logicalSelection")
         f = FakeHoleFeature(inp, miss_indices=self.miss_indices,
-                            modeled_readback=self.modeled_readback)
+                            modeled_readback=self.modeled_readback, parent=self.parent)
         self.added.append(f); return f
 
 
@@ -270,10 +281,14 @@ class _SketchPoints:
 
 
 class _Sketch:
-    def __init__(self, name="Sketch1", to_sketch=None, parent=None):
+    def __init__(self, name="Sketch1", to_sketch=None, parent=None, delete_answer=True):
         self.name = name
         self.sketchPoints = _SketchPoints()
         self.deleted = False
+        # What deleteMe answers. True marks the sketch deleted; False models a platform that
+        # DECLINED the delete, None one whose answer read as nothing, and an Exception one that
+        # raised - none of the three says the sketch went.
+        self._delete_answer = delete_answer
         # modelToSketchSpace maps a point from the sketch's PARENT COMPONENT's model space into the
         # sketch's own 2D space. `to_sketch` is the mapping a live sketch applies; None models one
         # that cannot convert at all. `parent` is what decides WHOSE model space it maps from.
@@ -290,6 +305,10 @@ class _Sketch:
         return p
 
     def deleteMe(self):
+        if isinstance(self._delete_answer, Exception):
+            raise self._delete_answer
+        if self._delete_answer is not True:
+            return self._delete_answer
         self.deleted = True
         return True
 
@@ -300,13 +319,15 @@ class _Sketches:
         self.created_on = []
         self.to_sketch = None      # the model -> sketch mapping every sketch created here applies
         self.owner = owner         # the component they report as parentComponent
+        self.delete_answer = True  # what deleteMe answers on every sketch created here
     def add(self, plane):
         # The live Sketches.add rejects a wrong-typed argument with a TypeError (it expects a face/plane
         # entity, NOT a tuple). Model that so an unpacking bug — passing _resolve_face's (entity, error)
         # tuple instead of the entity — fails here as it does live, rather than silently passing.
         if isinstance(plane, tuple):
             raise TypeError("Wrong number or type of arguments for overloaded function 'Sketches_add'.")
-        s = _Sketch("HolePts%d" % len(self.created_on), to_sketch=self.to_sketch, parent=self.owner)
+        s = _Sketch("HolePts%d" % len(self.created_on), to_sketch=self.to_sketch, parent=self.owner,
+                    delete_answer=self.delete_answer)
         self.created_on.append(plane)
         self._byname[s.name] = s; return s
     def itemByName(self, n):
@@ -314,15 +335,52 @@ class _Sketches:
 
 
 class _Features:
-    def __init__(self):
-        self.holeFeatures = FakeHoleFeatures()
+    def __init__(self, owner=None):
+        self.holeFeatures = FakeHoleFeatures(parent=owner)
         self.threadFeatures = FakeThreadFeatures()
 
 
+class _Comp:
+    """A component a hole can be HOSTED in: its own sketches and features (a hole is built through
+    exactly one component's collections), plus the entityToken same_component compares on - chosen
+    rather than inherited, because a component whose token does not read is its own tested state."""
+    def __init__(self, name="Bracket", token=None):
+        self.name = name
+        self.entityToken = token or f"tok:{name}"
+        # the component OWNS the sketches and features created in it, which is what its own
+        # parentComponent read-backs answer
+        self.sketches = _Sketches(owner=self)
+        self.features = _Features(owner=self)
+
+
+class _NamelessComp(_Comp):
+    """A component whose own NAME will not read, while its identity still does. Every wire string
+    that interpolates a component name is pinned against this: an unreadable name is worded, never
+    published as the literal 'None'."""
+    @property
+    def name(self):
+        raise RuntimeError("name is unavailable")
+
+    @name.setter
+    def name(self, _value):
+        # _Comp's __init__ assigns one; this component simply has none to hand back
+        pass
+
+
 def _bracket(name="Bracket"):
-    """A component the placement ladder can identify - same_component compares entityToken, so the
-    token is chosen rather than inherited."""
-    return MakeComp(name=name, entity_token=f"tok:{name}")
+    """A component the placement ladder can identify, and that a hole can be hosted in."""
+    return _Comp(name)
+
+
+class _Face(str):
+    """The resolved 'face'. It IS the string the placement setters assert on ('FACE'), and carries
+    the two reads the tool takes off a face: the body whose parentComponent OWNS the hole, and the
+    assemblyContext a proxy face reached through an occurrence carries."""
+    def __new__(cls, owner=None, context=None):
+        f = super().__new__(cls, "FACE")
+        f.body = type("_B", (), {"parentComponent": owner})()
+        f.assemblyContext = context
+        return f
 
 
 def _placing(comp, transform2, path="Bracket:1"):
@@ -331,13 +389,11 @@ def _placing(comp, transform2, path="Bracket:1"):
     return make_occurrence(path, comp, transform2=transform2)
 
 
-class _Root:
+class _Root(_Comp):
+    """The design root: a hostable component (its sketches' model space IS world) plus the
+    placement census the ladder walks."""
     def __init__(self):
-        # the root OWNS the sketches created in it, which is what makes their model space world
-        self.sketches = _Sketches(owner=self)
-        self.features = _Features()
-        self.name = "Root"
-        self.entityToken = "tok:Root"
+        super().__init__("Root", "tok:Root")
         # component entityToken -> the occurrences placing it: the census the placement ladder
         # walks when no context occurrence names one instance.
         self.placements = {}
@@ -372,8 +428,10 @@ def _install():
     mh._common.design = lambda: design
     mh._target_component = lambda d: d.rootComponent
     # face resolver returns (entity, error) — the GeometryHandle.resolve contract. The handler MUST
-    # unpack it; passing the whole tuple to sketches.add raises TypeError (see _Sketches.add).
-    mh._resolve_face = lambda d, h: ("FACE", None)
+    # unpack it; passing the whole tuple to sketches.add raises TypeError (see _Sketches.add). The
+    # face's body is owned by the ROOT here, which is also the active component - the ordinary case,
+    # where the host the face names and the active one are the same component.
+    mh._resolve_face = lambda d, h: (_Face(design.rootComponent), None)
     # additive-placement resolvers — default to a circular edge (so placement='center' works
     # out of the box); a test that needs a different shape overrides the seam directly.
     mh._resolve_edge = lambda d, h: (BRepEdge(Circle3D(None)), None)
@@ -645,6 +703,146 @@ class TestPerPointVerification:
         assert hf.added[0].deleted is False       # the landed feature survives the unreadable check
 
 
+# ── the placement sketch's own lifecycle ────────────────────────────────────
+#
+# Everything past comp.sketches.add owns the sketch it created: it is real geometry on the face, and
+# an exit that leaves it behind hands the caller a design dirtier than the one they had - by an
+# escaping raise, or by a rollback the platform did not perform and nobody disclosed. The mirror of
+# both: a clause about a placement sketch, on an exit that never made one, claims an effect the call
+# never had.
+
+class TestPlacementSketchIsNeverOrphaned:
+    def test_a_raising_single_point_setter_rolls_the_sketch_back(self):
+        # a raise from the placement setter is an exit like any other: the sketch is already on the
+        # face, so it goes back rather than escaping the handler with the sketch left behind
+        d = _install()
+        hf = d.rootComponent.features.holeFeatures
+        hf.refusals = {"setPositionBySketchPoint": RuntimeError("logicalSelection rejected")}
+        res = mh.handler(hole_type="simple", diameter="8 mm", face="h", points=[[2, 3, 0]],
+                         extent="through")
+        assert res["isError"] is True
+        assert "logicalSelection rejected" in res["message"]     # the platform's own words survive
+        assert hf.added == []
+        assert d.rootComponent.sketches._byname["HolePts0"].deleted is True
+
+    def test_a_raising_multi_point_setter_rolls_the_sketch_back(self):
+        # the plural setter is a different call and sits behind the collection build, so it is
+        # pinned separately
+        d = _install()
+        hf = d.rootComponent.features.holeFeatures
+        hf.refusals = {"setPositionBySketchPoints": RuntimeError("point collection rejected")}
+        res = mh.handler(hole_type="simple", diameter="5 mm", face="h",
+                         points=[[2, 2, 0], [5, 2, 0]], extent="through")
+        assert res["isError"] is True
+        assert "point collection rejected" in res["message"]
+        assert hf.added == []
+        assert d.rootComponent.sketches._byname["HolePts0"].deleted is True
+
+    def test_a_raising_point_collection_build_rolls_the_sketch_back_too(self):
+        # the collection the plural setter takes is BUILT inside the same guarded run, with the
+        # sketch already on the face - so a raise from the build leaves the same way the setter's
+        # does, and the error names it rather than escaping
+        d = _install()
+
+        def _boom():
+            raise RuntimeError("ObjectCollection unavailable")
+
+        mh._object_collection = _boom
+        res = mh.handler(hole_type="simple", diameter="5 mm", face="h",
+                         points=[[2, 2, 0], [5, 2, 0]], extent="through")
+        assert res["isError"] is True
+        assert "ObjectCollection unavailable" in res["message"]
+        assert d.rootComponent.features.holeFeatures.added == []
+        assert d.rootComponent.sketches._byname["HolePts0"].deleted is True
+
+    def _declined_rollback(self, delete_answer):
+        """A refused through-all extent (so the handler exits past the sketch) with deleteMe
+        answering `delete_answer`. Returns (design, result)."""
+        d = _install()
+        d.rootComponent.sketches.delete_answer = delete_answer
+        d.rootComponent.features.holeFeatures.refuse_extent = True
+        return d, mh.handler(hole_type="simple", diameter="8 mm", face="h", points=[[2, 3, 0]],
+                             extent="through")
+
+    def test_a_declined_rollback_is_disclosed_naming_the_sketch(self):
+        d, res = self._declined_rollback(False)
+        assert res["isError"] is True
+        assert "setAllExtent returned false" in res["message"]    # the original cause still leads
+        assert "Rolling the placement sketch 'HolePts0' back did not report success" in res["message"]
+        # the clause claims the ANSWER, not the sketch's fate - nothing read it back
+        assert "may still sit on the face" in res["message"]
+        assert "design_delete_feature" in res["message"]          # a remedy the caller can perform
+        assert d.rootComponent.sketches._byname["HolePts0"].deleted is False
+
+    def test_a_rollback_answer_that_read_as_nothing_is_disclosed_too(self):
+        # the exact boundary of the disclosure gate: only a TRUE answer says the sketch went, so an
+        # answer of None discloses rather than passing as a clean rollback
+        _d, res = self._declined_rollback(None)
+        assert res["isError"] is True and "did not report success" in res["message"]
+
+    def test_a_rollback_that_raised_is_disclosed_not_swallowed(self):
+        _d, res = self._declined_rollback(RuntimeError("sketch is not deletable"))
+        assert res["isError"] is True and "did not report success" in res["message"]
+        assert "setAllExtent returned false" in res["message"]
+
+    def test_a_rollback_that_took_claims_nothing_about_the_sketch(self):
+        # the positive side of the gate, pinned beside the three disclosures: a delete that answered
+        # true adds no sentence, so a clause emitted unconditionally is caught here
+        d, res = self._declined_rollback(True)
+        assert res["isError"] is True and "did not report success" not in res["message"]
+        assert "placement sketch" not in res["message"]
+        assert d.rootComponent.sketches._byname["HolePts0"].deleted is True
+
+    def test_a_placement_that_made_no_sketch_claims_nothing_about_one(self):
+        # placement='center' creates NO placement sketch, so every _abandon exit past it has nothing
+        # to roll back: a clause here would tell the caller about geometry the call never made.
+        d = _install()
+        d.rootComponent.features.holeFeatures.refuse_extent = True
+        res = mh.handler(hole_type="simple", diameter="5 mm", extent="through",
+                         placement="center", edge="e1")
+        assert res["isError"] is True
+        assert d.rootComponent.sketches.created_on == []           # nothing was created to disclose
+        assert "setAllExtent returned false" in res["message"]     # the real cause, and only it
+        assert "placement sketch" not in res["message"]
+
+    def test_a_feature_rollback_that_failed_leaves_the_sketch_its_feature_still_uses(self, monkeypatch):
+        # ORDER: the sketch goes only once the feature it placed is gone. A feature whose own
+        # rollback was DECLINED is still in the design, positioned by those sketch points, so the
+        # sketch stays with it rather than being deleted out from under a feature that survived.
+        d = _install_verified(monkeypatch)
+        hf = d.rootComponent.features.holeFeatures
+        hf.miss_indices = (1,)
+        orig_add = hf.add
+
+        def add_undeletable(inp):
+            f = orig_add(inp)
+            f.deleteMe = lambda: False        # the platform DECLINES the feature rollback
+            return f
+
+        hf.add = add_undeletable
+        res = mh.handler(hole_type="simple", diameter="4 mm", face="h",
+                         points=[[0, 0, 0], [100, 0, 0]], extent="through")
+        assert res["isError"] is True
+        assert "Rollback FAILED" in res["message"]
+        assert hf.added[0].deleted is False                        # the partial feature survived
+        assert d.rootComponent.sketches._byname["HolePts0"].deleted is False
+        assert "placement sketch" not in res["message"]
+
+    def test_a_declined_rollback_is_disclosed_on_the_partial_cut_path_too(self, monkeypatch):
+        # the shortfall path rolls the feature back and then the sketch; the sketch half of that
+        # rollback is disclosed the same way, so "nothing was drilled" cannot cover a survivor
+        d = _install_verified(monkeypatch)
+        d.rootComponent.sketches.delete_answer = False
+        hf = d.rootComponent.features.holeFeatures
+        hf.miss_indices = (1,)
+        res = mh.handler(hole_type="simple", diameter="4 mm", face="h",
+                         points=[[0, 0, 0], [100, 0, 0]], extent="through")
+        assert res["isError"] is True
+        assert "The partial feature was rolled back" in res["message"]
+        assert hf.added[0].deleted is True
+        assert "Rolling the placement sketch 'HolePts0' back did not report success" in res["message"]
+
+
 # ── counterbore / countersink ───────────────────────────────────────────────
 
 # -- points_space: world points converted by the sketch's OWN converter --------------------------
@@ -662,26 +860,47 @@ def _identity(x, y, z):
 def _framed(monkeypatch, to_sketch, owner=_ROOT, placements=None):
     """_install plus a placement sketch whose modelToSketchSpace applies `to_sketch`.
 
-    `owner` defaults to the design root - the space that IS world; pass another object to model a
-    sketch that landed in a sub-component, and None one whose owner cannot be read. `placements`
-    maps such a component to the occurrences that place it, which is what the world lift resolves
-    its frame through. adsk.core.Matrix3D stays UNPATCHED: a root-owned sketch must short-circuit
-    before any matrix is built, so a lift that reached for one would fail loudly here."""
+    `owner` is the component that owns the drilled 'face', so it is where the hole is HOSTED and
+    where its placement sketch lands: _ROOT (the default) is the design root, whose model space IS
+    world; a component models a face owned by a sub-component. `owner=None` keeps the root as the
+    host but gives its sketches no readable parentComponent - a sketch whose own space cannot be
+    established. `placements` maps a component to the occurrences that place it, which is what the
+    world lift resolves its frame through. adsk.core.Matrix3D stays UNPATCHED: a root-owned sketch
+    must short-circuit before any matrix is built, so a lift that reached for one would fail loudly
+    here."""
     import adsk.core
     d = _install()
     monkeypatch.setattr(adsk.core.Point3D, "create",
                         staticmethod(lambda x, y, z: FakePoint(x, y, z)))
-    d.rootComponent.sketches.to_sketch = to_sketch
-    d.rootComponent.sketches.owner = d.rootComponent if owner is _ROOT else owner
+    d.host = d.rootComponent if owner in (_ROOT, None) else owner
+    d.host.sketches.to_sketch = to_sketch
+    if owner is None:
+        d.host.sketches.owner = None
+    mh._resolve_face = lambda _d, _h: (_Face(d.host), None)
     for comp, occs in (placements or {}).items():
         d.rootComponent.placements[comp.entityToken] = list(occs)
     return d
 
 
+def _host(d):
+    """The component this call was hosted in - the one whose sketches/features the hole went into."""
+    return getattr(d, "host", d.rootComponent)
+
+
+def _the_sketch(d):
+    """The placement sketch this call created, wherever it was hosted."""
+    return next(iter(_host(d).sketches._byname.values()))
+
+
+def _added(d):
+    """The hole features this call built, wherever it was hosted."""
+    return _host(d).features.holeFeatures.added
+
+
 def _placed(d):
     """(x, y, z) in cm of every point actually added to the placement sketch."""
-    sketch = next(iter(d.rootComponent.sketches._byname.values()))
-    return [(p.geometry.x, p.geometry.y, p.geometry.z) for p in sketch.sketchPoints.items]
+    return [(p.geometry.x, p.geometry.y, p.geometry.z)
+            for p in _the_sketch(d).sketchPoints.items]
 
 
 def _drill(**kw):
@@ -724,9 +943,8 @@ class TestPointsSpaceWorld:
         res = _drill(points=[[0, 0, 5]], points_space="world")
         assert res["isError"] is True
         assert "[0, 0, 5]" in res["message"] and "5 'mm'" in res["message"]
-        assert d.rootComponent.features.holeFeatures.added == []       # nothing was drilled
-        sketch = next(iter(d.rootComponent.sketches._byname.values()))
-        assert sketch.deleted is True                                  # no orphaned placement sketch
+        assert _added(d) == []                                # nothing was drilled
+        assert _the_sketch(d).deleted is True                 # no orphaned placement sketch
 
     def test_the_off_plane_distance_is_reported_in_the_callers_units(self, monkeypatch):
         d = _framed(monkeypatch, _identity)
@@ -751,7 +969,7 @@ class TestPointsSpaceWorld:
         d = _framed(monkeypatch, None)          # modelToSketchSpace raises
         res = _drill(points=[[10, 10, 0]], points_space="world")
         assert res["isError"] is True and "points_space='sketch'" in res["message"]
-        assert d.rootComponent.features.holeFeatures.added == []
+        assert _added(d) == []
 
     def test_world_space_with_another_placement_is_refused(self):
         # the other placements take no 'points', so accepting it would silently do nothing
@@ -799,16 +1017,15 @@ class TestPointsSpaceWorldOnAnOffsetComponent:
         assert res["isError"] is True
         assert "Bracket" in res["message"] and "no single placement" in res["message"]
         assert "sketch_add_geometry" in res["message"]      # a remedy the caller can perform
-        assert d.rootComponent.features.holeFeatures.added == []
-        sketch = next(iter(d.rootComponent.sketches._byname.values()))
-        assert sketch.deleted is True
+        assert _added(d) == []
+        assert _the_sketch(d).deleted is True
 
     def test_a_sketch_with_no_readable_owner_refuses_too(self, monkeypatch):
         # an unproven space is refused; an unreadable owner is not a yes
         d = _framed(monkeypatch, _identity, owner=None)
         res = _drill(points=[[10, 0, 0]], points_space="world")
         assert res["isError"] is True and "no single placement" in res["message"]
-        assert d.rootComponent.features.holeFeatures.added == []
+        assert _added(d) == []
 
 
 class TestWorldPointsIntoANestedComponent:
@@ -858,7 +1075,7 @@ class TestWorldPointsIntoANestedComponent:
         assert res["isError"] is True and "off the plane" in res["message"]
         assert "20 'mm'" in res["message"]           # lifted
         assert "30 'mm'" not in res["message"]       # unlifted
-        assert d.rootComponent.features.holeFeatures.added == []
+        assert _added(d) == []
 
     def test_sketch_space_points_are_untouched_inside_the_same_component(self, monkeypatch):
         d, _sub = self._nested(monkeypatch)
@@ -872,8 +1089,9 @@ class TestWorldPointsIntoANestedComponent:
         first = _placing(sub, FakeMatrix3D(0.0, (0.0, 0.0, 0.0)), "Bracket:1")
         second = _placing(sub, FakeMatrix3D(90.0, (2.0, 0.0, 1.0)), "Bracket:2")
         d, _sub = self._nested(monkeypatch, occs=[first, second], sub=sub)
-        face = type("F", (), {"assemblyContext": second})()
-        mh._resolve_face = lambda _d, _h: (face, None)
+        # the same face, reached THROUGH the second instance: still owned by 'sub' (so the hole is
+        # hosted there), and carrying that instance as its assembly context
+        mh._resolve_face = lambda _d, _h: (_Face(sub, second), None)
         _payload(_drill(points=[[40, 20, 10]], points_space="world"))
         assert self._at(d) == [(2.0, -2.0, 0.0)]        # second's frame, not first's identity
 
@@ -882,7 +1100,7 @@ class TestWorldPointsIntoANestedComponent:
         d, _sub = self._nested(monkeypatch, occs=[_placing(sub, FakeMatrix3D(90.0, invertible=False))], sub=sub)
         res = _drill(points=[[40, 20, 10]], points_space="world")
         assert res["isError"] is True and "did not invert" in res["message"]
-        assert d.rootComponent.features.holeFeatures.added == []
+        assert _added(d) == []
 
 
 class TestSketchSpacePoint:
@@ -1007,57 +1225,311 @@ class TestSketchSpacePointTakesTheLift:
         assert mh._sketch_space_point(s, 1.0, 2.0, 3.0, _Refusing()) == (None, None, None)
 
 
-class TestForeignFaceIsNamedOnAShortfall:
-    """A hole built in one component against a 'face' owned by another cuts nothing, and Fusion says
-    only 'No target body!'. The refusal names both components - each read, neither inferred - and
-    the call that makes the face's own component the build target."""
+class TestTheFaceOwnsTheHole:
+    """The hole and its placement sketch are built in the component that owns the drilled 'face',
+    not in whatever component happens to be ACTIVE - a hole hosted on the active component puts its
+    placement sketch in a component that holds none of the geometry the hole was cut into."""
 
-    def _face_in(self, comp_name):
-        body = type("B", (), {"parentComponent": _bracket(comp_name)})()
-        return type("F", (), {"body": body, "assemblyContext": None})()
+    def _elsewhere(self, name="RightTieRod"):
+        """Make a DIFFERENT component the active one, so 'active' and 'the face's owner' part."""
+        active = _Comp(name)
+        mh._target_component = lambda _d: active
+        return active
 
-    def _shortfall(self, monkeypatch, face=None):
-        d = _install_verified(monkeypatch)
-        if face is not None:
-            mh._resolve_face = lambda _d, _h: (face, None)
-        d.rootComponent.features.holeFeatures.miss_indices = (0,)
-        return mh.handler(hole_type="simple", diameter="4 mm", face="h",
-                          points=[[10, 10, 0]], extent="through")
+    def test_the_hole_and_its_sketch_land_in_the_faces_component(self):
+        _install()
+        bracket = _bracket("Chassis")
+        mh._resolve_face = lambda _d, _h: (_Face(bracket), None)
+        active = self._elsewhere()
+        out = _payload(mh.handler(hole_type="simple", diameter="5 mm", face="h",
+                                  points=[[2, 2, 0]], extent="through"))
+        assert len(bracket.features.holeFeatures.added) == 1
+        assert bracket.sketches.created_on != []
+        # nothing at all was built through the active component
+        assert active.features.holeFeatures.added == [] and active.sketches.created_on == []
+        assert out["host_component"] == "Chassis" and out["host_from_face"] is True
 
-    def test_the_shortfall_names_the_faces_component_and_the_activation(self, monkeypatch):
-        res = self._shortfall(monkeypatch, self._face_in("Bracket"))
+    def test_a_non_sketch_placement_is_hosted_on_the_face_too(self):
+        # center/on_edge/plane_offsets make no placement sketch, but the FEATURE still has a host
+        _install()
+        bracket = _bracket("Chassis")
+        mh._resolve_face = lambda _d, _h: (_Face(bracket), None)
+        mh._resolve_edge = lambda _d, _h: (BRepEdge(Circle3D(None)), None)
+        active = self._elsewhere()
+        out = _payload(mh.handler(hole_type="simple", diameter="5 mm", extent="through",
+                                  placement="center", edge="e1"))
+        assert len(bracket.features.holeFeatures.added) == 1
+        assert active.features.holeFeatures.added == []
+        assert out["host_component"] == "Chassis"
+
+    def test_an_active_component_that_owns_the_face_builds_exactly_where_it_did(self):
+        # the unchanged half: active == owner, so the host is the same component either way
+        d = _install()
+        out = _payload(mh.handler(hole_type="simple", diameter="5 mm", face="h",
+                                  points=[[2, 2, 0]], extent="through"))
+        assert len(d.rootComponent.features.holeFeatures.added) == 1
+        assert out["host_component"] == "Root" and out["host_from_face"] is True
+
+    def test_a_face_whose_owner_does_not_read_builds_in_the_active_component_and_says_so(self):
+        # nothing was read to move the host, so the active component stands - and the payload
+        # publishes that the FACE did not name it, rather than implying the face did
+        d = _install()
+        mh._resolve_face = lambda _d, _h: ("FACE", None)      # no body to read an owner off
+        out = _payload(mh.handler(hole_type="simple", diameter="5 mm", face="h",
+                                  points=[[2, 2, 0]], extent="through"))
+        assert len(d.rootComponent.features.holeFeatures.added) == 1
+        assert out["host_component"] == "Root" and out["host_from_face"] is False
+        assert "did not read" in out["note"] and "'Root'" in out["note"]
+
+    def test_an_ordinary_hole_carries_no_fallback_disclosure(self):
+        # the other side of that gate, on the SUCCESS path: the face named the host, so a clause
+        # saying its owner did not read would state a read failure that never happened - beside
+        # host_from_face=true in the same payload, and would name the face's owner as the ACTIVE
+        # component while a different one is active.
+        _install()
+        bracket = _bracket("Chassis")
+        mh._resolve_face = lambda _d, _h: (_Face(bracket), None)
+        self._elsewhere()
+        out = _payload(mh.handler(hole_type="simple", diameter="5 mm", face="h",
+                                  points=[[2, 2, 0]], extent="through"))
+        assert out["host_from_face"] is True and out["host_component"] == "Chassis"
+        assert "did not read" not in out["note"]
+        assert "active component" not in out["note"]
+
+    def test_a_host_that_will_not_take_the_face_refuses_naming_it(self):
+        # the host is not silently swapped for one the platform would accept - the refusal names the
+        # component the sketch was attempted through, the DIVERGENCE from the active component the
+        # host derivation introduced, and the platform's own words, and ends on a performable step
+        d = _install()
+        bracket = _bracket("Chassis")
+        mh._resolve_face = lambda _d, _h: (_Face(bracket), None)
+
+        def _boom(_plane):
+            raise RuntimeError("object is not in the assembly context of this component")
+
+        bracket.sketches.add = _boom
+        res = mh.handler(hole_type="simple", diameter="5 mm", face="h", points=[[2, 2, 0]],
+                         extent="through")
         assert res["isError"] is True
-        assert "'Bracket'" in res["message"] and "'Root'" in res["message"]
+        assert "'Chassis'" in res["message"]
+        assert "not in the assembly context" in res["message"]
+        # both sides of the divergence, and where the host came from
+        assert "not the active component 'Root'" in res["message"]
+        assert "Activate 'Chassis' with design_activate_component" in res["message"]
+        assert "model_extrude(operation='cut')" in res["message"]
+        assert bracket.features.holeFeatures.added == []
+
+    def test_a_host_that_returns_no_sketch_refuses_naming_it_too(self):
+        # sketches.add answering with NOTHING is a different exit from a raise, and it names the
+        # same component - no hole is built through a host whose placement sketch never appeared
+        _install()
+        bracket = _bracket("Chassis")
+        mh._resolve_face = lambda _d, _h: (_Face(bracket), None)
+        bracket.sketches.add = lambda _plane: None
+        res = mh.handler(hole_type="simple", diameter="5 mm", face="h", points=[[2, 2, 0]],
+                         extent="through")
+        assert res["isError"] is True
+        assert "'Chassis'" in res["message"] and "returned nothing" in res["message"]
+        assert "not the active component 'Root'" in res["message"]
         assert "design_activate_component" in res["message"]
+        assert bracket.features.holeFeatures.added == []
 
-    def test_a_face_in_the_SAME_component_adds_no_clause(self, monkeypatch):
-        res = self._shortfall(monkeypatch, self._face_in("Root"))
-        assert res["isError"] is True and "design_activate_component" not in res["message"]
+    def test_an_active_host_that_refuses_the_face_claims_no_divergence(self):
+        # the exact boundary of the divergence gate: the host here IS the active component, so a
+        # clause naming an active component that was not used would report a divergence that never
+        # happened.
+        d = _install()
 
-    def test_an_unreadable_face_owner_adds_no_clause(self, monkeypatch):
-        # nothing was read, so nothing is claimed about where the face lives
-        res = self._shortfall(monkeypatch)
-        assert res["isError"] is True and "design_activate_component" not in res["message"]
+        def _boom(_plane):
+            raise RuntimeError("sketch plane rejected")
 
-    def test_an_owner_that_cannot_be_TOLD_APART_adds_no_clause(self, monkeypatch):
-        # The owner READS but same_component answers None (no entityToken on it). The clause STATES
-        # that the two components differ, so emitting it here would publish a component sentence
-        # from a comparison that was never made - and send the caller to activate a component the
-        # hole may already have been built in.
-        body = type("B", (), {"parentComponent": MakeComp(name="Bracket")})()   # no entityToken
-        face = type("F", (), {"body": body, "assemblyContext": None})()
-        res = self._shortfall(monkeypatch, face)
+        d.rootComponent.sketches.add = _boom
+        res = mh.handler(hole_type="simple", diameter="5 mm", face="h", points=[[2, 2, 0]],
+                         extent="through")
+        assert res["isError"] is True and "sketch plane rejected" in res["message"]
+        assert "not the active component" not in res["message"]
+        assert "'Root'" in res["message"]                    # the host itself is still named
+
+    def test_an_identity_that_will_not_read_claims_no_divergence_either(self):
+        # the other side of that boundary: same_component answers None when the active component
+        # carries no identity, and None is not a proven difference - a "was not used" clause about
+        # a component nothing was read about is the claim this refuses to make.
+        _install()
+        bracket = _bracket("Chassis")
+        mh._resolve_face = lambda _d, _h: (_Face(bracket), None)
+        mh._target_component = lambda _d: MakeComp(name="RightTieRod")     # no entityToken
+        bracket.sketches.add = lambda _plane: None
+        res = mh.handler(hole_type="simple", diameter="5 mm", face="h", points=[[2, 2, 0]],
+                         extent="through")
+        assert res["isError"] is True and "'Chassis'" in res["message"]
+        assert "not the active component" not in res["message"]
+        assert "RightTieRod" not in res["message"]
+
+    def test_a_fallback_host_refusal_never_says_to_activate_where_the_caller_already_is(self):
+        # the boundary of the activate step, on BOTH exits (a raise and a null sketch each build
+        # their own refusal): the face's owner did not read, so the host IS the component the
+        # caller is already in - activating it performs nothing, and 'face' re-taken there is the
+        # same face and the same refusal.
+        def _boom(_plane):
+            raise RuntimeError("sketch plane rejected")
+
+        for fail, words in ((_boom, "sketch plane rejected"), (lambda _p: None, "returned nothing")):
+            d = _install()
+            mh._resolve_face = lambda _d, _h: ("FACE", None)   # no body to read an owner off
+            d.rootComponent.sketches.add = fail
+            res = mh.handler(hole_type="simple", diameter="5 mm", face="h", points=[[2, 2, 0]],
+                             extent="through")
+            assert res["isError"] is True and words in res["message"]
+            assert "'Root'" in res["message"]                  # the host itself is still named
+            assert "design_activate_component" not in res["message"]
+            # the refusal still ends on something performable
+            assert "model_extrude(operation='cut')" in res["message"]
+
+    def test_a_host_whose_name_will_not_read_is_never_named_None(self):
+        # the refusal drops the name it could not read (and the step that would have to quote it)
+        # rather than telling the caller to activate a component called 'None'
+        _install()
+        nameless = _NamelessComp("Chassis")
+        mh._resolve_face = lambda _d, _h: (_Face(nameless), None)
+        nameless.sketches.add = lambda _plane: None
+        res = mh.handler(hole_type="simple", diameter="5 mm", face="h", points=[[2, 2, 0]],
+                         extent="through")
+        assert res["isError"] is True and "returned nothing" in res["message"]
+        assert "None" not in res["message"]
+        assert "sketch_add_geometry" in res["message"]        # the remedy still ends the refusal
+
+    def test_a_shortfall_discloses_a_host_the_face_did_not_name(self, monkeypatch):
+        # the fallback is the one branch that still hosts on the ACTIVE component, so the FAILURE
+        # path says which component the hole was built in, not just the success payload
+        d = _install_verified(monkeypatch)
+        mh._resolve_face = lambda _d, _h: ("FACE", None)      # no body to read an owner off
+        d.rootComponent.features.holeFeatures.miss_indices = (1,)
+        res = mh.handler(hole_type="simple", diameter="4 mm", face="h",
+                         points=[[0, 0, 0], [100, 0, 0]], extent="through")
+        assert res["isError"] is True and "1 of 2" in res["message"]
+        assert "The component that owns 'face' did not read" in res["message"]
+        assert "the active component 'Root'" in res["message"]
+
+    def test_a_shortfall_on_a_host_the_face_named_claims_no_fallback(self, monkeypatch):
+        # the boundary: the face DID name the host, so a clause saying its owner did not read would
+        # report a read that answered as one that did not
+        _install_verified(monkeypatch)
+        bracket = _bracket("Chassis")
+        mh._resolve_face = lambda _d, _h: (_Face(bracket), None)
+        bracket.features.holeFeatures.miss_indices = (1,)
+        res = mh.handler(hole_type="simple", diameter="4 mm", face="h",
+                         points=[[0, 0, 0], [100, 0, 0]], extent="through")
+        assert res["isError"] is True and "1 of 2" in res["message"]
+        assert "did not read" not in res["message"]
+
+
+class TestHostReadBack:
+    """Where the feature and its placement sketch actually landed, read back off each of them. A
+    PROVEN difference from the component the hole was created through is an error naming both
+    sides; an identity that would not read is disclosed instead of counted as agreement."""
+
+    def _in_bracket(self):
+        d = _install()
+        bracket = _bracket("Chassis")
+        mh._resolve_face = lambda _d, _h: (_Face(bracket), None)
+        return d, bracket
+
+    def _drill(self):
+        return mh.handler(hole_type="simple", diameter="5 mm", face="h", points=[[2, 2, 0]],
+                          extent="through")
+
+    def test_a_feature_that_read_back_in_another_component_is_an_error_naming_both(self):
+        d, bracket = self._in_bracket()
+        bracket.features.holeFeatures.parent = d.rootComponent      # it landed in the ROOT instead
+        res = self._drill()
         assert res["isError"] is True
-        assert "design_activate_component" not in res["message"]
-        assert "'Bracket'" not in res["message"]
+        assert "'Chassis'" in res["message"] and "'Root'" in res["message"]
+        assert "the hole feature sits in" in res["message"]
+        assert "design_delete_feature" in res["message"]
 
-    def test_the_clause_is_the_ONLY_thing_the_verdict_gates(self, monkeypatch):
-        # the positive branch, pinned beside the two silent ones: a PROVEN difference names both
-        # components as read, so a verdict flipped to silence is caught here rather than passing as
-        # "no clause was due".
-        res = self._shortfall(monkeypatch, self._face_in("Bracket"))
-        assert "belongs to component 'Bracket'" in res["message"]
-        assert "built in 'Root'" in res["message"]
+    def test_a_placement_sketch_that_read_back_elsewhere_is_an_error_naming_both(self):
+        d, bracket = self._in_bracket()
+        bracket.sketches.owner = d.rootComponent                    # the sketch landed in the ROOT
+        res = self._drill()
+        assert res["isError"] is True
+        assert "its placement sketch sits in 'Root'" in res["message"]
+        assert "'Chassis'" in res["message"]
+        # the misplaced sketch is a second thing to remove, not just a symptom to read about
+        assert "the placement sketch 'HolePts0' it was positioned by" in res["message"]
+        assert "design_delete_feature" in res["message"]
+
+    def test_a_mismatch_with_no_placement_sketch_tells_no_one_to_delete_one(self):
+        # center/on_edge/plane_offsets make no sketch, so naming one to remove would send the
+        # caller after geometry this call never created
+        _d, bracket = self._in_bracket()
+        bracket.features.holeFeatures.parent = _Comp("Elsewhere", "tok:Elsewhere")
+        res = mh.handler(hole_type="simple", diameter="5 mm", extent="through",
+                         placement="center", edge="e1")
+        assert res["isError"] is True
+        assert "the hole feature sits in 'Elsewhere'" in res["message"]
+        assert "placement sketch" not in res["message"]
+
+    def test_a_mismatch_against_an_unreadable_name_says_another_component(self):
+        # the difference was PROVEN, so it is reported - but the component whose name did not read
+        # is described, never interpolated as the literal 'None'
+        _d, bracket = self._in_bracket()
+        bracket.features.holeFeatures.parent = _NamelessComp("Elsewhere", "tok:Elsewhere")
+        res = self._drill()
+        assert res["isError"] is True
+        assert "the hole feature sits in another component" in res["message"]
+        assert "None" not in res["message"]
+
+    def test_a_host_whose_name_will_not_read_withholds_the_key_and_the_word_None(self):
+        # a name that did not read is not a component name: the payload withholds the key instead of
+        # publishing a null, and the note words the host without one
+        _install()
+        nameless = _NamelessComp("Chassis")
+        mh._resolve_face = lambda _d, _h: (_Face(nameless), None)
+        nameless.features.holeFeatures.parent = MakeComp(name="Chassis")   # identity will not read
+        out = _payload(mh.handler(hole_type="simple", diameter="5 mm", face="h",
+                                  points=[[2, 2, 0]], extent="through"))
+        assert "host_component" not in out
+        assert out["host_verified"] is False
+        assert "nothing here proves it landed in the host component." in out["note"]
+        assert "None" not in out["note"]
+
+    def test_a_matching_read_back_reports_the_host_as_verified(self):
+        # the positive branch, pinned beside the mismatch: a PROVEN match publishes the host and
+        # adds no disclosure clause. Both sides answer a DIFFERENT component object carrying the
+        # host's identity, because live every parentComponent read hands back a fresh wrapper - so
+        # the comparison that decides this runs on the identity, never on `a is b`.
+        _d, bracket = self._in_bracket()
+        bracket.features.holeFeatures.parent = _Comp("Chassis")     # a twin: same entityToken
+        bracket.sketches.owner = _Comp("Chassis")
+        assert bracket.features.holeFeatures.parent is not bracket
+        assert bracket.sketches.owner is not bracket
+        out = _payload(self._drill())
+        assert out["host_verified"] is True
+        assert out["host_component"] == "Chassis"
+        # "did not read", not "did not read back": the fallback disclosure opens with the shorter
+        # phrase, and a match on the longer one alone lets that clause through unseen
+        assert "did not read" not in out["note"]
+
+    def test_a_placement_that_made_no_sketch_is_not_reported_unreadable(self):
+        # center/on_edge/plane_offsets create NO placement sketch, so there is no sketch ownership
+        # to read back. Reading one anyway discloses a placement sketch the call never made, on
+        # three of the four placement modes.
+        _d, _bracket = self._in_bracket()
+        out = _payload(mh.handler(hole_type="simple", diameter="5 mm", extent="through",
+                                  placement="center", edge="e1"))
+        assert out["host_verified"] is True
+        assert "placement sketch" not in out["note"]
+
+    def test_an_ownership_that_will_not_read_is_disclosed_not_called_a_mismatch(self):
+        # same_component answers None here (the component the feature reports carries no
+        # entityToken), and None is not a difference - calling it one would roll back a hole that
+        # landed where it was asked to.
+        _d, bracket = self._in_bracket()
+        bracket.features.holeFeatures.parent = MakeComp(name="Chassis")   # no entityToken
+        out = _payload(self._drill())
+        assert out["host_verified"] is False
+        assert "the hole feature did not read back" in out["note"]
+        assert "'Chassis'" in out["note"]
 
 
 

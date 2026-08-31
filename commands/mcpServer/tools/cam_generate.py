@@ -48,9 +48,11 @@ def _collect_op_health(ops, labels=None):
     - a warning row is gated by _cam_common.counts_as_warning, the ONE predicate every readiness
       surface counts and samples through - the same one behind live_states.warnings, so the tally
       and this list select the same operations rather than two sets the payload claims are one. A
-      warning on an ERRORED op is left to that op's error row (which already blocks the post), and a
-      SUPPRESSED op is excluded from the post entirely. The text comes from OperationBase.warning;
-      the case the machinist most wants is a spindle speed over the machine limit (often acceptable).
+      warning on an ERRORED op is left to that op's error row (which already demotes the verdict),
+      and a SUPPRESSED op carries no toolpath - suppression DISCARDS it (measured, measure_api
+      cam-suppress-discards-toolpath). What a POST does with either is not measured and is not
+      claimed here. The text comes from OperationBase.warning; the case the machinist most wants is
+      a spindle speed over the machine limit (often acceptable).
     - 'empty' is the shared state read (_cam_common.is_empty_toolpath): an op that generated and
       produced no toolpath, told from the flags rather than from warning text.
       """

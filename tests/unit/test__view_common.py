@@ -211,6 +211,25 @@ class TestApplyNamedView:
         vc.apply_named_view(vp, "front")
         assert vp._cam.cameraType != "initial"
 
+    def test_the_standoff_survives_the_orient(self, monkeypatch):
+        # The orient re-places the eye along the named view's look direction and must leave it the
+        # SAME distance from the target it started at: apply_named_view reads that distance off the
+        # pre-orient camera, then rebuilds the eye from the TARGET. The expected distance is
+        # computed HERE from the coordinates, never through the same eye.distanceTo the orient
+        # reads, so a distanceTo answering a constant fails this instead of agreeing with itself.
+        # An iso corner is used because its table entry is un-normalized - iso-top-right is
+        # (1, -1, 1), of length sqrt(3) - so the assertion covers the normalization too.
+        import adsk.core
+        monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: FakePoint(x, y, z))
+        cam = _FakeCam()
+        cam.target = FakePoint(2, -3, 4)         # a focus off the origin
+        cam.eye = FakePoint(5, 1, 16)            # (3, 4, 12) from it - a standoff of exactly 13
+        vp = _FakeViewport(cam=cam)
+        vc.apply_named_view(vp, "iso-top-right")
+        eye, tgt = vp._cam.eye, vp._cam.target
+        assert math.isclose(math.dist((eye.x, eye.y, eye.z), (tgt.x, tgt.y, tgt.z)), 13.0,
+                            rel_tol=1e-9)
+
     def test_iso_corner_keeps_camera_type(self):
         vp = _FakeViewport()
         vc.apply_named_view(vp, "iso-top-right")

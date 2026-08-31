@@ -263,9 +263,10 @@ _FINALE = [
                        "target": "CarrierBar"},
      lambda p: _exported_bytes(p) is True and str(p.get("file_path", "")).endswith(".usdz"), None),
     # STL with the units baked in: the one format carrying its own unit, so the knob is set and read
-    # back off the options object that LANDED. The single-file path publishes 'options_applied' -
-    # the split path's 'options_requested' is the per-file split's own key, and reading that one
-    # here would assert nothing about this file.
+    # back off the options object that LANDED. The single-file path publishes 'options_applied' and
+    # 'options_requested'; this predicate reads only the applied value - what the options object
+    # that wrote THIS file read back. Reading 'options_requested' here would only echo this step's
+    # own two arguments back at it.
     ("design_export", {"format": "stl", "file_path": EXPORT_DIR + "/fmt_carrier_in",
                        "target": "CarrierBar", "stl_units": "in", "stl_binary": False},
      lambda p: _exported_bytes(p) is True

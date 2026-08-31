@@ -7,6 +7,9 @@ right ExportManager.create*Options call is used per format. No live Fusion - fak
 """
 
 import json
+
+import pytest
+
 from conftest import _NamedCollection, load_tool
 
 dx = load_tool("design_export")
@@ -345,6 +348,10 @@ class TestOptionsApplied:
         assert out.get("options_applied", {}).get("stl_binary") is None
         assert "stl_binary" in out["options_refused"]
         assert "did not take these options" in out["note"]
+        # ...and 'options_refused' names the KNOB only, so the value it was attempted with is
+        # recoverable from 'options_requested' or from nowhere - which is where the note points.
+        assert out["options_requested"]["stl_binary"] is False
+        assert "'options_requested' carries the value each was asked with" in out["note"]
 
     def _drops_every_write(self, em, **factory_values):
         """Options whose FACTORY values are 'factory_values' and which DROP every write to them -
@@ -367,7 +374,9 @@ class TestOptionsApplied:
     def test_a_unit_the_options_already_read_is_published_unverified(self, tmp_path, monkeypatch):
         # THE COLLISION. Every write is dropped, yet the options object reads 'mm' because that is
         # its factory value - so the read-back equals the request and would report a clean
-        # 'applied'. The file is written in INCHES. 'options_applied' may not stand alone here.
+        # 'applied'. Measured, the file is then written in the unit of the session's last explicit
+        # unitType assignment, which no read exposes (measure_api
+        # stl-export-unittype-is-sticky-session-state). 'options_applied' may not stand alone here.
         _, em, _ = _install(monkeypatch)
         self._drops_every_write(
             em, unitType=dx.adsk.fusion.DistanceUnits.MillimeterDistanceUnits)
@@ -440,11 +449,13 @@ class TestOptionsApplied:
         assert "options_verified" not in out         # nothing landed, so nothing to back
 
     def test_default_call_sets_no_extra_options(self, tmp_path, monkeypatch):
-        # the common case (no opt-in flags) must keep the plain export payload shape - no
-        # 'options_applied' key when nothing was requested.
+        # the common case (no opt-in flags) must keep the plain export payload shape - neither an
+        # 'options_applied' nor an 'options_requested' key when nothing was requested, since an
+        # empty pair of dicts is noise a caller reads past.
         _, em, _ = _install(monkeypatch)
         out = _payload(dx.handler(format="step", file_path=str(tmp_path / "p.step")))
         assert "options_applied" not in out
+        assert "options_requested" not in out
         opts = em.calls[-1]
         assert not hasattr(opts, "isIncludingInvisibleBodies")
         assert not hasattr(opts, "isBinaryFormat")
@@ -526,18 +537,92 @@ class TestOptionsApplied:
         _, em, _ = _install(monkeypatch)
         out = _payload(dx.handler(format="stl", file_path=str(tmp_path / "p.stl")))
         assert out["options_applied"]["stl_units"] == "mm"
+        # ...and the request beside it, as the sibling mesh_export publishes for every STL: the unit
+        # rides on every STL export whether it was asked for or not, so it is always in both keys.
+        assert out["options_requested"]["stl_units"] == "mm"
 
     def test_stl_units_bad_value_errors(self, tmp_path, monkeypatch):
         _install(monkeypatch)
         res = dx.handler(format="stl", file_path=str(tmp_path / "p.stl"), stl_units="parsecs")
         assert res["isError"] is True and "stl_units" in res["message"]
 
-    def test_stl_options_ignored_for_other_formats(self, tmp_path, monkeypatch):
+    def test_stl_binary_ignored_for_other_formats(self, tmp_path, monkeypatch):
+        # stl_binary carries no cross-format refusal - it is dropped on a non-STL format, so the
+        # options object must come back with neither STL property written on it.
         _, em, _ = _install(monkeypatch)
-        dx.handler(format="step", file_path=str(tmp_path / "p.step"), stl_binary=True, stl_units="mm")
+        dx.handler(format="step", file_path=str(tmp_path / "p.step"), stl_binary=True)
         opts = em.calls[-1]
         assert not hasattr(opts, "isBinaryFormat")
         assert not hasattr(opts, "unitType")
+
+    def test_a_unit_asked_for_on_a_non_stl_format_is_refused_naming_it(self, tmp_path, monkeypatch):
+        # Dropping it silently hands back a file whose unit nothing states - the defect this input
+        # exists to close, and the refusal the sibling mesh_export makes for the same request. It
+        # names the value AND the format it was asked with, so neither has to be guessed. The value
+        # asked for here is the Choice's own DEFAULT: naming the default unit is still asking for
+        # it, so it is refused exactly as any other value is.
+        _, em, _ = _install(monkeypatch)
+        res = dx.handler(format="step", file_path=str(tmp_path / "p.step"), stl_units="mm")
+        assert res["isError"] is True
+        assert "'mm'" in res["message"] and "format=step" in res["message"]
+        assert em.calls == []                              # nothing was written
+
+    @pytest.mark.parametrize("fmt", [f for f in dx._FORMAT.options if f != "stl"])
+    def test_every_format_but_stl_refuses_a_unit_it_bakes_into_nothing(self, fmt, tmp_path,
+                                                                       monkeypatch):
+        # stl is the ONE format this tool bakes a unit into, so the refusal is a rule over the whole
+        # format Choice rather than a property of any one format: a guard narrowed to exempt
+        # obj/3mf/usd - the mesh-shaped formats an agent is likeliest to pass a unit to by mistake -
+        # reads as correct against a sample of two. dxf is in the list for a second reason: it is
+        # reached by its OWN dispatch, so a guard sitting behind that branch never sees it. The unit
+        # here is NOT the Choice's default, so the message is pinned to the value the CALL names
+        # rather than to one the resolver could supply on its own.
+        _, em, _ = _install(monkeypatch)
+        res = dx.handler(format=fmt, stl_units="in", dxf_sketch="Profile1",
+                         file_path=str(tmp_path / ("p." + fmt)))
+        assert res["isError"] is True, fmt
+        assert "'in'" in res["message"] and f"format={fmt}" in res["message"], res["message"]
+        assert em.calls == [], fmt                         # nothing was written
+
+    def test_an_omitted_unit_on_a_non_stl_format_is_not_refused(self, tmp_path, monkeypatch):
+        # The refusal keys on what the CALLER asked for, not on the Choice's default - a STEP export
+        # that never mentioned a unit must still run.
+        _install(monkeypatch)
+        out = _payload(dx.handler(format="step", file_path=str(tmp_path / "p.step")))
+        assert out["exported"] is True
+
+    def test_the_single_target_payload_names_what_was_asked_for(self, tmp_path, monkeypatch):
+        # options_applied is the value that LANDED; without the request beside it a caller cannot
+        # tell a knob it asked for from one the options object already held. Same key the split path
+        # and mesh_export publish, over every knob this call writes.
+        _install(monkeypatch)
+        out = _payload(dx.handler(format="stl", file_path=str(tmp_path / "p.stl"),
+                                  stl_binary=False, include_invisible_bodies=True))
+        assert out["options_requested"] == {"invisible_bodies": True, "stl_binary": False,
+                                            "stl_units": "mm"}
+
+    def test_a_non_stl_export_names_what_was_asked_for_too(self, tmp_path, monkeypatch):
+        # The key is keyed on what the CALL asked for, never on the format: the invisible-* pair
+        # rides on every format, so a STEP export that asked for one publishes it exactly as an STL
+        # export does. Every other assertion on this key in the single-target path is made on an STL
+        # call, so without this one a publish narrowed to fmt == "stl" reads as correct.
+        _install(monkeypatch)
+        out = _payload(dx.handler(format="step", file_path=str(tmp_path / "p.step"),
+                                  include_invisible_bodies=True))
+        assert out["options_requested"] == {"invisible_bodies": True}
+
+    def test_a_refused_knob_on_a_non_stl_format_still_points_at_a_key_that_is_there(
+            self, tmp_path, monkeypatch):
+        # The refusal note NAMES 'options_requested', so that key has to be published on every
+        # format the note can be emitted on - on a STEP export whose invisible-bodies write is
+        # dropped, a key withheld would leave the sentence pointing at nothing.
+        _, em, _ = _install(monkeypatch)
+        self._drops_every_write(em, isIncludingInvisibleBodies=False)
+        out = _payload(dx.handler(format="step", file_path=str(tmp_path / "p.step"),
+                                  include_invisible_bodies=True))
+        assert out["options_refused"] == ["invisible_bodies"]
+        assert out["options_requested"]["invisible_bodies"] is True
+        assert "'options_requested' carries the value each was asked with" in out["note"]
 
 
 # ── format=dxf (sketch / face-profile 2D export) ──────────────────────────────

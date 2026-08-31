@@ -728,10 +728,13 @@ class TestExportRefinement:
 # â”€â”€ mesh_export: split_by_component (one mesh file per top-level occurrence) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class TestExportStlUnits:
-    """The STL file's UNIT. STLExportOptions.unitType left untouched writes INCHES (measured) while
-    mesh_insert's own default is mm, so an export that named no unit came back a 25.4th of its size.
-    mesh_export therefore ASSIGNS mm when nothing is asked for - the unit mesh_insert defaults to -
-    and publishes the unit the options object read back either way."""
+    """The STL file's UNIT. Measured, an STL whose unitType is left untouched is written in the unit
+    of the LAST EXPLICIT unitType assignment made anywhere in the Fusion session, carried across
+    documents (measure_api stl-export-unittype-is-sticky-session-state), and no read of the options
+    object names it - so an export that asked for no unit inherits an unrelated earlier export's,
+    while mesh_insert's own default is mm. mesh_export therefore ASSIGNS mm when nothing is asked
+    for - the unit mesh_insert defaults to - and publishes the unit the options object read back
+    either way."""
 
     def _stl_options_class(self, des, cls, only_for=None):
         """Point the STL options factory at 'cls' (for the named occurrences only, when given)."""
@@ -759,9 +762,9 @@ class TestExportStlUnits:
         assert out["options_requested"]["stl_units"] == advertised
 
     def test_omitting_the_unit_writes_mm_the_unit_mesh_insert_defaults_to(self, tmp_path):
-        # mm, NOT the property's own untouched value (which writes inches, measured): the two tools'
-        # defaults have to name one unit or an export/import round trip that asks for nothing
-        # divides every coordinate by 25.4.
+        # mm, NOT whatever an untouched unitType would write (measured: the session's last explicit
+        # unit, inherited across documents): the two tools' defaults have to name one unit, or an
+        # export/import round trip that asks for nothing carries an unrelated export's.
         _wire_adsk()
         des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
         out = _payload(mx.export_handler(format="stl", file_path=str(tmp_path / "p.stl")))

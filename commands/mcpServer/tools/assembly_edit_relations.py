@@ -15,6 +15,7 @@ from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, timeline_health
 from . import _common
 from . import _inputs
+from . import _joints
 from . import _relations
 
 # Which actions each relation kind supports. Only a motion link carries a direction and a pair of
@@ -40,7 +41,6 @@ _OCCURRENCES = _inputs.OccurrenceRefList(
     "occurrences", description="set_occurrences: the members you want - the action is refused and "
                                "names the path that works.")
 
-_RATIO_TOLERANCE = 1e-6
 
 def _flag(obj, prop):
     """A boolean flag read off `obj`, or None when it is unknown - `_common.read_flag` is the ONE
@@ -190,9 +190,12 @@ def _do_set_values(ml, name, ratio):
     # ratio clears an existing reversal. was_reversed reports what that overwrote.
     was_rev = _flag(ml, "isReversed")
     reversed_link = r < 0
-    mag = abs(r)
-    v1 = adsk.core.ValueInput.createByReal(1.0)
-    v2 = adsk.core.ValueInput.createByReal(mag)
+    # 'ratio' is stated in each DOF's DISPLAY unit; the shared codec (the same one joint_motion_link
+    # creates through) turns it into the native pair the API takes, so a re-value and a create of one
+    # coupling send the same two numbers.
+    value_one, value_two, ratio_facts = _joints.link_ratio_values(m1, m2, r)
+    v1 = adsk.core.ValueInput.createByReal(value_one)
+    v2 = adsk.core.ValueInput.createByReal(value_two)
     try:
         did = ml.setMotionData(m1, v1, m2, v2, reversed_link)
     except Exception as e:
@@ -207,13 +210,12 @@ def _do_set_values(ml, name, ratio):
     if one is None or two is None:
         return error(f"setMotionData reported success on '{name}' but its valueOne/valueTwo "
                      "parameters cannot be read back, so nothing confirms the new ratio.")
-    if not one:
-        return error(f"setMotionData reported success on '{name}' but its valueOne parameter reads "
-                     f"{one} - a zero first value is no coupling at all.")
-    got = two / one
-    if abs(got - mag) > max(_RATIO_TOLERANCE, _RATIO_TOLERANCE * mag):
-        return error(f"setMotionData reported success on '{name}' but its parameters read "
-                     f"{one}:{two} (a ratio of {got}), not {mag} - the ratio did not take.")
+    # value_one is 1, so the coupled pair's own ratio IS value_two - the NATIVE number this ratio
+    # converts to, which is what the read-back has to express. The comparison is the codec's own
+    # gate (_joints.link_ratio_mismatch), so the create path judges its read-back the same way.
+    mismatch = _joints.link_ratio_mismatch(value_two, one, two)
+    if mismatch:
+        return error(f"setMotionData reported success on '{name}' but {mismatch}.")
     if now_rev is None:
         return error(f"setMotionData reported success on '{name}' and its parameters read "
                      f"{one}:{two}, but isReversed cannot be read back, so the direction the SIGN "
@@ -222,14 +224,19 @@ def _do_set_values(ml, name, ratio):
     if now_rev != reversed_link:
         return error(f"setMotionData reported success on '{name}' but it reads isReversed="
                      f"{now_rev}, not {reversed_link} - the direction did not take.")
-    return ok({"kind": "motion_link", "name": name, "ratio": r, "value_one": one, "value_two": two,
-               "reversed": now_rev,
-               "was_reversed": was_rev,
-               "note": "Coupling re-valued: joint_two moves |ratio| per unit of joint_one, and the "
-                       "SIGN of ratio SETS the direction - so a positive ratio CLEARS an existing "
-                       "reversal (was_reversed reports what it overwrote). To flip the direction "
-                       "without re-valuing, use action='reverse'. Drive ONE member (joint_drive) "
-                       "and read the partner back."})
+    out = {"kind": "motion_link", "name": name, "ratio": r, "value_one": one, "value_two": two,
+           "reversed": now_rev,
+           "was_reversed": was_rev,
+           "note": "Coupling re-valued - 'interpreted' states how the ratio was read and the native "
+                   "pair sent to the API, and value_one/value_two are the link's own parameters "
+                   "READ BACK after the set. The SIGN of ratio SETS the direction - so a "
+                   "positive ratio CLEARS an existing reversal (was_reversed reports what it "
+                   "overwrote). To flip the direction without re-valuing, use action='reverse'. "
+                   "Drive ONE member (joint_drive) and read the partner back."}
+    # The codec's three keys, published identically by the create path (joint_motion_link), so one
+    # ratio reads the same whichever writer applied it.
+    out.update(ratio_facts)
+    return ok(out)
 
 
 def handler(kind: str = "", name: str = "", action: str = "", occurrences=None,
@@ -274,7 +281,8 @@ TOOL_DESCRIPTION = (
     "not guessed). 'suppress'/'unsuppress' park one without deleting it, reporting any feature the "
     "change breaks; 'delete' removes it IRREVERSIBLY and re-lists to confirm. 'reverse' flips a "
     "motion link's direction; 'set_values' re-couples it to 'ratio' (joint_two per unit of "
-    "joint_one; the SIGN sets direction, so a positive value clears a reversal). 'set_occurrences' "
+    "joint_one, each in its own display unit; the SIGN sets direction, so a positive value clears "
+    "a reversal). 'set_occurrences' "
     "is REFUSED - this build cannot edit a rigid group's members after creation - and the error "
     "names the path that works. Create relations with assembly_rigid_group / joint_motion_link / "
     "assembly_constrain."
@@ -290,7 +298,7 @@ tool = (
     .add_input_property("include_children", {"type": "boolean",
             "description": "set_occurrences: kept so the refused call is answered, not schema-rejected."})
     .add_input_property("ratio", {"type": "number",
-            "description": "set_values: joint_two's motion per unit of joint_one; the SIGN sets the direction, so a positive value clears an existing reversal."})
+            "description": "set_values: joint_two's motion per ONE unit of joint_one, in each joint's DISPLAY unit - deg for a rotating DOF, mm for a sliding one; the SIGN sets the direction, so a positive value clears an existing reversal."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="destructive", handler=handler,

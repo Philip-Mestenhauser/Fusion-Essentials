@@ -2,7 +2,8 @@
 
 Pinned: the kind/action matrix, name resolution (case-insensitive EXACT, a repeated name refused),
 and every verification gate - a suppress re-read, a delete re-listed, setOccurrences bracketed by
-the timeline roll and its member read-back, and setMotionData confirmed off valueOne/valueTwo.
+the timeline roll and its member read-back, and setMotionData confirmed off valueOne/valueTwo - in
+the native rad/cm the display-unit ratio converts to.
 
 RigidGroup / MotionLink / AssemblyConstraint have no shared conftest fake (no live SHAPES dump), so
 the relation objects are local; the design/component/occurrence skeleton comes from the shared
@@ -19,10 +20,15 @@ import adsk.fusion
 from conftest import _NamedCollection, error_message, install, load_tool, make_design, MakeComp, payload
 
 rel = load_tool("assembly_edit_relations")
+jt = load_tool("_joints")          # the ratio codec, to pin the payload against its own output
 
 JMT = adsk.fusion.JointMotionTypes
 REVOLUTE_DOF = JMT.RevoluteJointRotateMotionType
 SLIDER_DOF = JMT.SliderJointSlideMotionType
+
+# The rack-and-pinion ratio the unit conversion is measured on: this many degrees of pinion per
+# millimetre of rack is 0.5 rad per cm, the pair Fusion actually couples on.
+RIG_RATIO_DEG_PER_MM = 2.8647889757
 
 
 # ── the relation objects (the surface measured on the installed bindings) ───────────────────────
@@ -148,6 +154,41 @@ class _BlindReverse(_MotionLink):
         self._blind = True
 
 
+class _FailedLink(_MotionLink):
+    """A motion link whose entityToken RAISES - a token read that yields no value, which is one of
+    the two readings that leave a doubled relation doubled (the other being two wrappers answering
+    two different values; _relations states both). Every other read still answers, so nothing but
+    id() tells two WRAPPERS of it apart, and id() differs per wrapper. `_EmptyTokenLink` is the
+    same no-value reading arriving through a token that does NOT raise."""
+
+    @property
+    def entityToken(self):
+        raise RuntimeError("3 : An API Object refers to a deleted Object")
+
+    @entityToken.setter
+    def entityToken(self, value):
+        # _Relation.__init__ assigns one; a failed link swallows it and keeps answering the raise.
+        pass
+
+
+class _EmptyTokenLink(_MotionLink):
+    """A motion link whose entityToken READS and answers the EMPTY STRING - the third reading, next
+    to a raise and a None. An empty token carries no value, so it is no evidence that two rows are
+    one relation: ``_common.native_identity`` refuses exactly this reading ('None when the token
+    reads empty or not at all'), and the walk's de-dup has to refuse it the same way. Keyed on the
+    string itself every relation reading it collapses onto ONE row, and the rest leave the walk with
+    no name left to address them by."""
+
+    @property
+    def entityToken(self):
+        return ""
+
+    @entityToken.setter
+    def entityToken(self, value):
+        # _Relation.__init__ assigns one; this link swallows it and keeps answering the empty read.
+        pass
+
+
 class _Constraint(_Relation):
     def __init__(self, name, relationships=2, **kw):
         super().__init__(name, **kw)
@@ -194,7 +235,18 @@ def _occ(path):
     return types.SimpleNamespace(name=path.split("+")[-1], fullPathName=path)
 
 
+def _unreadable_items(count=1):
+    """A collection that COUNTS but whose item(i) RAISES - a member the collection promises and
+    cannot hand over. safe() turns that raise into None, which is the state every reader here has
+    to skip rather than publish."""
+    def item(_i):
+        raise RuntimeError("3 : An API Object refers to a deleted Object")
+    return types.SimpleNamespace(count=count, item=item)
+
+
 def _component(name, occurrences=(), rigid=(), links=(), constraints=()):
+    # No entityToken: the walk keys on nothing a COMPONENT answers (it asks _common.all_components
+    # for each component once), so a component's own identity is not this file's subject.
     comp = MakeComp(name=name, occurrences=list(occurrences))
     for coll_attr, members in (("rigidGroups", rigid), ("motionLinks", links),
                                ("assemblyConstraints", constraints)):
@@ -226,6 +278,15 @@ def world(monkeypatch):
     return _build
 
 
+def _doubled_root(name, subs=()):
+    """A design whose ROOT is reachable through TWO wrappers - design.rootComponent, and the wrapper
+    design.allComponents carries - each handing back its OWN wrapper of the same physical FAILED
+    motion link. A walk that reads BOTH routes emits that one link twice; the two link wrappers
+    share only a name, so nothing downstream can tell the pair back apart."""
+    return make_design(comp=_component("Root", links=[_FailedLink(name)]),
+                       all_components=[_component("Root", links=[_FailedLink(name)])] + list(subs))
+
+
 # ── the walk + the resolver (tools/_relations.py, shared with assembly_get) ──────────────────────
 
 class TestRelationWalk:
@@ -246,21 +307,61 @@ class TestRelationWalk:
         design = world(rigid=[_RigidGroup("RootGroup")], subs=[sub])
         assert sorted(rel._relations.relation_names(design, "rigid_group")) == ["RootGroup", "SubGroup"]
 
-    def test_root_reached_twice_is_counted_once(self, world):
-        # design.allComponents includes the root, so the root's relations are walked twice; the
-        # entityToken de-dup must not double-list them.
-        design = world(rigid=[_RigidGroup("RG1")])
+    def test_two_readings_answering_one_token_are_listed_once(self):
+        # the entityToken de-dup is the walk's SECOND line, over the relation objects: two readings
+        # that answer ONE token are one relation, however they were reached. Which live shape hands
+        # one relation back through two components is unmeasured - see all_relations - so this pins
+        # the line's behaviour, not an assembly anyone has read.
+        design = make_design(comp=_component("Root", rigid=[_RigidGroup("RG1", token="T")]),
+                             all_components=[_component("Root", rigid=[_RigidGroup("RG1", token="T")]),
+                                             _component("Tower", rigid=[_RigidGroup("RG1", token="T")])])
         assert rel._relations.relation_names(design, "rigid_group") == ["RG1"]
 
-    def test_root_reached_through_a_distinct_proxy_is_counted_once(self, world):
-        # live, allComponents returns the root as a proxy that is NOT identical to
-        # design.rootComponent, so identity de-dup misses it and every root relation is listed
-        # twice. The two proxies' relations share an entityToken, which is what de-dup keys on.
+    def test_two_relations_reading_an_empty_token_are_both_listed_and_both_addressable(self, world):
+        # THE BOUNDARY of the de-dup key, against the one-character token above: "T" is a value, so
+        # two readings of it are one relation; "" is a reading that carries no value, so keying on
+        # it merges two DISTINCT relations onto one row. Beta then leaves all_relations entirely and
+        # no name reaches it - the silent DROP, which is strictly worse than the id() over-count the
+        # fallback trades for. _common.native_identity refuses the same reading.
+        sub = _component("Tower", links=[_EmptyTokenLink("Beta")])
+        design = world(links=[_EmptyTokenLink("Alpha")], subs=[sub])
+        assert sorted(rel._relations.relation_names(design, "motion_link")) == ["Alpha", "Beta"]
+        assert len(rel._relations.all_relations(design, "motion_link")) == 2
+        obj, comp, err = rel._relations.find_relation(design, "motion_link", "Beta")
+        assert err is None and obj.name == "Beta" and comp.name == "Tower"
+
+    def test_a_failed_root_relation_is_listed_once_not_once_per_root_wrapper(self, world):
+        # the root answers as design.rootComponent AND inside design.allComponents, as two distinct
+        # wrappers. Prepending the first to the second reads the one link twice, and the token
+        # de-dup cannot collapse the pair: a token that yields no value keys on id(), which two
+        # wrappers of one link never share. Asking only the collection is what keeps the row single.
         world()
-        design = make_design(comp=_component("Root", rigid=[_RigidGroup("RG1", token="T")]),
-                             all_components=[_component("Root", rigid=[_RigidGroup("RG1", token="T")])])
-        install(rel, design)
-        assert rel._relations.relation_names(design, "rigid_group") == ["RG1"]
+        design = install(rel, _doubled_root("Motion Link1"))
+        assert rel._relations.relation_names(design, "motion_link") == ["Motion Link1"]
+        assert len(rel._relations.all_relations(design, "motion_link")) == 1
+
+    def test_a_design_whose_component_collection_does_not_read_still_reads_the_roots_relations(self):
+        # _common.all_components degrades to [root] when design.allComponents will not read; a walk
+        # that read that collection directly would answer nothing for a design holding relations.
+        design = types.SimpleNamespace(
+            rootComponent=_component("Root", links=[_MotionLink("RootLink")]))
+        assert rel._relations.relation_names(design, "motion_link") == ["RootLink"]
+
+    def test_a_design_whose_root_does_not_read_yields_nothing(self):
+        # the other end of that walk's contract: with no readable rootComponent there is no design
+        # to trust, and all_components answers [] rather than mining a collection whose owner did
+        # not read. Nothing is published from such a design, in place of a partial list - so an
+        # unreadable root answers here exactly as a design holding no relations does.
+        design = types.SimpleNamespace(allComponents=_NamedCollection(
+            [_component("Tower", links=[_MotionLink("SubLink")])]))
+        assert rel._relations.relation_names(design, "motion_link") == []
+
+    def test_a_relation_the_collection_will_not_hand_over_is_skipped_not_paired_as_none(self, world):
+        # the collection counts one and hands over nothing; that row is dropped here, not carried
+        # out as (None, component) for every consumer to read name and health fields off.
+        design = world(links=[_MotionLink("ML1")])
+        design.rootComponent.motionLinks = _unreadable_items(1)
+        assert rel._relations.all_relations(design, "motion_link") == []
 
     def test_kinds_do_not_bleed_into_each_other(self, world):
         design = world(rigid=[_RigidGroup("RG1")], links=[_MotionLink("ML1")],
@@ -285,6 +386,42 @@ class TestRelationWalk:
         world(rigid=[rg])
         names, total = rel._relations.rigid_group_members(rg, 12)
         assert total == 20 and len(names) == 12 and names[0] == "P0:1"
+
+    def test_a_member_that_does_not_read_is_skipped_while_the_total_still_counts_it(self, world):
+        # a member the collection will not hand over has no name to publish; appending it anyway
+        # would put a null in the member list. The TOTAL still reports what the group claims.
+        rg = _RigidGroup("RG1")
+        rg.occurrences = _unreadable_items(3)
+        world(rigid=[rg])
+        assert rel._relations.rigid_group_members(rg) == ([], 3)
+
+
+class TestAFailedRelationStaysAddressable:
+    """A relation the token de-dup cannot collapse is still ONE relation: it resolves by name and
+    the edit tool acts on it. Emitted twice by the walk it refuses its own name as ambiguous, and a
+    failed relation is exactly the one a caller needs to suppress or delete."""
+
+    def test_find_relation_resolves_it_instead_of_refusing_itself(self, world):
+        world()
+        design = install(rel, _doubled_root("Motion Link1"))
+        obj, comp, err = rel._relations.find_relation(design, "motion_link", "Motion Link1")
+        assert err is None
+        assert obj.name == "Motion Link1" and comp.name == "Root"
+
+    def test_the_edit_tool_acts_on_it_rather_than_refusing_the_name(self, world):
+        world()
+        install(rel, _doubled_root("Motion Link1"))
+        out = payload(rel.handler(kind="motion_link", name="Motion Link1", action="suppress"))
+        assert out["name"] == "Motion Link1" and out["is_suppressed"] is True
+
+    def test_two_failed_relations_sharing_a_name_are_still_refused(self, world):
+        # the walk collapses ONE relation reached twice, never two relations that merely share a
+        # name - which is the refusal that keeps an edit off the wrong assembly's link.
+        world()
+        sub = _component("Tower", links=[_FailedLink("Motion Link1")])
+        install(rel, _doubled_root("Motion Link1", subs=[sub]))
+        msg = error_message(rel.handler(kind="motion_link", name="Motion Link1", action="suppress"))
+        assert "names 2 motion links" in msg and "Root" in msg and "Tower" in msg
 
 
 class TestGuards:
@@ -590,14 +727,98 @@ class TestReverse:
 class TestSetValues:
     def test_ratio_reaches_setmotiondata_with_the_links_own_dofs(self, world):
         # the coupled DOF must be re-passed off the link (motionOne/motionTwo) - guessing one here
-        # would silently re-couple a different degree of freedom.
+        # would silently re-couple a different degree of freedom. This pair is rotation-to-slide, so
+        # the ratio also converts: 2 mm of travel per degree is 11.4591559026 cm per radian.
         ml = _MotionLink("ML1", motion_one=REVOLUTE_DOF, motion_two=SLIDER_DOF)
         world(links=[ml])
         out = payload(rel.handler(kind="motion_link", name="ML1", action="set_values", ratio=2.0))
         assert ml.motion_data["m1"] == REVOLUTE_DOF and ml.motion_data["m2"] == SLIDER_DOF
-        assert ml.motion_data["v1"] == ("real", 1.0) and ml.motion_data["v2"] == ("real", 2.0)
-        assert out["ratio"] == 2.0 and out["value_one"] == 1.0 and out["value_two"] == 2.0
+        assert ml.motion_data["v1"] == ("real", 1.0)
+        assert ml.motion_data["v2"][1] == pytest.approx(11.4591559026, abs=1e-9)
+        assert out["ratio"] == 2.0 and out["value_one"] == 1.0
+        assert out["value_two"] == pytest.approx(11.4591559026, abs=1e-9)
         assert out["reversed"] is False
+
+    def test_a_same_dof_link_re_values_at_the_bare_ratio(self, world):
+        # BACK-COMPAT: deg-to-deg cancels, so a rev/rev link is re-valued with exactly the number
+        # the caller passed - the pair every existing caller of this action sends.
+        ml = _MotionLink("ML1", motion_one=REVOLUTE_DOF, motion_two=REVOLUTE_DOF)
+        world(links=[ml])
+        out = payload(rel.handler(kind="motion_link", name="ML1", action="set_values", ratio=2.0))
+        assert ml.motion_data["v1"] == ("real", 1.0) and ml.motion_data["v2"] == ("real", 2.0)
+        assert out["value_one"] == 1.0 and out["value_two"] == 2.0
+        assert out["ratio_units"] == "deg of joint_two per deg of joint_one"
+        assert out["value_units"] == "value_one in rad, value_two in rad"
+
+    def test_the_rack_and_pinion_ratio_re_values_in_native_units(self, world):
+        # THE MEASURED PAIR, on the re-value path: 2.8647889757 deg of pinion per mm of rack IS
+        # 0.5 rad per cm. The read-back gate below compares against that CONVERTED number - against
+        # the raw display number it would reject the correct coupling as "did not take".
+        ml = _MotionLink("ML1", motion_one=SLIDER_DOF, motion_two=REVOLUTE_DOF)
+        world(links=[ml])
+        out = payload(rel.handler(kind="motion_link", name="ML1", action="set_values",
+                                  ratio=-RIG_RATIO_DEG_PER_MM))
+        assert ml.motion_data["v2"][1] == pytest.approx(0.5, abs=1e-9)
+        assert ml.motion_data["reversed"] is True          # the sign is still the reversal flag
+        assert out["ratio"] == -RIG_RATIO_DEG_PER_MM       # the caller's own number, unscaled
+        assert out["value_two"] == pytest.approx(0.5, abs=1e-9)
+        assert out["ratio_units"] == "deg of joint_two per mm of joint_one"
+        assert out["value_units"] == "value_one in cm, value_two in rad"
+        assert "2.8647889757 deg of joint_two per 1 mm of joint_one" in out["interpreted"]
+
+    def test_the_published_facts_are_the_codecs_own(self, world):
+        # PARITY with the create path (joint_motion_link): both writers publish exactly what the one
+        # codec returned for the same DOF pair and ratio, so a divergence between them reds here.
+        ml = _MotionLink("ML1", motion_one=SLIDER_DOF, motion_two=REVOLUTE_DOF)
+        world(links=[ml])
+        out = payload(rel.handler(kind="motion_link", name="ML1", action="set_values",
+                                  ratio=RIG_RATIO_DEG_PER_MM))
+        facts = jt.link_ratio_values(SLIDER_DOF, REVOLUTE_DOF, RIG_RATIO_DEG_PER_MM)[2]
+        assert {k: out[k] for k in facts} == facts
+
+    def test_a_dof_that_answers_no_unit_is_sent_unconverted_and_says_so(self, world):
+        # a link whose coupled DOF is outside the rotate/slide tables establishes no display unit,
+        # so the magnitude goes out as given and the payload withholds both unit names.
+        ml = _MotionLink("ML1", motion_one=object(), motion_two=REVOLUTE_DOF)
+        world(links=[ml])
+        out = payload(rel.handler(kind="motion_link", name="ML1", action="set_values",
+                                  ratio=RIG_RATIO_DEG_PER_MM))
+        assert ml.motion_data["v2"] == ("real", RIG_RATIO_DEG_PER_MM)
+        assert out["ratio_units"] is None and out["value_units"] is None
+        assert "NO unit conversion" in out["interpreted"]
+
+    def test_a_read_back_off_the_converted_value_by_float_noise_still_passes(self, world):
+        # the converted number carries a float tail (0.5000000000080081 for the rig ratio); a
+        # platform storing the clean 0.5 differs only in that tail, and the band must not call it a
+        # failed set.
+        ml = _MotionLink("ML1", motion_one=SLIDER_DOF, motion_two=REVOLUTE_DOF)
+
+        def rounded(m1, v1, m2, v2, r):
+            ml.valueOne = types.SimpleNamespace(value=1.0)
+            ml.valueTwo = types.SimpleNamespace(value=0.5)
+            ml.isReversed = r
+            return True
+        ml.setMotionData = rounded
+        world(links=[ml])
+        out = payload(rel.handler(kind="motion_link", name="ML1", action="set_values",
+                                  ratio=RIG_RATIO_DEG_PER_MM))
+        assert out["value_two"] == 0.5
+
+    def test_a_read_back_that_holds_the_DISPLAY_number_is_a_failed_set(self, world):
+        # the other side of that band: a link left holding the raw display number (5.7x the native
+        # coupling) has not taken the ratio, and the error names the native value expected.
+        ml = _MotionLink("ML1", motion_one=SLIDER_DOF, motion_two=REVOLUTE_DOF)
+
+        def raw(m1, v1, m2, v2, r):
+            ml.valueOne = types.SimpleNamespace(value=1.0)
+            ml.valueTwo = types.SimpleNamespace(value=RIG_RATIO_DEG_PER_MM)
+            ml.isReversed = r
+            return True
+        ml.setMotionData = raw
+        world(links=[ml])
+        msg = error_message(rel.handler(kind="motion_link", name="ML1", action="set_values",
+                                        ratio=RIG_RATIO_DEG_PER_MM))
+        assert "did not take" in msg and "0.5000000000080081" in msg
 
     def test_a_negative_ratio_reverses_with_the_magnitude(self, world):
         ml = _MotionLink("ML1")

@@ -59,7 +59,8 @@ _FORMAT = _inputs.Choice("format", options=list(_FORMATS), default="step",
 # export's unit instead of any stable default. stl_binary omitted leaves the factory value alone.
 _STL_UNITS = _inputs.Choice("stl_units", options=list(_export.STL_UNIT_MEMBERS), default="mm",
     description="format=stl only: the units baked into the file. Always assigned - an untouched "
-                "STL inherits the unit of the last STL export in this Fusion session.")
+                "STL takes the unit of the last explicit unit assignment made anywhere in this "
+                "Fusion session, across documents.")
 
 # There is deliberately NO dxf_units input: the FIRST read of DXFSketchExportOptions.units kills the
 # call UNCATCHABLY - no surrounding try/except runs, no later line lands, and the whole transaction
@@ -418,16 +419,24 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
     if ferr:
         return error(ferr)
 
+    stl_unit_key, sue = _STL_UNITS.resolve(stl_units)
+    if sue:
+        return error(sue)
+    # A unit asked for on a format this tool bakes no unit into is REFUSED naming both, rather than
+    # dropped: the caller who asked for it would otherwise get a file whose unit nothing states.
+    # An empty request is the omitted case and takes the Choice's default. Ahead of the dxf
+    # dispatch, so the 2D branch answers the same way the neutral-CAD formats do.
+    if (stl_units or "").strip() and fmt != "stl":
+        return error(f"'stl_units' ('{stl_unit_key}') applies to format=stl only, and this call "
+                     f"asked for format={fmt} - refusing rather than dropping it. Export as stl to "
+                     "bake the unit into the file, or omit 'stl_units'.")
+
     if fmt == "dxf":
         return _export_dxf(dxf_sketch, dxf_face, file_path,
                            dxf_export_construction, dxf_export_points, dxf_export_projected,
                            dxf_component)
 
     ext, factory_name, geom_first = _FORMATS[fmt]
-
-    stl_unit_key, sue = _STL_UNITS.resolve(stl_units)
-    if sue:
-        return error(sue)
 
     path = (file_path or "").strip().strip('"')
     if not path:
@@ -598,6 +607,13 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
             "data_upload_file (STEP/IGES are translated to a Fusion design on the cloud)."),
     }
     applied_opts, refused_opts, verified_opts = applied_opts
+    # What was ASKED FOR, one entry per knob this call writes - the key the split path above and the
+    # sibling mesh_export both publish, and the only place a REFUSED knob's attempted value is
+    # readable: 'options_refused' names the knob, never the value it was asked with.
+    requested_opts = _requested_options(fmt, include_invisible_bodies,
+                                        include_invisible_components, stl_binary, stl_unit_key)
+    if requested_opts:
+        out["options_requested"] = requested_opts
     if applied_opts:
         # The VALUE each knob actually holds, read back off the options object - never a
         # did-it-stick flag under the knob's own name.
@@ -617,7 +633,8 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
     if refused_opts:
         out["options_refused"] = refused_opts
         out["note"] += (" The export landed, but Fusion did not take these options: "
-                        + ", ".join(refused_opts) + ".")
+                        + ", ".join(refused_opts)
+                        + ". 'options_requested' carries the value each was asked with.")
     return ok(out)
 
 
