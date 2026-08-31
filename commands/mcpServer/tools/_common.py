@@ -14,8 +14,55 @@ import json
 import adsk.core
 import adsk.fusion
 
-# One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
-MAP_BLURB = "ok/error/safe, measured (a scaled number or None - the honest counterpart to safe(read, 0.0) for anything a caller treats as a MEASUREMENT, where 0 is an answer) + read_flag (the same honesty for a BOOLEAN: True/False/None, never a coerced False - the ONE unreadable-flag read every set-then-read-back gate and every published flag goes through) + counted (the same honesty for an INTEGER COUNT: the int or None, never a coerced 0/1 - for a count an absent read does NOT make zero, like a body's lumps or a built path's entities; safe(read, 0) stays right for a TALLY over a collection that may be absent), design/target_component, find_sketches_by_name + find_sketch + resolve_sketch + find_or_recent_sketch + resolve_or_recent_sketch (the ONE design-wide by-name sketch walk - every component asked for its OWN sketch of that name, de-duplicating nothing, so two components sharing one entityToken cannot merge and silently drop a hit - its resolve-one, which REFUSES a name SEVERAL sketches carry naming each owning component instead of first-matching, and the name-or-most-recent contract over it: find_or_recent_sketch hands the refusal back as a third value so a caller with a wire string NAMES the duplicate, resolve_* drop it for a caller with nowhere to put it) + placements_holding_sketch (the occurrence paths a shared-owner-name refusal names its owners by - an occurrence whose OWN component answers to the name AND hands back a sketch of it, both read off ONE occurrence, so each row is true on its own where no read attributes a placement to one of two components wearing one name), named_with_remainder + told_apart (the ONE capped wire list - the remainder COUNTED, never silently dropped - and the ONE substitution a listing makes when a name REPEATS: a name only one row carries renders as that name, a name several rows carry renders as that row's own discriminator (an occurrence path, a 'Setup / op' breadcrumb), and a row with none keeps its name; a listing that prints one name twice has restated its own count and said nothing else), resolve_entity_ref + resolve_entity_refs (the ONE '<type>:<index>' sketch-entity resolver and the comma-separated list parser over it), SKETCH_ANCHORS + parse_anchor_ref + anchor_point (the ONE entity-anchored position grammar - a ref's optional third segment ':start/:end/:mid/:center' naming WHICH point of the entity is meant, and the resolve to that SketchPoint; sketch_dimension and sketch_constrain read the same forms through it, and 'mid' CREATES a midpoint-constrained point where the others only read one), most_recent_body + resolve_body_or_recent (the ONE 'that body, or the most recent one' resolution every whole-body edit runs: a given handle/name goes through the caller's own BodyRef, empty falls back to most_recent_body, and the caller words the no-body error), NO_VOLUME_CHANGE_CM3 (the ONE band a before/after volume difference counts as no change at all - every material-changing feature judges its silent no-op against it), result_bodies + body_facts (the feature-result walk and the per-body {name, is_solid} projection it is published with), landed_extent_cm + landed_extent2_cm + EXTENT_MATCH_TOL_CM (the ONE read of the depth an extrude-family feature REPORTS, per SIDE - extentOne.distance.value in internal cm, and extentTwo's for the second side of a two-sided extent, MEASURED to keep the requested sign, to answer the per-SIDE number a symmetric extent was asked for, to be unperturbed by taper, to stay the REQUESTED distance on a cut that bottomed inside material, and to carry each two-sided side's own magnitude with no swap - and the band a landed depth may differ from the request by and still be the same length; every solid or surface extrude compares its request against these reads, so two of them cannot disagree about what the feature landed), open_profile_from_sketch, scale, timeline_health (the shared before/after edit guard), set_verified (the set-then-read-back every FeatureInput property assignment needs - a SWIG proxy accepts an unknown name silently), apply_rename (the ONE create-flow rename-with-disclosure: sets entity.name, reads it back, returns (final_name, warning-or-None) - a declined or deduped rename is DISCLOSED in the payload, never swallowed and never an error on a create that succeeded), cancel_input (the ONE abort for a partial-computing createInput transaction - trim/boundary fill - that reports a refused cancel instead of swallowing it), direct_feature_absence + no_feature_error + failed_effect_remedy + DIRECT_FEATURE_NOTE (the one mode gate for a Features.*.add() that returns nothing: measured per-class in DIRECT designs while the edit LANDS, so a site with a feature-independent effect check falls through to it, a site without one refuses honestly, and a wrong-effect error ends with the remedy that actually exists in that mode) + null_feature_note (the ONE sentence a payload appends for a null feature - DIRECT mode, or the base-feature edit scope that suppressed it - so no site re-rolls the branch or infers a design mode from the missing object), census_host + body_count (the resolve-the-collection-ONCE-before-the-mutation body census a feature-free effect check counts on - measured: the pieces land in the TARGET's parentComponent, not the active component), same_component (the ONE same-component test, TRI-STATE - component wrappers are measured NEVER identity-stable, so `a is b` between two component references is always False and must never carry the comparison; the verdict runs on native_identity, never on a bare entityToken - a token is DOCUMENT-LOCAL and every document's ROOT COMPONENT answers one shared token, so a token compare calls a component an x-ref brought in the host's own root - and answers None where a missing operand or an unreadable identity means no comparison was made, since a NAME is not the component: every caller branches `is True` / `is False` / `is None`, because a bare `if same_component(...)` reads the unknown as the 'different component' answer nothing was read to support), iter_collection (the ONE count/item(i) walk over a Fusion collection - every present item, empty when the collection is absent), native_token + native_identity (the ONE physical-entity identity, for BODIES and COMPONENTS alike: native_token is (nativeObject or self).entityToken, safe at both steps, which collapses a native body and its occurrence proxies onto one value but is DOCUMENT-LOCAL - two bodies in two x-ref'd documents answer the same one, and every document's ROOT COMPONENT answers one shared token - and native_identity is the KEY every comparison and de-dup runs on, that token paired with the source document's lineage urn, read through parentComponent.parentDesign for an entity a component OWNS or parentDesign for a COMPONENT (measured: exactly one of the two chains reads per kind; None for a never-saved document), None when the token does not read; a local safe(lambda: b.entityToken) re-roll is how a de-dup counts one body twice, and a bare-token key is how it MERGES two different bodies - or seven root components into one), occurrence_walk + all_occurrences + occurrence_paths + component_contains (the ONE design-wide occurrence census and its projections: root.allOccurrences is the fast path and the only source of true fullPathNames, but the PROPERTY ACCESS ITSELF raises on a design holding an unresolved external reference, so occurrence_walk falls back to a component.occurrences recursion and publishes WHICH walk answered (occurrences_walk: allOccurrences / recursed / unreadable), its usable rows, its unresolved rows and a total that is None - never 0 - when nothing enumerated; all_occurrences is the usable-rows-only list, occurrence_paths the path census a structural edit diffs to read its effect back, and component_contains the TRI-STATE cycle test a re-parent/instance refuses on - True/False, and None whenever the subtree was not fully enumerated, one occurrence's component identity would not read, or the census holds ANY unresolved-reference row (a broken row leaves complete=True, so that flag alone answers 'this edit is legal' on the very design an unresolved reference makes unreadable), since a False there is a positive claim and the caller must refuse instead of reading None as 'no cycle') + broken_reference (the ONE unresolved-external-reference detector: occ.component RAISING AT ALL is the gate and the raise text is published verbatim as the detail - isReferencedComponent, documentReference, isValid and isLightBulbOn were each measured LYING on a real broken reference), build_path (the ONE feature-path resolver every sweep/pipe/path-pattern/on-path datum builds its adsk.fusion.Path with: 'sketch:<name>' chains a path sketch's curves, ONE find_geometry edge handle chains from that seed across TANGENT connections - a sharp corner stops the chain, so the built Path's count is the truth - and a JSON list of edge handles is used exactly and must connect) - the response+resolve substrate"
+# The "what to reuse from here" catalog line for the generated CLAUDE.md helper map (see
+# tests/gen_manifest.py): each symbol with the one clause that says WHEN to reach for it. The
+# mechanism behind a clause lives at the symbol itself, in its test, or in VERIFIED_API_FACTS.md.
+MAP_BLURB = (
+    "ok/error/safe - the result pair every tool returns, and the per-FIELD read guard (never "
+    "wrapped around a MUTATION, which is left to raise); measured + read_flag + counted - the honest read of a MEASUREMENT, a FLAG, a "
+    "COUNT: None where safe(read, 0.0/False/0) would publish a coerced answer as a read one; "
+    "design/target_component - the active design, and the component a build belongs in; "
+    "find_sketches_by_name + find_sketch + resolve_sketch + find_or_recent_sketch + "
+    "resolve_or_recent_sketch - the ONE design-wide by-name sketch walk and its resolvers, for any "
+    "tool taking a sketch NAME: a name SEVERAL sketches carry is REFUSED naming its owners, never "
+    "first-matched - find_or_recent_sketch hands that refusal back, resolve_* drop it; "
+    "placements_holding_sketch - the occurrence paths that refusal names owners by when the owners "
+    "share a name too; named_with_remainder + told_apart - for a wire string that LISTS: the cap "
+    "discloses its remainder, a repeated name gives way to its discriminator; resolve_entity_ref + "
+    "resolve_entity_refs - the ONE '<type>:<index>' sketch-entity resolver and the comma-separated "
+    "list parser over it; SKETCH_ANCHORS + parse_anchor_ref + anchor_point - the entity-anchored "
+    "position grammar (a ref's third segment ':start/:end/:mid/:center'), where 'mid' CREATES a "
+    "welded midpoint and the others only read a point; most_recent_body + resolve_body_or_recent - "
+    "the 'that body, or the most recent one' input of every whole-body edit; NO_VOLUME_CHANGE_CM3 - "
+    "the ONE band a before/after volume difference counts as no change at all, for a "
+    "material-changing feature's silent-no-op check; result_bodies + body_facts - the "
+    "feature-result walk and the {name, is_solid} projection it is published with; landed_extent_cm "
+    "+ landed_extent2_cm + EXTENT_MATCH_TOL_CM - the per-SIDE depth an extrude-family feature "
+    "REPORTS and the band it may differ from the request by; open_profile_from_sketch - an OPEN "
+    "sketch chain as a surface profile; scale - cm-per-unit for mm/cm/in; timeline_health - the "
+    "shared before/after guard for an edit that can break downstream features; set_verified - the "
+    "read-back every FeatureInput property assignment needs, since a SWIG proxy accepts an unknown "
+    "property name silently; apply_rename - the create-flow rename-with-disclosure, publishing a "
+    "declined or deduped rename beside the name that landed; cancel_input - the abort for a "
+    "partial-computing createInput transaction, reporting a refused cancel; direct_feature_absence "
+    "+ no_feature_error + failed_effect_remedy + DIRECT_FEATURE_NOTE + null_feature_note - the "
+    "DIRECT-mode no-feature shape, for any site whose Features.*.add() can come back falsy while "
+    "the edit LANDS; census_host + body_count - the resolve-it-ONCE-before-the-mutation body census "
+    "a feature-free effect check counts on; same_component - the ONE component comparison, "
+    "TRI-STATE: wrappers are never identity-stable and a bare entityToken is document-local, so "
+    "every caller branches is True / is False / is None; iter_collection - the ONE count/item(i) "
+    "walk over a Fusion collection; native_token + native_identity - the physical-entity identity "
+    "of BODIES and COMPONENTS alike: native_identity (the native token PAIRED with the source "
+    "document's lineage urn) is the key every comparison and de-dup runs on, native_token alone "
+    "being DOCUMENT-LOCAL; occurrence_walk + all_occurrences + occurrence_paths + "
+    "component_contains - the ONE design-wide occurrence census and its projections: it publishes "
+    "WHICH walk answered and counts None - never 0 - when nothing enumerated; component_contains is "
+    "the TRI-STATE cycle test a re-parent/instance refuses on; broken_reference - the ONE "
+    "unresolved-external-reference detector: occ.component RAISING AT ALL is the gate, its raise "
+    "text the published detail (test_common.py pins the signals that read normal on a broken one); "
+    "build_path - the ONE feature-path resolver behind sweep/pipe/path pattern/on-path datum "
+    "('sketch:<name>', ONE find_geometry edge handle, or a JSON list of them; TestBuildPathLabel in "
+    "test_common.py pins the chaining rule) - the response+resolve substrate")
 
 app = adsk.core.Application.get()
 
@@ -64,8 +111,8 @@ def measured(getter, scale=1.0, places=6):
     The counterpart to safe() for anything a caller will treat as a MEASUREMENT. safe(read, 0.0)
     turns an unreadable property into a confident zero, and zero is an answer: "no gap", "no mass",
     "parallel". None says the value is unknown, which is the only honest thing an unreadable
-    property can say. safe(read, 0) stays right for a TALLY over a collection that may be ABSENT -
-    absent really does hold none; a COUNT whose unreadability is not a zero goes through counted()."""
+    property can say. A COUNT whose unreadability is not a zero goes through ``counted``, which
+    words the one default (a TALLY over a possibly ABSENT collection) that stays safe(read, 0)."""
     v = safe(getter)
     if not isinstance(v, (int, float)) or isinstance(v, bool):
         return None
@@ -117,15 +164,11 @@ def same_component(a, b):
     effectively ALWAYS FALSE and cannot carry a same-component test: written that way it silently
     takes the "different component" branch every time.
 
-    The comparison runs on ``native_identity`` - the token paired with the source document's lineage
-    urn - with the identity check kept as a free short-circuit. The token ALONE cannot carry it:
-    entityToken is DOCUMENT-LOCAL, and every document's ROOT COMPONENT answers one shared token
-    ('/v4BAAEAAwAAAAAAAAAAAAAA', measured across the root of a host and the roots each x-ref brought
-    in). A component reached through an x-ref IS that source document's root, so a token compare
-    answers True for two demonstrably different components and every `is True` branch - "nothing to
-    lift", "this JO is on the root", "the write landed where it was asked" - takes the wrong side on
-    exactly the cross-document pair it was written to separate. The urn half is what tells them
-    apart.
+    The comparison runs on ``native_identity`` - never on a bare entityToken, which is DOCUMENT-LOCAL
+    (measured - see there) and answers True for two demonstrably different components, so every
+    `is True` branch - "nothing to lift", "this JO is on the root", "the write landed where it was
+    asked" - would take the wrong side on exactly the cross-document pair it was written to separate.
+    The identity check is kept as a free short-circuit.
 
     A missing operand, or an identity that will not read on either side, answers None: a NAME is not
     the component - two components may carry one name and one component answers a different name
@@ -160,10 +203,9 @@ def native_token(entity):
     or None when neither reads.
 
     DOCUMENT-LOCAL, which is half an identity: the token names the entity WITHIN one document, and
-    two entities living in two DIFFERENT documents can answer the same token. MEASURED on a host
-    holding two x-refs of one design: the two 'Frame' bodies read byte-identical tokens. So this is
-    never the key a comparison or a de-dup runs on - ``native_identity`` is, and it pairs this with
-    the document the entity comes from.
+    two entities living in two DIFFERENT documents can answer the same token (measured - see
+    ``native_identity``). So this is never the key a comparison or a de-dup runs on -
+    ``native_identity`` is, and it pairs this with the document the entity comes from.
 
     MEASURED: a body and its occurrence PROXY carry DIFFERENT entityTokens (each stable across
     re-fetches of that wrapper), while ``nativeObject`` reads None on a native and hands back the
@@ -187,7 +229,8 @@ def _source_document_urn(native):
     second is a different entity depth, never a looser guess at the first.
 
     A never-saved document carries no ``dataFile``, so the id reads None there. That is an answer,
-    not a hole: an unsaved document cannot be x-ref'd into another one."""
+    not a hole: an unsaved document cannot be x-ref'd into another one, so a None urn belongs to the
+    HOST's own entities, where the token is already unique. Nothing is substituted for it."""
     design = (safe(lambda: native.parentComponent.parentDesign)
               or safe(lambda: native.parentDesign))
     return safe(lambda: design.parentDocument.dataFile.id)
@@ -197,25 +240,24 @@ def native_identity(entity):
     """The PHYSICAL-entity key any two entity references are compared or de-duplicated on: the pair
     ``(native_token, source-document lineage urn)``, or None when the token does not read. Bodies and
     COMPONENTS both answer it - see ``_source_document_urn`` for the two chains the urn is read
-    through.
+    through, and for why a never-saved document's None urn is an answer rather than a hole.
 
+    This is the ONE home of the document-local token measurement its callers cite.
     Both halves are needed, and each one alone is wrong in a different direction:
 
     * the TOKEN collapses a body and its occurrence proxies onto one value (they resolve to one
       native), which the wrapper's own token cannot;
     * the URN - the lineage id of the document the native LIVES in - separates two entities that
       merely share a document-local token. MEASURED on a host holding two x-refs of one design:
-      'Frame's body read one token through both x-refs while the two urns differed. MEASURED again
-      on a CAM job assembled from 7 source documents: the 7 ROOT COMPONENTS read one byte-identical
-      token between them, and all 7 urns read DISTINCT - each root answering its own source
-      document, the one matching the host being the host's own root rather than a collision. So a
-      token-only key collapses those 7 to 1 while this pair keeps them apart. Keyed on the token
+      'Frame's body read one token through both x-refs while the two urns differed, and two DISTINCT
+      components named 'Frame', one out of each x-ref, read byte-identical tokens
+      ('/v4BAAEAegEAAAAAAAAAAAAA', 24 chars, both read without raising). MEASURED again on a CAM job
+      assembled from 7 source documents: the 7 ROOT COMPONENTS read one byte-identical token between
+      them ('/v4BAAEAAwAAAAAAAAAAAAAA') and all 7 urns read DISTINCT - each root answering its own
+      source document, the one matching the host being the host's own root rather than a collision.
+      So a token-only key collapses those 7 to 1 while this pair keeps them apart. Keyed on the token
       alone such entities compare equal, so a de-dup drops one silently and a same-body guard
       refuses a legitimate pair.
-
-    A never-saved document has no ``dataFile``, so the urn half reads None. That is an answer, not a
-    hole: an unsaved document cannot be x-ref'd into another one, so a None urn belongs to the HOST's
-    own entities, where the token is already unique. Nothing is substituted for it.
 
     None when the token reads empty or not at all: there is then no identity to compare, and a caller
     keys on something it can defend (a name plus a scope) or refuses."""
@@ -271,13 +313,10 @@ def broken_reference(occ):
 
     The gate is ``occ.component`` RAISING AT ALL, and ``detail`` is that exception's text verbatim.
     A component that cannot be read is unusable to every caller whatever the wording, so the gate is
-    the raise itself rather than a substring match the platform could reword.
-
-    Every OTHER candidate signal was measured LYING on a real broken reference (an occurrence whose
-    source project is archived): ``isReferencedComponent`` reads False where a live xref reads True;
-    ``documentReference`` raises the SAME "not referencing an external component" text an ordinary
-    local occurrence gives, so it cannot tell the two apart; ``isValid`` and ``isLightBulbOn`` both
-    read True. ``name`` still reads, and is the only identity a caller can publish.
+    the raise itself rather than a substring match the platform could reword. Every OTHER candidate
+    signal was measured LYING on a real broken reference, so none of them may gate this - the
+    measured specimen and each lying signal are pinned by TestBrokenReference in test_common.py.
+    ``name`` still reads, and is the only identity a caller can publish.
 
     Structurally the broken occurrence is present in ``component.occurrences`` and ABSENT from
     ``childOccurrences`` (its assembly path is invalid), which is why ``occurrence_walk`` scans the
@@ -672,12 +711,11 @@ def find_sketches_by_name(d, name):
     The walk is ``all_components`` and NOTHING ELSE, and it de-duplicates NOTHING. That is the whole
     correctness argument. ``design.allComponents`` is Fusion's own collection and lists each
     component exactly once, so there is nothing to de-duplicate - while any de-dup keyed on component
-    identity MERGES two components that share an ``entityToken``, which is measured to happen: two
-    'Frame' components out of two inserted references both read '/v4BAAEAegEAAAAAAAAAAAAA',
-    byte-identical. Merging them dropped one hit, so a name TWO sketches carried came back as one and
-    RESOLVED instead of refusing - measured live, an unscoped read of a name two x-refs shared
-    returned one of them with no error and no disclosure. That silent first-match is the exact thing
-    this list exists to prevent, so the walk must not be able to lose a component.
+    identity MERGES two components that share an ``entityToken`` (measured - see
+    ``native_identity``). Merging them dropped one hit, so a name TWO sketches carried came back as
+    one and RESOLVED instead of refusing - measured live, an unscoped read of a name two x-refs
+    shared returned one of them with no error and no disclosure. That silent first-match is the
+    exact thing this list exists to prevent, so the walk must not be able to lose a component.
 
     Each component is asked with its own ``sketches.itemByName``, so a sketch in a sub-component is
     found, which a plain ``design.rootComponent.sketches.itemByName`` never sees. Order is the
@@ -686,20 +724,19 @@ def find_sketches_by_name(d, name):
     among several - it decides only the order a refusal lists owners in.
 
     Only when that walk finds NOTHING does it fall back to asking the active edit component and the
-    root directly. ``design.allComponents`` can fail to read (it degrades to the root alone), and a
-    sketch in an activated sub-component would then be unreachable by name. The fallback runs on an
-    EMPTY result, so it can never add a second copy of a component the main walk already asked - and
-    the two components it asks are de-duplicated by the sketch object itself, because the active
-    component IS the root whenever nothing is activated.
+    root directly: ``design.allComponents`` can fail to read (``all_components`` degrades to the root
+    alone), which would leave a sketch in an activated sub-component unreachable by name. Running
+    only on an EMPTY result is what stops the fallback adding a second copy of a component the main
+    walk already asked, and its two components de-duplicate by the sketch object itself, because the
+    active component IS the root whenever nothing is activated.
 
-    That empty-result trigger leaves ONE residual, and it is worth stating because ``all_components``
-    MANUFACTURES the state that produces it rather than it being some remote accident: in the
-    degraded state the collection is just ``[root]``, so if BOTH the root and the activated
-    sub-component hold that name, the main walk returns the root's hit alone, the fallback never
-    runs, and ``find_sketch`` RESOLVES to the root's sketch where a walk that saw both would refuse.
-    The trade is deliberate - a trigger that fired on a non-empty result would re-ask components the
-    main walk already asked, and every repeat visit is a chance to report one component's sketch as
-    several - but in that degraded state this list is not the complete answer it is elsewhere."""
+    The residual of that trigger: in the degraded state the collection is just ``[root]``, so if BOTH
+    the root and the activated sub-component hold that name, the main walk returns the root's hit
+    alone, the fallback never runs, and ``find_sketch`` RESOLVES to the root's sketch where a walk
+    that saw both would refuse. The trade is deliberate - a trigger firing on a non-empty result
+    would re-ask components already asked, and every repeat visit is a chance to report one
+    component's sketch as several - but in that degraded state this list is not the complete answer
+    it is elsewhere."""
     nm = (name or "").strip()
     if not nm:
         return []
@@ -905,14 +942,10 @@ def component_placements(d):
     the ONE pairing of a component with WHERE it is placed.
 
     Both halves come from the SAME occurrence, so the path is known by construction and nothing here
-    ever asks whether two components are the same one. That is the whole point of the shape.
-
-    MEASURED on a host holding two inserted references: two DISTINCT components, one out of each
-    reference, both named 'Frame', read BYTE-IDENTICAL entityTokens
-    ('/v4BAAEAegEAAAAAAAAAAAAA', 24 chars, both read without raising). ``entityToken`` is
-    document-LOCAL, so ``same_component`` answers True for that pair and ANY grouping keyed on it
-    merges them - which is exactly how each 'Frame' came to claim the other 'Frame''s path. The
-    repo-wide identity problem is tracked separately; this pairing simply never poses the question.
+    ever asks whether two components are the same one. That is the whole point of the shape: two
+    DISTINCT components can read byte-identical entityTokens (measured - see ``native_identity``),
+    so ANY grouping keyed on a bare token merges them and each namesake claims the other's path.
+    This pairing simply never poses the question.
 
     An occurrence whose component or path will not read is omitted: a placement missing either half
     identifies nothing."""
@@ -944,8 +977,8 @@ def placements_holding_sketch(d, owner_name, sketch_name):
     Both halves are read off the SAME occurrence, so each path is true on its own: that placement
     does hold a sketch of that name, and it resolves to ONE component. It is deliberately NOT "this
     hit's placement" - nothing readable pairs a hit against the occurrence walk while two distinct
-    components report one entityToken (measured - see ``component_placements``), so a path is
-    offered only for what it independently answers.
+    components report one entityToken (measured - see ``native_identity``), so a path is offered
+    only for what it independently answers.
 
     The sketch half is what keeps the row honest rather than merely plausible: a THIRD component of
     that name holding no such sketch is placed too, and listing it would name an owner that owns
@@ -973,7 +1006,7 @@ def find_sketch_in(d, name, comp, label, input_name="component"):
     ``find_sketches_by_name`` asks each component, so the scoped read sees exactly what the
     design-wide one does. It deliberately does NOT filter design-wide hits down by comparing
     components: two distinct components can read one entityToken (measured - see
-    ``component_placements``), so an identity filter answers True for the wrong component's hit, and
+    ``native_identity``), so an identity filter answers True for the wrong component's hit, and
     a NAME filter cannot separate them either. Asking the resolved component itself removes the
     question: whichever component the scope resolved to is the one whose collection answers.
 
@@ -1309,11 +1342,10 @@ def timeline_health(design, limit=None):
     change that corrupts the model is reported instead of swallowed. A direct-modelling design
     (no timeline) yields empty lists.
 
-    Each returned name is a ``_HealthName``: the human-facing label, compared on the row's entity
-    token. The delta every guard runs over these lists - ``[n for n in after if n not in before]``,
-    ``set(after) - set(before)`` - therefore separates two features that SHARE a name in different
-    components and names only the one that actually broke; a row with no readable token is keyed on
-    its name.
+    Each returned name is a ``_HealthName`` (see there): the human-facing label, compared on the
+    row's entity token, so the delta every guard runs over these lists - ``[n for n in after if n
+    not in before]``, ``set(after) - set(before)`` - names only the feature that actually broke
+    where two components SHARE a name.
 
     ``limit`` bounds the walk to the FIRST n items: a CREATE that only wants the damage it did to
     PRE-EXISTING features passes the total this returned before its mutation, which keeps the walk off
@@ -1616,12 +1648,14 @@ def build_path(comp, path_raw):
     """Resolve a feature path input to an adsk.fusion.Path. Returns (path, label, error).
 
     'sketch:<name>' -> chain the connected curves of that path sketch (Features.createPath, isChain).
-    Otherwise a find_geometry EDGE handle (ONE, passed to createPath with chaining requested) or a
-    JSON list of edge handles (used exactly, no chaining) -> a model-edge path (Path.create). A path
-    built from several edges requires them to geometrically connect into one path.
+    Otherwise a find_geometry EDGE handle (ONE, chained from that seed across TANGENT connections -
+    a sharp corner stops the chain, so the built Path's count is the truth) or a JSON list of edge
+    handles (used exactly, no chaining) -> a model-edge path (Path.create). A path built from
+    several edges requires them to geometrically connect into one path.
 
-    Requesting chaining is not the same as getting it (see the count note at the return): the label
-    reports the built Path's own count, which is the only statement of what the path holds."""
+    Requesting chaining is not the same as getting it: the label reports the built Path's own count,
+    which is the only statement of what the path holds (pinned by TestBuildPathLabel in
+    test_common.py, which also holds what one seed was measured to expand to)."""
     # _inputs imports _common, so the edge-handle kind is bound at call time rather than at import.
     from . import _inputs
     if isinstance(path_raw, str) and path_raw.strip().lower().startswith("sketch:"):
@@ -1667,13 +1701,12 @@ def build_path(comp, path_raw):
             return None, None, f"Could not build a path from the {len(edges)} edges: {e}"
     if not p:
         return None, None, "Path build returned nothing (the edges may not connect into one path)."
-    # The label publishes the BUILT path's own entity count (Path.count), never the input count.
-    # What a single seed handle produces is not predictable from the request: chaining follows
-    # TANGENT CONTINUITY and nothing else - an arc seed between two tangent lines built a 3-entity
-    # path, a tangent-continuous closed loop chained all 8 of its edges from one seed, and a sharp
-    # corner (including a fillet patch that breaks tangency at the junction) stops it. Open vs
-    # closed does not decide it. So the count is READ off the built Path and the wording asserts no
-    # expansion; only the read number says what was actually swept.
+    # The label publishes the BUILT path's own entity count (Path.count), never the input count -
+    # what a single seed handle produces is not predictable from the request. MEASURED behind the
+    # docstring's tangent rule: an arc seed between two tangent lines built a 3-entity path, a
+    # tangent-continuous closed loop chained all 8 of its edges from one seed, and a sharp corner
+    # (including a fillet patch that breaks tangency at the junction) stopped it - open vs closed
+    # does not decide it.
     built = safe(lambda: int(p.count), 0) or 0
     how = ("from 1 seed handle" if len(edges) == 1
            else f"from {len(edges)} handles, used exactly")

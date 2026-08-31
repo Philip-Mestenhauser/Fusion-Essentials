@@ -1865,9 +1865,12 @@ class _RaisingColl:
 
 
 class _BrokenOcc:
-    """The measured specimen. Only `name` reads. Every other signal a walk might gate on LIES:
-    isReferencedComponent reads False where a LIVE xref reads True, isValid reads True, and
-    documentReference raises the SAME text an ordinary local occurrence gives."""
+    """The measured specimen - an occurrence whose source project is archived. Only `name` reads,
+    and it is the only identity a caller can publish. Every other signal a walk might gate on LIES:
+    isReferencedComponent reads False where a LIVE xref reads True; documentReference raises the
+    SAME "not referencing an external component" text an ordinary local occurrence gives, so it
+    cannot tell the two apart; isValid and isLightBulbOn both read True. This class is the home of
+    that measurement, and the tests below hold each signal to it."""
     def __init__(self, name="45740", name_raises=False):
         self._name = name
         self._name_raises = name_raises
@@ -1959,6 +1962,13 @@ class TestBrokenReference:
         # the broken specimen reads FALSE and must still be caught; flipping the flag changes nothing.
         occ = _BrokenOcc()
         occ.isReferencedComponent = True
+        assert common.broken_reference(occ)[0] is True
+
+    def test_the_healthy_looking_flags_read_TRUE_and_still_do_not_gate_it(self):
+        # isValid and isLightBulbOn both read True on the measured specimen, so a gate keyed on
+        # either calls a broken reference healthy - only occ.component raising catches it.
+        occ = _BrokenOcc()
+        assert occ.isValid is True and occ.isLightBulbOn is True
         assert common.broken_reference(occ)[0] is True
 
 
@@ -2205,16 +2215,17 @@ class TestBuildPathLabel:
         _p, label, err = common.build_path(self._comp(None), ["E1", "E2", "E3"])
         assert err is None and label == "3 edge(s) from 3 handles, used exactly"
 
-    def test_the_map_blurb_states_the_tangent_continuity_rule(self):
-        # the helper map is what an author reads before wiring build_path: it must promise neither
-        # unconditional chaining nor its opposite (a tangent-continuous CLOSED loop chained all 8
-        # edges from one seed) - only tangent continuity, and the built count as the answer.
-        blurb = common.MAP_BLURB
-        assert "TANGENT connections" in blurb
-        assert "sharp corner stops the chain" in blurb
-        assert "count is the truth" in blurb
-        assert "auto-chain" not in blurb.lower()
-        assert "closed loop" not in blurb.lower() and "seed edge alone" not in blurb
+    def test_the_docstring_states_the_tangent_continuity_rule(self):
+        # build_path's own docstring is what an author reads before wiring it (the helper-map
+        # catalog line points here): it must promise neither unconditional chaining nor its
+        # opposite (a tangent-continuous CLOSED loop chained all 8 edges from one seed) - only
+        # tangent continuity, and the built count as the answer.
+        doc = common.build_path.__doc__
+        assert "TANGENT connections" in doc
+        assert "sharp corner stops the chain" in doc
+        assert "count is the truth" in doc
+        assert "auto-chain" not in doc.lower()
+        assert "closed loop" not in doc.lower() and "seed edge alone" not in doc
 
 
 class TestApplyRename:
