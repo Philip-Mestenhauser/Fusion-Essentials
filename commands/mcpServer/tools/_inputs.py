@@ -21,26 +21,24 @@ from . import _geom     # owning_bodies - the ONE identity-keyed owning-body wal
 from . import _joints   # the JointOrigin walk (all_joint_origins / find_joint_origins_by_name / proxy)
 from ._export import find_component as _find_component   # the one design-wide by-name component resolve
 
-# One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
-MAP_BLURB = ("the typed reference kinds - see the kinds table above; resolve_inputs/apply_to_tool + "
-             "length_value_input/looks_like_expression/expression_report (literal-or-parameter-"
-             "expression lengths; length_value_input hands back the ValueInput AND the value in "
-             "internal cm the units engine evaluated the expression to, which is the only number a "
-             "caller can guard an expression's sign with or compare a feature's read-back against) "
-             "+ world_construction_axis (world key -> origin ConstructionAxis) + "
-             "axis_line_of (the ONE numeric axis read behind an AxisRef ('edge', entity) value - a "
-             "bounded edge/sketch line derives its direction from worldGeometry's endpoints, a "
-             "construction axis carries origin/direction and gets lifted into WORLD space, since its "
-             "own .geometry is component-LOCAL) + single_placement (the ONE assembly-context "
-             "placement walk every consumer of a possibly-foreign entity runs - nothing to lift, or "
-             "the ONE occurrence to proxy into, or a refusal naming every fullPathName when the "
-             "owner is placed several times or not at all; each caller keeps its own leaf op and "
-             "noun) + entity_component (the ONE owner read for an "
-             "axis/direction entity: an edge's body's parent, a sketch line's sketch's parent, or a "
-             "datum's .component - never .parent, which is a BASE FEATURE for a non-parametric datum) "
-             "+ resolve_surface/surface_ref_label (the plane-then-face two-pass every *_to_surface "
-             "operand resolves through - see the SurfaceRef kind - and the resolved-entity label its "
-             "payload publishes instead of the raw input)")
+# The "what to reuse from here" catalog line for the generated CLAUDE.md helper map (see
+# tests/gen_manifest.py): each symbol with the one clause that says WHEN to reach for it. The
+# mechanism behind a clause lives at the symbol itself.
+MAP_BLURB = (
+    "the typed reference kinds - see the kinds table above; resolve_inputs + apply_to_tool - wire a "
+    "declared input spec onto a Tool's schema and resolve every input in it in one call; "
+    "length_value_input + looks_like_expression + expression_report - for a length input taking a "
+    "literal number OR a parameter expression: the ValueInput to build with, the value in internal "
+    "cm to judge a sign or a read-back by, and the echo a payload publishes; "
+    "world_construction_axis - a world axis key as the origin ConstructionAxis ENTITY, where a "
+    "feature input will not take a vector; axis_line_of - the world line behind an AxisRef "
+    "('edge', entity) value, for a consumer needing a numeric axis; single_placement - the "
+    "assembly-context walk to run before using a possibly-foreign entity: nothing to lift, the ONE "
+    "occurrence to proxy into, or a refusal; entity_component - the owning component of an "
+    "axis/direction entity (edge, sketch line, or construction datum); resolve_surface + "
+    "surface_ref_label - the plane-then-face resolve every *_to_surface operand takes (see the "
+    "SurfaceRef kind), and the resolved-entity label its payload publishes instead of the raw "
+    "input")
 
 app = adsk.core.Application.get()
 
@@ -194,16 +192,12 @@ class GeometryHandleList(GeometryHandle):
 
 
 # ── edge-loop / boundary reference (a SET of edge/curve handles treated as a boundary) ──────────
-#
-# PATCH, EXTEND, and surface_extrude(curves=...) all need a BOUNDARY of edges, with an open-vs-closed
-# contract. GeometryHandleList(require="edge") gets the handles but doesn't express loop-ness or
-# assemble the ObjectCollection the surface features want. EdgeLoopRef centralises that: it reuses the
-# handle resolution + staleness checks, optionally enforces single-body for an open chain, and returns
-# (ObjectCollection, meta) ready for Patch/Extend/createOpenProfile. The surface-side extension of the
-# geometry-as-values bridge - find_geometry edge handles flow in as a typed boundary value.
 
 class EdgeLoopRef(GeometryHandleList):
     """A boundary defined by edge handles from find_geometry.
+
+    The GeometryHandleList a surface feature takes: it adds the open-vs-closed contract and the
+    ObjectCollection those features want.
 
     closed=True  -> a CLOSED loop (or a single edge Fusion auto-completes into one)   [patch]
     closed=False -> an OPEN chain of OUTER surface edges, all from ONE body            [extend / open-extrude]
@@ -1238,11 +1232,7 @@ def MeshBodyRef(name, **kw):
     return BodyRef(name, kind="mesh", **kw)
 
 
-# ── feature reference (a TIMELINE object, by its name) ───────────────────────────────────────────
-#
-# Timeline feature names are NOT unique across a design (two components can each hold a "Fillet1"),
-# so this is the non-unique name space: an EXACT case-insensitive match, and a name matching several
-# objects is REFUSED with the 'name@index' candidates rather than resolved to the first hit.
+# ── feature reference (a TIMELINE object by name - the non-unique name space) ────────────────────
 
 def _timeline_objects(timeline):
     """Every timeline object the timeline can hand back. Walked through _common.iter_collection, so
@@ -1418,10 +1408,6 @@ class FeatureRefList(FeatureRef):
 
 
 # ── ModeGuard: declare the design mode / base-feature scope an op needs ──────────────────────────
-#
-# NOT an InputKind - a PRECONDITION guard a tool runs BEFORE any mutation. It computes its error FROM
-# the requirement, so the message structurally cannot point the wrong way (the bug model_construction
-# hand-wrote: a direct-only op whose error told the agent to switch TO parametric).
 
 MODE_PARAMETRIC = "parametric"
 MODE_DIRECT = "direct"
@@ -1476,8 +1462,9 @@ def _in_base_feature_scope(design) -> bool:
 
 
 class ModeGuard:
-    """A declarative precondition: 'this op needs <mode>'. Call check(design) BEFORE mutating; it
-    returns (ok, error_result_or_None) with the error DERIVED from self.requires (so it can't invert).
+    """A declarative precondition - not an InputKind: 'this op needs <mode>'. Call check(design)
+    BEFORE mutating; it returns (ok, error_result_or_None) with the error DERIVED from self.requires
+    (so it can't invert).
 
     requires: MODE_PARAMETRIC | MODE_DIRECT | MODE_BASE_FEATURE. `why` explains the API constraint,
     `fix_hint` tells the agent how to satisfy it (e.g. 'switch with design_set_mode')."""
@@ -1670,14 +1657,14 @@ class PlaneRef(InputKind):
 
     def _in_context(self, des, comp, cp, owner):
         """(the plane usable where this call builds, error). A plane native to ANOTHER component is
-        component-LOCAL, and Fusion refuses it in the current context ('object is not in the assembly
-        context of this component'), so it is PROXIED into the single occurrence that places its
-        owner - the lift single_placement decides. A root-owned plane is already in assembly context
-        and is handed back native; an owner placed several times is refused rather than guessed.
+        component-LOCAL and Fusion refuses it in the current context (``_proxy_or_refuse`` carries
+        the API's own wording), so it is PROXIED into the single occurrence that places its owner -
+        the lift single_placement decides. A root-owned plane is already in assembly context and is
+        handed back native; an owner placed several times is refused rather than guessed.
 
         An owner whose identity does not read is REFUSED, not handed back native: the native form is
-        legal only AT the root, and Fusion answers the wrong guess with 'object is not in the
-        assembly context of this component' at add() - a failure with nothing pointing at why."""
+        legal only AT the root, and anywhere else the wrong guess fails at add() with that same
+        context error - a failure with nothing pointing at why."""
         root = _common.safe(lambda: des.rootComponent)
         at_root = _common.same_component(owner, root)
         if at_root is True:
@@ -1864,11 +1851,10 @@ def single_placement(label, ent, comp, design):
     `label` opens the refusal sentence, so each caller keeps its own noun ("'direction_one': that
     direction", "it", "'axis': that construction axis").
 
-    _common.same_component, never `owner is comp`: component wrappers are measured NEVER
-    identity-stable (two reads of one component are different Python objects sharing an
-    entityToken), so `is` reads False even for the caller's OWN component and control would fall to
-    allOccurrencesByComponent, which returns 0 for the root and refuses a perfectly legal
-    reference."""
+    _common.same_component, never `owner is comp`: a component wrapper is never identity-stable
+    (measured - see there), so `is` reads False even for the caller's OWN component and control
+    would fall to allOccurrencesByComponent, which returns 0 for the root and refuses a perfectly
+    legal reference."""
     if _common.safe(lambda: ent.assemblyContext) is not None:
         return None, None
     # entity_component covers an edge/sketch-line/datum; a BODY answers its own parentComponent and
@@ -2307,14 +2293,10 @@ class Choice(InputKind):
 
 # ── occurrence reference (an assembly instance, by its entityToken handle or a path/name) ─────────
 #
-# The wrong-instance epidemic: ~15 tools each hand-rolled "match name, else substring-match name", which
-# silently grabs the FIRST of several same-named instances. Fusion enforces NO name uniqueness at any
-# level: an occurrence's `name` repeats under every sub-assembly ("Bolt:1"), and even a fullPathName can
-# be worn by two SIBLINGS - an xref insert plus an import of the same-named source produced two
-# 'CMG-050:1' occurrences under one parent, one referenced and one not (measured), neither addressable
-# by any name form. The entityToken is the exact identity, so it is the FIRST form this resolver tries;
-# a path/name resolves only when it names exactly one instance, and is refused - listing what tells
-# the candidates apart, the handle included wherever their paths do not - when it names several.
+# The non-unique name space, at every level: neither an occurrence's name nor its fullPathName is
+# unique, so the entityToken is the FIRST form tried and every by-string form refuses an ambiguity
+# instead of first-matching - the discipline test_no_first_match_resolvers.py bans repo-wide and
+# test_occurrence_ref_lint.py holds the routed tools to.
 
 def _occurrence_discriminator(occ) -> str:
     """What tells THIS instance apart from another wearing the same path/name: its component,
@@ -2345,7 +2327,7 @@ def _occurrence_path_candidates(occs):
     Each hit renders as its fullPathName - except a path SEVERAL of the hits wear, which renders as
     that hit's own path PLUS its discriminator instead (through ``_common.told_apart``, the one
     place a listing substitutes for a repeated name). Two occurrences can wear one byte-identical
-    fullPathName - an xref insert beside an import of the same-named source - so a raw path list
+    fullPathName (measured - an xref insert beside an import of the same-named source), so a raw path list
     prints one string twice and separates nothing.
 
     Returns (rendered, collide). ``collide`` is what decides the REMEDY: where a path is worn twice,
@@ -2408,9 +2390,9 @@ def _resolve_occurrence(name, raw, candidates=None):
     occs = walk.occurrences
     paths = [(_common.safe(lambda o=o: o.fullPathName) or "") for o in occs]
     names = [(_common.safe(lambda o=o: o.name) or "") for o in occs]
-    # 2) exact fullPathName - collect ALL hits, never the first. Two siblings CAN wear one path (the
-    # xref-plus-import case above), and there is no string that tells them apart, so the refusal hands
-    # back the handles that do.
+    # 2) exact fullPathName - collect ALL hits, never the first. Two siblings CAN wear one path (see
+    # _occurrence_path_candidates), and there is no string that tells them apart, so the refusal
+    # hands back the handles that do.
     by_path = [o for o, fp in zip(occs, paths) if fp == want]
     if len(by_path) == 1:
         return by_path[0], None
@@ -2530,15 +2512,8 @@ class OccurrenceRefList(InputKind):
 
 # ── joint-origin reference (a reusable WCS frame, by handle OR name; ambiguity refused) ───────────────
 #
-# A Joint Origin is the self-centering coordinate frame a template ships so a machining WCS (or a joint)
-# binds to it by NAME instead of a fragile box-point. JointOrigin.entityToken round-trips through
-# findEntityByToken (verified via the API doc), so a JO is a first-class handle like a face/edge - the
-# read (assembly_get(include=['joint_origins'])) mints one, and this kind resolves it. It also accepts a
-# name: bare when the JO is unique, else the qualified '<occurrence>:<JO name>' form. A bare name shared
-# across components (or an owning component instanced several times) is REFUSED with the qualified
-# candidates - the same non-unique-name-space discipline OccurrenceRef enforces. Composes the ONE JO
-# walk in _joints (all_joint_origins / find_joint_origins_by_name / jo_assembly_proxy) - it never
-# re-rolls the traversal.
+# Composes the ONE JO walk in _joints (all_joint_origins / find_joint_origins_by_name /
+# jo_assembly_proxy) - it never re-rolls the traversal.
 
 class JointOriginRef(InputKind):
     """A reference to a Joint Origin (a reusable WCS coordinate frame), as EITHER a 'handle' (the
@@ -2710,11 +2685,8 @@ class JointOriginRef(InputKind):
 
 # ── target reference (MULTI-SOURCE: a thing to MEASURE/COLOUR - body/face/mesh/occurrence/component/design) ──
 #
-# model_inspect / appearance_set need "the thing the user named", which can be a body, a face, a mesh
-# body, an assembly occurrence, a component, or the WHOLE design. TargetRef unifies that (like PlaneRef
-# did for planes): one input, several resolution paths tried in order, returning (entity, kind) so the
-# consumer can branch on what it got. It composes the existing resolvers (_resolve_token_entity /
-# _resolve_occurrence / _resolve_any_body / _export.find_component) rather than re-implementing them.
+# Composes the existing resolvers (_resolve_token_entity / _resolve_occurrence / _resolve_any_body /
+# _export.find_component) rather than re-implementing them.
 
 
 class TargetRef(InputKind):
@@ -2951,11 +2923,6 @@ class TargetRefList(InputKind):
 
 
 # ── profile reference (a STABLE handle, or a {sketch, profile_index} legacy selector) ────────────
-#
-# Replaces the fragile sketch_name+profile_index pattern (a blind index into an order-UNSTABLE
-# collection). A handle (entityToken) is order-stable across rebuilds; the legacy selector stays as a
-# fallback so existing model_extrude-style callers keep working. ProfileRefList PRESERVES ORDER (no
-# sort/dedupe) - loft order is load-bearing, unlike fillet's edge set.
 
 def _profile_sketch(name, sketch_name, component="", scope_input=None):
     """The sketch a profile selector addresses: a NAME resolves DESIGN-WIDE (every component asked
@@ -3234,11 +3201,7 @@ class ProfileRefList(ProfileRef):
         return out, None
 
 
-# ── sketch reference (a SKETCH by name, design-wide) ─────────────────────────────────────────────
-#
-# A sketch NAME can be carried by more than one sketch in a design, so this is the non-unique name
-# space. The census and the resolve are ONE walk - _common.find_sketch - which refuses a name
-# several sketches carry, naming each owning component, rather than taking the first hit.
+# ── sketch reference (a SKETCH by name, design-wide - the non-unique name space) ─────────────────
 
 # How many available names a miss lists. A COUNT cap, not a cut of the joined string: a duplicated
 # name comes back owner-qualified ('Plate (Alpha)'), so a character cut lands inside a name and
@@ -3373,10 +3336,8 @@ def contract_block(spec, header="INPUTS") -> str:
 
 # ── shared input singletons (the recurring enums, defined ONCE) ──────────────────────────────────
 #
-# These replace prose enums hand-copied across many tools. A tool wires one with
-# `.add_input_property(*_inputs.UNITS.as_property())` - one line, schema carries the validated `enum`,
-# and the option list lives in exactly one place (so it can't drift the way the prose did). Per-tool
-# factories (units_for / boolean_op / frame_axis) let a tool tweak the default or description while
+# A tool wires one with `.add_input_property(*_inputs.UNITS.as_property())`; the per-tool factories
+# below (units_property / boolean_op / frame_axis) let it tweak the default or description while
 # still sharing the option set.
 
 def units_property(description="Length units.", default="mm"):
