@@ -1,13 +1,20 @@
-"""Lint: the substring-first-match smell is banned across EVERY tool module, not just the ones
-already fixed (see ``test_occurrence_ref_lint.py`` for the resolver this smell should route through
-instead).
+"""Lint: the substring-first-match smell is banned across EVERY tool module, and the tools that
+resolve a single occurrence keep routing through the shared resolver.
 
 An occurrence's ``name`` is only LOCALLY unique - two different sub-assemblies can each contain an
 occurrence named "Bolt:1". A tool that resolves a single target by "does the search term
 (lowercased) appear inside this candidate's .name (lowercased)" silently returns whichever candidate
-happened to come first, instead of refusing the ambiguity. ``test_occurrence_ref_lint.py`` polices a
-FROZEN list of tools already migrated to the shared resolver; this test widens the same smell check
-to every module under ``tools/`` so a NEW tool can't reintroduce it.
+happened to come first, instead of refusing the ambiguity. The resolver that refuses instead of
+guessing is ``_inputs._resolve_occurrence`` (it prefers the unambiguous ``fullPathName``), reached
+directly or through the typed ``OccurrenceRef``/``OccurrenceRefList`` kind that calls it internally.
+
+Two checks, and they fail in opposite directions - which is why both live here rather than one
+standing in for the other. The SMELL BAN below covers every module under ``tools/``, so a NEW tool
+cannot reintroduce the pattern. ``TestRoutedToolsStayOnSharedResolver`` at the foot of this file
+holds a FROZEN list of routed tools to still REFERENCING the shared resolver, so a routed tool
+cannot pass the smell ban merely by ceasing to resolve occurrences at all. The resolver's own
+refuse-ambiguity behaviour is pinned by the unit tests in ``test_inputs.py``
+(TestSharedResolverBehaviour).
 
 A module with a genuine reason to do a substring/lower() name match (a multi-match read, or matching
 something that is not an occurrence) is named in ``_ALLOWLIST`` with a plain-English reason.
@@ -26,6 +33,7 @@ import operator
 import os
 import re
 
+import _corpus
 from conftest import TOOLS_DIR
 
 # WHAT THIS CATCHES (and deliberately does NOT). The wrong-instance risk is a single-target resolver
@@ -394,7 +402,7 @@ class TestNoFirstMatchResolverAnywhere:
             mod_name = fn[:-3]
             if mod_name in _ALLOWLIST:
                 continue
-            src = open(os.path.join(TOOLS_DIR, fn), encoding="utf-8").read()
+            src = _corpus.text(os.path.join(TOOLS_DIR, fn))
             for i, line in enumerate(src.splitlines(), 1):
                 if _smells(line):
                     offenders.append(f"{fn}:{i}: {line.strip()}")
@@ -416,7 +424,7 @@ class TestNoFirstMatchResolverAnywhere:
             if not os.path.exists(path):
                 stale.append(f"{mod_name}: no such module")
                 continue
-            src = open(path, encoding="utf-8").read()
+            src = _corpus.text(path)
             if not any(_smells(line) for line in src.splitlines()):
                 stale.append(f"{mod_name}: no longer matches the smell - remove the allowlist entry")
         assert not stale, "stale allowlist entries:\n  " + "\n  ".join(stale)
@@ -441,7 +449,7 @@ class TestNoFirstMatchResolverAnywhere:
         offenders = []
         for fn in _all_tool_files():
             mod_name = fn[:-3]
-            src = open(os.path.join(TOOLS_DIR, fn), encoding="utf-8").read()
+            src = _corpus.text(os.path.join(TOOLS_DIR, fn))
             for func, lineno, line in _first_match_loops(src):
                 if f"{mod_name}.{func}" in _FIRST_MATCH_ALLOWLIST:
                     continue
@@ -466,7 +474,7 @@ class TestNoFirstMatchResolverAnywhere:
             if not os.path.exists(path):
                 stale.append(f"{key}: no such module")
                 continue
-            src = open(path, encoding="utf-8").read()
+            src = _corpus.text(path)
             if not any(f == func for f, _ln, _line in _first_match_loops(src)):
                 stale.append(f"{key}: no longer a first-match loop - remove the allowlist entry")
         assert not stale, "stale first-match allowlist entries:\n  " + "\n  ".join(stale)
@@ -708,7 +716,7 @@ class TestNoFirstMatchResolverAnywhere:
     def test_the_fixed_resolver_no_longer_trips(self):
         # _export.find_component is the site this check was written for; it must be clean now, or
         # the check is passing for the wrong reason.
-        src = open(os.path.join(TOOLS_DIR, "_export.py"), encoding="utf-8").read()
+        src = _corpus.text(os.path.join(TOOLS_DIR, "_export.py"))
         assert _first_match_loops(src) == []
 
     def test_correct_exact_match_is_not_flagged(self):
@@ -719,3 +727,34 @@ class TestNoFirstMatchResolverAnywhere:
         assert not _smells('        if (nm or "").lower() == want:')        # find_setup:75 / find_operation:103
         assert not _smells('            if want and (s_name or "").lower() != want:')  # a FILTER, not a resolver
         assert not _smells('    n = value.find("x")')                       # .find without a containment guard
+
+
+# ── the positive check: the routed tools stay ON the shared resolver ───────────
+
+# Tools whose SINGLE-occurrence resolution was routed through _inputs._resolve_occurrence. Each must
+# stay on the shared resolver - i.e. not hand-roll a substring-on-occurrence-name loop again.
+_ROUTED_TOOLS = (
+    "assembly_transform",
+    "assembly_joints_advanced",
+    "model_arrange",
+    "model_pattern",
+    "joint_create_edit",
+    "view_screenshot",
+    "view_section",
+)
+
+
+class TestRoutedToolsStayOnSharedResolver:
+    def test_routed_tools_reference_the_shared_resolver(self):
+        # Positive check: each fixed tool actually calls the shared resolver - either directly
+        # (`_resolve_occurrence`) or via the typed kind that wraps it (`OccurrenceRef`/
+        # `OccurrenceRefList`, which call `_resolve_occurrence` internally) - so the tools-wide
+        # smell ban above can't pass merely because the tool stopped resolving occurrences at all.
+        missing = []
+        for name in _ROUTED_TOOLS:
+            src = _corpus.text(os.path.join(TOOLS_DIR, f"{name}.py"))
+            if "_resolve_occurrence" not in src and "OccurrenceRef" not in src:
+                missing.append(name)
+        assert not missing, (
+            "expected these to call _inputs._resolve_occurrence (directly or via "
+            "OccurrenceRef/OccurrenceRefList): " + ", ".join(missing))

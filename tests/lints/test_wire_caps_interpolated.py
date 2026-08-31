@@ -56,6 +56,7 @@ import ast
 import os
 import re
 
+import _corpus
 from conftest import TOOLS_DIR
 
 # The naming convention every wire description constant uses: TOOL_DESCRIPTION, plus the per-verb
@@ -208,8 +209,7 @@ def _sweep_bare_defaults():
     for fn in sorted(os.listdir(TOOLS_DIR)):
         if not fn.endswith(".py"):
             continue
-        with open(os.path.join(TOOLS_DIR, fn), encoding="utf-8") as fh:
-            src = fh.read()
+        src = _corpus.text(os.path.join(TOOLS_DIR, fn))
         for func, param, lineno, names, value in bare_cap_defaults(src, fn):
             if (fn, param) in _BARE_DEFAULT_ALLOWED:
                 continue
@@ -227,9 +227,8 @@ def _sweep(narrow=True):
         if not fn.endswith(".py"):
             continue
         path = os.path.join(TOOLS_DIR, fn)
-        with open(path, encoding="utf-8") as fh:
-            src = fh.read()
-        for label, lineno, names, value, _text in hardcoded_caps(src, path, narrow=narrow):
+        for label, lineno, names, value, _text in hardcoded_caps(_corpus.text(path), path,
+                                                                 narrow=narrow):
             offenders.append(f"{fn}:{lineno}: {label} spells {value} as a digit while "
                              f"{'/'.join(names)} holds it - interpolate it "
                              f"(f\"... {{{names[0]}}} ...\") so the sentence cannot outlive the value")
@@ -258,9 +257,9 @@ class TestHandlerDefaultsReadTheConstant:
         for fn in sorted(os.listdir(TOOLS_DIR)):
             if not fn.endswith(".py"):
                 continue
-            with open(os.path.join(TOOLS_DIR, fn), encoding="utf-8") as fh:
-                for _func, param, *_rest in bare_cap_defaults(fh.read(), fn):
-                    live.add((fn, param))
+            for _func, param, *_rest in bare_cap_defaults(_corpus.text(os.path.join(TOOLS_DIR, fn)),
+                                                          fn):
+                live.add((fn, param))
         stale = sorted(set(_BARE_DEFAULT_ALLOWED) - live)
         assert not stale, f"allowlist entries whose offender is gone - delete them: {stale}"
 

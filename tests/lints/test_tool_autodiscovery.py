@@ -14,6 +14,7 @@ contract WITHOUT importing entry.py (which needs the live Fusion add-in host):
 
 import os
 
+import _corpus
 from conftest import load_tool, TOOLS_DIR
 
 # Mirror entry.py's gated set + helper-skip rule.
@@ -97,7 +98,7 @@ class TestAutoDiscovery:
         # `tools.<name>`.
         import os
         entry = os.path.join(os.path.dirname(TOOLS_DIR), "entry.py")
-        src = open(entry, encoding="utf-8").read()
+        src = _corpus.text(entry)
         for bad in ("tools.sys_execute_script", "tools.sys_reload_addin"):
             assert bad not in src, (
                 f"entry.py references `{bad}` as an attribute — import it explicitly instead "

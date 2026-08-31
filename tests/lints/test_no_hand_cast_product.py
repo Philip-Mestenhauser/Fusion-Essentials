@@ -15,6 +15,7 @@ it falls back to the active document's DesignProductType - so a hand cast silent
 import os
 import re
 
+import _corpus
 from conftest import TOOLS_DIR
 
 _DESIGN_CAST = re.compile(r"Design\.cast\([^)]*activeProduct")
@@ -26,7 +27,7 @@ def _scan(regex, home):
     for fn in sorted(os.listdir(TOOLS_DIR)):
         if not fn.endswith(".py") or fn == home:
             continue
-        src = open(os.path.join(TOOLS_DIR, fn), encoding="utf-8").read()
+        src = _corpus.text(os.path.join(TOOLS_DIR, fn))
         for i, line in enumerate(src.splitlines(), 1):
             if regex.search(line):
                 offenders.append(f"{fn}:{i}: {line.strip()}")

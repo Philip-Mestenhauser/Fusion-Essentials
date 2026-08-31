@@ -16,6 +16,7 @@ automatically opts it into these checks (no per-tool wiring).
 
 import os
 
+import _corpus
 from conftest import load_tool, TOOLS_DIR
 
 _outputs = load_tool("_outputs")
@@ -49,7 +50,7 @@ class TestDeclaredOutputs:
     def test_declared_key_appears_in_source(self):
         offenders = []
         for name, mod in _tools_with_returns():
-            src = open(os.path.join(TOOLS_DIR, f"{name}.py"), encoding="utf-8").read()
+            src = _corpus.text(os.path.join(TOOLS_DIR, f"{name}.py"))
             for o in mod.RETURNS:
                 # The key must be written somewhere in the module (the payload that mints it).
                 if f'"{o.key}"' not in src and f"'{o.key}'" not in src:

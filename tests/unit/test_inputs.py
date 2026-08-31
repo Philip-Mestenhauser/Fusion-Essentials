@@ -3542,7 +3542,7 @@ class TestOccurrenceRefList:
 
 class TestSharedResolverBehaviour:
     """Behavioural anchors for _resolve_occurrence ITSELF - the canonical resolver
-    test_occurrence_ref_lint.py points every routed tool at. OccurrenceRef wraps it, but a tool may
+    test_no_first_match_resolvers.py points every routed tool at. OccurrenceRef wraps it, but a tool may
     also call it directly, so the helper's own contract (a handle is the exact identity; fullPathName
     beats a same-named instance; an ambiguous bare name or a collided path errors) is pinned here,
     not only through the kind."""

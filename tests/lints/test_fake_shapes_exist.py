@@ -20,10 +20,17 @@ not registering in _FAKE_TO_LIVE.
 import ast
 import os
 
+import _corpus
 import live_api_facts
 
 _CONFTEST = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                          "conftest.py")
+
+
+def _conftest_classes():
+    """class name -> its ClassDef, for every class at conftest.py's module scope. Every check here
+    starts from this map, and _corpus parses that (large) file once for the whole run."""
+    return {n.name: n for n in _corpus.tree(_CONFTEST).body if isinstance(n, ast.ClassDef)}
 
 # conftest fake class -> the live type (a SHAPES key) it impersonates. Only needed when the
 # stripped class name does not literally match its SHAPES key - everything else auto-maps.
@@ -143,8 +150,7 @@ def _effective_map(class_names):
 
 class TestSharedFakeShapesExist:
     def test_every_shared_fake_attribute_exists_live(self):
-        tree = ast.parse(open(_CONFTEST, encoding="utf-8").read())
-        classes = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
+        classes = _conftest_classes()
         offenders = []
         for fake, live in sorted(_effective_map(classes).items()):
             assert fake in classes, f"mapped fake {fake} not found in conftest.py"
@@ -166,8 +172,7 @@ class TestSharedFakeShapesExist:
         # The completeness gate: a NEW conftest fake that maps to nothing is a silently-unswept
         # mock - it must map (rename it so the stripped name hits a SHAPES key, add a manual
         # entry, or measure the missing live type), never just be left out.
-        tree = ast.parse(open(_CONFTEST, encoding="utf-8").read())
-        classes = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
+        classes = _conftest_classes()
         unmapped = _unmapped_fakes(classes, live_api_facts.SHAPES, _FAKE_TO_LIVE, _UNMAPPED_OK,
                                    live_names=_live_type_names())
         assert not unmapped, (
@@ -177,8 +182,7 @@ class TestSharedFakeShapesExist:
             + "\n  ".join(unmapped))
 
     def test_unmapped_ok_entries_still_trip(self):
-        tree = ast.parse(open(_CONFTEST, encoding="utf-8").read())
-        classes = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
+        classes = _conftest_classes()
         stale = []
         for name, reason in _UNMAPPED_OK.items():
             assert reason.strip(), f"{name} _UNMAPPED_OK entry needs a plain-English reason"
@@ -215,8 +219,7 @@ class TestSharedFakeShapesExist:
         assert set(live_api_facts.SHAPES) <= live and "MeshRepairFeature" in live
 
     def test_allowlist_entries_still_trip(self):
-        tree = ast.parse(open(_CONFTEST, encoding="utf-8").read())
-        classes = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
+        classes = _conftest_classes()
         stale = []
         for key, reason in _ALLOWLIST.items():
             assert reason.strip(), f"{key} allowlist entry needs a plain-English reason"

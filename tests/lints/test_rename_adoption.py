@@ -17,6 +17,8 @@ dedicated rename tool design_set_name errors on a miss; apply_rename itself sets
 import re
 from pathlib import Path
 
+import _corpus
+
 _TOOLS = Path(__file__).resolve().parents[2] / "commands" / "mcpServer" / "tools"
 
 _SWALLOWED_RENAME = re.compile(r"""setattr\(\s*[^,]+,\s*["']name["']""")
@@ -31,7 +33,7 @@ class TestRenameAdoption:
         for path in sorted(_TOOLS.glob("*.py")):
             if path.name == _HOME:
                 continue
-            for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            for i, line in enumerate(_corpus.text(path).splitlines(), 1):
                 if _SWALLOWED_RENAME.search(line):
                     offenders.append(f"{path.name}:{i}: {line.strip()}")
         assert not offenders, (

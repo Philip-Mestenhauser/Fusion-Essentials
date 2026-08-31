@@ -35,6 +35,7 @@ read as a property and its setter, and the plain def shadowing the property goes
 import ast
 from pathlib import Path
 
+import _corpus
 from conftest import TOOLS_DIR
 
 MCP_ROOT = Path(TOOLS_DIR).parent          # commands/mcpServer
@@ -47,16 +48,14 @@ _ACCESSOR_ATTRS = frozenset({"setter", "getter", "deleter"})
 
 
 def _py_files():
-    return [p for root in SCANNED_ROOTS
-            for p in sorted(root.rglob("*.py")) if "__pycache__" not in p.parts]
+    return [p for root in SCANNED_ROOTS for p in sorted(_corpus.py_files(root))]
 
 
 def _duplicate_top_level_defs(path):
     """[(name, [linenos])] for every top-level function/class name this module defines more than
     once. Scans `tree.body` directly (module scope only)."""
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     by_name = {}
-    for node in tree.body:
+    for node in _corpus.tree(path).body:
         if isinstance(node, _DEFS):
             by_name.setdefault(node.name, []).append(node.lineno)
     return [(name, linenos) for name, linenos in by_name.items() if len(linenos) > 1]
@@ -91,9 +90,8 @@ def _duplicate_class_body_defs(path):
     Walks EVERY class in the module (nested ones included) but compares names only within one
     class's own body, so the same method name in two classes is not a hit. A property and its
     accessors are skipped."""
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     hits = []
-    for cls in ast.walk(tree):
+    for cls in ast.walk(_corpus.tree(path)):
         if not isinstance(cls, ast.ClassDef):
             continue
         by_name = {}

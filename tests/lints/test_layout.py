@@ -20,9 +20,9 @@ TESTS = Path(__file__).resolve().parent.parent
 
 # The convention-enforcing tests (this file included). Shrink/grow deliberately, never by accident.
 _LINT_TESTS = frozenset({
-    "test_assert_strength", "test_axis_vectors_shared", "test_banned_vocabulary",
+    "test_assert_strength", "test_axis_vectors_shared",
     "test_bespoke_fake_ratchet", "test_choice_coverage", "test_dead_code",
-    "test_doc_citations", "test_docstring_restatement", "test_enum_families_measured",
+    "test_doc_citations", "test_enum_families_measured",
     "test_evergreen_no_baggage", "test_export_knob_preread",
     "test_fake_shapes_exist", "test_frame_disclosure",
     "test_generated_docs_current", "test_generators", "test_helper_duplication", "test_layout",
@@ -33,13 +33,12 @@ _LINT_TESTS = frozenset({
     "test_input_property_names", "test_rename_adoption",
     "test_no_first_match_resolvers", "test_no_hand_cast_product", "test_no_hand_seeded_enums",
     "test_strict_schema",
-    "test_occurrence_ref_lint",
     "test_operations_shared",
     "test_output_contracts",
     "test_permission_posture",
-    "test_postconditions_declared", "test_tool_autodiscovery", "test_tool_citations",
+    "test_postconditions_declared", "test_tool_autodiscovery",
     "test_tool_naming", "test_tool_verify_complete", "test_unit_coverage_complete",
-    "test_units_scaled", "test_units_typed", "test_wire_ascii", "test_wire_budget",
+    "test_units", "test_wire_ascii", "test_wire_budget",
     "test_wire_caps_interpolated",
     "test_wire_shape", "test_write_status_annotations",
 })

@@ -171,8 +171,8 @@ class TestBoolReturnsChecked:
         assert sorted(m for _l, _v, m, _h in found) == ["setDirectionOne"], found
 
     def test_an_ambiguous_factory_method_does_not_resolve_a_receiver(self, tmp_path):
-        # the boundary of the rule above: `createInput`'s 89 declarations return 88 DIFFERENT input
-        # classes, so on an UNRESOLVED receiver it names none of them. Resolving it anyway would
+        # the boundary of the rule above: `createInput`'s declarations DISAGREE on what they return,
+        # so on an UNRESOLVED receiver it names none of them. Resolving it anyway would
         # call any `x.setDistanceExtent(...)` a FeatureInput setter on the strength of a method name
         # whose meaning changes with the collection - the over-wide direction of this gate.
         src = tmp_path / "ambiguous.py"

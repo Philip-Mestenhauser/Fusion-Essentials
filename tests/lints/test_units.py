@@ -1,31 +1,43 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Lint: a length/coordinate input carries its unit in a typed selector, not in loose prose.
+"""Lint: a length carries its unit in a typed selector, and converts through the one shared table.
 
-The north star (CLAUDE.md "Input kinds"): a fact about an input - here, what unit a number is in -
-belongs in the typed surface an agent must consume to call the tool, not asserted in a description
-string that nothing checks. A numeric input whose description names a unit (mm/cm/inch) while its
-owning tool exposes no 'units' selector is a unit fact stranded in prose: an agent that learned
-"pass units=cm" from a sibling tool gets a silently wrong-by-a-factor result with no feedback. The
-remedy is to pair the number with the Distance + UnitField kinds from _inputs.py (which add the
-'units' selector), so the unit is declared and resolved rather than asserted.
+Two halves of one convention, so they live together: the INPUT side declares what unit a number is
+in, and the CONVERSION side turns that number into cm exactly one way.
 
-Flags a number (or array-of-number) input property whose description names a unit while its tool
-declares no 'units' input. The shrink-only _EXEMPT table carries any input where a fixed, non-agent-
-selectable unit is deliberate, each with a one-line reason.
+INPUT SIDE. The north star (CLAUDE.md "Input kinds"): a fact about an input - here, what unit a
+number is in - belongs in the typed surface an agent must consume to call the tool, not asserted in
+a description string that nothing checks. A numeric input whose description names a unit (mm/cm/inch)
+while its owning tool exposes no 'units' selector is a unit fact stranded in prose: an agent that
+learned "pass units=cm" from a sibling tool gets a silently wrong-by-a-factor result with no
+feedback. The remedy is to pair the number with the Distance + UnitField kinds from _inputs.py
+(which add the 'units' selector), so the unit is declared and resolved rather than asserted. The
+shrink-only _EXEMPT table carries any input where a fixed, non-agent-selectable unit is deliberate,
+each with a one-line reason.
 
-READ-SIDE companion (test_units_reporting_read_wires_the_units_kind): the mirror convention - a tool
-that REPORTS a 'units' field in its result payload must let the agent CHOOSE those units through the
-shared _inputs.UNITS enum kind (mm/cm/in), not a hand-rolled 'units' string. Every geometry-reporting
-read scales its output via _common.CM_TO_UNIT keyed by that selector, so the selector must be the
-typed kind or the report and the request silently disagree.
+READ-SIDE MIRROR (test_units_reporting_read_wires_the_units_kind): a tool that REPORTS a 'units'
+field in its result payload must let the agent CHOOSE those units through the shared _inputs.UNITS
+enum kind (mm/cm/in), not a hand-rolled 'units' string. Every geometry-reporting read scales its
+output via _common.CM_TO_UNIT keyed by that selector, so the selector must be the typed kind or the
+report and the request silently disagree.
+
+CONVERSION SIDE. `_common.scale(units)` IS exactly `UNIT_TO_CM.get((units or "mm").strip().lower())`.
+A tool that writes that expression itself, or keeps its own copy of the UNIT_TO_CM table, diverges
+from the single source the moment the shared table changes (a new unit, a corrected factor). Two
+clean signals, banned outside _common.py:
+  1. raw `UNIT_TO_CM` access (`.get(` or `[`) - call `_common.scale(units)` instead;
+  2. a dict literal mapping `"mm"` and `"cm"` to numbers - a copy of `UNIT_TO_CM`.
+A hardcoded scalar conversion (`* 10` / `/ 10`) has no clean signature and is NOT caught here - only
+a human read of the arithmetic catches those.
 """
 
+import ast
 import inspect
 import os
 import re
 
+import _corpus
 from conftest import load_tool, register_all_tools, TOOLS_DIR
 
 # a unit token, allowing a leading digit ("5mm") but not a letter ("swimming", "incoming").
@@ -79,7 +91,7 @@ def _tools_with_report_source():
         registry.reset_registry()
         rt()
         items = list(registry.get_tools())
-        module_src = open(os.path.join(TOOLS_DIR, fn), encoding="utf-8").read()
+        module_src = _corpus.text(os.path.join(TOOLS_DIR, fn))
         for it in items:
             d = it.to_dict()
             props = (d.get("inputSchema") or {}).get("properties", {}) or {}
@@ -242,3 +254,52 @@ class TestExemptionsAreNotStale:
         shared = [("t", {"units": {"type": "string", "enum": ["mm", "cm", "in"]}},
                    'payload = {"units": u}')]
         assert _stale_reports_exempt_entries({"t": "r"}, shared)
+
+
+# ── the conversion side: one table, one scale() ────────────────────────────────
+
+_SCALE_HOME = "_common.py"
+_RAW_ACCESS = re.compile(r"\bUNIT_TO_CM\s*[.\[]")
+
+
+def _files_outside_the_scale_home():
+    return [fn for fn in sorted(os.listdir(TOOLS_DIR))
+            if fn.endswith(".py") and fn != _SCALE_HOME]
+
+
+class TestUnitsScaled:
+    def test_no_raw_unit_to_cm_access_outside_common(self):
+        offenders = []
+        for fn in _files_outside_the_scale_home():
+            src = _corpus.text(os.path.join(TOOLS_DIR, fn))
+            for i, line in enumerate(src.splitlines(), 1):
+                if _RAW_ACCESS.search(line):
+                    offenders.append(f"{fn}:{i}: {line.strip()}")
+        assert not offenders, (
+            "unit conversion re-inlines _common.scale() via raw UNIT_TO_CM access - call "
+            "`_common.scale(units)` (unit->cm) or `_common.CM_TO_UNIT[units]` (cm->unit) instead:\n  "
+            + "\n  ".join(offenders))
+
+    def test_no_local_unit_table_copy_outside_common(self):
+        offenders = []
+        for fn in _files_outside_the_scale_home():
+            tree = _corpus.tree(os.path.join(TOOLS_DIR, fn))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Dict):
+                    continue
+                keys = [k.value for k in node.keys if isinstance(k, ast.Constant) and isinstance(k.value, str)]
+                numeric = node.values and all(
+                    isinstance(v, ast.Constant) and isinstance(v.value, (int, float)) for v in node.values)
+                if "mm" in keys and "cm" in keys and numeric:
+                    offenders.append(f"{fn}:{getattr(node, 'lineno', '?')}: local unit-factor table "
+                                     "(keys 'mm'+'cm' -> numbers)")
+        assert not offenders, (
+            "a local copy of the unit-factor table diverges from _common.UNIT_TO_CM - import it (or use "
+            "_common.scale/CM_TO_UNIT):\n  " + "\n  ".join(offenders))
+
+    def test_the_lint_bites(self):
+        # prove the raw-access regex catches a direct subscript/attribute hit and skips a longer
+        # identifier that merely starts with the same prefix.
+        assert _RAW_ACCESS.search("k = UNIT_TO_CM['mm']")
+        assert _RAW_ACCESS.search("k = UNIT_TO_CM.get(units)")
+        assert not _RAW_ACCESS.search("k = UNIT_TO_CMX['mm']")

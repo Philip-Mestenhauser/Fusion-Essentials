@@ -15,6 +15,7 @@ NAME map (string values), which this deliberately does not touch: that map is ho
 import ast
 import os
 
+import _corpus
 from conftest import TOOLS_DIR
 
 _HOME = "_inputs.py"        # where _AXIS_VECS is defined
@@ -50,8 +51,7 @@ class TestAxisVectorsShared:
         for fn in sorted(os.listdir(TOOLS_DIR)):
             if not fn.endswith(".py") or fn == _HOME:
                 continue
-            tree = ast.parse(open(os.path.join(TOOLS_DIR, fn), encoding="utf-8").read())
-            for node in ast.walk(tree):
+            for node in ast.walk(_corpus.tree(os.path.join(TOOLS_DIR, fn))):
                 if _is_xyz_vector_map(node):
                     offenders.append(f"{fn}:{getattr(node, 'lineno', '?')}")
         assert not offenders, (

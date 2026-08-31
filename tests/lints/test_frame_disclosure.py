@@ -29,6 +29,7 @@ import functools
 import os
 import re
 
+import _corpus
 from conftest import TOOLS_DIR
 
 # A frame payload key being MINTED: a dict-literal entry or an item assignment, under either name
@@ -85,14 +86,13 @@ def _tool_modules():
 
 
 def _source(name):
-    with open(os.path.join(TOOLS_DIR, f"{name}.py"), encoding="utf-8") as fh:
-        return fh.read()
+    return _corpus.text(os.path.join(TOOLS_DIR, f"{name}.py"))
 
 
 def _package_source():
     """Every tools/*.py, helpers included - a module may publish its frame through a shared helper
     (sketch_core's block is built in _sketch_detail), so the keys live one file over."""
-    return "\n".join(open(os.path.join(TOOLS_DIR, fn), encoding="utf-8").read()
+    return "\n".join(_corpus.text(os.path.join(TOOLS_DIR, fn))
                      for fn in sorted(os.listdir(TOOLS_DIR)) if fn.endswith(".py"))
 
 
@@ -106,9 +106,7 @@ def _minted_keys():
     for fn in sorted(os.listdir(TOOLS_DIR)):
         if not fn.endswith(".py"):
             continue
-        with open(os.path.join(TOOLS_DIR, fn), encoding="utf-8") as fh:
-            tree = ast.parse(fh.read(), filename=fn)
-        for node in ast.walk(tree):
+        for node in ast.walk(_corpus.tree(os.path.join(TOOLS_DIR, fn))):
             if isinstance(node, ast.Dict):
                 found.update(k.value for k in node.keys
                              if isinstance(k, ast.Constant) and isinstance(k.value, str))

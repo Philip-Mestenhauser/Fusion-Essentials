@@ -15,6 +15,7 @@ VALUE SHAPE: any dict literal outside _common whose values name a `FeatureOperat
 import ast
 import os
 
+import _corpus
 from conftest import TOOLS_DIR
 
 _HOME = "_common.py"
@@ -31,8 +32,7 @@ class TestOperationsShared:
         for fn in sorted(os.listdir(TOOLS_DIR)):
             if not fn.endswith(".py") or fn == _HOME:
                 continue
-            tree = ast.parse(open(os.path.join(TOOLS_DIR, fn), encoding="utf-8").read())
-            for node in ast.walk(tree):
+            for node in ast.walk(_corpus.tree(os.path.join(TOOLS_DIR, fn))):
                 if isinstance(node, ast.Dict) and any(_names_a_feature_operation(v) for v in node.values):
                     offenders.append(f"{fn}:{getattr(node, 'lineno', '?')}")
         assert not offenders, (

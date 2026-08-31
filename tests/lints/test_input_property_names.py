@@ -19,8 +19,8 @@ import pytest
 
 import _corpus
 import api_surface
-from _input_resolution import (_bindings, _collection_vars, _factory_target, _iter_tool_files,
-                               _named_assignments_in, _offenders_in, _scopes)
+from _input_resolution import (_factory_target, _iter_tool_files, _named_assignments_in,
+                               _offenders_in, input_scopes)
 
 class TestInputPropertyNamesAreReal:
     def test_every_assigned_input_property_exists_on_its_class(self):
@@ -52,14 +52,16 @@ class TestInputPropertyNamesAreReal:
 
     def test_the_gate_checks_a_real_number_of_assignments(self):
         """Resolving inputs is not the same as CHECKING properties on them: a scope walk that lost
-        the assignments would still resolve every binding and verify nothing."""
+        the assignments would still resolve every binding and verify nothing.
+
+        Counted over `input_scopes` - the same resolution the gate itself runs on - so a binding
+        shape the gate learns to follow is counted here too, and the census cannot measure a path
+        the gate no longer uses."""
         checked = 0
         for _name, path in _iter_tool_files():
-            for nodes, enclosing in _scopes(_corpus.tree(path)):
-                visible = enclosing + nodes
-                bound = _bindings(visible, _collection_vars(visible))
+            for nodes, bound in input_scopes(_corpus.tree(path)):
                 checked += sum(1 for _l, var, _p in _named_assignments_in(nodes) if var in bound)
-        assert checked >= 75, (
+        assert checked >= 110, (
             f"only {checked} input property assignments are being checked - the scope walk or the "
             "assignment collector has broken.")
 

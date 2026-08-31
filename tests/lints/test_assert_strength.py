@@ -12,6 +12,8 @@ payload fact). A test with no assertion at all (and no pytest.raises) cannot fai
 import ast
 from pathlib import Path
 
+import _corpus
+
 TESTS = Path(__file__).parent
 
 # test-id -> one-line audited reason a bare flag check is genuinely sufficient. Shrink-only.
@@ -63,8 +65,7 @@ class TestAssertStrength:
     def test_no_test_relies_on_a_bare_iserror_flag_alone(self):
         offenders = []
         for path in sorted(TESTS.rglob("test_*.py")):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            for prefix, fn in _test_functions(tree):
+            for prefix, fn in _test_functions(_corpus.tree(path)):
                 test_id = f"{path.name}::{prefix}{fn.name}"
                 if test_id in _EXEMPT:
                     continue

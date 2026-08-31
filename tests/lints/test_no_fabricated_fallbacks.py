@@ -20,9 +20,7 @@ import ast
 import os
 
 import _corpus
-
-TOOLS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-                         "commands", "mcpServer", "tools")
+from conftest import TOOLS_DIR
 
 # Attributes whose value IS a measurement: a fabricated number here is a false reading, not a
 # missing one. Read off the final attribute in the safe() lambda.

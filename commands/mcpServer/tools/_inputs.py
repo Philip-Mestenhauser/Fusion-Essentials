@@ -2296,7 +2296,7 @@ class Choice(InputKind):
 # The non-unique name space, at every level: neither an occurrence's name nor its fullPathName is
 # unique, so the entityToken is the FIRST form tried and every by-string form refuses an ambiguity
 # instead of first-matching - the discipline test_no_first_match_resolvers.py bans repo-wide and
-# test_occurrence_ref_lint.py holds the routed tools to.
+# holds the routed tools to.
 
 def _occurrence_discriminator(occ) -> str:
     """What tells THIS instance apart from another wearing the same path/name: its component,

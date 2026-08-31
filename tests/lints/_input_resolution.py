@@ -14,9 +14,7 @@ import os
 
 import _corpus
 import api_surface
-
-TOOLS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-                         "commands", "mcpServer", "tools")
+from conftest import TOOLS_DIR
 
 # A collection attribute reads `<lowerCamel>Features`/`<lowerCamel>s`; its class is the same name
 # with an initial capital. Only fusion/cam collections are resolved - a core factory is reached the
@@ -39,8 +37,8 @@ def _factories_by_method():
 # nothing, which is what resolves a collection reached through a PARAMETER - nothing in its own file
 # binds one. The filter reads RETURNED CLASSES, not declaring collections: a method several
 # collections declare still resolves as long as they agree on what it hands back, and only a method
-# whose declarations DISAGREE is dropped. `createInput` is the one that matters - 89 declarations
-# returning 88 different classes - so it names no class, and a resolved name can never be a
+# whose declarations DISAGREE is dropped. `createInput` is the one that matters - its declarations
+# disagree on what they return, so it names no class, and a resolved name can never be a
 # same-named factory on some other one.
 _UNIQUE_FACTORIES = {m: next(iter(v)) for m, v in _factories_by_method().items() if len(v) == 1}
 

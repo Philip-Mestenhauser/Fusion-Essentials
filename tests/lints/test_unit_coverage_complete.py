@@ -14,6 +14,8 @@ gained a test, or no longer exists) fails the other way, so the table can't rot.
 import re
 from pathlib import Path
 
+import _corpus
+
 _TESTS = Path(__file__).resolve().parents[1]
 _TOOLS = _TESTS.parent / "commands" / "mcpServer" / "tools"
 
@@ -30,7 +32,7 @@ def _unit_tested_modules():
     pat = re.compile(r'load_tool\(\s*["\']([A-Za-z0-9_]+)["\']')
     found = set()
     for path in (_TESTS / "unit").glob("test_*.py"):
-        found.update(pat.findall(path.read_text(encoding="utf-8")))
+        found.update(pat.findall(_corpus.text(path)))
     return found
 
 
