@@ -33,9 +33,12 @@ The baseline is PER FILE and must match measured reality exactly, moving only do
   and prints the corrected dict ready to paste over ``_PER_FILE_BASELINE``. Locking a win in
   immediately means a deleted legacy fake in one file can never fund a new bespoke fake in another.
 
-Cleaning up the existing counts is a dedicated migration nobody has green-lit, so the entries are
-measured legacy reality, not accepted targets. The total across files is printed for information
-only - it gates nothing.
+The entries are measured legacy reality, not accepted targets. Migrating a bespoke fake of a type
+that HAS a live SHAPES dump onto the matching conftest shared fake is green-lit work, and every
+such migration lowers the file's entry here - the falling numbers are the record of it. A type with
+no measured shape has no shared fake to migrate onto (test_fake_shapes_exist refuses one), so its
+bespoke fake stays where it is. The total across files is printed for information only - it gates
+nothing.
 
 Two different things move a number here, and they are kept apart:
 
@@ -71,19 +74,19 @@ _PER_FILE_BASELINE = {
     "test__data_read.py": 5,
     "test__geom.py": 2,
     "test__sketch_detail.py": 17,   # widened detection: a class named like an api_surface adsk class is counted whatever its prefix
-    "test__view_common.py": 3,
-    "test_appearance_set.py": 11,
+    "test__view_common.py": 2,
+    "test_appearance_set.py": 10,
     "test_assembly_get.py": 5,
     # The interference pipeline (input -> results -> per-pair bodies) incl. the input variant that
     # REFUSES coincident bodies - a createInput transaction surface no conftest fake models.
     "test_assembly_inspect_interference.py": 11,
     "test_assembly_joints_advanced.py": 10,
-    "test_assembly_transform.py": 8,
+    "test_assembly_transform.py": 7,
     "test_assert_kinds.py": 2,
     "test_cam_generate_setup_sheet.py": 2,   # the async-landing CAM fake (bool True before the file exists) conftest cannot model
     "test_cam_activate_setup.py": 1,
     "test_cam_compare.py": 7,
-    "test_cam_create_setup.py": 8,
+    "test_cam_create_setup.py": 7,
     "test_cam_delete.py": 3,
     "test_cam_edit_operation.py": 9,
     "test_cam_generate.py": 1,
@@ -101,7 +104,7 @@ _PER_FILE_BASELINE = {
     "test_design_configure.py": 4,   # widened detection: a class named like an api_surface adsk class is counted whatever its prefix
     "test_design_delete_feature.py": 4,   # widened detection: a class named like an api_surface adsk class is counted whatever its prefix
     "test_design_delete_occurrence.py": 6,
-    "test_design_export.py": 15,   # FakeOptions: an *ExportOptions attribute bag with a poison .units property - no conftest fake models an options object
+    "test_design_export.py": 14,   # FakeOptions: an *ExportOptions attribute bag with a poison .units property - no conftest fake models an options object
     "test_design_mode.py": 3,
     "test_design_ops.py": 3,
     "test_doc_insert_derive.py": 17,
@@ -126,21 +129,21 @@ _PER_FILE_BASELINE = {
     "test_mesh_delete.py": 5,   # meshBodies + MeshRemoveFeatures: an object graph the conftest solid-body fakes do not model
     "test_mesh_edit.py": 7,   # MeshBody/PolygonMesh/TriangleMesh are in SHAPES, so the local mesh fakes count
     "test_mesh_export.py": 17,   # same SHAPES-named mesh fakes as test_mesh_edit
-    "test_mesh_ops.py": 9,   # same SHAPES-named mesh fakes; its OWN MeshBody fake is a deliberate local one
+    "test_mesh_ops.py": 7,   # same SHAPES-named mesh fakes; its OWN MeshBody fake is a deliberate local one
     "test_model_arrange.py": 10,
     "test_model_combine.py": 7,
-    "test_model_compute_holder.py": 2,
+    "test_model_compute_holder.py": 1,
     "test_model_construction.py": 2,
     "test_model_create_component.py": 11,
     "test_model_draft.py": 4,
     "test_model_extrude.py": 12,
-    "test_model_fillet_chamfer.py": 16,   # + FakeRuleFilletInput - conftest models no fillet-input surface
+    "test_model_fillet_chamfer.py": 15,   # + FakeRuleFilletInput - conftest models no fillet-input surface
     "test_design_edit_timeline.py": 6,   # the Timeline/TimelineObject/TimelineGroup(s) graph plus the entity Attributes collection and the AttributeVector findAttributes returns (len()/[i], .count raises) - no conftest fake models them, and this is the only tool that reads entity.attributes
     "test_model_hole.py": 5,
     "test_model_move.py": 3,   # MoveFeatures createInput2/define*/add graph - no conftest fake models a feature-collection input factory (bodies/faces/bounding boxes come from the shared fakes)
     "test_model_offset_face.py": 5,   # OffsetFacesFeatures createInput/add transaction graph - no conftest fake models a feature-collection input factory
     "test_model_scale.py": 3,   # ScaleFeatures createInput/setToNonUniform/add graph - no conftest fake models a feature-collection input factory (bodies/bounding boxes come from the shared fakes)
-    "test_model_pattern.py": 9,
+    "test_model_pattern.py": 8,
     "test_model_revolve.py": 9,
     "test_model_shell.py": 5,
     "test_model_split.py": 5,
@@ -160,14 +163,14 @@ _PER_FILE_BASELINE = {
     "test_sketch_get_merge.py": 1,
     "test_sketch_project.py": 1,
     "test_sketch_set_text.py": 8,
-    "test_surface_create.py": 17,
-    "test_surface_edit.py": 20,
+    "test_surface_create.py": 16,
+    "test_surface_edit.py": 19,
     "test_surface_ops.py": 16,
     "test_sys_api_doc.py": 4,   # widened detection: a class named like an api_surface adsk class is counted whatever its prefix
     "test_view_screenshot.py": 3,
-    "test_view_screenshot_multi.py": 3,
-    "test_view_section.py": 12,
-    "test_view_set.py": 12,
+    "test_view_screenshot_multi.py": 2,
+    "test_view_section.py": 10,
+    "test_view_set.py": 10,
     "test_workspace_orient.py": 16,
     "test_write_guard.py": 4,
 }

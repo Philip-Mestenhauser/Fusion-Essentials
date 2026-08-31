@@ -11,19 +11,7 @@ tables are shrink-only in spirit (scripting a tool moves it PENDING -> STEPS); s
 name in a table that no longer registers) also fail, so the tables can't rot the other way.
 """
 
-import importlib.util
-from pathlib import Path
-
-from conftest import register_all_tools
-
-_VERIFY = Path(__file__).parent.parent / "live" / "tool_verify.py"   # tests/lints/ -> tests/live/
-
-
-def _load_verify():
-    spec = importlib.util.spec_from_file_location("tool_verify", _VERIFY)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+from conftest import load_tool_verify as _load_verify, register_all_tools
 
 
 class TestToolVerifyComplete:

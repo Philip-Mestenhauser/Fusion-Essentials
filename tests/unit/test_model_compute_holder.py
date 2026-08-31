@@ -18,7 +18,7 @@ that with a tiny fake core — pinning the handler's branching without a live BR
 
 import json
 
-from conftest import load_tool
+from conftest import load_tool, FakePoint
 
 mch = load_tool("model_compute_holder")
 holder = load_tool("_holder")
@@ -69,11 +69,7 @@ class _FakeAxisLine:
     pass
 
 
-class _FakePoint:
-    pass
-
-
-def _install_core(*, axis=_FakeAxisLine(), datum=_FakePoint(), profile=None):
+def _install_core(*, axis=_FakeAxisLine(), datum=FakePoint(), profile=None):
     """Patch the module's _holder with a fake core so the handler's branching is exercised without a
     live BRep. axis=None makes get_axis fail; datum=None makes the datum invalid; profile drives
     get_tool_profile. build_holder_data stays the REAL one (we want its JSON)."""

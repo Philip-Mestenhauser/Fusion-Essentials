@@ -19,12 +19,7 @@ pick, or an API this build does not carry cannot be exercised honestly here, and
 with rows that refuse for an unrelated reason would raise this number while proving nothing.
 """
 
-from pathlib import Path
-import importlib.util
-
-from conftest import register_all_tools
-
-_VERIFY = Path(__file__).parent.parent / "live" / "tool_verify.py"
+from conftest import load_tool_verify as _load_verify, register_all_tools
 
 # Choices the live sweep sends, measured by this test. Raise it when coverage grows; lowering it is
 # a deliberate edit that says which coverage went away and why.
@@ -44,13 +39,6 @@ _VERIFY = Path(__file__).parent.parent / "live" / "tool_verify.py"
 # the credit lands there. Named rather than absorbed: no step drives cam_get(scope='local') yet, so
 # this one point is the heuristic's coarseness and not new scope coverage.
 CHOICES_EXERCISED = 328
-
-
-def _load_verify():
-    spec = importlib.util.spec_from_file_location("tool_verify", _VERIFY)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
 
 def _strings(value, seen=None):

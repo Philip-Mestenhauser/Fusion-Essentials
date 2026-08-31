@@ -273,6 +273,30 @@ def register_all_tools():
     return registry.get_tools()
 
 
+def load_tool_verify():
+    """Import ``tests/live/tool_verify.py`` as a module and return it.
+
+    The live sweep's tables (STEPS / EXCLUDED / PENDING) are plain data, so the offline lints read
+    them without a Fusion - completeness against the registry, and which choices the steps send.
+    One loader here rather than one per lint: the sweep's path moves as a unit."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "live", "tool_verify.py")
+    with _no_bytecode():
+        spec = importlib.util.spec_from_file_location("tool_verify", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+    return mod
+
+
+def is_write_tool(item):
+    """True when a registered Item DECLARES itself a write - ``annotations.read_only is False``.
+
+    A missing annotation and ``read_only is None`` both answer False: a tool that never declared its
+    write status is not a write tool for a lint's purposes, and test_write_status_annotations is the
+    gate that no such tool exists."""
+    ann = item.primitive.annotations
+    return ann is not None and ann.read_only is False
+
+
 def load_mcp_server():
     """Import the REAL server/mcp_server.py (plus task_manager) for wire-level tests.
 
@@ -481,6 +505,15 @@ class FakePoint:
         # Mirrors adsk.core.Point3D.distanceTo -> Euclidean distance.
         return ((self.x - other.x) ** 2 + (self.y - other.y) ** 2
                 + (self.z - other.z) ** 2) ** 0.5
+
+    def transformBy(self, m):
+        """Move this point by `m` (a FakeMatrix3D) IN PLACE, answering the bool a caller gates
+        on (model_hole._sketch_space_point treats a falsy answer as 'not expressible'). A POINT
+        takes the matrix's rotation AND its translation - the live point/vector split
+        FakeMatrix3D's two applies keep. Subclass and return False for the platform DECLINING the
+        transform."""
+        self.x, self.y, self.z = m._apply_point(self.x, self.y, self.z)
+        return True
 
 
 class FakeBoundingBox3D:
@@ -732,12 +765,16 @@ class _NamedCollection:
         return iter(self._items)
 
 
+def make_bbox(minp, maxp):
+    """A FakeBoundingBox3D from (min xyz, max xyz) tuples in cm (Fusion's internal unit). The plain
+    function, so a module-level fake that HOLDS a bounding box can build one without a fixture."""
+    return FakeBoundingBox3D(FakePoint(*minp), FakePoint(*maxp))
+
+
 @pytest.fixture
 def bbox():
     """Factory: FakeBoundingBox3D from (min xyz, max xyz) in cm (Fusion's unit)."""
-    def _make(minp, maxp):
-        return FakeBoundingBox3D(FakePoint(*minp), FakePoint(*maxp))
-    return _make
+    return make_bbox
 
 
 # ── vectors / surfaces / curves for selection.py classification ────────────
@@ -762,7 +799,9 @@ class FakeVector3D:
         return (self.x ** 2 + self.y ** 2 + self.z ** 2) ** 0.5
 
     def copy(self):
-        return FakeVector3D(self.x, self.y, self.z)
+        # type(self), not FakeVector3D: a subclass modelling ONE refusing axis must survive the
+        # copy a lift takes before transforming (assembly_get._world_axes copies, then transforms).
+        return type(self)(self.x, self.y, self.z)
 
     def normalize(self):
         mag = (self.x ** 2 + self.y ** 2 + self.z ** 2) ** 0.5
@@ -781,6 +820,14 @@ class FakeVector3D:
         cy = self.z * other.x - self.x * other.z
         cz = self.x * other.y - self.y * other.x
         return (cx * cx + cy * cy + cz * cz) ** 0.5 < 1e-9
+
+    def transformBy(self, m):
+        """Move this DIRECTION by `m` (a FakeMatrix3D) IN PLACE, answering the bool a caller gates
+        on. A vector takes the matrix's ROTATION ONLY, so a placement's translation can never reach
+        an axis through it - the same live split FakePoint.transformBy sits on the other side of.
+        Subclass and return False for one axis the platform declines to express."""
+        self.x, self.y, self.z = m._apply_vector(self.x, self.y, self.z)
+        return True
 
 
 class FakeMatrix3D:

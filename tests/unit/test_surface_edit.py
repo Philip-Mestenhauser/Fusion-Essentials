@@ -12,7 +12,7 @@ No live Fusion — fake feature classes capture inputs and record cancel()/add()
 import json
 import types
 
-from conftest import MakeComp, body_proxy, load_tool, make_source_document
+from conftest import MakeComp, body_proxy, load_tool, make_source_document, _NamedCollection
 
 se = load_tool("surface_edit")
 inp = se._inputs
@@ -26,22 +26,12 @@ class FakeBody:
         self.isSolid = is_solid
 
 
-class FakeBodies:
-    def __init__(self, bodies):
-        self._b = list(bodies)
-    @property
-    def count(self):
-        return len(self._b)
-    def item(self, i):
-        return self._b[i]
-
-
 class FakeFeature:
     def __init__(self, name="Feat1", bodies=None, faces=None, distance_cm=None, thickness_cm=None):
         self.name = name
-        self.bodies = FakeBodies(bodies if bodies is not None else [FakeBody()])
+        self.bodies = _NamedCollection(bodies if bodies is not None else [FakeBody()])
         if faces is not None:
-            self.faces = FakeBodies(faces)      # a counted collection of created faces
+            self.faces = _NamedCollection(faces)   # a counted collection of created faces
         # ExtendFeature.distance and ThickenFeature.thickness are ModelParameters reading CM; None
         # gives a feature whose length parameter cannot be read at all.
         if distance_cm is not None:

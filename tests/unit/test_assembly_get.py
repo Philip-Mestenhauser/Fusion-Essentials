@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import load_tool, FakeMatrix3D
+from conftest import load_tool, FakeMatrix3D, FakePoint, FakeVector3D
 
 ap = load_tool("assembly_get")
 
@@ -154,9 +154,9 @@ class _JointFrame:
     (measured), so the placement has to come from the joint's own occurrence on that side."""
     def __init__(self, origin=(0.0, 0.0, 0.0), z=(0, 0, 1), x=(1, 0, 0), y=(0, 1, 0)):
         self.origin = _Vec(*origin)
-        self.primaryAxisVector = _JOPt(*z)
-        self.secondaryAxisVector = _JOPt(*x)
-        self.thirdAxisVector = _JOPt(*y)
+        self.primaryAxisVector = FakeVector3D(*z)
+        self.secondaryAxisVector = FakeVector3D(*x)
+        self.thirdAxisVector = FakeVector3D(*y)
 
 
 class _OpaqueFrame:
@@ -761,29 +761,11 @@ class TestCaps:
 # INSTANCE: name + qualified reference (bare, or '<occ>:<name>'), owning component, world position +
 # frame axes, the joints that CONSUME it, and a handle. A sub-component JO is reported per occurrence.
 
-class _JOPt:
-    """A Vector3D: the coordinate reads plus the copy()/transformBy(matrix) pair an axis lift makes.
-    transformBy reports True, as the API's own does, and takes the matrix's DIRECTION transform, so
-    a placement's translation can never reach an axis through it."""
-    def __init__(self, x, y, z):
-        self.x, self.y, self.z = x, y, z
-
-    def copy(self):
-        return _JOPt(self.x, self.y, self.z)
-
-    def transformBy(self, m):
-        self.x, self.y, self.z = m._apply_vector(self.x, self.y, self.z)
-        return True
-
-
-class _StuckAxis(_JOPt):
+class _StuckAxis(FakeVector3D):
     """ONE axis vector whose lift refuses. _world_axes reads each axis separately - getattr,
     copy, transformBy, axis_vec - so a single axis can come back None while its siblings resolve,
-    independently of whether the placement matrix did. copy() must stay this type or the refusal
-    does not survive the copy the lift takes first."""
-    def copy(self):
-        return _StuckAxis(self.x, self.y, self.z)
-
+    independently of whether the placement matrix did. The shared FakeVector3D.copy() answers
+    type(self), which is what carries this refusal through the copy the lift takes first."""
     def transformBy(self, m):
         return False
 
@@ -805,12 +787,13 @@ class _SliceJO:
     def __init__(self, name, pos=(0.0, 0.0, 0.0), offsets=(0.0, 0.0, 0.0), token=None, comp=None,
                  instance_pos=None):
         self.name = name
-        self.geometry = SimpleNamespace(origin=_JOPt(*pos))   # the BASE anchor point (cm, WORLD)
+        # the BASE anchor point (cm, WORLD) - a POINT, so its own shared fake
+        self.geometry = SimpleNamespace(origin=FakePoint(*pos))
         # The three axis vectors, in the OWNING COMPONENT's frame - measured: a JO on a component
         # turned 30 deg about Z still reads (1,0,0) here, natively and through a proxy alike.
-        self.primaryAxisVector = _JOPt(0.0, 0.0, 1.0)     # Z
-        self.secondaryAxisVector = _JOPt(1.0, 0.0, 0.0)   # X
-        self.thirdAxisVector = _JOPt(0.0, 1.0, 0.0)       # Y
+        self.primaryAxisVector = FakeVector3D(0.0, 0.0, 1.0)     # Z
+        self.secondaryAxisVector = FakeVector3D(1.0, 0.0, 0.0)   # X
+        self.thirdAxisVector = FakeVector3D(0.0, 1.0, 0.0)       # Y
         # offsetX/Y/Z ModelParameters (cm) - a coordinate-anchored JO carries its position here.
         self.offsetX = SimpleNamespace(value=offsets[0])
         self.offsetY = SimpleNamespace(value=offsets[1])

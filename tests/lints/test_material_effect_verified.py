@@ -24,7 +24,7 @@ reason naming why; that table only shrinks.
 
 import re
 
-from conftest import register_all_tools
+from conftest import is_write_tool, register_all_tools
 from test_postconditions_declared import _handler_parts
 
 # The mutation this lint anchors on: a features collection's add(). A tool that reaches its
@@ -86,8 +86,7 @@ def _verifies_material(parts):
 def _cut_capable_write_tools():
     out = {}
     for it in register_all_tools():
-        ann = it.primitive.annotations
-        if ann is None or ann.read_only is not False:
+        if not is_write_tool(it):
             continue                        # a read removes no material
         if _cut_capable(it):
             out[it.get_name()] = it

@@ -171,26 +171,10 @@ class FakeBody:
         object.__setattr__(self, key, value)
 
 
-class FakeBodies:
-    def __init__(self, bodies):
-        self._b = {b.name: b for b in bodies}
-        self._list = bodies
-
-    def itemByName(self, n):
-        return self._b.get(n)
-
-    @property
-    def count(self):
-        return len(self._list)
-
-    def item(self, i):
-        return self._list[i]
-
-
 class FakeComponent:
     def __init__(self, name, bodies=()):
         self.name = name
-        self.bRepBodies = FakeBodies(list(bodies))
+        self.bRepBodies = _NamedCollection(list(bodies))
 
 
 class FakeOcc:
@@ -198,7 +182,7 @@ class FakeOcc:
         self.name = name
         self.fullPathName = full_path or name
         self.appearance = None
-        self.bRepBodies = FakeBodies(list(bodies))
+        self.bRepBodies = _NamedCollection(list(bodies))
         self.component = component or FakeComponent(name + "_comp")
 
 
@@ -248,7 +232,7 @@ class FakeOccs:
 class FakeRoot:
     def __init__(self, name="Root", bodies=(), occurrences=()):
         self.name = name
-        self.bRepBodies = FakeBodies(list(bodies))
+        self.bRepBodies = _NamedCollection(list(bodies))
         self.occurrences = FakeOccs(list(occurrences))
         self.allOccurrences = list(occurrences)
 

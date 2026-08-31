@@ -13,7 +13,7 @@ import math
 
 import pytest
 
-from conftest import load_tool
+from conftest import load_tool, _make_object_collection
 
 
 asm = load_tool("assembly_transform")
@@ -175,18 +175,6 @@ class FakeRigidGroups:
         return FakeRigidGroup()
 
 
-class FakeObjectCollection:
-    def __init__(self):
-        self._items = []
-
-    @property
-    def count(self):
-        return len(self._items)
-
-    def add(self, x):
-        self._items.append(x)
-
-
 class FakeRoot:
     def __init__(self, occurrences, rg):
         self.allOccurrences = list(occurrences)
@@ -206,7 +194,7 @@ def _install(occ_names):
     asm._common.app = asm.app
     import adsk.fusion, adsk.core
     adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
-    adsk.core.ObjectCollection.create = staticmethod(FakeObjectCollection)
+    adsk.core.ObjectCollection.create = staticmethod(_make_object_collection)
     # Matrix3D + Vector3D for move
     adsk.core.Matrix3D.create = staticmethod(FakeMatrix)
     adsk.core.Vector3D.create = staticmethod(lambda x, y, z: ("vec", x, y, z))

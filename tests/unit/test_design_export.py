@@ -19,19 +19,6 @@ class FakeBody:
         self.name = name
 
 
-class FakeBodies:
-    def __init__(self, bodies):
-        self._b = {b.name: b for b in bodies}
-        self._list = bodies
-    def itemByName(self, n):
-        return self._b.get(n)
-    @property
-    def count(self):
-        return len(self._list)
-    def item(self, i):
-        return self._list[i]
-
-
 class FakeOcc:
     def __init__(self, name, full_path=None):
         self.name = name
@@ -58,7 +45,7 @@ class FakeOccs:
 class FakeComp:
     def __init__(self, name, bodies, occurrences=()):
         self.name = name
-        self.bRepBodies = FakeBodies(bodies)
+        self.bRepBodies = _NamedCollection(bodies)
         self.occurrences = FakeOccs(occurrences)
         self.allOccurrences = list(occurrences)
 

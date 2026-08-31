@@ -12,7 +12,8 @@ import json
 import types
 
 from conftest import (BRepEdge, BRepFace, Circle3D, Cylinder, FakePoint, FakeVector3D, Line3D,
-                      Plane, _NamedCollection, _SimpleNamed, entity_proxy, load_tool)
+                      Plane, _NamedCollection, _SimpleNamed, _make_object_collection,
+                      entity_proxy, load_tool)
 
 pt = load_tool("model_pattern")
 
@@ -26,21 +27,6 @@ class FakeOcc:
         # A real Occurrence always answers `component`; a read that RAISES is the
         # unresolved-external-reference signal the shared occurrence census filters on.
         self.component = types.SimpleNamespace(name=name.split(":")[0])
-
-
-class FakeObjectCollection:
-    def __init__(self):
-        self._items = []
-
-    @property
-    def count(self):
-        return len(self._items)
-
-    def add(self, item):
-        self._items.append(item)
-
-    def item(self, i):
-        return self._items[i] if 0 <= i < len(self._items) else None
 
 
 class FakeRectInput:
@@ -183,7 +169,7 @@ def _install(occ_names, refuse_two=False, circ_ignores=()):
     pt._common.app = pt.app
     import adsk.fusion, adsk.core
     adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
-    adsk.core.ObjectCollection.create = staticmethod(FakeObjectCollection)
+    adsk.core.ObjectCollection.create = staticmethod(_make_object_collection)
     adsk.core.ValueInput.createByReal = staticmethod(lambda v: ("real", v))
     adsk.core.ValueInput.createByString = staticmethod(lambda s: ("str", s))
     pdt = adsk.fusion.PatternDistanceType

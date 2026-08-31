@@ -17,7 +17,7 @@ and adding a new write tool here needs the same deliberation as adding a naming-
 import inspect
 import re
 
-from conftest import load_tool, register_all_tools
+from conftest import is_write_tool, load_tool, register_all_tools
 
 
 def _postconditions_of(item):
@@ -185,8 +185,7 @@ class TestPostconditionsDeclared:
     def test_every_write_tool_declares_or_is_exempt(self):
         missing = []
         for it in register_all_tools():
-            ann = it.primitive.annotations
-            if ann is None or ann.read_only is not False:
+            if not is_write_tool(it):
                 continue                      # read tools mutate nothing to verify
             if _postconditions_of(it):
                 continue
@@ -206,8 +205,7 @@ class TestPostconditionsDeclared:
             if it is None:
                 stale.append(f"{name} (no such tool)")
                 continue
-            ann = it.primitive.annotations
-            if ann is None or ann.read_only is not False:
+            if not is_write_tool(it):
                 stale.append(f"{name} (not a write tool)")
             elif _postconditions_of(it):
                 stale.append(f"{name} (already migrated - drop the exemption)")

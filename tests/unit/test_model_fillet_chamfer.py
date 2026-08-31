@@ -9,7 +9,7 @@ import math
 
 import pytest
 
-from conftest import BRepFace, FakeUnitsManager, load_tool
+from conftest import BRepFace, FakeUnitsManager, load_tool, _NamedCollection
 
 fl = load_tool("model_fillet_chamfer")
 
@@ -36,21 +36,6 @@ class FakeBody:
         self.isSolid = True          # BodyRef(kind='solid') checks this
         # None = the volume read does not answer, so the volume gate has nothing to judge.
         self.volume = volume
-
-
-class FakeBodies:
-    def __init__(self, bodies):
-        self._b = list(bodies)
-    @property
-    def count(self):
-        return len(self._b)
-    def item(self, i):
-        return self._b[i]
-    def itemByName(self, name):
-        for b in self._b:
-            if b.name == name:
-                return b
-        return None
 
 
 class FakeFilletInput:
@@ -252,7 +237,7 @@ class FakeChamferFeatures:
 class FakeComp:
     def __init__(self, bodies, ff, cf):
         self.name = "Comp"
-        self.bRepBodies = FakeBodies(bodies)
+        self.bRepBodies = _NamedCollection(bodies)
         self.features = type("F", (), {"filletFeatures": ff, "chamferFeatures": cf})()
 
 

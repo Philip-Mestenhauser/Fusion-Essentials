@@ -319,16 +319,6 @@ class _Features:
         self.threadFeatures = FakeThreadFeatures()
 
 
-class _LiftPoint(FakePoint):
-    """A Point3D that transforms IN PLACE, the way the lift carries a world point into a
-    component's own frame before the sketch's converter sees it. A POINT, so the placement's
-    translation applies (_apply_point), unlike a direction."""
-
-    def transformBy(self, m):
-        self.x, self.y, self.z = m._apply_point(self.x, self.y, self.z)
-        return True
-
-
 def _bracket(name="Bracket"):
     """A component the placement ladder can identify - same_component compares entityToken, so the
     token is chosen rather than inherited."""
@@ -680,7 +670,7 @@ def _framed(monkeypatch, to_sketch, owner=_ROOT, placements=None):
     import adsk.core
     d = _install()
     monkeypatch.setattr(adsk.core.Point3D, "create",
-                        staticmethod(lambda x, y, z: _LiftPoint(x, y, z)))
+                        staticmethod(lambda x, y, z: FakePoint(x, y, z)))
     d.rootComponent.sketches.to_sketch = to_sketch
     d.rootComponent.sketches.owner = d.rootComponent if owner is _ROOT else owner
     for comp, occs in (placements or {}).items():
@@ -926,7 +916,7 @@ class TestWorldLift:
         return type("D", (), {"rootComponent": root})()
 
     def _lifted(self, m, x, y, z):
-        p = _LiftPoint(x, y, z)
+        p = FakePoint(x, y, z)
         p.transformBy(m)
         return (round(p.x, 9), round(p.y, 9), round(p.z, 9))
 
@@ -997,7 +987,7 @@ class TestSketchSpacePointTakesTheLift:
     def _liftable_points(self, monkeypatch):
         import adsk.core
         monkeypatch.setattr(adsk.core.Point3D, "create",
-                            staticmethod(lambda x, y, z: _LiftPoint(x, y, z)))
+                            staticmethod(lambda x, y, z: FakePoint(x, y, z)))
 
     def test_the_lift_runs_BEFORE_the_sketchs_converter(self):
         # the converter subtracts 1 from x, the lift adds 10 - the order shows in the answer

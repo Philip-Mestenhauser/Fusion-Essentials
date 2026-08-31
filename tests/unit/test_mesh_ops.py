@@ -19,7 +19,7 @@ import json
 import re
 import types
 
-from conftest import body_proxy, load_tool
+from conftest import body_proxy, load_tool, make_bbox
 
 mo = load_tool("mesh_ops")
 
@@ -44,17 +44,6 @@ class PolygonMesh:
         self.nodeCount = nodes
 
 
-class FakePoint:
-    def __init__(self, x, y, z):
-        self.x, self.y, self.z = x, y, z
-
-
-class FakeBBox:
-    def __init__(self, mn, mx):
-        self.minPoint = FakePoint(*mn)
-        self.maxPoint = FakePoint(*mx)
-
-
 _UNSET = object()
 
 
@@ -74,7 +63,7 @@ class MeshBody:
         self.isClosed = is_closed
         self.isOriented = is_oriented
         self.entityToken = token or f"MTOK::{name}"
-        self.boundingBox = bbox or FakeBBox((0, 0, 0), (1, 2, 3))   # cm
+        self.boundingBox = bbox or make_bbox((0, 0, 0), (1, 2, 3))   # cm
         self.parentComponent = parent
         if area is not _UNSET:
             self.area = area
@@ -571,7 +560,7 @@ class TestMeshGet:
 class TestMeshMeasure:
     def test_measures_a_mesh_body(self):
         _wire_adsk()
-        m = MeshBody("Scan", tri=999, nodes=500, bbox=FakeBBox((0, 0, 0), (1, 2, 4)))
+        m = MeshBody("Scan", tri=999, nodes=500, bbox=make_bbox((0, 0, 0), (1, 2, 4)))
         out = _payload(mo.mesh_measure_of_body(m, units="mm"))
         assert out["triangle_count"] == 999 and out["node_count"] == 500
         assert out["is_closed"] is True

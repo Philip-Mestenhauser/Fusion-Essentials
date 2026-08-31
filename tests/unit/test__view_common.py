@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 import live_api_facts
-from conftest import MakeComp, load_tool, make_source_document
+from conftest import FakePoint, MakeComp, load_tool, make_source_document
 
 vc = load_tool("_view_common")
 
@@ -131,18 +131,11 @@ class TestOrthoFace:
 
 # ── apply_named_view: the one orient-then-fit both screenshot tools share ────
 
-class _FakePoint:
-    def __init__(self, x=0.0, y=0.0, z=0.0):
-        self.x, self.y, self.z = x, y, z
-
-    def distanceTo(self, other):
-        return 10.0
-
-
 class _FakeCam:
     def __init__(self):
-        self.eye = _FakePoint(5, 0, 0)
-        self.target = _FakePoint(0, 0, 0)
+        # conftest's shared point: apply_named_view reads eye.distanceTo(target) for the standoff
+        self.eye = FakePoint(5, 0, 0)
+        self.target = FakePoint(0, 0, 0)
         self.upVector = None
         self.cameraType = "initial"
 

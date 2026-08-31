@@ -18,23 +18,16 @@ import types
 
 import pytest
 
-from conftest import load_tool, make_source_document, BRepBody, MakeComp, _NamedCollection
+from conftest import (load_tool, make_source_document, make_bbox, BRepBody, FakePoint, FakeVector3D, MakeComp,
+                      _NamedCollection)
 
 iv = load_tool("view_set")
 
 
 # ── fakes ───────────────────────────────────────────────────────────────────
-
-class FakePoint:
-    def __init__(self, x, y, z):
-        self.x, self.y, self.z = x, y, z
-
-
-class FakeBBox:
-    def __init__(self, minp, maxp):
-        self.minPoint = FakePoint(*minp)
-        self.maxPoint = FakePoint(*maxp)
-
+#
+# Points and bounding boxes come from conftest's shared fakes (FakePoint / make_bbox); only the
+# occurrence/viewport/named-view graph below is local.
 
 class FakeOcc:
     def __init__(self, name, full_path=None, bbox=None, parent=None,
@@ -55,7 +48,7 @@ class FakeRoot:
     def __init__(self, occurrences, bodies=(), bbox=None):
         self.allOccurrences = list(occurrences)
         # the WHOLE-DESIGN box a fit frames - the denominator of the framing ratio
-        self.boundingBox = bbox if bbox is not None else FakeBBox((0, 0, 0), (100, 100, 100))
+        self.boundingBox = bbox if bbox is not None else make_bbox((0, 0, 0), (100, 100, 100))
         # root-level bodies (conftest.BRepBody instances) - the body-level hide/show targets.
         self.bRepBodies = _NamedCollection(bodies)
 
@@ -328,7 +321,7 @@ def _install(monkeypatch, occurrences=(), named_views=None, doc_name="Doc", doc_
         monkeypatch.setattr(vs, attr, i + 1, raising=False)
     # Point3D/Vector3D create -> simple carriers (orient math touches these).
     monkeypatch.setattr(adsk.core.Point3D, "create", staticmethod(lambda x, y, z: FakePoint(x, y, z)))
-    monkeypatch.setattr(adsk.core.Vector3D, "create", staticmethod(lambda x, y, z: FakePoint(x, y, z)))
+    monkeypatch.setattr(adsk.core.Vector3D, "create", staticmethod(lambda x, y, z: FakeVector3D(x, y, z)))
     # framing reads the frame through viewToModelSpace, which takes a Point2D
     monkeypatch.setattr(adsk.core.Point2D, "create",
                         staticmethod(lambda x, y: types.SimpleNamespace(x=x, y=y)))
@@ -635,7 +628,7 @@ class TestStyle:
 
 class TestOrient:
     def test_unknown_orientation_errors(self, monkeypatch):
-        _install(monkeypatch, [FakeOcc("Part", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))])
+        _install(monkeypatch, [FakeOcc("Part", bbox=make_bbox((0, 0, 0), (2, 2, 2)))])
         res = iv.handler(action="orient", orientation="sideways")
         assert res["isError"] is True and "Unknown orientation" in res["message"]
 
@@ -645,7 +638,7 @@ class TestOrient:
         assert res["isError"] is True and "no occurrence matching" in res["message"].lower()
 
     def test_front_orientation_sets_up_vector(self, monkeypatch):
-        _install(monkeypatch, [FakeOcc("Part", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))])
+        _install(monkeypatch, [FakeOcc("Part", bbox=make_bbox((0, 0, 0), (2, 2, 2)))])
         out = _payload(iv.handler(action="orient", orientation="front", focus="Part"))
         assert out["applied"]["orientation"] == "front"
         assert out["applied"]["focus"] == "Part"
@@ -658,7 +651,7 @@ class TestOrient:
         # eye (10,10,10) target (0,0,0): distance sqrt(300) ~= 17.32. Eye must land at
         # target + dir*dist = (1, 1 - dist, 1) — pure -Y from the (now re-targeted) center.
         import math
-        _install(monkeypatch, [FakeOcc("Part", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))])
+        _install(monkeypatch, [FakeOcc("Part", bbox=make_bbox((0, 0, 0), (2, 2, 2)))])
         _payload(iv.handler(action="orient", orientation="front", focus="Part"))
         cam = iv.app.activeViewport.camera
         dist = math.sqrt(300)
@@ -669,7 +662,7 @@ class TestOrient:
 
     def test_top_orientation_uses_plus_y_up(self, monkeypatch):
         # 'top' view_dir = (0,0,1), up = (0,1,0) (Y-up because the look axis IS Z).
-        _install(monkeypatch, [FakeOcc("Part", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))])
+        _install(monkeypatch, [FakeOcc("Part", bbox=make_bbox((0, 0, 0), (2, 2, 2)))])
         _payload(iv.handler(action="orient", orientation="top", focus="Part"))
         up = iv.app.activeViewport.camera.upVector
         assert (up.x, up.y, up.z) == (0, 1, 0)
@@ -677,7 +670,7 @@ class TestOrient:
     def test_focus_only_translates_eye_by_target_delta(self, monkeypatch):
         # No orientation, just focus -> the eye is SHIFTED by the same vector the target moved, so the
         # view DIRECTION is preserved (camera tracks to the new center without rotating).
-        _install(monkeypatch, [FakeOcc("Part", bbox=FakeBBox((0, 0, 4), (2, 2, 8)))])  # center (1,1,6)
+        _install(monkeypatch, [FakeOcc("Part", bbox=make_bbox((0, 0, 4), (2, 2, 8)))])  # center (1,1,6)
         # default camera: eye (10,10,10), target (0,0,0). target moves to (1,1,6): delta (1,1,6).
         _payload(iv.handler(action="orient", focus="Part"))
         cam = iv.app.activeViewport.camera
@@ -696,8 +689,8 @@ class TestFocusFraming:
     def test_framing_shrinks_the_extents_to_the_focus_share_of_the_frame(self, monkeypatch):
         # Part spans 2 on both screen axes inside a 100-wide world, so the camera has to come down
         # to 2/100 of its fitted extents, plus the margin that keeps it off the viewport border.
-        near = FakeOcc("Part", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))
-        far = FakeOcc("FarAway", bbox=FakeBBox((400, 0, 0), (402, 2, 2)))
+        near = FakeOcc("Part", bbox=make_bbox((0, 0, 0), (2, 2, 2)))
+        far = FakeOcc("FarAway", bbox=make_bbox((400, 0, 0), (402, 2, 2)))
         _install(monkeypatch, [near, far])
         out = _payload(iv.handler(action="orient", orientation="front", focus="Part"))
         assert out["applied"]["frame_ratio"] == pytest.approx(0.02 * iv._FRAME_MARGIN)
@@ -707,8 +700,8 @@ class TestFocusFraming:
     def test_framing_touches_no_visibility_at_all(self, monkeypatch):
         # The whole point of framing by camera extents: a camera move must not be a visibility
         # write. Nothing goes dark, so nothing can be left dark.
-        near = FakeOcc("Part", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))
-        far = FakeOcc("FarAway", bbox=FakeBBox((400, 0, 0), (402, 2, 2)))
+        near = FakeOcc("Part", bbox=make_bbox((0, 0, 0), (2, 2, 2)))
+        far = FakeOcc("FarAway", bbox=make_bbox((400, 0, 0), (402, 2, 2)))
         _install(monkeypatch, [near, far])
         out = _payload(iv.handler(action="orient", orientation="front", focus="Part"))
         assert near.isLightBulbOn is True and far.isLightBulbOn is True
@@ -718,7 +711,7 @@ class TestFocusFraming:
     def test_the_taller_axis_wins_so_the_focus_is_never_cropped(self, monkeypatch):
         # A focus that is a small fraction ACROSS but a large one DOWN must be framed on the down
         # axis - taking the smaller ratio would crop it vertically.
-        tall = FakeOcc("Tall", bbox=FakeBBox((0, 0, 0), (1, 1, 50)))
+        tall = FakeOcc("Tall", bbox=make_bbox((0, 0, 0), (1, 1, 50)))
         _install(monkeypatch, [tall])
         out = _payload(iv.handler(action="orient", orientation="front", focus="Tall"))
         assert out["applied"]["frame_ratio"] == pytest.approx(0.5 * iv._FRAME_MARGIN)   # 50/100, not 1/100
@@ -728,15 +721,15 @@ class TestFocusFraming:
         itself, so the size of the rest of the design cannot enter the arithmetic. Dividing by the
         whole-design box instead makes a wide flat scene read ~20x too loose; this pins that the
         world is not an input."""
-        part = FakeOcc("Part", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))
-        tiny_world = FakeOcc("Speck", bbox=FakeBBox((0, 0, 0), (3, 3, 3)))
-        huge_world = FakeOcc("Strip", bbox=FakeBBox((0, 0, 0), (4000, 60, 30)))
+        part = FakeOcc("Part", bbox=make_bbox((0, 0, 0), (2, 2, 2)))
+        tiny_world = FakeOcc("Speck", bbox=make_bbox((0, 0, 0), (3, 3, 3)))
+        huge_world = FakeOcc("Strip", bbox=make_bbox((0, 0, 0), (4000, 60, 30)))
 
-        _install(monkeypatch, [part, tiny_world], design_bbox=FakeBBox((0, 0, 0), (3, 3, 3)))
+        _install(monkeypatch, [part, tiny_world], design_bbox=make_bbox((0, 0, 0), (3, 3, 3)))
         small = _payload(iv.handler(action="orient", orientation="front",
                                     focus="Part"))["applied"]["frame_ratio"]
         _install(monkeypatch, [part, huge_world],
-                 design_bbox=FakeBBox((0, 0, 0), (4000, 60, 30)))
+                 design_bbox=make_bbox((0, 0, 0), (4000, 60, 30)))
         large = _payload(iv.handler(action="orient", orientation="front",
                                     focus="Part"))["applied"]["frame_ratio"]
         assert small == pytest.approx(large)
@@ -745,7 +738,7 @@ class TestFocusFraming:
         """No readable frame, no baseline to scale from. The tempting fallback - fit the whole
         model - would answer a framing request with the exact view framing exists to avoid, and
         report ok for it. So it refuses, and leaves the camera alone."""
-        part = FakeOcc("Part", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))
+        part = FakeOcc("Part", bbox=make_bbox((0, 0, 0), (2, 2, 2)))
         _install(monkeypatch, [part])
         before = iv.app.activeViewport.camera.viewExtents
         monkeypatch.setattr(iv.app.activeViewport, "width", 0)
@@ -758,7 +751,7 @@ class TestFocusFraming:
         """The baseline is the frame the viewport shows right now, so moving from a tightly framed
         part onto a bigger one legitimately zooms out. A ratio capped at 1.0 would leave the bigger
         part cropped."""
-        big = FakeOcc("Big", bbox=FakeBBox((0, 0, 0), (400, 400, 400)))
+        big = FakeOcc("Big", bbox=make_bbox((0, 0, 0), (400, 400, 400)))
         _install(monkeypatch, [big])
         out = _payload(iv.handler(action="orient", orientation="front", focus="Big"))
         # 400 across a 200-wide frame, 400 down a 100-tall one -> the DOWN axis needs 4x
@@ -770,8 +763,8 @@ class TestFocusFraming:
         sweep that draws 49 sketches has a whole category of thing nobody can see. A sketch carries
         a boundingBox, which is all the framing arithmetic needs."""
         sketch = types.SimpleNamespace(name="SlotBand",
-                                       boundingBox=FakeBBox((0, 0, 0), (50, 50, 0)))
-        _install(monkeypatch, [FakeOcc("Part", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))])
+                                       boundingBox=make_bbox((0, 0, 0), (50, 50, 0)))
+        _install(monkeypatch, [FakeOcc("Part", bbox=make_bbox((0, 0, 0), (2, 2, 2)))])
         monkeypatch.setattr(iv._common, "find_sketch", lambda d, n, remedy=None: (sketch, None))
         # TOP, because a flat XY sketch is edge-on from the front - its height span there is 0 and
         # the frame would be driven by width alone, which is correct but tells us nothing.
@@ -782,9 +775,9 @@ class TestFocusFraming:
 
     def test_an_occurrence_wins_over_a_sketch_of_the_same_name(self, monkeypatch):
         # The occurrence is tried first: a name carried by both must not silently frame the sketch.
-        part = FakeOcc("Twin", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))
+        part = FakeOcc("Twin", bbox=make_bbox((0, 0, 0), (2, 2, 2)))
         sketch = types.SimpleNamespace(name="Twin",
-                                       boundingBox=FakeBBox((0, 0, 0), (50, 50, 0)))
+                                       boundingBox=make_bbox((0, 0, 0), (50, 50, 0)))
         _install(monkeypatch, [part])
         monkeypatch.setattr(iv._common, "find_sketch", lambda d, n, remedy=None: (sketch, None))
         out = _payload(iv.handler(action="orient", orientation="front", focus="Twin"))
@@ -795,7 +788,7 @@ class TestFocusFraming:
         # of one name. The default remedy - rename one - is the dead end (a shared sketch name most
         # often comes from two referenced documents), so this tool hands over its OWN way forward:
         # the occurrence fullPathName the same input already resolves.
-        _install(monkeypatch, [FakeOcc("Part", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))])
+        _install(monkeypatch, [FakeOcc("Part", bbox=make_bbox((0, 0, 0), (2, 2, 2)))])
         seen = {}
 
         def _find(d, n, remedy=None):
@@ -810,7 +803,7 @@ class TestFocusFraming:
         assert "Rename" not in res["message"]
 
     def test_a_name_that_is_neither_names_both_kinds(self, monkeypatch):
-        _install(monkeypatch, [FakeOcc("Part", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))])
+        _install(monkeypatch, [FakeOcc("Part", bbox=make_bbox((0, 0, 0), (2, 2, 2)))])
         monkeypatch.setattr(iv._common, "find_sketch", lambda d, n, remedy=None: (None, None))
         res = iv.handler(action="orient", orientation="front", focus="Ghost")
         assert res["isError"] is True
@@ -819,8 +812,8 @@ class TestFocusFraming:
     def test_several_names_frame_their_union(self, monkeypatch):
         """A tool-group belongs on screen together. Framing one member hides the rest of it, so a
         list frames the box enclosing them all - here two 2-wide parts 40 apart, which spans 42."""
-        a = FakeOcc("GroupA", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))
-        b = FakeOcc("GroupB", bbox=FakeBBox((40, 0, 0), (42, 2, 2)))
+        a = FakeOcc("GroupA", bbox=make_bbox((0, 0, 0), (2, 2, 2)))
+        b = FakeOcc("GroupB", bbox=make_bbox((40, 0, 0), (42, 2, 2)))
         _install(monkeypatch, [a, b])
         out = _payload(iv.handler(action="orient", orientation="front",
                                   focus=["GroupA", "GroupB"]))
@@ -831,7 +824,7 @@ class TestFocusFraming:
     def test_a_group_focus_naming_something_absent_is_refused(self, monkeypatch):
         # Silently framing the members that DID resolve would show a group missing a member with
         # nothing to say it happened.
-        a = FakeOcc("GroupA", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))
+        a = FakeOcc("GroupA", bbox=make_bbox((0, 0, 0), (2, 2, 2)))
         _install(monkeypatch, [a])
         monkeypatch.setattr(iv._common, "find_sketch", lambda d, n, remedy=None: (None, None))
         res = iv.handler(action="orient", orientation="front", focus=["GroupA", "Ghost"])
@@ -847,8 +840,8 @@ class TestFocusFraming:
         """A point sketch spans nothing on either screen axis. There is no size to scale to, but
         aiming at it is still exactly what was asked for - so the zoom is left alone and the payload
         says so, rather than failing a framing the caller was right to request."""
-        point = types.SimpleNamespace(name="W3Pt", boundingBox=FakeBBox((5, 5, 0), (5, 5, 0)))
-        _install(monkeypatch, [FakeOcc("Part", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))])
+        point = types.SimpleNamespace(name="W3Pt", boundingBox=make_bbox((5, 5, 0), (5, 5, 0)))
+        _install(monkeypatch, [FakeOcc("Part", bbox=make_bbox((0, 0, 0), (2, 2, 2)))])
         monkeypatch.setattr(iv._common, "find_sketch", lambda d, n, remedy=None: (point, None))
         before = iv.app.activeViewport.camera.viewExtents
         out = _payload(iv.handler(action="orient", orientation="top", focus="W3Pt"))
@@ -868,7 +861,7 @@ class TestFocusFraming:
 
     def test_an_extents_write_the_platform_drops_is_an_error(self, monkeypatch):
         import adsk.core
-        near = FakeOcc("Part", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))
+        near = FakeOcc("Part", bbox=make_bbox((0, 0, 0), (2, 2, 2)))
         _install(monkeypatch, [near])
         # every camera READ hands back a fresh camera, so the extents write never sticks - the
         # framing silently did not happen, which must not be published as a framed view
@@ -878,8 +871,8 @@ class TestFocusFraming:
         assert res["isError"] is True and "did not take" in res["message"]
 
     def test_fit_false_re_aims_without_framing_and_says_so(self, monkeypatch):
-        near = FakeOcc("Part", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))
-        far = FakeOcc("FarAway", bbox=FakeBBox((400, 0, 0), (402, 2, 2)))
+        near = FakeOcc("Part", bbox=make_bbox((0, 0, 0), (2, 2, 2)))
+        far = FakeOcc("FarAway", bbox=make_bbox((400, 0, 0), (402, 2, 2)))
         _install(monkeypatch, [near, far])
         out = _payload(iv.handler(action="orient", orientation="front", focus="Part", fit=False))
         assert iv.app.activeViewport.fit_calls == 0      # no framing pass at all
@@ -887,8 +880,8 @@ class TestFocusFraming:
         assert "WITHOUT zooming" in out["note"]
 
     def test_no_focus_leaves_visibility_alone(self, monkeypatch):
-        a = FakeOcc("A", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))
-        b = FakeOcc("B", bbox=FakeBBox((400, 0, 0), (402, 2, 2)))
+        a = FakeOcc("A", bbox=make_bbox((0, 0, 0), (2, 2, 2)))
+        b = FakeOcc("B", bbox=make_bbox((400, 0, 0), (402, 2, 2)))
         _install(monkeypatch, [a, b])
         out = _payload(iv.handler(action="orient", orientation="front"))
         # a whole-model orient is the isFitView path - it must not run the isolation walk
@@ -898,8 +891,8 @@ class TestFocusFraming:
 
     def test_a_refused_projection_read_back_never_touches_visibility(self, monkeypatch):
         import adsk.core
-        near = FakeOcc("Part", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))
-        far = FakeOcc("FarAway", bbox=FakeBBox((400, 0, 0), (402, 2, 2)))
+        near = FakeOcc("Part", bbox=make_bbox((0, 0, 0), (2, 2, 2)))
+        far = FakeOcc("FarAway", bbox=make_bbox((400, 0, 0), (402, 2, 2)))
         _install(monkeypatch, [near, far])
         # a viewport that refuses the projection: the orient errors on the read-back, and framing
         # sits AFTER that check so a failed call leaves the design exactly as it found it.
@@ -919,7 +912,7 @@ class TestFocusFraming:
 
 class TestProjection:
     def _part(self):
-        return FakeOcc("Part", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))
+        return FakeOcc("Part", bbox=make_bbox((0, 0, 0), (2, 2, 2)))
 
     def test_each_key_maps_to_its_own_camera_types_member(self, monkeypatch):
         import adsk.core
@@ -1009,7 +1002,7 @@ class TestProjectionExtents:
     recomputes them. So the projection path fits whether or not the caller asked it to."""
 
     def _part(self):
-        return FakeOcc("Part", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))
+        return FakeOcc("Part", bbox=make_bbox((0, 0, 0), (2, 2, 2)))
 
     def test_projection_sets_isfitview_even_when_fit_is_false(self, monkeypatch):
         _install(monkeypatch, [self._part()])
@@ -1033,7 +1026,7 @@ class TestProjectionExtents:
 
 class TestPerspectiveAngle:
     def _part(self):
-        return FakeOcc("Part", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))
+        return FakeOcc("Part", bbox=make_bbox((0, 0, 0), (2, 2, 2)))
 
     def test_degrees_reach_the_camera_as_radians(self, monkeypatch):
         # Camera.perspectiveAngle is radians (a fresh perspective camera reads 0.39479 = Fusion's

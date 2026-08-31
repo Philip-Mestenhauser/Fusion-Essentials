@@ -69,9 +69,11 @@ fuller fake object model should. This is why `conftest.py` carries a large snaps
 fixture — it compensates for state the bespoke pattern leaves behind, which is also why the suite
 still passes under `-p randomly` despite the leak surface.
 
-**Do not copy the bespoke pattern for a new test.** When you touch an existing test file for an
-unrelated reason, migrating it to `monkeypatch`/the shared fakes is welcome opportunistically — there
-is no dedicated migration effort, so don't block unrelated work on it either.
+**Do not copy the bespoke pattern for a new test.** Migrating an existing bespoke fake onto the
+matching shared fake is welcome — and for a fake of a type that has a live SHAPES dump it is the
+green-lit direction: `test_bespoke_fake_ratchet.py`'s per-file baseline records each migration by
+falling. A type with no measured shape has no shared fake to migrate onto, so leave its bespoke fake
+alone. Either way, don't block unrelated work on it.
 
 ## The dual-seam trap
 

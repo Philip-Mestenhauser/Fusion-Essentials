@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import load_tool
+from conftest import load_tool, FakePoint
 
 cv = load_tool("view_screenshot_multi")
 
@@ -74,15 +74,6 @@ class TestParseViews:
 
 
 # ── handler fakes ───────────────────────────────────────────────────────────
-
-class FakePoint:
-    def __init__(self, x=0.0, y=0.0, z=0.0):
-        self.x, self.y, self.z = x, y, z
-
-    def distanceTo(self, other):
-        return ((self.x - other.x) ** 2 + (self.y - other.y) ** 2
-                + (self.z - other.z) ** 2) ** 0.5
-
 
 class FakeCamera:
     def __init__(self):

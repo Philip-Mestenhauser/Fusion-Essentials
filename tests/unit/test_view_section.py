@@ -13,23 +13,15 @@ without touching a camera.
 
 import json
 
-from conftest import load_tool
+from conftest import load_tool, FakePoint, FakeVector3D, make_bbox
 
 sv = load_tool("view_section")
 
 
 # ── fakes ───────────────────────────────────────────────────────────────────
-
-class FakePoint:
-    def __init__(self, x, y, z):
-        self.x, self.y, self.z = x, y, z
-
-
-class FakeBBox:
-    def __init__(self, minp, maxp):
-        self.minPoint = FakePoint(*minp)
-        self.maxPoint = FakePoint(*maxp)
-
+#
+# Points and bounding boxes come from conftest's shared fakes (FakePoint / make_bbox); only the
+# section-analysis object graph below is local.
 
 class FakeOcc:
     def __init__(self, name, bbox=None, full_path=None):
@@ -281,35 +273,35 @@ class TestSubComponentContextRefusal:
 class TestThroughCenter:
     def test_xy_uses_z_center(self):
         # bbox z spans 2..4 cm -> center cz = 3 cm; xy normal is Z.
-        occ = FakeOcc("Part", bbox=FakeBBox((0, 0, 2), (6, 8, 4)))
+        occ = FakeOcc("Part", bbox=make_bbox((0, 0, 2), (6, 8, 4)))
         sections = _install(occurrences=[occ])
         _payload(sv.handler(action="cut", through="Part", plane="xy", auto_view=False))
         assert sections.last_input.distance_cm == 3.0
 
     def test_front_uses_y_center(self):
         # y spans 1..5 -> cy = 3; front/xz normal is Y.
-        occ = FakeOcc("Part", bbox=FakeBBox((0, 1, 0), (6, 5, 4)))
+        occ = FakeOcc("Part", bbox=make_bbox((0, 1, 0), (6, 5, 4)))
         sections = _install(occurrences=[occ])
         _payload(sv.handler(action="cut", through="Part", plane="front", auto_view=False))
         assert sections.last_input.distance_cm == 3.0
 
     def test_through_adds_explicit_offset_on_top_of_center(self):
         # cy = 3 cm, plus 20 mm (=2 cm) offset -> 5 cm.
-        occ = FakeOcc("Part", bbox=FakeBBox((0, 1, 0), (6, 5, 4)))
+        occ = FakeOcc("Part", bbox=make_bbox((0, 1, 0), (6, 5, 4)))
         sections = _install(occurrences=[occ])
         _payload(sv.handler(action="cut", through="Part", plane="front",
                             offset=20.0, auto_view=False))
         assert sections.last_input.distance_cm == 5.0
 
     def test_through_defaults_to_xz_when_no_plane(self):
-        occ = FakeOcc("Part", bbox=FakeBBox((0, 1, 0), (6, 5, 4)))
+        occ = FakeOcc("Part", bbox=make_bbox((0, 1, 0), (6, 5, 4)))
         sections = _install(occurrences=[occ])
         out = _payload(sv.handler(action="cut", through="Part", auto_view=False))
         assert sections.last_input.entity == "PLANE_XZ"
         assert "xz plane" in out["where"]
 
     def test_through_substring_match(self):
-        occ = FakeOcc("Carrier Body:1", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))
+        occ = FakeOcc("Carrier Body:1", bbox=make_bbox((0, 0, 0), (2, 2, 2)))
         sections = _install(occurrences=[occ])
         out = _payload(sv.handler(action="cut", through="carrier", plane="xy", auto_view=False))
         assert "Carrier Body:1" in out["where"]
@@ -325,7 +317,7 @@ class TestAutoViewAim:
     def _patch_create(self):
         import adsk.core
         adsk.core.Point3D.create = staticmethod(lambda x, y, z: FakePoint(x, y, z))
-        adsk.core.Vector3D.create = staticmethod(lambda x, y, z: FakePoint(x, y, z))
+        adsk.core.Vector3D.create = staticmethod(lambda x, y, z: FakeVector3D(x, y, z))
 
     def test_yz_cut_aims_camera_down_plus_x_with_z_up(self):
         self._patch_create()

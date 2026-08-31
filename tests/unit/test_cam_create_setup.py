@@ -7,7 +7,7 @@ guards. No live Fusion - fakes mimic adsk.cam.CAM.setups.
 """
 
 import json
-from conftest import load_tool
+from conftest import load_tool, _NamedCollection
 
 cs = load_tool("cam_create_setup")
 
@@ -20,22 +20,9 @@ class FakeBody:
         self.isSolid = is_solid
 
 
-class FakeBodies:
-    def __init__(self, bodies):
-        self._list = bodies
-        self._by = {b.name: b for b in bodies}
-    @property
-    def count(self):
-        return len(self._list)
-    def item(self, i):
-        return self._list[i]
-    def itemByName(self, n):
-        return self._by.get(n)
-
-
 class FakeComp:
     def __init__(self, bodies):
-        self.bRepBodies = FakeBodies(bodies)
+        self.bRepBodies = _NamedCollection(bodies)
         self.occurrences = type("O", (), {"itemByName": lambda self, n: None})()
         self.allOccurrences = []
 

@@ -11,7 +11,7 @@ import types
 
 import pytest
 
-from conftest import load_tool
+from conftest import load_tool, _NamedCollection
 
 sc = load_tool("surface_create")
 inp = sc._inputs
@@ -25,20 +25,10 @@ class FakeBody:
         self.isSolid = is_solid
 
 
-class FakeBodies:
-    def __init__(self, bodies):
-        self._b = list(bodies)
-    @property
-    def count(self):
-        return len(self._b)
-    def item(self, i):
-        return self._b[i]
-
-
 class FakeFeature:
     def __init__(self, name="Surface1", bodies=None, extent_cm=None):
         self.name = name
-        self.bodies = FakeBodies(bodies if bodies is not None else [FakeBody()])
+        self.bodies = _NamedCollection(bodies if bodies is not None else [FakeBody()])
         if extent_cm is not None:
             # ExtrudeFeature.extentOne is a DistanceExtentDefinition (a SymmetricExtentDefinition
             # for a symmetric extrude) whose .distance is a ModelParameter reading CM, signed as
