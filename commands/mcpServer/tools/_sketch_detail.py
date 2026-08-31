@@ -2,8 +2,7 @@
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
 """Detail engine behind sketch_get: X-rays ONE sketch - entities, construction geometry,
-constraints, dimensions - and owns the sketch's world FRAME, the map from its local 2D coords to
-world that sketch_create publishes on the way in and sketch_get on the way out. Not a
+constraints, dimensions - and owns the sketch's world FRAME (sketch_world_frame). Not a
 separately-registered tool; sketch_get delegates here when called with a 'sketch_name'. Entity ids
 ('<type>:<index>') match the references sketch_constrain / model_extrude / sketch_add_geometry use.
 Read-only.
@@ -21,36 +20,32 @@ from . import _inputs
 
 app = adsk.core.Application.get()
 
-# One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
-MAP_BLURB = ("the ONE-sketch X-ray behind sketch_get(sketch_name=...): entities, construction "
-             "geometry, constraints, dimensions and profiles + sketch_world_frame (the ONE frame "
-             "for a sketch plane: where sketch (0,0) lands in mm, the unit +X/+Y directions and the "
-             "normal derived from them, plus the 'space' those numbers are in. It takes the DESIGN "
-             "BEING READ, and 'world' means that design's world - a sketch inside a referenced "
-             "document hangs off the SOURCE design, whose root answers for another document. "
-             "'world' when that design owns the sketch at its root or places its component EXACTLY "
-             "once (the read is lifted through that occurrence), or when the caller passes the "
-             "OCCURRENCE it reached the sketch through, which names one instance among several; "
-             "'component_local' when a component is instanced several times and nothing named an "
-             "instance, since each puts the sketch somewhere different and no single world frame "
-             "exists. The axis KEYS follow space - x_world/y_world or x_local/y_local - so a "
-             "consumer keyed on the world name reads a missing key rather than local numbers; "
-             "frame_space_note is the matching wire sentence. sketch_create publishes it on the way "
-             "in and sketch_get on the way out, so a caller places and VERIFIES against the same "
-             "numbers) + curve_id (the '<type>:<index>' entity "
-             "id every sketch reference is written in, which _common.resolve_entity_ref reads back) "
-             "+ scope_component / scope_components and the WRITE side over them - COMPONENT_SCOPE "
-             "(the ONE wire declaration of the 'component' input every by-name sketch edit adds - "
-             "_inputs.SketchRefList and ProfileRef take the same scope through their scope_input=, "
-             "so a kind's consumer opts in by declaring this property and passing its value), "
-             "scoped_sketch and scoped_or_recent_sketch (the same by-name resolves the unscoped "
-             "family runs, narrowed to that component when one was passed - a scope that WAS passed "
-             "is always resolved and validated, never dropped because the name happened to be "
-             "unique - and scope_remedy, the sentence a shared-name refusal ends on so it names the "
-             "input that actually narrows THAT reference, instead of a rename in another document) "
-             "+ unquote_text / font_read_back (the SketchText readers: textParameter.expression "
-             "holds the string QUOTED - .text/.height are retired - and fontName reads as a "
-             "name-or-None; sketch_set_text and sketch_delete_entity read through these)")
+# The "what to reuse from here" catalog line for the generated CLAUDE.md helper map (see
+# tests/gen_manifest.py): each symbol with the one clause that says WHEN to reach for it. The
+# mechanism behind a clause lives at the symbol itself, in its test, or in VERIFIED_API_FACTS.md.
+MAP_BLURB = (
+    "the ONE-sketch X-ray behind sketch_get(sketch_name=...) - entities, construction geometry, "
+    "constraints, dimensions and profiles; sketch_world_frame + frame_space_note - the ONE frame "
+    "for a sketch plane (where sketch (0,0) lands in mm, the unit +X/+Y directions, the normal, "
+    "and the 'space' those numbers are in) and the matching wire sentence, for a caller placing "
+    "geometry by computed coords: sketch_create publishes the frame on the way in and sketch_get "
+    "on the way out, so the numbers placed against are the numbers verified against. It answers "
+    "for the DESIGN BEING READ, and the axis KEYS follow space - x_world/y_world or x_local/y_local "
+    "- so a consumer keyed on the world name reads a missing key rather than local numbers; "
+    "curve_id - the '<type>:<index>' entity id every sketch reference is written in, "
+    "which _common.resolve_entity_ref reads back; scope_component + scope_components - the "
+    "'component' scope a by-name sketch READ narrows through, answering the one component (plus "
+    "the occurrence a path-spelled scope named, which a frame lifts through) or the several a LIST "
+    "may show apart; COMPONENT_SCOPE + component_scope - the ONE wire declaration of that input, "
+    "and the same declaration under another name for a tool whose own 'component' means something "
+    "else or that scopes a SECOND sketch reference (_inputs.SketchRefList and ProfileRef take the "
+    "scope through their scope_input=); scoped_sketch + scoped_or_recent_sketch - the by-name and "
+    "the name-or-most-recent resolve for a sketch EDIT, narrowed to that component when one was "
+    "passed and never dropped because the name happened to be unique; scope_remedy - the sentence "
+    "a shared-name refusal ends on, so it names the input that actually narrows THAT reference "
+    "instead of a rename in another document; unquote_text + font_read_back - the SketchText "
+    "readers (.text/.height are retired: the expression holds the string QUOTED, and fontName "
+    "reads as a name-or-None)")
 
 
 def unquote_text(expr):
@@ -93,9 +88,7 @@ def _plane_normal(x_world, y_world):
 WORLD_SPACE = "world"
 COMPONENT_LOCAL_SPACE = "component_local"
 
-# The one sentence each space owes the caller, keyed by frame['space']. Both sketch_create (on the
-# way in) and sketch_get (on the way out) append the SAME line, so a caller places and verifies
-# against one story - and neither can assert world while the numbers are not.
+# The one sentence each space owes the caller, keyed by frame['space'].
 FRAME_SPACE_NOTE = {
     WORLD_SPACE: (
         "'frame' maps sketch coords to WORLD (frame.space='world'): sketch (0,0) sits at "
@@ -116,7 +109,8 @@ FRAME_SPACE_NOTE = {
 
 def frame_space_note(frame) -> str:
     """The one sentence describing the space `frame`'s numbers are in - the shared line every
-    frame-publishing payload appends, so create and read tell the caller the same story. An
+    frame-publishing payload appends (sketch_create on the way in, sketch_get on the way out), so
+    create and read tell one story and neither asserts world while the numbers are not. An
     unreadable frame (None) gets the local wording: it never claims a world it could not resolve."""
     space = (frame or {}).get("space") if isinstance(frame, dict) else None
     return FRAME_SPACE_NOTE.get(space, FRAME_SPACE_NOTE[COMPONENT_LOCAL_SPACE])
@@ -126,55 +120,50 @@ def _placement_count(root, comp):
     """How many times `root`'s assembly places `comp` - 0 for a component nothing places there, and
     0 for `root` itself, since a root component is placed nowhere in its own design (measured).
 
-    NOT a lift and not a resolver: it reads no occurrence and refuses nothing - _inputs.
-    single_placement owns both. It answers the one question that walk cannot be asked without also
-    being asked whether two components are THE SAME ONE, which is a comparison of entityTokens that
-    two components in different documents were measured sharing."""
+    NOT a lift and not a resolver: it reads no occurrence and refuses nothing -
+    _inputs.single_placement owns both. It answers the one question that walk cannot be asked
+    without ALSO being asked whether two components are THE SAME ONE - an entityToken comparison
+    that components in different documents were measured defeating (_common.native_identity)."""
     occs = safe(lambda: root.allOccurrencesByComponent(comp)) if comp is not None else None
     return (safe(lambda: occs.count, 0) or 0) if occs is not None else 0
 
 
 def _frame_context(sketch, design, occurrence=None):
-    """(the sketch the frame is read off, the space those numbers are in).
+    """(the sketch the frame is read off, the space those numbers are in) - the ONE decision behind
+    'space'. The measured placement rules below cite the test carrying their specimen numbers.
 
     Sketch.origin/xDirection/yDirection are documented "in model space", and MEASURED, model space
-    is the sketch's PARENT COMPONENT rather than the assembly: a sketch on xy in a component placed
-    at world (30,0,0) and turned 90 deg about Z reads origin (0,0,0) and +X (1,0,0) off the NATIVE
-    sketch, while the same sketch proxied into the occurrence that places it reads (3,0,0) cm and
-    +X (0,1,0). So a native sketch owned by a sub-component is lifted through that occurrence
-    before anything is read off it.
+    is the sketch's PARENT COMPONENT rather than the assembly: the NATIVE sketch and its proxy into
+    the occurrence that places it read different origins and different axes (the specimen numbers
+    are in TestFrameSpace's one-occurrence case). So a native sketch owned by a sub-component is
+    lifted before anything is read off it.
 
-    `design` is the design BEING READ, and every lift resolves against ITS root - never against the
-    design the sketch's own component hangs off. For an x-ref'd sketch those are two different
-    documents: parentComponent.parentDesign is the SOURCE document, and MEASURED on a host holding
-    a referenced document placed at x=300 mm, the source design's root lifts that sketch to proxy
-    origin (0,0,0) while the host's root lifts the same sketch to (30,0,0). A frame resolved
-    against the source answers for a document the caller is not reading, so 'world' there names a
-    world the caller cannot place geometry in.
+    `design` is the design BEING READ, and every lift resolves against ITS root - never against
+    parentComponent.parentDesign, which for an x-ref'd sketch is the SOURCE document: the two roots
+    were MEASURED lifting one sketch to two different places (TestXrefFrame). 'world' resolved
+    against the source names a world the caller cannot place geometry in.
 
-    `occurrence` is the placement the caller reached the sketch THROUGH, when it reached it through
-    one - a 'component' scope spelled as an occurrence fullPathName or handle. It names the
-    instance outright, so the frame lifts through that occurrence without asking how many
-    placements exist. For an occurrence that does not place this sketch's component,
+    `occurrence` is the placement the caller reached the sketch THROUGH - a 'component' scope
+    spelled as an occurrence fullPathName or handle - and names the instance outright, so no census
+    is asked for. For an occurrence that does not place this sketch's component,
     createForAssemblyContext hands back nothing (the refusal _inputs._proxy_or_refuse records),
-    which lands as component_local - so a wrong occurrence cannot produce a world claim.
+    which lands as component_local: a wrong occurrence cannot produce a world claim.
 
-    Without one, three cases, which is why this reports a SPACE instead of always claiming world.
-    Which case applies turns on how many times the design BEING READ places the sketch's owner -
-    the census below - and never on an ownership answer alone:
+    Without one, three cases - which is why this reports a SPACE instead of always claiming world -
+    turning on how many times the design BEING READ places the sketch's owner, never on an
+    ownership answer alone:
       owned by THIS design's root, or already a proxy -> nothing to lift; the numbers are world as
         they stand. The census is what confirms it: this design places its own root zero times, so
         an owner it does place is not that root, whatever a comparison of the two says.
       component placed EXACTLY ONCE -> read through that occurrence; the numbers are world.
-      component placed SEVERAL times, or none -> MEASURED on two instances of one component, the
-        proxies disagree: one read origin (1.0, 0.5, 0) cm with unrotated axes while its sibling
-        read (-4.0, 0, 0) with axes turned 45 deg. There is no single world frame, so the
-        COMPONENT-LOCAL frame is published and labelled - picking one instance would be the
-        first-match guess this repo refuses.
+      component placed SEVERAL times, or none -> two instances of one component were MEASURED
+        disagreeing on both origin and axes (TestFrameSpace's several-instances case), so no single
+        world frame exists: the COMPONENT-LOCAL frame is published and labelled - picking one
+        instance would be the first-match guess this repo refuses.
 
-    A design that does not read reports component_local, so does a caller that establishes no
-    design, and so does a sketch whose owning component does not read: each understates a
-    root-owned sketch rather than claiming a world nothing establishes.
+    A design that does not read, a caller that establishes no design, and a sketch whose owning
+    component does not read all report component_local: each understates a root-owned sketch rather
+    than claiming a world nothing establishes.
 
     The lift runs on _inputs.single_placement, the ONE assembly-context walk - its entity_component
     chain is measured to raise on every read a Sketch does not carry, so it answers None and the
@@ -197,12 +186,11 @@ def _frame_context(sketch, design, occurrence=None):
         return _lift(occ)
     # "Nothing to lift" - true for a sketch this design's ROOT owns, and FALSE for one owned by a
     # referenced document's root component, which is what inserting a part file places. That answer
-    # rests on comparing the sketch's owner with this root, and two root components in DIFFERENT
-    # documents were MEASURED reading one entityToken (/v4BAAEAAwAAAAAAAAAAAAAA, on three distinct
-    # roots), so the comparison answers SAME and the source document's native numbers would ship as
-    # this design's world. The placement census settles it without asking whether two components
-    # are the same one: this design places its own root nowhere, so an owner it DOES place is not
-    # that root and has to be lifted like any other.
+    # rests on comparing the sketch's owner with this root, and root components in DIFFERENT
+    # documents were MEASURED reading one entityToken (_common.native_identity holds the specimen),
+    # so the comparison answers SAME and the source document's native numbers would ship as this
+    # design's world. The placement census settles it without that comparison: this design places
+    # its own root nowhere, so an owner it DOES place is not that root and is lifted like any other.
     if safe(lambda: sketch.assemblyContext) is not None:
         return sketch, WORLD_SPACE          # already in the assembly's space; nothing to census
     owner = safe(lambda: sketch.parentComponent)
@@ -223,22 +211,17 @@ def sketch_world_frame(sketch, design, occurrence=None) -> dict:
     """Map a sketch's local 2D coords out to the space 'space' names: where sketch (0,0) lands,
     where +X/+Y point, and the plane's normal. None when the plane cannot be read.
 
-    'world' means the world of `design` - the design BEING READ - so the caller is the one who says
-    which document the frame answers for; `occurrence`, when the caller reached the sketch through
-    a placement, names the instance to lift through (see _frame_context for both).
+    'world' means the world of `design` - the design BEING READ - and `occurrence`, when the caller
+    reached the sketch through a placement, names the instance to lift through. WHICH space a frame
+    gets is _frame_context's decision, taken on this design's own PLACEMENT count of the sketch's
+    owner rather than on an ownership comparison.
 
     The in-plane axis KEYS name the space they are in: 'x_world'/'y_world' only when the frame
-    really resolved into that assembly, 'x_local'/'y_local' when it did not (see _frame_context).
-    A consumer keyed on x_world therefore gets a MISSING KEY on a component-local frame rather than
-    component-local numbers under a world name - the false reading is structurally impossible, not
-    merely documented. 'space' says which pair is present, and is always published.
-
-    Which of the two a frame gets is decided by counting this design's PLACEMENTS of the sketch's
-    owner, so the world keys ride on a read of the document being answered for. Nothing is
-    published as world on the strength of two components comparing equal, which two components in
-    different documents were measured doing.
-
-    origin_mm and normal keep one name in both spaces: neither claims world, so neither can lie.
+    really resolved into that assembly, 'x_local'/'y_local' when it did not. A consumer keyed on
+    x_world therefore gets a MISSING KEY on a component-local frame rather than component-local
+    numbers under a world name - the false reading is structurally impossible, not merely
+    documented. 'space' says which pair is present and is always published; origin_mm and normal
+    keep one name in both spaces, since neither claims world and so neither can lie.
 
     On a face (or on xz/yz) the sketch origin is NOT the face centre and the in-plane axes need not
     align with world - reporting this lets the caller place geometry by computed coords, and read a
@@ -560,11 +543,11 @@ def _profiles(sketch, f):
         ap = safe(lambda p=p: p.areaProperties())
         area = safe(lambda: ap.area) if ap else None
         c = safe(lambda: ap.centroid) if ap else None
-        # The centroid is COMPONENT-LOCAL (cm, the API unit), not world: on a component placed at
-        # x=5 cm, a rectangle at its sketch origin reads 1.0, not 6.0, and the assembly-context
-        # proxy reads that same point - so a native sketch and a proxied one land in one space
-        # (measure_api row profile-centroid-component-local). It doubles as the locator for the
-        # composite handle, which _inputs._refind_profile matches against the same local read.
+        # The centroid is COMPONENT-LOCAL (cm, the API unit), not world, and the assembly-context
+        # proxy reads that same point, so a native sketch and a proxied one land in one space
+        # (VERIFIED_API_FACTS.md row profile-centroid-component-local holds the measurement). It
+        # doubles as the locator for the composite handle, which _inputs._refind_profile matches
+        # against the same local read.
         pos = (c.x, c.y, c.z) if c else None
         loops = safe(lambda p=p: p.profileLoops.count)
         # The locator kind carries sketch+area, not just 'profile': findEntityByToken resolves
@@ -583,8 +566,7 @@ def _profiles(sketch, f):
             "loop_count": loops,
             "handle": _inputs.make_handle(p, kind, pos) if pos else safe(lambda: p.entityToken),
         })
-    # largest first - the outer/main region is the common target; index preserves API order. A
-    # positive scale factor preserves order, so sorting on the scaled 'area' still agrees.
+    # A positive scale factor preserves order, so sorting on the scaled 'area' still agrees.
     out.sort(key=lambda r: (r["area"] is None, -(r["area"] or 0)))
     return out
 
@@ -594,11 +576,11 @@ _XRAY_CAP = 200   # a dense sketch can carry hundreds of entities/constraints/di
 
 def _entity_xray(sketch, f, max_results=_XRAY_CAP):
     """The HEAVY layer: every entity / constraint / dimension as its own record. Built ONLY when the
-    caller asks (include_entities=true) - on a dense sketch this is dozens of records and would flood
-    the agent's window if returned by default. Each of entities/constraints/dimensions is independently
-    capped at max_results (default _XRAY_CAP). Returns (entities, constraints, dimensions,
-    construction_count, driving_dim_count, truncated) - construction_count/driving_dim_count are
-    computed over the FULL (uncapped) walk, so they stay honest even when the arrays are capped.
+    caller asks (include_entities=true), since on a dense sketch this is dozens of records. Each of
+    entities/constraints/dimensions is independently capped at max_results (default _XRAY_CAP).
+    Returns (entities, constraints, dimensions, construction_count, driving_dim_count, truncated) -
+    the two counts are computed over the FULL (uncapped) walk, so they stay honest when the arrays
+    are capped.
 
     f = cm -> display-unit factor, applied to every LENGTH value (entity geometry, a distance/radius/
     diameter dimension's 'value')."""
@@ -656,11 +638,10 @@ def _scope_hits(design, raw):
     Fusion dedupes a RENAME, but not an INSERT - two referenced documents each bring their own
     'Frame' (measured), and only the path tells those two components apart.
 
-    The occurrence is the third answer the scope already holds. It is the placement the caller
-    reached the component THROUGH, so a frame read off what that component holds can be lifted into
-    the document being read instead of into whichever document owns the component - the two are
-    different documents for an x-ref. Only the occurrence vocabulary names a placement; a component
-    NAME names none, and answers None here."""
+    The occurrence is the third answer the scope already holds: the placement the caller reached the
+    component THROUGH, so a frame read off what that component holds lifts into the document being
+    read rather than into whichever document owns the component (see _frame_context). Only the
+    occurrence vocabulary names a placement; a component NAME names none, and answers None here."""
     want = (raw or "").strip()
     if not want:
         return _common.all_components(design), None, None
@@ -706,9 +687,9 @@ def scope_component(design, raw, input_name="component"):
     declare a strict schema, so naming 'component' there hands back a call the schema rejects.
 
     The occurrence is present only when the scope was SPELLED as an occurrence path or handle, and
-    it is what a frame read off this component lifts through: the component may live in a
-    referenced document, and then its own design's root answers for the wrong document (see
-    _frame_context). A name-spelled scope names no placement and hands back None.
+    it is what a frame read off this component lifts through (see _frame_context, since the
+    component may live in a referenced document). A name-spelled scope names no placement and hands
+    back None.
 
     A name SEVERAL components wear cannot narrow a by-name read, so it is refused - naming their
     occurrence PATHS, a spelling this same input accepts, so the caller's next call resolves. That
@@ -746,23 +727,21 @@ def scope_component(design, raw, input_name="component"):
                         "component='" + want + "') and no 'sketch_name'.")
 
 
-# ── the 'component' scope as a WRITE tool's input ───────────────────────────────────────────────
-# The read's scope, wired for the by-name sketch EDITS. Every edit in the family declares the SAME
-# property and resolves through the SAME two functions below, so one vocabulary answers everywhere.
+# ── the 'component' scope as a WRITE tool's input - the read's scope, wired for by-name EDITS ────
 
 def scope_remedy(input_name="component"):
     """The closing sentence a shared-name refusal carries once the calling tool has a scope of its
     own (see _common.find_sketch's ``remedy``).
 
-    ``input_name`` is the input that actually narrows THIS sketch reference, because a tool taking
-    two sketch names takes two scopes: naming 'component' in the refusal for a reference that
+    ``input_name`` is the input that actually narrows THIS sketch reference, and is not always
+    'component' (scope_component says why): naming 'component' in the refusal for a reference that
     'target_component' narrows would send the caller to an input that does not touch it - the same
     dead end as "rename one", one step further along.
 
-    Every caller names a real input: the two helpers below default it to 'component', each tool site
-    passes its own literal, and a typed kind reaches here only from inside its ``if scope_input:``
-    gate. A consumer with NO scope input never arrives - it resolves through the unscoped walk, which
-    is handed no remedy at all."""
+    Every caller names a real input: the helpers below default it to 'component', a tool site passes
+    its own literal, and a typed kind reaches here only from inside its ``if scope_input:`` gate. A
+    consumer with NO scope input never arrives - it resolves through the unscoped walk, which is
+    handed no remedy at all."""
     return (f"Name the one you mean by passing its owning component as '{input_name}' (sketch_get "
             "lists each sketch's owning component).")
 
@@ -775,7 +754,10 @@ _SCOPE_VOCABULARY = (
 )
 
 # The ONE wire declaration of that input, so no tool words the scope differently from its siblings:
-# tool.add_input_property(*_sketch_detail.COMPONENT_SCOPE).
+# tool.add_input_property(*_sketch_detail.COMPONENT_SCOPE), resolved through scoped_sketch /
+# scoped_or_recent_sketch below, so one vocabulary answers everywhere. _inputs.SketchRefList and
+# ProfileRef reach the same scope through their scope_input=, so a kind's consumer opts in by
+# declaring this property and passing its value.
 COMPONENT_SCOPE = ("component", {"type": "string", "description":
                    "Act on the sketch of that name inside THIS component - " + _SCOPE_VOCABULARY})
 
@@ -787,9 +769,9 @@ def component_scope(input_name, narrows=""):
     or when it scopes a SECOND sketch reference.
 
     ``narrows`` names the sketch input this scope applies to. A tool carrying more than one component
-    input has to say which reference each one narrows, or the caller cannot tell them apart - and the
-    name declared here is also what scoped_sketch's refusals must be told to quote. The vocabulary
-    sentence is the same either way, so no spelling of this scope drifts from 'component'."""
+    input has to say which reference each one narrows, or the caller cannot tell them apart; the name
+    declared here is also what scoped_sketch's refusals quote. The vocabulary sentence is the same
+    either way, so no spelling of this scope drifts from 'component'."""
     lead = (f"The component holding '{narrows}', when two components carry that name - "
             if narrows else "Act on the sketch of that name inside THIS component - ")
     return input_name, {"type": "string", "description": lead + _SCOPE_VOCABULARY}
@@ -807,21 +789,19 @@ def scoped_sketch(design, name, component, input_name="component"):
     """(sketch, error_or_None): ONE sketch by name for an EDIT, narrowed to ``component`` when the
     caller passed one - the refusing form ``_common.find_sketch`` is to an unscoped tool.
     ``input_name`` is the scope input's own name, and it reaches ALL THREE refusals this can
-    produce - the unscoped shared-name one, the ambiguous-scope one, and the scoped miss. Threading
-    it into one of the three and letting the others fall back to 'component' is the failure this
-    signature exists to prevent: model_arrange and design_export carry no 'component' input and
-    declare a strict schema, so a remedy naming it is a call their own schema rejects.
+    produce - the unscoped shared-name one, the ambiguous-scope one, and the scoped miss - because
+    threading it into one and letting the others fall back to 'component' is what hands a tool a
+    remedy its own schema rejects (scope_component).
 
     With NO scope this is that design-wide walk, refusing a name several components carry with the
-    remedy this family can honour - the caller's own scope input - instead of a rename that, at the
-    usual source of a shared name, means editing a different document.
+    remedy this family can honour - the caller's own scope input - instead of the rename dead end
+    scope_component describes.
 
     A scope that WAS passed is always resolved and validated, even where the sketch name would have
     identified one sketch on its own: an input a caller can get wrong without being told is a trap,
-    so a component this design does not hold, or a component NAME several components wear, refuses
-    here rather than being quietly dropped. It resolves through ``scope_component`` - the same
-    vocabulary and the same refusals the read scopes by - and the sketch then comes from THAT
-    component's own collection, so the scope decides which sketch answers."""
+    so a component this design does not hold, or a NAME several components wear, refuses here rather
+    than being quietly dropped. It resolves through ``scope_component``, and the sketch then comes
+    from THAT component's own collection, so the scope decides which sketch answers."""
     scope = (component or "").strip()
     if not scope:
         return _common.find_sketch(design, name, remedy=scope_remedy(input_name))
@@ -836,9 +816,9 @@ def scoped_or_recent_sketch(design, name, component, input_name="component"):
     contract with the same scope - ``_common.find_or_recent_sketch``'s shape, so a caller keeps
     wording its own not-found error apart from a refusal.
 
-    ``input_name`` reaches every refusal, exactly as in ``scoped_sketch``: the two helpers take the
-    same parameter so a tool wired to a differently-spelled scope cannot get a correct remedy from
-    one and a hardcoded 'component' from the other.
+    ``input_name`` reaches every refusal, exactly as in ``scoped_sketch`` - the two helpers take the
+    same parameter, so one cannot hand a differently-spelled scope a correct remedy while the other
+    hardcodes 'component'.
 
     A blank NAME still means "the most recent sketch", and the scope decides WHOSE: the scoped
     component's own collection when one was passed, the active component's when none was. Ignoring
@@ -882,11 +862,10 @@ def handler(sketch_name: str = "", include_entities: bool = False, units: str = 
     if not name:
         names = all_sketch_names(design)
         return error("Provide 'sketch_name'. Available: " + (", ".join(n for n in names if n) or "(none)"))
-    # Resolve across the WHOLE design - every component asked for its own sketch of that name, with no
-    # preference among them - so a sketch in an activated sub-component (the normal assembly flow) is
-    # findable, not only one in the root component, and a name several components carry is REFUSED
-    # rather than resolved to one of them. With 'component', that same walk is FILTERED to the named
-    # component, which is the answer to a name two components share.
+    # Resolve across the WHOLE design - _common.find_sketch asks every component for its own sketch
+    # of that name with no preference among them, so a sketch in an activated sub-component (the
+    # normal assembly flow) is findable, not only one in the root, and a name several components
+    # carry is REFUSED. With 'component', that same walk is FILTERED to the named component.
     scope = (component or "").strip()
     # The placement this read reached the sketch through, when the scope named one - the frame's
     # lift into THIS document's world runs on it. A name-spelled scope, and the unscoped read,
@@ -901,8 +880,7 @@ def handler(sketch_name: str = "", include_entities: bool = False, units: str = 
             return error(refusal)
     else:
         # The refusal closes on this tool's OWN 'component' scope - the same sentence its sibling
-        # by-name sketch writes end on - rather than on a rename, which at the usual source of a
-        # shared name means opening and editing a referenced document.
+        # by-name sketch writes end on - rather than on a rename (see scope_remedy).
         sketch, ambiguous = find_sketch(design, name, remedy=scope_remedy())
         if ambiguous:
             return error(ambiguous)
@@ -945,13 +923,12 @@ def handler(sketch_name: str = "", include_entities: bool = False, units: str = 
         "dimension_count": dim_count,
         "profile_count": safe(lambda: sketch.profiles.count, 0),
         "units": unit,
-        # Where this sketch sits in WORLD - the verification side of the same frame sketch_create
+        # Where this sketch sits in WORLD - the verification side of the frame sketch_create
         # publishes. Every x/y below is sketch-LOCAL, so without it a caller cannot check a plane's
         # position, its normal, or whether two sketches are coplanar. The world is THIS design's,
-        # which is why the design being read is handed over rather than taken off the sketch: a
-        # sketch inside a referenced document hangs off the SOURCE design, whose world is not the
-        # one the caller is reading. safe(): a plane read that raises reports frame null rather
-        # than sinking the whole read.
+        # which is why the design being READ is handed over rather than taken off the sketch (see
+        # _frame_context). safe(): a plane read that raises reports frame null rather than sinking
+        # the whole read.
         "frame": safe(lambda: sketch_world_frame(sketch, design, host_occurrence)),
         # The actionable layer: pass a profile's 'handle' as a ProfileRef to extrude/revolve/loft
         # instead of guessing a profile_index.
