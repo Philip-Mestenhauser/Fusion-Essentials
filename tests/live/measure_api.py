@@ -1089,7 +1089,7 @@ ROWS = [
     {
         "id": "enum-feature-health-states",
         "claim": "FeatureHealthStates ints: Healthy=0, Warning=1, Error=2, Suppressed=3 (RolledBack=4, Unknown=5 exist and are ignored by the rollups)",
-        "encoded_in": "tests/unit/test_assembly_get.py; _common.timeline_health; assembly_get.py health thresholds",
+        "encoded_in": "tests/unit/test_assembly_get.py; _common.timeline_health; _assembly_detail.py health thresholds",
         "body": """
     H = adsk.fusion.FeatureHealthStates
     dump_enum("fusion.FeatureHealthStates", H)

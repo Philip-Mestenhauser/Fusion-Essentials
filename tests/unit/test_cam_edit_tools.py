@@ -19,6 +19,7 @@ from types import SimpleNamespace
 from conftest import FakeOperation, _NamedCollection, load_tool
 
 ct = load_tool("cam_edit_tools")
+cp = load_tool("_cam_presets")          # the preset helpers cam_edit_tools' preset paths run through
 
 
 # ── fakes ────────────────────────────────────────────────────────────────────
@@ -1184,11 +1185,11 @@ def _preset_with(names):
 
 
 def _feed_param(preset):
-    return ct._preset_param_of(preset, ct._FEED_PARAM_CANDIDATES, "feed")
+    return cp._preset_param_of(preset, cp._FEED_PARAM_CANDIDATES, "feed")
 
 
 def _speed_param(preset):
-    return ct._preset_param_of(preset, ct._SPEED_PARAM_CANDIDATES, "speed")
+    return cp._preset_param_of(preset, cp._SPEED_PARAM_CANDIDATES, "speed")
 
 
 class TestPresetParamOf:
@@ -2396,9 +2397,9 @@ class TestPresetValuePlumbing:
 
     def test_a_boolean_is_never_a_plain_number(self):
         # True would otherwise float() to 1.0 and pass a value check it has to fail
-        assert ct._plain_number(True) is None and ct._plain_number(False) is None
-        assert ct._plain_number("900") == 900.0
-        assert ct._plain_number("35in/min") is None      # units carried, not a plain number
+        assert cp._plain_number(True) is None and cp._plain_number(False) is None
+        assert cp._plain_number("900") == 900.0
+        assert cp._plain_number("35in/min") is None      # units carried, not a plain number
 
     def test_a_preset_parameter_that_refuses_the_write_rolls_back(self, monkeypatch):
         tool = _preset_param_tool(_WriteProtected, "tool_feedCutting")

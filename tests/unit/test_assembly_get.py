@@ -16,6 +16,7 @@ import pytest
 from conftest import load_tool, FakeMatrix3D, FakePoint, FakeVector3D
 
 ap = load_tool("assembly_get")
+ad = load_tool("_assembly_detail")      # the row serializers assembly_get's handler publishes
 
 
 class _Pt:
@@ -967,7 +968,7 @@ class TestJointOriginsSlice:
         sub.entityToken = "SUB"
         root._occ_by_comp = {"Root": [_SliceOcc("Root:1", sub)]}
         jo = _SliceJO("Center", token="C")
-        refs = [ref for ref, _ctx in ap._jo_instances(_SliceDesign(root, subs=[sub]), jo, sub)]
+        refs = [ref for ref, _ctx in ad._jo_instances(_SliceDesign(root, subs=[sub]), jo, sub)]
         assert refs == ["Root:1:Center"]
 
     def test_a_second_wrapper_of_the_root_component_still_reads_as_the_root(self):
@@ -978,7 +979,7 @@ class TestJointOriginsSlice:
         other = _SliceComp("Root")                   # a second wrapper of the SAME component
         other.entityToken = "ROOT"
         jo = _SliceJO("Center", token="C")
-        refs = [ref for ref, _ctx in ap._jo_instances(_SliceDesign(root), jo, other)]
+        refs = [ref for ref, _ctx in ad._jo_instances(_SliceDesign(root), jo, other)]
         assert refs == ["Center"]
 
     # The row's world heading has to hold for the AXES too. A JointOrigin reports them in its owning

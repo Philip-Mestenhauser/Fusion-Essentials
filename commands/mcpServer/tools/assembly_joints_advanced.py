@@ -461,7 +461,7 @@ def as_built_joint_handler(occurrence_one: str = "", occurrence_two: str = "", g
 # healthState on an assembly constraint: 2 = error, 1 = warning - the same pair assembly_get's
 # relations slice publishes as healthy:false (_health there), so a caller re-reading the constraint
 # sees the state this refusal named. The two DIVERGE on an UNREADABLE state: the READS treat it as
-# healthy (assembly_get._health, joint_at_geometry) because a read must describe a design it did not
+# healthy (_assembly_detail._health, joint_at_geometry) because a read must describe a design it did not
 # change, while a CREATE that cannot confirm its own effect has nothing to stand on - so this refuses.
 # The create-side rule is the canonical one for a write: an unconfirmable mutation is an error.
 _HS_ERROR, _HS_WARNING = 2, 1

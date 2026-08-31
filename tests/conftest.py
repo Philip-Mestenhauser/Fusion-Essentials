@@ -800,7 +800,7 @@ class FakeVector3D:
 
     def copy(self):
         # type(self), not FakeVector3D: a subclass modelling ONE refusing axis must survive the
-        # copy a lift takes before transforming (assembly_get._world_axes copies, then transforms).
+        # copy a lift takes before transforming (_assembly_detail._world_axes copies, then transforms).
         return type(self)(self.x, self.y, self.z)
 
     def normalize(self):
