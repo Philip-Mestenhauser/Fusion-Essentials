@@ -318,3 +318,50 @@ class TestParkedSteps:
             ("b_get", {}, tool_verify.Parked("held", lambda p: p.get("n") == 2), None),
         ], {})
         assert [r[1] for r in rows] == ["pass", "FAIL"]
+
+
+class TestFacadeLateBinding:
+    """The four call-time facade() sites with no other offline pin: each must see what a consumer
+    stubs ON tool_verify at CALL time. An import-time binding of its own copy leaves the stub
+    unread while every other offline test stays green, so these assertions are each site's one
+    offline bite."""
+
+    def test_precondition_holds_reads_the_stubbed_wire(self, monkeypatch):
+        seen = []
+        monkeypatch.setattr(tool_verify, "call",
+                            lambda tool, args: (seen.append((tool, args)), (False, {}))[1])
+        assert tool_verify._precondition_holds(("sketch_get", {"sketch_name": "X"})) is True
+        assert seen == [("sketch_get", {"sketch_name": "X"})]
+        monkeypatch.setattr(tool_verify, "call", lambda tool, args: (True, "down"))
+        assert tool_verify._precondition_holds(("sketch_get", {})) is False
+
+    def test_shoot_reads_the_stubbed_wire_and_names_the_file(self, monkeypatch, tmp_path):
+        seen = []
+        monkeypatch.setattr(tool_verify, "call",
+                            lambda tool, args: (seen.append((tool, args)), (False, {}))[1])
+        path = tool_verify._shoot("Frame:1", str(tmp_path), 3)
+        assert seen and seen[0][0] == "view_screenshot"
+        assert path == seen[0][1]["file_path"] and "0003_Frame_1" in path
+        monkeypatch.setattr(tool_verify, "call", lambda tool, args: (True, "no viewport"))
+        assert tool_verify._shoot("x", str(tmp_path), 4) is None
+
+    def test_poll_generation_reads_the_stubbed_wire_and_story(self, monkeypatch):
+        monkeypatch.setattr(tool_verify, "call",
+                            lambda tool, args: (False, {"completed": True,
+                                                        "live_states": {"valid": 4},
+                                                        "empty_toolpaths": []}))
+        monkeypatch.setattr(tool_verify, "STORY", {"cam_get_status": "stubbed story line"})
+        rows, notes, valued = [], {}, set()
+        tool_verify.poll_generation(rows, notes, "DemoSetup", valued=valued)
+        assert rows == [("cam_get_status", "pass", "4 valid, non-empty toolpaths")]
+        assert notes["cam_get_status"] == "stubbed story line"
+        assert valued == {"cam_get_status"}
+
+    def test_check_reads_the_stubbed_source_hash(self, monkeypatch, tmp_path):
+        receipt = tmp_path / "VERIFIED_TOOLS.md"
+        stamp = "Stamp: source " + "ab" * 32 + " | Fusion 2705.1.4 | verified 2026-08-31" + chr(10)
+        receipt.write_text(stamp, encoding="utf-8")
+        monkeypatch.setattr(tool_verify, "source_hash", lambda root=None: "ab" * 32)
+        assert tool_verify.check(verified_path=str(receipt)) == 0
+        monkeypatch.setattr(tool_verify, "source_hash", lambda root=None: "cd" * 32)
+        assert tool_verify.check(verified_path=str(receipt)) == 1
