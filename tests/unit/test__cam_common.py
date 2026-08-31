@@ -1,4 +1,6 @@
-"""Unit tests for ``_cam_common.py`` -- the shared CAM read logic behind cam_get.
+"""Unit tests for ``_cam_common.py`` (the shared CAM substrate) and ``_cam_read.py`` (the slice
+handlers behind cam_get, which reach the substrate through it). ``cc`` is the substrate, ``cr`` the
+read cores.
 
 Covers the bounded-read caps (CLAUDE.md "Bound it"): setups_handler's top-level 'truncated'
 and per-setup 'model_lists_truncated', operations_handler's per-setup 'operations_truncated', and
@@ -28,6 +30,7 @@ from conftest import load_tool, make_cam, wcs_params
 from conftest import FakeSetup, FakeCAMFolder, FakeOperation
 
 cc = load_tool("_cam_common")
+cr = load_tool("_cam_read")
 
 
 def _payload(result):
@@ -57,9 +60,12 @@ class FakeCAM:
 
 @pytest.fixture
 def install(monkeypatch):
-    """Wire a fake CAM product into _cam_common's get_cam seam; patches undo themselves."""
+    """Wire a fake CAM product into BOTH get_cam seams - _cam_common's own and the name _cam_read
+    imported from it, which its handlers call - so one fixture serves a test in either
+    module; patches undo themselves."""
     def _install(cam):
         monkeypatch.setattr(cc, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(cr, "get_cam", lambda: (cam, None))
         return cam
     return _install
 
@@ -84,16 +90,16 @@ def occurrence_cast_passthrough(monkeypatch):
 class TestSetupsCap:
     def test_under_cap_untruncated_and_unchanged(self, install):
         install(FakeCAM([object() for _ in range(3)]))
-        out = _payload(cc.get_cam_setups_handler())
+        out = _payload(cr.get_cam_setups_handler())
         assert out["truncated"] is False
         assert len(out["setups"]) == 3
         assert out["setup_count"] == 3
 
     def test_at_cap_truncates_and_flags(self, install):
-        install(FakeCAM([object() for _ in range(cc._MAX_ITEMS + 5)]))
-        out = _payload(cc.get_cam_setups_handler())
+        install(FakeCAM([object() for _ in range(cr._MAX_ITEMS + 5)]))
+        out = _payload(cr.get_cam_setups_handler())
         assert out["truncated"] is True
-        assert len(out["setups"]) == cc._MAX_ITEMS
+        assert len(out["setups"]) == cr._MAX_ITEMS
 
 
 # ── get_cam_setups_handler: per-setup 'model_lists_truncated' (selected_models/fixtures/stock) ────
@@ -114,19 +120,19 @@ class TestModelListsCap:
     def test_under_cap_untruncated(self, install):
         s = _Setup(models=[_ModelStub("A"), _ModelStub("B")])
         install(FakeCAM([s]))
-        out = _payload(cc.get_cam_setups_handler())
+        out = _payload(cr.get_cam_setups_handler())
         rec = out["setups"][0]
         assert rec["model_lists_truncated"] is False
         assert rec["selected_models"] == ["A", "B"]
 
     def test_at_cap_truncates_and_flags(self, install):
-        many = [_ModelStub(f"M{i}") for i in range(cc._MAX_ITEMS + 3)]
+        many = [_ModelStub(f"M{i}") for i in range(cr._MAX_ITEMS + 3)]
         s = _Setup(models=many)
         install(FakeCAM([s]))
-        out = _payload(cc.get_cam_setups_handler())
+        out = _payload(cr.get_cam_setups_handler())
         rec = out["setups"][0]
         assert rec["model_lists_truncated"] is True
-        assert len(rec["selected_models"]) == cc._MAX_ITEMS
+        assert len(rec["selected_models"]) == cr._MAX_ITEMS
 
 
 class _RaisingSetup:
@@ -164,7 +170,7 @@ class TestUnreadableModelLists:
 
     def test_a_raising_models_property_publishes_null_not_an_empty_list(self, install):
         install(FakeCAM([_RaisingSetup(raising=("models",))]))
-        rec = _payload(cc.get_cam_setups_handler())["setups"][0]
+        rec = _payload(cr.get_cam_setups_handler())["setups"][0]
         assert rec["selected_models"] is None
         assert rec["model_lists_truncated"] is True
         assert rec["model_lists_unreadable"] == ["selected_models"]
@@ -173,7 +179,7 @@ class TestUnreadableModelLists:
         # The discriminating pair: an empty read is an ANSWER, so it keeps [] , stays untruncated,
         # and carries no unreadable marker.
         install(FakeCAM([_RaisingSetup(raising=())]))
-        rec = _payload(cc.get_cam_setups_handler())["setups"][0]
+        rec = _payload(cr.get_cam_setups_handler())["setups"][0]
         assert rec["selected_models"] == [] and rec["fixtures"] == [] and rec["stock_solids"] == []
         assert rec["model_lists_truncated"] is False
         assert "model_lists_unreadable" not in rec
@@ -182,14 +188,14 @@ class TestUnreadableModelLists:
         # One unreadable collection must not blank the two that DID read.
         install(FakeCAM([_RaisingSetup(raising=("fixtures",), models=[_ModelStub("A")],
                                        stock=[_ModelStub("Stock1")])]))
-        rec = _payload(cc.get_cam_setups_handler())["setups"][0]
+        rec = _payload(cr.get_cam_setups_handler())["setups"][0]
         assert rec["selected_models"] == ["A"] and rec["stock_solids"] == ["Stock1"]
         assert rec["fixtures"] is None
         assert rec["model_lists_unreadable"] == ["fixtures"]
 
     def test_every_raising_list_is_named(self, install):
         install(FakeCAM([_RaisingSetup(raising=("models", "fixtures", "stockSolids"))]))
-        rec = _payload(cc.get_cam_setups_handler())["setups"][0]
+        rec = _payload(cr.get_cam_setups_handler())["setups"][0]
         assert rec["model_lists_unreadable"] == ["selected_models", "fixtures", "stock_solids"]
         assert (rec["selected_models"], rec["fixtures"], rec["stock_solids"]) == (None, None, None)
 
@@ -200,7 +206,7 @@ class TestUnreadableModelLists:
         setup = _RaisingSetup(raising=("models",))
         setup.name = "S1"
         install(FakeCAM([setup]))
-        rec = _payload(cc.get_setup_references_handler())["setups"][0]
+        rec = _payload(cr.get_setup_references_handler())["setups"][0]
         assert rec["references"] == []
         assert rec["references_truncated"] is True
 
@@ -209,7 +215,7 @@ class TestUnreadableModelLists:
         setup = _RaisingSetup(raising=())
         setup.name = "S1"
         install(FakeCAM([setup]))
-        rec = _payload(cc.get_setup_references_handler())["setups"][0]
+        rec = _payload(cr.get_setup_references_handler())["setups"][0]
         assert rec["references"] == [] and rec["references_truncated"] is False
 
 
@@ -225,18 +231,18 @@ class TestOperationsCap:
     def test_under_cap_untruncated(self, install, operation_cast_passthrough):
         s = _OpSetup("S1", [object() for _ in range(3)])
         install(FakeCAM([s]))
-        out = _payload(cc.get_cam_operations_handler())
+        out = _payload(cr.get_cam_operations_handler())
         rec = out["setups"][0]
         assert rec["operations_truncated"] is False
         assert len(rec["operations"]) == 3
 
     def test_at_cap_truncates_and_flags(self, install, operation_cast_passthrough):
-        s = _OpSetup("S1", [object() for _ in range(cc._MAX_ITEMS + 7)])
+        s = _OpSetup("S1", [object() for _ in range(cr._MAX_ITEMS + 7)])
         install(FakeCAM([s]))
-        out = _payload(cc.get_cam_operations_handler())
+        out = _payload(cr.get_cam_operations_handler())
         rec = out["setups"][0]
         assert rec["operations_truncated"] is True
-        assert len(rec["operations"]) == cc._MAX_ITEMS
+        assert len(rec["operations"]) == cr._MAX_ITEMS
 
 
 class TestOperationsFilterNamedBranch:
@@ -245,13 +251,13 @@ class TestOperationsFilterNamedBranch:
 
     def test_duplicate_setup_name_is_refused(self, install, operation_cast_passthrough):
         install(FakeCAM([_OpSetup("Dup", [object()]), _OpSetup("Dup", [object(), object()])]))
-        res = cc.get_cam_operations_handler(setup="Dup")
+        res = cr.get_cam_operations_handler(setup="Dup")
         assert res["isError"] is True and "ambiguous" in res["message"].lower()
         assert res["message"].count("Dup") >= 3          # the input + both candidates named
 
     def test_named_setup_miss_lists_available(self, install, operation_cast_passthrough):
         install(FakeCAM([_OpSetup("S1", [])]))
-        res = cc.get_cam_operations_handler(setup="Ghost")
+        res = cr.get_cam_operations_handler(setup="Ghost")
         assert res["isError"] is True
         assert "Ghost" in res["message"] and "S1" in res["message"]
 
@@ -265,7 +271,7 @@ class TestOperationSummaryStateNaming:
                              isOptional=False, messageLog="")
         s = _OpSetup("S1", [op])
         install(FakeCAM([s]))
-        out = _payload(cc.get_cam_operations_handler())
+        out = _payload(cr.get_cam_operations_handler())
         assert out["setups"][0]["operations"][0]["state"] == "out_of_date"
 
 
@@ -291,7 +297,7 @@ class TestErroredOpNeverReadsValid:
 
     def test_the_errored_row_reads_error_not_valid(self, install, operation_cast_passthrough):
         install(self._cam())
-        rows = _payload(cc.get_cam_operations_handler())["setups"][0]["operations"]
+        rows = _payload(cr.get_cam_operations_handler())["setups"][0]["operations"]
         drill = next(r for r in rows if r["name"] == "Drill1")
         assert drill["state"] == "error"
         assert drill["has_toolpath"] is False and drill["has_error"] is True
@@ -300,8 +306,8 @@ class TestErroredOpNeverReadsValid:
     def test_both_aggregations_report_the_same_buckets(self, install,
                                                         operation_cast_passthrough):
         install(self._cam())
-        op_states = _payload(cc.get_cam_setups_handler())["setups"][0]["op_states"]
-        summary = _payload(cc.get_cam_operations_handler())["setups"][0]["summary"]
+        op_states = _payload(cr.get_cam_setups_handler())["setups"][0]["op_states"]
+        summary = _payload(cr.get_cam_operations_handler())["setups"][0]["summary"]
         assert op_states == {"valid": 3, "error": 1}
         assert summary["states"] == op_states           # no response contradicts itself
         drill = next(e for e in summary["exceptions"] if e["name"] == "Drill1")
@@ -315,8 +321,8 @@ class TestErroredOpNeverReadsValid:
                              isToolpathValid=False, isGenerating=True, isSuppressed=False,
                              isOptional=False, messageLog="")
         install(FakeCAM([FakeSetup("Setup1", ops=[op])]))
-        assert _payload(cc.get_cam_setups_handler())["setups"][0]["op_states"] == {"generating": 1}
-        summary = _payload(cc.get_cam_operations_handler())["setups"][0]["summary"]
+        assert _payload(cr.get_cam_setups_handler())["setups"][0]["op_states"] == {"generating": 1}
+        summary = _payload(cr.get_cam_operations_handler())["setups"][0]["summary"]
         assert summary["states"] == {"generating": 1}
 
 
@@ -341,13 +347,13 @@ class TestReferencesFilterNamedBranch:
     def test_duplicate_setup_name_is_refused(self, install, occurrence_cast_passthrough):
         # same contract as the operations filter: named -> shared resolver -> duplicate REFUSED.
         install(FakeCAM([_RefSetup("Dup"), _RefSetup("Dup")]))
-        res = cc.get_setup_references_handler(setup="Dup")
+        res = cr.get_setup_references_handler(setup="Dup")
         assert res["isError"] is True and "ambiguous" in res["message"].lower()
         assert res["message"].count("Dup") >= 3
 
     def test_named_setup_miss_lists_available(self, install, occurrence_cast_passthrough):
         install(FakeCAM([_RefSetup("S1")]))
-        res = cc.get_setup_references_handler(setup="Ghost")
+        res = cr.get_setup_references_handler(setup="Ghost")
         assert res["isError"] is True
         assert "Ghost" in res["message"] and "S1" in res["message"]
 
@@ -356,19 +362,19 @@ class TestReferencesCap:
     def test_under_cap_untruncated(self, install, occurrence_cast_passthrough):
         s = _RefSetup("S1", models=[_RefOcc("A"), _RefOcc("B")])
         install(FakeCAM([s]))
-        out = _payload(cc.get_setup_references_handler())
+        out = _payload(cr.get_setup_references_handler())
         rec = out["setups"][0]
         assert rec["references_truncated"] is False
         assert len(rec["references"]) == 2
 
     def test_at_cap_truncates_and_flags(self, install, occurrence_cast_passthrough):
-        many = [_RefOcc(f"O{i}") for i in range(cc._MAX_ITEMS + 4)]
+        many = [_RefOcc(f"O{i}") for i in range(cr._MAX_ITEMS + 4)]
         s = _RefSetup("S1", models=many)
         install(FakeCAM([s]))
-        out = _payload(cc.get_setup_references_handler())
+        out = _payload(cr.get_setup_references_handler())
         rec = out["setups"][0]
         assert rec["references_truncated"] is True
-        assert len(rec["references"]) == cc._MAX_ITEMS
+        assert len(rec["references"]) == cr._MAX_ITEMS
 
 
 # ── _invalidation_reasons: the messageLog regex - category vs per-parameter-delta split ──────────
@@ -376,7 +382,7 @@ class TestReferencesCap:
 class TestInvalidationReasons:
     def test_design_changed_line_is_a_categorical_reason(self):
         op = SimpleNamespace(messageLog="2024-01-01T00:00:00 I Invalidated: Design changed: WCS origin")
-        reasons, param_changes, machine_changed = cc._invalidation_reasons(op)
+        reasons, param_changes, machine_changed = cr._invalidation_reasons(op)
         assert reasons == ["Design changed: WCS origin"]
         assert param_changes == 0
         assert machine_changed is False
@@ -384,14 +390,14 @@ class TestInvalidationReasons:
     def test_parameter_delta_line_is_counted_not_added_as_a_reason(self):
         op = SimpleNamespace(
             messageLog="2024-01-01 I Op1 used a different value for parameter 'tool_feedCutting' before")
-        reasons, param_changes, machine_changed = cc._invalidation_reasons(op)
+        reasons, param_changes, machine_changed = cr._invalidation_reasons(op)
         assert reasons == []
         assert param_changes == 1
         assert machine_changed is False
 
     def test_machine_changed_line_sets_the_flag_not_a_reason(self):
         op = SimpleNamespace(messageLog="2024-01-01 I External changed: machine.limits")
-        reasons, param_changes, machine_changed = cc._invalidation_reasons(op)
+        reasons, param_changes, machine_changed = cr._invalidation_reasons(op)
         assert reasons == []
         assert param_changes == 0
         assert machine_changed is True
@@ -400,25 +406,25 @@ class TestInvalidationReasons:
         # "Invalidated: <x>" where <x> doesn't start with a known category prefix - not surfaced,
         # not counted as a parameter change either.
         op = SimpleNamespace(messageLog="2024-01-01 I Invalidated: Something obscure happened")
-        reasons, param_changes, machine_changed = cc._invalidation_reasons(op)
+        reasons, param_changes, machine_changed = cr._invalidation_reasons(op)
         assert reasons == [] and param_changes == 0 and machine_changed is False
 
     def test_duplicate_reasons_are_deduped(self):
         log = "\n".join(["2024-01-01 I Invalidated: Design changed: WCS origin"] * 3)
         op = SimpleNamespace(messageLog=log)
-        reasons, _, _ = cc._invalidation_reasons(op)
+        reasons, _, _ = cr._invalidation_reasons(op)
         assert reasons == ["Design changed: WCS origin"]
 
     def test_reasons_are_capped(self):
         lines = [f"2024-01-01 I Invalidated: Design changed: item {i}"
-                 for i in range(cc._INVAL_REASON_CAP + 3)]
+                 for i in range(cr._INVAL_REASON_CAP + 3)]
         op = SimpleNamespace(messageLog="\n".join(lines))
-        reasons, _, _ = cc._invalidation_reasons(op)
-        assert len(reasons) == cc._INVAL_REASON_CAP
+        reasons, _, _ = cr._invalidation_reasons(op)
+        assert len(reasons) == cr._INVAL_REASON_CAP
 
     def test_blank_message_log_yields_nothing(self):
         op = SimpleNamespace(messageLog="")
-        reasons, param_changes, machine_changed = cc._invalidation_reasons(op)
+        reasons, param_changes, machine_changed = cr._invalidation_reasons(op)
         assert reasons == [] and param_changes == 0 and machine_changed is False
 
 
@@ -559,17 +565,17 @@ class TestOperationsSummaryErrorGate:
         return base
 
     def test_errored_op_is_not_ready_to_post(self, monkeypatch):
-        monkeypatch.setattr(cc, "validity_basis", lambda: "manufacture_verified")
+        monkeypatch.setattr(cr, "validity_basis", lambda: "manufacture_verified")
         records = [self._rec("Face1"),
                    self._rec("Drill1", has_error=True)]   # toolpath reads valid but the op is errored
-        summary = cc._operations_summary(records)
+        summary = cr._operations_summary(records)
         assert "ready to post" not in summary["readiness"]
         drill = next(e for e in summary["exceptions"] if e["name"] == "Drill1")
         assert "operation_error" in drill["blocked_by"]
 
     def test_all_valid_no_errors_is_ready(self, monkeypatch):
-        monkeypatch.setattr(cc, "validity_basis", lambda: "manufacture_verified")
-        summary = cc._operations_summary([self._rec("Face1"), self._rec("Adaptive1")])
+        monkeypatch.setattr(cr, "validity_basis", lambda: "manufacture_verified")
+        summary = cr._operations_summary([self._rec("Face1"), self._rec("Adaptive1")])
         # the whole sentence, not a substring: every demoted verdict CONTAINS "ready to post"
         # inside "'ready to post' is NOT established", so a substring check asserts nothing.
         assert summary["readiness"] == "2 of 2 active ops have valid toolpaths - ready to post."
@@ -580,16 +586,16 @@ class TestOperationsSummaryErrorGate:
 
 class TestHms:
     def test_zero_seconds(self):
-        assert cc._hms(0) == "0:00:00"
+        assert cr._hms(0) == "0:00:00"
 
     def test_formats_hours_minutes_seconds(self):
-        assert cc._hms(3661) == "1:01:01"
+        assert cr._hms(3661) == "1:01:01"
 
     def test_rounds_fractional_seconds(self):
-        assert cc._hms(59.6) == "0:01:00"
+        assert cr._hms(59.6) == "0:01:00"
 
     def test_non_numeric_input_falls_back_to_zero(self):
-        assert cc._hms(None) == "0:00:00"
+        assert cr._hms(None) == "0:00:00"
 
 
 # ── machining-time estimate: pin the exact constants passed to getMachiningTime ──────────────────
@@ -680,7 +686,7 @@ class TestMachiningTimeConstants:
         # mean 1% feed and inflate the estimate roughly 100x.
         cam = _MTCam([_MTSetup("S1")])
         install(cam)
-        _payload(cc.get_machining_time_handler())
+        _payload(cr.get_machining_time_handler())
         assert cam.calls[0][1] == 100.0
 
     def test_rapid_feed_is_10_58_centimeters_per_second(self, install, object_collection,
@@ -689,14 +695,14 @@ class TestMachiningTimeConstants:
         # value (e.g. 1000) would understate rapids by roughly 60x.
         cam = _MTCam([_MTSetup("S1")])
         install(cam)
-        _payload(cc.get_machining_time_handler())
+        _payload(cr.get_machining_time_handler())
         assert cam.calls[0][2] == 10.58
 
     def test_tool_change_time_is_1_5_seconds(self, install, object_collection,
                                              operation_cast_passthrough):
         cam = _MTCam([_MTSetup("S1")])
         install(cam)
-        _payload(cc.get_machining_time_handler())
+        _payload(cr.get_machining_time_handler())
         assert cam.calls[0][3] == 1.5
 
     def test_total_seconds_sums_the_setup_aggregates_not_the_per_op_rows(
@@ -705,7 +711,7 @@ class TestMachiningTimeConstants:
         # a different, deliberately non-summing number and must never reach the total.
         cam = _MTCam([_MTSetup("S1"), _MTSetup("S2")])
         install(cam)
-        out = _payload(cc.get_machining_time_handler())
+        out = _payload(cr.get_machining_time_handler())
         assert out["total_machining_time_seconds"] == 240.0
         assert out["setups"][0]["machining_time_seconds"] == 120.0
         assert out["setups"][0]["machining_time_hms"] == "0:02:00"
@@ -715,7 +721,7 @@ class TestMachiningTimeConstants:
                                                                         operation_cast_passthrough):
         cam = _MTCam([_MTSetup("S1", has_valid_toolpath=False)])
         install(cam)
-        out = _payload(cc.get_machining_time_handler())
+        out = _payload(cr.get_machining_time_handler())
         assert "error" in out["setups"][0]
         assert cam.calls == []                 # never called getMachiningTime for it
         assert out["total_machining_time_seconds"] == 0.0
@@ -1386,7 +1392,7 @@ class TestInspectionEmptyState:
         # collection on others; this is the None side (the empty side is two tests down). Both are a
         # zero answer, so neither may come back as a failure.
         install(_inspection_cam(None))
-        out = _payload(cc.get_inspection_results_handler())
+        out = _payload(cr.get_inspection_results_handler())
         assert out["available"] is False and out["readable"] is True
         assert out["measure_count"] == 0 and out["measures"] == []
         assert "None" in out["note"] and "probing" in out["note"]
@@ -1396,21 +1402,21 @@ class TestInspectionEmptyState:
         # A gated CAM member RAISES rather than reading empty (measured on stockMaterialLibrary),
         # which must not be collapsed into "this document has no results".
         install(make_gated_cam(text="preview feature is not enabled"))
-        out = _payload(cc.get_inspection_results_handler())
+        out = _payload(cr.get_inspection_results_handler())
         assert out["available"] is False and out["readable"] is False
         assert "preview feature is not enabled" in out["read_error"]
         assert "RAISED" in out["note"]
 
     def test_present_but_empty_collection_reads_available_with_zero_measures(self, install):
         install(_inspection_cam([]))
-        out = _payload(cc.get_inspection_results_handler())
+        out = _payload(cr.get_inspection_results_handler())
         assert out["available"] is True and out["measure_count"] == 0
         assert "no measures" in out["note"]
 
     def test_null_path_results_is_zero_paths_not_a_crash(self, install):
         # CAMMeasure.inspectionPathResults is documented to return null when the measure holds none.
         install(_inspection_cam([_InspMeasure(None)]))
-        out = _payload(cc.get_inspection_results_handler())
+        out = _payload(cr.get_inspection_results_handler())
         assert out["measures"][0]["path_count"] == 0
         assert out["measures"][0]["point_count"] == 0
         assert "states" not in out["measures"][0]
@@ -1429,13 +1435,13 @@ class TestInspectionRollup:
 
     def test_clean_measure_drops_the_zero_buckets(self, install):
         install(self._cam())
-        row = _payload(cc.get_inspection_results_handler())["measures"][0]
+        row = _payload(cr.get_inspection_results_handler())["measures"][0]
         assert row["states"] == {"within_tolerance": 4}
         assert row["out_of_tolerance"] == 0 and "worst" not in row
 
     def test_out_of_tolerance_sums_above_below_and_unprojected(self, install):
         install(self._cam())
-        row = _payload(cc.get_inspection_results_handler())["measures"][1]
+        row = _payload(cr.get_inspection_results_handler())["measures"][1]
         assert row["states"] == {"within_tolerance": 1, "above_tolerance": 2,
                                  "below_tolerance": 1, "unprojected": 1}
         assert row["out_of_tolerance"] == 4
@@ -1443,7 +1449,7 @@ class TestInspectionRollup:
 
     def test_worst_point_is_the_highest_error_and_names_its_position(self, install):
         install(self._cam())
-        worst = _payload(cc.get_inspection_results_handler())["measures"][1]["worst"]
+        worst = _payload(cr.get_inspection_results_handler())["measures"][1]["worst"]
         # the below-tolerance point at path 1 / point 0 carries the largest error (0.7 cm -> 7 mm)
         assert worst["path"] == 1 and worst["point"] == 0
         assert worst["state"] == "below_tolerance" and worst["error"] == 7.0
@@ -1454,13 +1460,13 @@ class TestInspectionRollup:
         install(_inspection_cam([_InspMeasure([_InspPath([
             _InspPoint(_ABOVE, deviation=0.4, error=0.4),
             _InspPoint(_BELOW, deviation=0.9, error=-0.9)])])]))
-        worst = _payload(cc.get_inspection_results_handler())["measures"][0]["worst"]
+        worst = _payload(cr.get_inspection_results_handler())["measures"][0]["worst"]
         assert worst["point"] == 1 and worst["state"] == "below_tolerance"
         assert worst["error"] == -9.0
 
     def test_rows_are_indexed_and_carry_no_name(self, install):
         install(self._cam())
-        out = _payload(cc.get_inspection_results_handler())
+        out = _payload(cr.get_inspection_results_handler())
         assert [r["index"] for r in out["measures"]] == [0, 1]
         assert all("name" not in r for r in out["measures"])
         assert "INDEX" in out["note"]
@@ -1475,29 +1481,29 @@ class TestInspectionDeepRead:
         install(_inspection_cam([_InspMeasure([_InspPath(
             [_InspPoint(_WITHIN), _InspPoint(_ABOVE, deviation=0.2, error=0.1),
              _InspPoint(_WITHIN), _InspPoint(_UNPROJECTED)])])]))
-        out = _payload(cc.get_inspection_results_handler(measure="0"))
+        out = _payload(cr.get_inspection_results_handler(measure="0"))
         assert out["point_count"] == 4 and out["out_of_tolerance"] == 2
         assert [p["index"] for p in out["points"]] == [1, 3]
         assert out["filter"] == "out_of_tolerance" and out["truncated"] is False
 
     def test_default_cap_truncates_and_reports_the_honest_totals(self, install):
         install(self._oot_cam(300))
-        out = _payload(cc.get_inspection_results_handler(measure="0"))
-        assert out["returned"] == cc._INSPECTION_ROW_DEFAULT == len(out["points"])
+        out = _payload(cr.get_inspection_results_handler(measure="0"))
+        assert out["returned"] == cr._INSPECTION_ROW_DEFAULT == len(out["points"])
         assert out["truncated"] is True
         assert out["point_count"] == 300 and out["out_of_tolerance"] == 300
 
     def test_max_results_is_capped_hard(self, install):
         install(self._oot_cam(300))
-        out = _payload(cc.get_inspection_results_handler(measure="0", max_results=1000))
-        assert out["returned"] == cc._INSPECTION_ROW_CAP and out["truncated"] is True
+        out = _payload(cr.get_inspection_results_handler(measure="0", max_results=1000))
+        assert out["returned"] == cr._INSPECTION_ROW_CAP and out["truncated"] is True
 
     def test_path_scope_reads_only_that_path(self, install):
         install(_inspection_cam([_InspMeasure([
             _InspPath([_InspPoint(_ABOVE, deviation=0.1, error=0.1)]),
             _InspPath([_InspPoint(_BELOW, deviation=0.2, error=0.2),
                        _InspPoint(_BELOW, deviation=0.3, error=0.3)])])]))
-        out = _payload(cc.get_inspection_results_handler(measure="0/1"))
+        out = _payload(cr.get_inspection_results_handler(measure="0/1"))
         assert out["path"] == 1 and out["point_count"] == 2 and out["returned"] == 2
         assert {p["state"] for p in out["points"]} == {"below_tolerance"}
 
@@ -1506,7 +1512,7 @@ class TestInspectionDeepRead:
             _InspPoint(_ABOVE, deviation=1.0, error=0.5, offset=0.2, nominal=(2.0, 0.0, -1.0),
                        contact=(2.1, 0.0, -1.0), projected=(2.05, 0.0, -1.0),
                        delta=(0.1, 0.0, 0.0))])])]))
-        row = _payload(cc.get_inspection_results_handler(measure="0"))["points"][0]
+        row = _payload(cr.get_inspection_results_handler(measure="0"))["points"][0]
         assert row["deviation"] == 10.0 and row["error"] == 5.0 and row["offset"] == 2.0
         assert row["nominal"] == [20.0, 0.0, -10.0]
         assert row["contact"] == [21.0, 0.0, -10.0]
@@ -1516,29 +1522,29 @@ class TestInspectionDeepRead:
     def test_cm_units_leave_the_internal_value_alone(self, install):
         install(_inspection_cam([_InspMeasure([_InspPath([
             _InspPoint(_ABOVE, deviation=1.0, error=0.5)])])]))
-        row = _payload(cc.get_inspection_results_handler(measure="0", units="cm"))["points"][0]
+        row = _payload(cr.get_inspection_results_handler(measure="0", units="cm"))["points"][0]
         assert row["deviation"] == 1.0 and row["error"] == 0.5
 
     def test_unreadable_length_reads_null_never_zero(self, install):
         # 0.0 is an ANSWER ("dead on nominal"), so an unreadable field must not report one.
         install(_inspection_cam([_InspMeasure([_InspPath([
             _InspPoint(_ABOVE, deviation=1.0, error=0.5, readable=False)])])]))
-        row = _payload(cc.get_inspection_results_handler(measure="0"))["points"][0]
+        row = _payload(cr.get_inspection_results_handler(measure="0"))["points"][0]
         assert row["deviation"] is None and row["error"] == 5.0
 
 
 class TestInspectionStateNames:
     def test_unknown_state_value_degrades_to_str_and_is_not_called_out_of_tolerance(self, install):
         install(_inspection_cam([_InspMeasure([_InspPath([_InspPoint(7)])])]))
-        row = _payload(cc.get_inspection_results_handler())["measures"][0]
+        row = _payload(cr.get_inspection_results_handler())["measures"][0]
         assert row["states"] == {"7": 1}
         assert row["out_of_tolerance"] == 0     # no verdict on a state this build cannot name
 
     def test_unreadable_state_reads_unknown(self):
-        assert cc._point_state_name(None, {}) == "unknown"
+        assert cr._point_state_name(None, {}) == "unknown"
 
     def test_named_members_map_to_the_wire_names(self):
-        names = cc._point_state_map()
+        names = cr._point_state_map()
         assert names[_WITHIN] == "within_tolerance" and names[_ABOVE] == "above_tolerance"
         assert names[_BELOW] == "below_tolerance" and names[_UNPROJECTED] == "unprojected"
 
@@ -1546,13 +1552,13 @@ class TestInspectionStateNames:
 class TestInspectionGuards:
     def test_a_name_is_refused_because_measures_have_none(self, install):
         install(_inspection_cam([_InspMeasure([])]))
-        res = cc.get_inspection_results_handler(measure="Measure1")
+        res = cr.get_inspection_results_handler(measure="Measure1")
         assert res["isError"] is True
         assert "Measure1" in res["message"] and "index" in res["message"]
 
     def test_measure_index_out_of_range_names_the_range(self, install):
         install(_inspection_cam([_InspMeasure([]), _InspMeasure([])]))
-        res = cc.get_inspection_results_handler(measure="5")
+        res = cr.get_inspection_results_handler(measure="5")
         assert res["isError"] is True
         assert "5" in res["message"] and "2 measure(s)" in res["message"]
 
@@ -1561,48 +1567,48 @@ class TestInspectionGuards:
         # the scope cannot express; parsing it as measure 0 and dropping the rest would answer a
         # DIFFERENT question than the one asked, and report success doing it.
         install(_inspection_cam([_InspMeasure([_InspPath([])])]))
-        res = cc.get_inspection_results_handler(measure="0/1/2")
+        res = cr.get_inspection_results_handler(measure="0/1/2")
         assert res["isError"] is True
         assert "'0/1/2'" in res["message"] and "3 parts" in res["message"]
 
     def test_the_two_legal_scope_shapes_still_parse(self, install):
         # The refusal above must not swallow the shapes that ARE addressable.
-        assert cc._parse_measure_scope("1") == (1, None, None)
-        assert cc._parse_measure_scope("1/2") == (1, 2, None)
+        assert cr._parse_measure_scope("1") == (1, None, None)
+        assert cr._parse_measure_scope("1/2") == (1, 2, None)
 
     def test_path_index_out_of_range_names_the_path_count(self, install):
         install(_inspection_cam([_InspMeasure([_InspPath([])])]))
-        res = cc.get_inspection_results_handler(measure="0/3")
+        res = cr.get_inspection_results_handler(measure="0/3")
         assert res["isError"] is True
         assert "path index 3" in res["message"] and "1 path(s)" in res["message"]
 
     def test_unknown_units_refused_naming_the_value(self, install):
         install(_inspection_cam([]))
-        res = cc.get_inspection_results_handler(units="furlong")
+        res = cr.get_inspection_results_handler(units="furlong")
         assert res["isError"] is True and "furlong" in res["message"]
 
     def test_no_cam_product_surfaces_the_shared_gate(self, monkeypatch):
-        monkeypatch.setattr(cc, "get_cam", lambda: (None, "This document has no CAM product yet."))
-        res = cc.get_inspection_results_handler()
+        monkeypatch.setattr(cr, "get_cam", lambda: (None, "This document has no CAM product yet."))
+        res = cr.get_inspection_results_handler()
         assert res["isError"] is True and "CAM" in res["message"]
 
     def test_measure_rollup_is_capped_but_the_measure_count_stays_honest(self, install):
-        install(_inspection_cam([_InspMeasure([]) for _ in range(cc._MAX_ITEMS + 2)]))
-        out = _payload(cc.get_inspection_results_handler())
+        install(_inspection_cam([_InspMeasure([]) for _ in range(cr._MAX_ITEMS + 2)]))
+        out = _payload(cr.get_inspection_results_handler())
         assert out["measures_truncated"] is True
-        assert len(out["measures"]) == cc._MAX_ITEMS
-        assert out["measure_count"] == cc._MAX_ITEMS + 2      # the TRUE total, not the row count
+        assert len(out["measures"]) == cr._MAX_ITEMS
+        assert out["measure_count"] == cr._MAX_ITEMS + 2      # the TRUE total, not the row count
 
     def test_a_measure_index_that_does_not_resolve_is_refused(self, install):
         # the collection counts 1 but item(0) hands back nothing - an honest refusal, never an
         # empty-but-successful read of a measure that was never obtained.
         install(SimpleNamespace(inspectionResults=SimpleNamespace(count=1, item=lambda i: None)))
-        res = cc.get_inspection_results_handler(measure="0")
+        res = cr.get_inspection_results_handler(measure="0")
         assert res["isError"] is True and "did not resolve" in res["message"]
 
     def test_an_absent_point_reads_null_not_a_zero_triple(self):
         # _xyz's absent-point answer: [0,0,0] would claim a measured position at the origin.
-        assert cc._xyz(None, 10.0) is None
+        assert cr._xyz(None, 10.0) is None
 
 
 # --- expression_error: the post-set CAMParameter read-back every CAM param editor gates on ---
@@ -1706,10 +1712,10 @@ class TestValidityBasis:
 
 class TestSharedCamGate:
     def test_every_read_returns_the_gate_reason_unwrapped(self, monkeypatch):
-        monkeypatch.setattr(cc, "get_cam", lambda: (None, "no CAM product here."))
-        for handler in (cc.get_cam_setups_handler, cc.get_cam_operations_handler,
-                        cc.get_setup_references_handler, cc.get_tool_list_handler,
-                        cc.get_machining_time_handler, cc.get_nc_programs_handler):
+        monkeypatch.setattr(cr, "get_cam", lambda: (None, "no CAM product here."))
+        for handler in (cr.get_cam_setups_handler, cr.get_cam_operations_handler,
+                        cr.get_setup_references_handler, cr.get_tool_list_handler,
+                        cr.get_machining_time_handler, cr.get_nc_programs_handler):
             res = handler()
             assert res["isError"] is True, handler.__name__
             assert res["message"] == "no CAM product here.", handler.__name__
@@ -1916,15 +1922,15 @@ class TestOperationsSummaryWarningVerdict:
 
     @pytest.fixture(autouse=True)
     def _manufacture(self, monkeypatch):
-        monkeypatch.setattr(cc, "validity_basis", lambda: "manufacture_verified")
+        monkeypatch.setattr(cr, "validity_basis", lambda: "manufacture_verified")
 
     def test_zero_warnings_keeps_the_plain_ready_verdict(self):
-        summary = cc._operations_summary([self._rec("Face1"), self._rec("Adaptive1")])
+        summary = cr._operations_summary([self._rec("Face1"), self._rec("Adaptive1")])
         assert summary["readiness"] == "2 of 2 active ops have valid toolpaths - ready to post."
 
     def test_one_warning_demotes_the_verdict_and_names_the_op_and_its_first_line(self):
         # the exact boundary: 1 counted warning, everything else valid and unblocked.
-        summary = cc._operations_summary([
+        summary = cr._operations_summary([
             self._rec("Face1"),
             self._rec("2D Contour1", has_warning=True,
                       warning="Contour Selection: contours are missing selections.\nSECONDLINE")])
@@ -1940,22 +1946,22 @@ class TestOperationsSummaryWarningVerdict:
 
     def test_a_suppressed_warned_op_leaves_the_plain_ready_verdict(self):
         # the other boundary: a warning that does not count must demote nothing.
-        summary = cc._operations_summary([
+        summary = cr._operations_summary([
             self._rec("Face1"),
             self._rec("Off1", state="suppressed", is_suppressed=True, toolpath_valid=False,
                       has_warning=True, warning="empty toolpath")])
         assert summary["readiness"] == "1 of 1 active ops have valid toolpaths - ready to post."
 
     def test_an_errored_ops_warning_does_not_displace_the_exception_verdict(self):
-        summary = cc._operations_summary([
+        summary = cr._operations_summary([
             self._rec("Face1"),
             self._rec("Drill1", has_error=True, has_warning=True, warning="also warned")])
         assert "ready to post" not in summary["readiness"]
         assert "resolve the exceptions" in summary["readiness"]
 
     def test_an_unverified_workspace_still_gives_no_toolpath_verdict_at_all(self, monkeypatch):
-        monkeypatch.setattr(cc, "validity_basis", lambda: "unverified_design_workspace")
-        summary = cc._operations_summary([self._rec("Contour1", has_warning=True, warning="w")])
+        monkeypatch.setattr(cr, "validity_basis", lambda: "unverified_design_workspace")
+        summary = cr._operations_summary([self._rec("Contour1", has_warning=True, warning="w")])
         assert "ready to post" not in summary["readiness"]
         assert "Manufacture" in summary["readiness"]
 
@@ -2145,8 +2151,9 @@ class TestLiveReadinessConsumesSetupBlockers:
         # was built from - the two surfaces cannot report different answers about one setup.
         setups = [_machined_setup([_tally_op("Face1")], machine=None)]
         monkeypatch.setattr(cc, "get_cam", lambda: (self._cam(setups), None))
+        monkeypatch.setattr(cr, "get_cam", lambda: (self._cam(setups), None))
         sig, _err = cc.live_readiness()
-        slice_rec = _payload(cc.get_cam_setups_handler())["setups"][0]
+        slice_rec = _payload(cr.get_cam_setups_handler())["setups"][0]
         assert slice_rec["blocked_by"] == ["no_machine_selected"]
         assert [r["blocked_by"] for r in sig["setups_blocked"]] == [slice_rec["blocked_by"]]
 
@@ -2156,21 +2163,21 @@ class TestOperationsSummaryConsumesSetupBlockers:
 
     @pytest.fixture(autouse=True)
     def _manufacture(self, monkeypatch):
-        monkeypatch.setattr(cc, "validity_basis", lambda: "manufacture_verified")
+        monkeypatch.setattr(cr, "validity_basis", lambda: "manufacture_verified")
 
     def _rec(self, name):
         return {"name": name, "state": "valid", "toolpath_valid": True, "is_suppressed": False,
                 "has_error": False, "has_warning": False, "blocked_by": []}
 
     def test_a_blocked_setup_demotes_the_operations_summary_verdict(self):
-        summary = cc._operations_summary(
+        summary = cr._operations_summary(
             [self._rec("Face1")], [{"name": "S1", "blocked_by": ["no_machine_selected"]}])
         assert "- ready to post." not in summary["readiness"]
         assert "no_machine_selected" in summary["readiness"]
         assert summary["exceptions"] == []          # a SETUP blocker is not an op exception
 
     def test_no_blockers_keeps_the_plain_summary_verdict(self):
-        summary = cc._operations_summary([self._rec("Face1")], [])
+        summary = cr._operations_summary([self._rec("Face1")], [])
         assert summary["readiness"] == "1 of 1 active ops have valid toolpaths - ready to post."
 
     def _postable_op(self, name):
@@ -2190,7 +2197,7 @@ class TestOperationsSummaryConsumesSetupBlockers:
         machined = FakeSetup("Top", ops=[self._postable_op("Face1")])
         machined.machine = _machine()
         install(FakeCAM([machined, blocked]))
-        out = _payload(cc.get_cam_operations_handler())
+        out = _payload(cr.get_cam_operations_handler())
         by_name = {s["setup"]: s["summary"]["readiness"] for s in out["setups"]}
         assert by_name["Top"] == "1 of 1 active ops have valid toolpaths - ready to post."
         assert "- ready to post." not in by_name["Bottom"]
@@ -2231,7 +2238,7 @@ def _rollup_op(name, state=0, warning=False, log=""):
 class TestSetupInvalidationRollup:
     def _rec(self, install, ops):
         install(FakeCAM([FakeSetup("S1", ops=ops)]))
-        return _payload(cc.get_cam_setups_handler())["setups"][0]
+        return _payload(cr.get_cam_setups_handler())["setups"][0]
 
     def test_a_clean_setup_carries_only_the_valid_bucket(self, install, operation_cast_passthrough):
         rec = self._rec(install, [_rollup_op("A"), _rollup_op("B")])
@@ -2241,7 +2248,7 @@ class TestSetupInvalidationRollup:
     def test_a_setup_with_no_operations_carries_no_tally_at_all(self, install,
                                                                 operation_cast_passthrough):
         install(FakeCAM([FakeSetup("S1")]))
-        rec = _payload(cc.get_cam_setups_handler())["setups"][0]
+        rec = _payload(cr.get_cam_setups_handler())["setups"][0]
         assert "op_states" not in rec
         assert rec["operation_count"] == 0 and rec["folder_count"] == 0
 
@@ -2282,7 +2289,7 @@ class TestSetupInvalidationRollup:
 
     def test_a_failed_setup_read_is_an_error_not_a_partial_ok(self, install):
         install(SimpleNamespace(setups=SimpleNamespace(count=2, item=_unreadable_item)))
-        res = cc.get_cam_setups_handler()
+        res = cr.get_cam_setups_handler()
         assert res["isError"] is True
         assert "Could not read setups" in res["message"] and "setup read failed" in res["message"]
 
@@ -2292,7 +2299,7 @@ class TestSetupInvalidationRollup:
         monkeypatch.setattr(adsk.cam.Operation, "cast",
                             lambda x: x if getattr(x, "operationState", None) is not None else None)
         install(FakeCAM([FakeSetup("S1", ops=[_rollup_op("A"), SimpleNamespace(name="Holes")])]))
-        rec = _payload(cc.get_cam_setups_handler())["setups"][0]
+        rec = _payload(cr.get_cam_setups_handler())["setups"][0]
         assert rec["op_states"] == {"valid": 1}
 
 
@@ -2303,7 +2310,7 @@ class TestSetupInvalidationRollup:
 class TestSetupWcs:
     def _rec(self, install, params):
         install(FakeCAM([FakeSetup("Setup1", parameters=params)]))
-        return _payload(cc.get_cam_setups_handler())["setups"][0]
+        return _payload(cr.get_cam_setups_handler())["setups"][0]
 
     def test_a_geometry_bound_wcs_publishes_its_modes_and_entities(self, install):
         rec = self._rec(install, wcs_params(
@@ -2353,7 +2360,7 @@ class TestSetupWcs:
 class TestInvalidationReasonsBlankLines:
     def test_blank_and_carriage_returned_lines_are_skipped(self):
         op = SimpleNamespace(messageLog="\r\n \r\n2024-01-01 I Invalidated: Design changed: WCS\r\n\r\n")
-        reasons, param_changes, machine_changed = cc._invalidation_reasons(op)
+        reasons, param_changes, machine_changed = cr._invalidation_reasons(op)
         assert reasons == ["Design changed: WCS"]
         assert param_changes == 0 and machine_changed is False
 
@@ -2363,7 +2370,7 @@ class TestInvalidationReasonsBlankLines:
         op = SimpleNamespace(messageLog=("2024-01-01 I Generating toolpath\n"
                                          "2024-01-01 I Toolpath generated in 1.2s\n"
                                          "2024-01-01 I Invalidated: Stock changed"))
-        reasons, param_changes, machine_changed = cc._invalidation_reasons(op)
+        reasons, param_changes, machine_changed = cr._invalidation_reasons(op)
         assert reasons == ["Stock changed"]
         assert param_changes == 0 and machine_changed is False
 
@@ -2372,28 +2379,28 @@ class TestInvalidationReasonsBlankLines:
 
 class TestOpBlockedBy:
     def test_a_suppressed_op_blocks_nothing_even_with_no_tool_and_a_stale_path(self):
-        blocked, requires = cc._op_blocked_by(
+        blocked, requires = cr._op_blocked_by(
             None, {"is_suppressed": True, "tool": None, "is_out_of_date": True})
         assert blocked == [] and requires is None
 
     def test_an_op_with_no_tool_is_blocked_on_that(self):
-        blocked, requires = cc._op_blocked_by(None, {"tool": None, "is_out_of_date": False})
+        blocked, requires = cr._op_blocked_by(None, {"tool": None, "is_out_of_date": False})
         assert blocked == ["tool_unselected"] and requires is None
 
     def test_a_stale_op_names_the_tool_and_workspace_that_unblock_it(self):
-        blocked, requires = cc._op_blocked_by(None, {"tool": "flat 10mm", "is_out_of_date": True})
+        blocked, requires = cr._op_blocked_by(None, {"tool": "flat 10mm", "is_out_of_date": True})
         assert blocked == ["toolpath_out_of_date"]
         assert requires == {"tool": "cam_generate", "workspace": "Manufacture"}
 
 
 class TestOperationsSummarySuppressed:
     def test_a_suppressed_op_is_tallied_but_never_active_and_never_an_exception(self, monkeypatch):
-        monkeypatch.setattr(cc, "validity_basis", lambda: "manufacture_verified")
+        monkeypatch.setattr(cr, "validity_basis", lambda: "manufacture_verified")
         records = [{"name": "Face1", "state": "valid", "toolpath_valid": True,
                     "is_suppressed": False, "has_error": False, "blocked_by": []},
                    {"name": "Off1", "state": "suppressed", "toolpath_valid": False,
                     "is_suppressed": True, "has_error": False, "blocked_by": []}]
-        summary = cc._operations_summary(records)
+        summary = cr._operations_summary(records)
         assert summary["states"] == {"valid": 1, "suppressed": 1}
         assert summary["active_count"] == 1          # the suppressed op is excluded from posting
         assert summary["exceptions"] == []
@@ -2418,7 +2425,7 @@ class TestOperationSummaryDisclosure:
     def test_a_stale_errored_op_publishes_the_texts_and_the_reasons(self, install,
                                                                     operation_cast_passthrough):
         install(FakeCAM([_OpSetup("S1", [self._stale_op()])]))
-        out = _payload(cc.get_cam_operations_handler())
+        out = _payload(cr.get_cam_operations_handler())
         rec = out["setups"][0]["operations"][0]
         assert rec["tool"] == "flat 10mm"
         assert rec["warning"] == "Spindle speed is larger than supported"    # stripped, not a bool
@@ -2436,12 +2443,12 @@ class TestOperationSummaryDisclosure:
         op1 = SimpleNamespace(name="Face1", tool=flat, operationState=0, isSuppressed=False)
         op2 = SimpleNamespace(name="Face2", tool=flat, operationState=0, isSuppressed=False)
         install(FakeCAM([_OpSetup("S1", [op1, op2])]))
-        out = _payload(cc.get_cam_operations_handler())
+        out = _payload(cr.get_cam_operations_handler())
         assert out["tools_used"] == [{"tool": "flat 10mm", "operation_count": 2}]
 
     def test_a_named_setup_narrows_to_that_setup_only(self, install, operation_cast_passthrough):
         install(FakeCAM([_OpSetup("S1", [object()]), _OpSetup("S2", [object(), object()])]))
-        out = _payload(cc.get_cam_operations_handler(setup="s2"))     # case-insensitive exact
+        out = _payload(cr.get_cam_operations_handler(setup="s2"))     # case-insensitive exact
         assert out["setup_count"] == 1
         assert out["setups"][0]["setup"] == "S2" and len(out["setups"][0]["operations"]) == 2
 
@@ -2463,7 +2470,7 @@ class TestOperationRowContext:
     def _rows(self, install, setup, machine=None):
         setup.machine = machine
         install(FakeCAM([setup]))
-        out = _payload(cc.get_cam_operations_handler())
+        out = _payload(cr.get_cam_operations_handler())
         return out["setups"][0]
 
     def test_a_folder_nested_op_carries_its_breadcrumb_and_folder_name(
@@ -2544,7 +2551,7 @@ class TestOperationRowContext:
 
     def test_a_row_built_without_a_walk_node_carries_no_path(self):
         # _folder_of reads the walk's parent node; with no node there is nothing to name
-        assert cc._folder_of(None) is None
+        assert cr._folder_of(None) is None
 
 
 class TestSpindleScopedToActiveOps:
@@ -2555,7 +2562,7 @@ class TestSpindleScopedToActiveOps:
     def _rows(self, install, setup, machine=None):
         setup.machine = machine
         install(FakeCAM([setup]))
-        return _payload(cc.get_cam_operations_handler())["setups"][0]
+        return _payload(cr.get_cam_operations_handler())["setups"][0]
 
     def test_a_suppressed_row_is_not_compared_even_when_both_numbers_read(
             self, install, operation_cast_passthrough):
@@ -2610,7 +2617,7 @@ class TestSpindleScopedToActiveOps:
         # reads as a comparison that came out fine.
         setup = FakeSetup("Op1", ops=[_row_op("Parked", rpm=24999.0, suppressed=True)])
         install(FakeCAM([setup]))
-        note = _payload(cc.get_cam_operations_handler())["note"]
+        note = _payload(cr.get_cam_operations_handler())["note"]
         assert "suppressed_not_compared" in note and "spindle_over_machine_max_count" in note
 
     def test_a_setup_name_containing_a_separator_does_not_invent_a_folder(
@@ -2637,8 +2644,8 @@ class TestSpindleScopedToActiveOps:
         under_setup = cc.CamNode(object(), "operation", "Op", "S / 1", "S / 1 / Op", setup_node)
         under_folder = cc.CamNode(object(), "operation", "Op", "S / 1", "S / 1 / F / Op",
                                   folder_node)
-        assert cc._folder_of(under_setup) is None
-        assert cc._folder_of(under_folder) == "F"
+        assert cr._folder_of(under_setup) is None
+        assert cr._folder_of(under_folder) == "F"
 
     def test_a_container_that_slips_through_the_walk_is_skipped(self, install, monkeypatch):
         monkeypatch.setattr(adsk.cam.Operation, "cast",
@@ -2654,12 +2661,12 @@ class TestSpindleScopedToActiveOps:
         # node. Omitting it leaves a top-level op with no parent at all, which reads as "the
         # container is unknown" rather than "this op sits directly under the setup".
         seen = {}
-        real = cc._walk_children
+        real = cr._walk_children
 
         def _record(parent, setup_name, path, out, parent_node=None):
             seen["parent_node"] = parent_node
             return real(parent, setup_name, path, out, parent_node)
-        monkeypatch.setattr(cc, "_walk_children", _record)
+        monkeypatch.setattr(cr, "_walk_children", _record)
         setup = FakeSetup("Op1", ops=[_row_op("Rough")])
         self._rows(install, setup)
         assert seen["parent_node"] is not None
@@ -2668,12 +2675,12 @@ class TestSpindleScopedToActiveOps:
     def test_a_walk_that_raises_keeps_the_rows_it_reached(self, install, monkeypatch,
                                                           operation_cast_passthrough):
         # _walk_children appends as it goes, so a raise mid-walk leaves the nodes already collected
-        real = cc._walk_children
+        real = cr._walk_children
 
         def _dies(parent, setup_name, path, out, parent_node=None):
             real(parent, setup_name, path, out, parent_node)
             raise RuntimeError("the CAM tree stopped answering")
-        monkeypatch.setattr(cc, "_walk_children", _dies)
+        monkeypatch.setattr(cr, "_walk_children", _dies)
         setup = FakeSetup("Op1", ops=[_row_op("Rough")])
         rec = self._rows(install, setup)
         assert [r["name"] for r in rec["operations"]] == ["Rough"]
@@ -2683,7 +2690,7 @@ class TestSpindleScopedToActiveOps:
                                                               operation_cast_passthrough):
         def _boom(*_a, **_k):
             raise RuntimeError("operation read failed")
-        monkeypatch.setattr(cc, "_operation_summary", _boom)
+        monkeypatch.setattr(cr, "_operation_summary", _boom)
         setup = FakeSetup("Op1", ops=[_row_op("Rough")])
         rec = self._rows(install, setup)
         assert rec["operations"] == [] and rec["operations_truncated"] is True
@@ -2703,7 +2710,7 @@ class TestSetupReferences:
     def test_an_xref_occurrence_resolves_to_its_source_file(self, install,
                                                             occurrence_cast_passthrough):
         install(FakeCAM([_RefSetup("S1", models=[_xref_occ("Vise:1")])]))
-        rec = _payload(cc.get_setup_references_handler())["setups"][0]
+        rec = _payload(cr.get_setup_references_handler())["setups"][0]
         assert rec["reference_count"] == 1
         assert rec["references"][0] == {
             "role": "model", "occurrence_name": "Vise:1", "source_id": "urn:a",
@@ -2712,7 +2719,7 @@ class TestSetupReferences:
 
     def test_a_local_component_is_not_a_reference(self, install, occurrence_cast_passthrough):
         install(FakeCAM([_RefSetup("S1", models=[_xref_occ("Local:1", referenced=False)])]))
-        rec = _payload(cc.get_setup_references_handler())["setups"][0]
+        rec = _payload(cr.get_setup_references_handler())["setups"][0]
         assert rec["reference_count"] == 0 and rec["references"] == []
 
     def test_a_body_in_the_model_list_carries_no_reference(self, install, monkeypatch):
@@ -2721,7 +2728,7 @@ class TestSetupReferences:
                             lambda x: x if getattr(x, "isReferencedComponent", None) is not None
                             else None)
         install(FakeCAM([_RefSetup("S1", models=[SimpleNamespace(name="Body1")])]))
-        rec = _payload(cc.get_setup_references_handler())["setups"][0]
+        rec = _payload(cr.get_setup_references_handler())["setups"][0]
         assert rec["reference_count"] == 0
 
     def test_one_source_used_in_two_roles_is_listed_once(self, install,
@@ -2729,7 +2736,7 @@ class TestSetupReferences:
         s = _RefSetup("S1", models=[_xref_occ("Vise:1")])
         s.fixtures = [_xref_occ("Vise:1")]
         install(FakeCAM([s]))
-        rec = _payload(cc.get_setup_references_handler())["setups"][0]
+        rec = _payload(cr.get_setup_references_handler())["setups"][0]
         assert rec["reference_count"] == 1 and rec["references"][0]["role"] == "model"
 
     def test_two_distinct_sources_both_survive_the_dedupe(self, install,
@@ -2737,19 +2744,19 @@ class TestSetupReferences:
         s = _RefSetup("S1", models=[_xref_occ("Vise:1", source_id="urn:a")])
         s.fixtures = [_xref_occ("Soft jaws:1", source_id="urn:b", source_name="Jaws.f3d")]
         install(FakeCAM([s]))
-        rec = _payload(cc.get_setup_references_handler())["setups"][0]
+        rec = _payload(cr.get_setup_references_handler())["setups"][0]
         assert [r["source_id"] for r in rec["references"]] == ["urn:a", "urn:b"]
         assert [r["role"] for r in rec["references"]] == ["model", "fixture"]
 
     def test_an_out_of_date_reference_reports_its_staleness(self, install,
                                                             occurrence_cast_passthrough):
         install(FakeCAM([_RefSetup("S1", models=[_xref_occ("Vise:1", version=2, ood=True)])]))
-        ref = _payload(cc.get_setup_references_handler())["setups"][0]["references"][0]
+        ref = _payload(cr.get_setup_references_handler())["setups"][0]["references"][0]
         assert ref["is_out_of_date"] is True and ref["version"] == 2
 
     def test_a_named_setup_narrows_to_that_setup_only(self, install, occurrence_cast_passthrough):
         install(FakeCAM([_RefSetup("S1"), _RefSetup("S2", models=[_xref_occ("Vise:1")])]))
-        out = _payload(cc.get_setup_references_handler(setup="s2"))
+        out = _payload(cr.get_setup_references_handler(setup="s2"))
         assert out["setup_count"] == 1 and out["setups"][0]["setup"] == "S2"
         assert out["setups"][0]["reference_count"] == 1
 
@@ -2769,7 +2776,7 @@ class TestToolList:
     def test_operations_are_qualified_by_setup_so_a_shared_name_is_not_a_duplicate(
             self, install, operation_cast_passthrough):
         install(self._cam())
-        out = _payload(cc.get_tool_list_handler())
+        out = _payload(cr.get_tool_list_handler())
         assert out["tools"][0]["operations"] == ["S1 / Face1", "S1 / Adaptive1", "S2 / Face1"]
         assert out["tools"][0]["setups"] == ["S1", "S2"]
 
@@ -2780,7 +2787,7 @@ class TestToolList:
         flat = SimpleNamespace(description="flat 10mm")
         install(FakeCAM([_OpSetup("S1", [SimpleNamespace(name=None, tool=flat),
                                          SimpleNamespace(name="Face1", tool=flat)])]))
-        out = _payload(cc.get_tool_list_handler())
+        out = _payload(cr.get_tool_list_handler())
         rows = out["tools"][0]["operations"]
         assert rows == [f"S1 / {cc._UNREAD_SEGMENT}", "S1 / Face1"]
         # the row is a STRING either way: a bare null here would still count in operation_count
@@ -2795,20 +2802,20 @@ class TestToolList:
         # of real setup names, and a name nothing read is not one.
         flat = SimpleNamespace(description="flat 10mm")
         install(FakeCAM([_OpSetup(None, [SimpleNamespace(name="Face1", tool=flat)])]))
-        out = _payload(cc.get_tool_list_handler())
+        out = _payload(cr.get_tool_list_handler())
         assert out["tools"][0]["operations"] == [f"{cc._UNREAD_SEGMENT} / Face1"]
         assert out["tools"][0]["setups"] == []
 
     def test_the_most_used_tool_comes_first(self, install, operation_cast_passthrough):
         install(self._cam())
-        out = _payload(cc.get_tool_list_handler())
+        out = _payload(cr.get_tool_list_handler())
         assert out["distinct_tool_count"] == 2
         assert [t["tool"] for t in out["tools"]] == ["flat 10mm", "drill 5mm"]
         assert [t["operation_count"] for t in out["tools"]] == [3, 1]
 
     def test_an_operation_with_no_tool_is_skipped(self, install, operation_cast_passthrough):
         install(FakeCAM([_OpSetup("S1", [SimpleNamespace(name="Manual1", tool=None)])]))
-        out = _payload(cc.get_tool_list_handler())
+        out = _payload(cr.get_tool_list_handler())
         assert out["distinct_tool_count"] == 0 and out["tools"] == []
 
     def test_an_operation_whose_tool_reference_is_broken_is_skipped(self, install,
@@ -2816,7 +2823,7 @@ class TestToolList:
         # a raising .tool must not sink the whole tool list - the readable ops still report.
         good = SimpleNamespace(name="Face1", tool=SimpleNamespace(description="flat 10mm"))
         install(FakeCAM([_OpSetup("S1", [_op_with_unreadable_tool("Broken1"), good])]))
-        out = _payload(cc.get_tool_list_handler())
+        out = _payload(cr.get_tool_list_handler())
         assert out["distinct_tool_count"] == 1
         assert out["tools"][0]["operations"] == ["S1 / Face1"]
 
@@ -2826,12 +2833,12 @@ class TestToolList:
         install(FakeCAM([_OpSetup("S1", [SimpleNamespace(name="Holes"),
                                          SimpleNamespace(name="Face1", tool=SimpleNamespace(
                                              description="flat 10mm"))])]))
-        out = _payload(cc.get_tool_list_handler())
+        out = _payload(cr.get_tool_list_handler())
         assert out["tools"][0]["operations"] == ["S1 / Face1"]
 
     def test_a_failed_read_is_an_error_not_an_empty_tool_list(self, install):
         install(SimpleNamespace(setups=SimpleNamespace(count=1, item=_unreadable_item)))
-        res = cc.get_tool_list_handler()
+        res = cr.get_tool_list_handler()
         assert res["isError"] is True
         assert "Could not read tools" in res["message"] and "setup read failed" in res["message"]
 
@@ -2847,7 +2854,7 @@ class TestNcPrograms:
             postParameters=_Coll([SimpleNamespace(name="metric", title="Use metric",
                                                   expression="true")]))
         install(SimpleNamespace(ncPrograms=_Coll([nc])))
-        out = _payload(cc.get_nc_programs_handler())
+        out = _payload(cr.get_nc_programs_handler())
         assert out["nc_program_count"] == 1
         entry = out["nc_programs"][0]
         assert entry["name"] == "Main" and entry["machine"] == "Haas VF-2"
@@ -2860,7 +2867,7 @@ class TestNcPrograms:
         # operation_count especially: an unreadable count must not report 0 operations.
         install(SimpleNamespace(ncPrograms=_Coll([SimpleNamespace(
             name="Setup1", machine=None, postConfiguration=None, postParameters=None)])))
-        entry = _payload(cc.get_nc_programs_handler())["nc_programs"][0]
+        entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
         assert entry["machine"] is None and entry["post"] is None
         assert entry["operation_count"] is None
         assert entry["post_parameters"] == []
@@ -2869,7 +2876,7 @@ class TestNcPrograms:
         nc = SimpleNamespace(name="Main", machine=None, postConfiguration=None, operations=[],
                              postParameters=SimpleNamespace(count=1, item=_unreadable_item))
         install(SimpleNamespace(ncPrograms=_Coll([nc])))
-        out = _payload(cc.get_nc_programs_handler())
+        out = _payload(cr.get_nc_programs_handler())
         assert out["nc_program_count"] == 1
         assert out["nc_programs"][0]["name"] == "Main"
         assert out["nc_programs"][0]["post_parameters"] == []
@@ -2877,7 +2884,7 @@ class TestNcPrograms:
 
     def test_a_gated_programs_collection_is_an_error_not_an_empty_list(self, install):
         install(make_gated_cam(member="ncPrograms", text="programs unavailable"))
-        res = cc.get_nc_programs_handler()
+        res = cr.get_nc_programs_handler()
         assert res["isError"] is True
         assert "Could not read NC programs" in res["message"]
         assert "programs unavailable" in res["message"]
@@ -2896,7 +2903,7 @@ class TestNcProgramPostedOperations:
                                                                        operation_cast_passthrough):
         posted = [_row_op("Cut"), _row_op("Rough")]
         install(SimpleNamespace(ncPrograms=_Coll([self._program(posted)])))
-        entry = _payload(cc.get_nc_programs_handler())["nc_programs"][0]
+        entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
         assert entry["operation_count"] == 1          # NCProgram.operations - the setup
         assert entry["posted_operations"] == 2        # what actually posts
         assert entry["empty_toolpath_count"] == 0
@@ -2907,20 +2914,20 @@ class TestNcProgramPostedOperations:
         empty = _row_op("Rest Wall Finishing 1")
         empty.hasToolpath = False
         install(SimpleNamespace(ncPrograms=_Coll([self._program([_row_op("Cut"), empty])])))
-        entry = _payload(cc.get_nc_programs_handler())["nc_programs"][0]
+        entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
         assert entry["empty_toolpath_count"] == 1
         assert entry["empty_toolpaths"] == ["Rest Wall Finishing 1"]
 
     def test_the_named_empties_are_capped_while_the_count_is_not(self, install, monkeypatch,
                                                                  operation_cast_passthrough):
-        monkeypatch.setattr(cc, "_NC_EMPTY_NAME_CAP", 2)
+        monkeypatch.setattr(cr, "_NC_EMPTY_NAME_CAP", 2)
         empties = []
         for i in range(5):
             op = _row_op(f"Empty{i}")
             op.hasToolpath = False
             empties.append(op)
         install(SimpleNamespace(ncPrograms=_Coll([self._program(empties)])))
-        entry = _payload(cc.get_nc_programs_handler())["nc_programs"][0]
+        entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
         assert entry["empty_toolpath_count"] == 5 and len(entry["empty_toolpaths"]) == 2
 
     def test_a_non_operation_entry_is_skipped(self, install, monkeypatch):
@@ -2928,7 +2935,7 @@ class TestNcProgramPostedOperations:
                             lambda x: x if getattr(x, "name", "") != "folder" else None)
         install(SimpleNamespace(ncPrograms=_Coll([
             self._program([SimpleNamespace(name="folder"), _row_op("Cut")])])))
-        entry = _payload(cc.get_nc_programs_handler())["nc_programs"][0]
+        entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
         assert entry["posted_operations"] == 2 and entry["empty_toolpath_count"] == 0
 
     def test_an_unreadable_posted_list_claims_nothing(self, install):
@@ -2936,12 +2943,12 @@ class TestNcProgramPostedOperations:
         install(SimpleNamespace(ncPrograms=_Coll([SimpleNamespace(
             name="Main", machine=None, postConfiguration=None, operations=[],
             postParameters=None)])))
-        entry = _payload(cc.get_nc_programs_handler())["nc_programs"][0]
+        entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
         assert "posted_operations" not in entry and "empty_toolpath_count" not in entry
 
     def test_the_note_tells_the_two_lists_apart(self, install):
         install(SimpleNamespace(ncPrograms=_Coll([])))
-        note = _payload(cc.get_nc_programs_handler())["note"]
+        note = _payload(cr.get_nc_programs_handler())["note"]
         assert "filteredOperations" in note and "empty_toolpath_count" in note
 
     def _empty(self, name):
@@ -2956,7 +2963,7 @@ class TestNcProgramPostedOperations:
         # separates neither. The position is the fact this read holds.
         install(SimpleNamespace(ncPrograms=_Coll([self._program(
             [self._empty("Rough"), _row_op("Cut"), self._empty("Rough")])])))
-        entry = _payload(cc.get_nc_programs_handler())["nc_programs"][0]
+        entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
         assert entry["empty_toolpaths"] == ["Rough (posted operation 1)",
                                             "Rough (posted operation 3)"]
         assert entry["empty_toolpath_count"] == 2
@@ -2967,7 +2974,7 @@ class TestNcProgramPostedOperations:
         # identifies one row - a position there separates nothing that was not already separate.
         install(SimpleNamespace(ncPrograms=_Coll([self._program(
             [self._empty("Bore"), self._empty("Face")])])))
-        entry = _payload(cc.get_nc_programs_handler())["nc_programs"][0]
+        entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
         assert entry["empty_toolpaths"] == ["Bore", "Face"]
 
     def test_the_position_counts_over_the_posted_list_not_the_empty_rows(
@@ -2977,7 +2984,7 @@ class TestNcProgramPostedOperations:
         install(SimpleNamespace(ncPrograms=_Coll([self._program(
             [self._empty("Rough"), _row_op("Cut"), _row_op("Drill"),
              self._empty("Rough")])])))
-        entry = _payload(cc.get_nc_programs_handler())["nc_programs"][0]
+        entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
         assert entry["empty_toolpaths"] == ["Rough (posted operation 1)",
                                             "Rough (posted operation 4)"]
 
@@ -2990,7 +2997,7 @@ class TestNcProgramPostedOperations:
         install(SimpleNamespace(ncPrograms=_Coll([self._program(
             [self._empty("Rough"), SimpleNamespace(name="folder"),
              self._empty("Rough")])])))
-        entry = _payload(cc.get_nc_programs_handler())["nc_programs"][0]
+        entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
         assert entry["empty_toolpaths"] == ["Rough (posted operation 1)",
                                             "Rough (posted operation 3)"]
 
@@ -2998,10 +3005,10 @@ class TestNcProgramPostedOperations:
             self, install, monkeypatch, operation_cast_passthrough):
         # The cap is applied AFTER the substitution, or the visible list would print an address
         # that reaches two operations while looking unique.
-        monkeypatch.setattr(cc, "_NC_EMPTY_NAME_CAP", 2)
+        monkeypatch.setattr(cr, "_NC_EMPTY_NAME_CAP", 2)
         install(SimpleNamespace(ncPrograms=_Coll([self._program(
             [self._empty("Dup"), self._empty("Solo"), self._empty("Dup")])])))
-        entry = _payload(cc.get_nc_programs_handler())["nc_programs"][0]
+        entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
         assert entry["empty_toolpaths"] == ["Dup (posted operation 1)", "Solo"]
         assert entry["empty_toolpath_count"] == 3
 
@@ -3011,7 +3018,7 @@ class TestNcProgramPostedOperations:
         # operation never renders as a bare position with nothing in front of it.
         nameless = self._empty(None)
         install(SimpleNamespace(ncPrograms=_Coll([self._program([nameless])])))
-        entry = _payload(cc.get_nc_programs_handler())["nc_programs"][0]
+        entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
         assert entry["empty_toolpaths"] == [None]
 
     def test_the_note_describes_the_shape_the_rows_actually_take(
@@ -3021,7 +3028,7 @@ class TestNcProgramPostedOperations:
         # reader hunting for a name that is still sitting there.
         install(SimpleNamespace(ncPrograms=_Coll([self._program(
             [self._empty("Rough"), self._empty("Rough")])])))
-        out = _payload(cc.get_nc_programs_handler())
+        out = _payload(cr.get_nc_programs_handler())
         rows = out["nc_programs"][0]["empty_toolpaths"]
         assert all(r.startswith("Rough (") for r in rows)     # the name is KEPT, not replaced
         assert "with its POSITION in the posted list beside it" in out["note"]
@@ -3034,7 +3041,7 @@ class TestMachiningTimeScope:
                                                operation_cast_passthrough):
         cam = _MTCam([_MTSetup("S1"), _MTSetup("S2")])
         install(cam)
-        out = _payload(cc.get_machining_time_handler(setup="s2"))    # case-insensitive exact
+        out = _payload(cr.get_machining_time_handler(setup="s2"))    # case-insensitive exact
         assert out["setup_count"] == 1 and out["setups"][0]["setup"] == "S2"
         assert out["total_machining_time_seconds"] == 120.0
         assert len(cam.aggregate_calls) == 1                          # S1 was never timed
@@ -3042,13 +3049,13 @@ class TestMachiningTimeScope:
 
     def test_a_duplicated_setup_name_is_refused(self, install, operation_cast_passthrough):
         install(_MTCam([_MTSetup("Dup"), _MTSetup("Dup")]))
-        res = cc.get_machining_time_handler(setup="Dup")
+        res = cr.get_machining_time_handler(setup="Dup")
         assert res["isError"] is True and "ambiguous" in res["message"].lower()
 
     def test_a_named_setup_miss_lists_the_available_names(self, install,
                                                           operation_cast_passthrough):
         install(_MTCam([_MTSetup("S1")]))
-        res = cc.get_machining_time_handler(setup="Ghost")
+        res = cr.get_machining_time_handler(setup="Ghost")
         assert res["isError"] is True and "Ghost" in res["message"] and "S1" in res["message"]
 
     def test_an_unreadable_op_list_reports_the_precondition_not_a_crash(self, install):
@@ -3056,7 +3063,7 @@ class TestMachiningTimeScope:
         # to be treated as "nothing to time" rather than optimistically calling through.
         cam = _MTCam([SimpleNamespace(name="S1")])
         install(cam)
-        out = _payload(cc.get_machining_time_handler())
+        out = _payload(cr.get_machining_time_handler())
         assert "error" in out["setups"][0] and cam.calls == []
 
     def test_a_raising_estimate_becomes_that_setups_error(self, install, object_collection,
@@ -3067,13 +3074,13 @@ class TestMachiningTimeScope:
         def _boom(*_a):
             raise RuntimeError("post engine unavailable")
         monkeypatch.setattr(cam, "getMachiningTime", _boom)
-        out = _payload(cc.get_machining_time_handler())
+        out = _payload(cr.get_machining_time_handler())
         assert out["setups"][0]["error"] == "post engine unavailable"
         assert out["total_machining_time_seconds"] == 0.0
 
     def test_unknown_units_are_refused_by_name(self, install):
         install(_MTCam([_MTSetup("S1")]))
-        res = cc.get_machining_time_handler(units="furlongs")
+        res = cr.get_machining_time_handler(units="furlongs")
         assert res["isError"] is True and "furlongs" in res["message"]
 
 
@@ -3095,7 +3102,7 @@ class TestMachiningTimeExcludesSuppressed:
         cam = self._cam(install, [_MTOp("Cut", valid=True),
                                   _MTOp("Parked", valid=False, suppressed=True),
                                   _MTOp("AlsoParked", valid=False, suppressed=True)])
-        out = _payload(cc.get_machining_time_handler())
+        out = _payload(cr.get_machining_time_handler())
         assert [op.name for op in object_collection[0].items] == ["Cut"]
         assert out["setups"][0]["excluded_suppressed"] == 2
         assert out["setups"][0]["timed_operations"] == 1
@@ -3107,7 +3114,7 @@ class TestMachiningTimeExcludesSuppressed:
         # an op with a valid toolpath flag but nothing to cut is harmless to the call (measured),
         # so excluding it would understate the job for no reason.
         self._cam(install, [_MTOp("Cut", valid=True), _MTOp("Empty", valid=True)])
-        out = _payload(cc.get_machining_time_handler())
+        out = _payload(cr.get_machining_time_handler())
         assert [op.name for op in object_collection[0].items] == ["Cut", "Empty"]
         assert out["setups"][0]["excluded_suppressed"] == 0
 
@@ -3115,7 +3122,7 @@ class TestMachiningTimeExcludesSuppressed:
                                                                      object_collection,
                                                                      operation_cast_passthrough):
         cam = self._cam(install, [_MTOp("Parked", valid=True, suppressed=True)])
-        out = _payload(cc.get_machining_time_handler())
+        out = _payload(cr.get_machining_time_handler())
         assert "error" in out["setups"][0]
         assert out["setups"][0]["excluded_suppressed"] == 1
         assert cam.calls == []            # nothing timed - the one valid toolpath was suppressed
@@ -3126,7 +3133,7 @@ class TestMachiningTimeExcludesSuppressed:
         monkeypatch.setattr(adsk.core.ObjectCollection, "create",
                             lambda: _RecordingCollection(accept=False))
         cam = self._cam(install, [_MTOp("Cut", valid=True)])
-        out = _payload(cc.get_machining_time_handler())
+        out = _payload(cr.get_machining_time_handler())
         assert "0 of 1" in out["setups"][0]["error"]
         assert cam.calls == []
 
@@ -3137,7 +3144,7 @@ class TestMachiningTimeExcludesSuppressed:
         # state beats reporting a platform error the flags already predict.
         cam = self._cam(install, [_MTOp("Cut", valid=True),
                                   _MTOp("Empty", valid=True, has_toolpath=False)])
-        out = _payload(cc.get_machining_time_handler())
+        out = _payload(cr.get_machining_time_handler())
         rows = {r["operation"]: r for r in out["setups"][0]["operations"]}
         assert rows["Empty"] == {"operation": "Empty", "empty_toolpath": True}
         assert "machining_time_seconds" not in rows["Empty"]
@@ -3149,16 +3156,16 @@ class TestMachiningTimeExcludesSuppressed:
 
     def test_the_empty_rows_count_against_the_cap(self, install, object_collection,
                                                   operation_cast_passthrough, monkeypatch):
-        monkeypatch.setattr(cc, "_TIME_OP_CAP", 2)
+        monkeypatch.setattr(cr, "_TIME_OP_CAP", 2)
         self._cam(install, [_MTOp(f"Empty{i}", valid=True, has_toolpath=False) for i in range(4)])
-        out = _payload(cc.get_machining_time_handler())
+        out = _payload(cr.get_machining_time_handler())
         assert len(out["setups"][0]["operations"]) == 2
         assert out["setups"][0]["operations_truncated"] is True
 
     def test_per_operation_rows_carry_time_and_cut_distance(self, install, object_collection,
                                                             operation_cast_passthrough):
         self._cam(install, [_MTOp("Cut", valid=True), _MTOp("Stale", valid=False)])
-        out = _payload(cc.get_machining_time_handler())
+        out = _payload(cr.get_machining_time_handler())
         rows = out["setups"][0]["operations"]
         # only the op carrying a valid toolpath is timed; feedDistance is CM -> mm
         assert [r["operation"] for r in rows] == ["Cut"]
@@ -3168,7 +3175,7 @@ class TestMachiningTimeExcludesSuppressed:
     def test_distances_scale_to_the_requested_unit(self, install, object_collection,
                                                    operation_cast_passthrough):
         self._cam(install, [_MTOp("Cut", valid=True)])
-        out = _payload(cc.get_machining_time_handler(units="cm"))
+        out = _payload(cr.get_machining_time_handler(units="cm"))
         assert out["units"] == "cm"
         assert out["setups"][0]["feed_distance"] == 1000.0        # 1000 cm stays 1000 cm
         assert out["setups"][0]["operations"][0]["feed_distance"] == 100.0
@@ -3176,7 +3183,7 @@ class TestMachiningTimeExcludesSuppressed:
     def test_the_note_states_the_measured_non_summing_caveat(self, install, object_collection,
                                                              operation_cast_passthrough):
         self._cam(install, [_MTOp("Cut", valid=True)])
-        out = _payload(cc.get_machining_time_handler())
+        out = _payload(cr.get_machining_time_handler())
         assert "do NOT sum" in out["note"] and "SUPPRESSED" in out["note"]
 
     # --- CAM-18: BOTH totals ship, and the note says what each covers ---
@@ -3188,7 +3195,7 @@ class TestMachiningTimeExcludesSuppressed:
         # payload publishes both instead of leaving a caller to add the rows and guess which number
         # is the job.
         self._cam(install, [_MTOp("Cut", valid=True)])
-        rec = _payload(cc.get_machining_time_handler())["setups"][0]
+        rec = _payload(cr.get_machining_time_handler())["setups"][0]
         assert rec["machining_time_seconds"] == 120.0
         assert rec["operations_time_sum_seconds"] == 60.0
         assert rec["operations_time_summed"] == 1
@@ -3198,7 +3205,7 @@ class TestMachiningTimeExcludesSuppressed:
                                           operation_cast_passthrough):
         self._cam(install, [_MTOp("Cut", valid=True), _MTOp("Cut2", valid=True),
                             _MTOp("Cut3", valid=True)])
-        rec = _payload(cc.get_machining_time_handler())["setups"][0]
+        rec = _payload(cr.get_machining_time_handler())["setups"][0]
         assert rec["operations_time_sum_seconds"] == 180.0
         assert rec["operations_time_summed"] == 3
 
@@ -3208,7 +3215,7 @@ class TestMachiningTimeExcludesSuppressed:
         # zero the count then claims was measured.
         self._cam(install, [_MTOp("Cut", valid=True),
                             _MTOp("Empty", valid=True, has_toolpath=False)])
-        rec = _payload(cc.get_machining_time_handler())["setups"][0]
+        rec = _payload(cr.get_machining_time_handler())["setups"][0]
         assert len(rec["operations"]) == 2
         assert rec["operations_time_sum_seconds"] == 60.0
         assert rec["operations_time_summed"] == 1
@@ -3223,39 +3230,39 @@ class TestMachiningTimeExcludesSuppressed:
                 raise RuntimeError("per-op estimate unavailable")
             return real(obj, *a)
         monkeypatch.setattr(cam, "getMachiningTime", _boom)
-        rec = _payload(cc.get_machining_time_handler())["setups"][0]
+        rec = _payload(cr.get_machining_time_handler())["setups"][0]
         assert rec["operations_time_sum_seconds"] == 0.0
         assert rec["operations_time_summed"] == 0
 
     def test_a_truncated_row_pass_leaves_the_sum_covering_only_the_rows_present(
             self, install, object_collection, operation_cast_passthrough, monkeypatch):
-        monkeypatch.setattr(cc, "_TIME_OP_CAP", 2)
+        monkeypatch.setattr(cr, "_TIME_OP_CAP", 2)
         self._cam(install, [_MTOp(f"Op{i}", valid=True) for i in range(5)])
-        rec = _payload(cc.get_machining_time_handler())["setups"][0]
+        rec = _payload(cr.get_machining_time_handler())["setups"][0]
         assert rec["operations_truncated"] is True
         assert rec["operations_time_summed"] == 2 and rec["operations_time_sum_seconds"] == 120.0
 
     def test_the_note_names_both_totals_and_what_each_one_covers(self, install, object_collection,
                                                                  operation_cast_passthrough):
         self._cam(install, [_MTOp("Cut", valid=True)])
-        note = _payload(cc.get_machining_time_handler())["note"]
+        note = _payload(cr.get_machining_time_handler())["note"]
         assert "operations_time_sum_seconds" in note and "operations_time_summed" in note
         assert "not as a decomposition of the setup total" in note
         assert "operations_truncated" in note
 
     def test_per_op_rows_are_capped(self, install, object_collection, operation_cast_passthrough,
                                     monkeypatch):
-        monkeypatch.setattr(cc, "_TIME_OP_CAP", 3)
+        monkeypatch.setattr(cr, "_TIME_OP_CAP", 3)
         self._cam(install, [_MTOp(f"Op{i}", valid=True) for i in range(5)])
-        out = _payload(cc.get_machining_time_handler())
+        out = _payload(cr.get_machining_time_handler())
         assert len(out["setups"][0]["operations"]) == 3
         assert out["setups"][0]["operations_truncated"] is True
 
     def test_a_full_set_of_rows_is_not_flagged_truncated(self, install, object_collection,
                                                          operation_cast_passthrough, monkeypatch):
-        monkeypatch.setattr(cc, "_TIME_OP_CAP", 3)
+        monkeypatch.setattr(cr, "_TIME_OP_CAP", 3)
         self._cam(install, [_MTOp(f"Op{i}", valid=True) for i in range(3)])
-        out = _payload(cc.get_machining_time_handler())
+        out = _payload(cr.get_machining_time_handler())
         assert len(out["setups"][0]["operations"]) == 3
         assert "operations_truncated" not in out["setups"][0]
 
@@ -3272,7 +3279,7 @@ class TestMachiningTimeExcludesSuppressed:
                 raise RuntimeError("per-op estimate unavailable")
             return real(obj, *a)
         monkeypatch.setattr(cam, "getMachiningTime", _boom)
-        out = _payload(cc.get_machining_time_handler())
+        out = _payload(cr.get_machining_time_handler())
         rec = out["setups"][0]
         assert rec["machining_time_seconds"] == 120.0
         assert rec["operations"][0] == {"operation": "Cut", "error": "per-op estimate unavailable"}
@@ -3287,7 +3294,7 @@ class TestMachiningTimeExcludesSuppressed:
         cam = _MTCam([FakeSetup("S1", ops=[SimpleNamespace(name="Folderish"),
                                            _MTOp("Cut", valid=True)])])
         install(cam)
-        _payload(cc.get_machining_time_handler())
+        _payload(cr.get_machining_time_handler())
         assert [op.name for op in object_collection[0].items] == ["Cut"]
 
     def test_an_uncreatable_collection_is_an_error_not_a_setup_object_fallback(
@@ -3295,7 +3302,7 @@ class TestMachiningTimeExcludesSuppressed:
         import adsk.core
         monkeypatch.setattr(adsk.core.ObjectCollection, "create", lambda: None)
         cam = self._cam(install, [_MTOp("Cut", valid=True)])
-        out = _payload(cc.get_machining_time_handler())
+        out = _payload(cr.get_machining_time_handler())
         assert "Could not build the operation collection" in out["setups"][0]["error"]
         assert cam.calls == []          # never falls back to timing the Setup object
 
@@ -3647,12 +3654,12 @@ class TestPartialReadsAreFlaggedIncomplete:
     # collection at all is a THIRD kind of incompleteness beside the cap and the dying walk.
     def test_model_names_from_a_dying_collection_read_truncated(self):
         dying = _dying_after([SimpleNamespace(name="A"), SimpleNamespace(name="B")])
-        names, truncated = cc._model_names(lambda: dying)
+        names, truncated = cr._model_names(lambda: dying)
         assert names == ["A", "B"]                 # the partial read is kept, not blanked
         assert truncated is True                   # incomplete, not a full read
 
     def test_a_complete_model_walk_stays_untruncated(self):
-        names, truncated = cc._model_names(lambda: iter([SimpleNamespace(name="A")]))
+        names, truncated = cr._model_names(lambda: iter([SimpleNamespace(name="A")]))
         assert names == ["A"] and truncated is False
 
     def test_operations_from_a_dying_walk_read_truncated(self):
@@ -3660,20 +3667,20 @@ class TestPartialReadsAreFlaggedIncomplete:
         # promises one more item than it can hand over - the rows already read must survive.
         ops = [FakeOperation("Op1"), FakeOperation("Op2")]
         setup = SimpleNamespace(allOperations=_DyingCollection(ops))
-        summaries, truncated = cc._operations_in(setup)
+        summaries, truncated = cr._operations_in(setup)
         assert [s["name"] for s in summaries] == ["Op1", "Op2"]
         assert truncated is True
 
     def test_references_from_a_dying_walk_read_truncated(self):
         dying = _dying_after([])
-        found, truncated = cc._references_in(lambda: dying, "model")
+        found, truncated = cr._references_in(lambda: dying, "model")
         assert found == [] and truncated is True
 
     def test_a_raising_property_is_incomplete_in_both_walks(self):
         def _boom():
             raise RuntimeError("3 : input is null")
-        assert cc._model_names(_boom) == (None, True)      # null names, never []
-        assert cc._references_in(_boom, "model") == ([], True)
+        assert cr._model_names(_boom) == (None, True)      # null names, never []
+        assert cr._references_in(_boom, "model") == ([], True)
 
 
 
@@ -3995,7 +4002,7 @@ class _MachineSetup:
 class TestMachineLimits:
     def test_spindle_max_and_axis_travels_read_in_mm(self, install):
         install(FakeCAM([_MachineSetup("Op1", _haas())]))
-        out = _payload(cc.get_machine_limits_handler())
+        out = _payload(cr.get_machine_limits_handler())
         rec = out["setups"][0]
         assert rec["machine"] == "Haas with A-axis"
         assert rec["kinematics_readable"] is True
@@ -4006,7 +4013,7 @@ class TestMachineLimits:
 
     def test_travels_scale_with_the_units_input(self, install):
         install(FakeCAM([_MachineSetup("Op1", _haas())]))
-        out = _payload(cc.get_machine_limits_handler(units="in"))
+        out = _payload(cr.get_machine_limits_handler(units="in"))
         travels = {a["name"]: a.get("travel") for a in out["setups"][0]["axes"]}
         assert travels["X"] == 30.0                       # 76.2 cm = 30 in
         assert out["units"] == "in"
@@ -4014,7 +4021,7 @@ class TestMachineLimits:
     def test_an_infinite_rotary_axis_publishes_no_travel_number(self, install):
         # -inf/+inf is not a travel, and it is not valid JSON for a strict client either.
         install(FakeCAM([_MachineSetup("Op1", _haas())]))
-        out = _payload(cc.get_machine_limits_handler())
+        out = _payload(cr.get_machine_limits_handler())
         a_axis = [a for a in out["setups"][0]["axes"] if a["name"] == "A"][0]
         assert a_axis["is_infinite"] is True and a_axis["has_limits"] is False
         assert "travel" not in a_axis and "travel_deg" not in a_axis
@@ -4022,7 +4029,7 @@ class TestMachineLimits:
     def test_a_bounded_rotary_axis_reads_in_degrees(self, install):
         rotary = _MachPart(axis=_MachAxis("B", kind="rotary", lo=0.0, hi=math.pi))
         install(FakeCAM([_MachineSetup("Op1", _Machine(_MachElements([rotary])))]))
-        out = _payload(cc.get_machine_limits_handler())
+        out = _payload(cr.get_machine_limits_handler())
         axis = out["setups"][0]["axes"][0]
         assert axis["kind"] == "rotary" and axis["travel_deg"] == 180.0
         assert "travel" not in axis                        # radians are never reported as a length
@@ -4030,7 +4037,7 @@ class TestMachineLimits:
     def test_an_undecodable_axis_type_publishes_the_raw_range_unconverted(self, install):
         odd = _MachPart(axis=_MachAxis("W", kind="?", lo=-5.0, hi=5.0))
         install(FakeCAM([_MachineSetup("Op1", _Machine(_MachElements([odd])))]))
-        axis = _payload(cc.get_machine_limits_handler())["setups"][0]["axes"][0]
+        axis = _payload(cr.get_machine_limits_handler())["setups"][0]["axes"][0]
         assert axis["kind"] is None and axis["range_raw"] == [-5.0, 5.0]
         assert "travel" not in axis and "travel_deg" not in axis
 
@@ -4038,18 +4045,18 @@ class TestMachineLimits:
         # measured: maxToolDiameter/maxToolLength read 0.0 on a machine whose spindle read 12000 -
         # publishing 0 would read as "no tool wider than nothing fits".
         install(FakeCAM([_MachineSetup("Op1", _haas())]))
-        assert "tool_stations" not in _payload(cc.get_machine_limits_handler())["setups"][0]
+        assert "tool_stations" not in _payload(cr.get_machine_limits_handler())["setups"][0]
 
     def test_a_real_tool_station_limit_is_published(self, install):
         part = _MachPart(station=_MachStation(diameter=5.0, length=10.0))
         install(FakeCAM([_MachineSetup("Op1", _Machine(_MachElements([part])))]))
-        station = _payload(cc.get_machine_limits_handler())["setups"][0]["tool_stations"][0]
+        station = _payload(cr.get_machine_limits_handler())["setups"][0]["tool_stations"][0]
         assert station == {"max_tool_diameter": 50.0, "max_tool_length": 100.0, "units": "mm"}
 
     def test_the_unsupported_kinematics_shortcut_is_never_read(self, install):
         machine = _haas()
         install(FakeCAM([_MachineSetup("Op1", machine)]))
-        _payload(cc.get_machine_limits_handler())
+        _payload(cr.get_machine_limits_handler())
         assert machine.unsupported_reads == 0
         assert machine.elements.asked[0] == adsk.cam.KinematicsMachineElement.staticTypeId()
 
@@ -4057,38 +4064,38 @@ class TestMachineLimits:
         machine = _Machine(_MachElements([_MachPart(spindle=_MachSpindle(8000.0))],
                                          default_answers=False))
         install(FakeCAM([_MachineSetup("Op1", machine)]))
-        rec = _payload(cc.get_machine_limits_handler())["setups"][0]
+        rec = _payload(cr.get_machine_limits_handler())["setups"][0]
         assert rec["spindle"]["max_rpm"] == 8000.0
 
     def test_a_machine_without_kinematics_says_so(self, install):
         machine = _Machine(_MachElements([], has_kinematics=False))
         install(FakeCAM([_MachineSetup("Op1", machine)]))
-        rec = _payload(cc.get_machine_limits_handler())["setups"][0]
+        rec = _payload(cr.get_machine_limits_handler())["setups"][0]
         assert rec["kinematics_readable"] is False and rec["axes"] == []
 
     def test_a_setup_with_no_machine_is_blocked_not_silent(self, install):
         install(FakeCAM([_MachineSetup("Op1", None)]))
-        rec = _payload(cc.get_machine_limits_handler())["setups"][0]
+        rec = _payload(cr.get_machine_limits_handler())["setups"][0]
         assert rec["machine"] is None and rec["blocked_by"] == ["no_machine_selected"]
 
     def test_the_setup_filter_scopes_the_read(self, install):
         install(FakeCAM([_MachineSetup("Op1", _haas()), _MachineSetup("Op2", None)]))
-        out = _payload(cc.get_machine_limits_handler(setup="op2"))
+        out = _payload(cr.get_machine_limits_handler(setup="op2"))
         assert out["setup_count"] == 1 and out["setups"][0]["setup"] == "Op2"
 
     def test_a_duplicated_setup_name_is_refused(self, install):
         install(FakeCAM([_MachineSetup("Dup"), _MachineSetup("Dup")]))
-        res = cc.get_machine_limits_handler(setup="Dup")
+        res = cr.get_machine_limits_handler(setup="Dup")
         assert res["isError"] is True and "ambiguous" in res["message"].lower()
 
     def test_unknown_units_are_refused_by_name(self, install):
         install(FakeCAM([_MachineSetup("Op1", _haas())]))
-        res = cc.get_machine_limits_handler(units="cubits")
+        res = cr.get_machine_limits_handler(units="cubits")
         assert res["isError"] is True and "cubits" in res["message"]
 
     def test_the_note_keeps_the_machine_dimension_trap_out_of_the_travels(self, install):
         install(FakeCAM([_MachineSetup("Op1", _haas())]))
-        assert "machine_dimension_x/y/z" in _payload(cc.get_machine_limits_handler())["note"]
+        assert "machine_dimension_x/y/z" in _payload(cr.get_machine_limits_handler())["note"]
 
     def test_the_fastest_spindle_is_the_one_the_comparison_uses(self):
         machine = _Machine(_MachElements([_MachPart(spindle=_MachSpindle(6000.0)),

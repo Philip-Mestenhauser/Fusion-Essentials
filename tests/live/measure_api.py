@@ -2051,7 +2051,7 @@ ROWS = [
     {
         "id": "cam-machining-time-knobs",
         "claim": "getMachiningTime on a generated op returns a positive estimate decomposing as totalFeedTime + totalRapidTime + totalToolChangeTime; the feedScale/rapidFeed/toolChangeTime arguments are INERT on this build (identical result across values) despite the API doc's percent / cm-per-s / s units",
-        "encoded_in": "_cam_common.py get_machining_time_handler comment + constants; tests/unit/test__cam_common.py",
+        "encoded_in": "_cam_read.py get_machining_time_handler comment + constants; tests/unit/test__cam_common.py",
         "needs": "cam",
         "facts_on_pass": {"behavior.machining_time_args_inert": True},
         "body": """
@@ -2378,7 +2378,7 @@ ROWS = [
                   "reads: .presets answers .count as an int and .item(i).name as a string - no "
                   "tool library lookup in between"),
         "encoded_in": ("cam_get._slice_tool's active_preset + preset_names and "
-                       "_cam_common._operation_summary's per-row preset; "
+                       "_cam_read._operation_summary's per-row preset; "
                        "tests/unit/test_cam_get.py TestToolSlicePresets, "
                        "tests/unit/test__cam_common.py TestOperationRowContext"),
         "needs": "cam",
@@ -2494,7 +2494,7 @@ ROWS = [
                   "operations returns a time, and the SAME collection with a suppressed operation "
                   "added fails ('Machining time could not be calculated') - the suppressed "
                   "operation, not an empty toolpath, is what breaks the call"),
-        "encoded_in": ("_cam_common._timeable_ops / get_machining_time_handler and "
+        "encoded_in": ("_cam_read._timeable_ops / get_machining_time_handler and "
                        "tests/unit/test__cam_common.py TestMachiningTimeExcludesSuppressed"),
         "needs": "cam",
         "expect": "raise_or_abort",
@@ -2679,7 +2679,7 @@ ROWS = [
                   "operation reached through the setup walk: operationId matches and == is True "
                   "for every filtered op paired by name with its walked twin, while wrapper "
                   "identity 'is' does not carry it"),
-        "encoded_in": ("_cam_common._program_posted_ops position note - filteredOperations hands "
+        "encoded_in": ("_cam_read._program_posted_ops position note - filteredOperations hands "
                        "back Operations with no walk, and operationId is the measured tie a "
                        "breadcrumb beside the position discriminator would run on"),
         "needs": "cam",

@@ -33,11 +33,11 @@ _OP_NOISE = {"is_generating": False, "is_suppressed": False, "is_optional": Fals
              "preset": None, "spindle_over_machine_max": False}
 
 
-# ── slice helpers - each calls a read-implementation handler in _cam_common and unwraps its payload ──
+# ── slice helpers - each calls a read-implementation handler in _cam_read and unwraps its payload ──
 #
-# The handlers (get_cam_setups_handler, get_cam_operations_handler, ...) live in _cam_common - the
-# shared CAM substrate. cam_get is the thin rich-read router/surface over them; a slice decodes the
-# handler's ok() payload to a dict, then shapes/bounds it for the include= projection.
+# The handlers (get_cam_setups_handler, get_cam_operations_handler, ...) live in _cam_read - the CAM
+# read cores. cam_get is the thin rich-read router/surface over them; a slice decodes the handler's
+# ok() payload to a dict, then shapes/bounds it for the include= projection.
 
 def _unwrap(result):
     """(payload, None) on ok; (None, error_result) on error (so a slice's own guard can surface)."""
@@ -52,8 +52,8 @@ def _unwrap(result):
 def _slice_setups(cam, setup):
     """The setups orientation default: machine + model/fixture/stock + per-setup operation_count (the
     REAL total, incl. ops nested in folders) + folder_count (the depth breadcrumb)."""
-    from . import _cam_common as _cc
-    return _unwrap(_cc.get_cam_setups_handler())
+    from . import _cam_read as _cr
+    return _unwrap(_cr.get_cam_setups_handler())
 
 
 def _dedupe_orientation(out, inc):
@@ -96,8 +96,8 @@ def _slice_operations(cam, setup):
     normal op is {name,tool,strategy,state}; a suppressed/errored op keeps its flags and stands out).
     Bounded: across all setups the operation rows are capped (the counts in the default setups slice
     are unbounded, so the agent always sees the true total; 'setup' scopes to one setup)."""
-    from . import _cam_common as _cc
-    payload, err = _unwrap(_cc.get_cam_operations_handler(setup=setup))
+    from . import _cam_read as _cr
+    payload, err = _unwrap(_cr.get_cam_operations_handler(setup=setup))
     if payload:
         emitted = 0
         for su in payload.get("setups", []):
@@ -137,8 +137,8 @@ _REFERENCE_CENSUS = (
 def _slice_references(cam, setup):
     """Each setup's external X-ref models/fixtures/stock -> source document, plus the census sentence
     saying which entries that count covers (see _REFERENCE_CENSUS)."""
-    from . import _cam_common as _cc
-    payload, err = _unwrap(_cc.get_setup_references_handler(setup=setup))
+    from . import _cam_read as _cr
+    payload, err = _unwrap(_cr.get_setup_references_handler(setup=setup))
     if payload:
         rows = payload.get("setups") or []
         payload["counted"] = ("the model/fixture/stock entries each setup selects directly, and of "
@@ -156,8 +156,8 @@ def _slice_nc_programs(cam):
     """The NC/post programs - SUMMARY only (name, machine, post, op count + post_parameter_count). The
     full post_parameters are the post's static schema (often 60+ rows, identical across programs), a
     deeper level not dumped here - point at it rather than flooding (CLAUDE.md 'point, don't inline')."""
-    from . import _cam_common as _cc
-    payload, err = _unwrap(_cc.get_nc_programs_handler())
+    from . import _cam_read as _cr
+    payload, err = _unwrap(_cr.get_nc_programs_handler())
     if payload:
         for p in payload.get("nc_programs", []):
             params = p.pop("post_parameters", None)
@@ -168,21 +168,21 @@ def _slice_nc_programs(cam):
 
 def _slice_time(cam, setup, units):
     """Machining cycle-time estimate (per setup + per operation), suppressed ops excluded."""
-    from . import _cam_common as _cc
-    return _unwrap(_cc.get_machining_time_handler(setup=setup, units=units))
+    from . import _cam_read as _cr
+    return _unwrap(_cr.get_machining_time_handler(setup=setup, units=units))
 
 
 def _slice_machine(cam, setup, units):
     """The machine's own LIMITS per setup: spindle speed range + per-axis travels, off the machine's
     kinematics. Distinct from 'machines' (the catalog of machines you can assign)."""
-    from . import _cam_common as _cc
-    return _unwrap(_cc.get_machine_limits_handler(setup=setup, units=units))
+    from . import _cam_read as _cr
+    return _unwrap(_cr.get_machine_limits_handler(setup=setup, units=units))
 
 
 def _slice_tools(cam):
     """The distinct cutting tools used across operations (the tool sheet)."""
-    from . import _cam_common as _cc
-    return _unwrap(_cc.get_tool_list_handler())
+    from . import _cam_read as _cr
+    return _unwrap(_cr.get_tool_list_handler())
 
 
 def _slice_library(cam, scope, library, tool_type):
@@ -213,8 +213,8 @@ def _slice_inspection(cam, measure, max_results, units):
     """The recorded surface-inspection (probing) results: a per-measure state rollup + its worst
     out-of-tolerance point by default; 'measure'=<index> (or '<index>/<path>') drills that scope's
     out-of-tolerance points, capped by 'max_results'."""
-    from . import _cam_common as _cc
-    return _unwrap(_cc.get_inspection_results_handler(
+    from . import _cam_read as _cr
+    return _unwrap(_cr.get_inspection_results_handler(
         measure=measure, max_results=max_results, units=units))
 
 

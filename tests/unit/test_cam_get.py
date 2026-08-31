@@ -105,14 +105,14 @@ class TestReferencesCensus:
         off cam_get's package so the object patched here is the one the slice will import."""
         import importlib
         pkg = cg.__package__
-        return (importlib.import_module(pkg + "._cam_common"),
+        return (importlib.import_module(pkg + "._cam_read"),
                 importlib.import_module(pkg + "._common"))
 
     def _stub_source(self, monkeypatch, rows):
-        """Stub the shared source handler _slice_references delegates to, so these tests cover the
-        slice's own census composition and not _cam_common's walk."""
-        cc, common = self._siblings()
-        monkeypatch.setattr(cc, "get_setup_references_handler",
+        """Stub the read core _slice_references delegates to, so these tests cover the slice's own
+        census composition and not _cam_read's walk."""
+        cr, common = self._siblings()
+        monkeypatch.setattr(cr, "get_setup_references_handler",
                             lambda setup="": common.ok({"setup_count": len(rows), "setups": rows}))
 
     def test_zero_references_still_states_what_was_counted(self, monkeypatch):
@@ -306,13 +306,13 @@ class TestOperationRazor:
 
 class TestBounding:
     """A large CAM doc must not flood: operation rows capped + flagged; nc post_parameters summarized.
-    The slices call read handlers in _cam_common, so patch the handler on that module (a plain
+    The slices call read handlers in _cam_read, so patch the handler on that module (a plain
     monkeypatch.setattr - auto-restored, no sys.modules swap) to return the (big) ok() payload."""
 
-    def _fake_cam_common(self, monkeypatch, **handlers):
-        ccom = load_tool("_cam_common")
+    def _fake_cam_read(self, monkeypatch, **handlers):
+        crd = load_tool("_cam_read")
         for name, fn in handlers.items():
-            monkeypatch.setattr(ccom, name, fn)
+            monkeypatch.setattr(crd, name, fn)
 
     def _ok(self, payload):
         return {"isError": False, "content": [{"type": "text", "text": json.dumps(payload)}]}
@@ -320,7 +320,7 @@ class TestBounding:
     def test_operations_capped_and_flagged(self, monkeypatch):
         big = {"setups": [{"setup": "S", "operations": [
             {"name": f"Op{i}", "state": "valid"} for i in range(cg._OPERATIONS_CAP + 50)]}]}
-        self._fake_cam_common(monkeypatch,
+        self._fake_cam_read(monkeypatch,
                             get_cam_operations_handler=lambda setup="": self._ok(big))
         out, err = cg._slice_operations(object(), "")
         assert err is None
@@ -343,7 +343,7 @@ class TestBounding:
              "is_suppressed": False, "has_error": False, "preset": None,
              "spindle_over_machine_max": None, "spindle_check": "machine_max_unavailable"},
         ]
-        self._fake_cam_common(monkeypatch, get_cam_operations_handler=lambda setup="": self._ok(
+        self._fake_cam_read(monkeypatch, get_cam_operations_handler=lambda setup="": self._ok(
             {"setups": [{"setup": "Op1", "machine_spindle_max_rpm": 12000.0, "operations": rows}]}))
         out, err = cg._slice_operations(object(), "")
         assert err is None
@@ -365,7 +365,7 @@ class TestBounding:
     def test_nc_programs_summarizes_post_parameters(self, monkeypatch):
         ncp = {"nc_programs": [{"name": "Op1", "machine": "M",
                                 "post_parameters": [{"name": f"p{i}"} for i in range(65)]}]}
-        self._fake_cam_common(monkeypatch, get_nc_programs_handler=lambda: self._ok(ncp))
+        self._fake_cam_read(monkeypatch, get_nc_programs_handler=lambda: self._ok(ncp))
         out, err = cg._slice_nc_programs(object())
         prog = out["nc_programs"][0]
         assert prog["post_parameter_count"] == 65 and "post_parameters" not in prog
@@ -845,7 +845,7 @@ class TestToolSlicePresets:
 
 class TestMachineSlice:
     """include=['machine'] = the ASSIGNED machine's own limits (spindle speed, axis travels),
-    delegated to _cam_common's get_machine_limits_handler. Distinct from 'machines', the catalog of
+    delegated to _cam_read's get_machine_limits_handler. Distinct from 'machines', the catalog of
     machines that can be assigned."""
 
     def test_router_includes_machine_and_passes_setup_and_units(self, monkeypatch, stub_slices):
@@ -864,10 +864,10 @@ class TestMachineSlice:
         assert "machines" not in _payload(cg.handler(include=["machine"]))
         assert "machine" not in _payload(cg.handler(include=["machines"]))
 
-    def test_slice_delegates_to_the_cam_common_handler(self, monkeypatch):
-        ccom = load_tool("_cam_common")
+    def test_slice_delegates_to_the_cam_read_handler(self, monkeypatch):
+        crd = load_tool("_cam_read")
         seen = {}
-        monkeypatch.setattr(ccom, "get_machine_limits_handler",
+        monkeypatch.setattr(crd, "get_machine_limits_handler",
                             lambda setup, units: (
                                 seen.update(setup=setup, units=units)
                                 or {"isError": False, "content": [{"type": "text", "text": json.dumps(
@@ -877,9 +877,9 @@ class TestMachineSlice:
         assert seen == {"setup": "Op1", "units": "mm"}
 
     def test_time_slice_forwards_units(self, monkeypatch):
-        ccom = load_tool("_cam_common")
+        crd = load_tool("_cam_read")
         seen = {}
-        monkeypatch.setattr(ccom, "get_machining_time_handler",
+        monkeypatch.setattr(crd, "get_machining_time_handler",
                             lambda setup, units: (
                                 seen.update(setup=setup, units=units)
                                 or {"isError": False, "content": [{"type": "text",
@@ -1057,7 +1057,7 @@ class TestSetupParameterSlice:
 
 
 class TestInspectionSlice:
-    """include=['inspection'] = the recorded probing results, delegated to _cam_common's
+    """include=['inspection'] = the recorded probing results, delegated to _cam_read's
     get_inspection_results_handler; 'measure'/'max_results'/'units' scope and bound it."""
 
     def test_router_includes_inspection_and_passes_the_scope(self, monkeypatch, stub_slices):
@@ -1071,10 +1071,10 @@ class TestInspectionSlice:
         assert out["inspection"]["measure_count"] == 1
         assert seen == {"measure": "0/1", "max_results": 25, "units": "in"}
 
-    def test_slice_delegates_to_the_cam_common_handler(self, monkeypatch):
-        ccom = load_tool("_cam_common")
+    def test_slice_delegates_to_the_cam_read_handler(self, monkeypatch):
+        crd = load_tool("_cam_read")
         seen = {}
-        monkeypatch.setattr(ccom, "get_inspection_results_handler",
+        monkeypatch.setattr(crd, "get_inspection_results_handler",
                             lambda measure, max_results, units: (
                                 seen.update(measure=measure, max_results=max_results, units=units)
                                 or {"isError": False, "content": [{"type": "text", "text": json.dumps(
