@@ -7,16 +7,13 @@ fixture: P2a-Gimbal (the S2a artifact - the primary bodies, ENGAGED at their sup
   saves AS A NEW document (P2-Gimbal); P2a-Gimbal's cloud version must remain untouched. Missing
   fixture = ask the user - never create a project.
 budget:
-  max_tool_calls: 122
+  max_tool_calls: 165
   max_tokens: 190000
+skill: parametric-cad-design
 substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
 perturbations: none (baseline)
 expected_refusals: none
 ---
-
-> NEEDS-RUN - UNMEASURED WORDING: the volumetric-audit habit and the body-census postcondition
-> below have not been exercised by a blind executor, so the budget is a provisional pin, not a
-> measurement. This banner stands until a blind run measures this wording.
 
 # S2b - Hardware II: the pivot interfaces
 
@@ -64,11 +61,24 @@ GOAL - build the PIVOT INTERFACES that let the next stage joint the mechanism:
   through the part's local material, not a measured-depth pocket), with real clearance between
   pin and bore. Add local bosses/lugs on a part ONLY if its material at the interface is too
   thin to bore - and keep any added material clear of every OTHER body.
-- Where the ROTOR SHAFT meets the INNER RING, build the bearing seat the same way: the shaft
-  ends ride in through bores (or open seats) with clearance - the shaft must be able to spin.
+- Where the ROTOR SHAFT meets the INNER RING, build the bearing seat: the shaft ends ride in
+  through bores (or open seats) with clearance - the shaft must be able to spin. MEASURE FIRST
+  and expect to ADD a member. The inner ring is a peripheral BAND and the shaft is central, so
+  in the fixture as handed to you there is typically NO MATERIAL AT ALL on the shaft axis to
+  bore - not thin material, absent material. Look for a wall to drill and you will find none.
+  The seat then requires ADDING a spanning member (a yoke, spider, or cross-bar) that reaches
+  from the ring band to the axis, clear of the rotor's swept volume, before there is anything
+  to bore. Report the measurement that told you which case you are in.
 - BUILD PARAMETRIC: the pins, bores, and seats you add must be driven by the design's shared
   parameters (their sketch dimensions carry expressions), so the whole design still scales as
   one - a later stage bumps the driving diameter and everything must follow.
+- EVERY PIN IS OWNED. A pivot pin is FIXED to exactly one of the two parts it threads and
+  clearance-fits the other - that is what makes it a pivot rather than a loose dowel. Whatever
+  layout you choose, each pin must end up structurally attached to its owning part (a body
+  inside that component, or its own component rigid-grouped to it) and you must NAME the owner
+  per pin under a PIN OWNERSHIP heading. A free-floating pin body belonging to nobody is a FAIL
+  here, not a next-stage problem: the motion stage will tilt these rings, and a pin attached to
+  nothing stays put while the ring turns into it.
 - Do NOT create joints - the next stage assembles the motion. Parts stay at their positions.
 
 Finally save AS A NEW document: P2-Gimbal into MCP Test Project / Pipeline-v1/{{RUN_FOLDER}}
@@ -102,6 +112,11 @@ POSTCONDITIONS - verify EACH with your own fresh read call; report actual values
   rides in a bore or seat STRICTLY LARGER than it - a pin-in-bore or shaft-in-seat contact means
   the clearance is missing, so open that bore/seat until it clears (report the checker's actual
   output).
+- PIN OWNERSHIP - every pin is attached to a part, and the attachment is READ BACK: for EACH pin,
+  name its owning part and the structural fact that proves the attachment (the component the pin
+  body lives in, or the rigid group binding its component to the owner), read from a fresh
+  assembly/tree read rather than asserted. A pin in a component of its own with no rigid group is
+  a free body - report it as such and fix it, do not pass it forward.
 - RETENTION DISCLOSURE - name it, do not assume: for EACH pin and shaft interface, name the
   geometric feature that stops the pin/shaft from sliding axially out of its bore/seat, or state
   plainly that NONE exists. A pin floating in a clearance bore has no axial capture - say so.
@@ -158,8 +173,16 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
   anyway. Forcing the executor to NAME the retaining feature (or say none exists) puts the
   physical honesty on the record. "None exists" is the correct, passing disclosure here; retention
   is out of scope for the whole chain (see S2a). Grade the honesty of the disclosure, not a count.
-- Pin housing: pins may live as bodies inside a ring component or their own components; grade
-  placement sanity, not a prescribed layout. A Carrier blind-bore judgment
+- WHY PIN OWNERSHIP IS GRADED: a run can build all four pivot pins as ONE free `Pins` occurrence
+  attached to nothing and take every other postcondition on this page green - collinearity,
+  through-bores, clearance, zero interference - measured. S3 is then left to INFER that the pins
+  must be rigid-grouped to OuterRing (the unique common member of both pin pairs) or any tilt
+  drives the rings into stationary pins; a measured run found 3 overlaps at yaw -30 before working
+  that out, and the inference is in neither contract. Grade ownership HERE, where the pins are
+  made, so the motion stage inherits a mechanism instead of a puzzle.
+- Pin housing: pins may live as bodies inside a ring component or their own components, and either
+  is fine PROVIDED the ownership above is real and named; grade placement sanity, not a prescribed
+  layout. A Carrier blind-bore judgment
   (a solid hub on the axis, honestly disclosed) is acceptable - the contract is THREADING both
   parts and bore-through-local-material, not literal double-opening through a hub.
 - Handoff: P2-Gimbal is the artifact S3's fixture consumes (its fixture wording names the S2b
@@ -170,6 +193,14 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
   its own per-body volume inventory + body census before upholding a PASS. The per-bored-part
   before/after delta is the check nothing else here makes: a mis-scoped or no-op cut leaves the
   interference read, the health read, and every screenshot green while the bore does not exist.
-- Budget: the last measured run (Agent-executor harness) was 70 calls; the parametric-pins,
-  engagement-contact, and volumetric-audit reads add to that, so 122 calls / 190k output tokens is
-  a provisional pin - recalibrate at the first measured run_eval run of the current wording.
+- WHY THE BEARING SEAT SAYS "EXPECT TO ADD A MEMBER": this is the scenario's crux and it sits in
+  an easily-missed place. The shaft is central (r5) while the inner ring is a peripheral band
+  (r52-62) - measured - so there is no material at the centre to bore at all. A hint phrased as
+  bosses/lugs "only if too thin to bore" undersells "entirely absent", and an executor reading it
+  literally hunts for a wall and finds none. Grade whether the executor MEASURED the gap before
+  deciding, not which spanning shape it chose.
+- Budget: 165 calls / 190k is a provisional pin. A blind run_eval under the skill measures this
+  scenario at 132 calls / 132k, and 165 is that plus ~25% - but the bearing-seat and pin-ownership
+  clauses above add work no measured run has done, so treat 165 as a floor and re-pin from the
+  first blind run of THIS wording. This is the most call-hungry stage in the chain: it both adds
+  solids and removes material, and every bore is volume-audited.

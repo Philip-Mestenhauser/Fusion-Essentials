@@ -624,6 +624,7 @@ def request_user_selection_handler(what: str = "any", clear_current: bool = True
 # --------------------------------------------------------------- sys_get_selection
 
 _SELECTION_CAP = 50   # a big multi-select (e.g. edges picked for a batch fillet) is real; still bound it
+_SELECTION_CEILING = 200   # the ceiling: every record crosses the wire, so max_results cannot lift it away
 
 
 def get_user_selection_handler(require: str = "", max_results: int = _SELECTION_CAP) -> dict:
@@ -638,7 +639,7 @@ def get_user_selection_handler(require: str = "", max_results: int = _SELECTION_
         return error("Nothing is selected in Fusion. Ask the user to click an entity, then "
     "call sys_get_selection again (or re-run sys_request_selection).")
 
-    cap = clamp_rows(max_results, _SELECTION_CAP, 200)   # bounded: every record crosses the wire
+    cap = clamp_rows(max_results, _SELECTION_CAP, _SELECTION_CEILING)
     selections = []
     # The except turns an unreadable selection into an honest refusal, so this stays a positional
     # walk: iter_collection would skip it, publishing a short list and labelling it 'truncated'.
@@ -736,7 +737,7 @@ _GET_DESC = (
                                      "face/edge/vertex selection also carries a HANDLE - the same find_geometry mints - feeding "
                                      "joint_at_geometry or another Edit. Optionally set 'require' to flag a "
                                      "mismatch. If nothing is selected, returns an error telling you to re-prompt. 'selections' is "
-                                     "capped (max_results, default 50); 'truncated' flags when the cap was hit.\n"
+                                     f"capped (max_results, default {_SELECTION_CAP}); 'truncated' flags when the cap was hit.\n"
     + _outputs.produces_block(RETURNS)
 )
 get_tool = (
@@ -744,7 +745,7 @@ get_tool = (
     .add_input_property(*_inputs.Choice("require", list(_REQUIRE_KINDS),
             description="Optional expected kind to validate the selection against.").as_property())
     .add_input_property("max_results", {"type": "integer",
-            "description": "Cap on the 'selections' array returned (default 50, max 200)."})
+            "description": f"Cap on the 'selections' array returned (default {_SELECTION_CAP}, max {_SELECTION_CEILING})."})
     .strict_schema()
 )
 get_item = Item.create_tool_item(tool=get_tool, write="read", handler=get_user_selection_handler,

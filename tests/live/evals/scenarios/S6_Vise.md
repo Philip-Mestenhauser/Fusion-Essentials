@@ -5,7 +5,7 @@ fixture: fresh empty design (orchestrator stages with doc_new); active hub PINNE
   "MCP Test Project" verified to EXIST. The vise this scenario builds becomes the FIXTURE X-REF
   SOURCE the template chain consumes. Missing fixture = ask - never create a project.
 budget:
-  max_tool_calls: 115
+  max_tool_calls: 146
   max_tokens: 285000
 substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
 perturbations: none (baseline)
@@ -159,12 +159,11 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
 - This artifact gets EDITED by S7 (the opening-parameter bump proves x-ref staleness AND, with
   the joints in place, the jaws move as occurrences under the update) - version 1 is not
   immutable the way P1-P5 are; note it in the run record.
-- Budget: 115 calls = the last measured run (91 calls, Agent-executor harness, a full PASS
-  incl. the joint-frame discovery cost) + 25%. Run-to-run spread has been large (91-126 calls
-  across three measured runs): the driver is whether the executor discovers the offset-drive
-  recipe cheaply. assembly_get returns each joint's frame (z_axis = the offset direction) and
-  value_now, which should retire the probe cycles that dominated the spread - re-measure at the
-  next run and re-pin.
+- Budget: 146 calls = a blind run_eval measurement of 117 calls plus ~25%. Run-to-run spread is
+  large (91-126 across Agent-executor runs, 117 blind): the driver is whether the executor
+  discovers the offset-drive recipe cheaply. assembly_get returns each joint's frame (z_axis = the
+  offset direction) and value_now, which should retire the probe cycles behind that spread - if
+  the next run lands well under 117, re-pin down.
 - THE SLOT + NAME elements nudge the executor onto the
   slot family (sketch_add_geometry kind=slot and kin) and the text surface (sketch_set_text
   create + font_name) without naming either tool - the goal names the OUTCOME (a tee-slot's

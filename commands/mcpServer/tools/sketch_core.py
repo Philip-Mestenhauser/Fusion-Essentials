@@ -17,7 +17,7 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import apply_rename, error, ok, safe, scale, target_component
-from ._sketch_detail import frame_space_note, sketch_world_frame
+from ._sketch_detail import COMPONENT_SCOPE, frame_space_note, sketch_world_frame
 from . import _common
 from . import _inputs
 
@@ -64,23 +64,74 @@ def _sketch_summary(sketch) -> dict:
     }
 
 
-def get_sketches_handler() -> dict:
+def _shared_component_names(design) -> set:
+    """The lower-cased component names carried by MORE THAN ONE component. Empty for the ordinary
+    design, which is why a row only pays for a path when its own name cannot identify it."""
+    counts = {}
+    for comp in _common.all_components(design):
+        nm = (safe(lambda c=comp: c.name) or "").strip().lower()
+        if nm:
+            counts[nm] = counts.get(nm, 0) + 1
+    return {nm for nm, n in counts.items() if n > 1}
+
+
+def get_sketches_handler(component: str = "") -> dict:
     """List EVERY sketch in the design (all components), each tagged with its owning component -
     so a sketch inside a sub-component is visible without activating it first (the by-name overview
-    resolves design-wide via find_sketch, and this list matches that reach)."""
+    resolves design-wide via find_sketch, and this list matches that reach). 'component' narrows the
+    list, taking the same component name / occurrence path / handle the by-name read scopes by.
+
+    A component NAME can be worn by two components at once (two inserted references each bring their
+    own 'Frame' - measured), and then two rows are identical in every field, 'component' included.
+    This walk does not tell those rows apart - it reads NAMES, and the name is what collided. It
+    claims nothing about whether anything else could: that is a question about component identity,
+    and nothing here reads one. (Measured on one host, same-named components also shared an
+    entityToken - but this handler never looks at a token, so the payload must not report that as
+    the reason.) Rather than tag each row with a set of paths that is really the union over every
+    same-named component - which is what a token-keyed grouping produced, each row claiming the
+    other's placement - the payload publishes 'placements' at the TOP level: every occurrence path
+    whose component wears one of the shared names THIS response's rows carry, each listed once,
+    straight off the walk. Each of those paths resolves to ONE component when passed back as
+    'component', so the caller narrows in one more call. The list still does not REFUSE an ambiguous
+    scope, since a read that can show the candidates should show them."""
     design = _common.design()
     if not design:
         return error("No active design (open or create a document with design geometry).")
+    comps, scope_error = _detail_engine().scope_components(design, component)
+    if scope_error:
+        return error(scope_error)
     sketches = []
     try:
-        for comp in _common.all_components(design):
+        for comp in comps:
+            comp_name = safe(lambda c=comp: c.name)
             for sk in _common.iter_collection(safe(lambda c=comp: c.sketches)):
                 rec = _sketch_summary(sk)
-                rec["component"] = safe(lambda c=comp: c.name)
+                rec["component"] = comp_name
                 sketches.append(rec)
     except Exception as e:
         return error(f"Could not read sketches: {e}")
-    return ok({"sketch_count": len(sketches), "sketches": sketches})
+    payload = {"sketch_count": len(sketches), "sketches": sketches}
+    # Only names actually worn twice earn the placement block - a design whose names already identify
+    # their components has nothing to disambiguate and pays nothing. And only the ambiguous names
+    # THIS RESPONSE's rows carry: a scoped call asking about 'Frame' has no use for Shaft's and
+    # Rotor's placements, and a design-wide block grows with the DESIGN rather than with the query.
+    # An unscoped call lands design-wide anyway, because then every row is in play.
+    shared = _shared_component_names(design)
+    listed = [r["component"] for r in sketches]
+    ambiguous = sorted({n for n in listed if (n or "").strip().lower() in shared})
+    in_answer = {(n or "").strip().lower() for n in ambiguous}
+    placements = [{"path": p, "component": safe(lambda c=c: c.name)}
+                  for p, c in _common.component_placements(design)
+                  if (safe(lambda c=c: c.name) or "").strip().lower() in in_answer]
+    if ambiguous and placements:
+        payload["placements"] = placements
+        payload["note"] = (
+            "More than one component wears the same name here (" + ", ".join(ambiguous) + "), so a "
+            "row's 'component' does not identify which one holds it, and this list does not tell "
+            "those rows apart. 'placements' lists every occurrence path placing a component of one "
+            "of the names just listed, and no others; passing one back as 'component' reads THAT "
+            "component's sketches.")
+    return ok(payload)
 
 
 def _detail_engine():
@@ -93,13 +144,16 @@ def _detail_engine():
     return importlib.import_module("._sketch_detail", __package__)
 
 
-def sketch_get_handler(sketch_name: str = "", include_entities: bool = False, units: str = "mm") -> dict:
+def sketch_get_handler(sketch_name: str = "", include_entities: bool = False, units: str = "mm",
+                       component: str = "") -> dict:
     """No 'sketch_name': a summary list of every sketch. With one: that sketch's overview (or the
-    full X-ray with include_entities=true) via the _sketch_detail engine, in 'units' (mm default)."""
+    full X-ray with include_entities=true) via the _sketch_detail engine, in 'units' (mm default).
+    'component' scopes BOTH shapes to one component - the answer to a sketch name two components
+    share, which Fusion produces by default (it numbers sketches per component from 1)."""
     if (sketch_name or "").strip():
-        return _detail_engine().handler(sketch_name=sketch_name,
+        return _detail_engine().handler(sketch_name=sketch_name, component=component,
                                         include_entities=include_entities, units=units)
-    return get_sketches_handler()
+    return get_sketches_handler(component)
 
 
 # ---------------------------------------------------------------- sketch_create
@@ -149,7 +203,8 @@ def create_sketch_handler(plane: str = "xy", name: str = "", on_face: str = "") 
     # space frame['space'] names: world when the frame resolved into the assembly, component-local
     # when the sketch's component is instanced several times and no single world frame exists.
     # The same block sketch_get publishes, from the same helper, so place and verify read alike.
-    frame = safe(lambda: sketch_world_frame(sketch))
+    # The design being built into is handed over, because that is the world 'world' names.
+    frame = safe(lambda: sketch_world_frame(sketch, design))
 
     payload = {
         "created": True,
@@ -703,7 +758,8 @@ def add_sketch_geometry_handler(kind: str = "", sketch_name: str = "", units: st
                                 slot_length: float = None,
                                 angle_deg: float = None, create_width_dimension: bool = False,
                                 create_radius_dimension: bool = False,
-                                create_angle_dimension: bool = False) -> dict:
+                                create_angle_dimension: bool = False,
+                                component: str = "") -> dict:
     """Draw one geometry entity on a sketch; required params per 'kind' are in _REQUIRED."""
     kind = (kind or "").strip().lower()
     if kind not in _KINDS:
@@ -717,9 +773,13 @@ def add_sketch_geometry_handler(kind: str = "", sketch_name: str = "", units: st
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")
 
-    sketch, requested, ambiguous = _common.find_or_recent_sketch(design, sketch_name)
-    if ambiguous:
-        return error(ambiguous)
+    # 'component' narrows the by-name walk to one component's own sketches - the way through a name
+    # two components carry, which Fusion's per-component numbering makes the norm. Unscoped, the
+    # walk still REFUSES that name, now naming this input as the way to say which one was meant.
+    sketch, requested, refusal = _detail_engine().scoped_or_recent_sketch(
+        design, sketch_name, component)
+    if refusal:
+        return error(refusal)
     if not sketch:
         if requested:
             return error(f"No sketch named '{requested}'. Use sketch_get to list them, "
@@ -896,7 +956,7 @@ def draw_3d_line_handler(sketch_name: str = "", units: str = "mm",
                          x1: float = 0.0, y1: float = 0.0, z1: float = 0.0,
                          x2: float = None, y2: float = None, z2: float = None,
                          coincident_start_to_origin: bool = False,
-                         is_construction: bool = False) -> dict:
+                         is_construction: bool = False, component: str = "") -> dict:
     """Draw a line in 3D on a sketch - the end point may be off the sketch plane (z != 0)."""
     k = scale(units)
     if k is None:
@@ -910,9 +970,10 @@ def draw_3d_line_handler(sketch_name: str = "", units: str = "mm",
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")
 
-    sketch, requested, ambiguous = _common.find_or_recent_sketch(design, sketch_name)
-    if ambiguous:
-        return error(ambiguous)
+    sketch, requested, refusal = _detail_engine().scoped_or_recent_sketch(
+        design, sketch_name, component)
+    if refusal:
+        return error(refusal)
     if not sketch:
         if requested:
             return error(f"No sketch named '{requested}'. Use sketch_get or sketch_create.")
@@ -981,12 +1042,14 @@ _GET_DESC = (
     "sits in world plus the unit +X/+Y/normal directions - the map from these sketch-LOCAL "
     "coordinates to world. Add include_entities=true for the full per-entity/"
     "constraint/dimension X-ray (heavier - only when editing the sketch). Entity ids match "
-    "sketch_constrain's."
+    "sketch_constrain's. 'component' scopes either shape to one component."
 )
 sketch_get_tool = (
     Tool.create_simple(name="sketch_get", description=_GET_DESC)
     .add_input_property("sketch_name", {"type": "string",
             "description": "Omit for a summary list of all sketches; give a name for that sketch's overview (counts + profiles)."})
+    .add_input_property("component", {"type": "string",
+            "description": "Read the sketch of that name inside THIS component (Fusion numbers sketches per component, so several can hold a 'Sketch1'); with no 'sketch_name', list only its sketches. A component name, or - when two inserted references both bring a 'Frame' - an occurrence fullPathName/handle from design_get(include=['tree'])."})
     .add_input_property("include_entities", {"type": "boolean",
             "description": "Also return the full per-entity/constraint/dimension X-ray (default false - heavier; for editing geometry)."})
     .add_input_property(*_inputs.UNITS.as_property())
@@ -1034,6 +1097,7 @@ add_geometry_tool = (
             "description": "For polyline/closed_path/spline/cv_spline: list of [x,y] points (in 'units'). polyline/closed_path share endpoints (coincident) for a parametric loop; spline fits a smooth curve THROUGH them; cv_spline treats them as the control polygon.",
             "items": {"type": "array"}})
     .add_input_property("sketch_name", {"type": "string", "description": "Sketch to draw on (default: most recent)."})
+    .add_input_property(*COMPONENT_SCOPE)
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("x1", {"type": "number", "description": "X of point 1 / start (line, rectangle, arc)."})
     .add_input_property("y1", {"type": "number", "description": "Y of point 1 / start (line, rectangle, arc)."})
@@ -1072,6 +1136,7 @@ _3DLINE_DESC = (
 draw_3d_line_tool = (
     Tool.create_simple(name="sketch_add_3d_line", description=_3DLINE_DESC)
     .add_input_property("sketch_name", {"type": "string", "description": "Sketch to draw on (default: most recent)."})
+    .add_input_property(*COMPONENT_SCOPE)
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("x1", {"type": "number", "description": "Start X (default 0)."})
     .add_input_property("y1", {"type": "number", "description": "Start Y (default 0)."})

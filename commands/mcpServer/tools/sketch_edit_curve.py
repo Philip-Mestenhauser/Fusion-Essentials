@@ -128,7 +128,7 @@ def _refuse_non_line(refs):
 def handler(action: str = "", sketch_name: str = "", entity_one: str = "", entity_two: str = "",
             units: str = "mm", x1: float = None, y1: float = None, x2: float = None,
             y2: float = None, radius: float = None, distance: float = None,
-            distance_two: float = None, angle_deg: float = None) -> dict:
+            distance_two: float = None, angle_deg: float = None, component: str = "") -> dict:
     """See TOOL_DESCRIPTION."""
     act, aerr = _ACTION.resolve(action)
     if aerr:
@@ -144,9 +144,10 @@ def handler(action: str = "", sketch_name: str = "", entity_one: str = "", entit
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")
 
-    sketch, requested, ambiguous = _common.find_or_recent_sketch(design, sketch_name)
-    if ambiguous:
-        return error(ambiguous)
+    sketch, requested, refusal = _sketch_detail.scoped_or_recent_sketch(
+        design, sketch_name, component)
+    if refusal:
+        return error(refusal)
     if not sketch:
         if requested:
             return error(f"No sketch named '{requested}'. Available: "
@@ -300,6 +301,7 @@ tool = (
     .add_required_input("action")
     .add_input_property("sketch_name", {"type": "string",
             "description": "Sketch to edit (default: most recent)."})
+    .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
     .add_input_property("entity_one", {"type": "string",
             "description": "Curve to edit, '<type>:<index>'."})
     .add_input_property("entity_two", {"type": "string",
@@ -320,7 +322,8 @@ tool = (
 )
 
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True,
-                             postconditions=[_assert.SketchCurvesChanged()])
+                             postconditions=[_assert.SketchCurvesChanged(
+                                 scope_keys=("component",))])
 
 
 def register_tool():

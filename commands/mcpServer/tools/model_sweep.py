@@ -22,11 +22,15 @@ from . import _common
 from . import _geom
 from . import _inputs
 from . import _outputs
+from . import _sketch_detail
 
 app = adsk.core.Application.get()
 
 # profile may be a stable profile HANDLE (entityToken) or a {sketch, profile_index} selector.
-_PROFILE = _inputs.ProfileRef("profile", required=True)
+# scope_input: the {sketch, profile_index} form addresses a sketch BY NAME, and Fusion numbers
+# sketches per component from 1, so the name two components carry is refused - with the remedy
+# spelled as this tool's own 'component' input, which the schema below declares.
+_PROFILE = _inputs.ProfileRef("profile", required=True, scope_input="component")
 # target_bodies: scope a cut/intersect to these bodies so the sweep can't bleed through others.
 _TARGET_BODIES = _inputs.BodyRefList("target_bodies", required=False,
     description="Bodies a cut/intersect may affect (prevents cut bleed-through into other bodies).")
@@ -46,15 +50,19 @@ RETURNS = [
 ]
 
 
-def _sketch_for_open(comp, profile_raw):
+def _sketch_for_open(design, profile_raw, component):
     """The sketch to build an OPEN profile from when the profile selector has no closed region. Only a
     {sketch, profile_index} selector names a sketch; a bare handle can't (it points at a closed
-    Profile). Returns the sketch or None."""
-    if isinstance(profile_raw, dict):
-        nm = profile_raw.get("sketch", profile_raw.get("sketch_name", ""))
-        sk, _ = _common.target_sketch(comp, nm)
-        return sk
-    return None
+    Profile). Returns (sketch-or-None, refusal-or-None).
+
+    It resolves through the SAME scoped walk the closed-profile path does: a 'component' the caller
+    passed decides which component's sketch answers here too, or the open fallback would sweep the
+    active component's same-named sketch after the closed path refused the ambiguity."""
+    if not isinstance(profile_raw, dict):
+        return None, None
+    nm = profile_raw.get("sketch", profile_raw.get("sketch_name", ""))
+    sk, _requested, refusal = _sketch_detail.scoped_or_recent_sketch(design, nm, component)
+    return sk, refusal
 
 
 def _path_sketch_curves(host, path_raw):
@@ -90,7 +98,7 @@ def _cut_check_bodies(comp):
             if safe(lambda b=b: b.isSolid)]
 
 
-def _resolve_profile(comp, profile_raw, as_surface):
+def _resolve_profile(design, comp, profile_raw, as_surface, component=""):
     """Resolve the sweep profile. Returns (profile_arg, want_solid, open_profile, host, error).
 
     Closed profile resolved -> that profile; want_solid = not as_surface (a closed profile swept with
@@ -105,13 +113,15 @@ def _resolve_profile(comp, profile_raw, as_surface):
     if profile_raw in (None, "", []):
         return None, None, None, None, ("'profile' is required (a profile handle from sketch_get, or a "
                                         "{sketch, profile_index} selector).")
-    prof, err = _PROFILE.resolve(profile_raw)
+    prof, err = _PROFILE.resolve(profile_raw, component)
     if prof is not None:
         host = _inputs.profile_host_component(prof, None, comp)
         return prof, (not bool(as_surface)), False, host, None
     # No closed profile. If the selector names a sketch with open curves, build an OPEN profile on the
     # sketch's OWNING component (the same host the feature is built on).
-    sk = _sketch_for_open(comp, profile_raw)
+    sk, sk_refusal = _sketch_for_open(design, profile_raw, component)
+    if sk_refusal:
+        return None, None, None, None, sk_refusal
     if sk is not None:
         host = _common.safe(lambda: sk.parentComponent) or comp
         open_prof, operr = _common.open_profile_from_sketch(
@@ -125,7 +135,7 @@ def _resolve_profile(comp, profile_raw, as_surface):
 
 
 def handler(profile=None, path=None, operation: str = "new", orientation: str = "perpendicular",
-            as_surface: bool = False, target_bodies=None) -> dict:
+            as_surface: bool = False, target_bodies=None, component: str = "") -> dict:
     """See TOOL_DESCRIPTION."""
     op_key = (operation or "new").strip().lower()
     if op_key not in _common.OPERATIONS:
@@ -139,7 +149,8 @@ def handler(profile=None, path=None, operation: str = "new", orientation: str = 
         return error("No active design. Create or open a document first (see doc_new).")
     comp = target_component(design)
 
-    profile_arg, want_solid, open_profile, host, perr = _resolve_profile(comp, profile, as_surface)
+    profile_arg, want_solid, open_profile, host, perr = _resolve_profile(
+        design, comp, profile, as_surface, component)
     if perr:
         return error(perr)
 
@@ -299,6 +310,7 @@ sweep_tool = (
     .add_input_property("as_surface", {"type": "boolean",
             "description": "Sweep into an open SURFACE (isSolid=False, no end caps) instead of a solid (default false). Auto-applied when the profile sketch has only an open path. Every result reports 'is_solid'."})
     .add_input_property("target_bodies", _TARGET_BODIES.schema())
+    .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
     .strict_schema()
 )
 sweep_item = Item.create_tool_item(tool=sweep_tool, write="write", handler=handler, run_on_main_thread=True)

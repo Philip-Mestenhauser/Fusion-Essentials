@@ -17,6 +17,7 @@ from . import _common
 from . import _geom
 from . import _inputs
 from . import _assert
+from . import _sketch_detail
 
 app = adsk.core.Application.get()
 
@@ -51,7 +52,10 @@ def _result_body_report(feature):
 # ── input declarations ──────────────────────────────────────────────────────
 
 # LOFT
-_LOFT_PROFILES = _inputs.ProfileRefList("profiles", required=True,
+# scope_input: a {sketch, profile_index} element addresses a sketch BY NAME, and Fusion numbers
+# sketches per component from 1 - so the name two components carry is refused, with the remedy
+# spelled as this tool's own 'component' input, which the schema below declares.
+_LOFT_PROFILES = _inputs.ProfileRefList("profiles", required=True, scope_input="component",
     description="The profiles to loft through (>=2) - order is load-bearing, the loft runs through "
                 "them in the order given.")
 _LOFT_RAILS = _inputs.GeometryHandleList("rails", require="any", required=False,
@@ -75,7 +79,7 @@ _UNSTITCH_FACES = _inputs.GeometryHandleList("faces", require="face", required=F
 # ── LOFT ─────────────────────────────────────────────────────────────────────
 
 def loft_handler(profiles=None, rails=None, centerline="", operation="new",
-                 as_surface=None, is_closed=None) -> dict:
+                 as_surface=None, is_closed=None, component: str = "") -> dict:
     """Loft a body through an ORDERED list of profiles, optionally shaped by rails OR a centerline."""
     op_key = (operation or "new").strip().lower()
     if op_key not in _OPERATIONS:
@@ -85,7 +89,7 @@ def loft_handler(profiles=None, rails=None, centerline="", operation="new",
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")
 
-    secs, perr = _LOFT_PROFILES.resolve(profiles)
+    secs, perr = _LOFT_PROFILES.resolve(profiles, component)
     if perr:
         return error(perr)
     if not secs or len(secs) < 2:
@@ -426,6 +430,7 @@ loft_tool = (
             "description": "Force a SURFACE loft (isSolid=False). Default: the API's default (a solid is attempted)."})
     .add_input_property("is_closed", {"type": "boolean",
             "description": "Close the loft ring back through the first profile."})
+    .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
     .add_required_input("profiles")
     .strict_schema()
 )

@@ -2,7 +2,7 @@
 
 _Auto-generated from the live registry by `tests/gen_manifest.py`. Do not edit by hand — re-run the generator after adding/renaming a tool or kind. `--check` fails the suite if this is stale. This is the batch form of the `sys_find_tool` live lookup: the one place to see what already exists before building it._
 
-**Tools:** 184  |  **Input-kinds:** 21  |  write-status: `·` read · `✎` write · `⚠` destructive
+**Tools:** 186  |  **Input-kinds:** 21  |  write-status: `·` read · `✎` write · `⚠` destructive
 
 ## Input kinds — reference EXISTING geometry/structure with these (don't hand-roll a name/index)
 
@@ -138,8 +138,10 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | ✎ | `cam_create_operation` | CREATE a CAM milling operation in a setup |
 | ✎ | `cam_create_setup` | Create a CAM (Manufacture) SETUP on the active part - the prerequisite for any CAM job, since the other CAM tools (cam_apply_template, cam_generate) need a setu... |
 | ⚠ | `cam_delete` | Delete a CAM entity - a setup, operation, folder, or pattern - by name (the CAM-side delete; design_delete_feature / design_delete_occurrence only act on the de... |
+| ⚠ | `cam_delete_machine` | Delete a MACHINE from the LOCAL machine library by name - the counterpart to cam_create_machine, and the only tool here that removes one |
+| ⚠ | `cam_delete_template` | Delete a TEMPLATE from the LOCAL toolpath template library by name - the counterpart to cam_save_template, and the only tool here that removes one |
 | ✎ | `cam_edit_folders` | Manage a CAM setup's folders: list them, create one, rename one, or move operations into one |
-| ✎ | `cam_edit_operation` | Edit a CAM operation's PARAMETERS - the feeds/speeds/depths/tool values the other CAM tools can't reach |
+| ✎ | `cam_edit_operation` | Edit a CAM operation's PARAMETERS - the feeds/speeds/depths/tool values the other CAM tools can't reach - and its SUPPRESSION |
 | ✎ | `cam_edit_setup` | Edit a CAM SETUP - the setup-level companion to cam_edit_operation, one call per concern |
 | ✎ | `cam_edit_tools` | Read & manage CAM TOOL LIBRARIES + their tools |
 | ✎ | `cam_generate` | Launch CAM toolpath (re)generation and return IMMEDIATELY with a handle; generation runs in the background at its own pace (often minutes) - check cam_get_statu... |

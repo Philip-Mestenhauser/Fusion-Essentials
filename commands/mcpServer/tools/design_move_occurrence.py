@@ -102,10 +102,21 @@ def handler(occurrence: str = "", into_component: str = "") -> dict:
     # A component cannot contain an instance of itself. Measured: the platform refuses this itself -
     # moveToComponent raises '3 : cannot move the occurrence to the component' and the tree is
     # unchanged. This guard is the earlier, named error, not a crash shield.
-    if component_contains(moving, target):
+    cycle = component_contains(moving, target)
+    if cycle is True:
         return error(f"Refusing to move '{name}' into {target_label}: that target is its own "
                      f"component '{safe(lambda: moving.name)}' or sits inside it, so the component "
                      "would contain an instance of itself. Pick a target outside it.")
+    if cycle is None:
+        # The tri-state's whole point: False is the claim "this move is legal", and the walk answers
+        # None for several distinct reads - an unenumerable collection, a census holding an
+        # unresolved reference, or one occurrence whose component identity would not read. The wire
+        # says only what is common to all of them: no verdict was reached.
+        return error(f"Refusing to move '{name}' into {target_label}: whether "
+                     f"'{safe(lambda: moving.name)}' already sits inside that target could not be "
+                     "determined - its subtree could not be searched to a verdict, so a move there "
+                     "could make the component contain an instance of itself. Check the target for "
+                     "unresolved external references with assembly_get, then retry.")
 
     before = occurrence_paths(design)
     try:

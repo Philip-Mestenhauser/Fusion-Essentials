@@ -18,9 +18,10 @@ app = adsk.core.Application.get()
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import apply_rename, error, ok, safe, find_sketch
+from ._common import apply_rename, error, ok, safe
 from . import _common
 from . import _inputs
+from . import _sketch_detail
 from . import _joints
 
 _TARGETS = ("at", "origin")
@@ -179,7 +180,8 @@ def _anchor_direction_line(comp, center_cm, dir_vec, length=1.0):
 
 def _geometry_from_args(design, comp, anchor, target, x_cm, y_cm, z_cm,
                         sketch_name, entity_index, keypoint, geometry_handle=None,
-                        bbox_target=None, orient_axis="z", flip=False, meta=None):
+                        bbox_target=None, orient_axis="z", flip=False, meta=None,
+                        sketch_component=""):
     """Build the JointGeometry + a human description. Returns (geometry, desc, err). For a COMPUTED
     anchor (bbox_center/face_center), populates meta['anchor_cm'] with the world point used, so the
     handler can read it back against the created origin."""
@@ -267,11 +269,14 @@ def _geometry_from_args(design, comp, anchor, target, x_cm, y_cm, z_cm,
     if anchor in ("sketch_line", "sketch_point"):
         if not (sketch_name or "").strip():
             return None, None, f"anchor '{anchor}' needs 'sketch_name'."
-        # Whole-design resolve (active component first), so a JO can anchor on a sketch line/point
-        # drawn in an activated sub-component - not only one in the root component. find_sketch, not
-        # resolve_sketch: a name SEVERAL sketches carry comes back with its owners named, so the
-        # refusal cannot read "No sketch named X" over sketches that exist.
-        sketch, ambiguous = find_sketch(design, sketch_name.strip())
+        # Whole-design resolve (every component, no preference among them), so a JO can anchor on a
+        # sketch line/point drawn in an activated sub-component - not only one in the root component.
+        # A name SEVERAL sketches carry comes back with its owners named, so the refusal cannot read
+        # "No sketch named X" over sketches that exist, and 'sketch_component' narrows it. That scope
+        # is NOT the handler's 'component': that one names the occurrence RECEIVING the joint origin,
+        # and the sketch the JO anchors on can be owned by a different component entirely.
+        sketch, ambiguous = _sketch_detail.scoped_sketch(
+            design, sketch_name.strip(), sketch_component, "sketch_component")
         if ambiguous:
             return None, None, ambiguous
         if not sketch:
@@ -316,7 +321,7 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
             sketch_name: str = "", entity_index: int = 0, keypoint: str = "start",
             geometry: str = "", name: str = "",
             bbox_target: str = "", orient_axis: str = "z", flip: bool = False,
-            component: str = "") -> dict:
+            component: str = "", sketch_component: str = "") -> dict:
     """See TOOL_DESCRIPTION."""
     design = _common.design()
     if not design:
@@ -374,7 +379,7 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
     meta = {}
     geom, desc, err = _geometry_from_args(
         design, comp, anchor, target, x_cm, y_cm, z_cm, sketch_name, entity_index, kp, geometry,
-        bbox_target, orient_axis, flip, meta)
+        bbox_target, orient_axis, flip, meta, sketch_component)
     if err:
         return error(err)
     if target_occ is not None and anchor == "coordinates":
@@ -422,7 +427,11 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
     landed_comp = safe(lambda: joint_origin.parentComponent)
     landed_name = safe(lambda: landed_comp.name) if landed_comp is not None else None
     want_name = safe(lambda: comp.name) or "?"
-    if landed_comp is not None and not _common.same_component(landed_comp, comp):
+    # TRI-STATE. A PROVEN mismatch is rolled back; an unproven one is not, because deleting a
+    # created origin on a comparison that was never made destroys work over an unreadable token.
+    # It is disclosed instead - component_verified below is the read-back's own verdict.
+    landed_here = (_common.same_component(landed_comp, comp) if landed_comp is not None else None)
+    if landed_here is False:
         got_name = landed_name or "?"
         safe(lambda: joint_origin.deleteMe())
         return error(f"Joint origin landed on component '{got_name}', not the requested "
@@ -493,7 +502,7 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
     "anchored_on": desc,
     "frame_axes": axes,
     "component": landed_name or want_name,
-    "component_verified": landed_comp is not None,
+    "component_verified": landed_here is True,
     "joint_origin_count": safe(lambda: comp.jointOrigins.count),
     "note": ("Joint origin created. frame_axes shows the resulting Z/X/Y directions. For an oriented "
         "frame: anchor='bbox_center' (Z = orient_axis) / 'face_center' (Z = face normal) / a sketch "
@@ -513,6 +522,19 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
                               "parametric offsetX/Y/Z from the model origin")
         if offset_params is not None:
             payload["offset_parameters"] = offset_params
+    if landed_here is not True:
+        # Every un-proven landing is disclosed, not just the one where parentComponent read. An
+        # UNREADABLE parentComponent is the weaker read of the two, and it is also the one whose
+        # 'component' field falls back to the name the CALLER asked for - so staying silent there
+        # published the request as the landing. Each clause names the read that actually failed.
+        detail = ("was read but could not be matched against the requested component "
+                  f"'{want_name}'" if landed_comp is not None else
+                  f"did not read at all, so 'component' below repeats the requested '{want_name}' "
+                  "rather than a landing that was confirmed")
+        payload["note"] += (f" The origin's own parentComponent {detail}, so which component it "
+                            "belongs to is UNVERIFIED - a joint origin on another component cannot "
+                            "serve as this one's side of a joint. Confirm with "
+                            "assembly_get(include=['joint_origins']).")
     if param_names:
         payload["model_parameters"] = param_names
         payload["note"] += (" model_parameters names the dNN offset params - param_set one to an "
@@ -526,7 +548,10 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
         # the active edit target (measured) - unlike sketch/extrude, which build into the active one.
         # Disclosed only when the two actually differ, naming both components as read.
         active = _common.target_component(design)
-        if active is not None and not _common.same_component(active, design.rootComponent):
+        # `is False`: the note ASSERTS that another component is the active edit target, so it fires
+        # only on a proven difference - an unproven pair says nothing rather than naming a component
+        # it could not tell apart from the root.
+        if active is not None and _common.same_component(active, design.rootComponent) is False:
             active_name = safe(lambda: active.name) or "?"
             payload["active_component"] = active_name
             payload["note"] += (f" Landed on the root component '{payload['component']}' while "
@@ -572,6 +597,8 @@ tool = (
     .add_input_property("z", {"type": "number", "description": "Z coordinate (anchor=coordinates, target=at)."})
     .add_input_property("sketch_name", {"type": "string",
             "description": "Sketch holding the anchor line/point (anchor=sketch_line/sketch_point)."})
+    .add_input_property(*_sketch_detail.component_scope("sketch_component",
+                                                        narrows="sketch_name"))
     .add_input_property("entity_index", {"type": "integer",
             "description": "Index of the line/point within the sketch (default 0)."})
     .add_input_property(*_KEYPOINT_CHOICE.as_property())

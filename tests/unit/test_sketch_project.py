@@ -15,7 +15,8 @@ import types
 
 import pytest
 
-from conftest import BRepBody, MakeComp, load_tool, make_design, install, payload as _payload
+from conftest import (BRepBody, MakeComp, load_tool, make_design, make_source_document, install,
+                      payload as _payload)
 
 sp = load_tool("sketch_project")
 
@@ -178,12 +179,14 @@ def call(monkeypatch):
     def _run(sketch=None, entities="E1", link=True, resolve_err=None, sketch_none=False,
              raw=False, **kw):
         sk = sketch if sketch is not None else FakeSketch()
+        # remedy= is the shared resolver's per-caller refusal sentence; the stub takes it so it
+        # matches the real signature the scope helper calls through.
         if sketch_none:
             monkeypatch.setattr(sp._common, "find_or_recent_sketch",
-                                lambda d, n: (None, n or None, None))
+                                lambda d, n, remedy=None: (None, n or None, None))
         else:
             monkeypatch.setattr(sp._common, "find_or_recent_sketch",
-                                lambda d, n: (sk, n or None, None))
+                                lambda d, n, remedy=None: (sk, n or None, None))
         if resolve_err:
             monkeypatch.setattr(sp._ENTITIES, "resolve", lambda raw: (None, resolve_err))
         else:
@@ -209,8 +212,9 @@ def run(monkeypatch):
         """`*_out` are what each typed input kind RESOLVES to; **kw are the handler's own arguments."""
         sk = sketch if sketch is not None else FakeSketch()
         monkeypatch.setattr(sp._common, "find_or_recent_sketch",
-                            lambda d, n: (sk, n or None, None))
-        monkeypatch.setattr(sp._common, "find_sketch", lambda d, n: (source, None))
+                            lambda d, n, remedy=None: (sk, n or None, None))
+        monkeypatch.setattr(sp._common, "find_sketch",
+                            lambda d, n, remedy=None: (source, None))
         monkeypatch.setattr(sp._common, "resolve_entity_ref",
                             lambda s, r: curve if r == "line:0" else None)
         _stub(monkeypatch, sp._TARGET_FACES, faces_out if faces_out is not None else ["FACE"])
@@ -451,6 +455,57 @@ class TestForeignInputs:
         assert sk.intersect_args == [b]
 
 
+# ── _same_sketch: the tri-state identity the self-projection refusal rests on ──
+
+def _sketch_in(urn, name="Sketch1", token="tok"):
+    """A sketch whose owning component belongs to the document with lineage id `urn` - the second
+    half of the identity, reached through parentComponent.parentDesign (measured: a Sketch carries
+    parentComponent). `urn=None` models a never-saved document."""
+    sk = FakeSketch(name=name, token=token)
+    sk.parentComponent.parentDesign = make_source_document(urn)
+    return sk
+
+
+class TestSameSketch:
+    def test_two_reads_of_one_sketch_match(self):
+        assert sp._same_sketch(_sketch_in("urn:a", token="tok"),
+                               _sketch_in("urn:a", token="tok")) is True
+
+    def test_two_documents_sharing_one_token_are_different_sketches(self):
+        # the defect a bare-token compare carries: the token is document-local, so two references of
+        # one source design hand back byte-identical tokens for two DIFFERENT sketches
+        assert sp._same_sketch(_sketch_in("urn:host", token="tok"),
+                               _sketch_in("urn:xref", token="tok")) is False
+
+    def test_two_tokens_in_one_document_are_different_sketches(self):
+        assert sp._same_sketch(_sketch_in("urn:a", token="tok-a"),
+                               _sketch_in("urn:a", token="tok-b")) is False
+
+    def test_an_unreadable_token_answers_unknown_not_false(self):
+        # False is a positive claim ("these are two different sketches") that nothing was read to
+        # support; None is the state a caller must branch on separately
+        assert sp._same_sketch(FakeSketch(token=None), _sketch_in("urn:a", token="tok")) is None
+
+    def test_two_unreadable_identities_do_not_compare_equal(self):
+        # both sides through the None gate BEFORE the compare: two identities that each failed to
+        # read are not evidence they are one sketch
+        assert sp._same_sketch(FakeSketch(token=None), FakeSketch(token=None)) is None
+
+    def test_a_missing_operand_answers_unknown(self):
+        assert sp._same_sketch(None, _sketch_in("urn:a", token="tok")) is None
+
+    def test_two_missing_operands_answer_unknown(self):
+        # the input only the OPERAND gate decides: with one operand absent the identity gate below
+        # answers anyway, but `None is None` is True, so without this gate two absent operands
+        # short-circuit to "the same sketch" - a verdict from nothing at all
+        assert sp._same_sketch(None, None) is None
+
+    def test_one_object_handed_in_twice_short_circuits(self):
+        # identity is kept as a free short-circuit, so it answers even where no identity reads
+        blind = FakeSketch(token=None)
+        assert sp._same_sketch(blind, blind) is True
+
+
 # ── to_surface: projectToSurface(faces, curves, projectType[, directionEntity]) ─
 
 class TestToSurface:
@@ -500,14 +555,36 @@ class TestToSurface:
         assert out["isError"] is True
         assert "same sketch" in out["message"]
 
-    def test_same_sketch_detected_through_the_entity_token(self, run):
-        # a sketch read twice is a fresh proxy, so the refusal cannot rest on identity
-        sk = FakeSketch(name="Sketch1", token="tok-same")
-        proxy = FakeSketch(name="Sketch1", token="tok-same")
+    def test_two_proxies_of_one_sketch_are_refused_as_a_self_projection(self, run):
+        # a sketch read twice is a fresh proxy, so the refusal cannot rest on identity - both reads
+        # answer one native identity (one token, one source document) and that is what matches
+        sk = _sketch_in("urn:host", name="Sketch1", token="tok-same")
+        proxy = _sketch_in("urn:host", name="Sketch1", token="tok-same")
         out, _ = run("to_surface", raw=True, sketch=sk, source=proxy,
                      source_sketch="Sketch1", curve_refs=["line:0"])
         assert out["isError"] is True
         assert "same sketch" in out["message"]
+
+    def test_a_source_sketch_from_another_document_is_not_a_self_projection(self, run):
+        # An entityToken is DOCUMENT-LOCAL: two components brought in by two references of ONE
+        # source design read byte-identical tokens, and so do the sketches they hold. Refused on the
+        # bare token, this legitimate cross-document projection never reaches Fusion at all.
+        sk = _sketch_in("urn:host", name="Shared", token="tok-shared")
+        src = _sketch_in("urn:xref", name="Shared", token="tok-shared")
+        out, _ = run("to_surface", sketch=sk, source=src,
+                     source_sketch="Shared", curve_refs=["line:0"])
+        assert out["projected"] is True
+        assert sk.surface_args[1] == [run.curve]
+
+    def test_an_unreadable_identity_does_not_refuse_up_front(self, run):
+        # The refusal STATES the two references are one sketch, so only a PROVEN match may raise it.
+        # Neither sketch's identity reads here, which supports no such claim - the call goes through
+        # and Fusion answers for itself.
+        sk = FakeSketch(name="Target", token=None)
+        src = FakeSketch(name="Source", token=None)
+        out, _ = run("to_surface", sketch=sk, source=src,
+                     source_sketch="Source", curve_refs=["line:0"])
+        assert out["projected"] is True
 
     def test_curve_refs_without_source_sketch_is_refused(self, run):
         out, sk = run("to_surface", raw=True, curve_refs=["line:0"])
@@ -641,7 +718,7 @@ class TestIntersect:
         # raise, so the refusal has to happen here or the caller gets a wrong-cause plane error
         sk = FakeSketch(name="Sketch1")
         proxy = BRepBody(name="Body1", entity_token="tok-1",
-                         parent_component=MakeComp(name="CompX"))
+                         parent_component=MakeComp(name="CompX", entity_token="TOKEN:CompX"))
         proxy.assemblyContext = types.SimpleNamespace(name="CompX:1")
         out, _ = run("intersect", raw=True, sketch=sk, bodies_out=[proxy], bodies="Body1")
         assert out["isError"] is True
@@ -654,7 +731,7 @@ class TestIntersect:
         # measured: this one RAISES InternalValidationError, which the refusal pre-empts
         sk = FakeSketch(name="Sketch1")
         native = BRepBody(name="Body2", entity_token="tok-2",
-                          parent_component=MakeComp(name="CompY"))
+                          parent_component=MakeComp(name="CompY", entity_token="TOKEN:CompY"))
         out, _ = run("intersect", raw=True, sketch=sk, bodies_out=[native], bodies="Body2")
         assert out["isError"] is True
         assert "lives in component 'CompY'" in out["message"]
@@ -664,7 +741,7 @@ class TestIntersect:
     def test_a_face_is_judged_by_its_owning_bodys_component(self, run):
         sk = FakeSketch(name="Sketch1")
         face = types.SimpleNamespace(
-            body=BRepBody(name="Body1", parent_component=MakeComp(name="CompX")))
+            body=BRepBody(name="Body1", parent_component=MakeComp(name="CompX", entity_token="TOKEN:CompX")))
         out, _ = run("intersect", raw=True, sketch=sk, entities_out=[face], entities="h1")
         assert out["isError"] is True and "lives in component 'CompX'" in out["message"]
 
@@ -672,6 +749,16 @@ class TestIntersect:
         # an owning component that will not read is evidence of nothing - it must not block the call
         sk = FakeSketch(contributions={"tok-1": 1})
         b1 = BRepBody(name="Body1", entity_token="tok-1")   # parent_component defaults to None
+        out, _ = run("intersect", sketch=sk, bodies_out=[b1], bodies="Body1")
+        assert sk.intersect_args == [b1] and out["created_count"] == 1
+
+    def test_an_owner_that_reads_but_cannot_be_TOLD_APART_does_not_refuse(self, run):
+        # The owner reads, but same_component answers None (no token on it), so nothing established
+        # that the two components DIFFER - and the refusal's whole sentence is that they do. It must
+        # only fire on a proven difference, exactly as an unreadable owner does not fire it.
+        sk = FakeSketch(contributions={"tok-1": 1})
+        b1 = BRepBody(name="Body1", entity_token="tok-1",
+                      parent_component=MakeComp(name="CompZ"))     # no entityToken
         out, _ = run("intersect", sketch=sk, bodies_out=[b1], bodies="Body1")
         assert sk.intersect_args == [b1] and out["created_count"] == 1
 
@@ -749,9 +836,198 @@ class TestIntersect:
         assert "returned no entities" in out["note"]
 
 
+# ── the named-sketch miss ─────────────────────────────────────────────────────
+
+@pytest.fixture
+def real_walk():
+    """A design holding one sketch named 'Plate', with the sketch walk left UNSTUBBED - so the
+    miss path runs through _common.find_or_recent_sketch, which strips the name before searching."""
+    return install(sp, make_design(comp=MakeComp(name="Root", sketches=[FakeSketch("Plate")])))
+
+
+class TestNamedSketchMiss:
+    def test_reports_the_name_the_walk_searched_for_not_the_raw_input(self, real_walk):
+        # the resolver strips before searching, so echoing the raw input quotes a name nothing
+        # ever looked for - and the caller retries against a sketch that was never missing.
+        res = sp.handler(sketch_name="  Ghost  ", entities="F1")
+        assert res["isError"] is True
+        assert "No sketch named 'Ghost'" in res["message"]
+        assert "'  Ghost  '" not in res["message"]
+
+    def test_the_miss_still_lists_what_is_there(self, real_walk):
+        res = sp.handler(sketch_name="Ghost", entities="F1")
+        assert "Available: Plate" in res["message"]
+
+
 # ── RETURNS contract ──────────────────────────────────────────────────────────
 
 class TestReturnsContract:
     def test_declared_entity_refs_present_in_payload(self, call):
         out, sk = call()
         assert sp.RETURNS[0].assert_present(out) == ""
+
+
+# ── the 'component' / 'source_component' SCOPES ──────────────────────────────
+# Fusion numbers sketches per component from 1, so two components each holding a "Plate" is the
+# norm, and the design-wide walk REFUSES that name, pointing at the scope: a rename is impossible
+# for a component that arrived inside a referenced document. Two sketch names here
+# ('sketch_name' projected INTO, 'source_sketch' read FROM) so two scopes, each naming itself in
+# its own refusal. These drive the REAL _common walk, no stubbed resolver.
+
+@pytest.fixture
+def scoped(monkeypatch):
+    """Two components each holding a 'Plate', with DIFFERENT starting curve counts (Alpha 4 lines,
+    Beta none), so which sketch a projection landed in is readable from the counts."""
+    def _build():
+        alpha_sk = FakeSketch(name="Plate", base={"line": 4}, token="tok-alpha")
+        beta_sk = FakeSketch(name="Plate", token="tok-beta")
+        alpha = MakeComp(name="Alpha", sketches=[alpha_sk])
+        beta = MakeComp(name="Beta", sketches=[beta_sk])
+        install(sp, make_design(comp=alpha, all_components=[alpha, beta]))
+        _stub(monkeypatch, sp._ENTITIES, [object(), object()])
+        return alpha_sk, beta_sk
+    return _build
+
+
+class TestProjectComponentScope:
+    def test_the_unscoped_shared_name_refuses_and_names_the_scope_input(self, scoped):
+        alpha_sk, beta_sk = scoped()
+        res = sp.handler(sketch_name="Plate", entities="F1")
+        assert res["isError"] is True
+        assert "2 sketches are named 'Plate'" in res["message"]
+        assert "'component'" in res["message"] and "Rename one" not in res["message"]
+        assert alpha_sk.projected_with is None and beta_sk.projected_with is None
+
+    def test_the_scope_projects_into_THAT_components_sketch(self, scoped):
+        alpha_sk, beta_sk = scoped()
+        _payload(sp.handler(sketch_name="Plate", component="Beta", entities="F1"))
+        assert beta_sk.projected_with is not None and alpha_sk.projected_with is None
+
+    def test_the_sibling_component_is_reachable_by_the_same_call(self, scoped):
+        alpha_sk, beta_sk = scoped()
+        _payload(sp.handler(sketch_name="Plate", component="Alpha", entities="F1"))
+        assert alpha_sk.projected_with is not None and beta_sk.projected_with is None
+
+    def test_an_unknown_component_is_refused_before_the_projection(self, scoped):
+        alpha_sk, beta_sk = scoped()
+        res = sp.handler(sketch_name="Plate", component="Gamma", entities="F1")
+        assert res["isError"] is True and "No component named 'Gamma'" in res["message"]
+        assert alpha_sk.projected_with is None and beta_sk.projected_with is None
+
+    def test_a_wrong_component_is_refused_even_when_the_name_is_UNIQUE(self, monkeypatch):
+        # The scope is VALIDATED: a dropped one projects into Alpha on a call that named Beta.
+        alpha_sk = FakeSketch(name="OnlyOne", token="tok-alpha")
+        alpha = MakeComp(name="Alpha", sketches=[alpha_sk])
+        beta = MakeComp(name="Beta", sketches=[])
+        install(sp, make_design(comp=alpha, all_components=[alpha, beta]))
+        _stub(monkeypatch, sp._ENTITIES, [object()])
+        res = sp.handler(sketch_name="OnlyOne", component="Beta", entities="F1")
+        assert res["isError"] is True and "'Beta'" in res["message"]
+        assert alpha_sk.projected_with is None
+
+
+class TestSourceComponentScope:
+    """'source_component' narrows the sketch 'curve_refs' are read AGAINST. It is separate from
+    'component' because that one narrows the receiving sketch and would not change this answer."""
+
+    def _two_sources(self, monkeypatch):
+        target = FakeSketch(name="Target", token="tok-tgt")
+        a_src = FakeSketch(name="Plate", token="tok-a")
+        b_src = FakeSketch(name="Plate", token="tok-b")
+        alpha = MakeComp(name="Alpha", sketches=[target, a_src])
+        beta = MakeComp(name="Beta", sketches=[b_src])
+        install(sp, make_design(comp=alpha, all_components=[alpha, beta]))
+        _stub(monkeypatch, sp._TARGET_FACES, ["FACE"])
+        _stub(monkeypatch, sp._CURVE_HANDLES, [])
+        return target, a_src, b_src
+
+    def test_a_shared_source_name_refuses_naming_source_component(self, monkeypatch):
+        target, a_src, b_src = self._two_sources(monkeypatch)
+        res = sp.handler(action="to_surface", sketch_name="Target", component="Alpha",
+                         source_sketch="Plate", curve_refs=["line:0"], target_faces="F")
+        assert res["isError"] is True
+        assert "2 sketches are named 'Plate'" in res["message"]
+        assert "'source_component'" in res["message"] and "Rename one" not in res["message"]
+        assert target.surface_args is None
+
+    def test_source_component_selects_which_sketch_the_refs_are_read_against(self, monkeypatch):
+        target, a_src, b_src = self._two_sources(monkeypatch)
+        seen = []
+        monkeypatch.setattr(sp._common, "resolve_entity_ref",
+                            lambda s, r: (seen.append(s), object())[1])
+        _payload(sp.handler(action="to_surface", sketch_name="Target", component="Alpha",
+                            source_sketch="Plate", source_component="Beta",
+                            curve_refs=["line:0"], target_faces="F"))
+        assert seen == [b_src]          # Beta's 'Plate', not Alpha's
+
+    def test_the_sibling_source_is_reachable_by_the_same_call(self, monkeypatch):
+        target, a_src, b_src = self._two_sources(monkeypatch)
+        seen = []
+        monkeypatch.setattr(sp._common, "resolve_entity_ref",
+                            lambda s, r: (seen.append(s), object())[1])
+        _payload(sp.handler(action="to_surface", sketch_name="Target", component="Alpha",
+                            source_sketch="Plate", source_component="Alpha",
+                            curve_refs=["line:0"], target_faces="F"))
+        assert seen == [a_src]
+
+    def test_a_scoped_MISS_names_source_component_and_never_the_bare_component(self, monkeypatch):
+        # The scoped-miss refusal has to name the input that narrows THIS reference. 'component'
+        # narrows the sketch being projected INTO, so quoting it points at an input that cannot
+        # change which source was found.
+        target = FakeSketch(name="Target", token="tok-tgt")
+        a_src = FakeSketch(name="Plate", token="tok-a")
+        alpha = MakeComp(name="Alpha", sketches=[target, a_src])
+        beta = MakeComp(name="Beta", sketches=[FakeSketch(name="Other", token="tok-o")])
+        install(sp, make_design(comp=alpha, all_components=[alpha, beta]))
+        _stub(monkeypatch, sp._TARGET_FACES, ["FACE"])
+        _stub(monkeypatch, sp._CURVE_HANDLES, [])
+        res = sp.handler(action="to_surface", sketch_name="Target", component="Alpha",
+                         source_sketch="Plate", source_component="Beta",
+                         curve_refs=["line:0"], target_faces="F")
+        assert res["isError"] is True
+        assert "holds no sketch named 'Plate'" in res["message"]
+        assert "'source_component'" in res["message"]
+        assert "'component'" not in res["message"]
+        assert target.surface_args is None
+
+    def test_an_AMBIGUOUS_source_component_names_source_component(self, monkeypatch):
+        from conftest import make_occurrence
+        target = FakeSketch(name="Target", token="tok-tgt")
+        root = MakeComp(name="Root", sketches=[target])
+        a = MakeComp(name="Frame", sketches=[FakeSketch(name="Plate", token="tok-a")])
+        b = MakeComp(name="Frame", sketches=[FakeSketch(name="Plate", token="tok-b")])
+        root.allOccurrences = [make_occurrence("P2-Gimbal:1+Frame:1", a),
+                               make_occurrence("P3-Gimbal:1+Frame:1", b)]
+        install(sp, make_design(comp=root, all_components=[root, a, b]))
+        _stub(monkeypatch, sp._TARGET_FACES, ["FACE"])
+        _stub(monkeypatch, sp._CURVE_HANDLES, [])
+        res = sp.handler(action="to_surface", sketch_name="Target", source_sketch="Plate",
+                         source_component="Frame", curve_refs=["line:0"], target_faces="F")
+        assert res["isError"] is True
+        assert "2 components match 'Frame'" in res["message"]
+        assert "'source_component' also takes an occurrence fullPathName" in res["message"]
+        assert "'component'" not in res["message"]
+        assert target.surface_args is None
+
+    def test_a_wrong_source_component_is_refused_even_when_the_name_is_UNIQUE(self, monkeypatch):
+        # The validation decision at the ALTERNATE scope: dropped, it reads the refs against
+        # Alpha's 'OnlyOne' on a call that named Beta.
+        target = FakeSketch(name="Target", token="tok-tgt")
+        a_src = FakeSketch(name="OnlyOne", token="tok-a")
+        alpha = MakeComp(name="Alpha", sketches=[target, a_src])
+        beta = MakeComp(name="Beta", sketches=[])
+        install(sp, make_design(comp=alpha, all_components=[alpha, beta]))
+        _stub(monkeypatch, sp._TARGET_FACES, ["FACE"])
+        _stub(monkeypatch, sp._CURVE_HANDLES, [])
+        res = sp.handler(action="to_surface", sketch_name="Target", source_sketch="OnlyOne",
+                         source_component="Beta", curve_refs=["line:0"], target_faces="F")
+        assert res["isError"] is True and "'Beta'" in res["message"]
+        assert target.surface_args is None
+
+    def test_source_component_is_refused_on_the_actions_that_have_no_source(self, monkeypatch):
+        # It rides the same action gate as 'source_sketch' - an input silently dropped by the
+        # action router is the same trap as a scope silently ignored.
+        self._two_sources(monkeypatch)
+        res = sp.handler(action="into_sketch", sketch_name="Target", source_component="Beta",
+                         entities="F1")
+        assert res["isError"] is True and "'source_component' applies only to" in res["message"]

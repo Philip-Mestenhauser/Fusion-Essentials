@@ -16,6 +16,7 @@ from . import _assert
 from . import _common
 from . import _inputs
 from . import _outputs
+from . import _sketch_detail
 
 RETURNS = [
     _outputs.ReturnsValue("curves_added", "the curves the SVG added (proof it landed)"),
@@ -72,7 +73,7 @@ def _resolve_path(file_path):
 
 
 def handler(file_path: str = "", sketch_name: str = "", x=None, y=None, units: str = "mm",
-            scale=None) -> dict:
+            scale=None, component: str = "") -> dict:
     """See TOOL_DESCRIPTION."""
     path, perr = _resolve_path(file_path)
     if perr:
@@ -99,9 +100,10 @@ def handler(file_path: str = "", sketch_name: str = "", x=None, y=None, units: s
     if not design:
         return error("No active design. Open or create a document first (see doc_new).")
 
-    sketch, requested, ambiguous = _common.find_or_recent_sketch(design, sketch_name)
-    if ambiguous:
-        return error(ambiguous)
+    sketch, requested, refusal = _sketch_detail.scoped_or_recent_sketch(
+        design, sketch_name, component)
+    if refusal:
+        return error(refusal)
     if sketch is None:
         if requested:
             return error(f"No sketch named '{requested}'. Available: "
@@ -181,13 +183,15 @@ tool = (
     .add_required_input("file_path")
     .add_input_property("sketch_name", {"type": "string",
             "description": "Sketch to import into (default: most recent)."})
+    .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
     .add_input_property("scale", {"type": "number",
             "description": "Size multiplier (default 1)."})
     .strict_schema()
 )
 
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True,
-                             postconditions=[_assert.SketchCurvesChanged()])
+                             postconditions=[_assert.SketchCurvesChanged(
+                                 scope_keys=("component",))])
 
 
 def register_tool():

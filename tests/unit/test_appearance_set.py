@@ -150,10 +150,18 @@ def safe_id(appearance):
 
 
 class FakeBody:
-    def __init__(self, name, fail_appearance=False):
+    def __init__(self, name, fail_appearance=False, inherited_opacity=None):
         self._fail_appearance = fail_appearance
         self.name = name
         self.appearance = None
+        self.opacity = 1.0
+        # what the renderer actually shows: the body's own override unless a parent component's
+        # combines with it, which is the case inherited_opacity models.
+        self._inherited = inherited_opacity
+
+    @property
+    def visibleOpacity(self):
+        return self.opacity if self._inherited is None else self._inherited
 
     def __setattr__(self, key, value):
         # fail_appearance=True models the API rejecting an appearance assignment on THIS body, so a
@@ -470,12 +478,14 @@ class TestApply:
         assert b1.appearance is not None and b2.appearance is not None
         assert set(out["applied_to"]) == {"B1", "B2"}
 
-    def test_opaque_default_reaches_the_color_property(self):
+    def test_the_color_is_always_minted_fully_opaque(self):
+        # a Fusion appearance's transparency is its Prism material class, never its color alpha, so
+        # the alpha written here is a constant - the see-through control is 'opacity', separately.
         body = FakeBody("Body1")
         _install(FakeRoot(bodies=[body]))
-        out = _payload(ap.handler(target="Body1", color="#102030"))
-        assert out["opacity"] == 255
+        out = _payload(ap.handler(target="Body1", color="#102030", opacity=40))
         assert body.appearance.appearanceProperties.item(0).value == ("color", 16, 32, 48, 255)
+        assert out["opacity"] == 40
 
     def test_default_appearance_name_from_color(self):
         body = FakeBody("Body1")
@@ -549,43 +559,51 @@ class TestGuards:
         res = ap.handler(target="Body1", color="nope")
         assert res["isError"] is True and "hex" in res["message"].lower()
 
-    def test_non_integer_opacity_names_the_one_legal_value(self):
-        # the TYPE error must not advertise a range the very next guard refuses
+    def test_non_integer_opacity_names_the_percent_range(self):
         _install(FakeRoot(bodies=[FakeBody("Body1")]))
         res = ap.handler(target="Body1", color="#000000", opacity="translucent")
         assert res["isError"] is True
-        assert "255" in res["message"] and "0-255" not in res["message"]
+        assert "percent" in res["message"].lower() and "100" in res["message"]
 
     def test_out_of_range_opacity_is_refused(self):
-        _install(FakeRoot(bodies=[FakeBody("Body1")]))
-        res = ap.handler(target="Body1", color="#000000", opacity=999)
-        assert res["isError"] is True and "999" in res["message"]
-
-    def test_translucent_opacity_is_refused_not_reported_as_applied(self):
-        # transparency is the appearance's Prism class, not the color alpha, so a request this
-        # tool cannot deliver must fail rather than come back as a landed 'opacity' field
-        _install(FakeRoot(bodies=[FakeBody("Body1")]))
-        res = ap.handler(target="Body1", color="#000000", opacity=128)
-        assert res["isError"] is True
-        assert "128" in res["message"] and "transparen" in res["message"].lower()
-
-    def test_one_below_opaque_is_refused(self):
-        # the exact boundary on the refusing side
-        _install(FakeRoot(bodies=[FakeBody("Body1")]))
-        res = ap.handler(target="Body1", color="#000000", opacity=254)
-        assert res["isError"] is True
-
-    def test_opaque_is_accepted(self):
-        # the exact boundary on the accepting side - the guard must not refuse the one legal value
+        # 255 is the color-alpha number, and reading it as a percent would silently clamp to opaque
         _install(FakeRoot(bodies=[FakeBody("Body1")]))
         res = ap.handler(target="Body1", color="#000000", opacity=255)
-        assert "isError" not in res or res["isError"] is False
+        assert res["isError"] is True and "255" in res["message"]
 
-    def test_zero_opacity_is_refused(self):
-        # fully transparent is the same undeliverable request, not a special case
+    def test_translucent_opacity_lands_on_the_body(self):
+        body = FakeBody("Body1")
+        _install(FakeRoot(bodies=[body]))
+        out = _payload(ap.handler(target="Body1", color="#000000", opacity=40))
+        assert abs(body.opacity - 0.4) < 1e-9
+        assert out["opacity"] == 40 and out["opacity_rendered"] == 40
+
+    def test_zero_opacity_is_accepted(self):
+        # fully invisible is a legal setting of the override, not a request to refuse
+        body = FakeBody("Body1")
+        _install(FakeRoot(bodies=[body]))
+        out = _payload(ap.handler(target="Body1", color="#000000", opacity=0))
+        assert body.opacity == 0.0 and out["opacity"] == 0
+
+    def test_opacity_without_a_color_is_a_complete_request(self):
+        body = FakeBody("Body1")
+        _install(FakeRoot(bodies=[body]))
+        out = _payload(ap.handler(target="Body1", opacity=100))
+        assert out["opacity"] == 100 and body.appearance is None
+
+    def test_a_color_still_needs_a_color_when_no_opacity_is_asked_for(self):
         _install(FakeRoot(bodies=[FakeBody("Body1")]))
-        res = ap.handler(target="Body1", color="#000000", opacity=0)
-        assert res["isError"] is True
+        res = ap.handler(target="Body1")
+        assert res["isError"] is True and "color" in res["message"].lower()
+
+    def test_inherited_opacity_is_disclosed_not_claimed(self):
+        # the override is inherited, so what renders can differ from what was asked - the payload
+        # must publish the rendered value and say so rather than echo the request
+        body = FakeBody("Body1", inherited_opacity=0.25)
+        _install(FakeRoot(bodies=[body]))
+        out = _payload(ap.handler(target="Body1", opacity=80))
+        assert out["opacity"] == 80 and out["opacity_rendered"] == 25
+        assert "RENDERS at 25%" in out["note"]
 
     def test_no_active_design_errors(self):
         ap._common.design = lambda: None
@@ -1017,4 +1035,126 @@ class TestTheColorLandsOnTheAlbedoOnly:
         apps._items.append(stubborn)
         res = ap.handler(target="Body1", color="#1E8E3E")
         assert res["isError"] is True and "opaque_albedo" in res["message"]
+        assert body.appearance is None
+
+
+# ── the opacity override: where it lands, what it renders, and how it fails ────
+
+def _opacity_refusing_body(name):
+    """A body that takes an appearance but whose opacity override the API REJECTS. Built as a
+    subclass so `fail_appearance` and the shared FakeBody surface stay untouched."""
+    def _guarded(self, key, value):
+        if key == "opacity" and getattr(self, "_refuse_opacity", False):
+            raise RuntimeError("opacity is read-only on this body")
+        FakeBody.__setattr__(self, key, value)
+
+    body = type("OpacityRefusingBody", (FakeBody,), {"__setattr__": _guarded})(name)
+    body._refuse_opacity = True
+    return body
+
+
+def _opacity_silent_body(name):
+    """A body whose RENDERED opacity declines to answer. The write itself lands, so the payload has
+    to say the render is unconfirmed rather than echo the asked percent back as if it were read."""
+    def _no_read(self):
+        raise RuntimeError("visibleOpacity unavailable")
+
+    return type("SilentOpacityBody", (FakeBody,), {"visibleOpacity": property(_no_read)})(name)
+
+
+class TestOpacityOverride:
+    """Opacity is a second, independent override with its own holder rules: a face has none, an
+    occurrence has none of its own (its COMPONENT carries it), and what RENDERS is inherited, so it
+    is read back off the object rather than echoed. Every failure here aborts the whole call before
+    an appearance is minted - a half-applied write would leave an orphan asset in the design."""
+
+    def test_an_occurrence_opacity_is_written_to_its_component_and_the_note_says_so(self,
+                                                                                    monkeypatch):
+        # An Occurrence carries no settable opacity - the write goes to the Component, so it reaches
+        # EVERY instance of that component, not the one the caller named. The caller is told, because
+        # nothing in the request says the effect is per-instance.
+        comp = FakeComponent("Part", bodies=[FakeBody("B1", inherited_opacity=0.4)])
+        occ = FakeOcc("Part:1", bodies=[FakeBody("B1")], component=comp)
+        _install_mp(monkeypatch, FakeRoot(occurrences=[occ]))
+        _resolve_to(occ, "occurrence")
+        out = _payload(ap.handler(target="Part:1", opacity=40))
+        assert abs(comp.opacity - 0.4) < 1e-9              # the COMPONENT took it
+        assert getattr(occ, "opacity", None) is None       # the occurrence itself was never written
+        assert "COMPONENT" in out["note"]
+        assert "every instance of that component" in out["note"]
+
+    def test_an_occurrence_whose_component_cannot_be_reached_is_refused_and_mints_nothing(
+            self, monkeypatch):
+        # The component is the only holder an occurrence write has. Unreachable means the opacity
+        # was NOT set, so the call fails - and it fails before the appearance is copied, or a
+        # refusal leaves a persistent orphan appearance in the design.
+        orphan = type("OrphanOcc", (FakeOcc,), {
+            "component": property(lambda self: None, lambda self, v: None)})("Part:1")
+        design, apps = _install_mp(monkeypatch, FakeRoot(occurrences=[orphan]))
+        _resolve_to(orphan, "occurrence")
+        res = ap.handler(target="Part:1", color="#CC2200", opacity=50)
+        assert res["isError"] is True
+        assert "component behind this occurrence" in res["message"]
+        assert apps.copied == [] and apps.itemByName("AgentColor_CC2200") is None
+        assert orphan.appearance is None
+
+    def test_a_face_has_no_opacity_and_is_told_which_target_does(self, monkeypatch):
+        # A BRepFace takes a colour but has no opacity of its own; the refusal names the two targets
+        # that do, so the caller can act on it instead of guessing.
+        face = FakeFace()
+        design, apps = _install_mp(monkeypatch, FakeRoot())
+        _resolve_to(face, "face")
+        res = ap.handler(target="face:1", color="#CC2200", opacity=50)
+        assert res["isError"] is True
+        assert "FACE" in res["message"]
+        assert "body" in res["message"] and "occurrence" in res["message"]
+        assert apps.copied == [] and face.appearance is None
+
+    def test_an_opacity_the_api_rejects_is_an_error_not_a_reported_setting(self, monkeypatch):
+        # The API said no. Reporting the asked percent anyway is the cardinal sin - a write that
+        # did not happen must come back isError, carrying what the API said.
+        body = _opacity_refusing_body("Body1")
+        design, apps = _install_mp(monkeypatch, FakeRoot(bodies=[body]))
+        res = ap.handler(target="Body1", color="#CC2200", opacity=50)
+        assert res["isError"] is True
+        assert "Could not set opacity" in res["message"]
+        assert "read-only on this body" in res["message"]   # what the API actually said
+        assert apps.copied == [] and body.appearance is None
+
+    def test_an_unreadable_rendered_opacity_is_unconfirmed_not_the_asked_percent(self, monkeypatch):
+        # The write landed; the read-back did not. opacity_rendered must stay None rather than be
+        # filled in from the request, and the note must say the render is unconfirmed.
+        body = _opacity_silent_body("Body1")
+        _install_mp(monkeypatch, FakeRoot(bodies=[body]))
+        out = _payload(ap.handler(target="Body1", opacity=40))
+        assert abs(body.opacity - 0.4) < 1e-9              # the write itself did land
+        assert out["opacity"] == 40
+        assert out["opacity_rendered"] is None
+        assert "UNCONFIRMED" in out["note"]
+
+    def test_a_component_opacity_is_read_back_off_a_body_not_off_the_component(self, monkeypatch):
+        # A Component renders nothing itself, so its own opacity would read back the number just
+        # written whether or not anything changed on screen. The rendered value comes off one of its
+        # bodies - here 25%, which matches neither the asked 80% nor the 0.8 written on the holder.
+        comp = FakeComponent("Housing", bodies=[FakeBody("B1", inherited_opacity=0.25)])
+        _install_mp(monkeypatch, FakeRoot())
+        _resolve_to(comp, "component")
+        out = _payload(ap.handler(target="Housing", opacity=80))
+        assert abs(comp.opacity - 0.8) < 1e-9
+        assert out["opacity"] == 80 and out["opacity_rendered"] == 25
+        assert "RENDERS at 25%" in out["note"]
+
+
+class TestDirectAppearanceAssignmentFailure:
+    def test_a_body_whose_appearance_assignment_raises_is_an_error_naming_what_the_api_said(
+            self, monkeypatch):
+        # The single-entity branch (body/face/occurrence) has no per-body partial-success story to
+        # tell: the one assignment raised, nothing was coloured, and the call must say so with the
+        # API's own message rather than come back applied.
+        body = FakeBody("Body1", fail_appearance=True)
+        _install_mp(monkeypatch, FakeRoot(bodies=[body]))
+        res = ap.handler(target="Body1", color="#123456")
+        assert res["isError"] is True
+        assert "Body1" in res["message"]
+        assert "appearance rejected for Body1" in res["message"]
         assert body.appearance is None

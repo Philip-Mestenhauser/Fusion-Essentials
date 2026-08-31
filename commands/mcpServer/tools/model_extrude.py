@@ -19,6 +19,7 @@ from ._common import error, ok, safe, scale, target_component, root_body_advisor
 from . import _common
 from . import _geom
 from . import _inputs
+from . import _sketch_detail
 from . import _assert
 
 app = adsk.core.Application.get()
@@ -38,7 +39,7 @@ _EXTENT = _inputs.Choice("extent", _EXTENTS, default="distance",
 
 # profile_index may carry a profile HANDLE (entityToken from sketch_get) - resolved via ProfileRef.
 # _inputs.is_handle distinguishes a handle from an int/list/'all' selector.
-_PROFILE = _inputs.ProfileRef("profile_index")
+_PROFILE = _inputs.ProfileRef("profile_index", scope_input="component")
 _looks_like_handle = _inputs.is_handle
 
 # profile_index may instead carry a sketch TEXT address ('text:<i>'). ExtrudeFeatures.createInput
@@ -46,7 +47,7 @@ _looks_like_handle = _inputs.is_handle
 # as itself - the only route from a nameplate sketch, which holds no closed profile at all, to a
 # raised solid. allow_text is enabled on THIS resolution alone: the handle/index path above still
 # refuses a text address.
-_TEXT_PROFILE = _inputs.ProfileRef("profile_index", allow_text=True)
+_TEXT_PROFILE = _inputs.ProfileRef("profile_index", allow_text=True, scope_input="component")
 _is_text_ref = _inputs.is_text_ref
 
 
@@ -290,25 +291,6 @@ def _solid_count(design) -> int:
     return n
 
 
-def _failed_compute(feature):
-    """(state_label, condensed message) when the created feature carries a FAILED compute state,
-    else None.
-
-    The state read and its message condensation are ``_assert.compute_failure``'s - the ONE
-    unhealthy-feature classifier, which counts a WARNING as failed alongside an ERROR. What is
-    local here is WHERE to look: the ExtrudeFeature and its TimelineObject each carry healthState,
-    and the measured failure - a cut scoped with 'target_bodies' whose profile reaches none of them,
-    leaving a WARNING item saying 'No target body!' - was read off the TIMELINE ITEM. So BOTH are
-    asked, the feature first, and a HEALTHY feature state does not end the check. A state neither of
-    them reports as a failure yields NO verdict, so a health read that misbehaves cannot sink an
-    extrude that landed."""
-    for get_obj in (lambda: feature, lambda: feature.timelineObject):
-        failure = _assert.compute_failure(safe(get_obj))
-        if failure is not None:
-            return failure
-    return None
-
-
 def _effect_rows(affected) -> str:
     """ASCII 'what actually changed' phrase over the affected-bodies rows - what a refusal states
     before it decides whether the feature may be removed at all."""
@@ -395,10 +377,24 @@ def _feature_parameters(feature) -> dict:
     return out
 
 
+def _depth_mismatch(fname, what, got_cm, want_cm, raw, k, units) -> str:
+    """The refusal for a landed depth that disagrees with the request. ONE wording for every side,
+    so a two-sided extrude and a blind one cannot describe the same failure differently. `what`
+    names WHICH depth read back; the feature has landed, so the sentence says what remains and how
+    to remove it, and an expression request names itself beside the number it evaluated to."""
+    asked = f"{round(want_cm / k, 6)} {units}"
+    if _inputs.looks_like_expression(raw):
+        asked += f" (what the expression '{str(raw).strip()}' evaluates to)"
+    return (f"Extrude built '{fname}' but its {what} reads back {round(got_cm / k, 6)} {units}, "
+            f"not the requested {asked}. '{fname}' REMAINS in the timeline - inspect it with "
+            "design_get and remove it with design_delete_feature.")
+
+
 def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
             units: str = "mm", operation: str = "new", symmetric: bool = False,
             taper_deg: float = 0.0, to_object: str = "", target_bodies=None,
-            as_surface: bool = False, extent: str = "distance", distance2: float = 0.0) -> dict:
+            as_surface: bool = False, extent: str = "distance", distance2: float = 0.0,
+            component: str = "") -> dict:
     """See TOOL_DESCRIPTION."""
     k = scale(units)
     if k is None:
@@ -433,7 +429,8 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
         return error("No active design. Create or open a document first (see doc_new).")
 
     root = target_component(design)
-    sketch, requested, ambiguous = _common.find_or_recent_sketch(design, sketch_name)
+    sketch, requested, ambiguous = _sketch_detail.scoped_or_recent_sketch(
+        design, sketch_name, component)
     if ambiguous:
         return error(ambiguous)
     if not sketch:
@@ -492,12 +489,12 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
             addr = text_addr
             if "/" not in addr and (sketch_name or "").strip():
                 addr = f"{sketch_name.strip()}/{addr}"
-            prof, perr = _TEXT_PROFILE.resolve(addr)
+            prof, perr = _TEXT_PROFILE.resolve(addr, component)
             if perr:
                 return error(perr)
             profile_arg, indices = prof, [None]
         elif _looks_like_handle(profile_index):
-            prof, perr = _PROFILE.resolve(profile_index)
+            prof, perr = _PROFILE.resolve(profile_index, component)
             if perr:
                 return error(perr)
             profile_arg, indices = prof, [None]
@@ -532,6 +529,11 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
     # extent: 'to_object'/'to_face' wins; then through_all/two_side; else a blind distance.
     taper = float(taper_deg or 0.0)
     through_all_dir = None
+    # The depth sides this extent carries, in the order their parameters live on the feature
+    # (index 0 = extentOne, index 1 = extentTwo). Each row is
+    # (what, requested cm, the raw request, is this side two-sided). Empty for an extent style with
+    # no distance parameter to read back (through_all, to_face), which withholds the comparison.
+    depth_request = []
     try:
         if use_to_object:
             if taper:
@@ -576,18 +578,24 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
             if taper:
                 return error("taper_deg is not supported with extent=two_side "
                              "(setTwoSidesDistanceExtent takes no taper).")
-            d1, d1err = _inputs.length_value_input(distance, k, design, "distance")
+            d1, d1_cm, d1err = _inputs.length_value_input(distance, k, design, "distance")
             if d1err:
                 return error(d1err)
-            d2, d2err = _inputs.length_value_input(distance2, k, design, "distance2")
+            d2, d2_cm, d2err = _inputs.length_value_input(distance2, k, design, "distance2")
             if d2err:
                 return error(d2err)
             if not ext_input.setTwoSidesDistanceExtent(d1, d2):
                 return error("Fusion rejected extent=two_side (setTwoSidesDistanceExtent returned false).")
+            depth_request = [("side-one distance", d1_cm, distance, True),
+                             ("side-two distance", d2_cm, distance2, True)]
         else:
-            dist_val, dverr = _inputs.length_value_input(distance, k, design, "distance")
+            dist_val, want_distance_cm, dverr = _inputs.length_value_input(
+                distance, k, design, "distance")
             if dverr:
                 return error(dverr)
+            # One side, on extentOne. Its NEGATIVE case IS measured (the parameter keeps the
+            # requested sign, -15 mm reads -1.5), so this side is judged whichever way it points.
+            depth_request = [("distance", want_distance_cm, distance, False)]
             if taper and symmetric:
                 # symmetric WITH taper: setDistanceExtent carries no taper, so setSymmetricExtent does.
                 # isFullLength=False -> 'distance' is the per-side half-length, matching setDistanceExtent
@@ -710,7 +718,11 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
     # object for it, so the health state is the only signal at this point. It is removed ONLY where
     # the evidence above shows nothing landed - a rollback with geometry measurably changed would
     # delete a real effect, so that case names the effect and leaves the feature to be judged.
-    failed = _failed_compute(feature)
+    # The ExtrudeFeature AND its TimelineObject are both asked, feature first, through
+    # _assert.compute_state - the ONE home for that pairing. The measured failure (a cut scoped with
+    # 'target_bodies' whose profile reaches none of them, leaving a WARNING item saying 'No target
+    # body!') was read off the TIMELINE ITEM, so a healthy feature state does not end the check.
+    _state, failed = _assert.compute_state(feature)
     if failed:
         state_label, detail = failed
         fname = safe(lambda: feature.name) or "the new extrude feature"
@@ -750,6 +762,37 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
                      "in 'target_bodies' - check the profile overlaps them in the extrude direction "
                      "(a negative 'distance' reverses it)."
                      + _roll_back(design, feature, fname))
+
+    # DEPTH read-back, one loop over every side this extent carries: what the feature reports for
+    # that side's own distance ModelParameter, against the number the units engine evaluated THAT
+    # side's request to - literal and expression alike, since length_value_input answers a cm value
+    # for both forms. Side one lands on extentOne and side two on extentTwo - no swap (measured) -
+    # so a side is judged against its OWN request, never against the other's and never against a
+    # total.
+    #
+    # A side this CANNOT judge is recorded rather than passed over in silence: a success that
+    # skipped a compare is otherwise byte-indistinguishable from one that passed it, while every
+    # other success here means the depth read back matched. Three things withhold a verdict, and
+    # each is disclosed in the note below with the reason that applies:
+    #   - the units engine answered no number for the request (nothing to judge it against);
+    #   - the feature reported no depth for that side;
+    #   - the side is TWO-SIDED and its request is not positive. The two-sided measurement covers
+    #     positive requests only, so judging a negative one would test an unread convention.
+    unverified = []
+    landed_side = (_common.landed_extent_cm, _common.landed_extent2_cm)
+    for i, (what, want_cm, raw, two_sided) in enumerate(depth_request):
+        got_cm = landed_side[i](feature)
+        if want_cm is None:
+            unverified.append((what, "the units engine answered no number for its request, so "
+                                     "there was nothing to judge it against"))
+        elif two_sided and want_cm <= 0:
+            unverified.append((what, "the depth a NEGATIVE two-sided request stores is unmeasured, "
+                                     "so its landed depth was read but not judged"))
+        elif got_cm is None:
+            unverified.append((what, "the feature reported no depth number for it"))
+        elif abs(got_cm - want_cm) > _common.EXTENT_MATCH_TOL_CM:
+            fname = safe(lambda: feature.name) or "the new extrude feature"
+            return error(_depth_mismatch(fname, what, got_cm, want_cm, raw, k, units))
 
     body_names = [f["name"] for f in _common.body_facts(_common.result_bodies(feature))]
 
@@ -822,6 +865,11 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
     if model_params:
         note += (" Distance/taper are model parameters (see 'model_parameters') - param_set one to an "
                  "expression to drive this feature parametrically.")
+
+    # The one disclosure for every side the compare above could not judge, so a success that skipped
+    # a depth check never reads as one that passed it.
+    for what, why in unverified:
+        note += f" {what[0].upper()}{what[1:]} was not depth-verified: {why}."
 
     result = {
         "extruded": True,
@@ -909,6 +957,7 @@ extrude_tool = (
             "description": "Draft/taper angle in degrees - extent=distance only (one-sided or symmetric)."})
     .add_input_property("to_object", _TO_OBJECT.schema())
     .add_input_property("target_bodies", _TARGET_BODIES.schema())
+    .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
     .add_input_property("as_surface", {"type": "boolean",
             "description": "Extrude into a SURFACE wall (no end caps, isSolid=False) instead of a solid (default false). Auto-applied when the sketch has only an open path. Every result reports 'is_solid'."})
     .strict_schema()

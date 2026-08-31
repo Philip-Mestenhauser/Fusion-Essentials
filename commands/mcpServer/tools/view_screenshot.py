@@ -33,6 +33,11 @@ _VIEWS = ("current",) + tuple(_view_common.VIEW_DIRECTIONS)
 
 _MAX_DIM = 4096
 
+# The pixel size a caller who names none gets. The handler signature, its non-numeric fallback and
+# the three wire sentences all read these, so they cannot state different numbers.
+_WIDTH_DEFAULT = 800
+_HEIGHT_DEFAULT = 600
+
 # The capture is a PNG whatever the path says - this is the extension _export.prepare_out_path
 # appends, so no file lands with PNG bytes under another format's name.
 _PNG_EXT = ".png"
@@ -41,96 +46,22 @@ _FIT_TO = _inputs.OccurrenceRef("fit_to",
         description="Occurrence to frame the camera on (isolates it for the shot, then restores).")
 
 
-def _keep_visible(o_path, target_path):
-    """Keep an occurrence visible during a fit-to isolate if it IS the target, an ANCESTOR of it, or a
-    DESCENDANT of it. Hiding an ancestor hides the nested target (BLANK image); hiding a descendant
-    drops part of the target's own subtree. Nesting is by fullPathName ('Frame:1+Pedestal:1', '+' per
-    level). Comparison is by PATH, never Python `is` - the API mints a fresh occurrence proxy on each
-    access, so `o is target` is never true across two walks and would hide the target itself."""
-    if not o_path or not target_path:
-        return False
-    return (o_path == target_path
-            or target_path.startswith(o_path + "+")     # o is an ancestor of the target
-            or o_path.startswith(target_path + "+"))     # o is a descendant of the target
+# The frame-on-one-occurrence isolate is shared with view_set(orient, focus=) - ONE visibility walk
+# and ONE restore contract, so a fix to either reaches both.
+_keep_visible = _view_common.keep_visible
 
 
 def _isolate_for_fit(name):
-    """Temporarily hide every occurrence that is NOT the named one, its ancestors, or its descendants,
-    so the shot shows just the named one. Returns (restore_callable, target_occurrence, error) -
-    error is set (and the other two None) when the occurrence didn't resolve (including an
-    ambiguous name, which names the candidates); the target feeds the bodies-only camera fit.
-
-    The restore callable returns the NAMES of the occurrences whose bulb it could not put back
-    (empty when everything was restored): this tool mutates visibility to take its picture, so a
-    restore that silently failed would leave the document changed by a read."""
-    design = _common.design()
-    root = safe(lambda: design.rootComponent) if design else None
-    if not root:
-        return None, None, f"fit_to: no active design to resolve '{name}' against."
-    # Resolve via the shared OccurrenceRef kind (fullPathName-preferring, ambiguity-refusing) so an
-    # ambiguous name doesn't silently frame the wrong instance.
-    target, err = _FIT_TO.resolve(name)
-    if target is None:
-        return None, None, err
-    target_path = safe(lambda: target.fullPathName)
-    # The shared census, not a bare root.allOccurrences: that property RAISES on a design holding an
-    # unresolved external reference, and an empty walk would hide NOTHING while the shot is published
-    # as an isolated view of the target.
-    occs = _common.all_occurrences(design)
-    prev = []
-    for o in occs:
-        if _keep_visible(safe(lambda o=o: o.fullPathName), target_path):
-            continue
-        was = safe(lambda o=o: o.isLightBulbOn)
-        if was:
-            prev.append(o)
-            safe(lambda o=o: setattr(o, "isLightBulbOn", False))
-
-    # ALSO hide non-body geometry design-wide for the shot: vp.fit() frames every VISIBLE entity,
-    # and construction geometry owned by the fitted component (measured: a datum plane) blows the
-    # frame to the whole scene while the occurrence isolation holds. The per-component display
-    # FOLDER bulbs (the shared _view_common map) switch sketches/construction/origins/joints off
-    # in one write each without touching any entity's own bulb.
-    folder_prev = []                       # (component, attr, saved_value) - only bulbs we moved
-    for comp in _view_common.all_display_components(design):
-        for attr in _view_common.DISPLAY_FOLDERS.values():
-            if _common.read_flag(lambda comp=comp, attr=attr: getattr(comp, attr)):
-                folder_prev.append((comp, attr))
-                safe(lambda comp=comp, attr=attr: setattr(comp, attr, False))
-
-    def restore():
-        stuck = []
-        for o in prev:
-            safe(lambda o=o: setattr(o, "isLightBulbOn", True))
-            if safe(lambda o=o: o.isLightBulbOn) is not True:
-                stuck.append(safe(lambda o=o: o.fullPathName)
-                             or safe(lambda o=o: o.name) or "?")
-        for comp, attr in folder_prev:
-            safe(lambda comp=comp, attr=attr: setattr(comp, attr, True))
-            if _common.read_flag(lambda comp=comp, attr=attr: getattr(comp, attr)) is not True:
-                stuck.append(f"{safe(lambda comp=comp: comp.name) or '?'}:{attr}")
-        return stuck
-    return restore, target, None
+    """Hide everything but 'fit_to' (its ancestors and descendants stay lit) so vp.fit() frames just
+    it - the shared walk, bound to this tool's own input kind so its errors say 'fit_to'."""
+    return _view_common.isolate_for_fit(name, _FIT_TO)
 
 
 def _restore_message(restore_fit_to):
-    """Run the fit_to restore and return the sentence naming what it could NOT put back, or None.
-
-    A restore that did not take leaves the document changed by a READ tool, and the caller is the
-    only one who can undo it - so EVERY exit that reaches the isolate runs this, not just the
-    successful capture. Returns None when there was nothing to restore or everything came back."""
-    if not restore_fit_to:
-        return None
-    try:
-        stuck = restore_fit_to() or []
-    except Exception as e:
-        stuck = [f"the restore raised: {e}"]
-    if not stuck:
-        return None
-    return ("fit_to hid the other occurrences for this shot and could NOT turn "
-            f"{len(stuck)} of them back on: {', '.join(str(s) for s in stuck[:5])}. "
-            "The document is left with those hidden - view_set(action='show', target=...) "
-            "restores them.")
+    """The fit_to restore, plus the sentence naming any bulb it could not put back (None when
+    everything came back). A restore that did not take leaves the document changed by a READ tool,
+    so EVERY exit that reaches the isolate runs this, not just the successful capture."""
+    return _view_common.restore_message(restore_fit_to, "fit_to", "for this shot")
 
 
 def _restore_camera(vp, saved_camera):
@@ -184,7 +115,7 @@ def _write_png(b64, path):
     return size, None
 
 
-def handler(view: str = "current", width: int = 800, height: int = 600,
+def handler(view: str = "current", width: int = _WIDTH_DEFAULT, height: int = _HEIGHT_DEFAULT,
             zoom: float = 1.0, fit_to: str = "", transparent_background=None,
             anti_aliased=None, file_path: str = "") -> dict:
     """See TOOL_DESCRIPTION."""
@@ -196,7 +127,7 @@ def handler(view: str = "current", width: int = 800, height: int = 600,
         width = max(1, min(int(width), _MAX_DIM))
         height = max(1, min(int(height), _MAX_DIM))
     except Exception:
-        width, height = 800, 600
+        width, height = _WIDTH_DEFAULT, _HEIGHT_DEFAULT
 
     vp = app.activeViewport
     if not vp:
@@ -310,7 +241,7 @@ TOOL_DESCRIPTION = (
     "Capture a screenshot of the current Fusion viewport and return it as an image "
     "so you can visually inspect the model and verify your work. Optionally set "
     "'view' to reorient the camera (default 'current' = leave as-is). "
-    "'width'/'height' set the pixel size (default 800x600, max 4096). 'zoom' scales the view after "
+    f"'width'/'height' set the pixel size (default {_WIDTH_DEFAULT}x{_HEIGHT_DEFAULT}, max {_MAX_DIM}). 'zoom' scales the view after "
     "fitting (>1 zooms OUT, <1 zooms IN; default 1). 'fit_to' frames the camera on ONE occurrence "
     "by name (hides the others for the shot, restores them after, names any it could not). "
     "'transparent_background'/'anti_aliased' control the render; omit both for "
@@ -323,8 +254,8 @@ tool = (
     Tool.create_simple(name="view_screenshot", description=TOOL_DESCRIPTION)
     .add_input_property(*_inputs.Choice("view", list(_VIEWS), default="current",
             description="Camera orientation.").as_property())
-    .add_input_property("width", {"type": "integer", "description": "Width in px (1-4096, default 800)."})
-    .add_input_property("height", {"type": "integer", "description": "Height in px (1-4096, default 600)."})
+    .add_input_property("width", {"type": "integer", "description": f"Width in px (1-{_MAX_DIM}, default {_WIDTH_DEFAULT})."})
+    .add_input_property("height", {"type": "integer", "description": f"Height in px (1-{_MAX_DIM}, default {_HEIGHT_DEFAULT})."})
     .add_input_property("zoom", {"type": "number", "description": "Zoom factor after fitting (>1 out, <1 in; default 1)."})
     .add_input_property(*_FIT_TO.as_property())
     .add_input_property("transparent_background", {"type": "boolean",

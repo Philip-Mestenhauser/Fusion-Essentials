@@ -9,12 +9,16 @@ pinned explicitly. Entity RESOLUTION is TargetRef's job (tested elsewhere); here
 
 import json
 import math
+import types
 
 import pytest
 
-from conftest import load_tool, error_message
+from conftest import (BRepBody, BRepFace, FakeBoundingBox3D, FakePoint, FakeVector3D, Plane,
+                      _NamedCollection, error_message, load_tool)
 
 mr = load_tool("model_measure_relation")
+
+_PLATE = types.SimpleNamespace(name="Plate", entityToken="CTOK::Plate")
 
 _REAL_A, _REAL_B = mr._A.resolve, mr._B.resolve
 
@@ -268,6 +272,172 @@ class TestTouching:
         out = _payload(mr.handler(relation="touching"))
         assert out["passed"] is True
         assert "assembly_inspect_interference" in out["note"]   # does not silently call an overlap "touching"
+
+
+class TestParallelPlanarPairVerdicts:
+    """Two PARALLEL PLANAR faces are the pair whose minimum distance can be the separation between
+    their PLANES rather than the gap between the bounded faces. Judging a verdict on that number
+    reads a laterally offset pair as closer than it is - a clearance that fails on parts that clear,
+    and, at separation 0, a 'touching' PASS on faces that never meet."""
+
+    def _face(self, origin, normal, box, comp=None):
+        # Both faces are NATIVE faces of ONE component unless a test says otherwise - the space
+        # their boxes are only comparable in.
+        return BRepFace(Plane(FakeVector3D(*normal), FakePoint(*origin)),
+                        body=BRepBody(name="Plate1", parent_component=comp or _PLATE),
+                        bounding_box=FakeBoundingBox3D(FakePoint(*box[0]), FakePoint(*box[1])))
+
+    def _pair(self, monkeypatch, a, b, kind="face"):
+        monkeypatch.setattr(mr._A, "resolve", lambda raw: ((a, kind), None))
+        monkeypatch.setattr(mr._B, "resolve", lambda raw: ((b, kind), None))
+
+    def _offset_pair(self, monkeypatch, kind="face"):
+        """Planes 2 cm apart, faces 3 cm apart along x - so the bounded gap is sqrt(13) cm."""
+        self._pair(monkeypatch,
+                   self._face((0, 0, 0), (0, 0, 1), ((0, 0, 0), (1, 1, 0))),
+                   self._face((0, 0, 2), (0, 0, 1), ((4, 0, 2), (5, 1, 2))), kind=kind)
+
+    def test_clearance_is_judged_on_the_proven_gap_not_the_plane_separation(self, monkeypatch):
+        # 20 mm of plane separation FAILS a 25 mm requirement; the faces are actually 36.06 mm
+        # apart, so the parts clear. A clearance check that answers on the separation refuses an
+        # assembly that fits.
+        self._offset_pair(monkeypatch)
+        _install_mgr(monkeypatch, _MR(2.0, _P(0, 0, 0), _P(0, 0, 2)))
+        out = _payload(mr.handler(relation="clearance", tolerance=25, units="mm"))
+        assert out["passed"] is True
+        assert out["measured"]["min_distance"] == round(math.sqrt(13.0) * 10, 4)
+        assert out["measured"]["min_distance_is_lower_bound"] is True
+        assert out["measured"]["plane_separation"] == 20.0
+
+    def test_touching_does_not_pass_on_coplanar_faces_that_never_meet(self, monkeypatch):
+        # separation 0 reads as CONTACT, and these two faces are 44 mm apart in their shared plane.
+        self._pair(monkeypatch,
+                   self._face((0, 0, 0), (0, 0, 1), ((0, 0, 0), (1, 1, 0))),
+                   self._face((0, 0, 0), (0, 0, 1), ((5.4, 0, 0), (6.4, 1, 0))))
+        _install_mgr(monkeypatch, _MR(0.0, _P(0, 0, 0), _P(0, 0, 0)))
+        out = _payload(mr.handler(relation="touching"))
+        assert out["passed"] is False
+        assert out["measured"]["min_distance"] == 44.0
+        assert "assembly_inspect_interference" not in out["note"]   # not a 0-distance overlap
+
+    def test_a_bounded_verdict_drops_the_point_pair_it_no_longer_describes(self, monkeypatch):
+        self._offset_pair(monkeypatch)
+        _install_mgr(monkeypatch, _MR(2.0, _P(0, 0, 0), _P(0, 0, 2)))
+        measured = _payload(mr.handler(relation="clearance", tolerance=25, units="mm"))["measured"]
+        assert measured["closest_point_on_a"] is None and measured["closest_point_on_b"] is None
+
+    def test_an_overlapping_pair_keeps_its_number_and_says_what_it_is(self, monkeypatch):
+        # The boxes prove exactly the separation and no more, so the verdict stands on the measured
+        # number - flagged, because nothing here proves the two faces meet across it.
+        self._pair(monkeypatch,
+                   self._face((0, 0, 0), (0, 0, 1), ((0, 0, 0), (1, 1, 0))),
+                   self._face((0, 0, 2), (0, 0, 1), ((0, 0, 2), (1, 1, 2))))
+        _install_mgr(monkeypatch, _MR(2.0, _P(0, 0, 0), _P(0, 0, 2)))
+        out = _payload(mr.handler(relation="clearance", tolerance=25, units="mm"))
+        assert out["passed"] is False
+        assert out["measured"]["min_distance"] == 20.0
+        assert out["measured"]["plane_separation_only"] is True
+        assert out["measured"]["closest_point_on_b"]["z"] == 20.0
+        assert "IS that plane separation" in out["note"]
+
+    def test_a_body_pair_is_judged_exactly_as_before(self, monkeypatch):
+        self._offset_pair(monkeypatch, kind="body")
+        _install_mgr(monkeypatch, _MR(2.0, _P(0, 0, 0), _P(0, 0, 2)))
+        out = _payload(mr.handler(relation="clearance", tolerance=25, units="mm"))
+        assert out["passed"] is False and out["measured"]["min_distance"] == 20.0
+        assert "plane_separation" not in out["measured"]
+
+    def test_touching_still_passes_where_the_two_faces_really_do_meet(self, monkeypatch):
+        # The correction must not cost the true positive: coplanar faces whose boxes overlap.
+        self._pair(monkeypatch,
+                   self._face((0, 0, 0), (0, 0, 1), ((0, 0, 0), (1, 1, 0))),
+                   self._face((0, 0, 0), (0, 0, 1), ((0.5, 0.5, 0), (1.5, 1.5, 0))))
+        _install_mgr(monkeypatch, _MR(0.0, _P(0, 0, 0), _P(0, 0, 0)))
+        out = _payload(mr.handler(relation="touching"))
+        assert out["passed"] is True
+        assert out["measured"]["plane_separation_only"] is True
+
+
+def _occ(name, children=()):
+    """An occurrence as the verdict reads one: a name, a fullPathName, its direct children, and the
+    component-local collection the unresolved-child count is read through."""
+    kids = list(children)
+    return types.SimpleNamespace(name=name, fullPathName=name,
+                                 childOccurrences=_NamedCollection(kids),
+                                 component=types.SimpleNamespace(
+                                     occurrences=_NamedCollection(kids)))
+
+
+def _install_child_mgr(monkeypatch, pair_result, gaps):
+    """A measureManager answering the pair with one result and each named child with its own cm gap
+    ({fullPathName: cm}); a child absent from the table does not measure."""
+    class _Mgr:
+        def measureMinimumDistance(self, x, y):
+            key = getattr(x, "fullPathName", None)
+            if key in gaps:
+                return _MR(gaps[key])
+            return pair_result
+    monkeypatch.setattr(mr.app, "measureManager", _Mgr())
+
+
+class TestNestedTargetDisclosure:
+    """MEASURED: an occurrence is measured on its OWN bodies, so a verdict read off a parent judges
+    nothing nested inside it. A carrier that seats on a pedestal held by the frame clears the FRAME
+    by 6 mm while the pedestal inside it is touching - so 'clearance' PASSES on an assembly that
+    does not clear. The verdict stands for what it measured; the evidence has to carry each child's
+    own gap, or the pass is read as the whole assembly clearing."""
+
+    def test_a_flat_pair_carries_no_caveat(self, monkeypatch):
+        _resolve_ab(_occ("Carrier:1"), "occurrence", _occ("Frame:1"), "occurrence")
+        _install_mgr(monkeypatch, _MR(0.6, _P(0, 0, 0), _P(0.6, 0, 0)))
+        out = _payload(mr.handler(relation="clearance", entity_a="Carrier:1", entity_b="Frame:1"))
+        assert "targets_with_children" not in out["measured"]
+        assert "NESTED" not in out["note"]
+
+    def test_a_clearance_pass_carries_the_child_that_does_not_clear(self, monkeypatch):
+        # The verdict PASSES at 6 mm and the pedestal inside the frame is at 0 - the number the
+        # caller has to see before designing around that clearance.
+        _resolve_ab(_occ("Carrier:1"), "occurrence",
+                    _occ("Frame:1", [_occ("Frame:1+Pedestal:1")]), "occurrence")
+        _install_child_mgr(monkeypatch, _MR(0.6, _P(0, 0, 0), _P(0.6, 0, 0)),
+                           {"Frame:1+Pedestal:1": 0.0})
+        out = _payload(mr.handler(relation="clearance", tolerance=5, units="mm",
+                                  entity_a="Carrier:1", entity_b="Frame:1"))
+        assert out["passed"] is True and out["measured"]["min_distance"] == 6.0
+        rec = out["measured"]["targets_with_children"][0]
+        assert rec["target"] == "entity_b" and rec["measured_against"] == "entity_a"
+        assert rec["children"] == [{"name": "Frame:1+Pedestal:1", "distance": 0.0}]
+        assert "an occurrence contributes its OWN bodies" in out["note"]
+        assert "SMALLER" in out["note"]
+
+    def test_a_touching_verdict_carries_it_too(self, monkeypatch):
+        _resolve_ab(_occ("Carrier:1"), "occurrence",
+                    _occ("Frame:1", [_occ("Frame:1+Pedestal:1")]), "occurrence")
+        _install_child_mgr(monkeypatch, _MR(0.6, _P(0, 0, 0), _P(0.6, 0, 0)),
+                           {"Frame:1+Pedestal:1": 0.0})
+        out = _payload(mr.handler(relation="touching", entity_a="Carrier:1", entity_b="Frame:1"))
+        assert out["passed"] is False                      # the frame's own bodies do not touch
+        assert out["measured"]["targets_with_children"][0]["children"][0]["distance"] == 0.0
+        assert "the nearest is Frame:1+Pedestal:1 at 0.0 mm" in out["note"]
+
+    def test_the_verdict_and_its_number_are_untouched_by_the_caveat(self, monkeypatch):
+        # The disclosure changes what the evidence SAYS, never what was measured or judged.
+        for b, caveat in ((_occ("Frame:1"), False),
+                          (_occ("Frame:1", [_occ("Frame:1+Pedestal:1")]), True)):
+            _resolve_ab(_occ("Carrier:1"), "occurrence", b, "occurrence")
+            _install_child_mgr(monkeypatch, _MR(0.6, _P(0, 0, 0), _P(0.6, 0, 0)),
+                               {"Frame:1+Pedestal:1": 0.0})
+            out = _payload(mr.handler(relation="clearance", tolerance=5, units="mm",
+                                      entity_a="Carrier:1", entity_b="Frame:1"))
+            assert out["passed"] is True and out["measured"]["min_distance"] == 6.0
+            assert ("targets_with_children" in out["measured"]) is caveat
+
+    def test_a_body_target_is_unaffected(self, monkeypatch):
+        # Measuring the frame BAND directly is the way out of the trap, so that verdict stays clean.
+        _resolve_ab(_occ("Carrier:1"), "occurrence", _occ("Band", [_occ("Pedestal:1")]), "body")
+        _install_mgr(monkeypatch, _MR(0.6, _P(0, 0, 0), _P(0.6, 0, 0)))
+        out = _payload(mr.handler(relation="clearance", entity_a="Carrier:1", entity_b="h1"))
+        assert "targets_with_children" not in out["measured"] and "NESTED" not in out["note"]
 
 
 # ── concentric: two circular entities whose CENTER POINTS coincide (distinct from coaxial) ────────

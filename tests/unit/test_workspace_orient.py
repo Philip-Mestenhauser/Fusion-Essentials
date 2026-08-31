@@ -12,6 +12,8 @@ No live Fusion — fakes model exactly the read surface the handler touches.
 
 import json
 
+import adsk.cam
+
 from conftest import load_tool
 
 wo = load_tool("workspace_orient")
@@ -85,6 +87,28 @@ class FakeTL:
         self.healthState = health
 
 
+class FakeTimelineHealthOnly:
+    """The shape an AsBuiltJoint and a RigidGroup share: the OBJECT carries no healthState and no
+    errorOrWarningMessage attribute AT ALL (measured - AttributeError on both), so only its
+    timelineObject says whether it computed. One class serves both walks because the two live
+    classes are indistinguishable to this read.
+
+    The absence is an object that genuinely lacks the attribute, never a member deleted off the
+    shared adsk mock - that deletion does not reliably undo itself (tests/CLAUDE.md), and an ABSENT
+    attribute is exactly what has to stay distinguishable from a state that read fine."""
+    def __init__(self, name, tl_health=0):
+        self.name = name
+        self.timelineObject = FakeTL(tl_health)
+
+
+class FakeNoHealthAnywhere:
+    """A joint or relation NEITHER source answers for: no healthState of its own and no
+    timelineObject either. The counterpart to FakeTimelineHealthOnly, whose timeline item does
+    answer - together they separate 'could not read the state' from 'read it, it is fine'."""
+    def __init__(self, name):
+        self.name = name
+
+
 class _Pt:
     def __init__(self, x, y, z):
         self.x, self.y, self.z = x, y, z
@@ -112,12 +136,14 @@ class _RaisingWalk:
 
 class FakeRoot:
     def __init__(self, top_occs=(), all_count=None, joints=(), bodies=0, sketches=0, bbox=None,
-                 walk_raises=False):
+                 walk_raises=False, as_built=()):
         self.name = "Root"
         self.occurrences = _Coll(top_occs)
         self.allOccurrences = (_RaisingWalk() if walk_raises else
                                _Coll([None] * (all_count if all_count is not None else len(top_occs))))
         self.joints = _Coll(joints)
+        # the live Component carries BOTH joint collections; an as-built joint appears only here.
+        self.asBuiltJoints = _Coll(as_built)
         self.bRepBodies = _Coll([None] * bodies)
         self.sketches = _Coll([None] * sketches)
         # bbox = ((minx,miny,minz),(maxx,maxy,maxz)) in cm (internal API units), or None = no geometry
@@ -164,13 +190,49 @@ class FakeDesign:
 
 
 class FakeSetup:
-    def __init__(self, ops):
+    def __init__(self, ops, name="Setup1"):
         self.allOperations = _Coll(ops)
+        self.name = name
+
+
+class _OpFolder:
+    """A CAMFolder: the direct-children collection the shared walk recurses through, which is the
+    only place the folder objects exist - setup.allOperations flattens past them."""
+    def __init__(self, name, ops):
+        self.name = name
+        self.operations = _Coll(ops)
+        self.folders = _Coll([])
+        self.patterns = _Coll([])
+
+
+class _FoldersSetup:
+    """A Setup whose operations are reachable BOTH ways: .operations + .folders (what the walk
+    descends, keeping the containers) and .allOperations (the flat list the census counts against,
+    holding the same operations with the folders dropped)."""
+    def __init__(self, name, ops=(), folders=()):
+        self.name = name
+        self.operations = _Coll(list(ops))
+        self.folders = _Coll(list(folders))
+        self.patterns = _Coll([])
+        nested = [o for f in folders for o in f.operations]
+        self.allOperations = _Coll(list(ops) + nested)
 
 
 class FakeOp:
-    def __init__(self, has_toolpath):
+    """A CAM Operation as the orientation read buckets it: the lifecycle state plus the toolpath
+    pair that tells a generated-but-EMPTY op (valid, no toolpath) from one that never generated."""
+
+    def __init__(self, has_toolpath, name="Op", toolpath_valid=True, suppressed=False, state=None,
+                 errored=False):
+        self.name = name
         self.hasToolpath = has_toolpath
+        self.isToolpathValid = toolpath_valid
+        self.isSuppressed = suppressed
+        self.operationState = (adsk.cam.OperationStates.IsValidOperationState
+                               if state is None else state)
+        self.hasError = errored
+        self.hasWarning = False
+        self.isGenerating = False
 
 
 class FakeCAM:
@@ -504,17 +566,372 @@ class TestCam:
         out = _payload(wo.handler())
         assert out["has_cam"] is False and "cam" not in out
 
+    _STATES = adsk.cam.OperationStates
+
+    def _orient(self, monkeypatch, ops):
+        return self._orient_setups(monkeypatch, [FakeSetup(ops)])
+
+    def _orient_setups(self, monkeypatch, setups):
+        cam = FakeCAM(setups)
+        root = FakeRoot(top_occs=[FakeOcc("A:1")])
+        des = FakeDesign(root, timeline=[FakeTL(0)])
+        _install(active_product=des, doc=FakeDoc(design=des, cam=cam))
+        monkeypatch.setattr(wo._cam_common, "get_cam", lambda: (cam, None))
+        return _payload(wo.handler())
+
     def test_cam_present_with_ungenerated_ops(self, monkeypatch):
-        cam = FakeCAM([FakeSetup([FakeOp(True), FakeOp(False), FakeOp(False)])])
+        out = self._orient(monkeypatch, [
+            FakeOp(True),
+            FakeOp(False, toolpath_valid=False, state=self._STATES.NoToolpathOperationState),
+            FakeOp(False, toolpath_valid=False, state=self._STATES.IsInvalidOperationState)])
+        assert out["has_cam"] is True
+        assert out["cam"]["setups"] == 1 and out["cam"]["total_operations"] == 3
+        assert out["cam"]["ungenerated_operations"] == 2
+        assert "cam" in out["pointers"] and "need generating" in out["pointers"]["cam"]
+
+    def test_suppressed_and_empty_ops_are_not_counted_as_ungenerated(self, monkeypatch):
+        # the CAM-11 arithmetic: a parked op and a generated-but-empty one both read hasToolpath
+        # false, and counting that flag alone reported the pair as needing generation.
+        suppressed = [FakeOp(False, name=f"Parked{i}", toolpath_valid=False, suppressed=True,
+                             state=self._STATES.SuppressedOperationState) for i in range(65)]
+        empty = [FakeOp(False, name=f"Empty{i}") for i in range(13)]
+        out = self._orient(monkeypatch, suppressed + empty + [FakeOp(True, name="Cut")])
+        cam = out["cam"]
+        assert cam["total_operations"] == 79
+        assert cam["ungenerated_operations"] == 0        # NOT 78
+        assert cam["suppressed_operations"] == 65
+        assert cam["empty_toolpath_operations"] == 13
+
+    def test_the_pointer_names_the_empty_toolpaths(self, monkeypatch):
+        out = self._orient(monkeypatch, [FakeOp(True, name="Cut"),
+                                         FakeOp(False, name="Rest Finishing")])
+        pointer = out["pointers"]["cam"]
+        assert "need generating" not in pointer
+        assert "EMPTY" in pointer and "Rest Finishing" in pointer
+
+    def test_the_empty_name_list_is_capped_while_the_count_is_not(self, monkeypatch):
+        out = self._orient(monkeypatch,
+                           [FakeOp(False, name=f"Empty{i}") for i in range(wo._EMPTY_NAME_CAP + 4)])
+        cam = out["cam"]
+        assert cam["empty_toolpath_operations"] == wo._EMPTY_NAME_CAP + 4
+        assert len(cam["empty_toolpaths"]) == wo._EMPTY_NAME_CAP
+        # the sentence must not read as if it named them all, and must not run an ellipsis into
+        # its own full stop ('....', which is what the first live read printed)
+        pointer = out["pointers"]["cam"]
+        assert f"(first {wo._EMPTY_NAME_CAP} of {wo._EMPTY_NAME_CAP + 4})" in pointer
+        assert "...." not in pointer
+
+    def test_a_complete_empty_list_is_not_marked_as_more(self, monkeypatch):
+        out = self._orient(monkeypatch, [FakeOp(False, name="Empty1")])
+        assert "..." not in out["pointers"]["cam"]
+
+    def test_an_empty_name_two_setups_share_is_told_apart_by_its_setup(self, monkeypatch):
+        # This list is DOCUMENT-scoped and an operation name is unique only within a setup, so the
+        # bare name printed twice addresses two operations and separates neither.
+        out = self._orient_setups(monkeypatch, [
+            FakeSetup([FakeOp(False, name="Rest Finishing")], name="Front"),
+            FakeSetup([FakeOp(False, name="Rest Finishing")], name="Back")])
+        assert out["cam"]["empty_toolpaths"] == ["Front / Rest Finishing",
+                                                 "Back / Rest Finishing"]
+        # the pointer renders the same discriminated rows, not the shared name twice
+        assert "Front / Rest Finishing, Back / Rest Finishing" in out["pointers"]["cam"]
+
+    def test_a_name_only_one_setup_carries_stays_the_bare_name(self, monkeypatch):
+        # The discriminator separates nothing already separate, and the bare name is what a caller
+        # passes to cam_get/cam_generate - so a distinct name crosses the wire unchanged.
+        out = self._orient_setups(monkeypatch, [
+            FakeSetup([FakeOp(False, name="Bore")], name="Front"),
+            FakeSetup([FakeOp(False, name="Face")], name="Back")])
+        assert out["cam"]["empty_toolpaths"] == ["Bore", "Face"]
+
+    def test_two_empty_operations_of_one_name_in_ONE_setup_are_told_apart_by_position(
+            self, monkeypatch):
+        # The pair the setup path alone cannot separate: same name, same container. The walk
+        # position is what this read holds over them, so neither row repeats the other - a repeated
+        # string here addresses two operations and cam_get refuses it as ambiguous.
+        out = self._orient_setups(monkeypatch, [
+            FakeSetup([FakeOp(False, name="Bore"), FakeOp(False, name="Bore")], name="Front")])
+        listed = out["cam"]["empty_toolpaths"]
+        assert listed == ["Front / Bore (operation 1)", "Front / Bore (operation 2)"]
+        assert len(set(listed)) == len(listed)
+
+    def test_two_empty_namesakes_in_DIFFERENT_folders_are_told_apart_by_the_folder(
+            self, monkeypatch):
+        # The folder-inclusive breadcrumb the container-preserving walk builds separates the pair
+        # the flattened setup path could not - and it is read, not counted, so no position is spent.
+        out = self._orient_setups(monkeypatch, [
+            _FoldersSetup("Front", folders=[_OpFolder("Rough", [FakeOp(False, name="Bore")]),
+                                            _OpFolder("Finish", [FakeOp(False, name="Bore")])])])
+        assert out["cam"]["empty_toolpaths"] == ["Front / Rough / Bore", "Front / Finish / Bore"]
+        assert out["cam"]["empty_toolpath_operations"] == 2
+
+    def test_a_folder_whose_name_does_not_read_keeps_the_operation_name(self, monkeypatch):
+        # The walk writes whatever each level answered into the path, so a folder whose name did not
+        # read takes a segment of it anyway and the row would be named after a container nothing
+        # read. A row is named by its whole chain or by its own name - never by a breadcrumb with a
+        # hole in the middle. The sibling in the same list still gets its own, which is what shows
+        # the decision is per row.
+        class _BlindNameFolder:
+            def __init__(self, ops):
+                self.operations = _Coll(ops)
+                self.folders = _Coll([])
+                self.patterns = _Coll([])
+
+            @property
+            def name(self):
+                raise RuntimeError("folder name unreadable")
+
+        out = self._orient_setups(monkeypatch, [
+            _FoldersSetup("Front", folders=[_OpFolder("Rough", [FakeOp(False, name="Bore")]),
+                                            _BlindNameFolder([FakeOp(False, name="Bore")])])])
+        listed = out["cam"]["empty_toolpaths"]
+        assert listed == ["Front / Rough / Bore", "Bore"]
+        assert not any("None" in n for n in listed)
+
+    def test_a_folder_LITERALLY_named_None_still_yields_a_whole_address(self, monkeypatch):
+        # THE GUARD beside the test above: the degrade is decided on the READ - each level's own
+        # name through the walk's parent links - never on a string match against the joined path.
+        # A folder really named 'None' answered, so its row keeps the whole address the walk built
+        # and is NOT degraded to the bare operation name its unreadable sibling falls back to.
+        out = self._orient_setups(monkeypatch, [
+            _FoldersSetup("Front", folders=[_OpFolder("None", [FakeOp(False, name="Bore")]),
+                                            _OpFolder("Rough", [FakeOp(False, name="Bore")])])])
+        assert out["cam"]["empty_toolpaths"] == ["Front / None / Bore", "Front / Rough / Bore"]
+
+    def test_the_position_is_the_documents_walk_order_not_the_setups(self, monkeypatch):
+        # The position has to be unique across the whole list, which is document-scoped: two setups
+        # each holding their own same-named pair number 1,2 and 3,4 - a per-setup count would print
+        # '(operation 1)' twice and separate neither pair.
+        pair = lambda: [FakeOp(False, name="Bore"), FakeOp(False, name="Bore")]
+        out = self._orient_setups(monkeypatch, [FakeSetup(pair(), name="Front"),
+                                                FakeSetup(pair(), name="Front")])
+        listed = out["cam"]["empty_toolpaths"]
+        assert listed == ["Front / Bore (operation 1)", "Front / Bore (operation 2)",
+                          "Front / Bore (operation 3)", "Front / Bore (operation 4)"]
+
+    def test_a_folder_nested_operation_is_named_by_the_folder_it_sits_in(self, monkeypatch):
+        # allOperations FLATTENS folder-nested operations and drops the folders, so a read walking
+        # it names this pair 'Front / Bore' twice; the container-preserving walk names the nested
+        # one by the folder it actually sits in.
+        out = self._orient_setups(monkeypatch, [
+            _FoldersSetup("Front", ops=[FakeOp(False, name="Bore")],
+                          folders=[_OpFolder("Rough", [FakeOp(False, name="Bore")])])])
+        assert out["cam"]["total_operations"] == 2
+        assert out["cam"]["empty_toolpaths"] == ["Front / Bore", "Front / Rough / Bore"]
+
+    def test_the_substitution_is_judged_over_every_empty_operation_not_the_capped_head(
+            self, monkeypatch):
+        # The cap is applied AFTER the substitution: a listed name whose namesake falls outside the
+        # cap is still replaced, or the visible list would print an address that reaches two
+        # operations while looking unique.
+        fillers = [FakeOp(False, name=f"Empty{i}") for i in range(wo._EMPTY_NAME_CAP)]
+        out = self._orient_setups(monkeypatch, [
+            FakeSetup([FakeOp(False, name="Dup")] + fillers, name="Front"),
+            FakeSetup([FakeOp(False, name="Dup")], name="Back")])
+        listed = out["cam"]["empty_toolpaths"]
+        assert len(listed) == wo._EMPTY_NAME_CAP
+        assert listed[0] == "Front / Dup"          # its namesake was cut, the row is still told apart
+        assert out["cam"]["empty_toolpath_operations"] == wo._EMPTY_NAME_CAP + 2
+
+    def test_a_setup_whose_name_does_not_read_keeps_the_operation_name(self, monkeypatch):
+        # An empty discriminator is not a label: told_apart keeps the plain name, so a setup whose
+        # name RAISES never renders as half of an address. The sibling in the same list still gets
+        # its own, which is what shows the row-by-row decision.
+        class _BlindNameSetup:
+            def __init__(self, ops):
+                self.allOperations = _Coll(ops)
+
+            @property
+            def name(self):
+                raise RuntimeError("setup name unreadable")
+
+        out = self._orient_setups(monkeypatch, [
+            _BlindNameSetup([FakeOp(False, name="Rest Finishing")]),
+            FakeSetup([FakeOp(False, name="Rest Finishing")], name="Back")])
+        assert out["cam"]["empty_toolpaths"] == ["Rest Finishing", "Back / Rest Finishing"]
+
+    def test_two_namesakes_under_an_unread_setup_keep_their_names_not_a_bare_position(
+            self, monkeypatch):
+        # A blank breadcrumb is not an address, so it is never dressed up with a position: the
+        # position qualifies a path, and there is no path here. Spending one anyway ships rows
+        # carrying NO operation name at all - ' (operation 1)' - which names nothing and reaches
+        # the wire beside a count that says two operations are empty. A repeated plain name is the
+        # honest rendering: told_apart's own rule, and what a caller can still pass to cam_get.
+        class _BlindNameSetup:
+            def __init__(self, ops):
+                self.allOperations = _Coll(ops)
+
+            @property
+            def name(self):
+                raise RuntimeError("setup name unreadable")
+
+        out = self._orient_setups(monkeypatch, [
+            _BlindNameSetup([FakeOp(False, name="Bore"), FakeOp(False, name="Bore")])])
+        listed = out["cam"]["empty_toolpaths"]
+        assert listed == ["Bore", "Bore"]
+        assert all(n.strip() for n in listed)
+        assert out["cam"]["empty_toolpath_operations"] == 2
+
+    def test_a_folder_whose_name_reads_EMPTY_also_withholds_the_whole_path(self, monkeypatch):
+        # The withhold covers two DIFFERENT reads: a level that answered nothing, and one that
+        # answered an empty name. The second puts a blank segment in the middle - 'Front /  / Bore'
+        # - which is as much an address to nothing as the first, so the row degrades to its own
+        # name here too. The readable sibling still gets its whole chain.
+        out = self._orient_setups(monkeypatch, [
+            _FoldersSetup("Front", folders=[_OpFolder("", [FakeOp(False, name="Bore")]),
+                                            _OpFolder("Rough", [FakeOp(False, name="Bore")])])])
+        assert out["cam"]["empty_toolpaths"] == ["Bore", "Front / Rough / Bore"]
+
+    def test_a_fully_generated_job_reports_generated(self, monkeypatch):
+        out = self._orient(monkeypatch, [FakeOp(True), FakeOp(True)])
+        assert out["cam"]["ungenerated_operations"] == 0
+        assert "toolpaths look generated" in out["pointers"]["cam"]
+        assert "empty_toolpaths" not in out["cam"]
+
+    def test_the_pointer_names_the_parked_operations_beside_the_verdict(self, monkeypatch):
+        parked = FakeOp(False, name="Parked", toolpath_valid=False, suppressed=True,
+                        state=self._STATES.SuppressedOperationState)
+        out = self._orient(monkeypatch, [FakeOp(True, name="Cut"), parked])
+        assert "toolpaths look generated." in out["pointers"]["cam"]
+        assert "1 suppressed." in out["pointers"]["cam"]
+
+    def test_the_pointer_falls_back_when_the_summary_could_not_be_built(self):
+        # has_cam true with no summary: say the neutral thing, never invent a count
+        assert wo._cam_pointer(None) == "toolpaths look generated."
+
+    def test_an_errored_op_is_its_own_count_not_a_clean_bill(self, monkeypatch):
+        # an errored op is neither suppressed nor ungenerated nor empty - without its own bucket it
+        # would fall through every branch and the pointer would report the job as generated.
+        out = self._orient(monkeypatch, [FakeOp(True, name="Cut"),
+                                         FakeOp(False, name="Broken", toolpath_valid=False,
+                                                errored=True)])
+        cam = out["cam"]
+        assert cam["errored_operations"] == 1
+        assert cam["ungenerated_operations"] == 0      # generating again will not clear an error
+        assert cam["empty_toolpath_operations"] == 0
+        assert "ERRORS" in out["pointers"]["cam"] and "1 operation(s)" in out["pointers"]["cam"]
+
+    def test_errors_are_named_before_ungenerated_work(self, monkeypatch):
+        out = self._orient(monkeypatch, [
+            FakeOp(False, name="Broken", toolpath_valid=False, errored=True),
+            FakeOp(False, name="Stale", toolpath_valid=False,
+                   state=self._STATES.IsInvalidOperationState)])
+        assert out["cam"]["errored_operations"] == 1
+        assert out["cam"]["ungenerated_operations"] == 1
+        assert "ERRORS" in out["pointers"]["cam"]        # the blocker leads, not the stale count
+
+    def test_every_operation_lands_in_exactly_one_bucket(self, monkeypatch):
+        out = self._orient(monkeypatch, [
+            FakeOp(True, name="Cut"),
+            FakeOp(False, name="Empty"),
+            FakeOp(False, name="Stale", toolpath_valid=False,
+                   state=self._STATES.IsInvalidOperationState),
+            FakeOp(False, name="Parked", toolpath_valid=False, suppressed=True,
+                   state=self._STATES.SuppressedOperationState),
+            FakeOp(False, name="Broken", toolpath_valid=False, errored=True)])
+        cam = out["cam"]
+        counted = (cam["ungenerated_operations"] + cam["errored_operations"]
+                   + cam["suppressed_operations"] + cam["empty_toolpath_operations"])
+        assert cam["total_operations"] == 5
+        assert counted == 4                    # the one op holding a real toolpath is in none
+        assert "operations_unread" not in cam
+
+    def test_an_operation_that_does_not_read_is_disclosed_not_counted_away(self, monkeypatch):
+        # iter_collection SKIPS an item(i) that raises, so the walk comes back short; the setup's
+        # own count is the witness that the census is incomplete.
+        class _ShortCollection:
+            def __init__(self, items):
+                self._i = list(items)
+
+            @property
+            def count(self):
+                return len(self._i) + 2      # the setup declares two more than item() will hand over
+
+            def item(self, i):
+                if i >= len(self._i):
+                    raise RuntimeError("operation cannot be read")
+                return self._i[i]
+
+        cam = FakeCAM([type("S", (), {"allOperations": _ShortCollection([FakeOp(True)])})()])
         root = FakeRoot(top_occs=[FakeOcc("A:1")])
         des = FakeDesign(root, timeline=[FakeTL(0)])
         _install(active_product=des, doc=FakeDoc(design=des, cam=cam))
         monkeypatch.setattr(wo._cam_common, "get_cam", lambda: (cam, None))
         out = _payload(wo.handler())
-        assert out["has_cam"] is True
-        assert out["cam"]["setups"] == 1 and out["cam"]["total_operations"] == 3
-        assert out["cam"]["ungenerated_operations"] == 2
-        assert "cam" in out["pointers"] and "need generating" in out["pointers"]["cam"]
+        assert out["cam"]["total_operations"] == 1
+        assert out["cam"]["operations_unread"] == 2
+        assert "incomplete" in out["pointers"]["cam"]     # never a clean bill on a short census
+
+    def test_an_unreadable_operation_count_is_disclosed_as_unknown(self, monkeypatch):
+        class _NoCount:
+            @property
+            def count(self):
+                raise RuntimeError("count cannot be read")
+
+            def item(self, i):
+                raise RuntimeError("item cannot be read")
+
+        cam = FakeCAM([type("S", (), {"allOperations": _NoCount()})()])
+        root = FakeRoot(top_occs=[FakeOcc("A:1")])
+        des = FakeDesign(root, timeline=[FakeTL(0)])
+        _install(active_product=des, doc=FakeDoc(design=des, cam=cam))
+        monkeypatch.setattr(wo._cam_common, "get_cam", lambda: (cam, None))
+        out = _payload(wo.handler())
+        assert out["cam"]["setups_with_unreadable_operation_count"] == 1
+        assert "operations_unread" not in out["cam"]      # unknown is not a number
+        assert "incomplete" in out["pointers"]["cam"]
+
+    def test_a_short_census_is_disclosed_beside_an_error_verdict(self, monkeypatch):
+        # the blocker leads, but a job whose census came back short must not read as a complete
+        # count of its errors either
+        class _ShortCollection:
+            def __init__(self, items):
+                self._i = list(items)
+
+            @property
+            def count(self):
+                return len(self._i) + 3
+
+            def item(self, i):
+                if i >= len(self._i):
+                    raise RuntimeError("operation cannot be read")
+                return self._i[i]
+
+        broken = FakeOp(False, name="Broken", toolpath_valid=False, errored=True)
+        cam = FakeCAM([type("S", (), {"allOperations": _ShortCollection([broken])})()])
+        root = FakeRoot(top_occs=[FakeOcc("A:1")])
+        des = FakeDesign(root, timeline=[FakeTL(0)])
+        _install(active_product=des, doc=FakeDoc(design=des, cam=cam))
+        monkeypatch.setattr(wo._cam_common, "get_cam", lambda: (cam, None))
+        out = _payload(wo.handler())
+        assert out["cam"]["errored_operations"] == 1 and out["cam"]["operations_unread"] == 3
+        pointer = out["pointers"]["cam"]
+        assert "ERRORS" in pointer and "incomplete" in pointer
+
+    def test_a_short_census_is_disclosed_even_when_there_is_work_to_do(self, monkeypatch):
+        # the incompleteness rides on every verdict, not only the clean-looking one
+        class _ShortCollection:
+            def __init__(self, items):
+                self._i = list(items)
+
+            @property
+            def count(self):
+                return len(self._i) + 1
+
+            def item(self, i):
+                if i >= len(self._i):
+                    raise RuntimeError("operation cannot be read")
+                return self._i[i]
+
+        stale = FakeOp(False, name="Stale", toolpath_valid=False,
+                       state=self._STATES.IsInvalidOperationState)
+        cam = FakeCAM([type("S", (), {"allOperations": _ShortCollection([stale])})()])
+        root = FakeRoot(top_occs=[FakeOcc("A:1")])
+        des = FakeDesign(root, timeline=[FakeTL(0)])
+        _install(active_product=des, doc=FakeDoc(design=des, cam=cam))
+        monkeypatch.setattr(wo._cam_common, "get_cam", lambda: (cam, None))
+        pointer = _payload(wo.handler())["pointers"]["cam"]
+        assert "1 operation(s) need generating." in pointer and "incomplete" in pointer
 
 
 # ── external-reference (OOD) health — for ANY doc with xrefs, not just templates ─────────────────
@@ -927,3 +1344,107 @@ class TestRelationHealthInFirstCall:
         out = _payload(wo.handler())
         assert "No compute errors" in out["note"]
         assert "fix_relations" not in out["pointers"]
+
+
+class TestHealthReadOffTheTimelineItem:
+    """An entity carrying no healthState of its own is read through its timelineObject, so the
+    orientation rollup reaches the same verdict assembly_get does on one design. Live: an as-built
+    joint whose geometry body was deleted reported healthState 1 on its timeline item while the
+    joint object itself raised AttributeError."""
+
+    def _design(self, joints=(), as_built=(), relations=(), kind="rigidGroups"):
+        root = FakeRoot(top_occs=[FakeOcc("A:1")], joints=joints, as_built=as_built)
+        if relations:
+            setattr(root, kind, _Coll(relations))
+        return FakeDesign(root, timeline=[FakeTL(0)])
+
+    def test_as_built_joint_broken_on_its_timeline_item_is_named(self):
+        # tl healthState 1 = WARNING - the exact state a live as-built joint reported after its
+        # geometry body was deleted, and the state the joint object itself cannot answer.
+        des = self._design(as_built=[FakeTimelineHealthOnly("ArmSpin", tl_health=1)])
+        _install(active_product=des, doc=FakeDoc(design=des))
+        h = _payload(wo.handler())["health"]
+        assert h["broken_joints"] == ["ArmSpin"]
+        assert h["is_healthy"] is False
+        assert h["joint_count"] == 1
+        assert "joints_health_unknown" not in h
+
+    def test_as_built_joint_errored_on_its_timeline_item_is_named(self):
+        # the other failing state (2 = ERROR); both sides of the warning/error pair must count.
+        des = self._design(as_built=[FakeTimelineHealthOnly("ArmSpin", tl_health=2)])
+        _install(active_product=des, doc=FakeDoc(design=des))
+        assert _payload(wo.handler())["health"]["broken_joints"] == ["ArmSpin"]
+
+    def test_as_built_joint_healthy_on_its_timeline_item_is_not_named_or_unknown(self):
+        # healthState 0 = HEALTHY: the boundary just below the failing pair. Counted healthy, so
+        # neither broken nor withheld.
+        des = self._design(as_built=[FakeTimelineHealthOnly("ArmSpin", tl_health=0)])
+        _install(active_product=des, doc=FakeDoc(design=des))
+        h = _payload(wo.handler())["health"]
+        assert h["broken_joints"] == [] and h["is_healthy"] is True
+        assert "joints_health_unknown" not in h
+
+    def test_suppressed_as_built_joint_is_neither_broken_nor_unknown(self):
+        # healthState 3 = SUPPRESSED: the boundary just above the failing pair. A state that READ
+        # and is deliberately not flagged - so it must not land in the withheld count either, which
+        # is what separates 'parked on purpose' from 'could not be read'.
+        des = self._design(as_built=[FakeTimelineHealthOnly("Parked REVERSED", tl_health=3)])
+        _install(active_product=des, doc=FakeDoc(design=des))
+        h = _payload(wo.handler())["health"]
+        assert h["broken_joints"] == [] and h["is_healthy"] is True
+        assert "joints_health_unknown" not in h
+
+    def test_joint_no_source_answers_is_counted_unknown_not_broken_and_not_healthy(self):
+        des = self._design(as_built=[FakeNoHealthAnywhere("Mystery")])
+        _install(active_product=des, doc=FakeDoc(design=des))
+        out = _payload(wo.handler())
+        h = out["health"]
+        assert h["joints_health_unknown"] == 1
+        assert h["broken_joints"] == []          # a withheld state is not a fault
+        assert h["is_healthy"] is True           # ... and is_healthy makes no claim about it
+        assert "1 joint(s) (joints_health_unknown)" in out["note"]
+        assert "counted neither broken nor healthy" in out["note"]
+
+    def test_a_joint_that_answers_directly_still_counts_as_before(self):
+        # the plain Joint path is untouched: its own healthState answers and the timeline item is
+        # never needed.
+        des = self._design(joints=[FakeJoint("Good", 0), FakeJoint("PistonSlide", 2)])
+        _install(active_product=des, doc=FakeDoc(design=des))
+        h = _payload(wo.handler())["health"]
+        assert h["broken_joints"] == ["PistonSlide"] and "joints_health_unknown" not in h
+
+    def test_rigid_group_broken_on_its_timeline_item_is_named(self):
+        des = self._design(relations=[FakeTimelineHealthOnly("Rigid Group 1", tl_health=2)])
+        _install(active_product=des, doc=FakeDoc(design=des))
+        out = _payload(wo.handler())
+        assert out["health"]["broken_relations"] == ["Rigid Group 1"]
+        assert out["health"]["is_healthy"] is False
+        assert "Rigid Group 1" in out["pointers"]["fix_relations"]
+
+    def test_healthy_rigid_group_is_neither_broken_nor_unknown(self):
+        des = self._design(relations=[FakeTimelineHealthOnly("Rigid Group 1", tl_health=0)])
+        _install(active_product=des, doc=FakeDoc(design=des))
+        h = _payload(wo.handler())["health"]
+        assert h["broken_relations"] == [] and h["is_healthy"] is True
+        assert "relations_health_unknown" not in h
+
+    def test_relation_no_source_answers_is_counted_unknown_not_broken(self):
+        des = self._design(relations=[FakeNoHealthAnywhere("Rigid Group 1")])
+        _install(active_product=des, doc=FakeDoc(design=des))
+        out = _payload(wo.handler())
+        assert out["health"]["relations_health_unknown"] == 1
+        assert out["health"]["broken_relations"] == []
+        assert out["health"]["is_healthy"] is True
+        assert "1 assembly relation(s) (relations_health_unknown)" in out["note"]
+
+    def test_both_withheld_counts_are_reported_together(self):
+        des = self._design(as_built=[FakeNoHealthAnywhere("Mystery")],
+                           relations=[FakeNoHealthAnywhere("Rigid Group 1")])
+        _install(active_product=des, doc=FakeDoc(design=des))
+        out = _payload(wo.handler())
+        h = out["health"]
+        assert h["joints_health_unknown"] == 1 and h["relations_health_unknown"] == 1
+        assert ("1 joint(s) (joints_health_unknown) and 1 assembly relation(s) "
+                "(relations_health_unknown) published NO compute state") in out["note"]
+        # a withheld state is not a fault, so the clean verdict still leads
+        assert out["note"].startswith("No compute errors")

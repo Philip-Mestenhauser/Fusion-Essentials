@@ -141,8 +141,12 @@ class FakeOccurrences:
 
 
 class FakeComp:
-    def __init__(self, name="Root", derive_features=None, occurrences=()):
+    # entityToken, because _common.same_component compares on it: the landing net that catches a
+    # derive surfacing at ROOT instead of nested is skipped (and disclosed) when the target cannot
+    # be told from the root. A test that wants that state deletes the attribute.
+    def __init__(self, name="Root", derive_features=None, occurrences=(), token=None):
         self.name = name
+        self.entityToken = token if token is not None else f"TOKEN:{name}"
         self.features = FakeFeatures(derive_features if derive_features is not None else FakeDeriveFeatures())
         self.occurrences = FakeOccurrences(occurrences)
 
@@ -209,10 +213,14 @@ class FakeApp:
 
 # ── source-side builders (SimpleNamespace + the shared _NamedCollection - no new Fake* class) ──────
 
-def _src_comp(name, bodies=()):
-    """A SOURCE component: name + bRepBodies/meshBodies collections (count/item)."""
+def _src_comp(name, bodies=(), token=None):
+    """A SOURCE component: name + bRepBodies/meshBodies collections (count/item).
+
+    The entityToken is what _common.same_component compares on - the root derives as ITSELF while
+    any other component derives through its occurrences, and the handler refuses rather than pick
+    between those two on an identity that did not read. `token=None` is that unreadable state."""
     return types.SimpleNamespace(
-        name=name,
+        name=name, entityToken=token if token is not None else f"TOKEN:{name}",
         bRepBodies=_NamedCollection([types.SimpleNamespace(name=b) for b in bodies]),
         meshBodies=_NamedCollection([]))
 
@@ -225,7 +233,7 @@ def _src_occ(name):
 def _make_source(components=(), occ_by_comp=None, root_name="SrcRoot"):
     """A SOURCE design: rootComponent (with allOccurrencesByComponent) + allComponents (root + subs)."""
     occ_by_comp = dict(occ_by_comp or {})
-    root = types.SimpleNamespace(name=root_name,
+    root = types.SimpleNamespace(name=root_name, entityToken=f"TOKEN:{root_name}",
                                  bRepBodies=_NamedCollection([]), meshBodies=_NamedCollection([]))
     root.allOccurrencesByComponent = lambda c: _NamedCollection(
         list(occ_by_comp.get(getattr(c, "name", None), [])))
@@ -662,7 +670,8 @@ class TestIntoComponent:
         root_comp = FakeComp("Root")
         design = FakeDesign(root_comp)
         design.rootComponent = type("Root", (), {
-            "name": "Root", "allOccurrences": [occ], "occurrences": root_comp.occurrences,
+            "name": "Root", "entityToken": "TOKEN:Root",
+            "allOccurrences": [occ], "occurrences": root_comp.occurrences,
         })()
 
         def _restore_root():
@@ -726,6 +735,30 @@ class TestIntoComponent:
         res = io.handler(document_id="urn:x", into_component="Chassis:1")
         assert res["isError"] is True
         assert "ROOT" in res["message"] and "Stray:1" in res["message"]
+
+    def test_an_unidentifiable_target_discloses_the_unrun_landing_check(self, monkeypatch):
+        # same_component answers None with no readable token, so the stray-at-ROOT net cannot run:
+        # a root-targeted derive answers that net POSITIVELY, and firing it here would report a
+        # successful derive as a failure and tell the caller to delete it. The derive stands and the
+        # payload says the landing was not verified.
+        chassis_derive = FakeDeriveFeatures()
+        design, chassis, _, _calls = self._nested_setup(monkeypatch,
+                                                        chassis_derive=chassis_derive)
+        del chassis.entityToken
+        stray = FakeOcc("Stray:1", is_derived=True, body_count=1)
+        chassis_derive.on_add = (
+            lambda: design.rootComponent.occurrences._items.append(stray))
+        design.rootComponent.occurrences = FakeOccurrences([])
+        out = _payload(io.handler(document_id="urn:x", into_component="Chassis:1"))
+        assert out["derived"] is True                     # not rolled back on an unread token
+        assert "unverified" in out["landing_unverified"].lower()
+
+    def test_a_PROVEN_root_target_runs_no_stray_net(self, monkeypatch):
+        # the other side of the boundary: `is False` gates the net, so a target proven to BE the
+        # root neither reports its own successful landing as a stray nor discloses an unrun check
+        _install(monkeypatch)
+        out = _payload(io.handler(document_id="urn:x"))
+        assert out["derived"] is True and "landing_unverified" not in out
 
     def test_unknown_occurrence_errors(self, monkeypatch):
         _install(monkeypatch)

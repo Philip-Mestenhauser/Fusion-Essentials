@@ -18,6 +18,7 @@ from ._common import error, ok, safe, all_sketch_names
 from . import _common
 from . import _inputs
 from . import _outputs
+from . import _sketch_detail
 
 app = adsk.core.Application.get()
 
@@ -71,6 +72,7 @@ _ACTION_ONLY = (
     ("entities", ("into_sketch", "intersect")),
     ("target_faces", ("to_surface",)),
     ("source_sketch", ("to_surface",)),
+    ("source_component", ("to_surface",)),
     ("curve_refs", ("to_surface",)),
     ("curve_handles", ("to_surface",)),
     ("project_type", ("to_surface",)),
@@ -237,14 +239,29 @@ def _resolve_curve(sketch, ref, label):
     return ent, None
 
 
-def _same_sketch(a, b) -> bool:
-    """Whether two sketch reads are the same sketch. A sketch read twice hands back a fresh proxy, so
-    identity alone cannot answer it; entityToken is the stable key."""
+def _same_sketch(a, b):
+    """True when two sketch reads denote the SAME sketch, False when they denote DIFFERENT ones, and
+    None when the comparison COULD NOT BE MADE. A sketch read twice hands back a fresh proxy, so
+    identity alone cannot answer it - it is kept only as a free short-circuit.
+
+    The key is ``_common.native_identity``, never a bare entityToken. A token is DOCUMENT-LOCAL and a
+    Sketch reaches its source document through parentComponent (measured, live_api_facts.SHAPES), so
+    two components brought in by two references of ONE source design read byte-identical tokens and
+    the sketches they hold read them the same way: a token compare answers "same sketch" for two
+    demonstrably different sketches. The urn half of the identity is what tells them apart.
+
+    Both sides go through the None gate before the compare: two identities that BOTH failed to read
+    are not evidence they are one sketch. Callers branch on the three states explicitly - a bare
+    ``if _same_sketch(...)`` reads the unknown as the "different sketches" answer nothing was read
+    to support."""
+    if a is None or b is None:
+        return None
     if a is b:
         return True
-    ta = safe(lambda: a.entityToken)
-    tb = safe(lambda: b.entityToken)
-    return isinstance(ta, str) and bool(ta) and ta == tb
+    ia, ib = _common.native_identity(a), _common.native_identity(b)
+    if ia is None or ib is None:
+        return None
+    return ia == ib
 
 
 def _source_label(ent) -> str:
@@ -305,7 +322,10 @@ def _refuse_foreign_context(sketch, sources, labels) -> str:
         return ""
     for ent, label in zip(sources, labels):
         comp = _source_component(ent)
-        if comp is None or _common.same_component(comp, sk_comp):
+        # `is not False`: the refusal STATES the source lives in another component, so only a proven
+        # difference raises it - an identity that did not read is evidence of nothing, exactly as an
+        # unreadable owner already is.
+        if comp is None or _common.same_component(comp, sk_comp) is not False:
             continue
         owner = safe(lambda comp=comp: comp.name) or "another component"
         return (f"'{label}' lives in component '{owner}' but sketch "
@@ -349,7 +369,7 @@ def _direction_entity(raw, comp):
     return ent, None
 
 
-def _source_curves(design, sketch, source_sketch, curve_refs, curve_handles):
+def _source_curves(design, sketch, source_sketch, curve_refs, curve_handles, source_component=""):
     """(curves, error) for projectToSurface. Sketch curves must live in a DIFFERENT sketch from the
     one being projected into: Fusion refuses a self-projection with 'Not support projecting sketch
     geometry into same sketch, please change the target sketch or geometry.'"""
@@ -360,13 +380,19 @@ def _source_curves(design, sketch, source_sketch, curve_refs, curve_handles):
         if not name:
             return None, ("'curve_refs' needs 'source_sketch' - the sketch those ids are read "
                           "against, which must not be the sketch being projected into.")
-        src, ambiguous = _common.find_sketch(design, name)
-        if ambiguous:
-            return None, ambiguous
+        # The source is a SECOND by-name sketch reference, so it gets its own scope: 'component'
+        # narrows the sketch being projected INTO and would not narrow this one.
+        src, refusal = _sketch_detail.scoped_sketch(design, name, source_component,
+                                                    "source_component")
+        if refusal:
+            return None, refusal
         if src is None:
             return None, (f"No sketch named '{name}'. Available: "
                           + (", ".join(n for n in all_sketch_names(design) if n) or "(none)"))
-        if _same_sketch(src, sketch):
+        # `is True`: this refusal STATES the two references are one sketch, so only a PROVEN match
+        # raises it. An identity that would not read supports no such claim - the call goes through
+        # and Fusion's own refusal (quoted below) reaches the caller verbatim if it was right.
+        if _same_sketch(src, sketch) is True:
             return None, (f"'source_sketch' is '{name}', the sketch being projected into. Fusion "
                           "refuses that: 'Not support projecting sketch geometry into same sketch, "
                           "please change the target sketch or geometry.' Draw the curves in another "
@@ -450,12 +476,13 @@ def _into_sketch(sketch, entities, link) -> dict:
 
 
 def _to_surface(design, sketch, target_faces, source_sketch, curve_refs, curve_handles,
-                project_type, direction) -> dict:
+                project_type, direction, source_component="") -> dict:
     """projectToSurface(faces, curves, projectType[, directionEntity]) - FACES first, plain lists."""
     faces, ferr = _TARGET_FACES.resolve(target_faces)
     if ferr:
         return error(ferr)
-    curves, cerr = _source_curves(design, sketch, source_sketch, curve_refs, curve_handles)
+    curves, cerr = _source_curves(design, sketch, source_sketch, curve_refs, curve_handles,
+                                  source_component)
     if cerr:
         return error(cerr)
     ptype, perr = _PROJECT_TYPE.resolve(project_type)
@@ -605,14 +632,16 @@ def _intersect(sketch, entities, bodies) -> dict:
 
 def handler(entities="", sketch_name: str = "", link: bool = None, action: str = "",
             target_faces="", source_sketch: str = "", curve_refs="", curve_handles="",
-            project_type: str = "", direction: str = "", bodies="") -> dict:
+            project_type: str = "", direction: str = "", bodies="", component: str = "",
+            source_component: str = "") -> dict:
     """See TOOL_DESCRIPTION."""
     act, aerr = _ACTION.resolve(action)
     if aerr:
         return error(aerr)
     ferr = _refuse_foreign_inputs(act, {
         "link": link, "entities": entities, "target_faces": target_faces,
-        "source_sketch": source_sketch, "curve_refs": curve_refs, "curve_handles": curve_handles,
+        "source_sketch": source_sketch, "source_component": source_component,
+        "curve_refs": curve_refs, "curve_handles": curve_handles,
         "project_type": project_type, "direction": direction, "bodies": bodies})
     if ferr:
         return error(ferr)
@@ -621,20 +650,20 @@ def handler(entities="", sketch_name: str = "", link: bool = None, action: str =
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")
 
-    sk, requested, ambiguous = _common.find_or_recent_sketch(design, sketch_name)
-    if ambiguous:
-        return error(ambiguous)
+    sk, requested, refusal = _sketch_detail.scoped_or_recent_sketch(design, sketch_name, component)
+    if refusal:
+        return error(refusal)
     if not sk:
-        if (sketch_name or "").strip():
+        if requested:
             names = all_sketch_names(design)
-            return error(f"No sketch named '{sketch_name}'. Available: "
+            return error(f"No sketch named '{requested}'. Available: "
                          + (", ".join(n for n in names if n) or "(none)")
                          + ". Create one with sketch_create.")
         return error("No sketch to project into. Create one first with sketch_create.")
 
     if act == "to_surface":
         return _to_surface(design, sk, target_faces, source_sketch, curve_refs, curve_handles,
-                           project_type, direction)
+                           project_type, direction, source_component)
     if act == "intersect":
         return _intersect(sk, entities, bodies)
     return _into_sketch(sk, entities, link)
@@ -661,11 +690,15 @@ tool = (
     .add_input_property("entities", _ENTITIES.schema())
     .add_input_property("sketch_name", {"type": "string",
             "description": "Sketch to project INTO (omit = most recently created sketch)."})
+    .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
     .add_input_property("link", {"type": "boolean",
             "description": "into_sketch: keep the projected curves linked to the source geometry (default true); false = static copy."})
     .add_input_property(*_TARGET_FACES.as_property())
     .add_input_property("source_sketch", {"type": "string",
             "description": "to_surface: the sketch 'curve_refs' are read against - not the receiving sketch."})
+    .add_input_property("source_component", {"type": "string",
+            "description": "The component holding 'source_sketch', when two components carry that "
+                           "name - same forms as 'component'. Scopes the source only."})
     .add_input_property("curve_refs", {"type": "array", "items": {"type": "string"},
             "description": "to_surface: '<type>:<index>' curve ids in 'source_sketch' to project."})
     .add_input_property(*_CURVE_HANDLES.as_property())

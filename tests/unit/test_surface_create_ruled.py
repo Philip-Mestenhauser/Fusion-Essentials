@@ -22,8 +22,8 @@ import types
 import pytest
 
 from conftest import (BRepBody, BRepEdge, Line3D, MakeComp, MakeDesign, _NamedCollection,
-                      assert_no_active_design, assert_unknown_units, error_message, install,
-                      load_tool, payload)
+                      assert_no_active_design, assert_unknown_units, body_proxy, error_message,
+                      install, load_tool, payload)
 
 scr = load_tool("surface_create_ruled")
 
@@ -316,6 +316,32 @@ class TestResultBody:
         body = payload(_call())
         assert wired.parent.name not in body["result_bodies"]
         assert len(body["result_bodies"]) == 1
+
+    def test_the_parent_reached_as_an_OCCURRENCE_PROXY_is_still_not_created(self, wired):
+        # The two sides of the diff are two DIFFERENT collections - the component's own body census
+        # before, feature.bodies after - and each mints its own wrapper for the same body. A proxy's
+        # entityToken DIFFERS from its native's (measured), so keyed on the wrapper's token the
+        # parent body reads as newly created and the payload claims a second sheet nothing made.
+        wired.comp.bRepBodies = _NamedCollection([wired.parent])          # the census: the NATIVE
+        proxy = body_proxy(wired.parent,
+                           types.SimpleNamespace(name="Root:1", fullPathName="Root:1"))
+        assert proxy.entityToken != wired.parent.entityToken              # a real proxy, not a copy
+        wired.ruled.feature = _feature(parent=proxy, new=[_body("RuledSurf1")])
+        body = payload(_call())
+        assert body["result_bodies"] == ["RuledSurf1"]
+
+    def test_an_UNTOKENED_parent_and_its_proxy_still_key_together(self, wired):
+        # With no token there is no identity, and the fallback carries the pair on its own. It is the
+        # bare NAME for that reason: a proxy delegates its name to its native, while the wrapper's
+        # SCOPE reads the occurrence path off the proxy and the component name off the native - two
+        # keys for one body, and the parent published as a sheet this call created.
+        wired.parent.entityToken = None
+        wired.comp.bRepBodies = _NamedCollection([wired.parent])          # the census: the NATIVE
+        proxy = body_proxy(wired.parent,
+                           types.SimpleNamespace(name="Root:1", fullPathName="Root:1"))
+        wired.ruled.feature = _feature(parent=proxy, new=[_body("RuledSurf1")])
+        body = payload(_call())
+        assert body["result_bodies"] == ["RuledSurf1"]
 
     def test_a_solid_parent_does_not_make_the_sheet_read_solid(self, wired):
         # the draft-check case: ruling off a SOLID box edge. is_solid must come from the NEW sheet,

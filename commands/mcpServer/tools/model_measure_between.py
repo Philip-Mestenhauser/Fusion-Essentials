@@ -20,6 +20,7 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from . import _common
+from . import _geom
 from . import _inputs
 
 app = adsk.core.Application.get()
@@ -33,6 +34,53 @@ _MODES = ("distance", "angle")
 # guard below each surface a refusal, so an edge can never become a wrong number here.
 _A = _inputs.TargetRef("a", required=True, allow=("body", "face", "edge", "occurrence", "component"))
 _B = _inputs.TargetRef("b", required=True, allow=("body", "face", "edge", "occurrence", "component"))
+
+
+def _gap_to(point, entity):
+    """The measured distance in cm from ``point`` to ``entity``, or None when it will not read.
+    measureMinimumDistance takes a Point3D as either operand (live API doc: "The temporary geometry
+    supported are the Plane and Point3D objects")."""
+    if point is None or entity is None:
+        return None
+    mr, err = _common.min_distance(point, entity)
+    if err:
+        return None
+    v = safe(lambda: mr.value)
+    return None if isinstance(v, bool) or not isinstance(v, (int, float)) else v
+
+
+def _points_on(ent_a, p1, p2):
+    """(point on a, point on b) for a MeasureResults pair, decided by MEASURING each point against
+    'a' rather than by positionOne/positionTwo order.
+
+    positionOne is documented as the point on the FIRST entity, and for two PARALLEL planar faces it
+    comes back on the SECOND, swapping with the arguments; a NON-PARALLEL pair that is APART holds
+    the documented order in both argument orders. So the order alone cannot carry the labels. The
+    measurement is the 'min-distance-position-order-parallel-faces' row in measure_api.py, which
+    pins both legs - the non-parallel one is what discriminates, since a 0-distance pair returns one
+    point twice and agrees with either order. A read-back that will not answer, or a tie (both
+    points measure the same distance from 'a' - two coplanar targets do), keeps the documented
+    order."""
+    da, db = _gap_to(p1, ent_a), _gap_to(p2, ent_a)
+    if da is None or db is None:
+        return p1, p2
+    return (p2, p1) if db < da else (p1, p2)
+
+
+def _disclose_subtree(out, ent_a, kind_a, ent_b, kind_b, inv, units):
+    """`out`, plus what was read about child occurrences nested inside either target.
+
+    An occurrence is measured on its OWN bodies: a parent whose own body is 90 mm from the other
+    target answers 90 even while a child inside it sits at 40 (measured), and an occurrence carrying
+    no bodies of its own does not measure at all - it raises. So a gap read off a parent is silently
+    OPTIMISTIC about the assembly under it, and _geom.subtree_facts owns both the per-child
+    measurement and the sentence. It answers None for a pair with nothing nested, which is what
+    keeps this quiet on the ordinary body/face measurement."""
+    facts = _geom.subtree_facts((("a", ent_a, kind_a), ("b", ent_b, kind_b)), inv, units)
+    if facts is not None:
+        out["targets_with_children"] = facts["targets"]
+        out["note"] += " " + facts["note"]
+    return out
 
 
 def handler(a: str = "", b: str = "", mode: str = "distance", units: str = "mm") -> dict:
@@ -72,8 +120,12 @@ def handler(a: str = "", b: str = "", mode: str = "distance", units: str = "mm")
                          f"{dist_cm!r}, not a number, so the distance is UNKNOWN - reporting it as "
                          "0 would read as touching. Re-run find_geometry for fresh handles and "
                          "retry.")
-        pa = safe(lambda: mr.positionOne)
-        pb = safe(lambda: mr.positionTwo)
+        pa, pb = _points_on(ent_a, safe(lambda: mr.positionOne), safe(lambda: mr.positionTwo))
+        # Two PARALLEL PLANAR faces are the pair whose measured distance can be the separation
+        # between their PLANES rather than the gap between the bounded faces; _geom proves what the
+        # faces' own boxes allow and words the disclosure both measure tools publish.
+        planes = (_geom.parallel_plane_facts(ent_a, ent_b, dist_cm, f, units)
+                  if kind_a == "face" and kind_b == "face" else None)
         out = {
             "mode": "distance",
             "a": f"{kind_a} '{safe(lambda: ent_a.name) or a}'",
@@ -92,13 +144,27 @@ def handler(a: str = "", b: str = "", mode: str = "distance", units: str = "mm")
         def _at_origin(p):
             return p is not None and all(
                 abs(safe(lambda ax=ax: getattr(p, ax), 0.0) or 0.0) <= 1e-9 for ax in ("x", "y", "z"))
-        if dist_cm <= 1e-9 and _at_origin(pa) and _at_origin(pb):
+        # A PROVEN bound comes first: the faces are then known to be apart, so neither the
+        # degenerate-overlap reading below nor the API's own point pair describes this gap.
+        if planes is not None and planes["bounded"]:
+            out["distance"] = round(planes["distance_cm"] * f, 6)
+            out["distance_is_lower_bound"] = True
+            out["plane_separation"] = round(planes["separation_cm"] * f, 6)
+            out["closest_point_on_a"] = None
+            out["closest_point_on_b"] = None
+            out["note"] = planes["note"]
+        elif dist_cm <= 1e-9 and _at_origin(pa) and _at_origin(pb):
             out["closest_points_degenerate"] = True
             out["note"] = ("Distance 0 with both closest points at (0,0,0): the targets touch or "
                            "OVERLAP and this point pair is degenerate - it does NOT locate the "
                            "contact. Use assembly_inspect_interference on the pair to get the overlap "
                            "volume and where it sits.")
-        return ok(out)
+        elif planes is not None:
+            out["plane_separation_only"] = True
+            if planes["lateral_offset_untested"]:
+                out["lateral_offset_untested"] = True
+            out["note"] += " " + planes["note"]
+        return ok(_disclose_subtree(out, ent_a, kind_a, ent_b, kind_b, f, units))
 
     # angle
     mgr = safe(lambda: app.measureManager)

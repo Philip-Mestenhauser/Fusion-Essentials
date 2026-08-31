@@ -227,6 +227,93 @@ def _raiser(message):
     return _add
 
 
+# ── the 'component' SCOPE ────────────────────────────────────────────────────
+# Fusion numbers sketches per component from 1, so two components each holding a "Sketch1" is the
+# norm. The design-wide refusal is right - but "rename one" is no remedy for a component that came
+# in with a referenced document, so the write needs a scope of its own. The REAL _common walk and
+# scope filter run here; nothing about them is stubbed.
+
+class _MultiComp:
+    def __init__(self, name, sketches):
+        items = list(sketches)
+        self.name = name
+        self.sketches = type("SS", (), {
+            "itemByName": staticmethod(lambda n: next((s for s in items if s.name == n), None)),
+            "count": len(items), "item": staticmethod(lambda i: items[i])})()
+        self.xYConstructionPlane = SimpleNamespace(name="XY")
+
+
+class _MultiDesign:
+    def __init__(self, comps):
+        self.rootComponent = comps[0]
+        # allComponents is a DESIGN property - that is the collection all_components walks.
+        self.allComponents = type("CC", (), {
+            "count": len(comps), "item": staticmethod(lambda i: comps[i])})()
+        self.activeComponent = comps[0]
+        self.rootComponent.allOccurrences = []
+
+    def findEntityByToken(self, token):
+        return []
+
+
+def _install_multi(monkeypatch, pairs):
+    design = _MultiDesign([_MultiComp(n, s) for n, s in pairs])
+    monkeypatch.setattr(sd, "app", type("A", (), {"activeProduct": design})())
+    monkeypatch.setattr(sd._common, "app", sd.app)
+    monkeypatch.setattr(adsk.fusion.Design, "cast",
+                        lambda x: x if isinstance(x, _MultiDesign) else None)
+    monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: ("pt", x, y, z))
+    do = adsk.fusion.DimensionOrientations
+    monkeypatch.setattr(do, "AlignedDimensionOrientation", "aligned", raising=False)
+    return design
+
+
+class TestComponentScope:
+    def _shared(self, monkeypatch):
+        """ONE name in BOTH components - the only fixture where the filter actually runs. Each
+        sketch is its own object, so the dimension that landed names which one answered."""
+        alpha, beta = FakeSketch("Sketch1"), FakeSketch("Sketch1")
+        _install_multi(monkeypatch, [("Alpha", [alpha]), ("Beta", [beta])])
+        return alpha, beta
+
+    def test_the_unscoped_shared_name_refuses_and_names_the_scope_input(self, monkeypatch):
+        alpha, beta = self._shared(monkeypatch)
+        res = sd.handler(dim_type="radius", sketch_name="Sketch1", entity_one="circle:0",
+                         value="5 mm")
+        assert res["isError"] is True
+        assert "2 sketches are named 'Sketch1'" in res["message"]
+        assert "'component'" in res["message"] and "Rename one" not in res["message"]
+        assert alpha.sketchDimensions.calls == [] and beta.sketchDimensions.calls == []
+
+    def test_the_scope_dimensions_THAT_components_sketch(self, monkeypatch):
+        alpha, beta = self._shared(monkeypatch)
+        _payload(sd.handler(dim_type="radius", sketch_name="Sketch1", component="Beta",
+                            entity_one="circle:0", value="5 mm"))
+        assert len(beta.sketchDimensions.calls) == 1 and alpha.sketchDimensions.calls == []
+
+    def test_the_sibling_component_is_reachable_by_the_same_call(self, monkeypatch):
+        alpha, beta = self._shared(monkeypatch)
+        _payload(sd.handler(dim_type="radius", sketch_name="Sketch1", component="Alpha",
+                            entity_one="circle:0", value="5 mm"))
+        assert len(alpha.sketchDimensions.calls) == 1 and beta.sketchDimensions.calls == []
+
+    def test_an_unknown_component_is_refused(self, monkeypatch):
+        alpha, beta = self._shared(monkeypatch)
+        res = sd.handler(dim_type="radius", sketch_name="Sketch1", component="Gamma",
+                         entity_one="circle:0", value="5 mm")
+        assert res["isError"] is True and "No component named 'Gamma'" in res["message"]
+        assert alpha.sketchDimensions.calls == [] and beta.sketchDimensions.calls == []
+
+    def test_a_wrong_component_is_refused_even_when_the_name_is_UNIQUE(self, monkeypatch):
+        # The scope is VALIDATED, not dropped because the name would have resolved anyway.
+        alpha = FakeSketch("OnlyOne")
+        _install_multi(monkeypatch, [("Alpha", [alpha]), ("Beta", [])])
+        res = sd.handler(dim_type="radius", sketch_name="OnlyOne", component="Beta",
+                         entity_one="circle:0", value="5 mm")
+        assert res["isError"] is True and "'Beta'" in res["message"]
+        assert alpha.sketchDimensions.calls == []
+
+
 class TestDispatch:
     def test_distance_two_lines(self, monkeypatch):
         s = _install(monkeypatch)
@@ -920,6 +1007,24 @@ class TestGuards:
         _install(monkeypatch)
         res = sd.handler(dim_type="radius", sketch_name="Nope", entity_one="circle:0")
         assert res["isError"] is True and "No sketch named 'Nope'" in res["message"]
+
+    def test_the_named_miss_lists_the_sketches_that_are_there(self, monkeypatch):
+        # a miss that names only what is ABSENT leaves the caller guessing; the siblings
+        # (sketch_edit_curve, sketch_insert_svg, sketch_transform) all list what IS there.
+        # the siblings all end the miss with a terminated next step (sketch_constrain and
+        # sketch_delete_entity with ". Use sketch_get."), which is also the breadcrumb edge the
+        # pointer map reads out of this error.
+        _install(monkeypatch, sketches=[FakeSketch("First"), FakeSketch("Last")])
+        res = sd.handler(dim_type="radius", sketch_name="Nope", entity_one="circle:0")
+        assert res["isError"] is True
+        assert res["message"] == "No sketch named 'Nope'. Available: First, Last. Use sketch_get."
+
+    def test_the_named_miss_says_none_when_the_design_holds_no_sketch(self, monkeypatch):
+        # find_or_recent_sketch answers the most-recent sketch for a BLANK name only; a NAMED miss
+        # in an empty design still reaches the named branch, where an empty join reads as nothing.
+        _install(monkeypatch, sketches=[])
+        res = sd.handler(dim_type="radius", sketch_name="Nope", entity_one="circle:0")
+        assert res["isError"] is True and "Available: (none)" in res["message"]
 
     def test_a_padded_name_reports_the_name_the_walk_searched_for(self, monkeypatch):
         # the resolver STRIPS the name before searching, so the miss quotes the stripped form -

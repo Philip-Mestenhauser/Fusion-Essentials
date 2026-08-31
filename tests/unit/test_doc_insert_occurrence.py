@@ -305,8 +305,8 @@ class TestRemoveExisting:
 
     def test_an_insert_failure_after_the_removal_discloses_the_part_is_gone(self, monkeypatch):
         # remove_existing DELETES before addByInsert runs: a failure after that point must say the
-        # old occurrence is already gone, or the caller retries into an assembly missing a part it
-        # believes is still there.
+        # removed occurrence is already gone, or the caller retries into an assembly missing a part
+        # it believes is still there.
         old = FakeOcc("OldPart:1", component=FakeComp("OldPart"))
         design, root_comp = _install(monkeypatch, occurrences=[old])
         root_comp.occurrences.insert_result = None       # addByInsert returns nothing

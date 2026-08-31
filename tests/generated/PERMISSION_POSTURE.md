@@ -4,7 +4,7 @@ _Auto-generated from the live registry by `tests/gen_posture.py`. Do not edit by
 
 Every tool declares a write= kind (read / write / destructive); the MCP readOnlyHint / destructiveHint annotations derive from it. That machine-checked fact decides which tools are safe to auto-run under Claude Code. This file maps every tool to a posture bucket and emits ready-to-paste `settings.json` presets. Rules target the MCP wire name `mcp__fusion-essentials__<tool>`.
 
-**Tools:** 184  |  read: 28  |  write: 139  |  destructive: 16  |  script-hatch: 1
+**Tools:** 186  |  read: 28  |  write: 139  |  destructive: 18  |  script-hatch: 1
 
 ## Posture buckets
 
@@ -210,11 +210,13 @@ A write= kind says the model changes; it does not say WHERE the change lands. Th
 - `mcp__fusion-essentials__view_set`
 - `mcp__fusion-essentials__view_switch_workspace`
 
-### destructive - ask / deny (16)
+### destructive - ask / deny (18)
 
 - `mcp__fusion-essentials__assembly_edit_contacts`
 - `mcp__fusion-essentials__assembly_edit_relations`
 - `mcp__fusion-essentials__cam_delete`
+- `mcp__fusion-essentials__cam_delete_machine`
+- `mcp__fusion-essentials__cam_delete_template`
 - `mcp__fusion-essentials__data_delete_file`
 - `mcp__fusion-essentials__data_delete_folder`
 - `mcp__fusion-essentials__design_delete_feature`
@@ -415,6 +417,8 @@ Auto-allow reads only. Every write asks; destructive writes and the arbitrary-co
       "mcp__fusion-essentials__assembly_edit_contacts",
       "mcp__fusion-essentials__assembly_edit_relations",
       "mcp__fusion-essentials__cam_delete",
+      "mcp__fusion-essentials__cam_delete_machine",
+      "mcp__fusion-essentials__cam_delete_template",
       "mcp__fusion-essentials__data_delete_file",
       "mcp__fusion-essentials__data_delete_folder",
       "mcp__fusion-essentials__design_delete_feature",
@@ -588,6 +592,8 @@ Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). Cloud/doc
       "mcp__fusion-essentials__assembly_edit_relations",
       "mcp__fusion-essentials__cam_create_machine",
       "mcp__fusion-essentials__cam_delete",
+      "mcp__fusion-essentials__cam_delete_machine",
+      "mcp__fusion-essentials__cam_delete_template",
       "mcp__fusion-essentials__cam_edit_tools",
       "mcp__fusion-essentials__cam_generate_setup_sheet",
       "mcp__fusion-essentials__cam_post",

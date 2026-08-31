@@ -290,6 +290,18 @@ class TestHonesty:
         res = sh.handler(thickness=999, units="mm")
         assert res["isError"] is True and "Shell failed" in res["message"]
 
+    def test_the_raise_is_reported_with_the_platforms_own_cause_and_no_guessed_one(self):
+        # Nothing here measures the thickness against the geometry or which bodies the removed
+        # faces span, so naming either as the reason is a claim no read backs. The raise text is
+        # the one cause that was read, and it is the whole message.
+        body = FakeBody()
+        sf = FakeShellFeatures(body)
+        sf.add = lambda inp: (_ for _ in ()).throw(RuntimeError("3-4 : InternalValidationError"))
+        _install(body, sf)
+        msg = sh.handler(thickness=999, units="mm")["message"]
+        assert msg == "Shell failed: 3-4 : InternalValidationError"
+        assert "may be" not in msg and "try a smaller" not in msg
+
 
 # ── declared output contract ─────────────────────────────────────────────────
 

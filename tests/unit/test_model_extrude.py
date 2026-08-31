@@ -244,10 +244,29 @@ class TestGuards:
         # "No sketch named 'S'" states the opposite of what the design-wide walk read.
         _install([FakeSketch("S")])
         refusal = "2 sketches are named 'S' ('S' in Root, 'S' in Frame)"
-        monkeypatch.setattr(ex._common, "find_or_recent_sketch", lambda d, n: (None, n, refusal))
+        monkeypatch.setattr(ex._sketch_detail, "scoped_or_recent_sketch",
+                            lambda d, n, c, input_name="component": (None, n, refusal))
         res = ex.handler(sketch_name="S", distance=5)
         assert res["isError"] is True
         assert res["message"] == refusal and "No sketch named" not in res["message"]
+
+    def test_the_component_scope_is_declared_on_the_wire(self, monkeypatch):
+        # the schema is strict, so a handler parameter no property declares is refused before it
+        # reaches the handler - the scope would be unreachable and its refusal would name it anyway.
+        sd = load_tool("_sketch_detail")
+        assert ex.extrude_tool.input_schema["properties"]["component"] == sd.COMPONENT_SCOPE[1]
+
+    def test_the_component_scope_reaches_the_sketch_resolve(self, monkeypatch):
+        _install([FakeSketch("S")])
+        seen = {}
+
+        def _scoped(d, n, c, input_name="component"):
+            seen.update(component=c, input_name=input_name)
+            return None, n, "refused"
+
+        monkeypatch.setattr(ex._sketch_detail, "scoped_or_recent_sketch", _scoped)
+        ex.handler(sketch_name="S", distance=5, component="Frame")
+        assert seen == {"component": "Frame", "input_name": "component"}
 
     def test_profile_index_out_of_range(self):
         _install([FakeSketch("S", profile_count=1)])
@@ -1359,6 +1378,244 @@ class TestModelParameterLinkage:
         ef = _install([FakeSketch("S")])
         out = _payload(ex.handler(sketch_name="S", distance=5))   # add() returns a bare FakeFeature
         assert "model_parameters" not in out
+
+
+class TestDistanceReadBack:
+    """The depth the created feature REPORTS, against the number the units engine evaluated the
+    request to. A feature that lands at the wrong depth is returned as success by the API, so the
+    extent's own distance ModelParameter is the only thing that can contradict it - and because the
+    feature HAS landed, a mismatch names both values and says what remains in the timeline."""
+
+    def _feature(self, value_cm, name="Extrude1"):
+        """A created extrude whose first side reports `value_cm` on its distance ModelParameter."""
+        f = FakeFeature(name=name)
+        f.extentOne = types.SimpleNamespace(
+            distance=types.SimpleNamespace(name="d1", value=value_cm))
+        return f
+
+    def _two_side_feature(self, one_cm, two_cm, name="Extrude1"):
+        """A created two-sided extrude: side one on extentOne, side two on extentTwo, each with its
+        own distance ModelParameter - the shape a two-sided distance extent lands in (measured)."""
+        f = self._feature(one_cm, name)
+        f.hasTwoExtents = True
+        f.extentTwo = types.SimpleNamespace(
+            distance=types.SimpleNamespace(name="d2", value=two_cm))
+        return f
+
+    def test_a_matching_read_back_passes_silently(self):
+        ef = _install([FakeSketch("S")])
+        ef.add = lambda inp: self._feature(2.5)            # 25 mm -> 2.5 cm
+        out = _payload(ex.handler(sketch_name="S", distance=25, units="mm"))
+        assert out["extruded"] is True and out["distance"] == 25.0
+
+    def test_a_mismatched_read_back_errors_naming_both_values(self):
+        ef = _install([FakeSketch("S")])
+        ef.add = lambda inp: self._feature(1.25)           # asked 25 mm, landed 12.5 mm
+        res = ex.handler(sketch_name="S", distance=25, units="mm")
+        assert res["isError"] is True
+        msg = res["message"]
+        assert "12.5 mm" in msg and "25.0 mm" in msg
+        assert "Extrude1" in msg and "REMAINS in the timeline" in msg
+
+    def test_the_sign_is_part_of_the_comparison(self):
+        # A negative 'distance' reverses the extrude and the parameter keeps that sign, so a feature
+        # reading +2.5 cm for a requested -25 mm went the other way - a magnitude-only compare would
+        # pass it.
+        ef = _install([FakeSketch("S")])
+        ef.add = lambda inp: self._feature(2.5)
+        res = ex.handler(sketch_name="S", distance=-25, units="mm")
+        assert res["isError"] is True and "-25.0 mm" in res["message"]
+
+    def test_a_matching_negative_read_back_passes(self):
+        ef = _install([FakeSketch("S")])
+        ef.add = lambda inp: self._feature(-2.5)
+        out = _payload(ex.handler(sketch_name="S", distance=-25, units="mm"))
+        assert out["extruded"] is True
+
+    def test_an_expression_is_compared_against_what_it_evaluates_to(self):
+        ef = _install([FakeSketch("S")])
+        _with_units_mgr()                                  # a known expression evaluates to 2.5 cm
+        ef.add = lambda inp: self._feature(1.25)
+        res = ex.handler(sketch_name="S", distance="StockZ/2", units="mm")
+        assert res["isError"] is True
+        msg = res["message"]
+        assert "StockZ/2" in msg and "12.5 mm" in msg and "25.0 mm" in msg
+
+    def test_a_matching_expression_read_back_passes(self):
+        ef = _install([FakeSketch("S")])
+        _with_units_mgr()
+        ef.add = lambda inp: self._feature(2.5)
+        out = _payload(ex.handler(sketch_name="S", distance="StockZ/2", units="mm"))
+        assert out["distance"] == "StockZ/2"
+
+    def test_an_evaluation_that_answers_no_number_withholds_the_compare(self):
+        # The units engine answered something that is not a number, so nothing here can judge the
+        # feature's depth - treating that as zero would refuse an extrude that landed correctly.
+        ef = _install([FakeSketch("S")])
+        _with_units_mgr(types.SimpleNamespace(
+            evaluateExpression=lambda expr, units=None: "eleven", defaultLengthUnits="mm"))
+        ef.add = lambda inp: self._feature(2.5)
+        out = _payload(ex.handler(sketch_name="S", distance="StockZ/2", units="mm"))
+        assert out["extruded"] is True
+
+    def test_a_feature_reporting_no_distance_number_withholds_the_compare(self):
+        _install([FakeSketch("S")])                        # add() returns a bare FakeFeature
+        out = _payload(ex.handler(sketch_name="S", distance=25, units="mm"))
+        assert out["extruded"] is True
+
+    def test_a_through_all_extent_is_never_distance_compared(self):
+        # through_all carries no depth - 'distance' is only a direction sign there - so comparing it
+        # against one would refuse every through-all extrude.
+        ef = _install([FakeSketch("S")])
+        ef.add = lambda inp: self._feature(2.5)
+        out = _payload(ex.handler(sketch_name="S", distance=-25, units="mm", extent="through_all"))
+        assert out["extruded"] is True and out["extent"] == "through_all"
+
+    def test_a_two_side_extent_is_compared_side_by_side(self):
+        # A two-sided extrude splits its request across TWO extent definitions - side one on
+        # extentOne, side two on extentTwo, each reporting the magnitude ITS side was asked for
+        # (measured). So each side is judged against its OWN request: 25/10 mm reads 2.5/1.0 cm.
+        ef = _install([FakeSketch("S")])
+        ef.add = lambda inp: self._two_side_feature(2.5, 1.0)
+        out = _payload(ex.handler(sketch_name="S", extent="two_side", distance=25, distance2=10,
+                                  units="mm"))
+        assert out["extruded"] is True and out["extent"] == "two_side"
+
+    def test_side_one_reading_the_other_sides_number_errors(self):
+        # the swap the measurement rules out: extentOne reporting side TWO's depth. Comparing only
+        # against 'distance' as a whole, or exempting two_side, passes this.
+        ef = _install([FakeSketch("S")])
+        ef.add = lambda inp: self._two_side_feature(1.0, 2.5)
+        res = ex.handler(sketch_name="S", extent="two_side", distance=25, distance2=10, units="mm")
+        assert res["isError"] is True
+        msg = res["message"]
+        assert "side-one distance" in msg and "10.0 mm" in msg and "25.0 mm" in msg
+        assert "Extrude1" in msg and "REMAINS in the timeline" in msg
+
+    def test_side_two_is_compared_against_distance2_not_distance(self):
+        # side one lands correctly and side two does not - a compare that read both sides against
+        # 'distance' would pass side one and mis-name what side two was asked for
+        ef = _install([FakeSketch("S")])
+        ef.add = lambda inp: self._two_side_feature(2.5, 0.4)
+        res = ex.handler(sketch_name="S", extent="two_side", distance=25, distance2=10, units="mm")
+        assert res["isError"] is True
+        msg = res["message"]
+        assert "side-two distance" in msg and "4.0 mm" in msg and "10.0 mm" in msg
+
+    def test_a_two_side_feature_reporting_no_second_number_withholds_that_side(self):
+        # extentTwo absent (a bare fake feature carries only extentOne): the second side has nothing
+        # to judge, and treating that as zero would refuse an extrude that landed correctly
+        ef = _install([FakeSketch("S")])
+        ef.add = lambda inp: self._feature(2.5)
+        out = _payload(ex.handler(sketch_name="S", extent="two_side", distance=25, distance2=10,
+                                  units="mm"))
+        assert out["extruded"] is True
+        assert "Side-two distance was not depth-verified" in out["note"]
+        assert "reported no depth number" in out["note"]
+
+    def test_a_negative_two_side_request_is_left_uncompared(self):
+        # the measurement covers POSITIVE two-sided requests; what either parameter stores for a
+        # NEGATIVE one is not measured, so the side is not judged against an assumed convention.
+        # The feature here reports a POSITIVE magnitude for a negative request - the very thing an
+        # unmeasured convention would have to guess about.
+        ef = _install([FakeSketch("S")])
+        ef.add = lambda inp: self._two_side_feature(2.5, 1.0)
+        out = _payload(ex.handler(sketch_name="S", extent="two_side", distance=25, distance2=-10,
+                                  units="mm"))
+        assert out["extruded"] is True and out["distance2"] == -10.0
+
+    def test_a_skipped_side_is_disclosed_rather_than_reported_as_verified(self):
+        # a success that skipped a depth compare must not be byte-indistinguishable from one that
+        # PASSED it - every other success in this payload means the depth read back matched
+        ef = _install([FakeSketch("S")])
+        ef.add = lambda inp: self._two_side_feature(2.5, 1.0)
+        out = _payload(ex.handler(sketch_name="S", extent="two_side", distance=25, distance2=-10,
+                                  units="mm"))
+        assert "Side-two distance was not depth-verified" in out["note"]
+        assert "NEGATIVE two-sided request" in out["note"]
+        # side one WAS judged, so it is not disclosed as unverified
+        assert "Side-one distance was not depth-verified" not in out["note"]
+
+    def test_a_verified_two_side_extrude_discloses_nothing(self):
+        # the other side of the same boundary: both sides judged and matching means the note carries
+        # no unverified clause at all, so the clause reads as a real signal
+        ef = _install([FakeSketch("S")])
+        ef.add = lambda inp: self._two_side_feature(2.5, 1.0)
+        out = _payload(ex.handler(sketch_name="S", extent="two_side", distance=25, distance2=10,
+                                  units="mm"))
+        assert "not depth-verified" not in out["note"]
+
+    def test_an_unevaluable_blind_distance_is_disclosed_too(self):
+        # the SAME mechanism covers the single-sided compare: an evaluation that answered no number
+        # withheld the verdict, and that silence is disclosed rather than passed off as verified
+        ef = _install([FakeSketch("S")])
+        _with_units_mgr(types.SimpleNamespace(
+            evaluateExpression=lambda expr, units=None: "eleven", defaultLengthUnits="mm"))
+        ef.add = lambda inp: self._feature(2.5)
+        out = _payload(ex.handler(sketch_name="S", distance="StockZ/2", units="mm"))
+        assert "Distance was not depth-verified" in out["note"]
+        assert "answered no number" in out["note"]
+
+    def test_a_two_side_expression_side_names_itself_in_the_refusal(self):
+        ef = _install([FakeSketch("S")])
+        _with_units_mgr()                                  # a known expression evaluates to 2.5 cm
+        ef.add = lambda inp: self._two_side_feature(1.25, 1.0)
+        res = ex.handler(sketch_name="S", extent="two_side", distance="StockZ/2", distance2=10,
+                         units="mm")
+        assert res["isError"] is True
+        msg = res["message"]
+        assert "StockZ/2" in msg and "side-one distance" in msg and "12.5 mm" in msg
+
+    def test_side_two_quotes_its_OWN_expression_not_side_ones(self):
+        # Each side's refusal carries the raw request of THAT side: side one is a plain literal here
+        # and side two the expression, so a compare that reused side one's raw would drop the
+        # expression clause entirely and leave the caller with no idea which input to fix.
+        ef = _install([FakeSketch("S")])
+        _with_units_mgr()                                  # 'StockZ/2' evaluates to 2.5 cm
+        ef.add = lambda inp: self._two_side_feature(2.5, 1.0)   # side one ok, side two landed 10 mm
+        res = ex.handler(sketch_name="S", extent="two_side", distance=25, distance2="StockZ/2",
+                         units="mm")
+        assert res["isError"] is True
+        msg = res["message"]
+        assert "side-two distance" in msg and "StockZ/2" in msg
+        assert "10.0 mm" in msg and "25.0 mm" in msg
+
+    def test_a_two_side_difference_at_the_tolerance_passes_and_one_past_it_errors(self):
+        # the same 1e-6 cm band as the single-sided compare, on the SECOND side's own comparison
+        for got_cm, is_error in ((2e-6, False), (3e-6, True)):
+            ef = _install([FakeSketch("S")])
+            ef.add = lambda inp, v=got_cm: self._two_side_feature(1.0, v)
+            res = ex.handler(sketch_name="S", extent="two_side", distance=1, distance2=1e-6,
+                             units="cm")
+            assert res["isError"] is is_error, got_cm
+
+    def test_a_symmetric_extent_is_compared_against_the_per_side_request(self):
+        # A symmetric extent reports the per-SIDE number that was requested, so 25 mm each side
+        # reads 2.5 cm - the request round-trips and the extrude passes.
+        ef = _install([FakeSketch("S")])
+        ef.add = lambda inp: self._feature(2.5)
+        out = _payload(ex.handler(sketch_name="S", distance=25, units="mm", symmetric=True))
+        assert out["extruded"] is True and out["symmetric"] is True
+
+    def test_a_symmetric_extent_reading_the_full_length_errors_naming_both_values(self):
+        # 5.0 cm for a 25 mm per-side request is the whole length, not the side - a depth that
+        # disagrees with the request, and exempting symmetric from the compare would pass it.
+        ef = _install([FakeSketch("S")])
+        ef.add = lambda inp: self._feature(5.0)
+        res = ex.handler(sketch_name="S", distance=25, units="mm", symmetric=True)
+        assert res["isError"] is True
+        msg = res["message"]
+        assert "50.0 mm" in msg and "25.0 mm" in msg
+        assert "Extrude1" in msg and "REMAINS in the timeline" in msg
+
+    def test_a_difference_at_the_tolerance_passes_and_one_past_it_errors(self):
+        # The exact boundary of the 1e-6 cm band. 2e-6 - 1e-6 is EXACT in binary floating point, so
+        # the equal case really sits on the boundary rather than rounding under it.
+        for got_cm, is_error in ((2e-6, False), (3e-6, True)):
+            ef = _install([FakeSketch("S")])
+            ef.add = lambda inp, v=got_cm: self._feature(v)
+            res = ex.handler(sketch_name="S", distance=1e-6, units="cm")
+            assert res["isError"] is is_error, got_cm
 
 
 # ── cross-component cut read-back: the footgun warning + the honest 'component' field ──────────────

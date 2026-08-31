@@ -36,6 +36,15 @@ _MOTION = {
     6: ("ball", 3),
 }
 
+# The default cap on each bounded array. Every one is read by the handler signature below AND
+# interpolated into its own max_* input description, so the number an agent is told is the number
+# the handler applies when the agent names none.
+_MAX_OCCURRENCES_DEFAULT = 50
+_MAX_JOINTS_DEFAULT = 100
+_MAX_JOINT_ORIGINS_DEFAULT = 50
+_MAX_RELATIONS_DEFAULT = 50
+_MAX_CONTACTS_DEFAULT = 50
+_MAX_ALL_OCCURRENCES_DEFAULT = 100
 
 
 def _occ_record(occ, inv_k, occ_joints, include_joints, full_path=False):
@@ -78,18 +87,41 @@ def _all_occurrence_rows(walk, inv_k, cap, occ_joints, include_joints):
 
 
 def _health(obj):
-    """(healthy: bool, message) for an entity with a healthState, over the shared classifier
-    (_assert.compute_failure): only the ERROR and WARNING states are unhealthy - the SAME
+    """(healthy: True / False / None, message) for one entity's compute state, over the shared
+    classifier (_assert.compute_failure): only the ERROR and WARNING states are unhealthy - the SAME
     classification as _common.timeline_health, so the probe and design_get agree on one design.
     Healthy, Suppressed, and any other rollup state count as healthy: a collapsed TimelineGroup
     (Fusion wraps one around an inserted component) reports an 'unknown' state that is not a compute
     failure - flagging it is a false alarm. The message is condensed by the same shared reader, so a
-    republished failure is a whole sentence rather than a raw prefix of Fusion's repeating blob."""
-    failure = _assert.compute_failure(obj)
-    if failure is None:
-        return True, None
-    _label, msg = failure
-    return False, (msg or "compute failed / warning")
+    republished failure is a whole sentence rather than a raw prefix of Fusion's repeating blob.
+
+    The entity AND its timeline item are BOTH asked, feature-first - _assert.compute_state, the ONE
+    home for that pairing, which workspace_orient's orientation rollup and joint_create's read-back
+    share, so the three cannot reach different verdicts on one entity. MEASURED: an AsBuiltJoint
+    carries neither healthState nor errorOrWarningMessage (AttributeError on both) while its
+    TimelineObject answers both, so an as-built row reports a state that was read rather than one
+    assumed from an absent attribute.
+
+    None is the verdict only when NEITHER source answers a state ('unknown'). An unread state is not
+    a clean bill of health, so the flag is WITHHELD there - a caller must branch on `is False` /
+    `is True`, never on truthiness."""
+    state, failure = _assert.compute_state(obj)
+    if state == "broken":
+        _label, msg = failure
+        return False, (msg or "compute failed / warning")
+    return (True if state == "healthy" else None), None
+
+
+def _health_fields(obj):
+    """The row fields stating one entity's compute health: {'healthy': True}, {'healthy': False,
+    'error': msg}, or {'health_unknown': True} - the last WITHOUT a healthy key, so a row whose
+    state never read cannot be mistaken for one that read fine."""
+    healthy, msg = _health(obj)
+    if healthy is None:
+        return {"health_unknown": True}
+    if healthy:
+        return {"healthy": True}
+    return {"healthy": False, "error": msg}
 
 
 def _limit_facts(lims, to_out):
@@ -135,51 +167,129 @@ def _value_now(j):
     return out or None
 
 
-def _joint_frame(j, inv_k):
-    """The joint's own frame in WORLD coordinates - {origin (display units), z_axis, x_axis, y_axis} -
-    from geometryOrOriginOne, falling back to geometryOrOriginTwo, and None when neither reads.
+def _jo_in_context(jo, occ):
+    """A joint's JointOrigin reference as THAT HALF of the joint sees it, or None when the instance
+    cannot be re-established.
+
+    A joint's STORED reference reads assemblyContext None even when the joint was built from a
+    createForAssemblyContext proxy (measured), and the context-stripped native answers the FIRST
+    placement's world point for a component placed several times - on a component placed at (5,0,0)
+    and again turned 90 deg at (0,10,0), the native read (6,1,2) for a joint on the second instance,
+    whose own point is (-1,11,2). The occurrence the joint names on this half is what puts the
+    instance back. This is not jo_assembly_proxy, which SEARCHES for a single placement and refuses
+    a multi-placed component - the instance is already named here, so there is nothing to refuse."""
+    if safe(lambda: jo.assemblyContext) is not None or occ is None:
+        return jo
+    return safe(lambda: jo.createForAssemblyContext(occ))
+
+
+def _geometry_component(design, occ):
+    """The component a JointGeometry's axis vectors are expressed in: the component `occ` places, or
+    the ROOT when that side of the joint names no occurrence - a root-owned geometry's own frame IS
+    world. None when the occurrence reads but its component does not, which leaves the axes
+    unpublished rather than published in an unknown frame."""
+    if occ is None:
+        return safe(lambda: design.rootComponent)
+    return safe(lambda: occ.component)
+
+
+def _geometry_frame(design, g, comp, occ, inv_k):
+    """One JointGeometry's frame - {origin (display units), z_axis, x_axis, y_axis} - read through
+    `occ`'s placement of `comp`, or None when the reference answers neither an origin nor an axis.
+
+    A JointGeometry carries neither parentComponent nor assemblyContext (measured), so `comp` and
+    `occ` have to be supplied by whoever knows which instance this geometry stands for. Its AXES are
+    component-LOCAL and are lifted; its ORIGIN needs no lift because the STORED reference holds the
+    WORLD point of the instance THAT reference names. The property is not instance-invariant - built
+    from Blk:1's proxy an origin reads (7, 0.5, 0.5), from Blk:2's (-0.5, 12, 0.5), and from the
+    NATIVE face it reads Blk:1's point - so it is the stored reference, not the read, that carries
+    the instance. That is why the origin survives a placement that does not resolve, where a
+    JointOrigin's position does not."""
+    z, x, y = _world_axes(design, g, comp, occ)
+    o = safe(lambda: g.origin)
+    origin = None
+    if o is not None:
+        c = [_common.measured(lambda ax=ax: getattr(o, ax), inv_k, 3) for ax in ("x", "y", "z")]
+        origin = None if None in c else c
+    if origin is None and not (z or x or y):
+        return None
+    return {"origin": origin, "z_axis": z, "x_axis": x, "y_axis": y}
+
+
+def _as_built_source(j):
+    """(the ONE JointGeometry an as-built joint holds, the occurrence it is read through, that
+    occurrence's component), or None for a joint carrying no such geometry.
+
+    Read by the presence of `geometry`, which MEASURED tells the two classes apart exactly: an
+    AsBuiltJoint exposes `geometry` and neither geometryOrOriginOne nor Two, a Joint the reverse.
+    So an as-built joint has ONE frame, not two halves to pair - and the instance its axes belong to
+    is named by the geometry's own entity, not by occurrenceOne. On a joint between BlkA:1 (identity)
+    and BlkB:1 (turned 90 deg about Z), geometry.entityOne.assemblyContext read 'BlkB:1' and lifting
+    through it published (0, 1, 0) - the face's own world normal, and the same vector
+    jointMotion.rotationAxisVector reports - where the occurrenceOne pairing published the unlifted
+    (1, 0, 0). With no context on the entity, its owning component's single placement answers
+    (_joints.component_world_matrix), and several placements answer with no axes at all."""
+    g = safe(lambda: j.geometry)
+    if g is None:
+        return None
+    ent = safe(lambda: g.entityOne)
+    occ = safe(lambda: ent.assemblyContext)
+    comp = safe(lambda: occ.component) if occ is not None else _inputs.entity_component(ent)
+    return g, occ, comp
+
+
+def _joint_frame(design, j, inv_k):
+    """The joint's own frame - {origin (display units), z_axis, x_axis, y_axis} - from
+    geometryOrOriginOne, falling back to geometryOrOriginTwo, and None when neither reads. An
+    as-built joint answers off its single `geometry` instead (_as_built_source).
 
     The frame's Z is primaryAxisVector (X is secondary, Y is third), and that Z is the direction the
-    joint's OFFSET drives along - the fact a caller otherwise has to probe for."""
-    for attr in ("geometryOrOriginOne", "geometryOrOriginTwo"):
+    joint's OFFSET drives along - the fact a caller otherwise has to probe for. BOTH input kinds
+    report their axes in their owning component's frame, so each side's go through _world_axes and
+    the row is world - the same JointOrigin reaches the joint_origins slice too, and one payload
+    must not describe one frame two ways."""
+    as_built = _as_built_source(j)
+    if as_built is not None:
+        g, occ, comp = as_built
+        return _geometry_frame(design, g, comp, occ, inv_k)
+    for attr, occ_attr in (("geometryOrOriginOne", "occurrenceOne"),
+                           ("geometryOrOriginTwo", "occurrenceTwo")):
         g = safe(lambda a=attr: getattr(j, a))
         if g is None:
             continue
-        z = _geom.axis_vec(safe(lambda g=g: g.primaryAxisVector))
-        x = _geom.axis_vec(safe(lambda g=g: g.secondaryAxisVector))
-        y = _geom.axis_vec(safe(lambda g=g: g.thirdAxisVector))
-        if _joints.is_joint_origin(g):
-            # A JointOrigin carries the three axis vectors but NO origin of its own - its position is
-            # the base anchor plus its offsetX/Y/Z, which _jo_world_origin (the JO slice's read)
-            # already assembles.
-            origin = _jo_world_origin(g, x, y, z, inv_k)
-        else:
-            o = safe(lambda g=g: g.origin)
-            origin = None
-            if o is not None:
-                c = [_common.measured(lambda ax=ax: getattr(o, ax), inv_k, 3)
-                     for ax in ("x", "y", "z")]
-                origin = None if None in c else c
-        if origin is None and not (z or x or y):
+        # The occurrence THIS half is anchored to - the joint's own statement of which instance the
+        # half stands for, and the placement both frame kinds are read through.
+        occ = safe(lambda a=occ_attr: getattr(j, a))
+        if not _joints.is_joint_origin(g):
+            frame = _geometry_frame(design, g, _geometry_component(design, occ), occ, inv_k)
+            if frame is None:
+                continue
+            return frame
+        g = _jo_in_context(g, occ)
+        if g is None:
             continue
-        return {"origin": origin, "z_axis": z, "x_axis": x, "y_axis": y}
+        z, x, y = _world_axes(design, g, safe(lambda g=g: g.parentComponent), occ)
+        # A JointOrigin carries the three axis vectors but NO origin of its own - its position is
+        # the base anchor plus its offsetX/Y/Z, which _jo_world_origin (the JO slice's read)
+        # already assembles. That position is an INSTANCE read, so it stands or falls with the
+        # axes: with no placement resolved it would name whichever instance the reference
+        # happens to answer for, beside axes this row declines to state.
+        if not (z or x or y):
+            continue
+        return {"origin": _jo_world_origin(g, x, y, z, inv_k),
+                "z_axis": z, "x_axis": x, "y_axis": y}
     return None
 
 
-def _joint_record(j, inv_k):
+def _joint_record(design, j, inv_k):
     mt = safe(lambda: j.jointMotion.jointType)
     friendly, dof = _MOTION.get(mt, ("?", None))
-    healthy, msg = _health(j)
-    rec = {
-    "name": safe(lambda: j.name),
-    "type": friendly,
-    "dof": dof,
-    "healthy": healthy,
-    "occurrence_one": safe(lambda: j.occurrenceOne.name) if safe(lambda: j.occurrenceOne) else None,
-    "occurrence_two": safe(lambda: j.occurrenceTwo.name) if safe(lambda: j.occurrenceTwo) else None,
-    }
-    if not healthy:
-        rec["error"] = msg
+    rec = {"name": safe(lambda: j.name), "type": friendly, "dof": dof}
+    rec.update(_health_fields(j))
+    rec["occurrence_one"] = (safe(lambda: j.occurrenceOne.name)
+                             if safe(lambda: j.occurrenceOne) else None)
+    rec["occurrence_two"] = (safe(lambda: j.occurrenceTwo.name)
+                             if safe(lambda: j.occurrenceTwo) else None)
     # Suppression is DISCLOSED, not folded into healthy (a suppressed joint is inert, not broken;
     # measured: it positioned nothing while every field read plain-healthy). BOTH flags OR'd
     # (live-verified: Joint.isSuppressed keeps reading False when the suppression was set on the
@@ -197,7 +307,7 @@ def _joint_record(j, inv_k):
     now = _value_now(j)
     if now:
         rec["value_now"] = now
-    frame = _joint_frame(j, inv_k)
+    frame = _joint_frame(design, j, inv_k)
     if frame:
         rec["frame"] = frame
     return rec
@@ -238,8 +348,10 @@ def _jo_instances(design, jo, comp):
     nm = safe(lambda: jo.name) or "?"
     # same_component, not `is` or a name compare: component wrappers are never identity-stable, and
     # a NAME test calls a sub-component that happens to share the root's name the root - which hands
-    # back a bare reference for a JO that needs its occurrence path to be addressable.
-    if _common.same_component(comp, root):
+    # back a bare reference for a JO that needs its occurrence path to be addressable. `is True`
+    # only: an unproven owner takes the occurrence walk, which yields the qualified references that
+    # exist and falls back to the bare name when the component is placed nowhere.
+    if _common.same_component(comp, root) is True:
         yield nm, jo
         return
     occs = list(safe(lambda: root.allOccurrencesByComponent(comp)) or []) if root else []
@@ -252,12 +364,43 @@ def _jo_instances(design, jo, comp):
         yield (f"{fp}:{nm}" if fp else nm), proxy
 
 
+def _world_axes(design, frame, comp, context_occ):
+    """A joint frame's (Z, X, Y) axis vectors in WORLD, each an [x,y,z] unit list or None.
+
+    A JointOrigin AND a JointGeometry both report their axis vectors in the OWNING COMPONENT's
+    frame - MEASURED on a component turned 30 deg about Z: the JO reads (1,0,0) for the secondary
+    axis natively and through an assembly proxy alike, and a JointGeometry on a face whose local
+    normal is (1,0,0) reads that same (1,0,0) as its primary while the face's world normal is
+    (0.866, 0.5, 0). So the world heading these rows carry holds only once the component's placement
+    is applied. `context_occ` is the instance THIS row stands for, which is what picks one placement
+    out of several. Only DIRECTIONS are transformed, so the placement's translation never enters. An
+    axis that cannot be expressed in world reads None and its key is dropped, rather than being
+    published component-local under a world name."""
+    m = _joints.component_world_matrix(design, comp, context_occ)
+    out = []
+    for attr in ("primaryAxisVector", "secondaryAxisVector", "thirdAxisVector"):
+        moved = safe(lambda a=attr: getattr(frame, a).copy()) if m is not None else None
+        if moved is None or not safe(lambda mv=moved: mv.transformBy(m)):
+            out.append(None)
+            continue
+        out.append(_geom.axis_vec(moved))
+    return out[0], out[1], out[2]
+
+
 def _jo_world_origin(jo, xa, ya, za, inv_k):
     """The JO frame's world origin (units-scaled): the base geometry origin PLUS its offsetX/Y/Z
     parameters projected along the frame's X/Y/Z axes. A coordinate-anchored JO carries its position in
     those offsets (geometry.origin stays at the base anchor point, e.g. the model origin), so reading
     geometry.origin ALONE under-reports - verified live: a JO offset +45mm in Z reads geometry.origin
-    (0,0,0). offsetX/Y/Z default to 0, so a face/sketch/bbox-anchored JO reports geometry.origin as-is."""
+    (0,0,0). offsetX/Y/Z default to 0, so a face/sketch/bbox-anchored JO reports geometry.origin as-is.
+
+    geometry.origin is read in WORLD (measured: a JO on a component placed 50 mm out in X reads
+    (5.0, 0, 0) cm from the native JO and from its proxy alike), so the axes handed in must be world
+    too or the sum mixes two frames: a 20 mm offsetX projected on the component-LOCAL (1, 0, 0)
+    against that world base lands at (70, 0, 0) mm, 10 mm from where the frame's own axes put it
+    (67.32, 10.0, 0). _world_axes is the read that supplies them, and it answers None for an axis
+    it cannot place in world - so a NONZERO offset along such an axis has no direction to run along
+    and NO position is published: the world basis substituted there is the same mixed-frame sum."""
     o = safe(lambda: jo.geometry.origin)
     if o is None:
         return None
@@ -265,25 +408,30 @@ def _jo_world_origin(jo, xa, ya, za, inv_k):
     dx = safe(lambda: jo.offsetX.value, 0.0) or 0.0     # cm along the frame X (secondary axis)
     dy = safe(lambda: jo.offsetY.value, 0.0) or 0.0     # cm along the frame Y (third axis)
     dz = safe(lambda: jo.offsetZ.value, 0.0) or 0.0     # cm along the frame Z (primary axis)
-    xa = xa or [1.0, 0.0, 0.0]
-    ya = ya or [0.0, 1.0, 0.0]
-    za = za or [0.0, 0.0, 1.0]
+    if any(d and axis is None for d, axis in ((dx, xa), (dy, ya), (dz, za))):
+        return None
+    # Every offset with no axis is ZERO by the guard above, so a zero vector contributes exactly what
+    # that offset does - nothing - and no basis is invented for a direction nobody read.
+    xa = xa or [0.0, 0.0, 0.0]
+    ya = ya or [0.0, 0.0, 0.0]
+    za = za or [0.0, 0.0, 0.0]
     wx = ox + dx * xa[0] + dy * ya[0] + dz * za[0]
     wy = oy + dx * xa[1] + dy * ya[1] + dz * za[1]
     wz = oz + dx * xa[2] + dy * ya[2] + dz * za[2]
     return [round(wx * inv_k, 3), round(wy * inv_k, 3), round(wz * inv_k, 3)]
 
 
-def _jo_row(jo, ref, comp, inv_k, consumers):
+def _jo_row(design, jo, ref, comp, inv_k, consumers):
     """One joint_origins row: name + the qualified reference (feed to joint_create / joint_at_geometry /
     cam_edit_setup wcs), owning component, world position (units-scaled) + frame axes (Z/X/Y unit
-    vectors, dimensionless), the joints that consume it, and a HANDLE (entityToken; round-trips through
-    JointOriginRef)."""
+    vectors in WORLD, dimensionless), the joints that consume it, and a HANDLE (entityToken;
+    round-trips through JointOriginRef). The axes are the same space as world_position and as the
+    sibling occurrence rows' x_axis/y_axis/z_axis, so one payload describes one frame one way - and
+    where no placement answers for the owning component both keys are absent together, since an
+    offset published on a frame that could not be placed is the mixed-frame sum in another form."""
     nm = safe(lambda: jo.name)
     row = {"name": nm, "qualified_name": ref, "component": safe(lambda: comp.name)}
-    z = _geom.axis_vec(safe(lambda: jo.primaryAxisVector))
-    x = _geom.axis_vec(safe(lambda: jo.secondaryAxisVector))
-    y = _geom.axis_vec(safe(lambda: jo.thirdAxisVector))
+    z, x, y = _world_axes(design, jo, comp, safe(lambda: jo.assemblyContext))
     wp = _jo_world_origin(jo, x, y, z, inv_k)
     if wp is not None:
         row["world_position"] = wp
@@ -305,7 +453,7 @@ def _joint_origin_rows(design, inv_k, cap):
         for ref, ctx_jo in _jo_instances(design, jo, comp):
             total += 1
             if len(rows) < cap:
-                rows.append(_jo_row(ctx_jo, ref, comp, inv_k, consumers))
+                rows.append(_jo_row(design, ctx_jo, ref, comp, inv_k, consumers))
     return rows, total
 
 
@@ -330,28 +478,22 @@ def _motion_link_row(ml, comp):
     link between two DOF of the SAME joint (the API returns null there - it is not a read failure).
     value_one/value_two are the link's own ModelParameters in Fusion's internal units (cm / radians);
     their RATIO is what the coupling means."""
-    healthy, msg = _health(ml)
     row = {"name": safe(lambda: ml.name), "component": safe(lambda: comp.name),
            "joint_one": safe(lambda: ml.jointOne.name),
            "joint_two": safe(lambda: ml.jointTwo.name),
            "value_one": safe(lambda: ml.valueOne.value),
            "value_two": safe(lambda: ml.valueTwo.value),
            "reversed": bool(safe(lambda: ml.isReversed, False)),
-           "suppressed": bool(safe(lambda: ml.isSuppressed, False)),
-           "healthy": healthy}
-    if not healthy:
-        row["error"] = msg
+           "suppressed": bool(safe(lambda: ml.isSuppressed, False))}
+    row.update(_health_fields(ml))
     return row
 
 
 def _constraint_row(con, comp):
-    healthy, msg = _health(con)
     row = {"name": safe(lambda: con.name), "component": safe(lambda: comp.name),
            "relationship_count": safe(lambda: con.geometricRelationships.count, 0),
-           "suppressed": bool(safe(lambda: con.isSuppressed, False)),
-           "healthy": healthy}
-    if not healthy:
-        row["error"] = msg
+           "suppressed": bool(safe(lambda: con.isSuppressed, False))}
+    row.update(_health_fields(con))
     return row
 
 
@@ -426,9 +568,12 @@ def _normalize_include(include):
 
 
 def handler(units: str = "mm", include=None, include_joints: bool = True,
-            max_occurrences: int = 50, max_joints: int = 100, max_joint_origins: int = 50,
-            max_relations: int = 50, max_contacts: int = 50,
-            max_all_occurrences: int = 100) -> dict:
+            max_occurrences: int = _MAX_OCCURRENCES_DEFAULT,
+            max_joints: int = _MAX_JOINTS_DEFAULT,
+            max_joint_origins: int = _MAX_JOINT_ORIGINS_DEFAULT,
+            max_relations: int = _MAX_RELATIONS_DEFAULT,
+            max_contacts: int = _MAX_CONTACTS_DEFAULT,
+            max_all_occurrences: int = _MAX_ALL_OCCURRENCES_DEFAULT) -> dict:
     """See TOOL_DESCRIPTION."""
     k = scale(units)
     if k is None:
@@ -454,7 +599,7 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
     joints = []
     occ_joints = {}
     for j in _joints.all_joints(design):
-        rec = _joint_record(j, inv_k)
+        rec = _joint_record(design, j, inv_k)
         joints.append(rec)
         for key in ("occurrence_one", "occurrence_two"):
             nm = rec.get(key)
@@ -505,7 +650,11 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
     # (e.g. its axis doesn't match the geometry, over-constraining the assembly). Surface that
     # here so the probe doesn't report a broken assembly as fine. Also walk the timeline for any
     # errored/warning feature (not just joints).
-    broken_joints = [j["name"] for j in joints if not j.get("healthy", True)]
+    # `is False` / `.get("health_unknown")`, never truthiness: a row whose compute state NEITHER the
+    # entity nor its timeline item answered carries no healthy key at all, and reading that absence
+    # as broken would raise a false alarm exactly where the row declines to make a claim.
+    broken_joints = [j["name"] for j in joints if j.get("healthy") is False]
+    health_unknown_joints = [j["name"] for j in joints if j.get("health_unknown")]
     suppressed_joints = [j["name"] for j in joints if j.get("is_suppressed")]
     # Relation health is folded into the HEADLINE flag, not just the opt-in relations slice -
     # measured: a FAILED assembly constraint (healthy:false under include=['relations']) left
@@ -515,13 +664,13 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
     for kind in ("rigid_group", "motion_link", "constraint"):
         for rel, _owner in _relations.all_relations(design, kind):
             r_ok, r_msg = _health(rel)
-            if not r_ok:
+            if r_ok is False:
                 broken_relations.append({"kind": kind, "name": safe(lambda rel=rel: rel.name),
                                          "error": r_msg})
     timeline_problems = []
     for o in _common.iter_collection(safe(lambda: design.timeline)):
         healthy, msg = _health(o)
-        if not healthy:
+        if healthy is False:
             timeline_problems.append({"name": safe(lambda o=o: o.name), "error": msg})
 
     # A ROLLED-BACK marker means features after it (downstream joints included) are NOT in the current
@@ -693,6 +842,14 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
                         "AFTER it (downstream joints included) are ROLLED BACK and reverted to home, so "
                         "the joint state here is INCOMPLETE. Run design_recompute (or roll the marker to "
                         "the end) to restore the full model, then re-read.")
+    if health_unknown_joints:
+        # is_healthy is a verdict over the rows that HAVE one; a row that withheld its flag is not
+        # counted broken, so the count it is silent about is said out loud here.
+        out["note"] += (
+            f" {len(health_unknown_joints)} joint(s) publish NO healthy flag "
+            f"({', '.join(health_unknown_joints[:8])}): neither the joint nor its timeline item "
+            "answered a compute state, so those rows carry health_unknown:true and is_healthy "
+            "makes no claim about them.")
     if joints_broke_but_timeline_clean:
         out["health_may_be_stale"] = True
         out["note"] += (" WARNING: broken_joints is non-empty but the TIMELINE shows no errored feature - "
@@ -740,12 +897,12 @@ tool = (
     .add_input_property("include", {"type": ["array", "string"],
             "description": "Deeper slice: 'all_occurrences' (every occurrence, nested ones included, with its full path), 'joint_origins' (each Joint Origin WCS frame + handle), 'relations' (rigid groups / motion links / constraints), 'contacts' (contact sets + the contact-analysis flags). Omit for kinematic state only."})
     .add_input_property("include_joints", {"type": "boolean", "description": "List joints + annotate occurrences with their joints (default true)."})
-    .add_input_property("max_occurrences", {"type": "integer", "description": "Cap on the 'occurrences' array returned (default 50)."})
-    .add_input_property("max_joints", {"type": "integer", "description": "Cap on the 'joints' array returned (default 100)."})
-    .add_input_property("max_joint_origins", {"type": "integer", "description": "Cap on the 'joint_origins' array (default 50)."})
-    .add_input_property("max_relations", {"type": "integer", "description": "Cap on each 'relations' list (default 50)."})
-    .add_input_property("max_contacts", {"type": "integer", "description": "Cap on the 'contacts' list (default 50)."})
-    .add_input_property("max_all_occurrences", {"type": "integer", "description": "Cap on the 'all_occurrences' list (default 100)."})
+    .add_input_property("max_occurrences", {"type": "integer", "description": f"Cap on the 'occurrences' array returned (default {_MAX_OCCURRENCES_DEFAULT})."})
+    .add_input_property("max_joints", {"type": "integer", "description": f"Cap on the 'joints' array returned (default {_MAX_JOINTS_DEFAULT})."})
+    .add_input_property("max_joint_origins", {"type": "integer", "description": f"Cap on the 'joint_origins' array (default {_MAX_JOINT_ORIGINS_DEFAULT})."})
+    .add_input_property("max_relations", {"type": "integer", "description": f"Cap on each 'relations' list (default {_MAX_RELATIONS_DEFAULT})."})
+    .add_input_property("max_contacts", {"type": "integer", "description": f"Cap on the 'contacts' list (default {_MAX_CONTACTS_DEFAULT})."})
+    .add_input_property("max_all_occurrences", {"type": "integer", "description": f"Cap on the 'all_occurrences' list (default {_MAX_ALL_OCCURRENCES_DEFAULT})."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)

@@ -1387,6 +1387,20 @@ class TestOnPathToObject:
         assert out["landed"] == {"distance": "70.00 mm", "offset": "10.00 mm"}
         assert out["model_parameters"] == {"distance": "d3", "offset": "d4"}
 
+    def test_an_on_path_plane_is_not_offset_compared(self, monkeypatch):
+        # The offset read-back compare is scoped to mode='offset'. An on_path plane stores its
+        # placement as a 'distance' parameter with the offset as a SEPARATE one, and no measurement
+        # backs judging those against this request - so an offset parameter reading 99 mm for a
+        # 10 mm request is PUBLISHED, not refused.
+        comp = _install()
+        _stub_path(monkeypatch)
+        self._point_handle(monkeypatch)
+        comp.constructionPlanes.result_definition = _path_defn(
+            _param("d3", "70.00 mm", value=7.0), offset=_param("d4", "99.00 mm", value=9.9))
+        out = _payload(cn.handler(kind="plane", mode="on_path", path="<h>", to_object="<pt>",
+                                  offset=10, units="mm"))
+        assert out["landed"]["offset"] == "99.00 mm"
+
     def test_a_null_offset_parameter_is_not_published(self, monkeypatch):
         # a plane built by distance carries definition.offset = None - a null must not be reported
         # as a landed reading
@@ -1665,6 +1679,98 @@ class TestOffsetModelParameter:
         _install()
         out = _payload(cn.handler(kind="plane", plane="xy", offset=5))
         assert "model_parameters" not in out
+
+
+def _plane_with_offset_value(comp, value_cm, dname="d5"):
+    """Make constructionPlanes.add() return a plane whose ConstructionPlaneOffsetDefinition reports
+    `value_cm` on its offset ModelParameter - the SIGNED internal-cm read the compare gates on."""
+    param = type("MP", (), {"name": dname, "value": value_cm})()
+    defn = type("Def", (), {"offset": param})()
+    comp.constructionPlanes.add = lambda inp: type(
+        "O", (), {"name": "Datum", "geometry": None, "definition": defn})()
+
+
+class TestOffsetReadBack:
+    """The offset the CREATED plane REPORTS, against the number the units engine evaluated the
+    request to. Fusion hands back a plane object either way, so the definition's own offset
+    ModelParameter is the only thing that can contradict a datum that landed at a depth nobody asked
+    for - and it reads SIGNED internal cm (measured: a -12 mm request reads -1.2), so the sign is
+    part of the comparison rather than a magnitude match."""
+
+    def test_a_matching_read_back_passes_silently(self):
+        comp = _install()
+        _plane_with_offset_value(comp, 1.5)
+        out = _payload(cn.handler(kind="plane", plane="xy", offset=15, units="mm"))
+        assert out["created"] is True and out["offset"] == 15.0
+
+    def test_a_mismatched_read_back_errors_naming_both_values(self):
+        comp = _install()
+        _plane_with_offset_value(comp, 0.75)               # asked 15 mm, landed 7.5 mm
+        res = cn.handler(kind="plane", plane="xy", offset=15, units="mm")
+        assert res["isError"] is True
+        msg = res["message"]
+        assert "7.5 mm" in msg and "15.0 mm" in msg
+        assert "'Datum'" in msg and "still in the design" in msg
+
+    def test_the_sign_is_part_of_the_comparison(self):
+        # the parameter keeps the requested SIGN, so a plane reading +1.2 cm for a -12 mm request
+        # sits on the wrong side of its base - a magnitude-only compare would pass it
+        comp = _install()
+        _plane_with_offset_value(comp, 1.2)
+        res = cn.handler(kind="plane", plane="xy", offset=-12, units="mm")
+        assert res["isError"] is True and "-12.0 mm" in res["message"]
+
+    def test_a_matching_negative_read_back_passes(self):
+        comp = _install()
+        _plane_with_offset_value(comp, -1.2)
+        out = _payload(cn.handler(kind="plane", plane="xy", offset=-12, units="mm"))
+        assert out["created"] is True
+
+    def test_an_expression_is_compared_against_what_it_evaluates_to(self):
+        comp = _install()
+        _with_units_mgr()                       # 'StockZ/2' evaluates to 0.25 cm under mm
+        _plane_with_offset_value(comp, 0.5)     # the plane landed at 5 mm instead
+        res = cn.handler(kind="plane", plane="xy", offset="StockZ/2", units="mm")
+        assert res["isError"] is True
+        msg = res["message"]
+        assert "StockZ/2" in msg and "5.0 mm" in msg and "2.5 mm" in msg
+
+    def test_a_plane_reporting_no_offset_number_withholds_the_compare(self):
+        # the definition carries the parameter's NAME but no readable value - nothing to judge the
+        # datum by, and treating that as zero would refuse an offset plane that landed correctly
+        comp = _install()
+        _plane_with_offset_param(comp)
+        out = _payload(cn.handler(kind="plane", plane="xy", offset=15, units="mm"))
+        assert out["created"] is True and out["model_parameters"]["offset"] == "d5"
+
+    def test_a_boolean_offset_is_not_a_distance(self):
+        # isinstance(True, int) is True, so a guard that only excludes non-numbers turns an
+        # offset.value answering True into exactly 1.0 cm - which MATCHES a 10 mm request and passes
+        # the very comparison that exists to catch a wrong offset. The twin both siblings pin.
+        comp = _install()
+        _plane_with_offset_value(comp, True)
+        out = _payload(cn.handler(kind="plane", plane="xy", offset=10, units="mm"))
+        assert out["created"] is True                      # compare withheld, not read as 1.0 cm
+        assert cn._offset_value_cm(comp.constructionPlanes.add(None)) is None
+
+    def test_an_evaluation_that_answers_no_number_withholds_the_compare(self):
+        # the units engine answered something that is not a length, so nothing here can judge the
+        # datum's offset - the other half of the same gate
+        comp = _install()
+        _with_units_mgr(type("M", (), {"evaluateExpression": lambda self, e, u=None: "eleven",
+                                       "defaultLengthUnits": "mm"})())
+        _plane_with_offset_value(comp, 9.9)
+        out = _payload(cn.handler(kind="plane", plane="xy", offset="StockZ/2", units="mm"))
+        assert out["created"] is True
+
+    def test_a_difference_at_the_tolerance_passes_and_one_past_it_errors(self):
+        # The exact boundary of the 1e-6 cm band. 2e-6 - 1e-6 is EXACT in binary floating point, so
+        # the equal case really sits on the boundary rather than rounding under it.
+        for landed_cm, is_error in ((2e-6, False), (3e-6, True)):
+            comp = _install()
+            _plane_with_offset_value(comp, landed_cm)
+            res = cn.handler(kind="plane", plane="xy", offset=1e-6, units="cm")
+            assert res["isError"] is is_error, landed_cm
 
 
 # ── the created datum's HANDLE ──────────────────────────────────────────────────────────────────

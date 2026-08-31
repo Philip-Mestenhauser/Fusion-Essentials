@@ -12,17 +12,11 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
-from ._cam_common import get_cam, resolve_cam_node, walk_cam_tree, operations_under, find_setup
+from ._cam_common import get_cam, resolve_cam_node, operation_nodes, operations_under, find_setup
 
 app = adsk.core.Application.get()
 
 _ACTIONS = ("show", "hide", "isolate", "show_folder", "hide_all", "list")
-
-
-def _operation_nodes(cam):
-    """Every operation in the document as CamNodes (setup name + object) - the shared walk's
-    operation projection, used by list/isolate/hide_all."""
-    return [n for n in walk_cam_tree(cam) if n.kind == "operation"]
 
 
 def _set_bulb(o, on):
@@ -78,7 +72,7 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
 
     if action == "list":
         rows = []
-        for node in _operation_nodes(cam):
+        for node in operation_nodes(cam):
             o = node.obj
             rows.append({"setup": node.setup, "op": node.name,
         "has_toolpath": safe(lambda o=o: o.hasToolpath),
@@ -90,7 +84,7 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
     if action == "hide_all":
         n = 0
         failed = 0
-        for node in _operation_nodes(cam):
+        for node in operation_nodes(cam):
             o = node.obj
             if safe(lambda o=o: o.hasToolpath):
                 if _set_bulb(o, False):
@@ -112,7 +106,7 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
             return error(ferr + " Use cam_show_toolpath(list) or cam_get(include=['operations']).")
         ops, matched = operations_under(fnode.obj), fnode.name
         # hide everything, then show this folder's generated ops
-        for node in _operation_nodes(cam):
+        for node in operation_nodes(cam):
             _set_bulb(node.obj, False)
         shown = []
         failed = []
@@ -157,7 +151,7 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
         return ok({"action": "hide", "operation": name})
 
     if action == "isolate":
-        for node in _operation_nodes(cam):
+        for node in operation_nodes(cam):
             _set_bulb(node.obj, False)
         took = _set_bulb(o, True)
     else:  # show

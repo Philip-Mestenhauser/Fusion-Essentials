@@ -59,9 +59,13 @@ def test_a_miss_returns_the_resolvers_own_refusal(wire):
 
 
 def test_an_ambiguous_name_is_not_reported_as_missing(wire):
+    # the refusal is resolve_cam_node's own text: two same-named setups are told apart by the
+    # '<name>#<n>' address the same 'setup' input takes back (test__cam_common asserts it against
+    # the resolver itself).
     wire(setup=None, available=["Dup", "Dup"],
-         refusal="'Dup' is ambiguous - 2 CAM items share that name: Dup, Dup. Rename the target "
-                 "so its name is unique, then retry.")
+         refusal="'Dup' is ambiguous - 2 CAM items share that name: Dup#1 (2 operations), "
+                 "Dup#2 (1 operation). Retry with one of those '<name>#<n>' addresses; the number "
+                 "counts the items of that name in the order listed here.")
     msg = error_message(mod.activate_setup_handler(setup="Dup"))
     assert "is ambiguous" in msg
     assert "not found" not in msg.lower()

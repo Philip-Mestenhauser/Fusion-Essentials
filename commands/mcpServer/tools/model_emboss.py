@@ -25,6 +25,7 @@ from . import _assert
 from . import _geom
 from . import _inputs
 from . import _outputs
+from . import _sketch_detail
 
 
 # What this tool RETURNS (declared once; drives the PRODUCES: prose + the assert-present contract test).
@@ -36,7 +37,11 @@ RETURNS = [
 # allow_text: EmbossFeatures.createInput documents its profiles array as "Profile and SketchText
 # objects", so a sketch text is stamped as itself - the route a nameplate needs, since a SketchText
 # carries no Profile of its own.
+# scope_input: the {sketch, profile_index} and '<sketch>/text:<i>' forms address a sketch BY NAME,
+# and Fusion numbers sketches per component from 1 - so the name two components carry is refused,
+# with the remedy spelled as this tool's own 'component' input, which the schema below declares.
 _PROFILES = _inputs.ProfileRefList("profiles", required=True, allow_text=True,
+    scope_input="component",
     description="The closed profile(s) or sketch text(s) to stamp.")
 _FACES = _inputs.GeometryHandleList("faces", require="face", required=True,
     description="The face(s) to stamp onto - all on ONE body.")
@@ -49,7 +54,8 @@ _DEPTH = _inputs.Distance("depth", allow_zero=False, required=True)
 app = adsk.core.Application.get()
 
 
-def handler(profiles=None, faces=None, depth: float = 0.0, units: str = "mm") -> dict:
+def handler(profiles=None, faces=None, depth: float = 0.0, units: str = "mm",
+            component: str = "") -> dict:
     """See TOOL_DESCRIPTION."""
     scale_factor, uerr = _inputs.UNITS.resolve(units)
     if uerr:
@@ -63,7 +69,7 @@ def handler(profiles=None, faces=None, depth: float = 0.0, units: str = "mm") ->
         return error("No active design. Create or open a document first (see doc_new).")
     comp = target_component(design)
 
-    prof_ents, perr = _PROFILES.resolve(profiles)
+    prof_ents, perr = _PROFILES.resolve(profiles, component)
     if perr:
         return error(perr)
     face_ents, ferr = _FACES.resolve(faces)
@@ -89,12 +95,24 @@ def handler(profiles=None, faces=None, depth: float = 0.0, units: str = "mm") ->
     # creationOccurrence, which nothing here sets - refuse by name rather than emboss the wrong
     # component. same_component compares by token: component wrappers are never identity-stable.
     face_comp = safe(lambda: bodies[0].parentComponent)
-    if not _common.same_component(face_comp, host):
+    together = _common.same_component(face_comp, host)
+    if together is False:
         fname = safe(lambda: face_comp.name) or "unreadable"
         hname = safe(lambda: host.name) or "unreadable"
         return error(f"'faces' sit on a body in component '{fname}', but 'profiles' belong to "
                      f"component '{hname}' - an emboss is built on the profile's component, so both "
                      "must be the same one. Sketch the profile on the target body's component.")
+    if together is None:
+        # Not the refusal above: that one states the components DIFFER, which nothing here read.
+        # Proceeding is not the safer half either - a cross-component createInput raises
+        # 'InternalValidationError : bSet' from inside the API with nothing naming the cause.
+        fname = safe(lambda: face_comp.name) or "unreadable"
+        hname = safe(lambda: host.name) or "unreadable"
+        return error(f"Whether the 'faces' body (component '{fname}') and the 'profiles' sketch "
+                     f"(component '{hname}') belong to the SAME component could not be read, and an "
+                     "emboss across two components is refused by Fusion at createInput. Pass faces "
+                     "and profiles from one component - find_geometry with 'target' set to that "
+                     "component names both.")
 
     # Pre-mutation sample: the volume the emboss must move, and in which direction.
     vol_before = _geom.volumes(bodies)
@@ -191,6 +209,7 @@ emboss_tool = (
     .add_input_property(_FACES.name, _FACES.schema())
     .add_input_property(_DEPTH.name, _DEPTH.schema())
     .add_input_property(*_inputs.UNITS.as_property())
+    .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
     .strict_schema()
 )
 emboss_item = Item.create_tool_item(tool=emboss_tool, write="write", handler=handler,

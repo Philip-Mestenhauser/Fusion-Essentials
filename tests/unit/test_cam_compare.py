@@ -98,17 +98,47 @@ class TestGuards:
         assert res["isError"] is True and "Ghost" in res["message"]
         assert "ambiguous" not in res["message"].lower()     # a true miss stays not-found
 
-    def test_duplicate_name_words_ambiguity_with_paths(self, monkeypatch, install):
-        # find_operation REFUSES a duplicated name, returning each duplicate's 'Setup / op' path as
-        # the available list - the error must say ambiguous and list the paths, not a plain miss.
-        install([FakeOperation("A", {"p": "1"})])
-        monkeypatch.setattr(cc, "find_operation",
-                            lambda cam, name: (None, ["Setup1 / Drill1", "Setup2 / Drill1"])
-                            if name == "Drill1" else (cam.setups.item(0).allOperations.item(0), ["A"]))
-        res = cc.compare_operations_handler(operation_a="Drill1", operation_b="A")
+    def test_a_miss_lists_whole_names_capped_by_count(self, install):
+        # the shared resolver's not-found reaches this tool's callers, so every name it prints has
+        # to be a spelling this same input takes back: the list is capped by NAME COUNT with the
+        # remainder counted, never cut mid-name at a character budget.
+        install([FakeOperation(f"Operation-{i:02d}-LongEnoughToTruncate", {"p": "1"})
+                 for i in range(20)])
+        res = cc.compare_operations_handler(operation_a="Ghost", operation_b="Operation-00")
+        assert res["isError"] is True
+        listed = res["message"].split("Available: ")[1].rstrip(".").split(", ")
+        assert listed[:8] == [f"Operation-{i:02d}-LongEnoughToTruncate" for i in range(8)]
+        assert listed[8:] == ["... (+12 more not listed)"]
+
+    def test_duplicate_name_is_refused_with_the_ordinal_addresses_this_input_takes(self, monkeypatch):
+        # Two setups each holding a 'Drill1' - names collide across parents, never between setups
+        # (Fusion refuses a duplicate SETUP name outright). This tool carries no scope input, so the
+        # way through it names is the resolver's '<name>#<n>' address, which the SAME input resolves:
+        # nothing outside the call has to happen first, which is why an address is preferred wherever
+        # one separates the candidates. The resolver does word a rename elsewhere - the two-readings
+        # branch, where no address separates the readings at all (_common._RENAME_REMEDY is the same
+        # trade) - but no tool here renames a CAM operation, so it is never offered in its place.
+        from conftest import FakeSetup, make_cam
+        cam = make_cam(FakeSetup("Setup1", ops=[FakeOperation("Drill1", {"p": "1"})]),
+                       FakeSetup("Setup2", ops=[FakeOperation("Drill1", {"p": "2"})]))
+        monkeypatch.setattr(cc, "get_cam", lambda: (cam, None))
+        res = cc.compare_operations_handler(operation_a="Drill1", operation_b="Drill1")
         assert res["isError"] is True
         assert "ambiguous" in res["message"].lower()
-        assert "Setup1 / Drill1" in res["message"] and "Setup2 / Drill1" in res["message"]
+        assert "Drill1#1" in res["message"] and "Drill1#2" in res["message"]
+        assert "Rename" not in res["message"]
+
+    def test_an_ordinal_address_resolves_the_operation_it_names(self, monkeypatch):
+        # the address the refusal above hands back must actually resolve on this input, or the
+        # remedy is decoration: '#2' picks the SECOND setup's Drill1, whose parameter differs.
+        from conftest import FakeSetup, make_cam
+        cam = make_cam(FakeSetup("Setup1", ops=[FakeOperation("Drill1", {"feed": "100"})]),
+                       FakeSetup("Setup2", ops=[FakeOperation("Drill1", {"feed": "900"})]))
+        monkeypatch.setattr(cc, "get_cam", lambda: (cam, None))
+        out = _payload(cc.compare_operations_handler(operation_a="Drill1#1", operation_b="Drill1#2"))
+        assert out["difference_count"] == 1
+        assert out["differences"][0]["operation_a"] == "100"
+        assert out["differences"][0]["operation_b"] == "900"
 
 
 class TestDiffLogic:
@@ -158,6 +188,64 @@ class TestDiffLogic:
         assert d["parameter"] == "bottomOffset"        # keyed by the unique NAME
         assert d["title"] == "Offset"                  # title still reported for display
         assert d["operation_a"] == "2" and d["operation_b"] == "9"
+
+
+class _UnnamedParam:
+    """A CAMParameter whose NAME will not read. The diff is keyed by name, so there is no key to
+    file this one under - and keying it on the unreadable read would collide every such parameter
+    onto one row."""
+    title = "Anon"
+    expression = "7"
+
+    @property
+    def name(self):
+        raise RuntimeError("3 : name unavailable")
+
+
+class _OpWithUnreadableParameters:
+    """An operation that resolved but whose parameter collection raises."""
+    name = "B"
+    tool = FakeTool("Flat 10mm")
+
+    @property
+    def parameters(self):
+        raise RuntimeError("3 : parameters unavailable")
+
+
+class _OpWithUnreadableTool:
+    """An operation that resolved and reads its parameters, but whose .tool raises."""
+    def __init__(self, params):
+        self.name = "B"
+        self.parameters = FakeParams([FakeParam(k, v) for k, v in params.items()])
+
+    @property
+    def tool(self):
+        raise RuntimeError("3 : no tool")
+
+
+class TestUnreadableReads:
+    """The diff is keyed by parameter NAME, so a parameter whose name will not read has no key to
+    stand under. An unreadable collection is a hole in the diff, not a failed call: both operations
+    resolved, and everything that DID read is still worth reporting."""
+
+    def test_a_parameter_with_no_readable_name_is_skipped(self, install):
+        cam = install([FakeOperation("A", {}), FakeOperation("B", {})])
+        op_a = cam.setups.item(0).allOperations.item(0)
+        op_a.parameters = FakeParams([FakeParam("Feed", "100", name="feed"), _UnnamedParam()])
+        out = _payload(cc.compare_operations_handler(operation_a="A", operation_b="B"))
+        assert [d["parameter"] for d in out["differences"]] == ["feed"]
+
+    def test_an_unreadable_parameter_collection_leaves_that_side_empty(self, install):
+        install([FakeOperation("A", {"feed": "100"}), _OpWithUnreadableParameters()])
+        out = _payload(cc.compare_operations_handler(operation_a="A", operation_b="B"))
+        assert out["difference_count"] == 1
+        assert out["differences"][0]["operation_b"] == "(not present)"
+
+    def test_an_unreadable_tool_reports_null_rather_than_failing_the_diff(self, install):
+        install([FakeOperation("A", {"feed": "100"}), _OpWithUnreadableTool({"feed": "100"})])
+        out = _payload(cc.compare_operations_handler(operation_a="A", operation_b="B"))
+        assert out["tool_b"] is None
+        assert out["same_parameter_count"] == 1
 
 
 # ── BOUNDED READS: 'differences' is capped (CLAUDE.md "Bound it") ────────────────────────────────

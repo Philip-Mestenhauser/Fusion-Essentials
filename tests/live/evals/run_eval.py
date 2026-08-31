@@ -99,6 +99,40 @@ CONNECTION_LOST = (
     "do NOT schedule yourself to resume later.")
 
 
+# The design-practice skill a scenario can ask for by name in its frontmatter (`skill:`). The
+# executor cannot invoke a skill - the Skill tool is denied and its cwd holds no repo - so the
+# skill's BODY is appended to the prompt instead, the same way for every scenario that names one.
+# What this changes about the experiment is worth saying plainly: a scenario with no skill measures
+# what the WIRE alone teaches an agent, and a scenario with one measures the wire plus the practice.
+# The two are different experiments and their runs do not compare - which skill (if any) a run
+# carried is recorded in audit.json and in prompt.txt's exact bytes.
+SKILLS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(_HERE))),
+                          ".claude", "skills")
+SKILL_HEADER = (
+    "DESIGN PRACTICE (guidance, not the task - the task is above). These are the practices a "
+    "capable Fusion designer works by. Apply what is relevant while you build; do not recite them, "
+    "and do not let them displace a single instruction in the task.")
+
+
+def scenario_skill(scenario_path):
+    """The skill name a scenario's frontmatter declares, or None."""
+    text = open(scenario_path, encoding="utf-8").read()
+    m = re.search(r"^skill:\s*(\S+)\s*$", text, re.M)
+    return m.group(1) if m else None
+
+
+def skill_body(name):
+    """A skill's instructions - the SKILL.md below its frontmatter. The frontmatter is the loader's
+    (a description telling an agent WHEN to reach for it); appending it would tell an executor that
+    already has the skill to go looking for one."""
+    path = os.path.join(SKILLS_DIR, name, "SKILL.md")
+    if not os.path.exists(path):
+        sys.exit(f"scenario declares skill '{name}' but {path} does not exist")
+    text = open(path, encoding="utf-8").read()
+    m = re.match(r"^---\n.*?\n---\n+", text, re.S)
+    return (text[m.end():] if m else text).strip()
+
+
 def run_tag_for(stem, when=None):
     """The per-invocation cloud subfolder tag: SECONDS resolution AND the scenario stem. Minute
     resolution alone collides in the two ways this harness actually runs - two different scenarios
@@ -110,15 +144,21 @@ def run_tag_for(stem, when=None):
 def extract_prompt(scenario_path, run_tag):
     """The fenced block under '## AGENT PROMPT (verbatim)', byte-identical except the one
     sanctioned token: {{RUN_FOLDER}} becomes this invocation's run tag (same-name
-    collisions with prior chains' artifacts are structurally impossible). The CONNECTION_LOST
-    rule is appended to every prompt. prompt.txt records the exact bytes actually sent."""
+    collisions with prior chains' artifacts are structurally impossible). Then the two fixed
+    additions, in this order and identically on every scenario: the practice skill the frontmatter
+    declares (when it declares one), and the CONNECTION_LOST rule. The task block stays FIRST so
+    nothing appended can be read as amending it. prompt.txt records the exact bytes actually sent.
+    Returns (prompt, skill_name)."""
     text = open(scenario_path, encoding="utf-8").read()
     m = re.search(r"^## AGENT PROMPT \(verbatim\)\s*\n+```\n(.*?)\n```", text,
                   re.S | re.M)
     if not m:
         sys.exit(f"{scenario_path}: no '## AGENT PROMPT (verbatim)' fenced block found")
     prompt = m.group(1).replace("{{RUN_FOLDER}}", run_tag)
-    return prompt + "\n\n" + CONNECTION_LOST
+    skill = scenario_skill(scenario_path)
+    if skill:
+        prompt += "\n\n" + SKILL_HEADER + "\n\n" + skill_body(skill)
+    return prompt + "\n\n" + CONNECTION_LOST, skill
 
 
 def preflight_server():
@@ -323,7 +363,7 @@ def _auth_failure(stderr):
     return any(marker in (stderr or "").lower() for marker in _AUTH_FAILURE_MARKERS)
 
 
-def audit(transcript_path, run_dir, budget_calls, budget_tokens=None, stderr=""):
+def audit(transcript_path, run_dir, budget_calls, budget_tokens=None, stderr="", skill=None):
     """Parse the stream: tool calls (names, order), the final result text, usage - and the
     blindness check (every call is an allowed MCP call). BOTH declared budgets are scored here
     (audited MCP calls, executor output tokens). A harness-utility leak (a denied
@@ -374,6 +414,9 @@ def audit(transcript_path, run_dir, budget_calls, budget_tokens=None, stderr="")
         # death. main relaunches once with a fresh copy on this, gated on zero MCP calls.
         "auth_failure_suspected": _auth_failure(stderr),
         "num_turns": num_turns,
+        # Which practice the run carried, beside its numbers: a run under a skill and a run without
+        # one are different experiments, and this file is what a later reader compares.
+        "skill": skill,
         "usage": usage,
         "call_sequence": calls,
     }
@@ -443,7 +486,7 @@ def main():
     max_turns = args.max_turns
     if max_turns is None:
         max_turns = max(120, 2 * budget_calls) if budget_calls else 120
-    prompt = extract_prompt(scenario, run_tag)
+    prompt, skill = extract_prompt(scenario, run_tag)
     preflight_server()
 
     # Failure signatures earn RETRIES in fresh run dirs (every dir stays on disk as the honest
@@ -471,9 +514,9 @@ def main():
         os.makedirs(run_dir)
         print(f"run dir: {run_dir}\nmodel: {args.model}  budget: {budget_calls} calls / "
               f"{budget_tokens} output tokens  max_turns: {max_turns}  "
-              f"cloud folder tag: {run_tag}", flush=True)
+              f"cloud folder tag: {run_tag}  skill: {skill or 'none'}", flush=True)
         transcript, stderr, dead_spawn = launch(prompt, run_dir, args.model, max_turns)
-        report, final = audit(transcript, run_dir, budget_calls, budget_tokens, stderr)
+        report, final = audit(transcript, run_dir, budget_calls, budget_tokens, stderr, skill)
         # AUTH is diagnosed BEFORE the dead-spawn branch, because a credential rejection kills the
         # executor before its first tool call and so also reads as zero MCP calls. The relaunch is
         # gated on that zero: an executor that already called tools has MUTATED the live document,

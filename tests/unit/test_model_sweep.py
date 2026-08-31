@@ -29,10 +29,13 @@ class FakeOpenProfile:
 
 
 class FakeSketch:
-    def __init__(self, name, profiles=(), curves=0):
+    def __init__(self, name, profiles=(), curves=0, owner=None):
         self.name = name
         self.profiles = _NamedCollection(list(profiles))
         self.sketchCurves = _NamedCollection([object() for _ in range(curves)])
+        # The OPEN-profile path hosts the feature on the sketch's owner; left unset it falls back to
+        # the active component, which cannot tell two same-named sketches apart.
+        self.parentComponent = owner
 
 
 class FakeSweepInput:
@@ -422,6 +425,80 @@ class TestCrossComponentHost:
         assert out["swept"] is True
         assert sub_sf.last is not None       # the OWNER built the sweep
         assert root_sf.last is None          # NOT the active/root component (would be the bSet trap)
+
+
+def _install_same_name_in_two(sketch_name="Prof"):
+    """Two components BOTH holding a sketch of one name - what Fusion produces by default, since it
+    numbers sketches per component from 1. Each carries its own features surface, so which component
+    the scope selected is readable. Returns (alpha_features, beta_features, design)."""
+    from conftest import MakeComp
+    made = []
+    for name in ("Alpha", "Beta"):
+        sf = FakeSweepFeatures(body_names=("Body1",))
+        comp = MakeComp(name=name, bodies=())
+        comp.features = FakeFeatures(sf)
+        comp.createOpenProfile = lambda coll, chain: FakeOpenProfile()
+        comp.sketches = _NamedCollection([FakeSketch(sketch_name, profiles=[_OwnedProfile(comp)]),
+                                          FakeSketch("PathSketch", curves=3)])
+        made.append((sf, comp))
+    (alpha_sf, alpha), (beta_sf, beta) = made
+    design = make_design(comp=alpha, all_components=[alpha, beta])
+    install(sw, design)
+    return alpha_sf, beta_sf, design
+
+
+class TestComponentScope:
+    """SKETCH-6: the {sketch, profile_index} selector resolves a sketch BY NAME, so a name two
+    components carry identifies nothing. The scope input is what makes the refusal performable - and
+    it has to SELECT, not just reword the message."""
+
+    def test_the_scope_selects_that_components_own_sketch(self):
+        # asserted on WHICH component built the feature: both hold a 'Prof', so a scope that were
+        # ignored (or first-matched) would build on Alpha whatever the caller asked for.
+        alpha_sf, beta_sf, _ = _install_same_name_in_two()
+        out = _payload(sw.handler(profile={"sketch": "Prof", "profile_index": 0},
+                                  path="sketch:PathSketch", component="Beta"))
+        assert out["swept"] is True
+        assert beta_sf.last is not None and alpha_sf.last is None
+
+    def test_the_other_spelling_selects_the_other_component(self):
+        alpha_sf, beta_sf, _ = _install_same_name_in_two()
+        _payload(sw.handler(profile={"sketch": "Prof", "profile_index": 0},
+                            path="sketch:PathSketch", component="Alpha"))
+        assert alpha_sf.last is not None and beta_sf.last is None
+
+    def test_no_scope_refuses_the_shared_name_naming_this_tools_input(self):
+        _install_same_name_in_two()
+        res = sw.handler(profile={"sketch": "Prof", "profile_index": 0}, path="sketch:PathSketch")
+        assert res["isError"] is True
+        assert "2 sketches are named 'Prof'" in res["message"]
+        assert "as 'component'" in res["message"] and "Rename" not in res["message"]
+
+    def test_the_component_scope_is_declared_on_the_wire(self):
+        # the schema is strict, so a remedy naming an input no property declares would be a call the
+        # tool's own schema rejects - the input and the kind's scope ship together or not at all.
+        sd = load_tool("_sketch_detail")
+        assert sw.sweep_tool.input_schema["properties"]["component"] == sd.COMPONENT_SCOPE[1]
+
+    def test_the_open_curve_fallback_is_scoped_too(self):
+        # the open-profile fallback resolves through the SAME scoped walk as the closed path: an
+        # active-component-only lookup there builds from a different component's same-named sketch.
+        from conftest import MakeComp
+        made = []
+        for name in ("Alpha", "Beta"):
+            sf = FakeSweepFeatures(body_names=("Body1",))
+            comp = MakeComp(name=name, bodies=())
+            comp.features = FakeFeatures(sf)
+            comp.createOpenProfile = lambda coll, chain: FakeOpenProfile()
+            comp.sketches = _NamedCollection([FakeSketch("Prof", profiles=[], curves=2, owner=comp),
+                                              FakeSketch("PathSketch", curves=3, owner=comp)])
+            made.append((sf, comp))
+        (alpha_sf, alpha), (beta_sf, beta) = made
+        install(sw, make_design(comp=alpha, all_components=[alpha, beta]))
+        out = _payload(sw.handler(profile={"sketch": "Prof"}, path="sketch:PathSketch",
+                                  component="Beta"))
+        assert out["open_profile"] is True
+        assert beta_sf.last is not None and alpha_sf.last is None
 
 
 # ── declared outputs ────────────────────────────────────────────────────────

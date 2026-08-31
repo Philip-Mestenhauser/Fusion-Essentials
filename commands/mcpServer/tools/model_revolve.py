@@ -23,12 +23,13 @@ from ._common import error, ok, safe, target_component, root_body_advisory
 from . import _common
 from . import _geom
 from . import _inputs
+from . import _sketch_detail
 from . import _assert
 
 app = adsk.core.Application.get()
 
 # profile_index may carry a profile HANDLE (entityToken from sketch_get) - resolved via ProfileRef.
-_PROFILE = _inputs.ProfileRef("profile_index")
+_PROFILE = _inputs.ProfileRef("profile_index", scope_input="component")
 
 _VEC_TO_KEY = {(1, 0, 0): "x", (0, 1, 0): "y", (0, 0, 1): "z"}
 
@@ -118,7 +119,7 @@ def _axis_entity(design, comp, sketch, axis):
 
 def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
             angle_deg: float = 360.0, operation: str = "new", symmetric: bool = False,
-            second_angle_deg: float = 0.0) -> dict:
+            second_angle_deg: float = 0.0, component: str = "") -> dict:
     """See TOOL_DESCRIPTION."""
     op_key = (operation or "new").strip().lower()
     if op_key not in _common.OPERATIONS:
@@ -135,7 +136,8 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
         return error("No active design. Create or open a document first (see doc_new).")
     comp = target_component(design)
 
-    sketch, requested, ambiguous = _common.find_or_recent_sketch(design, sketch_name)
+    sketch, requested, ambiguous = _sketch_detail.scoped_or_recent_sketch(
+        design, sketch_name, component)
     if ambiguous:
         return error(ambiguous)
     if not sketch:
@@ -150,7 +152,7 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
     # HANDLE path: a profile entityToken from sketch_get (a ProfileRef) targets the exact region -
     # the robust pick on a multi-profile / on-face sketch, where a blind index is ambiguous.
     if _inputs.is_handle(profile_index):
-        profile, perr = _PROFILE.resolve(profile_index)
+        profile, perr = _PROFILE.resolve(profile_index, component)
         if perr:
             return error(perr)
         idx = "handle"
@@ -281,6 +283,7 @@ revolve_tool = (
     .add_input_property("second_angle_deg", {"type": "number",
             "description": "Also revolve this many degrees the OTHER direction (asymmetric two-sided revolve; ignored when symmetric)."})
     .add_input_property(*_inputs.boolean_op(default="new").as_property())
+    .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
     .add_input_property("symmetric", {"type": "boolean",
             "description": "Split the angle both ways about the profile plane (default false)."})
     .strict_schema()

@@ -17,15 +17,24 @@ runner/grader stops matching the docs.
   --max-turns backstop from this number (2x, floor 120), so an understated budget severs runs.
   `max_tokens` = the last measured run's OUTPUT tokens + 25% - the runner scores it the same way
   (audit.json's `within_token_budget`), so a postcondition change that adds reads re-pins BOTH.
+- `skill` (optional): a directory name under `.claude/skills/`. The runner appends that skill's
+  body - its `SKILL.md` below the frontmatter - after the task block. The executor cannot invoke a
+  skill (the `Skill` tool is denied and its cwd holds no repo), so the practice travels in the
+  prompt or not at all. Declaring one CHANGES THE EXPERIMENT: without a skill the scenario measures
+  what the WIRE alone teaches an agent; with one it measures the wire plus that practice, so runs of
+  the two do not compare and BOTH budgets have to be re-measured from a run under the skill.
+  `audit.json` records which skill a run carried. A named skill that is missing on disk STOPS the
+  run rather than quietly running without it.
 - `substitutions`: `{{RUN_FOLDER}}` is the one sanctioned token - the runner substitutes its
   per-invocation cloud subfolder tag so same-name artifact collisions across runs are impossible.
 - `perturbations` / `expected_refusals`: name them, or `none`.
 
 ## Prompt-block mechanics (every scenario)
 
-- The block is handed VERBATIM except for the runner's two fixed additions - the declared
-  {{placeholders}} substituted, and the MCP-CONNECTION-LOST paragraph appended after it (README's
-  "How to run one"). Write it for a blind, context-isolated executor: no repo access,
+- The block is handed VERBATIM except for the runner's three fixed additions - the declared
+  {{placeholders}} substituted, the `skill:` body appended when one is declared, and the
+  MCP-CONNECTION-LOST paragraph appended last (README's "How to run one"). The task block always
+  stays FIRST, so nothing appended can be read as amending it. Write it for a blind, context-isolated executor: no repo access,
   no harness utilities (the runner hard-denies them), MCP tools preloaded, so no ToolSearch step.
 - No AskUserQuestion, no human click: geometry picks go through find_geometry; ambiguity = report
   BLOCKED, never improvise a confirm.

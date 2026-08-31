@@ -94,8 +94,9 @@ def handler(body_name: str = "", thickness: float = 1.0, units: str = "mm",
         shell_input.outsideThickness = adsk.core.ValueInput.createByReal(outside_t)
         feature = comp.features.shellFeatures.add(shell_input)
     except Exception as e:
-        return error(f"Shell failed: {e}. (The thickness may be too large for the geometry, or the "
-                     "removed faces span more than one body - try a smaller thickness.)")
+        # The platform's own text is the only cause that was read - nothing here measures the
+        # thickness against the geometry or which bodies the removed faces span.
+        return error(f"Shell failed: {e}")
     if not feature:
         return error(_common.no_feature_error(
             design, "Shell", "(The body could not be hollowed at this thickness.)"))

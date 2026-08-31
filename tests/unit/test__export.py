@@ -5,6 +5,7 @@ one-file-per-top-level-occurrence split orchestration.
 """
 
 import os
+from types import SimpleNamespace
 
 import adsk
 import pytest
@@ -35,7 +36,86 @@ class TestSanitize:
         assert ex.sanitize("***") == "___"
 
 
-# ── component_by_name ─────────────────────────────────────────────────────────
+class TestStlUnitEnum:
+    """The unit key -> DistanceUnits member read both STL writers bake unitType from."""
+
+    def test_every_key_resolves_to_its_distance_units_member(self):
+        for key, member in ex.STL_UNIT_MEMBERS.items():
+            assert ex.stl_unit_enum(key) is getattr(adsk.fusion.DistanceUnits, member)
+
+    def test_the_map_is_distance_units_not_mesh_units(self):
+        # the members are DistanceUnits spellings; MeshUnits' own names would resolve to nothing
+        # here, and its mm/cm ints are SWAPPED relative to these - a 10x error on the two
+        # commonest units.
+        assert all(m.endswith("DistanceUnits") for m in ex.STL_UNIT_MEMBERS.values())
+
+    def test_an_unknown_key_is_none_not_a_guess(self):
+        # None is the caller's signal to record a refusal; assigning it would clear the property.
+        # This is also the answer on a build carrying no member for a KNOWN key.
+        assert ex.stl_unit_enum("parsecs") is None
+        assert ex.stl_unit_enum("") is None
+        assert ex.stl_unit_enum(None) is None
+
+
+class TestAppliedPair:
+    """The ONE export-options knob writer. Its whole reason for existing is that a bare
+    set-then-read-back cannot bite on a property whose factory value already equals the request -
+    measured, unitType reads 0 unset and MillimeterDistanceUnits IS 0."""
+
+    class _Opts:
+        """An options object with a factory value, optionally deaf to writes on that property."""
+        def __init__(self, factory, deaf=False):
+            object.__setattr__(self, "knob", factory)
+            object.__setattr__(self, "_deaf", deaf)
+
+        def __setattr__(self, k, v):
+            if k == "knob" and object.__getattribute__(self, "_deaf"):
+                return
+            object.__setattr__(self, k, v)
+
+    def test_a_write_that_changes_the_property_is_applied_and_changed(self):
+        opts = self._Opts("FACTORY")
+        assert ex.applied_pair(opts, "knob", "WANT", "key") == ("key", True)
+        assert opts.knob == "WANT"
+
+    def test_a_value_the_property_already_read_is_applied_but_not_changed(self):
+        # THE COLLISION: the write is dropped, yet the read-back equals the request because that
+        # is the factory value. Landed is honest (the object does read it); changed must be False,
+        # because this answers identically whether the assignment took or never happened.
+        opts = self._Opts("WANT", deaf=True)
+        assert ex.applied_pair(opts, "knob", "WANT", "key") == ("key", False)
+
+    def test_the_same_value_reports_the_same_pair_whether_or_not_the_write_lands(self):
+        # The discriminating statement: with the factory value equal to the request, a LANDING
+        # write and a DROPPED one are indistinguishable here - so neither may be called verified.
+        deaf = ex.applied_pair(self._Opts("WANT", deaf=True), "knob", "WANT", "key")
+        live = ex.applied_pair(self._Opts("WANT"), "knob", "WANT", "key")
+        assert deaf == live == ("key", False)
+
+    def test_a_dropped_write_the_read_back_can_see_is_not_applied(self):
+        opts = self._Opts("OTHER", deaf=True)
+        assert ex.applied_pair(opts, "knob", "WANT", "key") == ex.NOT_APPLIED
+
+    def test_a_falsy_requested_value_is_still_a_landed_value(self):
+        # MeshRefinementHigh is 0 and stl_binary can be False: a `not val` test here would report
+        # a landed knob as refused. The pair keys on the read-back, never on truthiness.
+        opts = self._Opts(1)
+        assert ex.applied_pair(opts, "knob", 0, "high") == ("high", True)
+
+    def test_an_unreadable_property_is_not_applied(self):
+        # every read goes through safe(), so a property that raises is a refusal, not a crash
+        class _Raises:
+            @property
+            def knob(self):
+                raise RuntimeError("this build has no such knob")
+
+        assert ex.applied_pair(_Raises(), "knob", "WANT", "key") == ex.NOT_APPLIED
+
+    def test_not_applied_is_a_no_value_no_evidence_pair(self):
+        assert ex.NOT_APPLIED == (None, False)
+
+
+# ── find_component ────────────────────────────────────────────────────────────
 
 class _Comp:
     def __init__(self, name):
@@ -56,22 +136,174 @@ class _CompColl:
 
 
 class _Design:
-    def __init__(self, comps):
+    def __init__(self, comps, occurrences=()):
         self.rootComponent = _Comp("Root")
+        # the design-wide occurrence census reads root.allOccurrences (the fast path); an empty
+        # design has none, which is what most of these tests want
+        self.rootComponent.allOccurrences = list(occurrences)
         self.allComponents = _CompColl(comps)
 
 
-class TestComponentByName:
+def _occ(path, comp):
+    """One placement: what the census reads off it is its component and its assembly path."""
+    return SimpleNamespace(name=path.split("+")[-1], fullPathName=path, component=comp)
+
+
+class TestFindComponent:
     def test_finds_matching_component(self):
         a, b = _Comp("A"), _Comp("B")
-        assert ex.component_by_name(_Design([a, b]), "B") is b
+        assert ex.find_component(_Design([a, b]), "B") == (b, None)
 
-    def test_no_match_returns_none(self):
-        assert ex.component_by_name(_Design([_Comp("A")]), "Nope") is None
+    def test_no_match_is_a_plain_miss_not_a_refusal(self):
+        # (None, None): the caller words its own not-found error off its own vocabulary
+        assert ex.find_component(_Design([_Comp("A")]), "Nope") == (None, None)
 
     def test_empty_component_list_returns_none(self):
         # all_components falls back to [root] on an empty collection; "A" still misses
-        assert ex.component_by_name(_Design([]), "A") is None
+        assert ex.find_component(_Design([]), "A") == (None, None)
+
+    def test_a_name_two_components_carry_is_refused_with_the_count(self):
+        # the whole point: neither 'Bracket' is the one asked for, so neither is handed back
+        comp, err = ex.find_component(_Design([_Comp("Bracket"), _Comp("Bracket")]), "Bracket")
+        assert comp is None
+        assert "2 components match 'Bracket'" in err
+        # both are spelled exactly as asked, so there is nothing to tell them apart by name
+        assert "(named" not in err
+
+    def test_a_third_duplicate_is_counted_not_capped_at_two(self):
+        comp, err = ex.find_component(
+            _Design([_Comp("Jaw"), _Comp("Jaw"), _Comp("Jaw")]), "Jaw")
+        assert comp is None and "3 components match 'Jaw'" in err
+
+    def test_one_hit_beside_other_names_still_resolves(self):
+        # exactly-one is the resolving case - a duplicate of a DIFFERENT name must not refuse it
+        target = _Comp("Frame")
+        des = _Design([_Comp("Bolt"), target, _Comp("Bolt")])
+        assert ex.find_component(des, "Frame") == (target, None)
+
+    def test_the_refusal_names_the_instances_that_place_each_hit(self):
+        # the candidates ARE the remedy: an occurrence fullPathName identifies one of two
+        # same-named components, where the name identifies neither
+        a, b = _Comp("Bracket"), _Comp("Bracket")
+        des = _Design([a, b], occurrences=[_occ("Sub-A:1+Bracket:1", a),
+                                           _occ("Sub-B:1+Bracket:1", b)])
+        comp, err = ex.find_component(des, "Bracket")
+        assert comp is None
+        assert "'Sub-A:1+Bracket:1'" in err and "'Sub-B:1+Bracket:1'" in err
+
+    def test_an_instance_of_a_DIFFERENT_component_is_not_listed(self):
+        # the list must be the placements of the AMBIGUOUS components only - naming an unrelated
+        # occurrence would hand the caller a spelling that resolves to the wrong part
+        a, b, other = _Comp("Bracket"), _Comp("Bracket"), _Comp("Frame")
+        des = _Design([a, b, other], occurrences=[_occ("Sub-A:1+Bracket:1", a),
+                                                  _occ("Frame:1", other)])
+        _comp, err = ex.find_component(des, "Bracket")
+        assert "'Sub-A:1+Bracket:1'" in err and "Frame:1" not in err
+
+    def test_the_instance_list_is_capped_and_says_how_many_are_hidden(self):
+        hits = [_Comp("Pin") for _ in range(10)]
+        des = _Design(hits, occurrences=[_occ(f"Sub-{i}:1+Pin:1", c) for i, c in enumerate(hits)])
+        _comp, err = ex.find_component(des, "Pin")
+        assert "'Sub-7:1+Pin:1'" in err            # the 8th, the last one listed
+        assert "'Sub-8:1+Pin:1'" not in err
+        assert "(+2 more not listed)" in err       # named_with_remainder's disclosure
+
+    def test_a_placement_whose_path_and_name_both_fail_to_read_is_not_listed(self):
+        # neither read answered, so there is no spelling to offer for that one - listing it as ''
+        # would hand the caller a candidate that cannot be passed back
+        a, b = _Comp("Bracket"), _Comp("Bracket")
+        blind = SimpleNamespace(name=None, fullPathName=None, component=a)
+        des = _Design([a, b], occurrences=[blind, _occ("Sub-B:1+Bracket:1", b)])
+        _comp, err = ex.find_component(des, "Bracket")
+        assert "Instances found: 'Sub-B:1+Bracket:1'." in err
+        assert "''" not in err
+
+    def test_no_instances_found_means_no_instance_claim(self):
+        # nothing placed them, so the refusal must not offer a spelling that was never read
+        _comp, err = ex.find_component(_Design([_Comp("Orphan"), _Comp("Orphan")]), "Orphan")
+        assert "2 components match 'Orphan'" in err
+        assert "Instances found" not in err
+
+    def test_the_refusal_never_asks_for_a_rename(self):
+        # components arriving from an inserted/x-ref'd document duplicate names wholesale, and
+        # renaming one of those means editing a different document - an unfollowable instruction
+        _comp, err = ex.find_component(_Design([_Comp("Rotor"), _Comp("Rotor")]), "Rotor")
+        assert "rename" not in err.lower()
+
+    def test_the_refusal_carries_no_remedy_of_its_own(self):
+        # the remedy is the caller's, because only the caller knows which of ITS vocabularies is
+        # still open; a remedy here would be advice this resolver cannot check
+        _comp, err = ex.find_component(_Design([_Comp("Rotor"), _Comp("Rotor")]), "Rotor")
+        for unreachable in ("find_geometry", "handle", "design_get", "retry"):
+            assert unreachable not in err.lower()
+
+    def test_the_match_ignores_case_and_surrounding_space(self):
+        # ONE comparison repo-wide (_common._component_is_named): a spelling that scopes a read in
+        # sketch_get must not miss here, or an agent's name works in one tool and not the next
+        beta = _Comp("Beta")
+        des = _Design([beta, _Comp("Gamma")])
+        assert ex.find_component(des, "beta") == (beta, None)
+        assert ex.find_component(des, "  BETA  ") == (beta, None)
+
+    def test_the_exact_spelling_still_resolves_against_a_case_variant(self):
+        # the widened match must not COST a resolve: 'Beta' names exactly one component exactly, so
+        # the presence of a 'BETA' beside it cannot turn that into an ambiguity
+        beta, shout = _Comp("Beta"), _Comp("BETA")
+        des = _Design([beta, shout])
+        assert ex.find_component(des, "Beta") == (beta, None)
+        assert ex.find_component(des, "BETA") == (shout, None)
+
+    def test_narrowing_to_the_exact_spelling_only_happens_when_ONE_survives(self):
+        # two components spelled 'Bracket' and one 'BRACKET': the exact spelling still names two, so
+        # the narrowing must not fire - collapsing to the exact hits would report 2 and drop the
+        # third component that answers to the same name
+        des = _Design([_Comp("Bracket"), _Comp("Bracket"), _Comp("BRACKET")])
+        comp, err = ex.find_component(des, "Bracket")
+        assert comp is None
+        assert "3 components match 'Bracket'" in err
+        assert "(named 'Bracket', 'BRACKET')" in err
+
+    def test_a_spelling_that_matches_BOTH_case_variants_is_ambiguous(self):
+        # 'beta' is the spelling of neither, so it names both - the one true ambiguity here
+        _comp, err = ex.find_component(_Design([_Comp("Beta"), _Comp("BETA")]), "beta")
+        assert _comp is None and "2 components match 'beta'" in err
+
+    def test_the_refusal_quotes_the_names_read_not_the_query(self):
+        # no component is named 'beta'; saying so would assert a name nothing carries, and the real
+        # spellings are exactly what the caller needs to retry with
+        _comp, err = ex.find_component(_Design([_Comp("Beta"), _Comp("BETA")]), "beta")
+        assert "(named 'Beta', 'BETA')" in err
+        assert "are named 'beta'" not in err
+
+    def test_the_spelling_list_is_deduplicated(self):
+        # ten hits, two spellings: the list is what tells them apart, so it carries each spelling
+        # once - one entry per HIT would be nine copies of 'Pin'
+        des = _Design([_Comp("Pin") for _ in range(9)] + [_Comp("PIN")])
+        _comp, err = ex.find_component(des, "pin")
+        assert "(named 'Pin', 'PIN')" in err
+
+    def test_the_spelling_list_is_capped_and_counts_the_rest(self):
+        # every list a refusal publishes crosses the wire, so none of them is unbounded
+        # ten spellings that all answer to 'pin', none of them spelled 'pin' (an exact hit would
+        # resolve instead of refusing)
+        variants = ["Pin", "PIN", "PiN", "pIn", "PIn", "piN", "pIN", "Pin ", " PIN", "  pin  "]
+        _comp, err = ex.find_component(_Design([_Comp(v) for v in variants]), "pin")
+        assert "'Pin', 'PIN', 'PiN', 'pIn', 'PIn', 'piN', 'pIN', 'Pin '" in err
+        assert "' PIN'" not in err                # the 9th is not listed
+        # The remainder is rendered by _common.named_with_remainder, the one capped-wire-list
+        # renderer - it names what it dropped, so a truncated list cannot read as the complete set.
+        assert "(+2 more not listed)" in err
+
+    def test_a_blank_name_matches_nothing(self):
+        # a component whose name does not READ answers "" to the walk; a blank query must not
+        # resolve to it
+        class _Unreadable:
+            @property
+            def name(self):
+                raise RuntimeError("name unreadable")
+
+        assert ex.find_component(_Design([_Unreadable()]), "") == (None, None)
+        assert ex.find_component(_Design([_Unreadable()]), "   ") == (None, None)
 
 
 # ── verify_written ─────────────────────────────────────────────────────────────

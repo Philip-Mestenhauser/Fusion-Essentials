@@ -5,7 +5,7 @@ from these values, so the mocks carry measured data, not hand-typed claims. Each
 owned by the measurement row of the same name in tests/live/VERIFIED_API_FACTS.md."""
 
 FUSION_VERSION = "2705.1.4"
-VERIFIED_ON = "2026-08-28"
+VERIFIED_ON = "2026-08-31"
 
 # '<adsk namespace>.<Class>' -> {member: int} - seeded onto the mock adsk modules.
 ENUMS = {
@@ -33,6 +33,10 @@ ENUMS = {
         "AllLoops": 0,
         "OnlyOutsideLoops": 1,
         "OnlyInsideLoops": 2,
+    },
+    "cam.MachineAxisTypes": {
+        "LinearMachineAxisType": 0,
+        "RotaryMachineAxisType": 1,
     },
     "cam.MachineTemplate": {
         "GenericLathe": 0,
@@ -223,6 +227,19 @@ ENUMS = {
         "EdgeAndAlignedHigherAngleDimPriorityDimensionStrategyType": 6,
         "EdgeAndAlignedWithBaselineDimensionStrategyType": 7,
     },
+    "fusion.DistanceUnits": {
+        "MillimeterDistanceUnits": 0,
+        "CentimeterDistanceUnits": 1,
+        "MeterDistanceUnits": 2,
+        "InchDistanceUnits": 3,
+        "FootDistanceUnits": 4,
+        "YardDistanceUnits": 5,
+        "MicronDistanceUnits": 6,
+        "HectometerDistanceUnits": 7,
+        "MileDistanceUnits": 8,
+        "MilDistanceUnits": 9,
+        "NauticalMileDistanceUnits": 10,
+    },
     "fusion.ExtentDirections": {
         "PositiveExtentDirection": 0,
         "NegativeExtentDirection": 1,
@@ -348,6 +365,12 @@ ENUMS = {
         "MaximumDeviationMeshReduceTargetType": 0,
         "ProportionMeshReduceTargetType": 1,
         "FaceCountMeshReduceTargetType": 2,
+    },
+    "fusion.MeshRefinementSettings": {
+        "MeshRefinementHigh": 0,
+        "MeshRefinementMedium": 1,
+        "MeshRefinementLow": 2,
+        "MeshRefinementCustom": 3,
     },
     "fusion.MeshRepairRebuildTypes": {
         "FastMeshRepairRebuildType": 0,
@@ -477,6 +500,8 @@ BEHAVIOR = {
     "allcomponents_on_design_only": True,
     "alloperations_drops_folder_objects": True,
     "alloperations_flattens_folder_children": True,
+    "camera_view_extents_follows_limiting_axis": True,
+    "camera_view_extents_is_linear": True,
     "collection_item_out_of_range_raises": True,
     "fillet_feature_has_edges": False,
     "find_entity_token_empty_on_miss": True,
@@ -617,6 +642,12 @@ SHAPES = {
         "curveType", "endPoint", "evaluator", "getData", "intersectWithCurve", "intersectWithSurface",
         "isColinearTo", "isValid", "objectType", "set", "startPoint", "this",
         "thisown", "transformBy",
+    ],
+    "Matrix3D": [
+        "asArray", "cast", "classType", "copy", "create", "determinant",
+        "getAsCoordinateSystem", "getCell", "invert", "isEqualTo", "isValid", "objectType",
+        "setCell", "setToAlignCoordinateSystems", "setToIdentity", "setToRotateTo", "setToRotation", "setWithArray",
+        "setWithCoordinateSystem", "this", "thisown", "transformBy", "translation",
     ],
     "MeshBody": [
         "appearance", "appearanceSourceType", "area", "assemblyContext", "attributes", "baseOrFormFeature",

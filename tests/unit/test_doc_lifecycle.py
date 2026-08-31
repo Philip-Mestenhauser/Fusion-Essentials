@@ -90,6 +90,19 @@ class FakeFile:
         return new
 
 
+class _BlindIdFile:
+    """A DataFile whose NAME reads but whose lineage id does not - the cloud read that fails one
+    step past the name. It is still a file carrying that name, so every same-name count includes
+    it; only its URN is unknown."""
+
+    def __init__(self, name):
+        self.name = name
+
+    @property
+    def id(self):
+        raise RuntimeError("3 : cloud read failed")
+
+
 class FakeFolder:
     """files_raise/folders_raise model the folder whose cloud enumeration fails - the hole in a
     by-name search space that a swallowed failure would report as an empty folder."""
@@ -166,12 +179,20 @@ class FakeSaveAsDoc:
     false-negative: saveAs RAISES (InternalValidationError) or returns false while the file DID land."""
 
     def __init__(self, is_saved=False, save_ok=True, new_urn=None,
-                 raise_on_save=False, land_on_save=False):
+                 raise_on_save=False, land_on_save=False, land_count=1, land_blind=False):
         self.isSaved = is_saved
         self._save_ok = save_ok
         self.saveas_args = None
         self._raise_on_save = raise_on_save
         self._land_on_save = land_on_save
+        # how many files of that name the folder reads back afterwards. One saveAs cannot land two;
+        # 2 models the state the documented retry hazard leaves - an earlier saveAs that outlived a
+        # client timeout had already landed one, this call's pre-check read a lagging folder listing
+        # and saw none, and the post-error read sees both.
+        # land_blind: the file lands but its lineage id will not read (it blinds EVERY landed file,
+        # so a mixed readable/unreadable landing is not constructible here).
+        self._land_count = land_count
+        self._land_blind = land_blind
         # dataFile.id after saveAs: a urn -> surfaced; a local handle -> reported null
         self._df = type("DF", (), {"id": new_urn})() if new_urn is not None else \
             type("DF", (), {"id": "C:/tmp/local-handle"})()
@@ -179,7 +200,10 @@ class FakeSaveAsDoc:
     def saveAs(self, name, target, description, tag):
         self.saveas_args = (name, target, description, tag)
         if self._land_on_save:                       # the file lands on disk even when the call fails
-            target._files.append(FakeFile(name, fid="urn:adsk.file:landed"))
+            for i in range(self._land_count):
+                target._files.append(
+                    _BlindIdFile(name) if self._land_blind else
+                    FakeFile(name, fid="urn:adsk.file:landed" + (f"-{i + 1}" if i else "")))
         if self._raise_on_save:
             raise RuntimeError("InternalValidationError")
         return self._save_ok
@@ -419,6 +443,173 @@ class TestSaveDocumentAs:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# a folder holding SEVERAL files of ONE name — the by-name file resolver
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestSameNameFilesInOneFolder:
+    """A folder holds several files of one name: two saveAs calls into one folder under one name
+    produce two DISTINCT lineages, and the folder reads back both files under that name. So a file
+    name is not an identity there - the resolver must REFUSE and name the candidates by the lineage
+    URN, the one thing that tells them apart, never hand back the first sibling."""
+
+    _URN_A = "urn:adsk.wipprod:dm.lineage:hW1WC_3CRkurSsn8eRCmaQ"
+    _URN_B = "urn:adsk.wipprod:dm.lineage:zTj_JYIcRyqZ35BGQj6N1Q"
+
+    def _twins(self):
+        proj = FakeProject("CAM")
+        proj.rootFolder._files.append(FakeFile("AR44-Dup", fid=self._URN_A))
+        proj.rootFolder._files.append(FakeFile("AR44-Dup", fid=self._URN_B))
+        return proj
+
+    def test_two_files_of_one_name_are_refused_naming_both_urns(self):
+        proj = self._twins()
+        found, refusal = _doc_lifecycle._file_in_folder_by_name(proj.rootFolder, "AR44-Dup")
+        assert found is None                       # never one of the two
+        assert self._URN_A in refusal and self._URN_B in refusal
+        assert "2 files" in refusal
+
+    def test_one_file_of_that_name_still_resolves(self):
+        proj = FakeProject("CAM")
+        only = FakeFile("AR44-Dup", fid=self._URN_A)
+        proj.rootFolder._files.append(only)
+        assert _doc_lifecycle._file_in_folder_by_name(proj.rootFolder, "AR44-Dup") == (only, None)
+
+    def test_no_file_of_that_name_is_a_clean_miss_not_a_refusal(self):
+        proj = FakeProject("CAM")
+        proj.rootFolder._files.append(FakeFile("Other", fid=self._URN_A))
+        assert _doc_lifecycle._file_in_folder_by_name(proj.rootFolder, "AR44-Dup") == (None, None)
+
+    def test_a_longer_name_is_a_different_file(self):
+        # whole-name match: 'AR44-Dup2' neither resolves as nor collides with 'AR44-Dup'
+        proj = FakeProject("CAM")
+        proj.rootFolder._files.append(FakeFile("AR44-Dup2", fid=self._URN_B))
+        assert _doc_lifecycle._file_in_folder_by_name(proj.rootFolder, "AR44-Dup") == (None, None)
+
+    def test_an_unreadable_id_is_named_as_such_beside_its_twin(self):
+        # the URN is what the refusal is FOR: an id that will not read must say so, not vanish and
+        # leave a caller reading one URN for two files.
+        proj = FakeProject("CAM")
+        proj.rootFolder._files.append(FakeFile("AR44-Dup", fid=self._URN_A))
+        proj.rootFolder._files.append(_BlindIdFile("AR44-Dup"))
+        found, refusal = _doc_lifecycle._file_in_folder_by_name(proj.rootFolder, "AR44-Dup")
+        assert found is None
+        assert self._URN_A in refusal and "(id unreadable)" in refusal
+
+    def test_doc_copy_refuses_an_ambiguous_destination_and_copies_nothing(self, monkeypatch):
+        proj = self._twins()
+        src = FakeFile("Template", fid="urn:adsk.file:src")
+        _install_mp(monkeypatch, [proj], by_id={"urn:adsk.file:src": src})
+        res = _doc_lifecycle.copy_document_handler(
+            document_id="urn:adsk.file:src", project="CAM", name="AR44-Dup")
+        assert res["isError"] is True
+        assert self._URN_A in res["message"] and self._URN_B in res["message"]
+        # the remedy is in doc_copy's OWN input vocabulary, not "go rename/delete a cloud file"
+        assert "'folder'" in res["message"] and "'name'" in res["message"]
+        assert len(proj.rootFolder._files) == 2            # nothing was copied in
+
+    def test_doc_save_as_refuses_by_default_naming_both_urns_and_the_optin(self, monkeypatch):
+        proj = self._twins()
+        doc = FakeSaveAsDoc(new_urn="urn:adsk.lineage:new")
+        _install_mp(monkeypatch, [proj], active=doc)
+        res = _doc_lifecycle.save_document_as_handler(name="AR44-Dup", project="CAM")
+        assert res["isError"] is True
+        assert self._URN_A in res["message"] and self._URN_B in res["message"]
+        assert "doc_open" in res["message"] and "allow_duplicate_name" in res["message"]
+        assert doc.saveas_args is None                     # refused BEFORE saving - no third fork
+
+    def test_the_opt_in_fork_lists_every_pre_existing_lineage(self, monkeypatch):
+        # one 'existing_document_id' cannot state two, so the collision block names them all rather
+        # than dropping the warning (or picking a sibling) when the name was already shared.
+        proj = self._twins()
+        doc = FakeSaveAsDoc(new_urn="urn:adsk.lineage:third")
+        _install_mp(monkeypatch, [proj], active=doc)
+        out = _payload(_doc_lifecycle.save_document_as_handler(
+            name="AR44-Dup", project="CAM", allow_duplicate_name=True))
+        assert out["saved"] is True and doc.saveas_args is not None
+        assert out["name_collision"]["existing_document_ids"] == [self._URN_A, self._URN_B]
+        assert "NAME COLLISION" in out["note"]
+
+    def test_the_fork_warning_names_an_unreadable_id_instead_of_dropping_it(self, monkeypatch):
+        # A file whose id will not read is still one of the files carrying that name. Dropping it
+        # renders 2 files under ONE URN - which reads as though both were that lineage - and hands
+        # back an id list one entry short of the count beside it.
+        proj = FakeProject("CAM")
+        proj.rootFolder._files.append(FakeFile("AR44-Dup", fid=self._URN_A))
+        proj.rootFolder._files.append(_BlindIdFile("AR44-Dup"))
+        doc = FakeSaveAsDoc(new_urn="urn:adsk.lineage:third")
+        _install_mp(monkeypatch, [proj], active=doc)
+        out = _payload(_doc_lifecycle.save_document_as_handler(
+            name="AR44-Dup", project="CAM", allow_duplicate_name=True))
+        collision = out["name_collision"]
+        assert collision["existing_document_ids"] == [self._URN_A, None]   # a slot per file
+        assert "2 files named 'AR44-Dup'" in collision["warning"]
+        assert "(id unreadable)" in collision["warning"]                   # named, not vanished
+
+    def test_a_recovery_read_finding_two_files_does_not_name_one_as_this_save(self, monkeypatch):
+        # The documented retry hazard: a saveAs outlived a client timeout and landed, the retry
+        # raised, and the folder now reads back TWO files of the name. WHICH lineage this call wrote
+        # is not readable off the folder, so document_id comes from the document's own settled URN.
+        proj = FakeProject("CAM")
+        doc = FakeSaveAsDoc(raise_on_save=True, land_on_save=True, land_count=2,
+                            new_urn="urn:adsk.lineage:settled")
+        _install_mp(monkeypatch, [proj], active=doc)
+        out = _payload(_doc_lifecycle.save_document_as_handler(name="X", project="CAM"))
+        assert out["saved"] is True and out["recovered_from_error"] is True
+        assert out["document_id"] == "urn:adsk.lineage:settled"
+        assert len(proj.rootFolder._files) == 2            # both really are there
+        # the duplicate it just measured is DISCLOSED, not discarded, even where document_id resolved
+        assert out["same_name_document_ids"] == ["urn:adsk.file:landed", "urn:adsk.file:landed-2"]
+        assert "2 files named 'X'" in out["note"]
+
+    def test_an_already_saved_doc_withholds_the_id_rather_than_naming_its_source_lineage(
+            self, monkeypatch):
+        # The other side of the was_saved boundary, and the damaging one: on an ALREADY-SAVED
+        # document dataFile.id still reads the lineage it was saved FROM - a different file, under a
+        # different name, in a different folder - so it must not stand in for the file this call
+        # wrote. Null, plus the candidates, beats a confident wrong URN.
+        proj = FakeProject("CAM")
+        doc = FakeSaveAsDoc(is_saved=True, raise_on_save=True, land_on_save=True, land_count=2,
+                            new_urn="urn:adsk.wipprod:dm.lineage:SOURCE")
+        _install_mp(monkeypatch, [proj], active=doc)
+        out = _payload(_doc_lifecycle.save_document_as_handler(name="X", project="CAM"))
+        assert out["saved"] is True and out["recovered_from_error"] is True
+        assert out["document_id"] is None                  # never the source lineage
+        assert "SOURCE" not in json.dumps(out)
+        # and the ambiguity this recovery MEASURED reaches the caller: the count and both URNs
+        assert out["same_name_document_ids"] == ["urn:adsk.file:landed", "urn:adsk.file:landed-2"]
+        assert "2 files named 'X'" in out["note"]
+        assert "urn:adsk.file:landed" in out["note"] and "urn:adsk.file:landed-2" in out["note"]
+        assert "'document_id' is null" in out["note"] and "data_get" in out["note"]
+
+    def test_a_single_landed_file_with_an_unreadable_id_also_withholds_it(self, monkeypatch):
+        # The same gate one file down: exactly one file landed but its id will not read, so there is
+        # nothing to publish - and an already-saved doc's own URN is still the wrong answer.
+        proj = FakeProject("CAM")
+        doc = FakeSaveAsDoc(is_saved=True, raise_on_save=True, land_on_save=True, land_blind=True,
+                            new_urn="urn:adsk.wipprod:dm.lineage:SOURCE")
+        _install_mp(monkeypatch, [proj], active=doc)
+        out = _payload(_doc_lifecycle.save_document_as_handler(name="X", project="CAM"))
+        assert out["saved"] is True and out["recovered_from_error"] is True
+        assert out["document_id"] is None
+        assert "same_name_document_ids" not in out         # one file is not an ambiguity
+        assert "'document_id' is null" in out["note"]
+
+    def test_several_landed_files_with_unreadable_ids_keep_a_slot_each(self, monkeypatch):
+        # The same dropped-slot defect as the fork warning, in the recovery disclosure: an id list
+        # that skips a blind file comes back shorter than the count in the note beside it, so the
+        # two surfaces disagree about how many files carry the name. One slot per file, always.
+        proj = FakeProject("CAM")
+        doc = FakeSaveAsDoc(is_saved=True, raise_on_save=True, land_on_save=True, land_count=2,
+                            land_blind=True, new_urn="urn:adsk.wipprod:dm.lineage:SOURCE")
+        _install_mp(monkeypatch, [proj], active=doc)
+        out = _payload(_doc_lifecycle.save_document_as_handler(name="X", project="CAM"))
+        assert out["saved"] is True
+        assert out["same_name_document_ids"] == [None, None]
+        assert out["note"].count("(id unreadable)") == 2   # named once per file, not collapsed
+        assert "2 files named 'X'" in out["note"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # copy_document_handler  (DataFile.copy — cloud-to-cloud copy of a saved file)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -473,6 +664,65 @@ class TestCopyDocument:
         res = _doc_lifecycle.copy_document_handler(
             document_id="urn:adsk.file:src", project="CAM", name="PartA_CAM")
         assert res["isError"] is True and "already exists" in res["message"]
+        # On the document_id path 'name' is free to be the COPY's name, so both of doc_copy's own
+        # inputs are performable remedies. Asking the caller to delete the existing cloud file is
+        # not something this tool - or a caller without delete rights - can do.
+        assert "different 'folder'" in res["message"]
+        assert "give the copy a different 'name'" in res["message"]
+        assert "remove the existing" not in res["message"]
+
+    def test_duplicate_name_on_the_by_name_path_does_not_offer_renaming_the_copy(self):
+        # 'name' doubles as the SOURCE lookup when copying by name, so "give the copy a different
+        # name" would copy a DIFFERENT document instead of renaming this one. The refusal offers
+        # 'folder', says what 'name' is doing on this call, and names document_id as what frees it.
+        lib = FakeProject("Library", pid="p-lib")
+        lib.rootFolder._files.append(FakeFile("Template", fid="urn:adsk.file:src"))
+        dest = FakeProject("CAM", pid="p-cam")
+        dest.rootFolder._files.append(FakeFile("Template", fid="urn:existing"))
+        _install([lib, dest])
+        res = _doc_lifecycle.copy_document_handler(
+            name="Template", source_project="Library", project="CAM")
+        assert res["isError"] is True and "already exists" in res["message"]
+        assert "different 'folder'" in res["message"]
+        assert "give the copy a different 'name'" not in res["message"]
+        assert "document_id" in res["message"]
+        assert "remove the existing" not in res["message"]
+
+    def test_several_same_name_files_at_the_destination_offer_the_same_branch_remedy(self):
+        # The destination already holds TWO files of the final name, so the guard returns the
+        # AMBIGUOUS refusal rather than the single-match one. Which branch a caller lands in depends
+        # on how many files are already there; which of doc_copy's inputs it can still move does not
+        # - so this refusal ends on the same branch-aware remedy. On the by-name path 'name' IS the
+        # source lookup, so offering it here would tell the caller to copy a different document.
+        lib = FakeProject("Library", pid="p-lib")
+        lib.rootFolder._files.append(FakeFile("Template", fid="urn:adsk.file:src"))
+        dest = FakeProject("CAM", pid="p-cam")
+        dest.rootFolder._files.append(FakeFile("Template", fid="urn:dup-a"))
+        dest.rootFolder._files.append(FakeFile("Template", fid="urn:dup-b"))
+        _install([lib, dest])
+        res = _doc_lifecycle.copy_document_handler(
+            name="Template", source_project="Library", project="CAM")
+        assert res["isError"] is True
+        assert "'Template' names 2 files" in res["message"]      # the ambiguous branch, not single
+        assert "different 'folder'" in res["message"]
+        assert "give the copy a different 'name'" not in res["message"]
+        assert "'name' selects the SOURCE file" in res["message"]
+        assert "document_id" in res["message"]
+
+    def test_several_same_name_files_still_offer_name_on_the_document_id_path(self):
+        # The other side of the branch: addressed by URN, 'name' is free to be the COPY's name, so
+        # the ambiguous refusal offers it - the same rule the single-match branch beside it follows.
+        proj = FakeProject("CAM")
+        proj.rootFolder._files.append(FakeFile("PartA_CAM", fid="urn:dup-a"))
+        proj.rootFolder._files.append(FakeFile("PartA_CAM", fid="urn:dup-b"))
+        src = FakeFile("Template", fid="urn:adsk.file:src")
+        _install([proj], by_id={"urn:adsk.file:src": src})
+        res = _doc_lifecycle.copy_document_handler(
+            document_id="urn:adsk.file:src", project="CAM", name="PartA_CAM")
+        assert res["isError"] is True
+        assert "'PartA_CAM' names 2 files" in res["message"]
+        assert "different 'folder' or give the copy a different 'name'." in res["message"]
+        assert "selects the SOURCE" not in res["message"]
 
     def test_copy_by_name_needs_source_project(self):
         _install([FakeProject("CAM")])

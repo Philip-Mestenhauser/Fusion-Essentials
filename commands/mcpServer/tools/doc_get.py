@@ -635,7 +635,7 @@ TOOL_DESCRIPTION = (
     "all_current/stale/unresolved rollup; 'used_in' = the "
     "REVERSE view (where-used) - documents "
     "that reference THIS one (a drawing made from it, a parent assembly that inserts it), each with "
-    "name/type/version/URN and a by-type rollup. open_documents is capped (max_results, default 50) and "
+    f"name/type/version/URN and a by-type rollup. open_documents is capped (max_results, default {_OPEN_DOCS_CAP}) and "
     "each slice is capped too; 'truncated' flags when a cap was hit. Roll a version back with "
     "doc_restore_version.\n"
     + _outputs.produces_block(RETURNS)
@@ -643,13 +643,13 @@ TOOL_DESCRIPTION = (
 
 tool = (
     Tool.create_simple(name="doc_get", description=TOOL_DESCRIPTION)
-    .add_input_property("max_results", {"type": "integer", "description": "Cap on the 'open_documents' array returned (default 50)."})
+    .add_input_property("max_results", {"type": "integer", "description": f"Cap on the 'open_documents' array returned (default {_OPEN_DOCS_CAP})."})
     .add_input_property("include", {"type": "array", "items": {"type": "string", "enum": ["versions", "xref_tree", "used_in"]},
             "description": "Opt-in cloud slices: 'versions' (version history + milestones), 'xref_tree' (referenced-component and derive-link freshness), and/or 'used_in' (where-used - documents that reference this one)."})
-    .add_input_property("versions_max", {"type": "integer", "description": "Cap on the 'versions' slice list (default 25)."})
-    .add_input_property("xref_max", {"type": "integer", "description": "Cap on the 'xref_tree' references walked/returned (default 50)."})
+    .add_input_property("versions_max", {"type": "integer", "description": f"Cap on the 'versions' slice list (default {_VERSIONS_CAP})."})
+    .add_input_property("xref_max", {"type": "integer", "description": f"Cap on the 'xref_tree' references walked/returned (default {_XREF_CAP})."})
     .add_input_property("max_depth", {"type": "integer", "description": "Optional max assembly depth for the 'xref_tree' walk (1 = top-level refs only)."})
-    .add_input_property("used_in_max", {"type": "integer", "description": "Cap on the 'used_in' referencing-documents list (default 50)."})
+    .add_input_property("used_in_max", {"type": "integer", "description": f"Cap on the 'used_in' referencing-documents list (default {_USED_IN_CAP})."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)

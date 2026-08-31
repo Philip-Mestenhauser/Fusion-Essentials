@@ -14,7 +14,7 @@ import adsk.fusion
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe, find_sketch, all_sketch_names
+from ._common import ok, error, safe, all_sketch_names
 from . import _common
 from . import _inputs
 from . import _sketch_detail
@@ -348,10 +348,14 @@ def _apply_rect_pattern(gc, ents, dir_one, dir_two, qty_one, qty_two, dist_one_c
     Sketch.move/copy demand. The quantities are counts and pass as plain reals; the DISTANCES carry
     their unit (see _cm_value)."""
     pin = gc.createRectangularPatternInput(ents, dist_type)
-    pin.setDirectionOne(dir_one, adsk.core.ValueInput.createByReal(qty_one),
-                        _cm_value(dist_one_cm))
-    pin.setDirectionTwo(dir_two, adsk.core.ValueInput.createByReal(qty_two),
-                        _cm_value(dist_two_cm))
+    if pin.setDirectionOne(dir_one, adsk.core.ValueInput.createByReal(qty_one),
+                           _cm_value(dist_one_cm)) is False:
+        return None, ("Fusion refused direction one of the rectangular pattern (setDirectionOne "
+                      "returned false), so no pattern was created.")
+    if pin.setDirectionTwo(dir_two, adsk.core.ValueInput.createByReal(qty_two),
+                           _cm_value(dist_two_cm)) is False:
+        return None, ("Fusion refused direction two of the rectangular pattern (setDirectionTwo "
+                      "returned false), so no pattern was created.")
     if symmetric:
         for prop in ("isSymmetricInDirectionOne", "isSymmetricInDirectionTwo"):
             serr = _common.set_verified(pin, prop, True, "symmetric", "rectangular_pattern")
@@ -564,7 +568,7 @@ def handler(constraint: str = "", sketch_name: str = "", entity_one: str = "",
             symmetric: bool = False, suppressed=None, result_option: str = "option1",
             dimension_strategy: str = "", inter_loop_strategy: str = "",
             symmetric_strategy: str = "", linear_diameter_dims: str = "",
-            units: str = "mm") -> dict:
+            units: str = "mm", component: str = "") -> dict:
     """See TOOL_DESCRIPTION."""
     cname = (constraint or "").strip().lower()
     if cname not in _CONSTRAINTS:
@@ -588,15 +592,17 @@ def handler(constraint: str = "", sketch_name: str = "", entity_one: str = "",
     design = _common.design()
     if not design:
         return error("No active design.")
-    # Resolve across the whole design (active component first) so a sketch in an activated
+    # Resolve across the whole design (every component, no preference among them) so a sketch in an activated
     # sub-component is constrainable, not only one in the root component. A name SEVERAL components'
-    # sketches carry is refused with them named, rather than constraining an arbitrary one.
-    sketch, ambiguous = find_sketch(design, (sketch_name or "").strip())
-    if ambiguous:
-        return error(ambiguous)
+    # sketches carry is refused with them named, rather than constraining an arbitrary one - and the
+    # refusal names 'component', the scope that narrows the walk to one component's own sketches.
+    wanted = (sketch_name or "").strip()
+    sketch, refusal = _sketch_detail.scoped_sketch(design, wanted, component)
+    if refusal:
+        return error(refusal)
     if not sketch:
         names = all_sketch_names(design)
-        return error(f"No sketch named '{sketch_name}'. Available: "
+        return error(f"No sketch named '{wanted}'. Available: "
                      + (", ".join(n for n in names if n) or "(none)") + ". Use sketch_get.")
 
     k, uerr = _inputs.UNITS.resolve(units)
@@ -898,6 +904,7 @@ tool = (
     .add_input_property(*_inputs.Choice("constraint", list(_CONSTRAINTS),
             description="The relationship to apply.").as_property())
     .add_input_property("sketch_name", {"type": "string", "description": "The sketch to constrain."})
+    .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
     .add_input_property("entity_one", {"type": "string", "description": "First entity ref; a POINT for midpoint/coincident and circular_pattern's centre, a direction LINE for rectangular_pattern. Point slots take an anchor, e.g. 'circle:0:center'; fix/unfix also take 'text:<i>'."})
     .add_input_property("entity_two", {"type": "string", "description": "Second entity ref; rectangular_pattern's second direction LINE."})
     .add_input_property("symmetry_line", {"type": "string", "description": "Axis line for 'symmetry'."})

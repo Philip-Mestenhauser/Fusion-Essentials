@@ -24,6 +24,11 @@ _DEFAULT_VIEWS = ["front", "top", "right", "iso-top-right"]
 _ALL_ORTHOS = ["front", "back", "left", "right", "top", "bottom"]
 _MAX_DIM = 4096
 _MAX_VIEWS = 8
+# The per-image pixel size a caller who names none gets - smaller than view_screenshot's, since
+# several images ride back in one payload. Held as constants so the clamp fallback and the wire
+# sentences cannot state different numbers.
+_WIDTH_DEFAULT = 600
+_HEIGHT_DEFAULT = 500
 
 
 def _parse_views(views):
@@ -54,7 +59,8 @@ def _parse_views(views):
     return out, None
 
 
-def handler(views=None, width: int = 600, height: int = 500, transparent_background=None,
+def handler(views=None, width: int = _WIDTH_DEFAULT, height: int = _HEIGHT_DEFAULT,
+            transparent_background=None,
             anti_aliased=None) -> dict:
     """See TOOL_DESCRIPTION."""
     names, err = _parse_views(views)
@@ -70,8 +76,8 @@ def handler(views=None, width: int = 600, height: int = 500, transparent_backgro
             return max(1, min(int(value), _MAX_DIM))
         except Exception:
             return default
-    width = _clamp_dim(width, 600)
-    height = _clamp_dim(height, 500)
+    width = _clamp_dim(width, _WIDTH_DEFAULT)
+    height = _clamp_dim(height, _HEIGHT_DEFAULT)
 
     vp = app.activeViewport
     if not vp:
@@ -138,8 +144,8 @@ tool = (
     .add_input_property("views", {"type": "array",
             "items": {"type": "string", "enum": list(_VIEWS) + ["all"]},
             "description": "Views to capture, in order; ['all'] for the six orthographic views; omit for a front/top/right/iso default."})
-    .add_input_property("width", {"type": "integer", "description": "Width of each image in px (default 600)."})
-    .add_input_property("height", {"type": "integer", "description": "Height of each image in px (default 500)."})
+    .add_input_property("width", {"type": "integer", "description": f"Width of each image in px (default {_WIDTH_DEFAULT})."})
+    .add_input_property("height", {"type": "integer", "description": f"Height of each image in px (default {_HEIGHT_DEFAULT})."})
     .add_input_property("transparent_background", {"type": "boolean",
             "description": "Render the background transparent."})
     .add_input_property("anti_aliased", {"type": "boolean",

@@ -15,6 +15,7 @@ from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from . import _common
 from . import _inputs
+from . import _sketch_detail
 
 app = adsk.core.Application.get()
 
@@ -288,7 +289,8 @@ def _moved_warning(moves, value_cm, gap_before_cm):
 
 def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str = "",
             entity_two: str = "", value: str = "", surface: str = "", is_driving: bool = True,
-            tangent_side_one: bool = True, tangent_side_two: bool = True) -> dict:
+            tangent_side_one: bool = True, tangent_side_two: bool = True,
+            component: str = "") -> dict:
     """See TOOL_DESCRIPTION."""
     dt = (dim_type or "distance").strip().lower()
     if dt not in _DIM_TYPES:
@@ -303,12 +305,16 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
     design = _common.design()
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")
-    sketch, requested, ambiguous = _common.find_or_recent_sketch(design, sketch_name)
-    if ambiguous:
-        return error(ambiguous)
+    sketch, requested, refusal = _sketch_detail.scoped_or_recent_sketch(
+        design, sketch_name, component)
+    if refusal:
+        return error(refusal)
     if not sketch:
-        return error(f"No sketch named '{requested}'." if requested else
-    "No sketch to dimension. Create one first with sketch_create.")
+        if requested:
+            return error(f"No sketch named '{requested}'. Available: "
+                         + (", ".join(n for n in _common.all_sketch_names(design) if n)
+                            or "(none)") + ". Use sketch_get.")
+        return error("No sketch to dimension. Create one first with sketch_create.")
 
     base1, anchor1, aerr1 = _common.parse_anchor_ref(entity_one)
     if aerr1:
@@ -537,6 +543,7 @@ tool = (
     .add_input_property(*_DIM_TYPE.as_property())
     .add_required_input("dim_type")
     .add_input_property("sketch_name", {"type": "string", "description": "Sketch to dimension (omit = most recent)."})
+    .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
     .add_input_property("entity_one", {"type": "string", "description": "First entity ref '<type>:<index>', optional position anchor ':start/:end/:mid/:center' (e.g. 'line:0:end')."})
     .add_input_property("entity_two", {"type": "string", "description": "Second entity ref (angle needs two; distance on a lone LINE may omit it = the line's length); same anchor forms as entity_one."})
     .add_input_property("value", {"type": "string", "description": "Driven expression (e.g. '25 mm', '90 deg', 'StockX/2'); omit to keep measured."})

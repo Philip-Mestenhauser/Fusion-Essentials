@@ -11,10 +11,11 @@ import time
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe
+from ._common import ok, error, safe, told_apart
 from . import _outputs
 from . import _cam_common   # the shared CAM substrate: live_readiness (the single job-health source)
-from ._write_guard import _active_identity   # the one active-document identity read
+from ._write_guard import _active_identity, document_key   # the one active-document identity read,
+                                                           # and the one key a launch is bound to
 
 # What this tool RETURNS: an async generation handle the agent checks with cam_get_status.
 RETURNS = [
@@ -32,33 +33,96 @@ _HANDLE_SEQ = _cam_common._HANDLE_SEQ
 register_future = _cam_common.register_future
 
 
-def _collect_op_health():
-    """Read warnings / errors from the LIVE document operations, with the message text.
+def _collect_op_health(ops, labels=None):
+    """Read warnings / errors from THESE operations, with the message text.
+
+    `ops` is the operations of the SCOPE the tally published beside these lists covers - a scoped
+    read hands that target's own operations, a document read the whole document's - so the lists and
+    that tally can never describe different scopes.
+
+    `labels` is what each row is NAMED by, parallel to `ops` (see _op_labels): an operation name is
+    unique only within a setup, so a document-scope list can otherwise carry one name twice with
+    nothing separating the rows. Omitted, every row is named by the operation's own name.
 
     Returns {"warnings": [{name, warning}], "errors": [{name, error}], "empty": [name]}.
-    - warning text comes from OperationBase.warning (hasWarning gates it). Common cases the
-      machinist wants to see: spindle speed exceeds the machine limit (often acceptable), and an
-      EMPTY toolpath (a region with nothing to cut - sometimes expected).
-    - 'empty' is derived by matching the warning text (Fusion has no toolpath-length API on
-      Operation), so empty toolpaths surface both in 'warnings' and, for convenience, in 'empty'.
+    - a warning row is gated by _cam_common.counts_as_warning, the ONE predicate every readiness
+      surface counts and samples through - the same one behind live_states.warnings, so the tally
+      and this list select the same operations rather than two sets the payload claims are one. A
+      warning on an ERRORED op is left to that op's error row (which already blocks the post), and a
+      SUPPRESSED op is excluded from the post entirely. The text comes from OperationBase.warning;
+      the case the machinist most wants is a spindle speed over the machine limit (often acceptable).
+    - 'empty' is the shared state read (_cam_common.is_empty_toolpath): an op that generated and
+      produced no toolpath, told from the flags rather than from warning text.
       """
-    cam, err = _cam_common.get_cam()
     out = {"warnings": [], "errors": [], "empty": []}
-    if err:
-        return out
-    try:
-        for o in _cam_common.walk_operations(cam):
-            name = safe(lambda o=o: o.name)
-            if safe(lambda o=o: o.hasError, False):
-                out["errors"].append({"name": name, "error": (safe(lambda o=o: o.error) or "").strip()})
-            if safe(lambda o=o: o.hasWarning, False):
-                wtext = (safe(lambda o=o: o.warning) or "").strip()
-                out["warnings"].append({"name": name, "warning": wtext})
-                if "empty" in wtext.lower():
-                    out["empty"].append(name)
-    except Exception:
-        pass
+    labels = list(labels or [])
+    for i, o in enumerate(ops or []):
+        facts = _cam_common.op_state_facts(o)
+        name = labels[i] if i < len(labels) else facts["name"]
+        if facts["has_error"]:
+            out["errors"].append({"name": name, "error": (safe(lambda o=o: o.error) or "").strip()})
+        if _cam_common.counts_as_warning(facts):
+            out["warnings"].append({"name": name,
+                                    "warning": (safe(lambda o=o: o.warning) or "").strip()})
+        if _cam_common.is_empty_toolpath(facts):
+            out["empty"].append(name)
     return out
+
+
+def _document_ops():
+    """Every operation NODE in the ACTIVE document - the health-list counterpart to live_readiness,
+    whose tally is the whole document's too. It is passed UNCALLED alongside that tally and
+    evaluated only where the lists are actually attached, so a still-generating poll never pays for
+    the walk.
+
+    Nodes rather than bare Operations: the whole document is the scope where one operation name
+    legitimately belongs to several operations, and the node's 'Setup / op' path is the only thing
+    that separates them (see _op_labels).
+
+    That laziness is why the document path re-walks: live_readiness took its own walk earlier in the
+    call, and this is a SECOND one. The two therefore share a scope, not an instant - an operation
+    that changed state in between lands in the lists under its later reading."""
+    cam, err = _cam_common.get_cam()
+    return [] if err else _cam_common.operation_nodes(cam)
+
+
+def _op_labels(nodes):
+    """What each operation row is NAMED by: the operation's own name, or - where several operations
+    in the SAME list carry that name - its 'Setup / ... / op' path, plus the row's POSITION in this
+    list wherever that path repeats too.
+
+    An operation name is unique only WITHIN a setup, so a document-scope list carries one name twice
+    unless the row is named by its path. The path is read off the walk that produced the node,
+    beside the name, so it describes THAT operation; the walk builds it one level at a time, which
+    is why a folder-nested operation carries its folder in the middle. The substitution is
+    _common.told_apart, the one rule every listing here follows: a name that already identifies one
+    row is left alone.
+
+    A PATH can repeat as well - it is the container's address joined with the operation's own name,
+    so two rows agreeing on both agree on the whole string and the substitution would print one
+    address for two operations, which is the count restated and nothing else. Such a row takes the
+    position it holds in THIS list beside its path: the same discriminator
+    workspace_orient._empty_labels spends on the same shape, so the two lists name a repeated
+    address one way rather than two. It is spent only where the path failed, and it addresses
+    nothing outside this payload - no tool takes it as input.
+
+    What Fusion permits here is not settled. An operation CREATED with a sibling's name under one
+    setup is reported to be stored under a different name, but that has no ledger row - and a RENAME
+    onto a sibling's name, and whether two setups may share a name (which would join two containers
+    to one address), are unread either way. PROBE NEEDED (CAM-34) covers all three. The repair does
+    not rest on that answer:
+    it reads the (name, path) pairs this list actually holds, so a repeat is separated whatever
+    produced it, and an unrepeated path is rendered exactly as before."""
+    per_path = {}
+    for n in nodes:
+        per_path[n.path] = per_path.get(n.path, 0) + 1
+    rows = []
+    for position, n in enumerate(nodes, 1):
+        disc = n.path
+        if disc and per_path[disc] > 1:
+            disc = f"{disc} (operation {position})"
+        rows.append((n.name, disc))
+    return told_apart(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -161,15 +225,128 @@ def _incomplete_note(live: dict) -> str:
     return note
 
 
-def _attach_op_health(payload: dict) -> None:
-    """Attach the per-op warning/error TEXT lists for the final review (the texture a machinist reads)."""
-    health = _collect_op_health()
+# What `completed` claims, stated wherever it is published as true. It is a GENERATION-lifecycle
+# flag, not a result: measured on a document reading "0 of 34 active ops valid", the poll still
+# reported completed:true because nothing was generating any more. This sentence stops the flag
+# being read as a result. The pointer to the health verdict is a SEPARATE sentence, because the two
+# paths that report a Future alone (a foreign active document, an unreadable tally) have no
+# readiness line to point at - promising one there and withdrawing it a clause later is worse than
+# either fact alone.
+_COMPLETED_MEANS = ("completed=true means nothing in scope is still generating - it is not a "
+                    "success verdict.")
+_READINESS_IS_THE_VERDICT = " The readiness line beside it is the health verdict."
+
+# What operations_completed IS, stated wherever the Future's counter is published. The number is
+# GenerateToolpathFuture.numberOfCompleted at that instant and nothing more. No running maximum is
+# published in its place: a high-water mark would go on claiming progress the platform's own counter
+# has stopped standing behind, and a regeneration inside this handle's scope legitimately starts the
+# count over, so a clamp could only lie about completion. Nothing here reads the number as a
+# verdict either - `completed` is gated on isGenerationCompleted plus the live per-op tally - so
+# disclosing the figure as instantaneous costs the read nothing it was using.
+_COUNT_IS_INSTANTANEOUS = (
+    " operations_completed is the generation Future's own numberOfCompleted at THIS read - an "
+    "instantaneous figure, not a monotonic progress count: it has been observed to FALL between two "
+    "reads of one generation (24 -> 23 -> 25), and it reads 0 after a completed single-operation "
+    "generation (measured). Read progress from 'completed' and the readiness line, never from this "
+    "number rising.")
+
+
+def _same_document(entry: dict):
+    """Whether this generation's launch document IS the active one - the ONE comparison the status
+    read gates on, so the tally path and the handle-routing path can never disagree about it.
+
+    Three answers, because two of them are not the same fact. True and False are IDENTITY, read off
+    the document_key the launch recorded and the one the active document answers now - the lineage
+    URN for a saved document, and for a never-saved one a token minted per document INSTANCE and
+    matched by document handle. That key is why a never-saved document is comparable at all: its
+    NAME never was, since two open never-saved documents both answer 'Untitled' (measured), so a
+    name match is not evidence that they are one document.
+
+    None is "no identity was readable, so the two cannot be compared" - no document read when the
+    generation was launched, or none reads now. Callers gate on `is True` - a None read as truthy
+    attaches another document's tallies, and read as plain False it reports a document as inactive
+    that may be the active one.
+
+    A key that no longer matches is not yet a different document: the key is DERIVED from what
+    reads on the document, and document_key prefers a data-file id which does not arrive settled -
+    so a launch document saved mid-generation can answer a new key MORE THAN ONCE while being the
+    same open document, and this comparison has to survive each of them. The launch document
+    HANDLE is compared before that mismatch is reported as one - handle equality is the comparison
+    document_key itself matches a never-saved document on, and a closed or foreign document
+    compares unequal there rather than raising. It can only turn a mismatch into a match: a key
+    that still matches is already the answer.
+    """
+    launched = entry.get("doc_key")
+    if not launched:
+        return None
+    active = document_key()
+    if active is None:
+        return None
+    if launched == active:
+        return True
+    doc = entry.get("doc")
+    if doc is None:
+        return False
+    # Read through the same application object register_future stamped the handle from, so the two
+    # halves of this comparison cannot come from different seams.
+    live = safe(lambda: _cam_common.app.activeDocument)
+    if live is None:
+        return False
+    return bool(safe(lambda: doc == live, False))
+
+
+def _latest_refusal(latest: str, entry: dict, same) -> str:
+    """The refusal 'latest' returns when it cannot name the job the caller meant.
+
+    'latest' is a POSITIONAL pick naming neither a handle nor a document, so it may only answer over
+    a launch document it can CONFIRM is the active one. The two ways it cannot are different facts
+    and get different sentences: `same` is False when the launch document is identified and is not
+    this one, None when no identity was readable on one side or the other to compare at all."""
+    doc_name = entry.get("doc_name")
+    ways_out = (f"Pass handle='{latest}' to read that generation deliberately, or omit 'handle' for "
+                "the ACTIVE document's live state.")
+    if same is None:
+        return (f"'latest' is generation '{latest}', and no document identity could be read to "
+                "compare it against the active one - either no document read when it was launched, "
+                f"or none reads now. Its name ({doc_name!r}) is not an identity - two open "
+                "never-saved documents answer the same one - so this read cannot confirm the "
+                f"generation belongs to the document open now. {ways_out}")
+    return (f"'latest' is generation '{latest}' of document '{doc_name}', which is not the active "
+            f"document ({_active_identity()[0]!r}). It names no document of its own, so this read "
+            f"would report another document's job. {ways_out} Or doc_activate '{doc_name}' first "
+            "for its per-operation tallies.")
+
+
+def _attach_op_health(payload: dict, nodes, scope_label: str) -> str:
+    """Attach the per-op warning/error TEXT lists for the final review (the texture a machinist
+    reads), read over the SAME SCOPE live_states was tallied over, and NAME that scope in the
+    payload. Returns the note clause stating it.
+
+    Lists and counts are both built from `nodes`, so a scoped read cannot report six operations in
+    its tally beside thirty-four warnings drawn from every setup in the document - a mixed pair a
+    reader has no way to tell apart. health_scope is what says which of the two a given payload
+    holds.
+
+    Each row is named through _op_labels, so a name two operations in this scope share is replaced
+    by the path that separates them - and the note SAYS so when that happened, since a reader
+    meeting 'Setup1 / Rough' in a name field otherwise has to guess why."""
+    labels = _op_labels(nodes)
+    health = _collect_op_health([n.obj for n in nodes], labels)
     payload["operations_with_warnings"] = health["warnings"]   # [{name, warning}]
     payload["operations_with_errors"] = health["errors"]       # [{name, error}]
     payload["empty_toolpaths"] = health["empty"]               # generated but 0 toolpath length
     payload["counts"] = {"with_warnings": len(health["warnings"]),
                          "with_errors": len(health["errors"]),
                          "empty_toolpaths": len(health["empty"])}
+    payload["health_scope"] = scope_label      # WHICH operations the three lists above describe
+    # The walk names each level it descends, so the path is 'Setup / op' for a top-level operation
+    # and carries the folder(s) in between for a nested one - the clause says it the way the walk
+    # builds it rather than promising the two-part form.
+    shared = (" Operations sharing a name here are named by their setup path instead - "
+              "'Setup / op', with any folders between - and where two rows carry that same path "
+              "too, by the position they hold in this list."
+              if any(label != n.name for label, n in zip(labels, nodes)) else "")
+    return f" The warning/error/empty lists and their counts cover: {scope_label}.{shared}"
 
 
 def status_handler(handle: str = "", target: str = "", include_operations: bool = True) -> dict:
@@ -195,20 +372,38 @@ def status_handler(handle: str = "", target: str = "", include_operations: bool 
                 "state, or pass 'target' (a setup/operation name) to read an inline generation by name.")
         return _status_future(entry, key, include_operations)
 
-    # 3. handle omitted/'latest': the most recent launched generation if there is one...
-    if _GENERATIONS:
-        key = f"gen{_HANDLE_SEQ[0]}"
-        entry = _GENERATIONS.get(key)
-        if entry:
-            return _status_future(entry, key, include_operations)
+    # 3. 'latest' - the most recent launched generation. It is a POSITIONAL pick naming neither a
+    #    handle nor a DOCUMENT, so every way it can fail to identify a job is refused rather than
+    #    quietly answered from something else: a handle that is no longer registered, one whose
+    #    launch document is identified and is not active (a stale entry from a closed document
+    #    answers with completed:true about THAT job, which reads as a verdict on whatever is open
+    #    now), and one whose launch document carries no identity to compare at all.
+    if key:
+        latest = f"gen{_HANDLE_SEQ[0]}"
+        entry = _GENERATIONS.get(latest)
+        if not entry:
+            return error(
+                f"'latest' resolves to handle '{latest}', which is not registered - a generation "
+                "is dropped from the registry once it completes. Active handles: "
+                f"{', '.join(_GENERATIONS.keys()) or '(none)'}. Omit 'handle' to read the ACTIVE "
+                "document's live state, or pass 'target' (a setup/operation name) to read an "
+                "inline generation by name.")
+        same = _same_document(entry)
+        if same is not True:
+            return error(_latest_refusal(latest, entry, same))
+        return _status_future(entry, latest, include_operations)
 
-    # 4. ...otherwise read live DOCUMENT state - an inline/UI generation with no self-minted handle.
+    # 4. handle AND target omitted: read live state of the ACTIVE DOCUMENT. A registered handle does
+    #    NOT capture this call - a bare read is a question about what is open now, and answering it
+    #    from a launch registry certifies a document the caller never named. 'latest' above is the
+    #    way to ask about the most recent launch.
     return _status_live("document", include_operations)
 
 
 def _handle_scope_state(entry: dict):
-    """(live_dict, basis_label, err) for THIS handle's OWN operations - the tally its completion
-    settles on, the name of whose operations that is, and why no tally could be read.
+    """(live_dict, basis_label, health_ops, err) for THIS handle's OWN operations - the tally its
+    completion settles on, the name of whose operations that is, the zero-arg callable handing back
+    those same operations for the health lists, and why no tally could be read.
 
     A handle launched against ONE setup/folder/operation settles on THAT target's ops (the scoped walk
     _scope_state already does for the no-handle path). Gating it on the DOCUMENT-wide generating count
@@ -224,17 +419,18 @@ def _handle_scope_state(entry: dict):
     if scoped:
         cam, cerr = _cam_common.get_cam()
         if not cerr:
-            live, label, serr = _scope_state(cam, name)
+            live, label, health_ops, serr = _scope_state(cam, name)
             if not serr and live is not None:
-                return live, label, None
+                return live, label, health_ops, None
     live, lerr = _cam_common.live_readiness()
     if lerr or live is None:
         reason = lerr or "the read returned no tally"
-        return {}, f"this generation's Future alone (no per-op tally could be read: {reason})", reason
+        return ({}, f"this generation's Future alone (no per-op tally could be read: {reason})",
+                None, reason)
     if scoped:
         return live, (f"document (the launch target '{name}' could not be re-resolved - "
-                      "renamed, deleted, or now ambiguous)"), None
-    return live, "document", None
+                      "renamed, deleted, or now ambiguous)"), _document_ops, None
+    return live, "document", _document_ops, None
 
 
 def _status_future(entry: dict, key: str, include_operations: bool) -> dict:
@@ -243,9 +439,11 @@ def _status_future(entry: dict, key: str, include_operations: bool) -> dict:
     CRITICAL: holding the GenerateToolpathFuture (in _GENERATIONS) keeps the background work alive.
 
     The per-op tallies read the ACTIVE document - so they are only attached when the generating
-    document IS the active one. When another document is active, the Future's own counters still
-    report progress, the payload says whose generation this is, and completion falls back to the
-    Future alone (a wrong-document tally must never gate it)."""
+    document is CONFIRMED to be the active one. Otherwise the Future's own counters still report
+    progress, the payload says whose generation this is, and completion falls back to the Future
+    alone (a wrong-document tally must never gate it). 'Otherwise' covers both a document that is
+    identified and is not this one and a launch whose identity was never readable - see
+    _same_document, whose None the completion_basis and note tell apart."""
     future = entry["future"]
 
     total = safe(lambda: future.numberOfOperations, entry.get("total"))
@@ -253,9 +451,11 @@ def _status_future(entry: dict, key: str, include_operations: bool) -> dict:
     future_done = bool(safe(lambda: future.isGenerationCompleted, False))
     elapsed = round(time.time() - entry["started_at"], 1)
 
-    active_name, active_urn = _active_identity()
     doc_urn, doc_name = entry.get("doc_urn"), entry.get("doc_name")
-    same_doc = (doc_urn and doc_urn == active_urn) or (not doc_urn and doc_name == active_name)
+    same_doc = _same_document(entry)
+    # Said only where the number is actually published: a Future whose counter did not read carries
+    # operations_completed null, and a caveat about a figure that is not there teaches nothing.
+    count_caveat = _COUNT_IS_INSTANTANEOUS if done_count is not None else ""
 
     payload = {
     "handle": key,
@@ -266,16 +466,35 @@ def _status_future(entry: dict, key: str, include_operations: bool) -> dict:
     "elapsed_seconds": elapsed,
     }
 
-    if not same_doc:
-        # Per-op tallies would describe the WRONG document - report Future progress only.
+    if same_doc is not True:
+        # The tallies read the ACTIVE document, so they are attached only over a launch document
+        # this call can CONFIRM is that one. A DIFFERENT document and an UNCONFIRMABLE one are
+        # separate facts and get separate sentences - reporting the second as the first tells the
+        # caller their document is not active when it may be the one they are looking at.
         payload["completed"] = future_done
-        payload["completion_basis"] = "this generation's Future alone (its document is not active)"
+        if same_doc is None:
+            payload["completion_basis"] = ("this generation's Future alone (no document identity "
+                                           "could be read to compare it with the active one)")
+            # The launch document is NAMED only where a name actually read. This branch is reached
+            # two ways - a launch that read no document at all, whose name is None too, and a read
+            # taken while none reads now - and an interpolated None is a document name nothing saw.
+            named = f" for '{doc_name}'" if doc_name else ""
+            why = (f" No document identity could be read{named} - either none read when this "
+                   "generation was launched, or none reads now - and a name is not an identity "
+                   "(two open never-saved documents answer the same one). Per-op tallies and "
+                   "warnings were skipped rather than read off a document this call cannot confirm "
+                   "is the right one, so no readiness line could be read at all.")
+        else:
+            payload["completion_basis"] = ("this generation's Future alone (its document is not "
+                                           "active)")
+            why = (f" The generating document '{doc_name}' is NOT the active document - per-op "
+                   "tallies and warnings were skipped (they read the active document), so no "
+                   f"readiness line could be read at all. doc_activate '{doc_name}' for the full "
+                   "read.")
         payload["note"] = (
-            (f"Generation complete ({done_count} of {total} operations)." if future_done else
-             "Still generating in the background - check again later.")
-            + f" The generating document '{doc_name}' is NOT the active document - per-op "
-            "tallies and warnings were skipped (they read the active document). "
-            f"doc_activate '{doc_name}' for the full read.")
+            (f"Generation complete ({done_count} of {total} operations). {_COMPLETED_MEANS}"
+             if future_done else
+             "Still generating in the background - check again later.") + why + count_caveat)
         if future_done:
             _GENERATIONS.pop(key, None)
         return ok(payload)
@@ -283,7 +502,7 @@ def _status_future(entry: dict, key: str, include_operations: bool) -> dict:
     # Health/readiness is NOT re-derived here - it is the _cam_common domain (the single CAM-health
     # source cam_get exposes). The scope read walks ops + (document scope) setup/NC-program errors and
     # returns the tally + a ready-made readiness verdict. This path owns the progress delta on top.
-    live, basis, tally_err = _handle_scope_state(entry)
+    live, basis, health_ops, tally_err = _handle_scope_state(entry)
 
     if tally_err:
         # No tally was read at all, so nothing can corroborate the Future - report the Future-alone
@@ -292,10 +511,11 @@ def _status_future(entry: dict, key: str, include_operations: bool) -> dict:
         payload["completed"] = future_done
         payload["completion_basis"] = basis
         payload["note"] = (
-            (f"Generation complete ({done_count} of {total} operations)." if future_done else
+            (f"Generation complete ({done_count} of {total} operations). {_COMPLETED_MEANS}"
+             if future_done else
              "Still generating in the background - check again later.")
             + f" The per-op tallies could not be read ({tally_err}), so this rests on the "
-            "generation Future alone - cam_get for the job's health.")
+            "generation Future alone - cam_get for the job's health." + count_caveat)
         if future_done:
             _GENERATIONS.pop(key, None)
         return ok(payload)
@@ -311,13 +531,16 @@ def _status_future(entry: dict, key: str, include_operations: bool) -> dict:
     payload["live_states"] = live  # valid/out_of_date/errored/generating/suppressed (+ setup/program for document)
 
     if not completed:
-        payload["note"] = _incomplete_note(live)
+        payload["note"] = _incomplete_note(live) + count_caveat
         return ok(payload)
 
-    if include_operations:
-        _attach_op_health(payload)
-    payload["note"] = (f"Generation complete. {live.get('readiness', '')} "
-                       "cam_get(include=['operations']) for the per-op detail.")
+    # The health lists cover the scope the tally above settled on - `basis` names that same scope,
+    # so the payload cannot pair a scoped tally with document-wide warning rows.
+    health_note = _attach_op_health(payload, health_ops(), basis) if include_operations else ""
+    payload["note"] = (f"Generation complete. {_COMPLETED_MEANS}{_READINESS_IS_THE_VERDICT} "
+                       f"{live.get('readiness', '')} "
+                       "cam_get(include=['operations']) for the per-op detail."
+                       + health_note + count_caveat)
 
     # Generation finished - drop the registry entry so it does not leak across the session.
     _GENERATIONS.pop(key, None)
@@ -336,6 +559,9 @@ def _op_tally(ops) -> dict:
             "generating": t["generating"], "suppressed": t["suppressed"],
             "warnings": t["warnings"], "total": t["total"],
             "active": t["active"], "setups_errored": 0, "programs_errored": 0,
+            # the OWNING setup's blocked_by, filled by _scope_state - a scoped verdict reads the
+            # same setup-level prerequisites the document-level one does.
+            "setups_blocked": [],
             "samples": {"op": t["op_sample"], "setup": None, "program": None,
                         "warning": t["warning_sample"]}}
 
@@ -343,7 +569,8 @@ def _op_tally(ops) -> dict:
 def _scope_readiness(t: dict) -> str:
     """The scoped readiness verdict for an _op_tally. The postable sentence itself is
     _cam_common.ready_verdict - the ONE builder live_readiness and cam_get's summary also end on -
-    so a scoped poll cannot say 'ready to post' over warnings the document poll would name."""
+    so a scoped poll cannot say 'ready to post' over warnings, or over a blocked owning setup,
+    that the document poll would name."""
     active_total = t["valid"] + t["out_of_date"] + t["errored"]
     if t["errored"]:
         return (f"BLOCKER: {t['errored']} operation(s) have errors - "
@@ -351,29 +578,44 @@ def _scope_readiness(t: dict) -> str:
     if active_total and t["valid"] == active_total:
         return _cam_common.ready_verdict(f"{t['valid']} of {active_total} active ops valid",
                                          t.get("warnings", 0),
-                                         (t.get("samples") or {}).get("warning"))
+                                         (t.get("samples") or {}).get("warning"),
+                                         t.get("setups_blocked"))
     if active_total:
         return f"{t['valid']} of {active_total} active ops valid - run cam_generate to finish the rest."
     return "no active operations to assess."
 
 
 def _scope_state(cam, target: str):
-    """(live_dict, scope_label, err). Document/all scope REUSES _cam_common.live_readiness; a named
-    setup/folder/operation is tallied by a scoped op walk. live_dict is live_readiness-shaped so the
-    same note/payload code serves both poll paths."""
+    """(live_dict, scope_label, health_ops, err). Document/all scope REUSES
+    _cam_common.live_readiness; a named setup/folder/operation is tallied by a scoped op walk.
+    live_dict is live_readiness-shaped so the same note/payload code serves both poll paths.
+
+    health_ops is a zero-arg callable handing back the operation NODES of the scope this tally
+    covers - the per-op warning/error/empty lists are built from it, which is what keeps them and the
+    tally describing one scope. A named target closes over the list already walked here; the document
+    branch re-walks at attach time (see _document_ops), so what the two share there is the scope,
+    not the instant. It stays a callable so a still-generating poll, which publishes no lists, never
+    walks the document a second time."""
     want = (target or "").strip()
     if not want or want.lower() in ("all", "document", "*"):
         live, err = _cam_common.live_readiness()
-        return (live or {}), "document", err
+        return (live or {}), "document", _document_ops, err
     node, rerr = _cam_common.resolve_cam_node(
         cam, want, kinds=("setup", "folder", "operation"), label="setup/folder/operation")
     if rerr:
-        return None, None, rerr + " Omit 'target' to poll the whole document."
-    tgt, kind = node.obj, node.kind
-    ops = [tgt] if kind == "operation" else _cam_common.operations_under(tgt)
-    tally = _op_tally(ops)
+        return None, None, None, rerr + " Omit 'target' to poll the whole document."
+    kind = node.kind
+    # Nodes, not bare Operations: the health lists name what they hold, and only the node carries
+    # the 'Setup / op' path that separates two operations of one name (see _op_labels).
+    nodes = [node] if kind == "operation" else _cam_common.operation_nodes_under(node)
+    tally = _op_tally([n.obj for n in nodes])
+    # The setup this target sits under, read off the walk's own parent chain (owning_setup) - a
+    # folder or operation is posted through its setup, so that setup's blocked_by gates this
+    # verdict exactly as it gates the document-level one.
+    owner = _cam_common.owning_setup(node)
+    tally["setups_blocked"] = _cam_common.blocked_setup_records([owner] if owner is not None else [])
     tally["readiness"] = _scope_readiness(tally)
-    return tally, f"{kind} '{node.name or want}'", None
+    return tally, f"{kind} '{node.name or want}'", (lambda: nodes), None
 
 
 def _status_live(target: str, include_operations: bool) -> dict:
@@ -385,7 +627,7 @@ def _status_live(target: str, include_operations: bool) -> dict:
     if err:
         return error(err)
 
-    live, scope_label, serr = _scope_state(cam, target)
+    live, scope_label, health_ops, serr = _scope_state(cam, target)
     if serr:
         return error(serr)
 
@@ -403,10 +645,10 @@ def _status_live(target: str, include_operations: bool) -> dict:
         payload["note"] = _incomplete_note(live)
         return ok(payload)
 
-    if include_operations:
-        _attach_op_health(payload)
-    payload["note"] = (f"No operations are still generating in scope. {live.get('readiness', '')} "
-                       "cam_get(include=['operations']) for the per-op detail.")
+    health_note = _attach_op_health(payload, health_ops(), scope_label) if include_operations else ""
+    payload["note"] = (f"No operations are still generating in scope. {_COMPLETED_MEANS}"
+                       f"{_READINESS_IS_THE_VERDICT} {live.get('readiness', '')} "
+                       "cam_get(include=['operations']) for the per-op detail." + health_note)
     return ok(payload)
 
 
@@ -448,8 +690,10 @@ STATUS_DESCRIPTION = (
     "document scope: an ERRORED op (parameter/geometry fault) will NEVER finish, and a faulted "
     "SETUP or NC PROGRAM blocks the whole job from posting - the note flags these (with one sample "
     "each) so you stop waiting, and points at cam_get for the full error text + readiness verdict. "
-    "Per-op tallies read the ACTIVE document; a handle whose generating document is not active "
-    "still reports the Future's own progress and says so."
+    "Per-op tallies read the ACTIVE document: omit both 'handle' and 'target' to read what is open "
+    "NOW; 'latest' is refused when its launch document is not active; an explicit handle reports "
+    "that Future's progress and names its document. completed=true means nothing in scope is still "
+    "generating - NOT that the ops succeeded; read the readiness line beside it."
 )
 
 status_tool = (

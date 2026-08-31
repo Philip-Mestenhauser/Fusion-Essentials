@@ -31,7 +31,8 @@ app = adsk.core.Application.get()
 RETURNS = [
     _outputs.ReturnsName("joint_name", of="joint", consumers=["joint_edit", "joint_motion_link"]),
     _outputs.ReturnsValue("healthy", "whether the joint actually COMPUTES (added != working); null "
-                                     "when its state does not read as one Fusion names"),
+                                     "only when neither the joint nor its timeline item answered a "
+                                     "state"),
 ]
 
 _MOTIONS = {"rigid", "revolute", "slider", "cylindrical", "ball"}
@@ -128,27 +129,42 @@ _NON_FAILURE_STATES = (("healthy", "HealthyFeatureHealthState"),
                        ("rolled_back", "RolledBackFeatureHealthState"))
 
 
+def _non_failure_state(joint):
+    """The NAME of the non-failure health state the joint reports, read off the joint first and then
+    its timeline item - the same two sources, in the same order, the verdict below is taken from.
+    None when neither answers a state this build carries a member for; the members are read off
+    adsk.fusion.FeatureHealthStates by NAME, never a hand-typed int."""
+    states = safe(lambda: adsk.fusion.FeatureHealthStates)
+    if states is None:
+        return None
+    for src in (joint, safe(lambda: joint.timelineObject)):
+        hs = safe(lambda src=src: src.healthState) if src is not None else None
+        if hs is None:
+            continue
+        for name, member in _NON_FAILURE_STATES:
+            if hs == safe(lambda m=member: getattr(states, m)):
+                return name
+    return None
+
+
 def _health_verdict(joint):
     """(healthy, state_name, message) for the created joint - the tri-state read behind the payload's
     authoritative 'healthy' flag.
 
-    healthy True: the joint reports a state that is not a compute failure. False: the shared
-    classifier (_assert.compute_failure) read an ERROR or WARNING state - the only two states that
-    ARE a failed compute - and `message` is its condensed text. None: the state is Unknown, or a
-    member this build does not carry, or the read itself did not answer - so whether the joint
-    computes was not established here and no verdict may be published for it."""
-    failure = _assert.compute_failure(joint)
-    if failure is not None:
+    The verdict is _assert.compute_state's: the joint AND its timeline item are both asked, joint
+    first, so this create tool and joint_create reach the same verdict on one design. False when
+    either source answered an ERROR or WARNING state - the only two that ARE a failed compute - and
+    `message` is the shared classifier's condensed text. True when a source answered a state that is
+    not a failure; `state_name` names it where the name is one this tool carries, else null. None
+    when NEITHER source answered a state at all - an unread state is not a clean bill of health, so
+    no verdict is published for it."""
+    state, failure = _assert.compute_state(joint)
+    if state == "broken":
         label, msg = failure
         return False, label, msg
-    states = safe(lambda: adsk.fusion.FeatureHealthStates)
-    hs = safe(lambda: joint.healthState)
-    if states is None or hs is None:
+    if state == "unknown":
         return None, None, None
-    for name, member in _NON_FAILURE_STATES:
-        if hs == safe(lambda m=member: getattr(states, m)):
-            return True, name, None
-    return None, None, None
+    return True, _non_failure_state(joint), None
 
 
 def _axis_note(mot, ax_name, use_custom):
@@ -300,16 +316,22 @@ def handler(handle_one: str = "", handle_two: str = "", motion: str = "revolute"
         out["health_warning"] = ("This joint FAILED TO COMPUTE (likely over-constrained): "
                                  + (msg or "conflicts with assembly relationships"))
     elif healthy is None:
-        # An Unknown / unreadable state is not a failure and not a clean compute - claiming either
-        # would be a verdict this read never took.
-        out["health_warning"] = ("This joint's health state did not read as one Fusion names, so "
-                                 "whether it computes is UNVERIFIED here - 'healthy' is null. "
+        # NEITHER the joint nor its timeline item answered a state - not a failure and not a clean
+        # compute; claiming either would be a verdict this read never took.
+        out["health_warning"] = ("Neither this joint nor its timeline item answered a health state, "
+                                 "so whether it computes is UNVERIFIED here - 'healthy' is null. "
                                  "Re-read it with assembly_get (is_healthy / broken_joints).")
     elif health_state in ("suppressed", "rolled_back"):
         # A state that is not a compute failure but is not an active compute either: published by
         # NAME, with no claim about what the joint does or does not position.
         out["note"] += (f" This joint's health state reads '{health_state}' - not a compute failure. "
                         "Read what it positions with assembly_get.")
+    elif health_state is None:
+        # A state ANSWERED that no name in this tool's table matches. 'healthy' reports what was
+        # read - not a compute failure - and no state name is claimed for it.
+        out["note"] += (" This joint's compute state answered a value this tool has no name for - "
+                        "it is not a compute failure, so 'healthy' is true and 'health_state' is "
+                        "null. Read what it positions with assembly_get.")
 
     # Report how far a part was repositioned to align the keypoints. The move is legitimate joint
     # behavior (keypoints align at a face CENTROID / edge MIDPOINT) - flagging it just ends the silence

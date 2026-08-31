@@ -11,6 +11,7 @@ survives between MCP calls (one session).
 
 import json
 import math
+import types
 
 import adsk.core
 import adsk.fusion
@@ -22,6 +23,7 @@ from ._common import ok, error, safe
 from . import _common
 from . import _inputs
 from . import _view_common
+from . import _write_guard
 
 app = adsk.core.Application.get()
 
@@ -50,9 +52,18 @@ _VIS_TARGET = _inputs.TargetRefList("target", with_kinds=True,
         contract=("A list of occurrences (handle/fullPathName/name) and/or - hide/show only - bodies "
                   "(find_geometry 'handle' or body name); ambiguous names are refused."))
 _FOCUS = _inputs.OccurrenceRef("focus",
-        description="Occurrence to fit the view to (orient).")
+        description="Occurrence or sketch name to frame the view on (orient).")
 
-# Saved-state stack, keyed by active document name so snapshots don't cross documents.
+# The way forward a SHARED sketch name gets on this input. 'focus' carries no component scope, so no
+# spelling of it names one of two same-named sketches; what it does take is an occurrence
+# fullPathName, which the shared-name refusal has just named the owning components for. The default
+# remedy - rename one - is the dead end this replaces: a shared sketch name usually comes from two
+# referenced documents, and renaming there means editing a different document.
+_FOCUS_SKETCH_REMEDY = ("'focus' carries no component scope, so no spelling of it picks one of them. "
+                        "It does take an occurrence fullPathName - frame the placement of the "
+                        "component you mean (design_get(include=['tree']) lists the paths).")
+
+# Saved-state stack, keyed by _doc_key (one key per DOCUMENT) so snapshots don't cross documents.
 # Each entry: {"camera": <Camera copy>, "visualStyle": int, "occ": {fullPath: (bulb, isolated)}}
 _SNAPSHOTS = {}
 
@@ -108,19 +119,40 @@ def _is_perspective(value):
                      adsk.core.CameraTypes.PerspectiveWithOrthoFacesCameraType)
 
 
+# A closed document's snapshot describes a viewport and an occurrence set that closed with it, and
+# leaving it parks a Camera copy plus a per-occurrence dict per scratch document for the life of the
+# add-in session. The shared key registry evicts the closed document; this drops the snapshot it
+# held, in the same pass and whichever consumer's read triggered the prune.
+_write_guard.on_key_evicted(lambda key: _SNAPSHOTS.pop(key, None))
+
+
+def _carry_snapshot(old_key, new_key):
+    """Move this document's saved state onto the key it answers now (a save re-keys an open
+    document - see _write_guard.on_key_renamed).
+
+    The snapshot is the ONLY copy of the pre-explore camera/visibility state, and nothing else can
+    reclaim it: it was never parked under the new key, so a restore taken after the flip misses
+    honestly and the state it was holding is lost for the session. Both keys name the same open
+    document, so this re-addresses one entry - it never merges two documents' snapshots.
+    """
+    snap = _SNAPSHOTS.pop(old_key, None)
+    if snap is not None:
+        _SNAPSHOTS[new_key] = snap
+
+
+_write_guard.on_key_renamed(_carry_snapshot)
+
+
 def _doc_key():
-    """A key that identifies the active document across snapshot/restore calls. Prefers the cloud
-    data-file id (stable, unique) so two open documents that happen to share a NAME (e.g. two
-    unsaved "Untitled") don't collide; falls back to the name when there's no data file (unsaved doc)."""
-    doc = safe(lambda: app.activeDocument)
-    if doc is None:
-        return "<active>"
-    df = safe(lambda: doc.dataFile)
-    if df is not None:
-        did = safe(lambda: df.id)
-        if did:
-            return did
-    return safe(lambda: doc.name) or "<active>"
+    """The key the snapshot store holds the active document's saved state under.
+
+    _write_guard.document_key is the one home for that identity: a cloud data file's id, else a
+    per-instance token matched by document handle - NOT by name, because two open unsaved documents
+    share the name "Untitled" and a name key makes one of them restorable into the other.
+    "<active>" is this store's own stand-in for a call where no document reads at all.
+    """
+    key = _write_guard.document_key()
+    return "<active>" if key is None else key
 
 
 def _show_with_ancestors(occ):
@@ -168,19 +200,28 @@ def _do_snapshot(design):
             continue
         occ_state[fp] = (bool(safe(lambda o=o: o.isLightBulbOn, True)),
                          bool(safe(lambda o=o: o.isIsolated, False)))
-    # Per-component display-folder bulbs (sketches/construction/origins/joints), keyed by the
-    # component's entityToken (names are non-unique) - so a display toggle is covered by restore.
+    # Per-component display-folder bulbs (sketches/construction/origins/joints), keyed by
+    # _common.native_identity - so a display toggle is covered by restore. NOT the component's bare
+    # entityToken and not its name: a name is non-unique, and a token is DOCUMENT-LOCAL, which every
+    # document's ROOT component answers with the same value (measured on a job assembled from 7
+    # source documents). Keyed on the token these 7 components write ONE entry, the last one wins,
+    # and restore below puts that one component's bulbs onto all 7. A component whose identity does
+    # not read is skipped rather than stored under a key that would collide with every other
+    # unidentifiable one.
     folder_state = {}
     for comp in _view_common.all_display_components(design):
-        tok = safe(lambda comp=comp: comp.entityToken)
-        if not tok:
+        ident = _common.native_identity(comp)
+        if ident is None:
             continue
-        folder_state[tok] = {
+        folder_state[ident] = {
             attr: _common.read_flag(lambda comp=comp, attr=attr: getattr(comp, attr))
             for attr in _view_common.DISPLAY_FOLDERS.values()}
     # Camera objects are snapshots by value when read; store a copy.
     cam = vp.camera
-    _SNAPSHOTS[_doc_key()] = {
+    # ONE key read, used for both the store and the payload: a 'saved_for' naming a key the
+    # snapshot is not stored under is a pointer to nothing.
+    key = _doc_key()
+    _SNAPSHOTS[key] = {
                          "camera": cam,
                          "visualStyle": int(safe(lambda: vp.visualStyle, 0)),
                          "occ": occ_state,
@@ -189,7 +230,10 @@ def _do_snapshot(design):
     }
     note = ("Current camera, visual style, and all occurrence visibility saved. "
             "Explore freely; call view_set(restore) to put it all back.")
-    out = {"action": "snapshot", "saved_for": _doc_key(),
+    # 'saved_for' is the store key, and for an unsaved document that key is a session token no
+    # tool takes as an argument - so the document it belongs to is named beside it.
+    out = {"action": "snapshot", "saved_for": key,
+           "document": safe(lambda: app.activeDocument.name),
            "occurrences_saved": len(occ_state),
            "visual_style": int(safe(lambda: vp.visualStyle, 0))}
     if truncated:
@@ -202,18 +246,157 @@ def _do_snapshot(design):
     return ok(out)
 
 
+def _union_box(boxes):
+    """One box enclosing them all - what a multi-name focus frames on. Kept as a plain record
+    rather than an adsk BoundingBox3D: framing reads only minPoint/maxPoint, and building a live
+    API box here would be a second way to say the same thing."""
+    lo = [min(b.minPoint.x for b in boxes), min(b.minPoint.y for b in boxes),
+          min(b.minPoint.z for b in boxes)]
+    hi = [max(b.maxPoint.x for b in boxes), max(b.maxPoint.y for b in boxes),
+          max(b.maxPoint.z for b in boxes)]
+    return types.SimpleNamespace(minPoint=types.SimpleNamespace(x=lo[0], y=lo[1], z=lo[2]),
+                                 maxPoint=types.SimpleNamespace(x=hi[0], y=hi[1], z=hi[2]))
+
+
+def _camera_axes(cam):
+    """The camera's screen-plane unit vectors (right, up), or None if eye/target/up will not read
+    or are degenerate. Both boxes in a framing ratio are measured on THESE axes, so whatever the
+    viewport's aspect and the fit's own margin are, they are the same for both and cancel."""
+    eye, tgt, up = safe(lambda: cam.eye), safe(lambda: cam.target), safe(lambda: cam.upVector)
+    if eye is None or tgt is None or up is None:
+        return None
+    lx, ly, lz = tgt.x - eye.x, tgt.y - eye.y, tgt.z - eye.z
+    ux, uy, uz = up.x, up.y, up.z
+    ln = math.sqrt(lx * lx + ly * ly + lz * lz)
+    un = math.sqrt(ux * ux + uy * uy + uz * uz)
+    if not ln or not un:
+        return None
+    lx, ly, lz = lx / ln, ly / ln, lz / ln
+    ux, uy, uz = ux / un, uy / un, uz / un
+    rx, ry, rz = ly * uz - lz * uy, lz * ux - lx * uz, lx * uy - ly * ux
+    rn = math.sqrt(rx * rx + ry * ry + rz * rz)
+    if not rn:                      # up parallel to the look direction - no screen plane
+        return None
+    return (rx / rn, ry / rn, rz / rn), (ux, uy, uz)
+
+
+def _screen_span(bb, right, up):
+    """(width, height) a WORLD-AXIS-ALIGNED box spans on the camera's screen axes. Exact for an
+    AABB: each world extent contributes its own length times that axis's screen component."""
+    dx = abs(bb.maxPoint.x - bb.minPoint.x)
+    dy = abs(bb.maxPoint.y - bb.minPoint.y)
+    dz = abs(bb.maxPoint.z - bb.minPoint.z)
+    return (dx * abs(right[0]) + dy * abs(right[1]) + dz * abs(right[2]),
+            dx * abs(up[0]) + dy * abs(up[1]) + dz * abs(up[2]))
+
+
+# Headroom around the framed entity. Well above 1.0 on purpose: a frame drawn tight to the
+# subject reads as claustrophobic and hides the context that makes the subject legible.
+_FRAME_MARGIN = 2.0
+
+
+def _frame_world_spans(vp):
+    """(width, height) of what the viewport currently shows, in MODEL units - read from the
+    viewport's own view->model mapping, so no fit is needed to learn it.
+
+    Reading the frame is what lets framing skip a whole-model fit. Fusion repaints on the camera
+    ASSIGNMENT, so a fit taken only to measure against is still drawn - a zoom-out to the whole
+    model followed by a zoom-in, which is most of what a watching operator sees. This costs four
+    viewToModelSpace calls and moves no camera.
+
+    Exact for an ORTHOGRAPHIC camera, where the frame is the same size at every depth. On a
+    perspective camera the span varies with depth and this is the span at the plane the mapping
+    picks, which is close enough to aim a camera with.
+    """
+    w, h = safe(lambda: vp.width), safe(lambda: vp.height)
+    if not w or not h:
+        return None
+
+    def at(px, py):
+        return safe(lambda: vp.viewToModelSpace(adsk.core.Point2D.create(float(px), float(py))))
+
+    left, right = at(0, h / 2.0), at(w, h / 2.0)
+    top, bottom = at(w / 2.0, 0), at(w / 2.0, h)
+    if left is None or right is None or top is None or bottom is None:
+        return None
+
+    def span(p, q):
+        return math.sqrt((p.x - q.x) ** 2 + (p.y - q.y) ** 2 + (p.z - q.z) ** 2)
+
+    across, down = span(left, right), span(top, bottom)
+    if across <= 0 or down <= 0:
+        return None
+    return across, down
+
+
+def _frame_ratio(cam, focus_bb, frame_w, frame_h):
+    """How far the camera's extents must scale for 'focus_bb' to fill the frame that currently
+    measures frame_w x frame_h in model units - or None when the box or the camera basis will not
+    read (a refusal to report, never a 1.0 that silently leaves the view where it was).
+
+    The LARGER of the two per-axis ratios wins: the focus has to fit across AND down, and the
+    smaller would crop it on the other axis. NOT capped at 1: the baseline is the live frame, not a
+    whole-model fit, so coming from a tightly framed part onto a bigger one legitimately zooms OUT.
+    """
+    axes = _camera_axes(cam)
+    if axes is None or focus_bb is None or not frame_w or not frame_h:
+        return None
+    right, up = axes
+    fw, fh = _screen_span(focus_bb, right, up)
+    if fw <= 0 and fh <= 0:
+        # A point sketch, or an entity seen exactly edge-on, spans nothing on either screen axis.
+        # There is no size to scale to - but re-aiming at it is still the right answer, so this
+        # reports "no zoom" rather than failing a framing the caller legitimately asked for.
+        return 0.0
+    return max(fw / frame_w, fh / frame_h) * _FRAME_MARGIN
+
+
 def _do_orient(design, orientation, focus, fit, projection="", perspective_angle_deg=None):
     vp = app.activeViewport
+    # Measured BEFORE anything moves: the frame the viewport shows right now is the baseline a
+    # focus framing scales from, so the framed path never needs a whole-model fit. Orientation does
+    # not change these spans on an orthographic camera - the frame is the same size whichever way
+    # it points - so one read here serves the camera this call is about to build.
+    frame = _frame_world_spans(vp) if (focus and fit) else None
     applied = {}
     cam = vp.camera  # build the FINAL camera on ONE object, assign once (no double move)
 
-    # Target: the focus occurrence's bbox center if given, else keep the current target.
+    # Target: the focus entity's bbox center if given, else keep the current target.
     target = cam.target
+    focus_bb = None
     if focus:
-        o, focus_err = _FOCUS.resolve(focus)
-        if focus_err:
-            return error(focus_err)
-        bb = safe(lambda: o.boundingBox)
+        names = [n.strip() for n in (focus if isinstance(focus, list) else [focus]) if str(n).strip()]
+        boxes, labels = [], []
+        for nm in names:
+            # An OCCURRENCE first, then a SKETCH by the same name - sketch work is a whole category
+            # of what there is to look at and owns no occurrence to aim at. Both carry a
+            # boundingBox, which is all framing needs, so the arithmetic is identical for either.
+            o, focus_err = _FOCUS.resolve(nm)
+            if o is None:
+                sk, sketch_err = _common.find_sketch(design, nm, remedy=_FOCUS_SKETCH_REMEDY)
+                if sketch_err:
+                    return error(sketch_err)
+                if sk is None:
+                    # BOTH kinds were tried, so a refusal naming only one sends the caller looking
+                    # in the wrong place.
+                    return error(f"'focus': nothing named '{nm}' to frame - no occurrence and no "
+                                 f"sketch carries that name."
+                                 + (f" Occurrence lookup said: {focus_err}" if focus_err else ""))
+                o, focus_err = sk, None
+            if focus_err:
+                return error(focus_err)
+            labels.append(safe(lambda o=o: o.name) or nm)
+            bx = safe(lambda o=o: o.boundingBox)
+            if bx is not None:
+                boxes.append(bx)
+        if not boxes:
+            return error(f"'focus': none of {labels} has a readable bounding box, so there is "
+                         "nothing to frame on. Re-run with fit=false to re-aim only.")
+        # SEVERAL names frame their UNION - a group of related parts or sketches belongs on screen
+        # together, and framing one member of a group hides the rest of it.
+        bb = _union_box(boxes)
+        focus_bb = bb
+        o = types.SimpleNamespace(name=", ".join(labels), boundingBox=bb)
         if bb:
             target = adsk.core.Point3D.create((bb.minPoint.x + bb.maxPoint.x) / 2,
                                               (bb.minPoint.y + bb.maxPoint.y) / 2,
@@ -292,11 +475,47 @@ def _do_orient(design, orientation, focus, fit, projection="", perspective_angle
     # assigning such a camera raises "Camera type must be orthographic for extents" unless
     # isFitView recomputes them (live-verified). So a projection change fits whether or not
     # 'fit' asked for it.
-    if fit or want_key:
-        cam.isFitView = True       # reliable framing (preferred over guessing extents)
+    ratio = None
+    if focus and fit and frame is None and not want_key:
+        # Falling back to a whole-model fit here would answer a framing request with the very view
+        # framing exists to avoid, and report ok for it. Refuse instead.
+        return error(f"Could not read what the viewport currently shows, so the view could not be "
+                     f"framed on '{applied.get('focus')}' and the camera was NOT moved. Re-run "
+                     "with fit=false to re-aim only.")
+    if focus and fit and frame is not None and not want_key:
+        # Frame ON the focus, in the same assignment that aims the camera: scale the extents by the
+        # share the occurrence takes of the frame measured above. No fit, so nothing zooms out.
+        ratio = _frame_ratio(cam, focus_bb, *frame)
+        extents = safe(lambda: cam.viewExtents)
+        if ratio == 0.0:
+            # Nothing to zoom to; the camera is re-aimed at it and the zoom is left alone.
+            applied["frame_ratio"] = None
+            applied["no_measurable_size"] = True
+            ratio = None
+        elif ratio is None or extents is None:
+            return error(f"Could not measure '{applied.get('focus')}' against the current view (a "
+                         "bounding box, the camera's axes, or its extents would not read), so the "
+                         "view is NOT framed on it. Re-run with fit=false to re-aim only.")
+        if ratio is not None:
+            cam.viewExtents = extents * ratio
+    elif fit or want_key:
+        # No focus to frame on (or a projection change, which REQUIRES a fit to recompute the
+        # extents before the camera can be assigned at all) - fit the whole model.
+        cam.isFitView = True
     vp.camera = cam                # single assignment -> single move
+    # Fusion repaints on the camera ASSIGNMENT, not on this refresh: skipping the refresh here was
+    # measured NOT to hide the intermediate whole-model fit, so the refresh stays unconditional and
+    # the visible zoom-out has to be fixed by not assigning a fitted camera at all.
     vp.refresh()
     note = "Camera aimed. Call view_screenshot to capture."
+    if focus:
+        if fit:
+            note = (f"Camera aimed and framed on '{applied.get('focus')}'. Call view_screenshot "
+                    "to capture.")
+        else:
+            note = (f"Camera re-aimed at '{applied.get('focus')}' WITHOUT zooming to it - "
+                    "fit=false keeps the current eye-to-target distance. Pass fit=true (the "
+                    "default) to frame it.")
     if want_key:
         # None means the property was UNREADABLE, which is a different report from a read that
         # shows the change did not take.
@@ -332,6 +551,19 @@ def _do_orient(design, orientation, focus, fit, projection="", perspective_angle
             applied["perspective_angle_requested_deg"] = round(angle_deg, 4)
             note += (" The camera settled on a different perspective angle than requested - "
                      "'perspective_angle_deg' is what it reads back.")
+    if ratio is not None:
+        # The zoom is a WRITE the platform can drop (view_screenshot's own zoom guards the same
+        # property), and a dropped one leaves the previous frame in place while the payload claims
+        # the occurrence fills it - so it is read back rather than assumed.
+        want = safe(lambda: cam.viewExtents)
+        got = safe(lambda: vp.camera.viewExtents)
+        if want is None or got is None or abs(got - want) > max(1e-6, abs(want) * 0.02):
+            return error(f"Set the camera extents to frame '{applied.get('focus')}' "
+                         f"({'unreadable' if want is None else format(want, '.4f')}) but the "
+                         f"viewport reads back "
+                         f"{'unreadable' if got is None else format(got, '.4f')} - the framing did "
+                         "not take, and the view is left where it was.")
+        applied["frame_ratio"] = round(ratio, 6)
     return ok({"action": "orient", "applied": applied, "note": note})
 
 
@@ -546,7 +778,11 @@ def _do_restore(design):
     key = _doc_key()
     snap = _SNAPSHOTS.get(key)
     if not snap:
-        return error(f"No snapshot saved for '{key}'. Call view_set(snapshot) first. "
+        # Name the DOCUMENT, not the store key: for an unsaved document that key is an
+        # 'unsaved:N' session token - not a name, not a URN, not doc_get's 'open:N' address - so
+        # no tool accepts it and no read reports it. The key stands in only if the name will not read.
+        doc_label = safe(lambda: app.activeDocument.name) or key
+        return error(f"No snapshot saved for '{doc_label}'. Call view_set(snapshot) first. "
     "(Snapshots are held in memory for this session only - reloading the add-in "
     "clears them. To recover a clean state without a snapshot, use "
     "clear_isolation then show the components you want.)")
@@ -582,12 +818,16 @@ def _do_restore(design):
             restored_occ += 1
         else:
             failed.append(fp)
-    # restore the display-folder bulbs a 'display' toggle may have moved (token-keyed; a bulb whose
-    # snapshot read was None is left alone - unreadable then proves nothing about the wanted state)
+    # restore the display-folder bulbs a 'display' toggle may have moved. Keyed on the same
+    # _common.native_identity the snapshot stored, so each component gets ITS OWN saved bulbs back -
+    # a bare token is shared by every document's root component, which would write one component's
+    # state onto all of them. An identity that does not read is None, which the snapshot never
+    # stored, so such a component is left alone; a bulb whose snapshot read was None is left alone
+    # too - unreadable then proves nothing about the wanted state.
     folders = snap.get("folders") or {}
     if folders:
         for comp in _view_common.all_display_components(design):
-            saved = folders.get(safe(lambda comp=comp: comp.entityToken) or "")
+            saved = folders.get(_common.native_identity(comp))
             if not saved:
                 continue
             for attr, val in saved.items():
@@ -796,8 +1036,8 @@ def handler(action: str = "", target=None, orientation: str = "", focus: str = "
 TOOL_DESCRIPTION = (
     "View-state verbs to inspect the model from different angles, then restore - no geometry changes. "
     "'snapshot' (save camera+style+all visibility; call before exploring) | 'restore' (put "
-    "them back to the last snapshot) | 'orient' ('orientation' and/or 'focus'=fit to a named "
-    "occurrence; 'projection' sets the camera projection, 'perspective_angle_deg' its "
+    "them back to the last snapshot) | 'orient' ('orientation' and/or 'focus'=frame ONE "
+    "named occurrence or sketch; 'projection' sets the camera projection, 'perspective_angle_deg' its "
     "field of view) | 'isolate'/'show'/'hide'/'clear_isolation' "
     "('target'=occurrence(s); hide/show also take BODIES (root-level / one of a multi-body "
     "component); ambiguous names refused; 'show' lights ancestors) | "
@@ -820,7 +1060,9 @@ tool = (
             "description": "Name for save_view / apply_view (a persistent document Named View)."})
     .add_input_property(*_inputs.Choice("orientation", list(_ORIENTATIONS),
             description="Camera preset for 'orient'.").as_property())
-    .add_input_property(*_FOCUS.as_property())
+    .add_input_property("focus", {"type": ["string", "array"], "items": {"type": "string"},
+            "description": "Occurrence or sketch name to frame the view on (orient); a LIST frames "
+                           "their union, so a group of related parts stays on screen together."})
     .add_input_property(*_inputs.Choice("projection", list(_PROJECTIONS),
             description="Camera projection for 'orient'.").as_property())
     .add_input_property("perspective_angle_deg", {"type": "number",
@@ -829,7 +1071,7 @@ tool = (
     .add_input_property(*_inputs.Choice("style", list(_STYLES),
             description="Visual style for 'style'.").as_property())
     .add_input_property("fit", {"type": "boolean",
-            "description": "Fit the view when orienting (default true)."})
+            "description": "Fit when orienting (default true) - frames 'focus' if given, else all."})
     .add_input_property("categories", {"type": "array",
             "items": {"type": "string", "enum": ["sketches", "construction", "origins", "joints"]},
             "description": "Display folders for action='display' (omit = all four)."})

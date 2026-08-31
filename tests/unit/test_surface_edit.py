@@ -12,7 +12,7 @@ No live Fusion — fake feature classes capture inputs and record cancel()/add()
 import json
 import types
 
-from conftest import load_tool
+from conftest import MakeComp, body_proxy, load_tool, make_source_document
 
 se = load_tool("surface_edit")
 inp = se._inputs
@@ -1136,3 +1136,133 @@ class TestThickenJoinDisclosure:
         _wire(comp, handle_map={"F1": f1})
         out = _payload(se.thicken_handler(faces=["F1"], thickness=3, operation="join"))
         assert "fused" not in out and "disjoint_join" not in out
+
+
+# The x-ref shape, measured on a host holding two x-refs of one design: two DISTINCT bodies read one
+# byte-identical entityToken while their source documents' lineage ids differ.
+_URN_XREF = "urn:adsk.wipprod:dm.lineage:K3I2nkywRlaWPHJexysOdA"
+_URN_HOST = "urn:adsk.wipprod:dm.lineage:N_QoPrrrSJmF__f9BZV86A"
+_SHARED_TOKEN = "/vB+AAEAAwAAAAAAAAAAAAAA"
+
+
+def _body_from_document(name, token, urn):
+    """A solid body owned by a component in the document with lineage id `urn` - the chain a body's
+    source document is read through (parentComponent -> parentDesign -> parentDocument ->
+    dataFile.id)."""
+    b = FakeBody(name, is_solid=True)
+    b.entityToken = token
+    b.parentComponent = MakeComp(name=name, parent_design=make_source_document(urn))
+    return b
+
+
+class TestThickenJoinAcrossDocuments:
+    """The pre-add census is taken on the FACE's own component (census_host) while the thicken is
+    added to the ACTIVE component's features, so the two sides of the before/after diff need not be
+    one document - and an entityToken is DOCUMENT-LOCAL."""
+
+    def _scene(self):
+        import types as _t
+        standing = _body_from_document("Xref_Frame", _SHARED_TOKEN, _URN_XREF)
+        wall = _body_from_document("Wall1", _SHARED_TOKEN, _URN_HOST)
+        tf = FakeThickenFeatures(result_bodies=[wall], created_faces=[_face_on(wall)])
+        comp = FakeComp(FakeFeatures(thicken=tf))
+        comp.bRepBodies = _t.SimpleNamespace(count=1, item=lambda i: standing)
+        _wire(comp, handle_map={"F1": FakeFace()})
+        return standing, wall
+
+    def test_the_x_ref_fixture_really_models_the_collision(self):
+        # Both halves must be real: with no token collision the created body was never going to be
+        # mistaken for a standing one, and with one document there is nothing to tell them apart by.
+        standing, wall = self._scene()
+        assert standing is not wall and standing.entityToken == wall.entityToken
+        assert (standing.parentComponent.parentDesign.parentDocument.dataFile.id
+                != wall.parentComponent.parentDesign.parentDocument.dataFile.id)
+
+    def test_a_new_body_whose_token_collides_with_a_censused_one_is_still_disclosed(self):
+        # Keyed on the bare token the created wall reads as a body that already stood there, so the
+        # join is reported as a fuse that never happened - a wrong report, not a refusal.
+        self._scene()
+        out = _payload(se.thicken_handler(faces=["F1"], thickness=3, operation="join"))
+        assert out["fused"] is False and out["disjoint_join"] is True
+        assert "Wall1" in out["note"] and "fused NOTHING" in out["note"]
+
+    def test_a_created_body_with_NO_readable_identity_is_still_disclosed(self):
+        # An unreadable identity is None, and None must not enter the census: admitted there, a
+        # created body nobody could identify matches a standing body nobody could identify, and the
+        # join publishes a fuse that was never verified. Both bodies here answer no entityToken.
+        import types as _t
+        standing = FakeBody("Standing", is_solid=True)
+        wall = FakeBody("Wall1", is_solid=True)
+        assert not hasattr(standing, "entityToken") and not hasattr(wall, "entityToken")
+        tf = FakeThickenFeatures(result_bodies=[wall], created_faces=[_face_on(wall)])
+        comp = FakeComp(FakeFeatures(thicken=tf))
+        comp.bRepBodies = _t.SimpleNamespace(count=1, item=lambda i: standing)
+        _wire(comp, handle_map={"F1": FakeFace()})
+        out = _payload(se.thicken_handler(faces=["F1"], thickness=3, operation="join"))
+        assert out["fused"] is False and out["disjoint_join"] is True
+
+    def test_a_real_fuse_inside_ONE_saved_document_is_still_not_flagged(self):
+        # The other direction: reading the document must not split a body from itself, or every join
+        # in a saved document would publish a fuse-nothing warning.
+        import types as _t
+        target = _body_from_document("Target", _SHARED_TOKEN, _URN_HOST)
+        tf = FakeThickenFeatures(result_bodies=[target], created_faces=[_face_on(target)])
+        comp = FakeComp(FakeFeatures(thicken=tf))
+        comp.bRepBodies = _t.SimpleNamespace(count=1, item=lambda i: target)
+        _wire(comp, handle_map={"F1": FakeFace()})
+        out = _payload(se.thicken_handler(faces=["F1"], thickness=3, operation="join"))
+        assert "fused" not in out and "disjoint_join" not in out
+
+
+class TestCreatedBodyWalkKeysOnPhysicalIdentity:
+    """_created_bodies delegates its owning-body walk to _geom.owning_bodies, whose de-dup key is
+    _common.native_identity. A key built on the wrapper's own entityToken is wrong in two
+    directions: it MERGES two distinct bodies whose document-local tokens collide, and it SPLITS one
+    body reached both natively and through an occurrence proxy."""
+
+    def test_two_created_bodies_sharing_a_document_local_token_are_both_published(self):
+        # Keyed on the bare token these two DISTINCT bodies collapse to one entry, and the offset
+        # publishes a single result body while the second disappears from the payload with no trace.
+        a = _body_from_document("SurfA", _SHARED_TOKEN, _URN_XREF)
+        b = _body_from_document("SurfB", _SHARED_TOKEN, _URN_HOST)
+        assert a.entityToken == b.entityToken            # the fixture really models the collision
+        of = FakeOffsetFeatures(result_bodies=[a, b], created_faces=[_face_on(a), _face_on(b)])
+        comp = FakeComp(FakeFeatures(offset=of))
+        _wire(comp, handle_map={"F1": FakeFace()})
+        out = _payload(se.offset_handler(faces=["F1"], distance=2))
+        assert out["result_bodies"] == ["SurfA", "SurfB"]
+
+    def test_one_body_reached_natively_and_through_its_proxy_is_ONE_result_body(self):
+        native = _body_from_document("Surf1", _SHARED_TOKEN, _URN_HOST)
+        proxy = body_proxy(native, types.SimpleNamespace(name="Surf1:1"))
+        # the other half of the fixture: the proxy's OWN token differs, so a wrapper-token key would
+        # report one physical body twice
+        assert proxy.entityToken != native.entityToken
+        of = FakeOffsetFeatures(result_bodies=[native],
+                                created_faces=[_face_on(native), _face_on(proxy)])
+        comp = FakeComp(FakeFeatures(offset=of))
+        _wire(comp, handle_map={"F1": FakeFace()})
+        out = _payload(se.offset_handler(faces=["F1"], distance=2))
+        assert out["result_bodies"] == ["Surf1"]
+        assert out["faces_offset"] == 2      # the FACE count is the collection's own, not the walk's
+
+    def test_two_created_bodies_with_no_readable_identity_stay_distinct(self):
+        # The `or id(b)` last resort, unchanged by the delegation: two bodies nothing can be
+        # identified from must over-count rather than merge into one entry.
+        a, b = FakeBody("SurfA", is_solid=False), FakeBody("SurfB", is_solid=False)
+        assert not hasattr(a, "entityToken") and not hasattr(b, "entityToken")
+        of = FakeOffsetFeatures(result_bodies=[a, b], created_faces=[_face_on(a), _face_on(b)])
+        comp = FakeComp(FakeFeatures(offset=of))
+        _wire(comp, handle_map={"F1": FakeFace()})
+        out = _payload(se.offset_handler(faces=["F1"], distance=2))
+        assert out["result_bodies"] == ["SurfA", "SurfB"]
+
+    def test_several_faces_of_ONE_body_still_collapse_to_one(self):
+        # The de-dup's day job, unchanged: three faces of one surface are one result body.
+        surf = _body_from_document("Skin1", _SHARED_TOKEN, _URN_HOST)
+        of = FakeOffsetFeatures(result_bodies=[surf],
+                                created_faces=[_face_on(surf) for _ in range(3)])
+        comp = FakeComp(FakeFeatures(offset=of))
+        _wire(comp, handle_map={"F1": FakeFace()})
+        out = _payload(se.offset_handler(faces=["F1"], distance=2))
+        assert out["result_bodies"] == ["Skin1"] and out["faces_offset"] == 3

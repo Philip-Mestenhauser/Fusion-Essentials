@@ -3,7 +3,7 @@
 ``_live_op_tally`` is already pinned in test_tier2_misc.py. This file covers the rest of the real
 logic (no live Fusion): target resolution through the shared ``_cam_common.resolve_cam_node``
 (setup/folder classification, the duplicate-name refusal, not-found), ``_collect_op_health``
-(warning/error collection and the EMPTY-toolpath text derivation), and the two handlers' branching —
+(which operations earn a warning/error/empty row, off the shared state flags), and the two handlers' branching —
 generate's skip-valid short-circuit and target-not-found, and status's handle/'latest' resolution,
 the unknown-handle guard, the wrong-active-document fallback (Future progress only, no foreign
 tallies), the "nothing generating but out-of-date remain" stall warning, and the NO-HANDLE live
@@ -43,8 +43,27 @@ class _FakeCAM:
         return SimpleNamespace(numberOfOperations=3)
 
 
-def _setup(name, ops=()):
-    return SimpleNamespace(name=name, allOperations=_NamedCollection(ops))
+class _DocHandle:
+    """A Document wrapper. The same open document reads as a NEW wrapper on every
+    app.activeDocument access - `is` answers False across two reads while `==` answers True
+    (measured) - so two of them are compared by EQUALITY, and a fake that models identity only
+    would pass a comparison the live objects fail."""
+
+    def __init__(self, ident):
+        self._ident = ident
+
+    def __eq__(self, other):
+        return isinstance(other, _DocHandle) and other._ident == self._ident
+
+    def __hash__(self):
+        return hash(self._ident)
+
+
+def _setup(name, ops=(), machine=SimpleNamespace(description="Haas VF-2")):
+    """A setup as the poll walks it. It carries an assigned machine by default: the scoped verdict
+    reads _cam_common.setup_blockers off Setup.machine, so a machine-less fake is a setup blocked by
+    no_machine_selected, not a clean one."""
+    return SimpleNamespace(name=name, allOperations=_NamedCollection(ops), machine=machine)
 
 
 class TestTargetResolution:
@@ -106,47 +125,71 @@ class TestTargetResolution:
 
 # ── _collect_op_health: warnings / errors / empty derivation ────────────────────────────────────────
 
-def _op(name, warning=None, error=None):
+def _op(name, warning=None, error=None, has_toolpath=True, toolpath_valid=True,
+        suppressed=False, state=0):
     return SimpleNamespace(
         name=name,
         hasWarning=warning is not None, warning=warning or "",
         hasError=error is not None, error=error or "",
+        hasToolpath=has_toolpath, isToolpathValid=toolpath_valid,
+        isSuppressed=suppressed, isGenerating=False, operationState=state,
     )
 
 
-def _cam_with_ops(ops):
-    setup = SimpleNamespace(allOperations=_NamedCollection(ops))
-    return SimpleNamespace(setups=SimpleNamespace(count=1, item=lambda i: setup))
-
-
 class TestCollectOpHealth:
-    def _wire_cast(self, monkeypatch):
-        import adsk.cam
-        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
+    """The collector reads exactly the operations it is HANDED - its caller decides the scope, so
+    the lists and the tally published beside them describe one set."""
 
-    def test_warnings_and_errors_separated(self, monkeypatch):
-        self._wire_cast(monkeypatch)
-        ops = [_op("a", warning="Spindle too fast"), _op("b", error="bad geometry"), _op("c")]
-        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (_cam_with_ops(ops), None))
-        out = gen._collect_op_health()
+    def test_warnings_and_errors_separated(self):
+        out = gen._collect_op_health([_op("a", warning="Spindle too fast"),
+                                      _op("b", error="bad geometry"), _op("c")])
         assert out["warnings"] == [{"name": "a", "warning": "Spindle too fast"}]
         assert out["errors"] == [{"name": "b", "error": "bad geometry"}]
 
-    def test_empty_toolpath_derived_from_warning_text(self, monkeypatch):
-        self._wire_cast(monkeypatch)
-        ops = [_op("face", warning="The toolpath is empty.")]
-        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (_cam_with_ops(ops), None))
-        out = gen._collect_op_health()
+    def test_empty_toolpath_read_from_the_state_flags(self):
+        # an op that GENERATED and produced no toolpath: state IsValid, isToolpathValid true,
+        # hasToolpath false. Read from the flags, so it lands in 'empty' whatever its warning says.
+        out = gen._collect_op_health([_op("face", warning="The toolpath is empty.",
+                                          has_toolpath=False)])
         # surfaces in BOTH warnings and the convenience 'empty' list
         assert out["empty"] == ["face"]
         assert out["warnings"][0]["name"] == "face"
 
-    def test_warning_text_stripped(self, monkeypatch):
-        self._wire_cast(monkeypatch)
-        ops = [_op("a", warning="  padded  ")]
-        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (_cam_with_ops(ops), None))
-        out = gen._collect_op_health()
+    def test_a_generated_op_with_a_toolpath_is_not_empty(self):
+        # the discriminator: same warning text, but the op HAS a toolpath - it cut something.
+        ops = [_op("face", warning="Toolpath is empty in one region.", has_toolpath=True)]
+        assert gen._collect_op_health(ops)["empty"] == []
+
+    def test_a_suppressed_op_with_no_toolpath_is_not_empty(self):
+        # a parked op has no toolpath BY DESIGN (measured state 2) - counting it as empty would
+        # report every parked menu item as an operation that cuts nothing.
+        ops = [_op("parked", has_toolpath=False, toolpath_valid=False, suppressed=True, state=2)]
+        assert gen._collect_op_health(ops)["empty"] == []
+
+    def test_warning_text_stripped(self):
+        out = gen._collect_op_health([_op("a", warning="  padded  ")])
         assert out["warnings"][0]["warning"] == "padded"
+
+    def test_a_warned_and_errored_op_is_reported_as_an_error_only(self):
+        # the gate is _cam_common.counts_as_warning, the predicate live_states.warnings counts
+        # through: a warning on an op that ALREADY blocks the post adds nothing to its error, and a
+        # row here that the tally does not count is exactly the disagreement health_scope denies.
+        out = gen._collect_op_health([_op("Contour20", warning="Chip load is high",
+                                          error="Top height must not be below the bottom height")])
+        assert out["warnings"] == []
+        assert out["errors"][0]["name"] == "Contour20"
+
+    def test_a_suppressed_warned_op_is_not_a_warning_row(self):
+        # a parked op is excluded from the post, so its warning never reaches a readiness surface.
+        out = gen._collect_op_health([_op("Parked drill", warning="Parked and warned",
+                                          has_toolpath=False, toolpath_valid=False,
+                                          suppressed=True, state=2)])
+        assert out["warnings"] == [] and out["empty"] == []
+
+    def test_no_operations_reads_no_health(self):
+        # the size-0 end of the scope contract: a scope holding nothing reports nothing, rather
+        # than falling back to some wider set.
+        assert gen._collect_op_health([]) == {"warnings": [], "errors": [], "empty": []}
 
 
 # ── generate_handler: scope selection + skip-valid short-circuit ────────────────────────────────────
@@ -198,11 +241,13 @@ class TestStatusHandler:
         gen._GENERATIONS.clear()
         gen._HANDLE_SEQ[0] = 0
 
-    # Entries carry the launch document's identity; the status read compares it to the ACTIVE
-    # document. These tests run in the same-document case unless a test says otherwise.
+    # Entries carry the launch document's KEY (what register_future stamps) plus its name/urn (what
+    # the payload names it by); the status read compares that key to the ACTIVE document's. These
+    # tests run in the same-document case unless a test says otherwise.
     @pytest.fixture(autouse=True)
     def _same_active_document(self, monkeypatch):
         monkeypatch.setattr(gen, "_active_identity", lambda: ("Doc", "urn:doc"))
+        monkeypatch.setattr(gen, "document_key", lambda: "urn:doc")
 
     def test_unknown_handle_lists_active(self):
         gen._GENERATIONS["gen1"] = {"future": SimpleNamespace(isGenerationCompleted=True),
@@ -216,7 +261,8 @@ class TestStatusHandler:
         return {"future": SimpleNamespace(isGenerationCompleted=True, numberOfOperations=2,
                                           numberOfCompleted=2),
                 "target": "all setups", "started_at": 0.0, "total": 2,
-                "doc_name": "Doc", "doc_urn": "urn:doc"}
+                "doc_name": "Doc", "doc_urn": "urn:doc",
+                "doc_key": "urn:doc"}
 
     # status_handler delegates CAM health to _cam_common.live_readiness (the single source) - tests
     # patch that seam (gen._cam_common.live_readiness -> (signal, None)) instead of a local tally.
@@ -231,13 +277,20 @@ class TestStatusHandler:
         base = self._states(**kw)
         return lambda: (base, None)
 
+    def _stub_health(self, monkeypatch):
+        """Both halves of the health attachment: WHICH operations it reads (for a document-scope
+        read, the document walk - no CAM tree is wired in these routing tests) and what it makes of
+        them. A test stubbing only the second half reaches the real walk through the first."""
+        monkeypatch.setattr(gen, "_document_ops", list)
+        monkeypatch.setattr(gen, "_collect_op_health",
+                            lambda ops, labels=None: {"warnings": [], "errors": [], "empty": []})
+
     def test_latest_resolves_to_last_handle(self, monkeypatch):
         gen._GENERATIONS["gen1"] = self._completed_entry()
         gen._GENERATIONS["gen2"] = self._completed_entry()
         gen._HANDLE_SEQ[0] = 2
         monkeypatch.setattr(gen._cam_common, "live_readiness", self._readiness(readiness="ready to post."))
-        monkeypatch.setattr(gen, "_collect_op_health",
-                            lambda: {"warnings": [], "errors": [], "empty": []})
+        self._stub_health(monkeypatch)
         out = _payload(gen.status_handler(handle="latest"))
         assert out["handle"] == "gen2" and out["completed"] is True
 
@@ -246,7 +299,8 @@ class TestStatusHandler:
             "future": SimpleNamespace(isGenerationCompleted=False, numberOfOperations=2,
                                       numberOfCompleted=0),
             "target": "all setups", "started_at": 0.0, "total": 2,
-            "doc_name": "Doc", "doc_urn": "urn:doc"}
+            "doc_name": "Doc", "doc_urn": "urn:doc",
+                "doc_key": "urn:doc"}
         gen._HANDLE_SEQ[0] = 1
         monkeypatch.setattr(gen._cam_common, "live_readiness",
                             self._readiness(out_of_date=2, generating=0, total=2,
@@ -254,6 +308,75 @@ class TestStatusHandler:
         out = _payload(gen.status_handler(handle="gen1"))
         assert out["completed"] is False
         assert "WARNING" in out["note"]
+
+    # ── operations_completed is DISCLOSED, not smoothed (CAM-13b) ───────────────────────────────
+    #
+    # The Future's numberOfCompleted has been observed to FALL between two reads of one generation
+    # (24 -> 23 -> 25) and MEASURED reading 0 after a completed single-op generation. Nothing here
+    # publishes a running maximum in its place - a high-water mark would keep claiming progress the
+    # counter has stopped standing behind - so the figure ships as the instantaneous one it is, and
+    # every payload that carries the number carries the sentence saying so.
+
+    def test_a_completed_poll_names_the_count_as_instantaneous(self, monkeypatch):
+        gen._GENERATIONS["gen1"] = self._completed_entry()
+        gen._HANDLE_SEQ[0] = 1
+        monkeypatch.setattr(gen._cam_common, "live_readiness",
+                            self._readiness(readiness="ready to post."))
+        self._stub_health(monkeypatch)
+        out = _payload(gen.status_handler(handle="gen1"))
+        assert out["operations_completed"] == 2
+        assert "instantaneous figure" in out["note"]
+        assert "24 -> 23 -> 25" in out["note"]
+        assert "never from this number rising" in out["note"]
+
+    def test_an_incomplete_poll_carries_the_caveat_on_a_ZERO_count(self, monkeypatch):
+        # 0 is the reading most likely to be misread as "nothing has happened yet", so the caveat
+        # has to ride the incomplete note too - not only the completion one.
+        gen._GENERATIONS["gen1"] = {
+            "future": SimpleNamespace(isGenerationCompleted=False, numberOfOperations=2,
+                                      numberOfCompleted=0),
+            "target": "all setups", "started_at": 0.0, "total": 2,
+            "doc_name": "Doc", "doc_urn": "urn:doc", "doc_key": "urn:doc"}
+        gen._HANDLE_SEQ[0] = 1
+        monkeypatch.setattr(gen._cam_common, "live_readiness",
+                            self._readiness(generating=2, total=2, readiness=""))
+        out = _payload(gen.status_handler(handle="gen1"))
+        assert out["completed"] is False and out["operations_completed"] == 0
+        assert "instantaneous figure" in out["note"]
+
+    def test_a_foreign_document_poll_carries_the_caveat_too(self, monkeypatch):
+        # the Future-alone path publishes operations_completed as well, so the sentence about what
+        # that number is has to travel with it there.
+        gen._GENERATIONS["gen1"] = self._completed_entry()
+        gen._HANDLE_SEQ[0] = 1
+        monkeypatch.setattr(gen, "document_key", lambda: "urn:another")
+        out = _payload(gen.status_handler(handle="gen1"))
+        assert out["operations_completed"] == 2
+        assert "NOT the active document" in out["note"]
+        assert "instantaneous figure" in out["note"]
+
+    def test_a_future_whose_count_does_not_read_carries_no_caveat(self, monkeypatch):
+        # numberOfCompleted raises "Generation not started" on the launch tick: the payload's
+        # operations_completed is null, and a caveat about a figure that is not there teaches
+        # nothing.
+        class _NoCount:
+            isGenerationCompleted = True
+            numberOfOperations = 2
+
+            @property
+            def numberOfCompleted(self):
+                raise RuntimeError("Generation not started")
+
+        gen._GENERATIONS["gen1"] = {
+            "future": _NoCount(), "target": "all setups", "started_at": 0.0, "total": 2,
+            "doc_name": "Doc", "doc_urn": "urn:doc", "doc_key": "urn:doc"}
+        gen._HANDLE_SEQ[0] = 1
+        monkeypatch.setattr(gen._cam_common, "live_readiness",
+                            self._readiness(readiness="ready to post."))
+        self._stub_health(monkeypatch)
+        out = _payload(gen.status_handler(handle="gen1"))
+        assert out["operations_completed"] is None
+        assert "instantaneous figure" not in out["note"]
 
     def test_errored_op_surfaced_while_still_generating(self, monkeypatch):
         # An errored op (hasError) will NEVER finish, so a still-generating poll must
@@ -263,7 +386,8 @@ class TestStatusHandler:
             "future": SimpleNamespace(isGenerationCompleted=False, numberOfOperations=3,
                                       numberOfCompleted=0),
             "target": "all setups", "started_at": 0.0, "total": 3,
-            "doc_name": "Doc", "doc_urn": "urn:doc"}
+            "doc_name": "Doc", "doc_urn": "urn:doc",
+                "doc_key": "urn:doc"}
         gen._HANDLE_SEQ[0] = 1
         monkeypatch.setattr(gen._cam_common, "live_readiness",
                             self._readiness(errored=1, generating=2, total=3,
@@ -286,7 +410,8 @@ class TestStatusHandler:
             "future": SimpleNamespace(isGenerationCompleted=False, numberOfOperations=2,
                                       numberOfCompleted=0),
             "target": "all setups", "started_at": 0.0, "total": 2,
-            "doc_name": "Doc", "doc_urn": "urn:doc"}
+            "doc_name": "Doc", "doc_urn": "urn:doc",
+                "doc_key": "urn:doc"}
         gen._HANDLE_SEQ[0] = 1
         monkeypatch.setattr(gen._cam_common, "live_readiness",
                             self._readiness(valid=1, out_of_date=1, generating=1, total=2, setups_errored=1,
@@ -317,8 +442,7 @@ class TestStatusHandler:
         gen._HANDLE_SEQ[0] = 1
         monkeypatch.setattr(gen._cam_common, "live_readiness",
                             self._readiness(valid=2, generating=0, total=2, readiness="ready to post."))
-        monkeypatch.setattr(gen, "_collect_op_health",
-                            lambda: {"warnings": [], "errors": [], "empty": []})
+        self._stub_health(monkeypatch)
         out = _payload(gen.status_handler(handle="gen1"))
         assert out["completed"] is True
 
@@ -339,7 +463,8 @@ class TestStatusHandler:
         return {"future": SimpleNamespace(isGenerationCompleted=future_done, numberOfOperations=2,
                                           numberOfCompleted=2),
                 "target": f"setup '{name}'", "scope": "setup", "target_name": name,
-                "started_at": 0.0, "total": 2, "doc_name": "Doc", "doc_urn": "urn:doc"}
+                "started_at": 0.0, "total": 2, "doc_name": "Doc", "doc_urn": "urn:doc",
+                "doc_key": "urn:doc"}
 
     def _install_cam(self, monkeypatch, *setups):
         import adsk.cam
@@ -360,8 +485,7 @@ class TestStatusHandler:
                                                _live_op("F2", state=1, generating=True)]))
         monkeypatch.setattr(gen._cam_common, "live_readiness",
                             self._readiness(valid=2, out_of_date=2, generating=2, total=4))
-        monkeypatch.setattr(gen, "_collect_op_health",
-                            lambda: {"warnings": [], "errors": [], "empty": []})
+        self._stub_health(monkeypatch)
         out = _payload(gen.status_handler(handle="gen1"))
         assert out["completed"] is True
         assert out["live_states"]["generating"] == 0           # the handle's OWN scope, not 2
@@ -437,7 +561,7 @@ class TestStatusHandler:
         # a foreign tally must neither be attached nor gate completion - the Future alone decides,
         # and the note names the generating document.
         entry = self._completed_entry()
-        entry["doc_urn"] = "urn:other"
+        entry["doc_urn"] = entry["doc_key"] = "urn:other"
         entry["doc_name"] = "OtherDoc"
         gen._GENERATIONS["gen1"] = entry
         gen._HANDLE_SEQ[0] = 1
@@ -455,7 +579,7 @@ class TestStatusHandler:
         entry = self._completed_entry()
         entry["future"] = SimpleNamespace(isGenerationCompleted=False, numberOfOperations=5,
                                           numberOfCompleted=2)
-        entry["doc_urn"] = "urn:other"
+        entry["doc_urn"] = entry["doc_key"] = "urn:other"
         entry["doc_name"] = "OtherDoc"
         gen._GENERATIONS["gen1"] = entry
         gen._HANDLE_SEQ[0] = 1
@@ -464,6 +588,432 @@ class TestStatusHandler:
         assert out["operations_completed"] == 2
         assert "live_states" not in out
         assert "gen1" in gen._GENERATIONS                  # still running - entry kept
+
+    # ── which document a status read ANSWERS ABOUT ──────────────────────────────────────────────
+    # A BARE read (no handle, no target) is a question about what is open NOW. Answering it from the
+    # launch registry reported a CLOSED document's job as completed:true, which a caller reading
+    # 'completed' alone takes as a verdict on the active document.
+
+    def _live_document(self, monkeypatch, **states):
+        """Wire the live ACTIVE-document path (the one a bare read must reach)."""
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (object(), None))
+        monkeypatch.setattr(gen._cam_common, "live_readiness", self._readiness(**states))
+        monkeypatch.setattr(gen, "_collect_op_health",
+                            lambda ops, labels=None: {"warnings": [], "errors": [], "empty": []})
+
+    def test_a_bare_read_answers_about_the_active_document_not_a_registered_handle(self, monkeypatch):
+        # THE BITE: a stale handle of another (here, no-longer-active) document sits in the registry
+        # and its Future says done. The bare read must report the ACTIVE document's live state -
+        # 2 of 5 valid, still generating - not the handle's completed:true.
+        entry = self._completed_entry()
+        entry["doc_urn"], entry["doc_key"], entry["doc_name"] = "urn:closed", "urn:closed", "ClosedDoc"
+        gen._GENERATIONS["gen1"] = entry
+        gen._HANDLE_SEQ[0] = 1
+        self._live_document(monkeypatch, valid=2, out_of_date=3, generating=1, total=5,
+                            readiness="2 of 5 active ops valid - run cam_generate to finish the rest.")
+        out = _payload(gen.status_handler())
+        assert out["handle"] is None                 # the live path, not the handle path
+        assert out["target"] == "document"
+        assert out["completed"] is False             # the ACTIVE document's state decided this
+        assert "generating_document" not in out      # nothing about the registry's document
+        assert "gen1" in gen._GENERATIONS            # a bare read consumes no handle
+
+    def test_a_bare_read_reads_live_even_when_the_handle_is_the_active_documents(self, monkeypatch):
+        # The routing is by ARGUMENT, not by luck of the document matching: 'latest' is the way to
+        # ask about the most recent launch, so a bare read never picks one up.
+        gen._GENERATIONS["gen1"] = self._completed_entry()      # SAME document as active
+        gen._HANDLE_SEQ[0] = 1
+        self._live_document(monkeypatch, valid=1, generating=1, total=2,
+                            readiness="1 of 2 active ops valid - run cam_generate to finish the rest.")
+        out = _payload(gen.status_handler())
+        assert out["handle"] is None and out["completed"] is False
+
+    def test_latest_is_refused_when_its_launch_document_is_not_active(self, monkeypatch):
+        # 'latest' is a POSITIONAL pick - it names no document - so it may not answer from a foreign
+        # one. The refusal names all three ways forward in this tool's own vocabulary.
+        entry = self._completed_entry()
+        entry["doc_urn"], entry["doc_key"], entry["doc_name"] = "urn:other", "urn:other", "OtherDoc"
+        gen._GENERATIONS["gen1"] = entry
+        gen._HANDLE_SEQ[0] = 1
+        res = gen.status_handler(handle="latest")
+        assert res["isError"] is True
+        msg = res["message"]
+        assert "OtherDoc" in msg and "not the active document" in msg
+        assert "handle='gen1'" in msg and "doc_activate" in msg and "omit 'handle'" in msg
+
+    def test_latest_with_an_empty_registry_is_refused_not_silently_the_active_document(self):
+        # the fourth cell of the routing: the caller asked about a LAUNCH. Falling through to the
+        # active document would answer a different question with no word that no launch exists -
+        # so it refuses the way an unknown explicit handle does, and names the same ways out.
+        res = gen.status_handler(handle="latest")     # registry cleared by setup_method
+        assert res["isError"] is True
+        msg = res["message"]
+        assert "'latest' resolves to handle 'gen0'" in msg and "not registered" in msg
+        assert "Active handles: (none)" in msg
+        assert "Omit 'handle'" in msg and "'target'" in msg
+
+    def test_latest_pointing_at_a_completed_handle_names_the_ones_that_remain(self):
+        # a generation is dropped from the registry on completion, so 'latest' can address a handle
+        # that is gone while OLDER ones survive - the refusal lists what is actually there.
+        gen._GENERATIONS["gen1"] = self._completed_entry()
+        gen._HANDLE_SEQ[0] = 2                        # gen2 launched, completed, and was popped
+        res = gen.status_handler(handle="latest")
+        assert res["isError"] is True
+        assert "'gen2'" in res["message"] and "Active handles: gen1" in res["message"]
+
+    def test_latest_still_answers_when_its_launch_document_is_active(self, monkeypatch):
+        # the other side of the boundary: same document, so the positional pick names the right job.
+        gen._GENERATIONS["gen1"] = self._completed_entry()
+        gen._HANDLE_SEQ[0] = 1
+        monkeypatch.setattr(gen._cam_common, "live_readiness",
+                            self._readiness(valid=2, generating=0, total=2,
+                                            readiness="2 of 2 active ops valid - ready to post."))
+        self._stub_health(monkeypatch)
+        out = _payload(gen.status_handler(handle="latest"))
+        assert out["handle"] == "gen1" and out["completed"] is True
+
+    def test_an_explicit_handle_still_reports_its_own_foreign_documents_progress(self, monkeypatch):
+        # An explicit handle NAMES one job, so it is answered (and disclosed) rather than refused -
+        # the active document can change under a running generation with no call from the caller.
+        entry = self._completed_entry()
+        entry["future"] = SimpleNamespace(isGenerationCompleted=False, numberOfOperations=5,
+                                          numberOfCompleted=2)
+        entry["doc_urn"], entry["doc_key"], entry["doc_name"] = "urn:other", "urn:other", "OtherDoc"
+        gen._GENERATIONS["gen1"] = entry
+        gen._HANDLE_SEQ[0] = 1
+        out = _payload(gen.status_handler(handle="gen1"))
+        assert out["generating_document"]["name"] == "OtherDoc"
+        assert out["operations_completed"] == 2
+
+    # ── what `completed` claims ─────────────────────────────────────────────────────────────────
+    # Measured beside a readiness of "0 of 34 active ops valid": completed:true does not mean the
+    # operations succeeded, only that nothing is generating. Every path that publishes it true says so.
+
+    def test_the_handle_path_words_what_completed_means(self, monkeypatch):
+        gen._GENERATIONS["gen1"] = self._completed_entry()
+        gen._HANDLE_SEQ[0] = 1
+        monkeypatch.setattr(gen._cam_common, "live_readiness",
+                            self._readiness(valid=0, out_of_date=2, generating=0, total=2,
+                                            readiness="0 of 2 active ops valid - run cam_generate to finish the rest."))
+        self._stub_health(monkeypatch)
+        out = _payload(gen.status_handler(handle="gen1"))
+        assert out["completed"] is True                      # nothing is generating
+        assert "not a success verdict" in out["note"]        # ...which is NOT the same as succeeded
+        assert "0 of 2 active ops valid" in out["note"]      # the readiness line rides beside it
+
+    def test_the_foreign_document_path_words_what_completed_means(self, monkeypatch):
+        entry = self._completed_entry()
+        entry["doc_urn"], entry["doc_key"], entry["doc_name"] = "urn:other", "urn:other", "OtherDoc"
+        gen._GENERATIONS["gen1"] = entry
+        gen._HANDLE_SEQ[0] = 1
+        out = _payload(gen.status_handler(handle="gen1"))
+        assert out["completed"] is True and "not a success verdict" in out["note"]
+
+    def test_the_unreadable_tally_path_words_what_completed_means(self, monkeypatch):
+        gen._GENERATIONS["gen1"] = self._completed_entry()
+        gen._HANDLE_SEQ[0] = 1
+        monkeypatch.setattr(gen._cam_common, "live_readiness", lambda: (None, "No CAM product."))
+        out = _payload(gen.status_handler(handle="gen1"))
+        assert out["completed"] is True and "not a success verdict" in out["note"]
+
+
+class TestSameDocumentIdentity:
+    """A never-saved document carries no lineage URN, and its NAME is not a substitute: measured
+    live, two open never-saved documents both answer 'Untitled', so a name match is not evidence
+    that the launch document and the active one are one document.
+
+    What settles it is the key register_future stamped (_write_guard.document_key): the lineage urn
+    for a saved document, and for a never-saved one a token minted per document INSTANCE, which is
+    why a launch from a scratch document is comparable at all rather than falling back to the
+    Future alone. _same_document still hands back None - not False - where NO identity was readable
+    on one side or the other, since 'not confirmable' and 'a different document' are different
+    facts with different remedies.
+    """
+
+    def _entry(self, doc_name, doc_key, doc_urn=None):
+        return {"future": SimpleNamespace(isGenerationCompleted=True, numberOfOperations=1,
+                                          numberOfCompleted=1),
+                "target": "all setups", "started_at": 0.0, "total": 1,
+                "doc_name": doc_name, "doc_urn": doc_urn, "doc_key": doc_key}
+
+    def _active(self, monkeypatch, doc):
+        """What app.activeDocument hands back for this call - the seam register_future stamped the
+        launch document from."""
+        monkeypatch.setattr(gen._cam_common, "app", SimpleNamespace(activeDocument=doc))
+
+    # ── _same_document: the three answers ────────────────────────────────────────────────────────
+
+    def test_two_never_saved_documents_sharing_a_name_are_not_called_the_same(self, monkeypatch):
+        # THE BITE. Both documents are unsaved and both are named 'Untitled' - exactly the live
+        # repro. A name comparison answers True here and attaches the wrong document's tallies;
+        # the per-instance keys differ, so this is a definite False.
+        monkeypatch.setattr(gen, "_active_identity", lambda: ("Untitled", None))
+        monkeypatch.setattr(gen, "document_key", lambda: "unsaved:2")
+        assert gen._same_document(self._entry("Untitled", "unsaved:1")) is False
+
+    def test_a_never_saved_launch_document_is_identified_when_it_is_still_active(self, monkeypatch):
+        # The other half, and what the key BUYS: a launch from a never-saved document is confirmed
+        # as the active one, so the status read attaches that document's per-op tallies instead of
+        # falling back to the Future alone. A urn-only comparison answers None here.
+        monkeypatch.setattr(gen, "_active_identity", lambda: ("Untitled", None))
+        monkeypatch.setattr(gen, "document_key", lambda: "unsaved:1")
+        assert gen._same_document(self._entry("Untitled", "unsaved:1")) is True
+
+    def test_a_launch_that_recorded_no_identity_answers_none_rather_than_false(self, monkeypatch):
+        # None is the honest answer, and it has to be DISTINCT from False: False means 'a different
+        # document', which the callers word as "is NOT the active document" - a claim nothing here
+        # supports, and one that is wrong whenever the launch document IS the active one.
+        monkeypatch.setattr(gen, "_active_identity", lambda: ("Untitled", None))
+        monkeypatch.setattr(gen, "document_key", lambda: "unsaved:1")
+        assert gen._same_document(self._entry("Untitled", None)) is None
+
+    def test_no_readable_active_document_answers_none_rather_than_false(self, monkeypatch):
+        # The same fact on the other side: the launch is identified but nothing reads now, so the
+        # two cannot be compared - not evidence that a different document is in front of the caller.
+        monkeypatch.setattr(gen, "_active_identity", lambda: (None, None))
+        monkeypatch.setattr(gen, "document_key", lambda: None)
+        assert gen._same_document(self._entry("Doc", "urn:doc", doc_urn="urn:doc")) is None
+
+    def test_a_matching_key_is_the_same_document(self, monkeypatch):
+        monkeypatch.setattr(gen, "_active_identity", lambda: ("Doc", "urn:doc"))
+        monkeypatch.setattr(gen, "document_key", lambda: "urn:doc")
+        assert gen._same_document(self._entry("Doc", "urn:doc", doc_urn="urn:doc")) is True
+
+    def test_a_differing_key_is_a_definite_false(self, monkeypatch):
+        monkeypatch.setattr(gen, "_active_identity", lambda: ("Doc", "urn:doc"))
+        monkeypatch.setattr(gen, "document_key", lambda: "urn:doc")
+        assert gen._same_document(self._entry("OtherDoc", "urn:other", doc_urn="urn:other")) is False
+
+    def test_an_unsaved_launch_against_a_saved_active_document_is_a_definite_false(self, monkeypatch):
+        # Not None: both sides carry a key and the keys differ. A name collision is real here too -
+        # a saved document may be named 'Untitled' - so the name cannot settle this pair either way.
+        monkeypatch.setattr(gen, "_active_identity", lambda: ("Untitled", "urn:saved"))
+        monkeypatch.setattr(gen, "document_key", lambda: "urn:saved")
+        assert gen._same_document(self._entry("Untitled", "unsaved:1")) is False
+
+    def test_a_saved_launch_against_an_unsaved_active_document_is_not_the_same(self, monkeypatch):
+        monkeypatch.setattr(gen, "_active_identity", lambda: ("Untitled", None))
+        monkeypatch.setattr(gen, "document_key", lambda: "unsaved:1")
+        assert gen._same_document(self._entry("Doc", "urn:doc", doc_urn="urn:doc")) is False
+
+    # ── the key is DERIVED, so a key that stopped matching is not yet a different document ───────
+
+    def test_a_launch_document_saved_mid_generation_is_still_the_active_document(self, monkeypatch):
+        # THE BITE. document_key prefers a readable data-file id, so the FIRST SAVE of a scratch
+        # document replaces the key the launch stamped ('unsaved:1' -> the new urn) while the same
+        # document stays open and active. Compared on the key alone this is a definite False, and
+        # the status read then says "is NOT the active document" about the document in front of the
+        # caller and withholds its own per-op tallies.
+        launched, active = _DocHandle("doc-a"), _DocHandle("doc-a")
+        assert launched is not active            # a new wrapper per read, as the live API hands back
+        monkeypatch.setattr(gen, "_active_identity", lambda: ("Bracket", "urn:new"))
+        monkeypatch.setattr(gen, "document_key", lambda: "urn:new")
+        self._active(monkeypatch, active)
+        entry = self._entry("Untitled", "unsaved:1")
+        entry["doc"] = launched
+        assert gen._same_document(entry) is True
+
+    def test_a_different_active_document_stays_a_definite_false(self, monkeypatch):
+        # The fallback may only turn a stale key into a match: two documents compare unequal, and
+        # answering True there would attach another document's tallies to this handle.
+        monkeypatch.setattr(gen, "_active_identity", lambda: ("Other", "urn:other"))
+        monkeypatch.setattr(gen, "document_key", lambda: "urn:other")
+        self._active(monkeypatch, _DocHandle("doc-b"))
+        entry = self._entry("Untitled", "unsaved:1")
+        entry["doc"] = _DocHandle("doc-a")
+        assert gen._same_document(entry) is False
+
+    def test_a_launch_handle_that_will_not_compare_is_a_definite_false(self, monkeypatch):
+        # A leftover wrapper whose comparison RAISES proves nothing about the active document - it
+        # is not a match, and it is not an exception out of a status poll either.
+        class _Unreadable:
+            def __eq__(self, other):
+                raise RuntimeError("An API Object refers to a deleted Object")
+            __hash__ = None
+
+        monkeypatch.setattr(gen, "_active_identity", lambda: ("Bracket", "urn:new"))
+        monkeypatch.setattr(gen, "document_key", lambda: "urn:new")
+        self._active(monkeypatch, _DocHandle("doc-a"))
+        entry = self._entry("Untitled", "unsaved:1")
+        entry["doc"] = _Unreadable()
+        assert gen._same_document(entry) is False
+
+    def test_no_readable_active_document_still_answers_none_with_a_handle_kept(self, monkeypatch):
+        # The tri-state survives the fallback: nothing reads now, so the two cannot be COMPARED -
+        # the handle does not turn that into a claim that a different document is open.
+        monkeypatch.setattr(gen, "_active_identity", lambda: (None, None))
+        monkeypatch.setattr(gen, "document_key", lambda: None)
+        self._active(monkeypatch, _DocHandle("doc-a"))
+        entry = self._entry("Untitled", "unsaved:1")
+        entry["doc"] = _DocHandle("doc-a")
+        assert gen._same_document(entry) is None
+
+    def test_an_entry_with_no_launch_handle_compares_on_its_key_alone(self, monkeypatch):
+        # Every launch registered before this session's add-in reload carries no handle; the entry
+        # falls back to the key comparison rather than reading the active document as a match.
+        monkeypatch.setattr(gen, "_active_identity", lambda: ("Bracket", "urn:new"))
+        monkeypatch.setattr(gen, "document_key", lambda: "urn:new")
+        self._active(monkeypatch, _DocHandle("doc-a"))
+        assert gen._same_document(self._entry("Untitled", "unsaved:1")) is False
+
+    # ── consumer: the handle path attaches the tallies once the document is confirmed ────────────
+
+    def test_the_status_read_attaches_the_tallies_of_a_saved_launch_document(self, monkeypatch):
+        # The consumer's own branch on the new match: _status_future attaches the per-op tallies
+        # only over a launch document it can CONFIRM is active, so a saved-mid-generation document
+        # gets its own health back instead of the Future-alone fallback.
+        gen._GENERATIONS.clear()
+        monkeypatch.setattr(gen, "_active_identity", lambda: ("Bracket", "urn:new"))
+        monkeypatch.setattr(gen, "document_key", lambda: "urn:new")
+        self._active(monkeypatch, _DocHandle("doc-a"))
+        monkeypatch.setattr(gen._cam_common, "live_readiness",
+                            lambda: ({"valid": 1, "generating": 0, "total": 1,
+                                      "readiness": "ready to post."}, None))
+        monkeypatch.setattr(gen, "_document_ops", list)
+        monkeypatch.setattr(gen, "_collect_op_health",
+                            lambda ops, labels=None: {"warnings": [], "errors": [], "empty": []})
+        entry = self._entry("Untitled", "unsaved:1")
+        entry["doc"] = _DocHandle("doc-a")
+        gen._GENERATIONS["gen1"] = entry
+        gen._HANDLE_SEQ[0] = 1
+        out = _payload(gen.status_handler(handle="gen1"))
+        assert out["live_states"]["valid"] == 1       # its OWN document's tally, attached
+        assert out["completion_basis"] == "document"  # not "its document is not active"
+        assert "is NOT the active document" not in out["note"]
+
+    # ── consumer 1: the 'latest' routing gate ────────────────────────────────────────────────────
+    # _same_document's None is a new state for this caller's `if`, so it gets its own test here -
+    # the helper's own tests do not cover the branch this consumer takes on it.
+
+    def test_latest_is_refused_when_the_launch_document_cannot_be_identified(self, monkeypatch):
+        gen._GENERATIONS.clear()
+        monkeypatch.setattr(gen, "_active_identity", lambda: ("Untitled", None))
+        monkeypatch.setattr(gen, "document_key", lambda: "unsaved:1")
+        gen._GENERATIONS["gen1"] = self._entry("Untitled", None)
+        gen._HANDLE_SEQ[0] = 1
+        res = gen.status_handler(handle="latest")
+        assert res["isError"] is True
+        msg = res["message"]
+        assert "no document identity could be read" in msg
+        # the refusal must NOT claim the document is inactive - it does not know that
+        assert "is not the active document" not in msg
+        assert "handle='gen1'" in msg
+
+    def test_the_unidentifiable_refusal_is_worded_apart_from_the_foreign_document_one(self, monkeypatch):
+        gen._GENERATIONS.clear()
+        monkeypatch.setattr(gen, "_active_identity", lambda: ("Doc", "urn:doc"))
+        monkeypatch.setattr(gen, "document_key", lambda: "urn:doc")
+        gen._GENERATIONS["gen1"] = self._entry("OtherDoc", "urn:other", doc_urn="urn:other")
+        gen._HANDLE_SEQ[0] = 1
+        msg = gen.status_handler(handle="latest")["message"]
+        assert "is not the active document" in msg and "OtherDoc" in msg
+        assert "no document identity" not in msg     # the wrong diagnosis for THIS refusal
+
+    def test_latest_answers_over_a_never_saved_launch_document_that_is_still_active(self, monkeypatch):
+        # What the key buys the 'latest' gate: a scratch-document launch is CONFIRMED as the active
+        # one, so 'latest' answers over it instead of refusing for want of a readable identity.
+        gen._GENERATIONS.clear()
+        monkeypatch.setattr(gen, "_active_identity", lambda: ("Untitled", None))
+        monkeypatch.setattr(gen, "document_key", lambda: "unsaved:1")
+        monkeypatch.setattr(gen._cam_common, "live_readiness",
+                            lambda: ({"valid": 1, "generating": 0, "total": 1,
+                                      "readiness": "ready to post."}, None))
+        monkeypatch.setattr(gen, "_document_ops", list)
+        monkeypatch.setattr(gen, "_collect_op_health",
+                            lambda ops, labels=None: {"warnings": [], "errors": [], "empty": []})
+        gen._GENERATIONS["gen1"] = self._entry("Untitled", "unsaved:1")
+        gen._HANDLE_SEQ[0] = 1
+        out = _payload(gen.status_handler(handle="latest"))
+        assert out["handle"] == "gen1" and out["completed"] is True
+        assert out["live_states"]["valid"] == 1       # its OWN document's tally, attached
+
+    # ── consumer 2: the explicit-handle tally gate ───────────────────────────────────────────────
+
+    def test_a_never_saved_launch_document_gets_its_own_per_op_tallies(self, monkeypatch):
+        # What the key buys this consumer: a scratch document carries no urn, so an identity read on
+        # the urn alone cannot confirm the launch and the tally is skipped entirely - no readiness
+        # line at all. The per-instance key confirms it, so that document's own tally lands.
+        gen._GENERATIONS.clear()
+        monkeypatch.setattr(gen, "_active_identity", lambda: ("Untitled", None))
+        monkeypatch.setattr(gen, "document_key", lambda: "unsaved:1")
+        gen._GENERATIONS["gen1"] = self._entry("Untitled", "unsaved:1")
+        gen._HANDLE_SEQ[0] = 1
+        monkeypatch.setattr(gen._cam_common, "live_readiness",
+                            lambda: ({"valid": 0, "out_of_date": 1, "generating": 0, "total": 1,
+                                      "readiness": "0 of 1 active ops valid - run cam_generate to "
+                                                   "finish the rest."}, None))
+        monkeypatch.setattr(gen, "_document_ops", list)
+        monkeypatch.setattr(gen, "_collect_op_health",
+                            lambda ops, labels=None: {"warnings": [], "errors": [], "empty": []})
+        out = _payload(gen.status_handler(handle="gen1"))
+        assert out["live_states"]["out_of_date"] == 1
+        assert "0 of 1 active ops valid" in out["note"]
+
+    def test_a_handle_with_no_recorded_identity_attaches_no_tallies(self, monkeypatch):
+        # THE BITE for this consumer: no tally may be attached over a document the call cannot
+        # confirm - a wrong-document tally under this handle reads as this generation's own state.
+        gen._GENERATIONS.clear()
+        monkeypatch.setattr(gen, "_active_identity", lambda: ("Untitled", None))
+        monkeypatch.setattr(gen, "document_key", lambda: "unsaved:1")
+        gen._GENERATIONS["gen1"] = self._entry("Untitled", None)
+        gen._HANDLE_SEQ[0] = 1
+        monkeypatch.setattr(gen._cam_common, "live_readiness",
+                            lambda: ({"valid": 0, "out_of_date": 1, "generating": 0, "total": 1,
+                                      "readiness": "0 of 1 active ops valid - run cam_generate to "
+                                                   "finish the rest."}, None))
+        out = _payload(gen.status_handler(handle="gen1"))
+        assert "live_states" not in out                  # the unconfirmed tally never lands
+        assert "0 of 1 active ops valid" not in out["note"]
+        assert out["completed"] is True                  # the Future alone settles it
+        assert "document identity could be read" in out["note"]
+        assert "no document identity" in out["completion_basis"]
+
+    def test_an_unreadable_document_is_not_NAMED_on_the_wire(self, monkeypatch):
+        # THE ENTRY SHAPE THAT ACTUALLY REACHES THIS BRANCH: a launch made while no document read
+        # records (None, None) from _active_identity and no key, so every field is None. An
+        # interpolated name then puts the literal 'None' on the wire as the document this
+        # generation belongs to - a name nothing ever read. Every other test here launches from
+        # 'Untitled', where a fabricated name is indistinguishable from a real one.
+        gen._GENERATIONS.clear()
+        monkeypatch.setattr(gen, "_active_identity", lambda: (None, None))
+        monkeypatch.setattr(gen, "document_key", lambda: None)
+        gen._GENERATIONS["gen1"] = {"future": SimpleNamespace(isGenerationCompleted=True,
+                                                             numberOfOperations=1,
+                                                             numberOfCompleted=1),
+                                    "target": "all setups", "started_at": 0.0, "total": 1,
+                                    "doc_name": None, "doc_urn": None, "doc_key": None}
+        gen._HANDLE_SEQ[0] = 1
+        out = _payload(gen.status_handler(handle="gen1"))
+        assert "'None'" not in out["note"] and "None" not in out["note"]
+        assert "document identity could be read" in out["note"]   # the fact still reaches the wire
+        # the same entry through the 'latest' gate, the other consumer of this branch
+        msg = gen.status_handler(handle="latest")["message"]
+        assert "'None'" not in msg
+
+    def test_the_unidentifiable_note_does_not_claim_the_document_is_inactive(self, monkeypatch):
+        # The document may well BE the active one - the call simply cannot tell. Saying it is not
+        # active states a fact nothing read.
+        gen._GENERATIONS.clear()
+        monkeypatch.setattr(gen, "_active_identity", lambda: ("Untitled", None))
+        monkeypatch.setattr(gen, "document_key", lambda: "unsaved:1")
+        gen._GENERATIONS["gen1"] = self._entry("Untitled", None)
+        gen._HANDLE_SEQ[0] = 1
+        out = _payload(gen.status_handler(handle="gen1"))
+        assert "NOT the active document" not in out["note"]
+        assert "doc_activate" not in out["note"]         # the remedy for a DIFFERENT document
+
+    def test_a_foreign_document_handle_still_says_it_is_not_active(self, monkeypatch):
+        # the other side of the boundary: an identified, different document keeps its own wording
+        # and its own remedy, so the two states stay distinguishable on the wire.
+        gen._GENERATIONS.clear()
+        monkeypatch.setattr(gen, "_active_identity", lambda: ("Doc", "urn:doc"))
+        monkeypatch.setattr(gen, "document_key", lambda: "urn:doc")
+        gen._GENERATIONS["gen1"] = self._entry("OtherDoc", "urn:other", doc_urn="urn:other")
+        gen._HANDLE_SEQ[0] = 1
+        out = _payload(gen.status_handler(handle="gen1"))
+        assert "NOT the active document" in out["note"] and "doc_activate" in out["note"]
+        assert "document identity could be read" not in out["note"]
+        assert "live_states" not in out
 
 
 # ── status_handler live-poll path: NO cam_generate handle (inline / UI generation) ──────────────────
@@ -495,7 +1045,7 @@ class TestScopedReadinessWarningVerdict:
         cam = _FakeCAM([_setup("Roughing", ops)])
         monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
         monkeypatch.setattr(gen, "_collect_op_health",
-                            lambda: {"warnings": [], "errors": [], "empty": []})
+                            lambda ops, labels=None: {"warnings": [], "errors": [], "empty": []})
         return _payload(gen.status_handler(target="Roughing"))
 
     def test_the_tally_carries_the_warning_count_and_its_sample(self, monkeypatch):
@@ -535,6 +1085,314 @@ class TestScopedReadinessWarningVerdict:
         assert out["live_states"]["readiness"].startswith("BLOCKER:")
 
 
+class TestScopedReadinessSetupBlockers:
+    """A SCOPED poll reads the same SETUP-level prerequisites the document signal does. The
+    discriminating fixture is a setup that is fully op-valid, warning-free and error-free AND has no
+    machine: a verdict built from op state alone reads 'ready to post' on it, which is exactly what
+    cam_get's blocked_by contradicted."""
+
+    def _out(self, monkeypatch, target, machine=None, folder=None):
+        import adsk.cam
+        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
+        ops = [_warn_op("Face1", warning=""), _warn_op("Face2", warning="")]
+        if folder:
+            setup = SharedSetup("Roughing", folders=[SharedFolder(folder, ops=ops)])
+            setup.machine = machine
+        else:
+            setup = _setup("Roughing", ops, machine=machine)
+        cam = _FakeCAM([setup])
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(gen, "_collect_op_health",
+                            lambda ops, labels=None: {"warnings": [], "errors": [], "empty": []})
+        return _payload(gen.status_handler(target=target))
+
+    def test_a_machine_less_setup_never_reads_ready_to_post_however_valid_its_ops(self, monkeypatch):
+        out = self._out(monkeypatch, "Roughing", machine=None)
+        readiness = out["live_states"]["readiness"]
+        assert out["live_states"]["valid"] == 2 and out["live_states"]["warnings"] == 0
+        assert "- ready to post." not in readiness          # op state alone did NOT earn it
+        assert "no_machine_selected" in readiness and "'Roughing'" in readiness
+        assert "cam_edit_setup" in readiness                # the remedy, in tool vocabulary
+        assert out["live_states"]["setups_blocked"] == [
+            {"name": "Roughing", "blocked_by": ["no_machine_selected"]}]
+        assert readiness in out["note"]                     # and it reaches the agent-facing note
+
+    def test_an_assigned_machine_restores_the_plain_scoped_verdict(self, monkeypatch):
+        # the other side of the boundary - the demotion must key on the blocker, not on being scoped
+        out = self._out(monkeypatch, "Roughing",
+                        machine=SimpleNamespace(description="Haas VF-2"))
+        assert out["live_states"]["setups_blocked"] == []
+        assert out["live_states"]["readiness"] == "2 of 2 active ops valid - ready to post."
+
+    def test_a_folder_scoped_poll_reads_its_OWNING_setups_blockers(self, monkeypatch):
+        # the parent-chain walk (owning_setup): the target is a FOLDER, so its blockers are the
+        # setup's - a scope that only looked at its own object would find no machine field at all.
+        out = self._out(monkeypatch, "Finishing ops", machine=None, folder="Finishing ops")
+        assert "folder" in out["target"]
+        assert out["live_states"]["setups_blocked"] == [
+            {"name": "Roughing", "blocked_by": ["no_machine_selected"]}]
+        assert "- ready to post." not in out["live_states"]["readiness"]
+
+    def test_a_folder_under_a_machined_setup_stays_plainly_ready(self, monkeypatch):
+        out = self._out(monkeypatch, "Finishing ops", folder="Finishing ops",
+                        machine=SimpleNamespace(description="Haas VF-2"))
+        assert out["live_states"]["readiness"] == "2 of 2 active ops valid - ready to post."
+
+
+class TestScopedHealthLists:
+    """A SCOPED status read's warning/error/empty LISTS and their counts describe the scope its
+    tally does, and the payload names which set that is.
+
+    Measured on a 99-op job: a folder-scoped read reported live_states.total 6 and
+    operations_total 6 beside counts.with_warnings 34, with warning rows from both setups (and one
+    operation name that exists in each). A reader could not tell which rows were its target's, and
+    the counts contradicted the tally sitting next to them.
+
+    The fixture below is that shape in miniature: two setups that REPEAT an operation name in each
+    of the three buckets - warned ('Rough to Model Top'), errored ('Contour20') and empty ('Rough
+    clean') - because duplicate names across setups are this template's documented reality, and a
+    count that deduplicated by name would undercount every one of them. Every bucket is also a
+    DIFFERENT size, within each scope and across the document, so a count wired to the wrong list
+    cannot hide behind a coincidence. Roughing holds the two operations the warning predicate must
+    reject - one warned AND errored, one warned AND suppressed."""
+
+    def _cam(self, monkeypatch):
+        import adsk.cam
+        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
+        roughing = SharedSetup("Roughing", ops=[               # 2 warned, 1 errored, 3 empty
+            _op("Rough to Model Top", warning="Spindle speed exceeds the machine limit"),
+            _op("Rough adaptive", warning="Spindle speed exceeds the machine limit"),
+            _op("Contour20", warning="Chip load is high",
+                error="Top height must not be below the bottom height"),
+            _op("Parked drill", warning="Parked and warned", has_toolpath=False,
+                toolpath_valid=False, suppressed=True, state=2),
+            _op("Rough clean", has_toolpath=False),
+            _op("Rough clean 2", has_toolpath=False),
+            _op("Rough clean 3", has_toolpath=False)])
+        finishing = SharedSetup("Finishing", ops=[             # 4 warned, 2 errored, 2 empty
+            _op("Rough to Model Top", warning="Spindle speed exceeds the machine limit"),
+            _op("Contour21", warning="Contour Selection: contours are missing selections."),
+            _op("Finish chamfer", warning="Spindle speed exceeds the machine limit"),
+            _op("Finish contour", warning="Spindle speed exceeds the machine limit"),
+            _op("Finish bore", error="broken"),
+            _op("Contour20", error="Top height must not be below the bottom height"),
+            _op("Finish clean", has_toolpath=False),
+            _op("Rough clean", has_toolpath=False)])
+        for s in (roughing, finishing):
+            s.machine = SimpleNamespace(description="Haas VF-2")
+        cam = _FakeCAM([roughing, finishing])
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
+        return cam
+
+    def _names(self, rows):
+        return [r["name"] for r in rows]
+
+    def test_a_scoped_read_lists_only_its_own_scopes_warnings_errors_and_empties(self, monkeypatch):
+        # THE BITE: 'Contour21', 'Finish chamfer', the other setup's 'Rough to Model Top' and
+        # 'Finish clean' belong to a scope this call did not name - none may appear under 'Roughing'.
+        self._cam(monkeypatch)
+        out = _payload(gen.status_handler(target="Roughing"))
+        assert out["live_states"]["total"] == 7
+        assert self._names(out["operations_with_warnings"]) == ["Rough to Model Top",
+                                                                "Rough adaptive"]
+        assert self._names(out["operations_with_errors"]) == ["Contour20"]
+        assert out["empty_toolpaths"] == ["Rough clean", "Rough clean 2", "Rough clean 3"]
+
+    def test_the_scoped_counts_never_pair_with_a_wider_list(self, monkeypatch):
+        # A scoped tally beside document-wide counts is a pair a reader cannot tell apart. Counts and
+        # lists are built from ONE operation set, so each count is its own list's length - and the
+        # three buckets are different sizes, so a count reading the wrong list is a wrong number.
+        self._cam(monkeypatch)
+        out = _payload(gen.status_handler(target="Roughing"))
+        assert out["counts"] == {"with_warnings": 2, "with_errors": 1, "empty_toolpaths": 3}
+        assert out["counts"]["with_warnings"] == len(out["operations_with_warnings"])
+        assert out["counts"]["with_errors"] == len(out["operations_with_errors"])
+        assert out["counts"]["empty_toolpaths"] == len(out["empty_toolpaths"])
+
+    def test_the_warning_count_and_the_readiness_tally_share_one_predicate(self, monkeypatch):
+        # health_scope asserts the tally and the lists describe one set - so they must also AGREE.
+        # live_states.warnings counts through _cam_common.counts_as_warning, which drops a warning
+        # on an ERRORED op (its error already blocks the post) and on a SUPPRESSED one (excluded
+        # from the post); the health count reads the same predicate, so the two numbers match.
+        self._cam(monkeypatch)
+        out = _payload(gen.status_handler(target="Roughing"))
+        assert out["live_states"]["warnings"] == out["counts"]["with_warnings"] == 2
+        named = self._names(out["operations_with_warnings"])
+        assert "Contour20" not in named        # warned AND errored - its error row is the report
+        assert "Parked drill" not in named     # suppressed - it is not in the post at all
+
+    def test_the_payload_names_which_operations_the_health_lists_cover(self, monkeypatch):
+        self._cam(monkeypatch)
+        out = _payload(gen.status_handler(target="Roughing"))
+        assert out["health_scope"] == "setup 'Roughing'"
+        assert "cover: setup 'Roughing'" in out["note"]
+
+    def test_a_document_read_still_covers_every_setup(self, monkeypatch):
+        # the other side of the boundary: unscoped, the lists ARE the whole document's - it is the
+        # scope that narrows them, so a read naming none narrows nothing.
+        self._cam(monkeypatch)
+        out = _payload(gen.status_handler())
+        assert out["live_states"]["total"] == 15
+        # A name TWO of these operations carry is rendered as its 'Setup / op' path - the only
+        # thing that separates them; a name unique in this list stays the plain name a caller
+        # passes back. Every bucket carries both kinds, so neither rule can be missing.
+        assert self._names(out["operations_with_warnings"]) == [
+            "Roughing / Rough to Model Top", "Rough adaptive", "Finishing / Rough to Model Top",
+            "Contour21", "Finish chamfer", "Finish contour"]
+        assert self._names(out["operations_with_errors"]) == [
+            "Roughing / Contour20", "Finish bore", "Finishing / Contour20"]
+        assert out["empty_toolpaths"] == ["Roughing / Rough clean", "Rough clean 2",
+                                          "Rough clean 3", "Finish clean",
+                                          "Finishing / Rough clean"]
+        assert out["health_scope"] == "document"
+        # 6 / 3 / 5 - three different numbers, so each count is pinned to its OWN list; and each
+        # exceeds its bucket's DISTINCT-name count (5 / 2 / 4), so a count that deduplicated by
+        # name - which would drop a real operation on any job reusing a name across setups - reads
+        # short here rather than passing.
+        assert out["counts"] == {"with_warnings": 6, "with_errors": 3, "empty_toolpaths": 5}
+        assert out["live_states"]["warnings"] == out["counts"]["with_warnings"]
+
+    def test_a_document_read_says_it_named_the_repeats_by_path(self, monkeypatch):
+        # A reader meeting 'Roughing / Rough to Model Top' in a NAME field has to be told why it is
+        # not a name. The clause ships only where the substitution happened.
+        self._cam(monkeypatch)
+        note = _payload(gen.status_handler())["note"]
+        assert "named by their setup path instead - 'Setup / op', with any folders between" in note
+
+    def test_a_scope_whose_names_are_already_distinct_claims_no_substitution(self, monkeypatch):
+        # the other side: inside 'Roughing' every name identifies one operation, so the rows keep
+        # their plain names AND the note must not claim a rename it did not make.
+        self._cam(monkeypatch)
+        out = _payload(gen.status_handler(target="Roughing"))
+        assert "Rough to Model Top" in self._names(out["operations_with_warnings"])
+        assert "Roughing / Rough to Model Top" not in self._names(out["operations_with_warnings"])
+        assert "named by their setup path" not in out["note"]
+
+    def test_a_folder_scoped_read_stops_at_the_folder(self, monkeypatch):
+        # A folder-scoped read covers the folder's OWN operations, so the setup's other operations
+        # stay out of the folder's lists.
+        import adsk.cam
+        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
+        folder = SharedFolder("WindowFrame Roughing", ops=[    # 1 warned, 0 errored, 2 empty
+            _op("Contour20", warning="Spindle speed exceeds the machine limit"),
+            _op("Rough clean", has_toolpath=False),
+            _op("Rough clean 2", has_toolpath=False)])
+        setup = SharedSetup("WindowFrame", ops=[_op("Contour21", warning="outside the folder")],
+                            folders=[folder])
+        setup.machine = SimpleNamespace(description="Haas VF-2")
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (_FakeCAM([setup]), None))
+        out = _payload(gen.status_handler(target="WindowFrame Roughing"))
+        assert out["health_scope"] == "folder 'WindowFrame Roughing'"
+        assert out["live_states"]["total"] == 3
+        assert self._names(out["operations_with_warnings"]) == ["Contour20"]
+        assert out["empty_toolpaths"] == ["Rough clean", "Rough clean 2"]
+        assert out["counts"] == {"with_warnings": 1, "with_errors": 0, "empty_toolpaths": 2}
+
+    def test_a_scoped_handle_read_lists_only_its_launch_targets_operations(self, monkeypatch):
+        # the handle path settles completion on the launch target's own ops (_handle_scope_state);
+        # its health lists read that same set, and health_scope repeats the completion basis.
+        gen._GENERATIONS.clear()
+        monkeypatch.setattr(gen, "_active_identity", lambda: ("Doc", "urn:doc"))
+        monkeypatch.setattr(gen, "document_key", lambda: "urn:doc")
+        self._cam(monkeypatch)
+        gen._GENERATIONS["gen1"] = {
+            "future": SimpleNamespace(isGenerationCompleted=True, numberOfOperations=7,
+                                      numberOfCompleted=7),
+            "target": "setup 'Roughing'", "scope": "setup", "target_name": "Roughing",
+            "started_at": 0.0, "total": 7, "doc_name": "Doc", "doc_urn": "urn:doc",
+                "doc_key": "urn:doc"}
+        out = _payload(gen.status_handler(handle="gen1"))
+        assert out["completed"] is True
+        assert out["health_scope"] == out["completion_basis"] == "setup 'Roughing'"
+        assert self._names(out["operations_with_warnings"]) == ["Rough to Model Top",
+                                                                "Rough adaptive"]
+        assert out["counts"] == {"with_warnings": 2, "with_errors": 1, "empty_toolpaths": 3}
+
+    def test_an_incomplete_scoped_read_publishes_no_health_lists(self, monkeypatch):
+        # nothing is claimed about a scope still computing - the lists (and the scope name that
+        # qualifies them) appear only once the read reports completed.
+        import adsk.cam
+        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
+        setup = SharedSetup("Roughing", ops=[_op("Rough clean", has_toolpath=False)])
+        setup.operations._items[0].isGenerating = True
+        setup.machine = SimpleNamespace(description="Haas VF-2")
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (_FakeCAM([setup]), None))
+        out = _payload(gen.status_handler(target="Roughing"))
+        assert out["completed"] is False
+        assert "empty_toolpaths" not in out and "health_scope" not in out
+
+    def test_include_operations_false_publishes_no_health_lists(self, monkeypatch):
+        self._cam(monkeypatch)
+        out = _payload(gen.status_handler(target="Roughing", include_operations=False))
+        assert out["completed"] is True
+        assert "counts" not in out and "health_scope" not in out
+        assert "cover:" not in out["note"]
+
+
+class TestOpLabelsRepeatedPath:
+    """A label reaching two rows is the row count restated and nothing else.
+
+    _op_labels substitutes a row's 'Setup / ... / op' path for a name several rows carry. That path
+    is the container's address joined with the SAME name, so two rows agreeing on both agree on the
+    whole string and the substitution alone prints one address twice. Such a row takes the position
+    it holds in this list beside its path - the discriminator workspace_orient._empty_labels spends
+    on the same shape, so the two listings name a repeated address one way rather than two."""
+
+    def _node(self, name, path):
+        return gen._cam_common.CamNode(object(), "operation", name, "S", path, None)
+
+    def test_a_name_only_one_row_carries_stays_the_bare_name(self):
+        rows = [self._node("Bore", "S1 / Bore"), self._node("Face", "S1 / Face")]
+        assert gen._op_labels(rows) == ["Bore", "Face"]
+
+    def test_a_repeated_name_whose_paths_differ_spends_no_position(self):
+        rows = [self._node("Bore", "S1 / Bore"), self._node("Bore", "S2 / Bore")]
+        assert gen._op_labels(rows) == ["S1 / Bore", "S2 / Bore"]
+
+    def test_a_repeated_PATH_takes_the_rows_position_beside_it(self):
+        # THE BITE: one name AND one address on both rows, so the path substitution by itself
+        # prints 'S1 / Bore' twice and separates neither.
+        rows = [self._node("Bore", "S1 / Bore"), self._node("Bore", "S1 / Bore")]
+        labels = gen._op_labels(rows)
+        assert labels == ["S1 / Bore (operation 1)", "S1 / Bore (operation 2)"]
+        assert len(set(labels)) == len(labels)
+
+    def test_the_position_is_spent_only_where_the_path_failed(self):
+        rows = [self._node("Bore", "S1 / Bore"), self._node("Bore", "S1 / Bore"),
+                self._node("Bore", "S2 / Bore")]
+        assert gen._op_labels(rows) == ["S1 / Bore (operation 1)", "S1 / Bore (operation 2)",
+                                        "S2 / Bore"]
+
+    def test_the_position_counts_over_the_whole_list_not_per_repeated_address(self):
+        # Two different repeated addresses: a counter restarting per address prints
+        # '(operation 1)' twice and separates neither pair.
+        rows = [self._node("Bore", "S1 / Bore"), self._node("Bore", "S1 / Bore"),
+                self._node("Face", "S2 / Face"), self._node("Face", "S2 / Face")]
+        assert gen._op_labels(rows) == [
+            "S1 / Bore (operation 1)", "S1 / Bore (operation 2)",
+            "S2 / Face (operation 3)", "S2 / Face (operation 4)"]
+
+    def test_a_row_whose_path_is_empty_keeps_its_plain_name(self):
+        # A blank discriminator addresses nothing, so it is never dressed up with a position -
+        # told_apart's own rule, unchanged by the repeat check.
+        rows = [self._node("Bore", ""), self._node("Bore", "S2 / Bore")]
+        assert gen._op_labels(rows) == ["Bore", "S2 / Bore"]
+
+    def test_a_repeated_address_reaches_the_wire_separated_and_explained(self, monkeypatch):
+        # end to end: the rows a reader meets in a 'name' field are distinct, and the note says
+        # what the trailing number is - a reader cannot recover that from the payload.
+        import adsk.cam
+        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
+        setup = SharedSetup("Roughing", ops=[_op("Rough clean", has_toolpath=False),
+                                             _op("Rough clean", has_toolpath=False)])
+        setup.machine = SimpleNamespace(description="Haas VF-2")
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (_FakeCAM([setup]), None))
+        out = _payload(gen.status_handler(target="Roughing"))
+        assert out["empty_toolpaths"] == ["Roughing / Rough clean (operation 1)",
+                                          "Roughing / Rough clean (operation 2)"]
+        assert "by the position they hold in this list" in out["note"]
+
+
 class TestStatusLivePoll:
     def setup_method(self):
         gen._GENERATIONS.clear()
@@ -566,9 +1424,23 @@ class TestStatusLivePoll:
                             self._readiness(valid=3, generating=0, total=3,
                                             readiness="3 of 3 active ops valid - ready to post."))
         monkeypatch.setattr(gen, "_collect_op_health",
-                            lambda: {"warnings": [], "errors": [], "empty": []})
+                            lambda ops, labels=None: {"warnings": [], "errors": [], "empty": []})
         out = _payload(gen.status_handler())
         assert out["completed"] is True and out["handle"] is None
+
+    def test_the_live_path_words_what_completed_means(self, monkeypatch):
+        # the same claim on the no-handle path: nothing generating, but 0 of 34 valid - so the note
+        # says completed is not a success verdict and carries the readiness line that is.
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (object(), None))
+        monkeypatch.setattr(gen._cam_common, "live_readiness",
+                            self._readiness(valid=0, out_of_date=34, generating=0, total=34,
+                                            readiness="0 of 34 active ops valid - run cam_generate to finish the rest."))
+        monkeypatch.setattr(gen, "_collect_op_health",
+                            lambda ops, labels=None: {"warnings": [], "errors": [], "empty": []})
+        out = _payload(gen.status_handler())
+        assert out["completed"] is True
+        assert "not a success verdict" in out["note"]
+        assert "0 of 34 active ops valid" in out["note"]
 
     def test_live_errored_op_flagged_not_generating_forever(self, monkeypatch):
         # an errored op will NEVER finish - a still-generating live poll must flag the BLOCKER now, not
@@ -625,7 +1497,7 @@ class TestStatusLivePoll:
 
         def one_read(cam, target):
             reads["n"] += 1
-            return self._states(generating=1, total=1), "document", None
+            return self._states(generating=1, total=1), "document", list, None
         monkeypatch.setattr(gen, "_scope_state", one_read)
         out = _payload(gen.status_handler())
         assert reads["n"] == 1                                  # exactly one snapshot

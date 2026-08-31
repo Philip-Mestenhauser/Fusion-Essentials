@@ -189,7 +189,8 @@ class TestGuards:
         # error() here unpacks into a ValueError instead of reaching the caller. And the message
         # names the sketches that DO carry the name, never "No sketch named 'Plate'".
         refusal = "2 sketches are named 'Plate' ('Plate' in Root, 'Plate' in Frame)"
-        monkeypatch.setattr(mod._common, "find_or_recent_sketch", lambda d, n: (None, n, refusal))
+        monkeypatch.setattr(mod._common, "find_or_recent_sketch",
+                            lambda d, n, remedy=None: (None, n, refusal))
         msg = error_message(mod.move_handler(sketch_name="Plate", entities="line:0", dx=10))
         assert msg == refusal and "No sketch named" not in msg
 
@@ -364,10 +365,187 @@ class TestCopy:
         calls = []
         plate.copy = _copier(calls, plate, made=[_boxed("L2", 9.0, 0.0)])
         refusal = "2 sketches are named 'Other' ('Other' in Root, 'Other' in Frame)"
-        monkeypatch.setattr(mod._common, "find_sketch", lambda d, n: (None, refusal))
+        monkeypatch.setattr(mod._common, "find_sketch", lambda d, n, remedy=None: (None, refusal))
         msg = error_message(mod.copy_handler(entities="line:0", target_sketch="Other", dx=10))
         assert msg == refusal and "No sketch named" not in msg
         assert calls == []          # nothing was copied
+
+
+# ── the 'component' / 'target_component' SCOPES ──────────────────────────────
+# Fusion numbers sketches per component from 1, so two components each holding a "Plate" is the
+# norm. sketch_copy takes TWO sketch names, so it takes two scopes: a refusal on 'target_sketch'
+# that named 'component' would point at an input which does not narrow it. The REAL walk runs here.
+
+@pytest.fixture
+def shared_name(mod, monkeypatch):
+    """One name across two components, DIFFERENT geometry: Alpha's 'Plate' has two lines starting
+    at x=0 and x=5, Beta's has ONE at x=20. The moved corner says which sketch answered - two
+    equal-sized sketches would hide a swapped source."""
+    from conftest import MakeComp
+    alpha_sk = make_sketch("Plate", lines=[_boxed("A0", 0.0, 0.0), _boxed("A1", 5.0, 0.0)])
+    beta_sk = make_sketch("Plate", lines=[_boxed("B0", 20.0, 0.0)])
+    alpha = MakeComp(name="Alpha", sketches=[alpha_sk])
+    beta = MakeComp(name="Beta", sketches=[beta_sk])
+    install(mod, make_design(comp=alpha, all_components=[alpha, beta]))
+    monkeypatch.setattr(adsk.core.Matrix3D, "create", lambda: _matrix())
+    monkeypatch.setattr(adsk.core.Vector3D, "create", lambda x, y, z: FakePoint(x, y, z))
+    monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: FakePoint(x, y, z))
+    return alpha_sk, beta_sk
+
+
+class TestMoveComponentScope:
+    def test_the_unscoped_shared_name_refuses_and_names_the_scope_input(self, mod, shared_name):
+        alpha_sk, beta_sk = shared_name
+        moves = []
+        alpha_sk.move = _mover(moves, moves=None)
+        beta_sk.move = _mover(moves, moves=None)
+        msg = error_message(mod.move_handler(sketch_name="Plate", entities="line:0", dx=10))
+        assert "2 sketches are named 'Plate'" in msg
+        assert "'component'" in msg and "Rename one" not in msg
+        assert moves == []
+
+    def test_the_scope_moves_THAT_components_curve(self, mod, shared_name):
+        alpha_sk, beta_sk = shared_name
+        alpha_sk.move = _mover([], moves=None)
+        beta_sk.move = _mover([], moves=None)
+        payload(mod.move_handler(sketch_name="Plate", component="Beta", entities="line:0", dx=10))
+        assert _corner(_lines(beta_sk).item(0)) == (21.0, 0.0)      # 20 + 10 mm = 21 cm
+        assert _corner(_lines(alpha_sk).item(0)) == (0.0, 0.0)      # the sibling never moved
+
+    def test_the_sibling_component_is_reachable_by_the_same_call(self, mod, shared_name):
+        alpha_sk, beta_sk = shared_name
+        alpha_sk.move = _mover([], moves=None)
+        beta_sk.move = _mover([], moves=None)
+        payload(mod.move_handler(sketch_name="Plate", component="Alpha", entities="line:0", dx=10))
+        assert _corner(_lines(alpha_sk).item(0)) == (1.0, 0.0)
+        assert _corner(_lines(beta_sk).item(0)) == (20.0, 0.0)
+
+    def test_an_unknown_component_is_refused_before_the_move(self, mod, shared_name):
+        alpha_sk, beta_sk = shared_name
+        moves = []
+        alpha_sk.move = _mover(moves, moves=None)
+        msg = error_message(mod.move_handler(sketch_name="Plate", component="Gamma",
+                                             entities="line:0", dx=10))
+        assert "No component named 'Gamma'" in msg and moves == []
+
+    def test_a_wrong_component_is_refused_even_when_the_name_is_UNIQUE(self, mod, monkeypatch):
+        # The scope is VALIDATED: a dropped one moves Alpha's curve on a call that named Beta.
+        from conftest import MakeComp
+        alpha_sk = make_sketch("OnlyOne", lines=[_boxed("A0", 0.0, 0.0)])
+        alpha = MakeComp(name="Alpha", sketches=[alpha_sk])
+        beta = MakeComp(name="Beta", sketches=[])
+        install(mod, make_design(comp=alpha, all_components=[alpha, beta]))
+        monkeypatch.setattr(adsk.core.Matrix3D, "create", lambda: _matrix())
+        monkeypatch.setattr(adsk.core.Vector3D, "create", lambda x, y, z: FakePoint(x, y, z))
+        monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: FakePoint(x, y, z))
+        moves = []
+        alpha_sk.move = _mover(moves, moves=None)
+        msg = error_message(mod.move_handler(sketch_name="OnlyOne", component="Beta",
+                                             entities="line:0", dx=10))
+        assert "'Beta'" in msg and moves == []
+
+
+class TestCopyTargetComponentScope:
+    """'target_component' narrows the DESTINATION. It is a separate input because 'component'
+    narrows the source, and a refusal has to name the one that would actually change the answer."""
+
+    def test_a_shared_target_name_refuses_naming_target_component_not_component(self, mod,
+                                                                                shared_name):
+        alpha_sk, beta_sk = shared_name
+        calls = []
+        alpha_sk.copy = _copier(calls, alpha_sk, made=[_boxed("A2", 9.0, 0.0)])
+        msg = error_message(mod.copy_handler(sketch_name="Plate", component="Alpha",
+                                             entities="line:0", target_sketch="Plate", dx=10))
+        assert "2 sketches are named 'Plate'" in msg
+        assert "'target_component'" in msg and "Rename one" not in msg
+        assert calls == []
+
+    def test_target_component_selects_the_destination_sketch(self, mod, shared_name):
+        alpha_sk, beta_sk = shared_name
+        calls = []
+        alpha_sk.copy = _copier(calls, alpha_sk, made=[_boxed("A2", 9.0, 0.0)])
+        out = payload(mod.copy_handler(sketch_name="Plate", component="Alpha", entities="line:0",
+                                       target_sketch="Plate", target_component="Beta", dx=10))
+        # the destination handed to Sketch.copy is BETA's sketch, and the curve landed there
+        assert calls[0][2] is beta_sk
+        assert out["curve_count_after"] == 2 and len(_lines(alpha_sk)._items) == 2
+
+    def test_an_unknown_target_component_is_refused_before_the_copy(self, mod, shared_name):
+        alpha_sk, _beta_sk = shared_name
+        calls = []
+        alpha_sk.copy = _copier(calls, alpha_sk, made=[_boxed("A2", 9.0, 0.0)])
+        msg = error_message(mod.copy_handler(sketch_name="Plate", component="Alpha",
+                                             entities="line:0", target_sketch="Plate",
+                                             target_component="Gamma", dx=10))
+        assert "No component named 'Gamma'" in msg and calls == []
+
+    def test_a_scoped_MISS_names_target_component_and_never_the_bare_component(self, mod,
+                                                                               monkeypatch):
+        # The scoped-miss refusal ("Retry with one of those as ...") has to name the input that
+        # narrows THIS reference. 'component' narrows the SOURCE, so quoting it sends the caller to
+        # an input that cannot change which destination was found.
+        from conftest import MakeComp
+        src = make_sketch("Source", lines=[_boxed("S0", 0.0, 0.0)])
+        alpha_sk = make_sketch("Plate", lines=[_boxed("A0", 0.0, 0.0)])
+        alpha = MakeComp(name="Alpha", sketches=[src, alpha_sk])
+        beta = MakeComp(name="Beta", sketches=[make_sketch("Other", lines=[])])
+        install(mod, make_design(comp=alpha, all_components=[alpha, beta]))
+        monkeypatch.setattr(adsk.core.Matrix3D, "create", lambda: _matrix())
+        monkeypatch.setattr(adsk.core.Vector3D, "create", lambda x, y, z: FakePoint(x, y, z))
+        monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: FakePoint(x, y, z))
+        calls = []
+        src.copy = _copier(calls, src, made=[_boxed("S2", 9.0, 0.0)])
+        msg = error_message(mod.copy_handler(sketch_name="Source", entities="line:0",
+                                             target_sketch="Plate", target_component="Beta",
+                                             dx=10))
+        assert "holds no sketch named 'Plate'" in msg
+        assert "'target_component'" in msg
+        assert "'component'" not in msg
+        assert calls == []
+
+    def test_an_AMBIGUOUS_target_component_names_target_component(self, mod, monkeypatch):
+        # Component names are not unique either, and that refusal offers the occurrence-path
+        # spelling - of the input that actually narrows the destination.
+        from conftest import MakeComp, make_occurrence
+        src = make_sketch("Source", lines=[_boxed("S0", 0.0, 0.0)])
+        root = MakeComp(name="Root", sketches=[src])
+        a = MakeComp(name="Frame", sketches=[make_sketch("Plate", lines=[])])
+        b = MakeComp(name="Frame", sketches=[make_sketch("Plate", lines=[])])
+        root.allOccurrences = [make_occurrence("P2-Gimbal:1+Frame:1", a),
+                               make_occurrence("P3-Gimbal:1+Frame:1", b)]
+        install(mod, make_design(comp=root, all_components=[root, a, b]))
+        monkeypatch.setattr(adsk.core.Matrix3D, "create", lambda: _matrix())
+        monkeypatch.setattr(adsk.core.Vector3D, "create", lambda x, y, z: FakePoint(x, y, z))
+        monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: FakePoint(x, y, z))
+        calls = []
+        src.copy = _copier(calls, src, made=[_boxed("S2", 9.0, 0.0)])
+        msg = error_message(mod.copy_handler(sketch_name="Source", entities="line:0",
+                                             target_sketch="Plate", target_component="Frame",
+                                             dx=10))
+        assert "2 components match 'Frame'" in msg
+        assert "'target_component' also takes an occurrence fullPathName" in msg
+        assert "'component'" not in msg
+        assert calls == []
+
+    def test_a_wrong_target_component_is_refused_even_when_the_target_name_is_UNIQUE(
+            self, mod, monkeypatch):
+        # The validation decision, at the ALTERNATE scope: a target_component quietly dropped
+        # because 'Plate' happened to resolve copies into Alpha on a call that named Beta.
+        from conftest import MakeComp
+        src = make_sketch("Source", lines=[_boxed("S0", 0.0, 0.0)])
+        alpha_sk = make_sketch("Plate", lines=[])
+        alpha = MakeComp(name="Alpha", sketches=[src, alpha_sk])
+        beta = MakeComp(name="Beta", sketches=[])
+        install(mod, make_design(comp=alpha, all_components=[alpha, beta]))
+        monkeypatch.setattr(adsk.core.Matrix3D, "create", lambda: _matrix())
+        monkeypatch.setattr(adsk.core.Vector3D, "create", lambda x, y, z: FakePoint(x, y, z))
+        monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: FakePoint(x, y, z))
+        calls = []
+        src.copy = _copier(calls, src, made=[_boxed("S2", 9.0, 0.0)])
+        msg = error_message(mod.copy_handler(sketch_name="Source", entities="line:0",
+                                             target_sketch="Plate", target_component="Beta",
+                                             dx=10))
+        assert "'Beta'" in msg and calls == []
 
 
 class TestCopyRefsCrossTheProxySeam:
@@ -476,6 +654,28 @@ class TestPostconditionWiring:
     def test_copy_verifies_the_target_sketch_before_the_source(self, mod):
         assert [p.describe() for p in mod.copy_item.handler.__wrapped__.__assert_postconditions__] \
             == ["sketch_curves_changed(target_sketch|sketch_name)"]
+
+    def test_both_copy_scopes_are_declared_from_the_one_shared_factory(self, mod):
+        # sketch_copy carries TWO component inputs. Both come from _sketch_detail, so they accept
+        # the same three forms and are described in the same words - and the second names the
+        # reference it narrows, which is the only thing telling a caller them apart.
+        sd = load_tool("_sketch_detail")
+        props = mod.copy_tool.input_schema["properties"]
+        assert props["component"] == sd.COMPONENT_SCOPE[1]
+        assert props["target_component"] == sd.component_scope("target_component",
+                                                               narrows="target_sketch")[1]
+        assert "'target_sketch'" in props["target_component"]["description"]
+
+    def test_each_sketch_key_is_paired_with_the_scope_that_narrows_it(self, mod):
+        # 'target_sketch' is narrowed by 'target_component' and 'sketch_name' by 'component'; the
+        # pairing is POSITIONAL, so swapping the two would fingerprint the target sketch inside the
+        # SOURCE's component and disclose a false unconfirmed on every copy across two components
+        # that share a sketch name.
+        move, = mod.move_item.handler.__wrapped__.__assert_postconditions__
+        copy, = mod.copy_item.handler.__wrapped__.__assert_postconditions__
+        assert move.keys == ("sketch_name",) and move.scope_keys == ("component",)
+        assert copy.keys == ("target_sketch", "sketch_name")
+        assert copy.scope_keys == ("target_component", "component")
 
     def test_the_target_key_selects_which_sketch_is_fingerprinted(self, mod, sketches):
         plate, second = sketches

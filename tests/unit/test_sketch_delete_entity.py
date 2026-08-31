@@ -12,6 +12,9 @@ collection must FAIL).
 
 import json
 
+import adsk.fusion
+import pytest
+
 from conftest import load_tool
 
 sd = load_tool("sketch_delete_entity")
@@ -161,6 +164,89 @@ def _full_sketch():
                       splines=[FakeEntity("SP0"), FakeEntity("SP1")],
                       cv_splines=[FakeEntity("CV0")],
                       fixed_splines=[FakeEntity("FX0")])
+
+
+# ── the 'component' SCOPE ────────────────────────────────────────────────────
+# Fusion numbers sketches per component from 1, so two components each holding a "Sketch1" is the
+# norm - and this is the DESTRUCTIVE member of the family, so the refusal has to hold AND has to
+# offer a way through that does not mean editing another document. monkeypatch (not the imperative
+# _install above) so every seam is restored after each test.
+
+class _MultiComp:
+    def __init__(self, name, sketches):
+        self.name = name
+        self.sketches = FakeSketches(sketches)
+
+
+class _MultiDesign:
+    """Several named components, each with its own sketches. allComponents lives on the DESIGN."""
+    def __init__(self, comps):
+        self.rootComponent = comps[0]
+        self.allComponents = _DelColl(list(comps))
+        self.activeComponent = comps[0]
+        self.rootComponent.allOccurrences = []
+
+
+@pytest.fixture
+def install_multi(monkeypatch):
+    def _do(pairs):
+        design = _MultiDesign([_MultiComp(n, s) for n, s in pairs])
+        monkeypatch.setattr(sd, "app", type("A", (), {"activeProduct": design})())
+        monkeypatch.setattr(sd._common, "app", sd.app)
+        monkeypatch.setattr(adsk.fusion.Design, "cast",
+                            lambda x: x if isinstance(x, _MultiDesign) else None)
+        return design
+    return _do
+
+
+@pytest.fixture
+def shared_name(install_multi):
+    """ONE name across TWO components, with DIFFERENT contents - Alpha holds three lines, Beta one
+    line and one circle. Equal-sized collections would hide a swapped source; these do not."""
+    alpha = FakeSketch("Sketch1",
+                       lines=[FakeEntity("A0"), FakeEntity("A1"), FakeEntity("A2")])
+    beta = FakeSketch("Sketch1", lines=[FakeEntity("B0")], circles=[FakeEntity("BC")])
+    install_multi([("Alpha", [alpha]), ("Beta", [beta])])
+    return alpha, beta
+
+
+class TestComponentScope:
+    def test_the_unscoped_shared_name_refuses_and_deletes_nothing(self, shared_name):
+        alpha, beta = shared_name
+        res = sd.handler(sketch_name="Sketch1", target="line:0")
+        assert res["isError"] is True
+        assert "2 sketches are named 'Sketch1'" in res["message"]
+        assert "'component'" in res["message"] and "Rename one" not in res["message"]
+        assert alpha.sketchCurves.sketchLines.count == 3
+        assert beta.sketchCurves.sketchLines.count == 1
+
+    def test_the_scope_deletes_from_THAT_components_sketch_only(self, shared_name):
+        alpha, beta = shared_name
+        out = _payload(sd.handler(sketch_name="Sketch1", component="Beta", target="line:0"))
+        assert out["deleted"] is True
+        assert beta.sketchCurves.sketchLines.count == 0
+        assert alpha.sketchCurves.sketchLines.count == 3      # the sibling is untouched
+
+    def test_the_sibling_component_is_reachable_by_the_same_call(self, shared_name):
+        alpha, beta = shared_name
+        _payload(sd.handler(sketch_name="Sketch1", component="Alpha", target="line:0"))
+        assert alpha.sketchCurves.sketchLines.count == 2
+        assert beta.sketchCurves.sketchLines.count == 1
+
+    def test_an_unknown_component_is_refused_and_nothing_is_deleted(self, shared_name):
+        alpha, beta = shared_name
+        res = sd.handler(sketch_name="Sketch1", component="Gamma", target="line:0")
+        assert res["isError"] is True and "No component named 'Gamma'" in res["message"]
+        assert alpha.sketchCurves.sketchLines.count == 3
+        assert beta.sketchCurves.sketchLines.count == 1
+
+    def test_a_wrong_component_is_refused_even_when_the_name_is_UNIQUE(self, install_multi):
+        # A silently-dropped scope here deletes out of Alpha on a call that named Beta.
+        alpha = FakeSketch("OnlyOne", lines=[FakeEntity("A0")])
+        install_multi([("Alpha", [alpha]), ("Beta", [])])
+        res = sd.handler(sketch_name="OnlyOne", component="Beta", target="line:0")
+        assert res["isError"] is True and "'Beta'" in res["message"]
+        assert alpha.sketchCurves.sketchLines.count == 1
 
 
 # ── curve/point deletion ─────────────────────────────────────────────────────
@@ -504,3 +590,32 @@ class TestGuards:
         s = _sketch(); _install(s)
         res = sd.handler(sketch_name="S", target="line:abc")
         assert res["isError"] is True
+
+
+@pytest.fixture
+def wired(monkeypatch):
+    """Wire a design holding `sketch` into the tool's seams for one test; monkeypatch undoes it."""
+    def _do(sketch):
+        design = FakeDesign([sketch])
+        monkeypatch.setattr(sd, "app", type("A", (), {"activeProduct": design})())
+        monkeypatch.setattr(sd._common, "app", sd.app)
+        monkeypatch.setattr(adsk.fusion.Design, "cast",
+                            lambda x: x if isinstance(x, FakeDesign) else None)
+        return design
+    return _do
+
+
+class TestNamedSketchMiss:
+    def test_reports_the_name_the_walk_searched_for_not_the_raw_input(self, wired):
+        # the name is STRIPPED before the walk, so echoing the raw input quotes a name nothing
+        # ever looked for - and a delete is retried against a sketch that was never missing.
+        wired(_sketch())
+        res = sd.handler(sketch_name="  Ghost  ", target="line:0")
+        assert res["isError"] is True
+        assert "No sketch named 'Ghost'" in res["message"]
+        assert "'  Ghost  '" not in res["message"]
+
+    def test_the_miss_still_lists_what_is_there(self, wired):
+        wired(_sketch())
+        res = sd.handler(sketch_name="Ghost", target="line:0")
+        assert "Available: S" in res["message"]

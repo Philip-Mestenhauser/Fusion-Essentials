@@ -180,7 +180,10 @@ def _plane_misses_mesh(mesh, plane_entity, plane_geom):
     if safe(lambda: plane_entity.assemblyContext) is not None:
         return None, None
     owner, host = _inputs.entity_component(plane_entity), safe(lambda: mesh.parentComponent)
-    if owner is None or host is None or not _common.same_component(owner, host):
+    # `is not True`: same_component answers None where an owner's identity did not read, and this
+    # gate licenses subtracting a plane from a box - an unproven pair joins the unreadable ones on
+    # the (None, None) "no answer from reads actually taken" path.
+    if owner is None or host is None or _common.same_component(owner, host) is not True:
         return None, None
 
     g = plane_geom

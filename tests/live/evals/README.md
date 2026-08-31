@@ -18,15 +18,24 @@ context-isolated headless executor: empty scratch cwd, sterile config, only the 
 MCP server on its wire, source tools hard-denied.
 
 **The block reaches the executor BYTE-IDENTICAL.** Compose nothing around it, so every run of a
-scenario is the same experiment and runs compare cleanly. The runner makes exactly two additions,
+scenario is the same experiment and runs compare cleanly. The runner makes exactly three additions,
 identically on every scenario:
 
 1. It substitutes the declared `{{placeholders}}`. The frontmatter's `{{RUN_FOLDER}}` is the
    per-invocation cloud subfolder tag; it carries SECONDS and the scenario stem, so two runs can
    never share one.
-2. It APPENDS one fixed paragraph, the MCP-connection-lost rule (`CONNECTION_LOST` in
+2. When the frontmatter declares `skill: <name>`, it APPENDS that skill's body (the `SKILL.md`
+   below its frontmatter, from `.claude/skills/`) under a fixed header. The executor cannot invoke
+   a skill - the `Skill` tool is denied and its cwd holds no repo - so the practice is carried in
+   the prompt or not at all. **This changes the experiment, and deliberately:** a scenario with no
+   skill measures what the WIRE alone teaches an agent; a scenario with one measures the wire plus
+   that practice. Runs of the two do not compare, so `audit.json` records which skill a run carried
+   and a scenario's budget has to be re-measured when its skill changes.
+3. It APPENDS one fixed paragraph, the MCP-connection-lost rule (`CONNECTION_LOST` in
    `run_eval.py`): when the Fusion transport drops, stop and report BLOCKED instead of retrying a
    dead connection or self-scheduling a resume.
+
+The task block always stays FIRST, so nothing appended can be read as amending it.
 
 The run dir's `prompt.txt` records the exact bytes sent. Everything outside the block is grader-only
 and never reaches the agent.

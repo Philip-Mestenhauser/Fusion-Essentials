@@ -276,6 +276,44 @@ def compute_failure(entity):
     return label, compute_failure_message(safe(lambda: entity.errorOrWarningMessage))
 
 
+def health_state_read(entity):
+    """True when `entity` ANSWERED a compute state - the half of compute_failure's contract its None
+    hides.
+
+    compute_failure returns None for two different things: a state it deliberately does not flag
+    (Healthy, Suppressed, a collapsed group's rollup) and an entity carrying no healthState at all -
+    measured, an AsBuiltJoint raises AttributeError on both healthState and errorOrWarningMessage.
+    A caller that PUBLISHES a health verdict asks this before turning that None into 'healthy', so
+    "read it, it is fine" stays distinguishable from "could not read it"."""
+    return entity is not None and safe(lambda: entity.healthState) is not None
+
+
+def compute_state(entity):
+    """('broken' | 'healthy' | 'unknown', the compute_failure pair or None) for ONE entity - the ONE
+    dispatch over the two readers above, so every surface publishing a health verdict reaches the
+    same one on the same entity.
+
+    BOTH the entity and its timelineObject are asked, ENTITY FIRST, and the first failure found
+    decides: 'broken' carries that failure's ('error' | 'warning', condensed message) pair, so a
+    caller republishing the text states the failure the verdict was taken from rather than a second
+    read of its own. The pairing is what makes an answer readable at all for two classes - MEASURED,
+    an AsBuiltJoint and a RigidGroup each raise AttributeError on healthState AND
+    errorOrWarningMessage while the TimelineObject beside them answers both.
+
+    'healthy' means a source ANSWERED a state compute_failure does not flag - Healthy, Suppressed
+    (the author parked that entity), or a collapsed group's rollup. 'unknown' means NEITHER source
+    answered: an unread state is not a clean bill of health, so it is neither 'broken' nor 'healthy'
+    and each caller counts it apart or withholds its flag. A READ - it never mutates."""
+    sources = (entity, safe(lambda: entity.timelineObject))
+    for src in sources:
+        failure = compute_failure(src)
+        if failure is not None:
+            return "broken", failure
+    if any(health_state_read(src) for src in sources):
+        return "healthy", None
+    return "unknown", None
+
+
 class FeatureHealthy(Postcondition):
     """After a feature-creating Edit: every timeline item the handler ADDED computed cleanly. A
     feature can be add()ed successfully - a truthy feature object returned - yet FAIL to compute
@@ -375,28 +413,44 @@ class SketchCurvesChanged(Postcondition):
     token nor the length. ``keys`` names the handler kwargs holding the sketch to read, in priority
     order: a copy into another sketch must verify its TARGET, since the source it copied FROM is left
     untouched. Resolves through the same name-or-most-recent contract the handler uses. NEVER
-    mutates - capture/verify are safe() reads."""
+    mutates - capture/verify are safe() reads.
+
+    ``scope_keys`` pairs each of those name keys with the handler's component-SCOPE kwarg for the
+    SAME reference: the fingerprint reads the sketch the handler's own scope resolved. It is the
+    companion of that scope, not a guard against it - a handler with no component input pairs
+    nothing and both sides run the same design-wide walk. An UNPAIRED scope reads a different
+    sketch: the handler narrows a shared name to one component and lands its edit while this walk,
+    seeing every component, resolves none and reports 'sketch_curves_confirmed: false'.
+
+    The pairing is positional and each scope may be '', because a tool with two sketch references
+    carries two scopes and neither may borrow the other's component."""
 
     name = "sketch_curves_changed"
     read_tool = "sketch_get"
 
-    def __init__(self, keys=("sketch_name",)):
+    def __init__(self, keys=("sketch_name",), scope_keys=()):
         self.keys = tuple(keys)
+        self.scope_keys = tuple(scope_keys)
         # the handler parameters this kind reads; wrap() refuses a name the handler does not take,
         # so a typo'd key cannot silently fall through to the most-recent sketch.
-        self.input_keys = self.keys
+        self.input_keys = self.keys + tuple(k for k in self.scope_keys if k)
 
     def _fingerprint(self, kwargs):
-        from ._common import design, resolve_or_recent_sketch
+        from ._common import design
+        from ._sketch_detail import scoped_or_recent_sketch
         d = design()
         if d is None:
             return None
-        wanted = ""
-        for key in self.keys:
+        wanted, scope = "", ""
+        for i, key in enumerate(self.keys):
+            # name and scope are taken from the SAME position, and both are carried past a blank
+            # name: an empty name means "the most recent sketch", and the scope decides whose.
             wanted = (kwargs.get(key) or "").strip()
+            scope = ((kwargs.get(self.scope_keys[i]) or "").strip()
+                     if i < len(self.scope_keys) and self.scope_keys[i] else "")
             if wanted:
                 break
-        sketch, _requested = resolve_or_recent_sketch(d, wanted)
+        sketch, _requested, _refusal = scoped_or_recent_sketch(d, wanted, scope)
         if sketch is None:
             return None
         marks = {}

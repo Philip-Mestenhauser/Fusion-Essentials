@@ -7,6 +7,7 @@ delegation is proven by live validation, not by mocking 6 handlers' internals.
 """
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,6 +21,12 @@ def _payload(result):
     return json.loads(result["content"][0]["text"])
 
 
+def _named_op(name):
+    """The bare Operation a by-name RESOLVE needs: the walk classifies nodes structurally and reads
+    only .name, so nothing else has to be modelled for a resolution test."""
+    return SimpleNamespace(name=name)
+
+
 @pytest.fixture
 def stub_slices(monkeypatch):
     monkeypatch.setattr(cg, "get_cam", lambda: (object(), None))   # a CAM product
@@ -28,7 +35,9 @@ def stub_slices(monkeypatch):
     monkeypatch.setattr(cg, "_slice_operations", lambda cam, setup: ({"operations": []}, None))
     monkeypatch.setattr(cg, "_slice_references", lambda cam, setup: ({"references": []}, None))
     monkeypatch.setattr(cg, "_slice_nc_programs", lambda cam: ({"nc_programs": []}, None))
-    monkeypatch.setattr(cg, "_slice_time", lambda cam, setup: ({"total_minutes": 12}, None))
+    monkeypatch.setattr(cg, "_slice_time", lambda cam, setup, units: ({"total_minutes": 12}, None))
+    monkeypatch.setattr(cg, "_slice_machine",
+                        lambda cam, setup, units: ({"setup_count": 0, "setups": []}, None))
     monkeypatch.setattr(cg, "_slice_tools", lambda cam: ({"tools": []}, None))
     monkeypatch.setattr(cg, "_slice_library",
                         lambda cam, scope, library, tool_type: ({"tool_count": 0, "tools": []}, None))
@@ -80,6 +89,132 @@ class TestIncludeSlices:
         assert "operations" in out and "time" in out
 
 
+class TestReferencesCensus:
+    """The references slice states WHAT it counted, because 0 without a census reads as a verdict on
+    the document.
+
+    Measured live on a two-setup job holding 6 reference links: each setup selects three occurrences
+    that read isReferencedComponent False (a model, a fixture and a stock container), the slice
+    counted 0, and three referenced components sat one level below them - which
+    doc_get(include=['xref_tree']) found. The underlying walk tests the SELECTED entries and does
+    not descend, so the note has to say that rather than let 0 stand alone.
+    """
+
+    def _siblings(self):
+        """The sibling modules _slice_references reaches through its own `from . import` - resolved
+        off cam_get's package so the object patched here is the one the slice will import."""
+        import importlib
+        pkg = cg.__package__
+        return (importlib.import_module(pkg + "._cam_common"),
+                importlib.import_module(pkg + "._common"))
+
+    def _stub_source(self, monkeypatch, rows):
+        """Stub the shared source handler _slice_references delegates to, so these tests cover the
+        slice's own census composition and not _cam_common's walk."""
+        cc, common = self._siblings()
+        monkeypatch.setattr(cc, "get_setup_references_handler",
+                            lambda setup="": common.ok({"setup_count": len(rows), "setups": rows}))
+
+    def test_zero_references_still_states_what_was_counted(self, monkeypatch):
+        # THE BITE: the live shape - selections present, none of them a referenced component.
+        self._stub_source(monkeypatch, [
+            {"setup": "Op1", "reference_count": 0, "references": [], "references_truncated": False},
+            {"setup": "Op2", "reference_count": 0, "references": [], "references_truncated": False}])
+        payload, err = cg._slice_references(object(), "")
+        assert err is None
+        note = payload["note"]
+        assert "Counted 0 referenced component(s)" in note
+        assert "2 setup(s)" in note
+        assert "selects directly" in payload["counted"]
+        # the reader must be told 0 is not a verdict on the document, and where the deeper read is
+        assert "not 'this document has no external references'" in note
+        assert "doc_get(include=['xref_tree'])" in note
+
+    def test_the_census_names_the_slice_that_carries_the_selection_keys(self, monkeypatch):
+        # The note sits on references.note, and references.setups[] carries NONE of
+        # selected_models / fixtures / stock_solids - those live on the TOP-LEVEL setups[] slice. A
+        # bare 'setups[].selected_models' resolves against the object the note sits in and finds
+        # nothing, so the sentence has to name which slice it means.
+        self._stub_source(monkeypatch, [
+            {"setup": "Op1", "reference_count": 0, "references": [], "references_truncated": False}])
+        payload, _ = cg._slice_references(object(), "")
+        assert "top-level setups[] slice" in payload["note"]
+        assert "setups[].selected_models" not in payload["note"]
+
+    def test_the_count_is_the_sum_across_setups(self, monkeypatch):
+        self._stub_source(monkeypatch, [
+            {"setup": "Op1", "reference_count": 2, "references": [{}, {}],
+             "references_truncated": False},
+            {"setup": "Op2", "reference_count": 1, "references": [{}],
+             "references_truncated": False}])
+        payload, _ = cg._slice_references(object(), "")
+        assert "Counted 3 referenced component(s)" in payload["note"]
+        assert "2 setup(s)" in payload["note"]
+
+    def test_a_missing_reference_count_is_not_read_as_a_number(self, monkeypatch):
+        # a row whose count did not read must not crash the census or silently count as 0 more than
+        # it already does - the sum still has to compose.
+        self._stub_source(monkeypatch, [
+            {"setup": "Op1", "reference_count": None, "references": []},
+            {"setup": "Op2", "reference_count": 2, "references": [{}, {}]}])
+        payload, _ = cg._slice_references(object(), "")
+        assert "Counted 2 referenced component(s)" in payload["note"]
+
+    def test_no_setups_in_scope_counts_zero_setups(self, monkeypatch):
+        self._stub_source(monkeypatch, [])
+        payload, _ = cg._slice_references(object(), "")
+        assert "Counted 0 referenced component(s)" in payload["note"]
+        assert "0 setup(s)" in payload["note"]
+
+    def test_a_truncated_selection_list_is_disclosed_beside_the_census(self, monkeypatch):
+        # even the selected-entry census is incomplete when a selection list would not read or hit
+        # its cap - a census that does not say so overstates what it examined.
+        self._stub_source(monkeypatch, [
+            {"setup": "Op1", "reference_count": 1, "references": [{}],
+             "references_truncated": True}])
+        payload, _ = cg._slice_references(object(), "")
+        assert "references_truncated" in payload["note"]
+        assert "incomplete" in payload["note"]
+
+    def test_one_truncated_setup_among_several_still_discloses_incompleteness(self, monkeypatch):
+        # The disclosure is ANY, not ALL: one setup whose selection list would not read makes the
+        # whole census incomplete. With a single row any and all agree, so only a job with a
+        # truncated setup BESIDE a clean one separates them - and under 'all' the sentence silently
+        # drops, leaving the census overstating what it examined.
+        self._stub_source(monkeypatch, [
+            {"setup": "Op1", "reference_count": 1, "references": [{}],
+             "references_truncated": True},
+            {"setup": "Op2", "reference_count": 0, "references": [],
+             "references_truncated": False}])
+        payload, _ = cg._slice_references(object(), "")
+        assert "incomplete" in payload["note"]
+        assert "references_truncated" in payload["note"]
+
+    def test_an_untruncated_read_does_not_claim_incompleteness(self, monkeypatch):
+        self._stub_source(monkeypatch, [
+            {"setup": "Op1", "reference_count": 1, "references": [{}],
+             "references_truncated": False}])
+        payload, _ = cg._slice_references(object(), "")
+        assert "incomplete" not in payload["note"]
+
+    def test_a_source_error_passes_through_with_no_census(self, monkeypatch):
+        cc, common = self._siblings()
+        monkeypatch.setattr(cc, "get_setup_references_handler",
+                            lambda setup="": common.error("No CAM product."))
+        payload, err = cg._slice_references(object(), "")
+        assert payload is None and err is not None      # nothing to state a census over
+
+    def test_the_census_rides_through_the_router(self, monkeypatch):
+        # the slice is reached through include=['references'], so the sentence actually crosses the
+        # wire rather than living on a helper nobody calls.
+        monkeypatch.setattr(cg, "get_cam", lambda: (object(), None))
+        monkeypatch.setattr(cg, "_slice_setups", lambda cam, setup: ({"setups": []}, None))
+        self._stub_source(monkeypatch, [
+            {"setup": "Op1", "reference_count": 0, "references": [], "references_truncated": False}])
+        out = _payload(cg.handler(include=["references"]))
+        assert "Counted 0 referenced component(s)" in out["references"]["note"]
+
+
 class TestCamPointers:
     """`_cam_pointers` - the actionable breadcrumb: a present, actionable CAM state names the tool that
     resolves it (stale/ungenerated toolpaths -> cam_generate; out-of-date machine -> cam_edit_setup)."""
@@ -123,7 +258,7 @@ class TestOrientationDedup:
             {"name": "Op1", "machine": "Haas", "op_states": {"out_of_date": 2},
              "invalidation_reasons": ["Design changed: WCS origin"]}]}, None))
         monkeypatch.setattr(cg, "_slice_operations", lambda cam, setup: ({"operations": []}, None))
-        monkeypatch.setattr(cg, "_slice_time", lambda cam, setup: ({"total_minutes": 5}, None))
+        monkeypatch.setattr(cg, "_slice_time", lambda cam, setup, units: ({"total_minutes": 5}, None))
 
     def test_default_keeps_setup_invalidation_reasons(self, stub_with_reasons):
         out = _payload(cg.handler())
@@ -190,6 +325,42 @@ class TestBounding:
         out, err = cg._slice_operations(object(), "")
         assert err is None
         assert len(out["setups"][0]["operations"]) == cg._OPERATIONS_CAP and out["truncated"] is True
+
+    def test_terse_rows_keep_the_spindle_and_preset_signals_that_matter(self, monkeypatch):
+        # _OP_NOISE decides which of the new per-op keys survive into the wire rows. The whole
+        # point of the spindle check is that an OVER-limit op stands out, so the noise default has
+        # to be the quiet answer (false) - a default of true would delete exactly the rows a
+        # machinist is looking for.
+        rows = [
+            {"name": "Over", "state": "valid", "has_toolpath": True, "toolpath_valid": True,
+             "is_suppressed": False, "has_error": False, "preset": "Aluminum - Adaptive",
+             "spindle_over_machine_max": True, "spindle_rpm": 24999.0,
+             "machine_max_rpm": 12000.0},
+            {"name": "Under", "state": "valid", "has_toolpath": True, "toolpath_valid": True,
+             "is_suppressed": False, "has_error": False, "preset": None,
+             "spindle_over_machine_max": False},
+            {"name": "Unchecked", "state": "valid", "has_toolpath": True, "toolpath_valid": True,
+             "is_suppressed": False, "has_error": False, "preset": None,
+             "spindle_over_machine_max": None, "spindle_check": "machine_max_unavailable"},
+        ]
+        self._fake_cam_common(monkeypatch, get_cam_operations_handler=lambda setup="": self._ok(
+            {"setups": [{"setup": "Op1", "machine_spindle_max_rpm": 12000.0, "operations": rows}]}))
+        out, err = cg._slice_operations(object(), "")
+        assert err is None
+        by_name = {r["name"]: r for r in out["setups"][0]["operations"]}
+        # the over-limit row keeps the flag AND both numbers
+        assert by_name["Over"]["spindle_over_machine_max"] is True
+        assert by_name["Over"]["spindle_rpm"] == 24999.0
+        assert by_name["Over"]["machine_max_rpm"] == 12000.0
+        assert by_name["Over"]["preset"] == "Aluminum - Adaptive"
+        # the at-or-under row drops the boring answer, and a null preset drops too
+        assert "spindle_over_machine_max" not in by_name["Under"]
+        assert "preset" not in by_name["Under"]
+        # the unchecked row keeps null + the marker - never collapsed into "fine"
+        assert by_name["Unchecked"]["spindle_over_machine_max"] is None
+        assert by_name["Unchecked"]["spindle_check"] == "machine_max_unavailable"
+        # and the setup's own maximum rides along, so the comparison is checkable
+        assert out["setups"][0]["machine_spindle_max_rpm"] == 12000.0
 
     def test_nc_programs_summarizes_post_parameters(self, monkeypatch):
         ncp = {"nc_programs": [{"name": "Op1", "machine": "M",
@@ -339,30 +510,259 @@ class TestDeepZoom:
         assert "hidden" not in str(g)                        # invisible param dropped
 
 
+def _refuses_with(paths, refusal="the shared resolver's refusal"):
+    """A resolve_operation stub: no node, the resolver's refusal, and the available list. Both come
+    off ONE walk in the real helper, which is what TestOnePoolForResolveAndRemedy pins."""
+    return lambda cam, name, label="operation": (None, refusal, paths)
+
+
 class TestDuplicateOperationName:
-    """_cam_common.find_operation REFUSES a duplicated name, returning each duplicate's 'Setup / op'
-    path as the available list - the deep-zoom miss error must word that as ambiguity naming the
-    paths, never a plain not-found."""
+    """_cam_common.resolve_operation REFUSES a duplicated name, returning each duplicate's
+    'Setup / op' path as the available list - the deep-zoom miss error must word that as ambiguity
+    naming the paths, never a plain not-found."""
 
     def test_parameters_duplicate_words_ambiguity_with_paths(self, monkeypatch, stub_slices):
-        monkeypatch.setattr(cg, "find_operation",
-                            lambda cam, name: (None, ["Setup1 / Drill1", "Setup2 / Drill1"]))
+        monkeypatch.setattr(cg, "resolve_operation",
+                            _refuses_with(["Setup1 / Drill1", "Setup2 / Drill1"]))
         msg = error_message(cg.handler(include=["parameters"], operation="Drill1"))
         assert "ambiguous" in msg.lower()
         assert "Setup1 / Drill1" in msg and "Setup2 / Drill1" in msg
 
     def test_tool_duplicate_words_ambiguity_with_paths(self, monkeypatch, stub_slices):
-        monkeypatch.setattr(cg, "find_operation",
-                            lambda cam, name: (None, ["Setup1 / Drill1", "Setup2 / Drill1"]))
+        monkeypatch.setattr(cg, "resolve_operation",
+                            _refuses_with(["Setup1 / Drill1", "Setup2 / Drill1"]))
         msg = error_message(cg.handler(include=["tool"], operation="Drill1"))
         assert "ambiguous" in msg.lower() and "Setup2 / Drill1" in msg
 
     def test_true_miss_stays_not_found_listing_names(self, monkeypatch, stub_slices):
-        monkeypatch.setattr(cg, "find_operation",
-                            lambda cam, name: (None, ["Face1", "Adaptive1"]))
+        # a name NO operation carries is worded by the shared resolver over the real tree, so the
+        # available list is the walk's own - not a second census this tool keeps.
+        from conftest import FakeSetup, make_cam
+        cam = make_cam(FakeSetup("Setup1", ops=[_named_op("Face1"), _named_op("Adaptive1")]))
+        monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
         msg = error_message(cg.handler(include=["parameters"], operation="Drill1"))
         assert "ambiguous" not in msg.lower()
         assert "Face1" in msg and "Adaptive1" in msg
+
+    def test_the_refusal_offers_the_setup_values_this_tool_actually_accepts(self, monkeypatch,
+                                                                            stub_slices):
+        # the refusal must name a remedy in THIS tool's own input vocabulary - "rename the target"
+        # is not one, and sharing an operation name across setups is normal shop practice.
+        monkeypatch.setattr(cg, "resolve_operation",
+                            _refuses_with(["Setup1 / Drill1", "Setup2 / Drill1"]))
+        msg = error_message(cg.handler(include=["parameters"], operation="Drill1"))
+        assert "setup='Setup1'" in msg and "setup='Setup2'" in msg
+        assert "Rename" not in msg
+
+    def test_a_duplicate_inside_one_folder_path_still_offers_the_owning_setup(self, monkeypatch,
+                                                                              stub_slices):
+        # the breadcrumb can be several segments deep; the SETUP is the first one, never the last
+        monkeypatch.setattr(cg, "resolve_operation",
+                            _refuses_with(["Top / Roughing / Drill1", "Bottom / Roughing / Drill1"]))
+        msg = error_message(cg.handler(include=["parameters"], operation="Drill1"))
+        assert "setup='Top'" in msg and "setup='Bottom'" in msg
+        assert "setup='Roughing'" not in msg          # the folder is not a setup value
+
+    def test_two_duplicates_in_ONE_setup_offer_the_ordinal_address_not_a_rename(self, monkeypatch,
+                                                                                stub_slices):
+        # scoping cannot separate two ops of one name inside a SINGLE setup - setup='Setup1' would
+        # refuse all over again - so that value is never printed. What IS performable is the shared
+        # resolver's '<name>#<n>' address, which this same 'operation' input reads back.
+        # The reachable shape: one operation per FOLDER, since names collide across parents.
+        from conftest import FakeCAMFolder, FakeSetup, make_cam
+        cam = make_cam(FakeSetup("Setup1", folders=[
+            FakeCAMFolder("Roughing", ops=[_named_op("Drill1")]),
+            FakeCAMFolder("Finishing", ops=[_named_op("Drill1")])]))
+        monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
+        msg = error_message(cg.handler(include=["parameters"], operation="Drill1"))
+        assert "ambiguous" in msg.lower()
+        assert "setup=" not in msg
+        assert "Rename" not in msg
+        assert "Drill1#1" in msg and "Drill1#2" in msg
+
+    def test_a_duplicated_name_is_listed_capped_not_in_full(self, monkeypatch, stub_slices):
+        # every candidate rides in an error string, so the list is capped and the remainder COUNTED;
+        # an uncapped join reads as the complete set to a caller picking its next call out of it.
+        paths = [f"Setup{i} / Drill1" for i in range(1, 13)]
+        monkeypatch.setattr(cg, "resolve_operation", _refuses_with(paths))
+        msg = error_message(cg.handler(include=["parameters"], operation="Drill1"))
+        assert "12 operations share that name" in msg
+        assert "(+4 more not listed)" in msg
+        assert "Setup12 / Drill1" not in msg
+
+    def test_only_the_setups_holding_ONE_duplicate_are_offered(self, monkeypatch, stub_slices):
+        # the mixed case: 'Bottom' holds two of the three, so scoping to it refuses again and it is
+        # dropped; 'Top' holds exactly one, so it is the value that resolves and the only one named.
+        monkeypatch.setattr(cg, "resolve_operation",
+                            _refuses_with(["Top / Drill1", "Bottom / Drill1", "Bottom / Drill1"]))
+        msg = error_message(cg.handler(include=["parameters"], operation="Drill1"))
+        assert "setup='Top'" in msg
+        assert "setup='Bottom'" not in msg
+
+    def test_a_breadcrumb_with_no_setup_segment_hands_back_the_shared_refusal(self):
+        # walk_cam_tree builds every operation path setup-first, so a separator-less breadcrumb
+        # names no setup to scope by - and the helper then returns the resolver's own refusal
+        # VERBATIM rather than wording a second one, which could only offer a rename.
+        res = cg._op_miss_error("Drill1", ["Drill1", "Drill1"], "the shared resolver's refusal")
+        assert res["isError"] is True
+        assert res["message"] == "the shared resolver's refusal"
+
+    def test_a_SINGLE_bare_name_is_not_offered_as_a_setup_value(self):
+        # resolve_operation returns the plain NAME list on a miss, and a two-readings miss can leave
+        # exactly ONE bare name whose leaf matches: a tree holding two operations named 'Face' plus
+        # one literally named 'Face#2' answers names = ['Face', 'Face#2', 'Face'] for 'Face#2'. A
+        # bare name's first segment is the OPERATION, not a setup, so counting it as a scope would
+        # print setup='Face#2' - a setup the document does not hold. One bare name also slips the
+        # "appears exactly once" filter, so the breadcrumb guard is the only thing refusing it.
+        refusal = ("'Face#2' reads two ways here: the operation CARRYING that name, and an ordinal "
+                   "address over the same-named set. Both exist, so it identifies neither.")
+        res = cg._op_miss_error("Face#2", ["Face", "Face#2", "Face"], refusal)
+        assert res["isError"] is True
+        assert res["message"] == refusal
+        assert "setup=" not in res["message"]
+
+
+class TestOnePoolForResolveAndRemedy:
+    """The refusal and the setup= remedy that accompanies it come back from ONE resolve call, off
+    one operation pool. Two separate lookups agree only by construction, and nothing asserted it."""
+
+    def _cam(self, monkeypatch):
+        from conftest import FakeSetup, make_cam
+        cam = make_cam(FakeSetup("Top", ops=[_named_op("Drill1"), _named_op("TopOnly")]),
+                       FakeSetup("Bottom", ops=[_named_op("Drill1")]))
+        monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
+        return cam
+
+    def test_the_refusal_and_its_setup_values_come_from_one_resolve(self, monkeypatch,
+                                                                     stub_slices):
+        # end to end through the REAL resolver - no stub stands between the two, so a divergence
+        # would have to be built into the shared helper rather than hidden by the fake.
+        self._cam(monkeypatch)
+        msg = error_message(cg.handler(include=["parameters"], operation="Drill1"))
+        assert "Top / Drill1" in msg and "Bottom / Drill1" in msg
+        assert "setup='Top'" in msg and "setup='Bottom'" in msg
+
+    def test_the_setups_named_are_only_those_the_resolve_refused_over(self, monkeypatch,
+                                                                       stub_slices):
+        # 'TopOnly' is in the tree but not in the refusal's candidate set, so its setup may not be
+        # offered a second time - the failure mode a separately-built remedy pool has.
+        self._cam(monkeypatch)
+        msg = error_message(cg.handler(include=["parameters"], operation="Drill1"))
+        assert "TopOnly" not in msg
+
+    def test_cam_get_holds_exactly_one_operation_resolving_seam(self):
+        # the structural guard: a second by-name operation lookup imported here is a second pool.
+        assert hasattr(cg, "resolve_operation")
+        assert not hasattr(cg, "find_operation")
+
+
+class TestOperationScopedBySetup:
+    """CAM-7: an operation name is unique only WITHIN a setup (a template routinely carries one
+    'Op1' per setup), so 'setup' must scope the deep per-operation reads - not just filter the
+    listing. The fixture is two setups each holding a 'Shared' operation with DIFFERENT parameters,
+    so a resolver that ignored the scope, or took the first hit, reads the wrong op's values."""
+
+    def _cam(self, monkeypatch):
+        from conftest import FakeSetup, make_cam
+
+        def _op(name, feed):
+            return type("O", (), {
+                "name": name, "strategy": "adaptive",
+                "parameters": _SetupParams([_Param("tool_feedCutting", "Feed", feed)]),
+                "tool": type("T", (), {"description": f"{feed} cutter",
+                                       "presets": _PresetColl([])})(),
+                "toolPreset": None})()
+
+        top = FakeSetup("Top", ops=[_op("Shared", "3000"), _op("TopOnly", "10")])
+        bottom = FakeSetup("Bottom", ops=[_op("Shared", "800")])
+        cam = make_cam(top, bottom)
+        monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
+        return cam
+
+    def test_unscoped_a_shared_name_is_refused_never_first_matched(self, monkeypatch):
+        cam = self._cam(monkeypatch)
+        out, err = cg._slice_parameters(cam, "Shared", "")
+        assert out is None
+        assert "ambiguous" in err["message"].lower()
+
+    def test_the_refusals_own_advice_resolves_the_read_it_refused(self, monkeypatch):
+        # THE ROUND TRIP: take the setup= value the refusal printed and pass it straight back.
+        cam = self._cam(monkeypatch)
+        _out, err = cg._slice_parameters(cam, "Shared", "")
+        assert "setup='Bottom'" in err["message"]
+        out, err2 = cg._slice_parameters(cam, "Shared", "Bottom")
+        assert err2 is None
+        assert out["sections"]["General"][0]["expression"] == "800"   # Bottom's op, not Top's
+
+    def test_each_setup_scopes_to_ITS_operation_of_the_shared_name(self, monkeypatch):
+        cam = self._cam(monkeypatch)
+        top, _e1 = cg._slice_parameters(cam, "Shared", "Top")
+        bottom, _e2 = cg._slice_parameters(cam, "Shared", "Bottom")
+        assert top["sections"]["General"][0]["expression"] == "3000"
+        assert bottom["sections"]["General"][0]["expression"] == "800"
+
+    def test_the_scope_is_case_insensitive_like_every_other_cam_resolve(self, monkeypatch):
+        cam = self._cam(monkeypatch)
+        out, err = cg._slice_parameters(cam, "shared", "bottom")
+        assert err is None and out["operation"] == "Shared"
+
+    def test_the_tool_slice_takes_the_same_scoping(self, monkeypatch):
+        # both deep per-operation slices resolve through the one helper, so the setup= the
+        # parameters refusal advertises works for include=['tool'] too
+        cam = self._cam(monkeypatch)
+        out, err = cg._slice_tool(cam, "Shared", "", "Bottom")
+        assert err is None and out["tool"] == "800 cutter"
+
+    def test_the_router_passes_setup_through_to_the_tool_slice(self, monkeypatch, stub_slices):
+        seen = {}
+        monkeypatch.setattr(cg, "_slice_tool",
+                            lambda cam, operation, preset, setup="": (
+                                seen.update(operation=operation, setup=setup) or ({}, None)))
+        cg.handler(include=["tool"], operation="Shared", setup="Bottom")
+        assert seen == {"operation": "Shared", "setup": "Bottom"}
+
+    def test_a_miss_inside_the_scope_lists_THAT_setups_operations(self, monkeypatch):
+        # a scoped miss that listed the whole document's operations would offer names this call
+        # just excluded - 'TopOnly' is not reachable under setup='Bottom'
+        cam = self._cam(monkeypatch)
+        out, err = cg._slice_parameters(cam, "TopOnly", "Bottom")
+        assert out is None
+        msg = err["message"]
+        assert "in setup 'Bottom'" in msg and "Shared" in msg
+        assert "TopOnly" not in msg.split("Available:")[-1]
+
+    def test_an_unknown_setup_is_refused_by_the_setup_resolver(self, monkeypatch):
+        cam = self._cam(monkeypatch)
+        out, err = cg._slice_parameters(cam, "Shared", "Ghost")
+        assert out is None
+        assert "Ghost" in err["message"] and "Top" in err["message"]
+
+    def test_an_unscoped_UNIQUE_name_still_resolves_with_no_setup(self, monkeypatch):
+        # the scope stays optional: only a shared name needs it
+        cam = self._cam(monkeypatch)
+        out, err = cg._slice_parameters(cam, "TopOnly", "")
+        assert err is None and out["operation"] == "TopOnly"
+
+    def test_a_name_duplicated_INSIDE_one_setup_offers_no_scope_that_would_refuse(self,
+                                                                                  monkeypatch):
+        # end to end through the REAL resolvers: both duplicates live in 'Top', so no setup= value
+        # can separate them. The refusal must offer none - and the scoped retry it would have
+        # advertised does refuse, which is why it may not be printed.
+        from conftest import FakeSetup, make_cam
+
+        def _op(feed):
+            return type("O", (), {
+                "name": "Twin", "strategy": "adaptive",
+                "parameters": _SetupParams([_Param("tool_feedCutting", "Feed", feed)])})()
+
+        cam = make_cam(FakeSetup("Top", ops=[_op("3000"), _op("800")]))
+        monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
+        _out, err = cg._slice_parameters(cam, "Twin", "")
+        msg = err["message"]
+        assert "ambiguous" in msg.lower() and "setup=" not in msg
+        # and the value that was withheld would indeed have refused
+        _out2, err2 = cg._slice_parameters(cam, "Twin", "Top")
+        assert err2 is not None and "ambiguous" in err2["message"].lower()
 
 
 class _PresetColl:
@@ -385,43 +785,275 @@ class TestToolSlicePresets:
     expressions. The names come off a count/item walk, so a tool holding several presets must
     report every one - and a miss must name what IS available."""
 
-    def _wire(self, monkeypatch, presets):
+    def _wire(self, monkeypatch, presets, active=None):
+        """A real one-setup CAM tree holding the operation - the resolve runs over the shared walk,
+        so a stubbed resolve_operation would no longer be the seam that answers. Returns the cam."""
+        from conftest import FakeSetup, make_cam
         tool = type("T", (), {"description": "6mm flat", "presets": _PresetColl(presets)})()
-        op = type("O", (), {"name": "Adaptive1", "tool": tool})()
-        monkeypatch.setattr(cg, "find_operation", lambda cam, name: (op, []))
-        return op
+        op = type("O", (), {"name": "Adaptive1", "tool": tool, "toolPreset": active})()
+        return make_cam(FakeSetup("Setup1", ops=[op]))
+
+    def test_the_preset_the_operation_actually_uses_is_named_with_its_id(self, monkeypatch):
+        # a tool can hold 20 presets; WHICH one this op runs is what decides its feeds and speeds
+        chosen = type("P", (), {"name": "Aluminum - Adaptive",
+                                "id": "79273b38-74c8-454f-9645-719dfe7dfd68"})()
+        cam = self._wire(monkeypatch, [_Preset("Aluminum - Adaptive", {}), _Preset("Steel", {})],
+                         active=chosen)
+        out, err = cg._slice_tool(cam, "Adaptive1", "")
+        assert err is None
+        assert out["active_preset"] == {"name": "Aluminum - Adaptive",
+                                        "id": "79273b38-74c8-454f-9645-719dfe7dfd68"}
+
+    def test_an_operation_with_no_preset_reads_null_not_the_first_one(self, monkeypatch):
+        cam = self._wire(monkeypatch, [_Preset("Aluminum - Adaptive", {}), _Preset("Steel", {})])
+        out, err = cg._slice_tool(cam, "Adaptive1", "")
+        assert err is None and out["active_preset"] is None
+        assert out["preset_names"] == ["Aluminum - Adaptive", "Steel"]   # the catalog still lists
 
     def test_every_preset_name_is_published_with_its_count(self, monkeypatch):
-        self._wire(monkeypatch, [_Preset("Alu roughing", {"tool_feedCutting": "3000 mm/min"}),
-                                 _Preset("Steel finishing", {"tool_feedCutting": "800 mm/min"}),
-                                 _Preset("Brass", {"tool_spindleSpeed": "14000"})])
-        out, err = cg._slice_tool(object(), "Adaptive1", "")
+        cam = self._wire(monkeypatch, [_Preset("Alu roughing", {"tool_feedCutting": "3000 mm/min"}),
+                                       _Preset("Steel finishing", {"tool_feedCutting": "800 mm/min"}),
+                                       _Preset("Brass", {"tool_spindleSpeed": "14000"})])
+        out, err = cg._slice_tool(cam, "Adaptive1", "")
         assert err is None
         assert out["preset_names"] == ["Alu roughing", "Steel finishing", "Brass"]
         assert out["preset_count"] == 3
         assert out["tool"] == "6mm flat"
 
     def test_preset_drill_returns_that_presets_expressions(self, monkeypatch):
-        self._wire(monkeypatch, [_Preset("Alu roughing", {"tool_feedCutting": "3000 mm/min"}),
-                                 _Preset("Steel finishing", {"tool_feedCutting": "800 mm/min",
-                                                             "tool_spindleSpeed": "4500"})])
-        out, err = cg._slice_tool(object(), "Adaptive1", "Steel finishing")
+        cam = self._wire(monkeypatch, [_Preset("Alu roughing", {"tool_feedCutting": "3000 mm/min"}),
+                                       _Preset("Steel finishing", {"tool_feedCutting": "800 mm/min",
+                                                                   "tool_spindleSpeed": "4500"})])
+        out, err = cg._slice_tool(cam, "Adaptive1", "Steel finishing")
         assert err is None
         assert out["preset"] == {"name": "Steel finishing",
                                  "expressions": {"tool_feedCutting": "800 mm/min",
                                                  "tool_spindleSpeed": "4500"}}
 
     def test_preset_miss_names_the_available_presets(self, monkeypatch):
-        self._wire(monkeypatch, [_Preset("Alu roughing", {}), _Preset("Steel finishing", {})])
-        out, err = cg._slice_tool(object(), "Adaptive1", "Titanium")
+        cam = self._wire(monkeypatch, [_Preset("Alu roughing", {}), _Preset("Steel finishing", {})])
+        out, err = cg._slice_tool(cam, "Adaptive1", "Titanium")
         assert out is None
         msg = err["message"]
         assert "Titanium" in msg and "Alu roughing" in msg and "Steel finishing" in msg
 
     def test_a_tool_with_no_presets_reports_an_empty_list_not_a_miss(self, monkeypatch):
-        self._wire(monkeypatch, [])
-        out, err = cg._slice_tool(object(), "Adaptive1", "")
+        cam = self._wire(monkeypatch, [])
+        out, err = cg._slice_tool(cam, "Adaptive1", "")
         assert err is None and out["preset_names"] == [] and out["preset_count"] == 0
+
+
+class TestMachineSlice:
+    """include=['machine'] = the ASSIGNED machine's own limits (spindle speed, axis travels),
+    delegated to _cam_common's get_machine_limits_handler. Distinct from 'machines', the catalog of
+    machines that can be assigned."""
+
+    def test_router_includes_machine_and_passes_setup_and_units(self, monkeypatch, stub_slices):
+        seen = {}
+        monkeypatch.setattr(cg, "_slice_machine",
+                            lambda cam, setup, units: (
+                                seen.update(setup=setup, units=units)
+                                or ({"setup_count": 1, "setups": [{"setup": "Op1"}]}, None)))
+        out = _payload(cg.handler(include=["machine"], setup="Op1", units="in"))
+        assert out["machine"]["setup_count"] == 1
+        assert seen == {"setup": "Op1", "units": "in"}
+
+    def test_machine_and_machines_are_different_slices(self, stub_slices):
+        # a caller asking for the catalog must not get the limits, and vice versa
+        assert "machine" in _payload(cg.handler(include=["machine"]))
+        assert "machines" not in _payload(cg.handler(include=["machine"]))
+        assert "machine" not in _payload(cg.handler(include=["machines"]))
+
+    def test_slice_delegates_to_the_cam_common_handler(self, monkeypatch):
+        ccom = load_tool("_cam_common")
+        seen = {}
+        monkeypatch.setattr(ccom, "get_machine_limits_handler",
+                            lambda setup, units: (
+                                seen.update(setup=setup, units=units)
+                                or {"isError": False, "content": [{"type": "text", "text": json.dumps(
+                                    {"setup_count": 1, "setups": [{"spindle": {"max_rpm": 12000.0}}]})}]}))
+        out, err = cg._slice_machine(object(), "Op1", "mm")
+        assert err is None and out["setups"][0]["spindle"]["max_rpm"] == 12000.0
+        assert seen == {"setup": "Op1", "units": "mm"}
+
+    def test_time_slice_forwards_units(self, monkeypatch):
+        ccom = load_tool("_cam_common")
+        seen = {}
+        monkeypatch.setattr(ccom, "get_machining_time_handler",
+                            lambda setup, units: (
+                                seen.update(setup=setup, units=units)
+                                or {"isError": False, "content": [{"type": "text",
+                                                                   "text": json.dumps({"units": units})}]}))
+        out, err = cg._slice_time(object(), "Op1", "in")
+        assert err is None and out["units"] == "in"
+        assert seen == {"setup": "Op1", "units": "in"}
+
+
+class _SetupParams:
+    """Setup.parameters: the visible rows the grouping keeps, plus the computed extents that read
+    isVisible false and are reachable only by name."""
+
+    def __init__(self, visible=(), hidden=None):
+        self._items = list(visible)
+        self._hidden = dict(hidden or {})
+
+    @property
+    def count(self):
+        return len(self._items)
+
+    def item(self, i):
+        return self._items[i]
+
+    def itemByName(self, name):
+        for p in self._items:
+            if p.name == name:
+                return p
+        return self._hidden.get(name)
+
+
+class _Param:
+    def __init__(self, name, title=None, expression="", visible=True, enabled=True, value=None):
+        self.name = name
+        self.title = title or name
+        self.expression = expression
+        self.isVisible = visible
+        self.isEnabled = enabled
+        self.value = type("V", (), {"value": value})()
+
+
+class TestSetupParameterSlice:
+    """include=['parameters'] with 'setup' and no 'operation' - the SETUP's own parameters (the
+    read-back side of cam_edit_setup's writes), including the computed stock extents."""
+
+    def _wire(self, monkeypatch, params):
+        setup = type("S", (), {"name": "Op1", "parameters": params})()
+        monkeypatch.setattr(cg, "find_setup", lambda cam, name: (setup, ["Op1"], None))
+        return setup
+
+    def _params(self):
+        return _SetupParams(
+            visible=[_Param("group_job", "Job", value=True),
+                     _Param("job_stockMode", "Mode", "'solid'"),
+                     _Param("job_stockInfoDimensionX", "Stock Width (X)", "stockXHigh - stockXLow")],
+            # value = Fusion's internal CM, expression = the document's mm display text (measured)
+            hidden={"stockXLow": _Param("stockXLow", expression="-176.3", visible=False,
+                                        value=-17.63),
+                    "stockXHigh": _Param("stockXHigh", expression="-62.0", visible=False,
+                                         value=-6.2)})
+
+    def test_setup_alone_reads_that_setups_parameters(self, monkeypatch):
+        self._wire(monkeypatch, self._params())
+        out, err = cg._slice_parameters(object(), "", "Op1")
+        assert err is None and out["setup"] == "Op1"
+        assert out["sections"]["Job"][0]["name"] == "job_stockMode"
+        assert out["parameter_count"] == 2
+
+    def test_the_computed_stock_extents_ride_along(self, monkeypatch):
+        # they read isVisible false, so the visible grouping drops them - a stock check needs them
+        self._wire(monkeypatch, self._params())
+        out, _err = cg._slice_parameters(object(), "", "Op1")
+        assert out["stock_extents"]["stockXLow"] == {"value": -176.3, "expression": "-176.3"}
+        assert "stockYLow" not in out["stock_extents"]        # absent parameter -> absent key
+
+    def test_the_extent_value_is_scaled_out_of_cm_and_the_expression_is_not(self, monkeypatch):
+        # measured on a millimetre document: ONE parameter reports -17.63 through .value.value
+        # (Fusion's internal cm) and "-176.3" through .expression (the display unit). Publishing
+        # them as one unit understates the stock tenfold.
+        self._wire(monkeypatch, _SetupParams(hidden={
+            "stockXLow": _Param("stockXLow", expression="-176.3", visible=False, value=-17.63)}))
+        out, _err = cg._slice_parameters(object(), "", "Op1")
+        row = out["stock_extents"]["stockXLow"]
+        assert row["value"] == -176.3                      # -17.63 cm -> mm
+        assert row["expression"] == "-176.3"               # authored text, untouched
+        assert out["stock_extents"]["units"] == "mm"
+
+    def test_the_extent_value_follows_the_units_input(self, monkeypatch):
+        self._wire(monkeypatch, _SetupParams(hidden={
+            "stockXLow": _Param("stockXLow", expression="-176.3", visible=False, value=-17.63)}))
+        out, _err = cg._slice_parameters(object(), "", "Op1", "in")
+        assert out["stock_extents"]["stockXLow"]["value"] == -6.940945    # -17.63 cm in inches
+        assert out["stock_extents"]["stockXLow"]["expression"] == "-176.3"
+        assert out["stock_extents"]["units"] == "in"
+
+    def test_an_expression_that_is_not_a_number_is_never_converted(self, monkeypatch):
+        # a computed extent's expression can be an EXPRESSION; scaling it would be nonsense
+        self._wire(monkeypatch, _SetupParams(hidden={
+            "stockZLow": _Param("stockZLow", expression="stockZHigh - 38.1", visible=False,
+                                value=-1.905)}))
+        out, _err = cg._slice_parameters(object(), "", "Op1")
+        assert out["stock_extents"]["stockZLow"] == {"value": -19.05,
+                                                     "expression": "stockZHigh - 38.1"}
+
+    def test_unknown_units_are_refused_by_name(self, monkeypatch):
+        self._wire(monkeypatch, self._params())
+        out, err = cg._slice_parameters(object(), "", "Op1", "furlongs")
+        assert out is None and "furlongs" in err["message"]
+
+    def test_the_note_tells_the_two_units_apart(self, monkeypatch):
+        self._wire(monkeypatch, self._params())
+        out, _err = cg._slice_parameters(object(), "", "Op1")
+        assert "DIFFERENT units" in out["note"] and "display unit" in out["note"]
+
+    def test_an_operation_still_takes_the_operation_path(self, monkeypatch):
+        # with an operation named, the OPERATION is the target - 'setup' scopes WHICH operation of
+        # that name is read (see TestOperationScopedBySetup), never the setup-parameters payload.
+        op = type("O", (), {"name": "Adaptive1", "strategy": "adaptive",
+                            "parameters": _SetupParams([_Param("tool_feedCutting", "Feed", "3000")])})()
+        setup = type("S", (), {"name": "Op1"})()
+        monkeypatch.setattr(cg, "find_setup", lambda cam, name: (setup, ["Op1"], None))
+        monkeypatch.setattr(cg, "resolve_cam_node",
+                            lambda cam, name, kinds=(), setup=None, label=None:
+                            (SimpleNamespace(obj=op), None))
+        out, err = cg._slice_parameters(object(), "Adaptive1", "Op1")
+        assert err is None and out["operation"] == "Adaptive1" and "setup" not in out
+
+    def test_neither_target_names_both_ways_out(self, stub_slices):
+        msg = error_message(cg.handler(include=["parameters"]))
+        assert "operation" in msg.lower() and "setup" in msg.lower()
+
+    def test_a_setup_miss_returns_the_resolvers_refusal(self, monkeypatch):
+        monkeypatch.setattr(cg, "find_setup",
+                            lambda cam, name: (None, ["Op1"], "No setup named 'Ghost'. Available: Op1."))
+        out, err = cg._slice_parameters(object(), "", "Ghost")
+        assert out is None and "Ghost" in err["message"] and "Op1" in err["message"]
+
+    def test_a_setup_without_readable_parameters_says_so(self, monkeypatch):
+        self._wire(monkeypatch, None)
+        out, err = cg._slice_parameters(object(), "", "Op1")
+        assert out is None and "no readable parameters" in err["message"]
+
+    def test_an_extent_that_reads_nothing_is_not_published_as_a_null_row(self, monkeypatch):
+        # a parameter that EXISTS but whose value and expression both fail to read says nothing
+        # about the stock; a {value: null, expression: null} row would read as a measured absence.
+        class _Unreadable:
+            name = "stockXLow"
+
+            @property
+            def value(self):
+                raise RuntimeError("value cannot be read")
+
+            @property
+            def expression(self):
+                raise RuntimeError("expression cannot be read")
+
+        self._wire(monkeypatch, _SetupParams(hidden={"stockXLow": _Unreadable(),
+                                                     "stockXHigh": _Param("stockXHigh",
+                                                                          expression="-62.0",
+                                                                          visible=False,
+                                                                          value=-6.2)}))
+        out, err = cg._slice_parameters(object(), "", "Op1")
+        assert err is None
+        assert "stockXLow" not in out["stock_extents"]      # nothing read -> nothing claimed
+        assert out["stock_extents"]["stockXHigh"]["value"] == -62.0
+
+    def test_an_extent_with_only_an_expression_still_publishes(self, monkeypatch):
+        # a computed extent whose numeric value does not read but whose expression does is a real
+        # answer - the row carries the half that read.
+        self._wire(monkeypatch, _SetupParams(hidden={
+            "stockZLow": _Param("stockZLow", expression="stockZHigh - 38.1", visible=False)}))
+        out, _err = cg._slice_parameters(object(), "", "Op1")
+        assert out["stock_extents"]["stockZLow"] == {"value": None,
+                                                     "expression": "stockZHigh - 38.1"}
 
 
 class TestInspectionSlice:

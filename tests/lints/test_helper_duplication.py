@@ -28,6 +28,12 @@ _DENYLIST = {
     "find_setup": ("_cam_common", "def"),
     "find_operation": ("_cam_common", "def"),
     "walk_operations": ("_cam_common", "def"),
+    # The ONE operation pool (walk_cam_tree filtered to kind == 'operation') and the ONE unscoped
+    # resolve that hands back the refusal AND the available list off a single walk of it. A local
+    # re-filter is how a caller's remedy comes to describe a different census than the refusal it
+    # accompanies - and how one unscoped miss walks the tree twice.
+    "operation_nodes": ("_cam_common", "def"),
+    "resolve_operation": ("_cam_common", "def"),
     "setup_names": ("_cam_common", "def"),
     "op_state_tally": ("_cam_common", "def"),
     "op_state_facts": ("_cam_common", "def"),
@@ -38,10 +44,18 @@ _DENYLIST = {
     # next (each read still passes its OWN default/ceiling pair).
     "clamp_rows": ("_cam_common", "def"),
     # The ONE compute-failure read (healthState classed error/warning + the condensed one-sentence
-    # message before the 'Compute Failed' marker) - assembly_get still carries a third re-roll
-    # (EC-2c); this entry stops a fourth.
+    # message before the 'Compute Failed' marker).
     "compute_failure": ("_assert", "def"),
     "compute_failure_message": ("_assert", "def"),
+    # compute_failure's other half: whether a compute state ANSWERED at all, which its None hides.
+    # One home, or a surface turns "could not read it" into a published healthy:true while its
+    # sibling withholds the flag on the same entity.
+    "health_state_read": ("_assert", "def"),
+    # The ONE dispatch over those two halves: entity first, then its timelineObject, answering
+    # 'broken'/'healthy'/'unknown' plus the failure the verdict was taken from. A re-roll is how two
+    # surfaces reach DIFFERENT verdicts on one entity - an as-built joint whose state only its
+    # timeline item answers reads broken in one payload and healthy in the next.
+    "compute_state": ("_assert", "def"),
     # The ONE any-True / False-if-any-False / else-None collapse over per-body is_solid flags -
     # home is surface_edit (its first consumer); a re-roll is how one surface tool reads an
     # unreadable flag as an open sheet while its sibling says unknown.
@@ -61,6 +75,10 @@ _DENYLIST = {
     "tree_nodes": ("_cam_common", "def"),
     "resolve_cam_node": ("_cam_common", "def"),
     "operations_under": ("_cam_common", "def"),
+    # Its node-carrying form: the scoped walk started from the node's OWN path, so every row keeps
+    # the 'Setup / ... / op' breadcrumb. A local re-roll walks from "" and prints ' / Drill1',
+    # naming neither setup nor folder - which is the one thing separating two same-named operations.
+    "operation_nodes_under": ("_cam_common", "def"),
     # The ONE 'parameters' request parser ({name: expression} or 'name=value, ...'): the operation
     # and setup parameter editors validate the SAME two wire forms, so a second copy is how one of
     # them starts accepting a form the other refuses.
@@ -72,6 +90,21 @@ _DENYLIST = {
     "walk_library_folders": ("_cam_common", "def"),
     "library_assets": ("_cam_common", "def"),
     "library_children": ("_cam_common", "def"),
+    # The ONE 'which asset answers to this name' matcher every library DELETE addresses its target
+    # with: a stored leafName carries the file EXTENSION the object's own name does not, so an asset
+    # answers to its whole leafName AND to its stem, both compared EXACTLY. A local re-roll is how
+    # one delete tool matches on a substring and removes the neighbour whose name merely starts the
+    # same, or splits on the FIRST dot and cannot find 'Mill v1.2.mch' at all.
+    "asset_key": ("_cam_common", "def"),
+    "asset_leaf": ("_cam_common", "def"),
+    "asset_leaf_keys": ("_cam_common", "def"),
+    "assets_named": ("_cam_common", "def"),
+    # The ONE MachineLibrary handle (off CAMManager.libraryManager, so no open CAM job is needed)
+    # and the ONE 'which location holds this machine' read - a single FILTERED Local query. A second
+    # copy is how the create's clash report and the delete's local-only gate start answering
+    # 'fusion360' and 'local' about one machine.
+    "machine_library": ("_cam_common", "def"),
+    "machine_location": ("_cam_common", "def"),
     "_b64url_decode": ("_data_common", "def"),
     # The ONE DataFile epoch-seconds -> ISO-8601-UTC conversion (None for anything that is not a
     # number); the raw integer ships beside it, so a second copy is a second convention.
@@ -97,9 +130,37 @@ _DENYLIST = {
     # from: a local re-roll is how a read names one document while the write that follows it
     # names another.
     "_active_identity": ("_write_guard", "def"),
+    # The ONE per-instance document key every store that outlives one MCP call is keyed by (a view
+    # snapshot, a driven-joint registry, a live generation), its backing registry, and the prune
+    # that evicts a closed document from it. A second copy is how one consumer keeps the BACKWARD
+    # prune walk while the other's forward walk skips the entry that slid into the freed slot and
+    # then indexes past the end, raising IndexError out of every handler that reads a key. One
+    # home, and the walk is pinned once.
+    "document_key": ("_write_guard", "def"),
+    "prune_closed_documents": ("_write_guard", "def"),
+    "on_key_evicted": ("_write_guard", "def"),
+    "on_key_renamed": ("_write_guard", "def"),
+    "UNSAVED_DOC_KEYS": ("_write_guard", "assign"),
+    "UNSAVED_DOC_SEQ": ("_write_guard", "assign"),
     "sanitize": ("_export", "def"),
-    "component_by_name": ("_export", "def"),
+    # The ONE design-wide by-name component resolve: exactly one component carrying the name
+    # resolves, a name several carry is refused with the count. A second copy is how one tool
+    # exports/imports into whichever same-named component its own walk reached first.
+    "find_component": ("_export", "def"),
     "verify_written": ("_export", "def"),
+    # The ONE unit key -> DistanceUnits member map every writer of an STL bakes unitType from, and
+    # the read that resolves it. STLExportOptions.unitType takes DistanceUnits and NOT MeshUnits,
+    # whose mm/cm ints are SWAPPED - a second copy is how one exporter starts writing 10x-wrong
+    # geometry for the two commonest units while its sibling stays right.
+    "STL_UNIT_MEMBERS": ("_export", "assign"),
+    "stl_unit_enum": ("_export", "def"),
+    # The ONE export-options knob writer both exporters set every option through: pre-read, write,
+    # post-read, returning (key, changed). The PRE-read is the load-bearing half - it separates "the
+    # assignment put this value here" from "the value was already there" - and a naive set-then-
+    # compare cannot: STLExportOptions.unitType reads 0 both when unset (which writes INCHES) and
+    # when explicitly millimetres, because MillimeterDistanceUnits IS 0. A local three-line re-roll
+    # drops the pre-read and silently loses that distinction.
+    "applied_pair": ("_export", "def"),
     # The ONE output-path prep every file writer runs: strip the request, APPEND the format's
     # extension when the name lacks it, create the directory. A local re-roll is how one exporter
     # appends and the next silently writes PNG bytes to a .jpg name.
@@ -132,6 +193,36 @@ _DENYLIST = {
     "resolve_sketch": ("_common", "def"),
     "find_or_recent_sketch": ("_common", "def"),
     "resolve_or_recent_sketch": ("_common", "def"),
+    # The component SCOPE over that same walk: one match rule (exact, case-insensitive) and one
+    # unknown-component refusal, so a scoped list and a scoped by-name read can never select
+    # different components or teach different vocabulary. find_sketch_in filters by component
+    # IDENTITY, since two components CAN wear one name and a name comparison cannot tell them apart.
+    "components_in_scope": ("_common", "def"),
+    "find_sketch_in": ("_common", "def"),
+    # The occurrence PATH is the only spelling that separates two same-named components. Both halves
+    # of a placement are read off ONE occurrence, so no caller has to ask whether two components are
+    # the same - which nothing can answer while two distinct components report one entityToken.
+    "component_placements": ("_common", "def"),
+    "placement_paths_named": ("_common", "def"),
+    # The address a shared-owner-name refusal names its owners by, read off ONE occurrence (its own
+    # component answers to the name AND hands back the sketch). A local re-roll drops the sketch
+    # half and offers an owner that owns nothing, or pairs a hit against the walk - which gives
+    # every namesake every other's path while two components report one entityToken.
+    "placements_holding_sketch": ("_common", "def"),
+    # The ONE capped wire list: a truncated candidate list that does not COUNT what it dropped reads
+    # as the complete set, and a caller picks its next call out of it.
+    "named_with_remainder": ("_common", "def"),
+    # The ONE substitution a listing makes when a name REPEATS - the name where it identifies one
+    # row, that row's discriminator where it does not. Every re-roll of this rule is a listing that
+    # prints one name twice and has told the caller only the count it already stated.
+    "told_apart": ("_common", "def"),
+    # The spellings a case-insensitive component match ACTUALLY read - the clause that keeps a scope
+    # refusal from asserting the query is a name some component carries.
+    "spelled_as_read": ("_common", "def"),
+    # The 'component' scope's vocabulary (component name / occurrence path / handle) - one home, so
+    # sketch_get's two depths cannot accept different spellings.
+    "scope_components": ("_sketch_detail", "def"),
+    "scope_component": ("_sketch_detail", "def"),
     "timeline_health": ("_common", "def"),
     "result_bodies": ("_common", "def"),
     "body_facts": ("_common", "def"),
@@ -152,11 +243,21 @@ _DENYLIST = {
     # The ONE same-component test. Component wrappers are measured never identity-stable, so this
     # cannot be re-rolled as `a is b` anywhere: one home keeps the token-then-name hedge in step.
     "same_component": ("_common", "def"),
-    # The ONE (nativeObject or self).entityToken read - the key any two body references are compared
-    # or de-duplicated on. A native and its occurrence proxy carry DIFFERENT tokens of their own, so
-    # a local `safe(lambda: b.entityToken)` re-roll is how one de-dup counts a body twice while the
-    # same-body guard beside it never fires.
+    # The ONE (nativeObject or self).entityToken read, and the ONE identity key built from it - the
+    # key any two body references are compared or de-duplicated on. A native and its occurrence proxy
+    # carry DIFFERENT tokens of their own, so a local `safe(lambda: b.entityToken)` re-roll is how one
+    # de-dup counts a body twice while the same-body guard beside it never fires; and a token is
+    # DOCUMENT-LOCAL, so a local (token-only) key is how one de-dup merges two x-ref'd bodies into one.
     "native_token": ("_common", "def"),
+    "native_identity": ("_common", "def"),
+    # The body key the by-name body walk groups a native and its proxy with: native_identity, else
+    # the (name, scope) pair. Home is _inputs, the walk that needs the scope half - it names which
+    # wrapper an ambiguity refusal lists. A copy keyed on the WRAPPER's entityToken splits one body
+    # reached through two wrappers and merges two bodies sharing a document-local token. A caller
+    # wanting the identity alone imports _common.native_identity; a before/after diff over ONE
+    # component keys on native_identity plus the bare NAME, since the scope half re-splits the
+    # native/proxy pair this key exists to join.
+    "_body_key": ("_inputs", "def"),
     # The ONE feature-path resolver (sweep / pipe / path pattern / on-path datum): one home so the
     # 'sketch:<name>' chain rule and the single-handle chaining rule cannot be right in one tool
     # and stale in the next.
@@ -212,6 +313,17 @@ _DENYLIST = {
     # DIFFERENT one written safe(read, 0), which is how two tools start disagreeing about whether an
     # unreadable count is a zero.
     "counted": ("_common", "def"),
+    # The ONE read of the depth an extrude-family feature reports, and the band a landed depth may
+    # differ from the request by. A copy drifts on the TYPE GUARD alone - one accepting int-or-float
+    # beside one accepting only float is one feature the solid extrude calls unverifiable while the
+    # surface extrude verifies it - and the measured contract (sign kept, the per-side number for a
+    # symmetric extent, unclipped on a cut) holds only where it is stated once.
+    "landed_extent_cm": ("_common", "def"),
+    # The second side's twin, for a two-sided extent. It carries its own measured caveat - the
+    # positive-request measurement says nothing about what a NEGATIVE two-sided side stores - and a
+    # local copy is how one caller drops that caveat and compares against a convention nothing read.
+    "landed_extent2_cm": ("_common", "def"),
+    "EXTENT_MATCH_TOL_CM": ("_common", "assign"),
     # The ONE no-volume-change band every material-changing feature judges "the API reported success
     # but nothing moved" against; a site whose signal is not a volume keeps its own named tolerance.
     "NO_VOLUME_CHANGE_CM3": ("_common", "assign"),
@@ -247,6 +359,11 @@ _DENYLIST = {
     # other.
     "lump_count": ("_geom", "def"),
     "aabb_gap": ("_geom", "def"),
+    # The ONE bounded-gap measure for two PARALLEL PLANAR faces, and the sentence it discloses the
+    # result with. A per-tool copy is how one measure tool starts judging a clearance on a plane
+    # separation the other has already bounded - the two would then answer differently about the
+    # same pair of faces, which is the drift a shared verdict cannot afford.
+    "parallel_plane_facts": ("_geom", "def"),
     # The thread-table walk that turns a designation into a ThreadInfo, shared by the tapped hole
     # and the thread-an-existing-cylinder tools.
     # The ONE sketch local -> world frame: sketch_create publishes it on the way in and sketch_get on

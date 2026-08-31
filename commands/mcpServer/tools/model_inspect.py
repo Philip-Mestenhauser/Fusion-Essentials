@@ -28,6 +28,13 @@ app = adsk.core.Application.get()
 _SLICES = ("mass",)   # mesh stats are automatic for a mesh target (routed by kind), not an include=
 # target accepts a handle (body/face/mesh) or a name (occurrence/component/body), or '' = whole design.
 _TARGET = _inputs.TargetRef("target")
+# frame: the Joint Origin the oriented box is measured in. NATIVE selector - this READS the frame's
+# axis vectors rather than handing the JO to a joint, so it stays on the object the owning component
+# carries instead of an assembly proxy. required=True is about the resolve, not the schema: the tool
+# reaches it only after its own "was a frame asked for?" test, so a blank here is a caller bug.
+_FRAME = _inputs.JointOriginRef(
+    "frame", native=True, required=True,
+    description="Measure the bounding box in this Joint Origin's part-space frame.")
 
 _ACCURACY = {
     "low": adsk.fusion.CalculationAccuracy.LowCalculationAccuracy,
@@ -54,14 +61,17 @@ def _vec(v, f=1.0):
 
 
 def _measurable_geometry(entity):
-    """Return a B-Rep entity for getOrientedBoundingBox (which rejects a Component).
+    """Return a B-Rep entity for getOrientedBoundingBox (which rejects a Component and an Occurrence).
 
-    A BRepBody or Occurrence is returned as-is. A Component (e.g. the root, the whole-design target)
-    has no B-Rep identity, so fall back to its single body, or the largest body if several. Returns
-    (geometry, note) where note flags any fallback for the caller.
+    A BRepBody is returned as-is. Neither a Component (the root, the whole-design target) nor an
+    Occurrence carries a B-Rep identity the call accepts - MEASURED, an Occurrence raises
+    "3 : invalid argument geometry" - so both fall back to the bodies they hold: the single one, or
+    the largest by world-AABB volume when there are several. An occurrence's bodies are its assembly
+    PROXIES, so the fallback keeps measuring the instance the caller named. Returns (geometry, note)
+    where note flags any fallback for the caller.
     """
     tname = safe(lambda: type(entity).__name__) or ""
-    if tname in ("BRepBody", "Occurrence"):
+    if tname == "BRepBody":
         return entity, ""
     bodies = safe(lambda: entity.bRepBodies)
     if bodies is None:
@@ -124,16 +134,115 @@ def _subtree_occurrences(entity, limit):
     return out
 
 
-def _joint_origin_axes(design, frame_name):
-    """(X_vec, Y_vec, Z_vec, jo_name) for a named joint origin, or (None, ...) if not found. The
-    read-axes leaf over the ONE JO walk (_joints.find_joint_origins_by_name -> all_joint_origins);
-    first name match, since a frame is user-named for an oriented bbox. X=secondary, Y=third, Z=primary."""
-    matches = _joints.find_joint_origins_by_name(design, frame_name)
-    if not matches:
-        return None, None, None, None
-    jo = matches[0][0]
-    return (safe(lambda: jo.secondaryAxisVector), safe(lambda: jo.thirdAxisVector),
-            safe(lambda: jo.primaryAxisVector), safe(lambda: jo.name))
+def _joint_origin_axes(frame_name):
+    """(X_vec, Y_vec, Z_vec, jo, jo_name, error) for the Joint Origin 'frame' references.
+    X=secondary, Y=third, Z=primary, in the JO's own PART space - the frame the payload publishes.
+    The resolved JO travels out too, because measuring needs those axes lifted into the space the
+    target's geometry is read in and only the JO knows which component's frame they are in.
+
+    Resolution is the JointOriginRef kind's, in its NATIVE selector: one acceptor for the handle, the
+    bare name and the '<occurrence>:<JO name>' form, one refusal for an ambiguous name, and no
+    assembly proxy - the frame read here is the one the owning component carries. The read-axes leaf
+    is all that is local. Every failure travels in the error slot, so a JO that resolved but whose
+    axis vectors did not read is never reported as a JO that does not exist."""
+    jo, err = _FRAME.resolve(frame_name)
+    if err:
+        return None, None, None, None, None, err
+    x_vec, y_vec = safe(lambda: jo.secondaryAxisVector), safe(lambda: jo.thirdAxisVector)
+    jo_name = safe(lambda: jo.name) or (frame_name or "").strip()
+    if x_vec is None or y_vec is None:
+        # getOrientedBoundingBox takes the X/Y pair below, so an unreadable one leaves no frame to
+        # measure in. Naming WHICH read came back empty keeps this off the not-found error.
+        return None, None, None, None, None, (
+            f"Joint Origin '{jo_name}' resolved, but its "
+            f"{'X (secondary)' if x_vec is None else 'Y (third)'} axis vector did not read, so there "
+            "is no frame to measure in. Omit 'frame' for a world-aligned box.")
+    return x_vec, y_vec, safe(lambda: jo.primaryAxisVector), jo, jo_name, None
+
+
+def _measuring_axes(jo, geom, x_vec, y_vec, jo_name, desc):
+    """(X, Y, error) - the frame's X/Y axes re-expressed in the coordinate space
+    ``getOrientedBoundingBox`` reads `geom` in.
+
+    MEASURED, on a 40x30x10 mm slab in a component turned 30 deg about Z and moved 50 mm in X: the
+    call reads its AXIS ARGUMENTS in the SAME space as the geometry it is handed, and a JointOrigin
+    reports its axis vectors in its owning COMPONENT's space whether it is read natively or through
+    an assembly proxy (both read (1,0,0) while that component's X in world is (0.866, 0.5, 0)). An
+    assembly-PROXY body is read in world coordinates (its AABB spanned 3.5 to 8.464 cm) and a NATIVE
+    body in its own component's (the same slab, 0 to 4.0 cm). Both MATCHED pairings measured
+    4.000 x 3.000 x 1.000 cm - the slab's true size; both MIXED pairings measured
+    4.964 x 4.598 x 1.000.
+
+    Only directions are transformed, so a matrix's translation never enters (measured: the lifted X
+    read (0.866, 0.5, 0), not the occurrence's 5 cm offset) - two instances of one component that
+    differ only in position give the same answer here.
+    """
+    occ = safe(lambda: geom.assemblyContext)
+    # Two reads, because no ONE of them spans the target kinds this tool accepts (both MEASURED):
+    # every BRepBody answers parentComponent while the shared entity_component chain returns None
+    # for it, and a BRepFace is the mirror image - it has no parentComponent attribute at all
+    # (hasattr False), and its owner is reached through the chain's body.parentComponent leg.
+    # A face landing on the miss below is measured UNLIFTED: the +X face of a root body read in a
+    # 30-deg-turned frame came back 0.0 x 30.0 x 10.0 mm instead of 15.0 x 25.981 x 10.0.
+    geom_comp = safe(lambda: geom.parentComponent) or _inputs.entity_component(geom)
+    jo_comp = safe(lambda: jo.parentComponent)
+    # `is True`: "nothing to lift" is a claim that both sides sit in ONE frame, so an unproven pair
+    # falls through to the lift below, which either derives a real matrix or refuses by naming the
+    # input it could not place.
+    if occ is None and _common.same_component(geom_comp, jo_comp) is True:
+        return x_vec, y_vec, None       # one component's frame on both sides - nothing to lift
+    if occ is None and geom_comp is None:
+        # Nothing this tool can read said which space the target is measured in, so there is no
+        # lift to derive and no ambiguity to report either - the axes go on as read. A geometry
+        # getOrientedBoundingBox cannot measure is refused by the call itself, and that refusal
+        # names the target rather than blaming the frame.
+        return x_vec, y_vec, None
+    design = _common.design()
+    # Two DIFFERENT inputs can be the one with no single placement, and each has its own remedy, so
+    # each names the input the code actually read as unplaceable. Blaming the frame for the target's
+    # ambiguity sends the caller to re-word the one argument that was fine.
+    frame_unplaced = (f"Joint Origin '{jo_name}' could not be placed in the same space as the "
+                      "target, so the frame its extents would be measured in is unknown. Target a "
+                      "body inside the occurrence you mean (find_geometry returns one handle per "
+                      "instance), or omit 'frame' for a world-aligned box.")
+    untransformed = (f"Joint Origin '{jo_name}' resolved, but its axis vectors did not transform "
+                     "into the target's space, so there is no frame to measure in. Omit 'frame' "
+                     "for a world-aligned box.")
+    # `occ` scopes the JO's placement to the INSTANCE the target was reached through, so a component
+    # placed several times still resolves for the instance in hand.
+    to_world = _joints.component_world_matrix(design, jo_comp, occ)
+    if to_world is None:
+        return None, None, frame_unplaced
+    # A PROXY's geometry is read in world, so world axes are the answer and nothing comes back out.
+    # A NATIVE body is read in its OWN component's frame, so the world axes have to be brought back
+    # into that one - the only pairing left here, since a native body of the JO's own component
+    # returned above.
+    inverse = None
+    if occ is None:
+        from_world = _joints.component_world_matrix(design, geom_comp)
+        if from_world is None:
+            # The FRAME placed (to_world read above); it is the target's own component that no
+            # single placement answers for.
+            return None, None, (
+                f"No single placement answers for the component {desc} belongs to, so the space its "
+                f"extents are measured in is unknown - Joint Origin '{jo_name}' placed fine. Target "
+                "a body inside the occurrence you mean (find_geometry returns one handle per "
+                "instance), or omit 'frame' for a world-aligned box.")
+        inverse = safe(lambda: from_world.copy())
+        if inverse is None or not safe(lambda: inverse.invert()):
+            return None, None, (
+                f"The placement of the component {desc} belongs to did not invert, so the frame's "
+                "axes could not be brought into the space its extents are measured in. Omit "
+                "'frame' for a world-aligned box.")
+    out = []
+    for v in (x_vec, y_vec):
+        moved = safe(lambda v=v: v.copy())
+        if moved is None or not safe(lambda m=moved: m.transformBy(to_world)):
+            return None, None, untransformed
+        if inverse is not None and not safe(lambda m=moved: m.transformBy(inverse)):
+            return None, None, untransformed
+        out.append(moved)
+    return out[0], out[1], None
 
 
 # ── measure cores (take a RESOLVED entity; no resolution here) ────────────────
@@ -146,10 +255,9 @@ def _bbox(design, entity, desc, frame, units):
 
     want_frame = (frame or "").strip()
     if want_frame:
-        x_vec, y_vec, z_vec, jo_name = _joint_origin_axes(design, want_frame)
-        if x_vec is None:
-            return error(f"No Joint Origin named '{frame}'. Create one with joint_create_origin, "
-                         "or omit 'frame' for a world-aligned box.")
+        x_vec, y_vec, z_vec, jo, jo_name, frame_err = _joint_origin_axes(want_frame)
+        if frame_err:
+            return error(frame_err)
         mgr = safe(lambda: app.measureManager)
         if not mgr:
             return error("MeasureManager unavailable.")
@@ -157,8 +265,13 @@ def _bbox(design, entity, desc, frame, units):
         if geom is None:
             return error(f"{desc} has no B-Rep body to measure in a frame. Target a specific "
                          "body/occurrence (design_get(include=['tree']) lists them).")
+        # The measurement runs on the axes lifted into the target geometry's own space; frame_axes
+        # below publishes the UNLIFTED pair, which is the part-space frame the payload describes.
+        m_x, m_y, lift_err = _measuring_axes(jo, geom, x_vec, y_vec, jo_name, desc)
+        if lift_err:
+            return error(lift_err)
         try:
-            obb = mgr.getOrientedBoundingBox(geom, x_vec, y_vec)
+            obb = mgr.getOrientedBoundingBox(geom, m_x, m_y)
         except Exception as e:
             return error(f"Oriented bounding-box measurement failed: {e}. (The X/Y axes of the "
                          "frame must be perpendicular, and the target must be B-Rep geometry.)")
@@ -166,7 +279,7 @@ def _bbox(design, entity, desc, frame, units):
             return error("getOrientedBoundingBox returned nothing for this target.")
         return ok({
             "target": (desc + geom_note),
-            "frame": f"joint origin '{jo_name}' (part space)",
+            "frame": f"joint origin '{jo_name}' (part space; the frame its owning component carries)",
             "oriented": True,
             "units": units,
             "x": _common.measured(lambda: obb.length, f),    # length=X, width=Y, height=Z (right-hand)
@@ -175,7 +288,10 @@ def _bbox(design, entity, desc, frame, units):
             "center": _common.ptxyz(safe(lambda: obb.centerPoint), f),
             "frame_axes": {"x_axis": _vec(x_vec), "y_axis": _vec(y_vec), "z_axis": _vec(z_vec)},
             "note": "Measured in the joint-origin frame; x/y/z are the part-space extents. Feed "
-                    "these to param_set to drive stock size.",
+                    "these to param_set to drive stock size. The frame is the Joint Origin its "
+                    "owning COMPONENT carries - the same one for every instance of that component, "
+                    "so naming an instance ('<occurrence>:<JO name>') does not select a different "
+                    "one.",
         })
 
     bb = _geom.body_aabb(entity)
@@ -416,8 +532,7 @@ tool = (
     .add_input_property("per_body", {"type": "boolean",
             "description": "With include=['mass']: also a mass + CoM row per occurrence in the "
                            "subtree (nested included; a row with children aggregates them)."})
-    .add_input_property("frame", {"type": "string",
-            "description": "A Joint Origin name to measure the bounding box in that part-space frame."})
+    .add_input_property(*_FRAME.as_property())
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)

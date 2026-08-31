@@ -150,10 +150,20 @@ def _collect_source_entities(source_design, component_names, body_names):
         # same_component, not a NAME compare: the resolved component and source_design.rootComponent
         # are separate wrappers (component identity is never stable), and a name that will not read
         # on one of them would send the ROOT down the occurrence branch, where it has none.
-        if _common.same_component(comp, source_root):
+        at_source_root = _common.same_component(comp, source_root)
+        if at_source_root is True:
             entities.append(comp)                       # the whole source design (Component form)
             labels.append(f"{want} (whole design)")
             continue
+        if at_source_root is None:
+            # The two branches build DIFFERENT source entities (the Component itself vs its
+            # occurrences), so an unproven answer picks the wrong sourceEntities half the time - and
+            # the occurrence branch's own refusal would blame a missing instance instead.
+            return None, None, (f"Whether source component '{want}' is the source design's ROOT "
+                                "could not be read, and the root derives as itself while any other "
+                                "component derives through its occurrences - so which entities to "
+                                "derive is unknown. Name a sub-component, or omit 'components' to "
+                                "derive the whole source design.")
         occs = _component_occurrences(source_root, comp)
         if not occs:
             return None, None, (f"Source component '{want}' has no occurrence in the assembly to "
@@ -314,8 +324,11 @@ def handler(document_id: str = "", into_component: str = "",
     before_occ_tokens = _occurrence_tokens(comp)
     root = safe(lambda: design.rootComponent)
     # same_component, not `is`: component wrappers are never identity-stable, so `comp is not root`
-    # reads True even at the root and this would re-walk the same collection.
-    before_root_tokens = (before_occ_tokens if _common.same_component(comp, root)
+    # reads True even at the root and this would re-walk the same collection. The branch is an
+    # optimisation only - re-walking root yields the same census - so an unproven answer takes the
+    # walk, which is right whichever component `comp` turns out to be.
+    target_is_root = _common.same_component(comp, root)
+    before_root_tokens = (before_occ_tokens if target_is_root is True
                           else _occurrence_tokens(root))
 
     # The platform routes a derive into the ACTIVE component (the UI Insert>Derive behavior),
@@ -368,7 +381,17 @@ def handler(document_id: str = "", into_component: str = "",
                       "is_derived": bool(safe(lambda b=b: b.isDerived, False))}
                      for b in _common.result_bodies(feature)]
     derived_components = _new_derived_occurrences(comp, before_occ_tokens)
-    if not derived_components and not _common.same_component(comp, root):
+    # `is False` only. The net's error tells the caller the nesting FAILED and to delete the feature;
+    # run against a target that may itself be the root, a successful root derive answers that net
+    # positively and the call would report its own success as a failure. An unproven answer skips the
+    # net and DISCLOSES that the landing was not checked - see landing_note below.
+    landing_note = None
+    if not derived_components and target_is_root is None:
+        landing_note = ("Whether the derive's target component is this design's root could not be "
+                        "read, so the check for a derive that landed at ROOT instead of nested was "
+                        "not run - the bodies reported below landed, but WHERE they nested is "
+                        "unverified. Confirm with design_get(include=['tree']).")
+    if not derived_components and target_is_root is False:
         # Landing net: nothing new in the TARGET component - if the derive surfaced at ROOT
         # instead, the nesting failed and saying so beats a silent root sibling.
         strays = _new_derived_occurrences(root, before_root_tokens)
@@ -424,6 +447,8 @@ def handler(document_id: str = "", into_component: str = "",
             "here (a fillet, a patch, an offset) never travel back to the source, and the source "
             "itself was not modified. Build prep on top of the derived body/bodies."),
     }
+    if landing_note:
+        result["landing_unverified"] = landing_note
     if model_parameters_added is not None:
         # Beside parameters_imported (the userParameters delta), because the two count different
         # things and only the pair shows whether source values arrived at all. Omitted rather than

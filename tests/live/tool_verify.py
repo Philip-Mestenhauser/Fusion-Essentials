@@ -58,12 +58,15 @@ MCP = BASE + "/mcp"
 SERVER_NAME = "Fusion-Essentials MCP Server"
 DOC_PREFIX = "EVAL_sweep"
 
-# The machine cam_create_machine stores lives in the LOCAL machine library, outside the document the
-# sweep discards - and this server has no tool that removes a machine, so a fixed name would be
-# refused as a duplicate by every run after the first. One run stamp names it. Each run therefore
-# leaves one 'SweepMach3Axis <stamp>' (vendor SweepCo) machine behind, and that residue is the price
-# of the beat.
+# Two things this run stores OUTSIDE the document it discards: a machine in the LOCAL machine
+# library and a template in the LOCAL template library. Each is taken back out by its own teardown
+# beat at the end of the CAM deliverables act, in the same branch that created it and judged on
+# that delete's own read-backs. Each name carries a run stamp, which guards the window while the
+# asset EXISTS: two overlapping runs, or a run that died before its teardown, must not collide on
+# one name - the machine create refuses a duplicate, and cam_save_template always writes a NEW
+# template, so a repeated template name leaves one more asset in the library per run.
 MACHINE_NAME = "SweepMach3Axis " + time.strftime("%Y%m%d-%H%M%S")
+TEMPLATE_NAME = "GyroTmpl " + time.strftime("%Y%m%d-%H%M%S")
 
 # How much of a failing step's payload the ledger keeps. A FAIL row is read to DIAGNOSE, and the
 # keys that carry the diagnosis (a measured extent, a change list) sit late in a payload - at 160
@@ -71,6 +74,23 @@ MACHINE_NAME = "SweepMach3Axis " + time.strftime("%Y%m%d-%H%M%S")
 # read only as confirmation, so its note stays short.
 NOTE_MAX = 480
 REFUSAL_NOTE_MAX = 80
+# Pause between steps. UNDER MEASUREMENT: at 0.1 it was 121s of a 402s run - 30% of the budget -
+# with no recorded reason, against a file whose own doctrine says an async wait is a bounded poll
+# "never by a sleep inside the call". Held at 0.0 while three consecutive runs decide whether it
+# was hiding a main-thread race; if they are clean the sleep goes, if one flakes the step that
+# flaked gets its own bounded poll rather than a blanket pause.
+STEP_SLEEP_S = 0.0
+
+# The wall-clock the sweep has to finish inside, and the shell ceiling it is drawn from. Every agent
+# runs this file through a shell tool that is killed at 600 s, and a kill leaves no receipt at all -
+# so the run fails ITSELF at the lower number, with its act and tool breakdowns printed, while there
+# is still room to say so.
+_SHELL_TIMEOUT_S = 600.0
+_RUNTIME_BUDGET_S = 540.0
+
+# The pseudo-tool a showcase beat uses to hold a view on screen. Never dispatched to the server and
+# never counted as coverage - STEPS filters it out.
+_DWELL = "_dwell"
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(os.path.dirname(_HERE))
@@ -345,6 +365,20 @@ def _measured(label, got, ok_):
     return True
 
 
+# Values a LATER step's predicate has to compare against. A predicate is handed the payload alone,
+# deliberately, so it cannot drift into reading run state - but a before/after check genuinely needs
+# the before, and re-reading it at assert time would only compare the model to itself.
+_RECALL = {}
+
+
+def _recall(key, pick):
+    """A save-slot extractor that also parks its value under 'key' for a later predicate."""
+    def take(payload):
+        _RECALL[key] = pick(payload)
+        return _RECALL[key]
+    return take
+
+
 # The band the one-inch square is measured against. The nominal is exactly 25.4 mm, but the sketch's
 # bounding box spans the imported PAINT, so it carries half the rect's stroke on each side plus the
 # importer's own rounding - measured live at min.y -25.41 / height 25.42, a hundredth or two over.
@@ -424,6 +458,36 @@ def _datum_plane(base):
     return check
 
 
+def _dim_measures(mm, tol=0.05):
+    """sketch_dimension: the number the dimension MEASURED, in mm. A dimension that attached to the
+    neighbouring entity, or read the right one in centimetres, still returns ok - the measured value
+    is the only thing that tells those apart. Translation-invariant, so the layout pass moving the
+    bench cannot change it."""
+    def check(p):
+        parts = (p.get("value") or "").split()
+        try:
+            got = float(parts[0])
+        except (IndexError, ValueError):
+            got = None
+        return _measured(f"dimension measures {mm} mm",
+                         {"dim_type": p.get("dim_type"), "value": p.get("value")},
+                         got is not None and abs(got - mm) < tol)
+    return check
+
+
+def _datum(kind):
+    """model_construction in any of its geometry-driven build modes: the datum LANDED. It carries
+    the kind that was asked for, an entityToken the next call can point AT, and a geometry read off
+    the CREATED object - not an echo of the request, which every mode would satisfy identically."""
+    def check(p):
+        g = p.get("geometry") or {}
+        return _measured(f"{kind} datum landed",
+                         {"mode": p.get("mode"), "name": p.get("name"), "geometry": g},
+                         p.get("created") is True and p.get("kind") == kind
+                         and bool(p.get("handle")) and bool(g))
+    return check
+
+
 def _result_bodies(label):
     """The shared feature-landed read for the solid builders: the feature named itself and
     'result_bodies' is the walk over the bodies that feature actually produced."""
@@ -471,6 +535,34 @@ def _relation_measured(relation):
                           "passed": p.get("passed")},
                          p.get("relation") == relation and isinstance(p.get("passed"), bool)
                          and isinstance(ang, (int, float)) and not isinstance(ang, bool))
+    return check
+
+
+def _rebuilt(method, density):
+    """mesh_repair(repair_type='rebuild'): the method that ran and the density it ran at, the
+    latter read off the feature's own ModelParameter. A method the API silently swapped, or a
+    density it clamped, differs here - the request alone would agree with itself."""
+    def check(p):
+        return _measured(f"rebuild ran {method} at density {density}",
+                         {"rebuild_method": p.get("rebuild_method"), "density": p.get("density"),
+                          "unverified": p.get("density_unverified")},
+                         p.get("repaired") is True and p.get("rebuild_method") == method
+                         and p.get("density") == density and "density_unverified" not in p)
+    return check
+
+
+def _relation_read(relation, key):
+    """model_measure_relation for the relations that do NOT report an angle. Each relation measures
+    its own quantity - an angle for the alignments, a distance for the fits - so the key it has to
+    publish is named per relation instead of assumed, and a relation answering with someone else's
+    measurement fails here."""
+    def check(p):
+        got = (p.get("measured") or {}).get(key)
+        return _measured(f"{relation} measured {key}",
+                         {"relation": p.get("relation"), "measured": p.get("measured"),
+                          "passed": p.get("passed")},
+                         p.get("relation") == relation and isinstance(p.get("passed"), bool)
+                         and isinstance(got, (int, float)) and not isinstance(got, bool))
     return check
 
 
@@ -707,6 +799,47 @@ def _jointed(name):
     return check
 
 
+def _mesh_round_trip(width_mm, height_mm, tol=0.5):
+    """model_inspect on a re-imported mesh: it comes back the SIZE of the mesh that was written.
+
+    mesh_export defaults stl_units to mm and mesh_insert defaults units to mm, so a file written and
+    re-imported with neither naming a unit agrees end to end. The two defaults are set in separate
+    tools, and a mismatch is silent: read at the wrong unit, every coordinate is divided (or
+    multiplied) by 25.4 and the mesh arrives a fortieth of its size and a fortieth of its distance
+    from the origin, which puts it inside whatever is parked there. Only a size check catches that;
+    the import returns ok either way.
+
+    A SIZE, not a position: the layout pass moves the bench, and 25.4 is the only thing being looked
+    for. 'is_oriented' and 'volume' ride in the evidence unasserted - the round trip comes back
+    un-oriented with zero signed volume, and pinning a value here would pin that rather than
+    describe it."""
+    def check(p):
+        b = p.get("bbox") or {}
+        return _measured(f"re-imported mesh measures {width_mm} x {height_mm} mm",
+                         {"x": b.get("x"), "y": b.get("y"), "z": b.get("z"),
+                          "is_closed": p.get("is_closed"), "is_oriented": p.get("is_oriented"),
+                          "volume": p.get("volume")},
+                         _near(b.get("x"), width_mm, tol) and _near(b.get("y"), width_mm, tol)
+                         and _near(b.get("z"), height_mm, tol))
+    return check
+
+
+def _joint_origin_landed(name, z=10.0):
+    """joint_create_origin for a bench station. The X/Y it was asked for travel with the layout, and
+    a predicate is not shifted with the step it belongs to - so this asserts the axis the layout
+    never touches (Z, the height up the base) plus the name and units read back off the created
+    origin. Where it sits ALONG the base is proven by the arms landing apart, not by a literal."""
+    def check(p):
+        loc = p.get("offset_parameters") or {}
+        return _measured(f"joint origin '{name}' landed at z={z} mm",
+                         {"created": p.get("created"),
+                          "joint_origin_name": p.get("joint_origin_name"),
+                          "offset_parameters": loc},
+                         p.get("created") is True and p.get("joint_origin_name") == name
+                         and loc.get("units") == "mm" and _near(loc.get("z"), z, 1e-4))
+    return check
+
+
 def _joint_origin_at(name, x=0.0, y=0.0, z=0.0):
     """joint_create_origin(anchor='coordinates'): 'offset_parameters' holds the created JO's own
     offsetX/Y/Z VALUES read back off it (the tool deletes the origin and errors when they differ
@@ -900,6 +1033,18 @@ def _captured(p):
                       "snapshot_count": n, "pose_held": p.get("pose_held")},
                      p.get("captured") is True and bool(p.get("snapshot"))
                      and _num(n) and n >= 1 and p.get("pose_held") is True)
+
+
+def _joint_is(name, kind):
+    """assembly_get: one joint's motion type, read off the DESIGN's own joint walk. joint_edit
+    publishes the type it was ASKED for, so a retype that silently did not land reads back correct
+    from the writer and wrong from here - which is the whole point of asking someone else."""
+    def check(p):
+        row = next((j for j in (p.get("joints") or []) if j.get("name") == name), None)
+        return _measured(f"{name} reads back as {kind}",
+                         {"joint": row and {"name": row.get("name"), "type": row.get("type")}},
+                         bool(row) and row.get("type") == kind)
+    return check
 
 
 def _joints_listed(minimum, poses=None):
@@ -1099,25 +1244,1158 @@ def _imported(p):
                      and bool(p.get("created")))
 
 
-def _box(name, ox=0, oy=0):
-    """Four steps building a fresh free component 'name' holding one 20x20x10 solid box (offset
-    ox/oy in the world grid - every cameo gets its own slot so nothing builds on top of the
-    gyroscope or another cameo). The reusable free occurrence the joint/assembly steps mate."""
+def _imported_sketches(p):
+    """doc_insert_import, DXF branch: one sketch per DXF layer carrying 2D geometry. The receiving
+    component's own sketch census, differenced across the import, is the receipt - importToTarget2
+    returns nothing for a DXF."""
+    n = p.get("sketches_added")
+    return _measured("DXF sketches landed",
+                     {"sketches_added": n, "plane": p.get("plane"),
+                      "created": (p.get("created") or [])[:2]},
+                     p.get("imported") is True and _num(n) and n >= 1)
+
+
+def _imported_curves(p):
+    """doc_insert_import, SVG branch: the curves land in an EXISTING sketch, so the receipt is that
+    sketch's own curve count differenced across the import."""
+    n = p.get("curves_added")
+    return _measured("SVG curves landed",
+                     {"curves_added": n, "objects_created": p.get("objects_created"),
+                      "into": p.get("into")},
+                     p.get("imported") is True and _num(n) and n >= 1)
+
+
+def _exported_bytes(p):
+    """design_export: the file LANDED with content. The API's own success bool is not enough - a
+    build missing a format's factory, or an export that writes an empty file, reports success and
+    leaves nothing to open, so the size on disk is what the row stands on."""
+    n = p.get("size_bytes")
+    return _measured("exported file on disk",
+                     {"format": p.get("format"), "file_path": p.get("file_path"), "size_bytes": n},
+                     p.get("exported") is True and _num(n) and n > 0)
+
+
+def _box(name, ox=0, oy=0, tint="", shape="box"):
+    """Steps building a fresh free component 'name' holding one small solid (offset ox/oy in the
+    world grid - every cameo gets its own slot so nothing builds on top of the gyroscope or another
+    cameo). The reusable free occurrence the joint/assembly steps mate.
+
+    'shape' and 'tint' make the two halves of a jointed PAIR tell apart. Two identical grey 20 mm
+    cubes mated together show nothing: which one moved, and which way, is exactly what a viewer is
+    trying to read off the joint."""
+    if shape == "disc":
+        draw = ("sketch_add_geometry", {"kind": "circle", "cx": ox + 10, "cy": oy + 10, "radius": 10,
+                                        "sketch_name": name + "S"}, "ok", None)
+        height = 16
+    elif shape == "bar":
+        draw = ("sketch_add_geometry", {"kind": "rectangle", "x1": ox, "y1": oy + 5,
+                                        "x2": ox + 34, "y2": oy + 15,
+                                        "sketch_name": name + "S"}, "ok", None)
+        height = 8
+    else:
+        draw = ("sketch_add_geometry", {"kind": "rectangle", "x1": ox, "y1": oy,
+                                        "x2": ox + 20, "y2": oy + 20,
+                                        "sketch_name": name + "S"}, "ok", None)
+        height = 10
     return [
         ("model_create_component", {"name": name, "activate": True}, _made_component, None),
         ("sketch_create", {"plane": "xy", "name": name + "S"}, "ok", None),
-        ("sketch_add_geometry", {"kind": "rectangle", "x1": ox, "y1": oy, "x2": ox + 20, "y2": oy + 20,
-                                 "sketch_name": name + "S"}, "ok", None),
-        ("model_extrude", {"sketch_name": name + "S", "profile_index": 0, "distance": 10},
+        draw,
+        ("model_extrude", {"sketch_name": name + "S", "profile_index": 0, "distance": height},
          _extruded, None),
-    ]
+    ] + ([("appearance_set", {"target": name, "color": tint}, "ok", None)] if tint else [])
+
+
+# The joint bench's stations: (tag, motion, rotation axis, slide axis, drive kwarg, drive value).
+# A drive of None is a motion with no single driven parameter - rigid has no freedom at all, and
+# ball/planar carry several at once, so joint_drive has nothing to set and the station stands as a
+# created joint. Axes are FRAME-relative; every part here is built in world coordinates on a
+# world-aligned frame, so they read as world axes too.
+# (tag, motion, rotation axis, slide axis, [(drive kwarg, value), ...], pose, tint).
+# EVERY motion with a degree of freedom moves. The two ways of using one are different tools, and
+# which one applies is a property of the motion, not a preference:
+#   drives - joint_drive sets a joint's own driven VALUE, and takes revolute / slider / cylindrical
+#            only (measured; it refuses the rest by name). Cylindrical carries BOTH freedoms, so it
+#            is driven twice - rotation then slide - and shows them one at a time.
+#   pose   - the multi-freedom motions have no single value to set, so they are POSED with
+#            assembly_move within the freedom their joint allows: pin_slot slides and turns, ball
+#            turns about three axes, planar slides in its plane and spins in it. joint_drive's own
+#            refusal points at assembly_move for exactly this.
+# Rigid is the one station that must NOT move; it is the control the others are read against.
+_JOINT_STATIONS = (
+    ("Rev", "revolute",    "z", "",  [("angle_deg", 90.0)],                  None,
+     "#E5533C"),
+    ("Sld", "slider",      "x", "",  [("distance", 22.0)],                   None,
+     "#1E88E5"),
+    ("Cyl", "cylindrical", "z", "",  [("angle_deg", 60.0), ("distance", 14.0)], None,
+     "#43A047"),
+    ("Pin", "pin_slot",    "z", "x", [], {"dx": 18.0, "rotate_z": 35.0},     "#FB8C00"),
+    ("Bal", "ball",        "z", "",  [], {"rotate_x": 25.0, "rotate_z": 40.0}, "#8E24AA"),
+    ("Pla", "planar",      "z", "",  [], {"dx": 15.0, "dy": 12.0, "rotate_z": 20.0}, "#00ACC1"),
+    ("Rig", "rigid",       "z", "",  [], None,                               "#9E9E9E"),
+)
+# Where each station sits along the base, and where its arm is drawn before the joint carries it
+# there. Both are authored; the layout pass moves the whole bench as one welded group.
+_STN_X0, _STN_PITCH, _STN_Y, _STN_Z = 890.0, 45.0, 320.0, 10.0
+# How long one motion is held before the next starts. Ten of these is the price of the seven motions
+# reading as seven rather than as one blur; it is the largest dwell budget in the sweep, and the
+# sweep runs against a 600 s ceiling, so it stays under a second.
+_JOINT_BEAT = 0.8
+
+
+def _pose_took(tag):
+    """model_inspect on a POSED arm: its world footprint is no longer the 34 x 10 mm bar it was drawn
+    as. Every pose on this bench TURNS the arm as well as sliding it, so an axis-aligned box still
+    measuring 34 x 10 says the pose did not take. assembly_move's own report cannot say that - it
+    describes the move it asked for - and a transform that ticked is not a part that moved.
+
+    The two extents are judged TOGETHER, because a turn does not change them evenly: measured, a
+    35 deg pose takes a 34 x 10 bar to 33.59 x 27.69, so the long axis barely moves while the short
+    one nearly triples. Either extent alone would call that pose a no-op."""
+    def check(p):
+        return _measured(f"Ind{tag} is off its 34 x 10 mm rest footprint",
+                         {"x": p.get("x"), "y": p.get("y"), "z": p.get("z")},
+                         _num(p.get("x")) and _num(p.get("y"))
+                         and abs(p["x"] - 34.0) + abs(p["y"] - 10.0) > 5.0)
+    return check
+
+
+def _joint_bench():
+    """A station per motion type: a Joint Origin ON the base at that station, an indicator arm drawn
+    clear of it, and the joint that carries the arm to the station. Then the drive pass, so the
+    motions that HAVE a degree of freedom are seen using it.
+
+    The stations are Joint Origins rather than a snap onto the base's top face because a face snap
+    resolves to that face's centre - every arm would mate at the same point and the seven motions
+    would end up in one pile, which is the opposite of a demonstration."""
+    rows = []
+    # EVERY ARM FIRST, in a row clear of the base, and only then the frame that holds the whole
+    # bench. The ASSEMBLY is the thing worth watching here - seven arms hopping onto seven stations -
+    # and it cannot be watched while the camera is still fitted to a bare base, or while it cuts to
+    # each arm as that arm is drawn. Building the parts before the joints is what makes one frame
+    # cover the whole of it.
+    for i, (tag, _m, _ax, _sl, _dk, _dv, tint) in enumerate(_JOINT_STATIONS):
+        rows += _box("Ind" + tag, ox=_STN_X0 + i * _STN_PITCH, oy=_STN_Y + 60.0,
+                     tint=tint, shape="bar")
+    rows.append(("design_activate_component", {"occurrence": "root"}, "ok", None))
+    rows.append(_watch(["JointBase:1"] + ["Ind" + st[0] + ":1" for st in _JOINT_STATIONS]))
+    for i, (tag, motion, axis, slide, _dk, _dv, _t) in enumerate(_JOINT_STATIONS):
+        x = _STN_X0 + i * _STN_PITCH
+        # FLIPPED, and the reason is measured: an arm's bottom face points -Z while the station's
+        # frame points +Z, so a flush mate opposes the two normals and rotates the arm 180 degrees -
+        # it hangs DOWN from the station and ends up inside the base rather than standing on it
+        # (measured: an 8 mm arm landing at z 2..10 inside a base spanning z 0..10, invisible).
+        # Flipping seats the arm proud of the base, which is the only place a driven motion reads -
+        # measured on a finished run, all seven land at z 10..18 on a base spanning z 0..10.
+        joint = {"occurrence_one": "Ind" + tag + ":1:bottom", "occurrence_two": "Stn" + tag,
+                 "joint_type": motion, "axis": axis, "flip": True, "name": "J" + tag}
+        if slide:
+            joint["slide_axis"] = slide
+        rows += [
+            ("design_activate_component", {"occurrence": "JointBase:1"}, "ok", None),
+            ("joint_create_origin", {"anchor": "coordinates", "x": x, "y": _STN_Y, "z": _STN_Z,
+                                     "name": "Stn" + tag},
+             _joint_origin_landed("Stn" + tag), None),
+            ("design_activate_component", {"occurrence": "root"}, "ok", None),
+            ("joint_create", joint, _jointed("J" + tag), None),
+        ]
+    # THE MOTION PASS. Everything that CAN move is moved before anything is put back, so one frame
+    # of the bench shows six arms displaced at once against the rigid station that cannot be - which
+    # is the only way a motion type reads as a motion rather than a label.
+    # Each motion gets its OWN beat. Back to back they read as one blur - a viewer cannot tell which
+    # arm moved for which joint, which is the whole point of a bench with one station per type. The
+    # beat is a dwell rather than a camera row: the bench is already framed as a whole, and moving
+    # the camera per station would cost seven zooms to show seven small displacements.
+    for tag, _m, _ax, _sl, drives, _pose, _t in _JOINT_STATIONS:
+        for kwarg, value in drives:
+            check = _driven_angle(value) if kwarg == "angle_deg" else _driven_slide(value)
+            rows.append(("joint_drive", {"joint_name": "J" + tag, kwarg: value}, check, None))
+            rows.append(_dwell(_JOINT_BEAT))
+    # the multi-freedom motions, POSED - each within what its own joint allows. assembly_move on a
+    # jointed occurrence is a TRANSIENT pose and says so in 'jointed_warning'; it is discarded below
+    # rather than captured, because a pending uncaptured move makes the next joint create refuse.
+    for tag, _m, _ax, _sl, _d, pose, _t in _JOINT_STATIONS:
+        if not pose:
+            continue
+        rows.append(("assembly_move", dict(occurrence="Ind" + tag + ":1", **pose),
+                     _moved_occurrence(), None))
+        rows.append(("model_inspect", {"target": "Ind" + tag + ":1"}, _pose_took(tag), None))
+        rows.append(_dwell(_JOINT_BEAT))
+    # THE DISPLACED FRAME, captured before anything is put back: six arms off their rest pose against
+    # the one rigid station that cannot leave its. 'current' shoots what the camera already frames -
+    # a named view would refit to the whole model and lose the bench.
+    rows.append(_dwell(2.5))
+    rows.append(("view_screenshot", {"view": "current", "width": 640, "height": 460}, "ok", None))
+    # the motions joint_drive will NOT take, each refused by name rather than answered with a value
+    # it does not have: rigid has no freedom at all, ball carries three rotations at once, and
+    # pin_slot is outside the drivable set even though it has freedom in two. The refusal is what
+    # sends a caller to assembly_move, which is what the poses above use.
+    for tag in ("Rig", "Bal", "Pin"):
+        rows.append(("joint_drive", {"joint_name": "J" + tag, "angle_deg": 30.0}, "refused", None))
+    # HOME AGAIN: the transient poses reverted in one call, then every driven value back to zero, so
+    # the bench is left as it was built and the next act starts from a known pose.
+    rows.append(("assembly_capture_position", {"action": "discard_pending"},
+                 lambda p: p.get("discarded") is True and p.get("has_pending") is False, None))
+    for tag, _m, _ax, _sl, drives, _pose, _t in _JOINT_STATIONS:
+        for kwarg, _value in drives:
+            check = _driven_angle(0.0) if kwarg == "angle_deg" else _driven_slide(0.0)
+            rows.append(("joint_drive", {"joint_name": "J" + tag, kwarg: 0.0}, check, None))
+    return rows
+
+
+def _group_of(name):
+    """The tool-group a cameo or scratch sketch belongs to - its name with any trailing index,
+    suffix letter or role word stripped. SlotA..SlotH are one group, EditTrim/EditSplit/EditCorner
+    another, PipeRun/PipeHalf/PipeCut another. Grouping is what lets the camera move once per family
+    of related operations instead of once per entity, and frame the family together."""
+    stem = re.sub(r"(:\d+)$", "", name)
+    stem = re.sub(r"(Sketch|Path|Prof|Block|Post|Cameo|Comp|Part|Run|S)$", "", stem) or stem
+    stem = re.sub(r"[A-Z]?\d*$", "", stem) or stem
+    return stem or name
 
 
 def _watch(occurrence):
-    """A camera row: orient iso and FIT to the occurrence just built, so a viewer watching the run
-    sees each feature appear instead of an empty corner of the world."""
-    return ("view_set", {"action": "orient", "orientation": "iso-top-right", "focus": occurrence},
-            "ok", None)
+    """A camera row: orient and FRAME the occurrence, so a viewer watching the run sees the chunk
+    about to be exercised fill the viewport instead of sitting as a speck in a corner. The story
+    world is metres wide (every cameo gets its own grid slot) while the parts are tens of
+    millimetres, so an unframed orient shows nothing legible - one of these opens each chunk that
+    works on its own geometry, not each step.
+
+    Sketch-only subjects are shot from the TOP, not iso: a flat XY sketch seen from iso-top-right is
+    foreshortened to near nothing, and text on it cannot be read at all. Anything with a body in it
+    keeps iso, where a solid reads as a solid."""
+    names = occurrence if isinstance(occurrence, list) else [occurrence]
+    flat = not any(str(n).endswith(":1") for n in names)
+    view = "iso-top-right"
+    if flat:
+        planes = {_SKETCH_PLANE.get(str(n)) for n in names}
+        planes.discard(None)
+        # one shared plane: look straight down its normal. Mixed planes have no such view, so iso
+        # at least shows all of them at an angle rather than one of them edge-on.
+        view = _PLANE_VIEW.get(planes.pop(), "top") if len(planes) == 1 else "iso-top-right"
+    return ("view_set", {"action": "orient", "orientation": view, "focus": occurrence}, "ok", None)
+
+
+def _dwell(seconds):
+    """Hold the current view for a beat. The ONLY sleep in the sweep and a deliberate one: a
+    showcase step exists to be watched, and a toolpath that flicks on and off inside one frame
+    shows nothing. It is not a wait for an async result - those are bounded polls - so it never
+    guards a correctness step, and _DWELL is filtered out of STEPS so it cannot pass as a tool."""
+    return (_DWELL, {"seconds": seconds}, "ok", None)
+
+
+def _leaves_no_row(step):
+    """True for a step run_steps judges nothing for and appends NO row - today only a _dwell.
+
+    The ONE definition of that class, because two sites depend on it agreeing: run_steps skips on
+    it, and judged_steps drops it to keep the by-position pairing honest. A second row-less step
+    kind taught to one site alone would silently shift that pairing again."""
+    return step[0] == _DWELL
+
+
+def _watch_all():
+    """A camera row with NO focus: fit the whole model. Correct only while the world IS the subject
+    - the parametric skeleton, before the first cameo lands in its own grid slot - and wrong once
+    the grid spreads the world over a metre, which is what _watch(occurrence) is for."""
+    return ("view_set", {"action": "orient", "orientation": "iso-top-right"}, "ok", None)
+
+
+# The steps that first put a BODY in a freshly created component - the moment there is something to
+# frame. model_construction is deliberately NOT one: a datum plane is not geometry a viewer can see,
+# and the body it is drawn for arrives a few steps later.
+# The steps that first put geometry ON a sketch - the moment it becomes something to look at.
+_SKETCH_MAKERS = ("sketch_add_geometry", "sketch_add_3d_line", "sketch_set_text",
+                  "sketch_insert_svg", "sketch_project")
+
+_BODY_MAKERS = ("model_extrude", "model_revolve", "model_loft", "model_sweep", "model_pipe",
+                "model_base_feature", "surface_extrude", "surface_revolve", "surface_patch",
+                "mesh_insert")
+
+# view_set frames a subject at this multiple of its own size. Modelled here so the sweep can tell
+# what the standing frame already shows and leave the camera alone when the answer is "this".
+_FRAME_MARGIN = 5.0
+# How much bigger than its subject a frame reaches for context, and the floor under that for a
+# subject with no measurable size. Proportional, not absolute: a constant neighbourhood frames a
+# small sketch at a few percent of the viewport and a large assembly too tight.
+_FRAME_CONTEXT = 3.5
+_FRAME_MIN_SPAN = 260.0
+# The most a single neighbour may stretch that neighbourhood. Without a ceiling one distant part
+# drags the frame out to the whole field, where every named subject reads as a speck.
+_FRAME_STRETCH = 1.4
+# How many recent neighbours to lend a subject whose own position is unknown, purely for scale.
+_FRAME_FALLBACK_NEIGHBOURS = 3
+
+# The most subjects one frame may name. The boxes this pass reasons with are built from AUTHORED
+# SKETCH COORDINATES, not from geometry: a ring whose sketch is a point at the origin is 160 mm of
+# real body, and a revolve or a pattern reaches further still. So every span computed here is a
+# lower bound, and a long focus list quietly frames far more than the arithmetic predicts - graded
+# by eye, every single-subject frame read well and the 5-to-8 subject frames were whole-field
+# photographs. Keeping the list short is the guard that does not depend on the model being right.
+_FRAME_MAX_SUBJECTS = 6
+# Sketches are watched a HANDFUL at a time rather than one by one: a sketch command is quick, and a
+# camera move per command is more motion than the work is worth. The span cap is what keeps that
+# honest - five neighbouring sketches in one row share a frame, five scattered ones do not.
+_FRAME_SKETCH_GROUP = 10
+_FRAME_SKETCH_SPAN = 560.0
+# How much wider a JOINT frame reaches than a build frame - a mate is watched, not inspected.
+_FRAME_RELATION_WIDEN = 2.2
+
+# The sketch planes that exist from the start. A sketch on one of these can be drawn at any time; a
+# sketch on a named datum or a face cannot exist before the body that datum is derived from.
+_ORIGIN_PLANES = ("xy", "xz", "yz")
+
+# Sketch tools whose result depends on what the sketch holds when they run, so a sketch any of them
+# touches cannot be drawn up front. A dimension or a constraint is NOT one of these: it names its
+# operands, and they travel with the curves.
+_SKETCH_ORDER_BOUND = ("sketch_edit_curve", "sketch_copy", "sketch_move", "sketch_set_text",
+                       "sketch_delete_entity", "sketch_project", "sketch_insert_svg")
+
+
+def _sketches_first(program, after):
+    """Move every sketch that CAN be drawn before anything is solid into one phase, and return
+    (that phase, the program without it).
+
+    A profile has to exist before the feature that consumes it - but nothing says it has to be drawn
+    JUST before, and drawing each one where its solid is needed is what makes the modelling acts
+    look like they are still doing sketch work. A sketch qualifies when it sits on an origin plane
+    and its geometry is written out rather than read from run context; what stays behind is the
+    sketches that CANNOT come early - one on a datum plane or a face that a later body defines, and
+    one whose curves are projected off a solid.
+
+    A component holding a hoisted sketch moves with it (a sketch needs its parent), and a
+    'design_activate_component' takes its place in the narrative so everything after it still builds
+    where it did."""
+    hoisted, kept_acts, phase_active = [], [], None
+    for name, pre, narr, fb in program:
+        if name in after:
+            kept_acts.append((name, pre, narr, fb))
+            continue
+        move, comps, owner_of = set(), {}, {}
+        active = None
+        for i, step in enumerate(narr):
+            args = step[1] if isinstance(step[1], dict) else None
+            if args and step[0] == "model_create_component" and args.get("activate"):
+                active = args.get("name")
+            elif args and step[0] == "design_activate_component" and args.get("occurrence"):
+                occ = re.sub(r":\d+$", "", args["occurrence"])
+                active = None if occ == "root" else occ
+            if step[0] != "sketch_create" or not args or not args.get("name"):
+                continue
+            if args.get("plane") not in _ORIGIN_PLANES:
+                continue
+            sk = args["name"]
+            # A sketch moves early unless a later step EDITS it. A dimension, a constraint or a
+            # read works on the curves wherever they were drawn, and those come with it; trimming,
+            # copying, moving, texting or projecting all depend on what the sketch holds AT THAT
+            # MOMENT, and hoisting every curve up front changes that.
+            if any(s[0] in _SKETCH_ORDER_BOUND and isinstance(s[1], dict)
+                   and s[1].get("sketch_name") == sk for s in narr):
+                continue
+            owner_of[i] = active
+            # A sketch that later RECEIVES a projection cannot come early: projecting a body's face
+            # into a sketch that predates the body is a circular timeline dependency, and Fusion
+            # refuses it by name (CIRCULAR_DEPENDENCY).
+            if any(s[0] == "sketch_project" and isinstance(s[1], dict)
+                   and s[1].get("sketch_name") == sk for s in narr):
+                continue
+            end = next((j for j in range(i + 1, len(narr))
+                        if narr[j][0] in ("sketch_create", "model_create_component")), len(narr))
+            draws = [k for k in range(i + 1, end)
+                     if narr[k][0] in _SKETCH_MAKERS and isinstance(narr[k][1], dict)
+                     and narr[k][1].get("sketch_name") == sk]
+            if not draws:
+                continue
+            # A sketch that READS run context cannot come early. Callable args mean a handle saved by
+            # an earlier step - and a handle is a face or an edge on a body, so the sketch is being
+            # dimensioned or constrained against geometry a LATER feature defines. Hoisting it puts
+            # the sketch before that body in the timeline and the reference points backwards, which
+            # Fusion rejects at validation (measured: 'InternalValidationError : rSurface3D' on a
+            # line_to_surface dimension whose sketch had been hoisted ahead of the shell it measures).
+            if any(not isinstance(narr[k][1], dict) for k in range(i + 1, end)):
+                continue
+            move.add(i)
+            move.update(draws)
+            owner = next((j for j in range(i - 1, -1, -1)
+                          if narr[j][0] == "model_create_component"), None)
+            if owner is not None and isinstance(narr[owner][1], dict) \
+                    and narr[owner][1].get("activate") and narr[owner][1].get("name"):
+                comps[owner] = narr[owner][1]["name"]
+
+        kept = []
+        for i, step in enumerate(narr):
+            if i in comps:
+                hoisted.append(step)
+                phase_active = comps[i]
+                kept.append(("design_activate_component",
+                             {"occurrence": comps[i] + ":1"}, "ok", None))
+            elif i in move:
+                # The sketch phase runs the creates out of their original order, so whichever
+                # component happens to be open is NOT the one this sketch was authored in. Put the
+                # right one back first, or a root-level sketch lands inside an unrelated component
+                # and is carried off to that component's slot.
+                want = owner_of.get(i, phase_active)
+                if i in owner_of and want != phase_active:
+                    hoisted.append(("design_activate_component",
+                                    {"occurrence": (want + ":1") if want else "root"}, "ok", None))
+                    phase_active = want
+                hoisted.append(step)
+            else:
+                kept.append(step)
+        kept_acts.append((name, pre, kept, fb))
+
+    if hoisted:
+        hoisted.append(("design_activate_component", {"occurrence": "root"}, "ok", None))
+    return hoisted, kept_acts
+
+def _sketch_reading_order(phase, slots):
+    """The sketch phase re-ordered so the camera reads the field once instead of commuting.
+
+    The packer already deals cells left to right in the order the sketches are drawn, so the field
+    IS in reading order - rows marching across and stepping down. What breaks the walk is that some
+    sketches cannot be dealt a cell at all: one anchored to the world origin (a scale or a mirror is
+    origin-relative, and an angular dimension's contract is stated against the sketch origin) stays
+    in the origin band while the field sits a metre away. Interleaved with the placed ones, every
+    such sketch costs a round trip out to the origin and back.
+
+    So the pinned ones are drawn together, ahead of the field. Relative order is preserved inside
+    each group, which is what keeps this safe to run AFTER the cells are dealt: the packer's order
+    over the PLACED chunks is untouched, so 'slots' stays true.
+
+    A block is one sketch: its create, the component create hoisted with it, and its drawing steps.
+    Blocks move whole - a sketch separated from the component it belongs to lands in the wrong one.
+    """
+    # The owner is READ OFF the phase as built, never re-derived: a sketch whose component was
+    # created outside this phase has no create to look at, and guessing 'root' for it drops the
+    # sketch into the root component - where the geometry it feeds is then missing by name.
+    blocks, pending, owner, owners = [], [], None, {}
+    for step in phase:
+        args = step[1] if isinstance(step[1], dict) else {}
+        if step[0] == "design_activate_component":
+            occ = str(args.get("occurrence") or "")
+            owner = None if occ in ("", "root") else re.sub(r":\d+$", "", occ)
+            continue                       # regenerated below from each block's recorded owner
+        if step[0] == "model_create_component":
+            pending.append(step)           # travels with the sketch it was hoisted for
+            if args.get("activate") and args.get("name"):
+                owner = args["name"]
+            continue
+        if step[0] == "sketch_create":
+            blocks.append(pending + [step])
+            owners[id(blocks[-1])] = owner
+            pending = []
+            continue
+        if blocks:
+            blocks[-1].append(step)
+
+    def owner_of(block):
+        return owners.get(id(block))
+
+    def chunk_of(block):
+        made = next((s for s in block if s[0] == "model_create_component"), None)
+        if made:
+            return made[1]["name"]
+        held = owner_of(block)
+        if held:
+            return held
+        create = next(s for s in block if s[0] == "sketch_create")
+        return create[1].get("name")
+
+    pinned = [b for b in blocks if chunk_of(b) not in slots]
+    placed = [b for b in blocks if chunk_of(b) in slots]
+
+    out, active = [], None
+    for block in pinned + placed:
+        want = owner_of(block)
+        # a block that CREATES its component activates it on the way in; anything else has to say
+        # where it belongs, or a root sketch lands inside whichever component was left open.
+        if not any(s[0] == "model_create_component" for s in block) and want != active:
+            out.append(("design_activate_component",
+                        {"occurrence": (want + ":1") if want else "root"}, "ok", None))
+        out.extend(block)
+        active = want
+    if out:
+        out.append(("design_activate_component", {"occurrence": "root"}, "ok", None))
+    return out
+
+
+# Tools that ACT on parts already built - no creation step marks the moment, so they are framed on
+# their own operands or the assembly act plays out wherever the camera was last left.
+_RELATION_TOOLS = ("joint_create", "joint_create_as_built", "joint_edit", "joint_drive",
+                   "joint_motion_link", "assembly_ground", "assembly_move", "assembly_rigid_group",
+                   "assembly_constrain", "assembly_capture_position")
+
+# {chunk: [x0, x1, y0, y1]} in the PLACED world, and {entity name: its chunk} - both filled beside
+# _SLOTS, once the acts are defined.
+_PLACED_BOX = {}
+_CHUNK_OF = {}
+# The chunk names that are COMPONENTS - a body in one is framed as an occurrence ('Name:1'), a body
+# at the root as the sketch that drew it.
+_COMPONENTS = set()
+# Chunks a pattern acts on. Their bodies reach well outside the sketch that drew them, and the frame
+# is sized from that sketch - measured, a 70 mm pad carrying a 3x2 grid at 60 mm framed at 154 mm and
+# cropped. The step's own spacings cannot be read (its arguments resolve a body from run context and
+# are a callable), so the frame widens by a factor rather than by a measurement.
+_PATTERNED = set()
+_FRAME_PATTERN_WIDEN = 3.0
+# {sketch name: the origin plane it was drawn on} - a sketch is shot NORMAL to its own plane, or it
+# is edge-on and renders as nothing. Shooting every sketch from the top assumes every sketch is on
+# XY; an XZ one photographed from above is a blank frame.
+_SKETCH_PLANE = {}
+_PLANE_VIEW = {"xy": "top", "xz": "front", "yz": "right"}
+
+
+def _framed(steps):
+    """Insert camera rows: one when the next thing to look at is NOT already on screen, framing it
+    together with the neighbours around it.
+
+    Two rules, both learned from watching the run. A camera row per family moved the camera ~126
+    times and bounced between a cameo and the gyroscope every time the story alternated, so a
+    subject already inside the standing frame gets no row at all. And a family is one compact cell,
+    so framing it alone fills the screen with a 20 mm sketch; the focus list grows outward through
+    the nearest already-built neighbours until it spans the caller's target, which is what puts the
+    work in context instead of under a microscope.
+
+    A component or sketch the narrative already frames by hand keeps its own row, and one that
+    never gets geometry before the next entity starts is skipped - there is nothing to frame yet.
+    """
+    ready = {}                       # group -> (last step index it is ready at, [member names])
+    hand_framed = set()
+    for k, step in enumerate(steps):
+        a = steps[k][1] if isinstance(steps[k][1], dict) else {}
+        if steps[k][0] == "view_set" and a.get("focus"):
+            f = a["focus"]
+            for nm in (f if isinstance(f, list) else [f]):
+                hand_framed.add(_group_of(str(nm)))
+
+    def note(name, at, member):
+        g = _group_of(name)
+        if g in hand_framed:
+            return
+        cur = ready.get(g)
+        members = (cur[1] if cur else [])
+        if member not in members:
+            members = members + [member]
+        ready[g] = (max(at, cur[0]) if cur else at, members)
+
+    for i, step in enumerate(steps):
+        args = step[1] if isinstance(step[1], dict) else {}
+        if step[0] == "sketch_create" and args.get("name"):
+            name = args["name"]
+            end = next((j for j in range(i + 1, len(steps))
+                        if steps[j][0] in ("sketch_create", "model_create_component")), len(steps))
+            drawn = next((k for k in range(i + 1, end) if steps[k][0] in _SKETCH_MAKERS
+                          and isinstance(steps[k][1], dict)
+                          and steps[k][1].get("sketch_name", name) == name), None)
+            # A profile drawn inside a component only exists to be extruded a step later: the body
+            # frame covers it, and framing the rectangle first is what makes a modelling act look
+            # like it is doing sketch work. A sketch at the ROOT is the sketch tools' own subject
+            # and keeps its frame - and so does one whose body is built in a LATER act, or the
+            # sketch phase would draw everything off camera with nothing following to frame it.
+            covered = any(s[0] in _BODY_MAKERS and isinstance(s[1], dict)
+                          and s[1].get("sketch_name") == name for s in steps)
+            fixture = covered and _CHUNK_OF.get(name, name) != name
+            if drawn is not None and not fixture:
+                note(name, drawn, name)
+        elif step[0] == "model_create_component" and args.get("activate") and args.get("name"):
+            comp = args["name"]
+            # the chunk runs to the NEXT create: a later part's body is not this part's body, and
+            # framing this occurrence on it would aim the camera at the wrong slot.
+            end = next((j for j in range(i + 1, len(steps))
+                        if steps[j][0] == "model_create_component"), len(steps))
+            body = next((k for k in range(i + 1, end) if steps[k][0] in _BODY_MAKERS), None)
+            if body is not None:
+                note(comp, body, comp + ":1")
+        elif step[0] in _BODY_MAKERS and args.get("sketch_name") in _CHUNK_OF:
+            # The moment a solid appears, whether or not this act is where its component and sketch
+            # were made. Once the sketch phase hoists those away, a creation-only trigger leaves a
+            # whole act - the finale among them - with no camera row at all, playing out at
+            # whatever zoom the previous act left behind.
+            owner = _CHUNK_OF.get(args["sketch_name"], args["sketch_name"])
+            note(owner, i, owner + ":1" if owner in _COMPONENTS else owner)
+
+    inserts = {}
+    for _g, (at, members) in ready.items():
+        inserts.setdefault(at, []).extend(members)
+
+    # A joint, a ground, a rigid group or a drive ACTS on parts that already exist, so no creation
+    # step marks the moment - and the parts it mates sit in whichever slots they were built in.
+    # Without a row of their own the whole assembly act plays out wherever the camera happened to be
+    # left. These frame on their own operands, at the step that does the work.
+    relation_at = set()
+    for i, step in enumerate(steps):
+        if step[0] not in _RELATION_TOOLS or not isinstance(step[1], dict):
+            continue
+        operands = []
+        for key in ("occurrence", "occurrences", "occurrence_one", "occurrence_two"):
+            v = step[1].get(key)
+            for nm in (v if isinstance(v, list) else [v]):
+                # an occurrence may be named through a sub-entity ('Carrier:1:origin') - the frame
+                # wants the occurrence itself.
+                if isinstance(nm, str) and nm and nm != "origin":
+                    m = re.match(r"^([^:]+:\d+)", nm)
+                    if m and m.group(1) not in operands:
+                        operands.append(m.group(1))
+        if operands:
+            at = i - 1 if i else 0
+            inserts.setdefault(at, []).extend(operands)
+            relation_at.add(at)
+
+    # A neighbour is only worth framing while it still answers to the name it was built under: the
+    # story renames and deletes as it goes, and view_set refuses a focus it cannot resolve.
+    retired = {}
+    for k, step in enumerate(steps):
+        a = step[1] if isinstance(step[1], dict) else {}
+        if step[0] in ("design_set_name", "design_delete_occurrence", "design_move_occurrence",
+                       "design_delete_feature", "mesh_delete", "cam_delete"):
+            for key in ("target", "occurrence", "name"):
+                if isinstance(a.get(key), str):
+                    retired.setdefault(re.sub(r":\d+$", "", a[key]), k)
+
+    out, frame, built = [], None, []
+    for i, step in enumerate(steps):
+        out.append(step)
+        members = inserts.get(i)
+        if not members:
+            continue
+        built = [b for b in built
+                 if all(retired.get(re.sub(r":\d+$", "", str(n)), len(steps)) > i for n in b[0])]
+        # A relation's operands are NOT trimmed: a joint between two parts is only legible with BOTH
+        # of them in shot, so the frame widens to hold them however far apart they were built.
+        # A SKETCH has almost no visual area, so a frame spanning two of them is sized by the gap
+        # between them rather than by either one - graded by eye, sketch-only frames naming two or
+        # more scored 1 good in 27. One at a time; a solid is big enough to share a shot.
+        solid = any(str(n).endswith(":1") for n in members)
+        if i not in relation_at:
+            keep = _FRAME_MAX_SUBJECTS if solid else _FRAME_SKETCH_GROUP
+            members = _frame_cluster(members, None if solid else _FRAME_SKETCH_SPAN)[-keep:]
+        subject = _frame_box(members)
+        built.append((members, subject))
+        if subject and frame and _inside(subject, frame):
+            continue                     # already on screen - moving would only jog the view
+        # How far the frame reaches is set by the SUBJECT's own size, never by a constant: a 20 mm
+        # sketch inside a fixed 220 mm neighbourhood renders in a 440 mm view, which is 4% of the
+        # frame - graded by eye, every one of those read as a speck. A joint is the exception that
+        # wants space around it, because a mate is watched rather than inspected.
+        # from the LARGEST single subject, never the union: a union of two far-apart parts is a
+        # measure of their SEPARATION, and zooming to 2.2x that is the whole-field photograph again.
+        each = [_frame_box([m]) for m in members]
+        own = max((max(b[1] - b[0], b[3] - b[2]) for b in each if b), default=0.0)
+        if any(_CHUNK_OF.get(str(m), str(m)).rstrip(":1") in _PATTERNED
+               or _CHUNK_OF.get(str(m), str(m)) in _PATTERNED for m in members):
+            own *= _FRAME_PATTERN_WIDEN
+        span = max(own * _FRAME_CONTEXT, _FRAME_MIN_SPAN)
+        if i in relation_at:
+            span *= _FRAME_RELATION_WIDEN
+        # A SKETCH frame reaches for its neighbours on purpose: sketch commands are quick, and a
+        # camera move for each one is more motion than the work is worth. The span cap is what keeps
+        # it honest - a handful of sketches from the SAME row share a frame, scattered ones do not,
+        # and the group is what the earlier one-at-a-time rule was over-correcting for.
+        if not solid and subject is not None:
+            span, cap = _FRAME_SKETCH_SPAN, _FRAME_SKETCH_GROUP
+        else:
+            cap = _FRAME_MAX_SUBJECTS
+        focus, box = _frame_neighbourhood(members, subject, built, span, cap)
+        frame = _expand(box, _FRAME_MARGIN) if box else None
+        out.append(_watch(focus))
+    return out
+
+
+def _frame_box(names):
+    """The world box the named entities occupy, or None when none of them is placed. A name is
+    resolved through _CHUNK_OF first: a sketch rides on the body that owns it, and it is that body's
+    box the camera will see."""
+    stems = [re.sub(r":\d+$", "", str(n)) for n in names]
+    got = [_PLACED_BOX[c] for c in (_CHUNK_OF.get(s, s) for s in stems) if c in _PLACED_BOX]
+    if not got:
+        return None
+    return [min(b[0] for b in got), max(b[1] for b in got),
+            min(b[2] for b in got), max(b[3] for b in got)]
+
+
+def _frame_cluster(members, limit=None):
+    """The members that actually fit in one shot together, keeping the ones nearest the LAST one
+    built - the work just done. A family is framed as a family, but a family whose members ended up
+    in different rows of the field (SlotA..SlotH, or a profile pinned at the origin beside the post
+    it revolved) does not fit in any one frame, and stretching to cover both leaves every member a
+    speck."""
+    if len(members) < 2 or _frame_box(members) is None:
+        return members
+    anchor = _frame_box([members[-1]]) or _frame_box(members)
+    # what the group may grow to is set by the anchor's OWN size, so a family of small sketches
+    # stays tight and a family of large parts is allowed the room it needs
+    own = max(anchor[1] - anchor[0], anchor[3] - anchor[2])
+    limit = limit or max(own * _FRAME_CONTEXT, _FRAME_MIN_SPAN) * _FRAME_STRETCH
+    kept, box = [], list(anchor)
+    for name in members:
+        b = _frame_box([name])
+        if b is None:
+            # Where this one sits is unknown, so it cannot be shown to fit - and keeping it anyway
+            # is what let a member at the far end of the field back into a trimmed frame.
+            continue
+        grown = [min(box[0], b[0]), max(box[1], b[1]), min(box[2], b[2]), max(box[3], b[3])]
+        if max(grown[1] - grown[0], grown[3] - grown[2]) > limit:
+            continue
+        kept.append(name)
+        box = grown
+    return kept or members
+
+
+def _expand(box, factor):
+    cx, cy = (box[0] + box[1]) / 2.0, (box[2] + box[3]) / 2.0
+    hw, hh = (box[1] - box[0]) * factor / 2.0, (box[3] - box[2]) * factor / 2.0
+    return [cx - hw, cx + hw, cy - hh, cy + hh]
+
+
+def _inside(box, outer):
+    return (outer[0] <= box[0] and box[1] <= outer[1]
+            and outer[2] <= box[2] and box[3] <= outer[3])
+
+
+def _frame_neighbourhood(members, subject, built, target=None, cap=None):
+    """The focus list to hand view_set: the subject, widened through the nearest already-built
+    neighbours until it spans 'target' (_FRAME_MIN_SPAN by default). Only things already
+    built can be framed - a
+    sketch that does not exist yet cannot be resolved - so the frame trails backwards, which reads
+    as the new work arriving beside what it followed."""
+    target, cap = target or _FRAME_MIN_SPAN, cap or _FRAME_MAX_SUBJECTS
+    known = [(names, b) for names, b in built if b is not None]
+    if subject is None:
+        # Nothing is known about where this subject is - a sketch with no coordinates of its own, an
+        # SVG import. Framing it alone lets the camera fit whatever degenerate extent it has and dive
+        # into the origin construction geometry, so hand it the last few neighbours for scale.
+        focus, box = list(members), None
+        for names, other in reversed(known[-_FRAME_FALLBACK_NEIGHBOURS:]):
+            grown = list(other) if box is None else [
+                min(box[0], other[0]), max(box[1], other[1]),
+                min(box[2], other[2]), max(box[3], other[3])]
+            # the ceiling applies here too - lending a subject three neighbours spread over a metre
+            # buys it scale by making everything in shot a speck.
+            if max(grown[1] - grown[0], grown[3] - grown[2]) > target * _FRAME_STRETCH:
+                continue
+            focus += [n for n in names if n not in focus]
+            box = grown
+        return focus, box
+
+    focus, box = list(members), list(subject)
+
+    def span(b):
+        return max(b[1] - b[0], b[3] - b[2])
+
+    def reach(b):
+        return max(abs((b[0] + b[1]) / 2.0 - (subject[0] + subject[1]) / 2.0),
+                   abs((b[2] + b[3]) / 2.0 - (subject[2] + subject[3]) / 2.0))
+
+    for names, other in sorted(known, key=lambda nb: reach(nb[1])):
+        if span(box) >= target or len(focus) >= cap:
+            break
+        if all(n in focus for n in names):
+            continue
+        grown = [min(box[0], other[0]), max(box[1], other[1]),
+                 min(box[2], other[2]), max(box[3], other[3])]
+        # A neighbour is only context while it stays in shot WITH the subject. Testing the union
+        # AFTER adding is what let one distant part drag the frame out to the whole 1500 mm field,
+        # where every named subject reads as a speck.
+        if span(grown) > target * _FRAME_STRETCH:
+            continue
+        focus += [n for n in names if n not in focus]
+        box = grown
+    return focus, box
+
+
+# --- physical layout: one slot per scratch chunk, laid out in narrative order --------------------
+# A chunk's coordinates as written are LOCAL to that chunk: two chunks may be authored on the same
+# patch of the XY plane, and this pass translates each one into a cell of its own, in the order the
+# acts build them. So a camera framed on a chunk contains its subject, and the neighbours in shot
+# are the steps that ran just before and just after it.
+#
+# Rigid translation is what makes it safe: a chunk's internal offsets, sizes and probe points all
+# move with it, so nothing inside a chunk can be broken by the move. What could break is a world
+# point one chunk aims at another - so the chunk is the COMPONENT, which is the unit those points
+# are shared within, and the gyroscope/vise/stock world at the origin never moves at all. A world
+# point that DOES cross a component boundary fails the layout gate in test_tool_verify_complete.py
+# rather than drifting quietly: put the geometry in one component, or pin it.
+
+# Key PAIRS that pin a step to a PLACE. A key holding a delta (dx, dy, distance, spacing) or a size
+# (radius, slot_length, depth) is deliberately absent - a rigid translation leaves those alone. Both
+# halves of a pair must be present: a lone 'x' is a cross-mode input a refusal step passes to be
+# rejected, not a place, and reading it as one would drag its whole chunk across the world.
+_PLACE_PAIRS = (("x", "y"), ("x1", "y1"), ("x2", "y2"), ("x3", "y3"), ("cx", "cy"),
+                ("center_x", "center_y"))
+# Tools whose x/y is a TRANSFORM relative to the entity's own origin, not a place in the world.
+# design_add_instance sets an occurrence's translation, and the component's geometry already carries
+# wherever the layout put it - so shifting the transform too applies the offset TWICE and throws the
+# instance a whole field away from the original it is meant to sit beside.
+_PLACE_DELTA_TOOLS = ("design_add_instance",)
+
+_PLACE_XYZ = ("nearest_to", "point")        # one [x, y, z], always world
+_PLACE_POINTS = ("points",)                 # a list of [x, y] or [x, y, z], always world
+
+# Keys naming the entity a step addresses, most specific first. A step that names one belongs to
+# that entity's chunk wherever it sits in the narrative; only a step naming none inherits the chunk
+# being built around it. 'name' is absent on purpose - on a creating step it names the thing being
+# made, which belongs to the chunk around it (a datum plane that split off on its own name would be
+# left behind by the body it cuts).
+_PLACE_NAMES = ("sketch_name", "target", "occurrence", "component", "body", "bodies")
+
+# A sketch's coordinates are in ITS plane's frame, not the world's: on XZ a 'cy' is a world Z, on YZ
+# a 'cx' is a world Y. Each entry maps the sketch's (u, v) onto the world axes a translation moves,
+# with None for the axis the plane does not span. Reading an XZ sketch as if it were XY moves a
+# revolve profile off its axis, which turns a sphere into a torus and passes every count check.
+_PLACE_FRAMES = {"xy": ("x", "y"), "xz": ("x", None), "yz": ("y", None)}
+
+# Chunks the layout cannot see are one rigid body. Both are components in their own right - which is
+# what lets one find_geometry name each without ambiguity - but they are stacked on purpose, and the
+# call that joins them reaches for both through run-time handles no static read can follow. Sharing
+# ground is NOT the test: half the scratch field is authored on the same patch of XY by chance.
+_PLACE_WITH = {
+    "ReplBlock": "ReplRoof",     # the open sheet that replaces the block's top face sits above it
+}
+
+# Chunks a JOINT or an assembly CONSTRAINT co-locates. Both move a part onto the other's geometry,
+# so the
+# cell the layout dealt the mover is abandoned the instant the joint lands, and the mover arrives in
+# the PARTNER's cell - on top of whatever the packer had already put there. Measured on the finished
+# document: the ball/axis/rigid post chain piled five bodies into one cell and spilled into the next,
+# which is what a viewer sees as cameos sitting inside older ones.
+# Each group is dealt ONE cell and every member takes the SAME offset, so the group travels as the
+# rigid assembly it is about to become and keeps its authored relative positions. The joint then
+# moves parts WITHIN that cell, which is the only place it was ever going to move them.
+_JOINT_GROUPS = (
+    ("BallSphere", "BallPost", "AxisPost", "RigidPost"),
+    ("TorusRing", "TorusPost"),
+    ("AsbPin", "AsbPlate"),
+    ("ConA", "ConB"),            # the single-relationship constrain pair
+    ("MateSeat", "MateArm"),     # the multi-relationship one - a seat AND a turn in one feature
+    # the joint bench: the base and every indicator arm its stations carry into place
+    ("JointBase",) + tuple("Ind" + s[0] for s in _JOINT_STATIONS),
+)
+_JOINT_FAMILY = {c: g[0] for g in _JOINT_GROUPS for c in g}
+
+# Chunks whose READ-BACK is relative to the world origin, so moving them changes the answer. The
+# angular-dimension contract is "the wedge FACING THE SKETCH ORIGIN", which flips to the supplement
+# once the crossing point moves to the other side of it - a 60 degree beat silently becomes 120.
+_PLACE_ANCHORED = ("W3Dims",)
+
+# Tools whose RESULT is measured from the world origin, so the further out the chunk sits the
+# further its result is thrown: a mirror about an origin plane reflects to the far side (joined,
+# that is ONE body spanning both), and a scale multiplies the distance along with the size. Measured
+# on a placed field: EmbossBlock mirrored+joined at y 720 became a single body 1480 mm long, and
+# ScaleBlock scaled at y 720 ended up at y 1594. A chunk either of these acts on stays put.
+_ORIGIN_RELATIVE_TOOLS = ("model_mirror", "model_scale")
+
+_PIN_HALF = 160.0        # half-width of the origin neighbourhood, which never moves
+_FIELD_X0 = 200.0        # the scratch field starts clear of it
+# ...and starts ABOVE the band the anchored chunks occupy (every one of them sits at y <= 140), so
+# the packer never has to step around an obstacle. Stepping around one is what made the sequence
+# jump: a row would skip a gap, and the eye loses the order the acts were built in.
+_FIELD_Y0 = 220.0
+_FIELD_WIDTH = 900.0     # a row wraps past here - narrow keeps the field a BLOCK, not a long strip
+# Empty millimetres between one chunk's cell and the next. This is ALSO the packer's only margin for
+# error, and it needs one: a cell is measured from the coordinates the steps are WRITTEN with, which
+# under-counts the body that grows from them - a circle contributes its centre, not its radius, and
+# an extrude contributes nothing at all in the third axis. So the real geometry routinely reaches
+# past its cell by a radius or two, and at 18 mm that reach landed in the neighbour. Measured on the
+# finished document: widening this from 18 to 60 is what separates the cameos that were touching.
+# The cost is a taller field, which nothing pays for - every chunk is framed on itself.
+_FIELD_GUTTER = 60.0
+
+
+def _place_owner(args):
+    """The entity a step addresses, or None when it names none. An occurrence path is reduced to
+    its component - instance :1 and :2 of a component are the same chunk of the world."""
+    for key in _PLACE_NAMES:
+        v = args.get(key)
+        if isinstance(v, (list, tuple)) and v and isinstance(v[0], str):
+            v = v[0]
+        if isinstance(v, str) and v:
+            return re.sub(r":\d+$", "", v.split("+")[0].strip())
+    return None
+
+
+def _place_num(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _place_points(args, frame="xy", tool=""):
+    """Every world position the step's arguments pin, as (x, y) with None on an axis the argument
+    does not constrain. Pair keys are read in 'frame' - the plane the sketch was drawn on - so an
+    XZ sketch pins only X. frame None is a plane derived from geometry that travels with its chunk,
+    which anchors nothing."""
+    num, out = _place_num, []
+    axes = _PLACE_FRAMES.get(frame or "", (None, None))
+    pairs = tuple(p for p in _PLACE_PAIRS
+                  if not (p == ("x", "y") and tool in _PLACE_DELTA_TOOLS))
+    for kx, ky in pairs:
+        if not (num(args.get(kx)) and num(args.get(ky))):
+            continue
+        # a circle or polygon is authored as a CENTRE plus a radius, so the centre alone measures it
+        # as a point and the chunk's cell comes out far too small to hold it
+        r = args.get("radius") if (kx, ky) == ("cx", "cy") else None
+        r = r if num(r) else 0
+        for dx, dy in (((0, 0),) if not r else ((-r, -r), (r, r))):
+            world = dict(zip(axes, (args[kx] + dx, args[ky] + dy)))
+            world.pop(None, None)
+            if world:
+                out.append((world.get("x"), world.get("y")))
+    if args.get("kind") == "plane" and num(args.get("offset")):
+        # an origin plane's offset is a world position along its NORMAL: an XZ plane sits at that Y,
+        # so a body it splits moves out from under it unless the offset moves too.
+        normal = {"xz": "y", "yz": "x"}.get(args.get("plane"))
+        if normal == "x":
+            out.append((args["offset"], None))
+        elif normal == "y":
+            out.append((None, args["offset"]))
+    for key in _PLACE_XYZ:
+        v = args.get(key)
+        if isinstance(v, (list, tuple)) and len(v) >= 2 and num(v[0]) and num(v[1]):
+            out.append((v[0], v[1]))
+    for key in _PLACE_POINTS:
+        v = args.get(key)
+        if isinstance(v, (list, tuple)):
+            for p in v:
+                if isinstance(p, (list, tuple)) and len(p) >= 2 and num(p[0]) and num(p[1]):
+                    out.append((p[0], p[1]))
+    return out
+
+
+def _place_walk(steps, home_out=None):
+    """Yield (step, chunk, cursor, frame) for every step. chunk is the rigid body the step
+    addresses: the ACTIVE COMPONENT when one is open, otherwise the root-level sketch. A component
+    is the natural unit - CC1 and CC2 are two sketches inside CombineCameo whose solids must keep
+    overlapping, and they do because the component moves as one - while root sketches each get their
+    own cell, so SlotA..SlotH lie side by side and the framing pass still frames all eight together.
+
+    chunk is None for a step that pins nothing to the world. cursor is the body being built around
+    the step, which couples a probe to the pad it reads back. frame is the plane the step's pair
+    keys are read in. home_out, when given, collects {entity name: its chunk} - the map that turns a
+    sketch name back into the body it rides on."""
+    active, plane, cursor = None, {}, None
+    home = home_out if home_out is not None else {}
+    for step in steps:
+        args = step[1]
+        frame = "xy"
+        if isinstance(args, dict):
+            if step[0] == "model_create_component" and args.get("name"):
+                if args.get("activate"):
+                    active = args["name"]
+                home[args["name"]] = args["name"]
+            elif step[0] == "design_activate_component" and args.get("occurrence"):
+                occ = re.sub(r":\d+$", "", args["occurrence"])
+                active = None if occ == "root" else occ
+            elif step[0] == "model_construction" and args.get("kind") == "plane" and args.get("name"):
+                # a datum offset from an origin plane keeps that plane's frame; one built on a path
+                # or a face gets its frame from geometry, and nothing drawn on it is world-anchored.
+                plane[args["name"]] = args.get("plane") if args.get("plane") in _PLACE_FRAMES else None
+            elif step[0] == "sketch_create" and args.get("name"):
+                home[args["name"]] = active or args["name"]
+                p = args.get("plane")
+                plane[args["name"]] = p if p in _PLACE_FRAMES else plane.get(p)
+            if step[0] == "design_activate_component":
+                # back at the root nothing is being built around the steps that follow, so the
+                # cursor goes with it - leaving it set attributes the next loose coordinate to
+                # whatever component happened to be open last.
+                cursor = active
+            elif active:
+                cursor = active
+            elif args.get("sketch_name") in home:
+                cursor = home[args["sketch_name"]]
+            elif step[0] == "sketch_create" and args.get("name"):
+                cursor = home[args["name"]]
+            if step[0].startswith("sketch_"):
+                sk = args.get("sketch_name") or (args.get("name") if step[0] == "sketch_create" else None)
+                frame = plane.get(sk, "xy") if sk else "xy"
+            if _place_points(args, frame, step[0]):
+                own = _place_owner(args)
+                yield step, (home.get(own, own) if own else cursor), cursor, frame
+                continue
+        # a callable builds its arguments from run context and cannot be read here, so it belongs
+        # to the body being built around it - which is where any world point it bakes in came from.
+        yield step, (cursor if callable(args) else None), cursor, frame
+
+
+def _place_shift(args, dx, dy, frame="xy", tool=""):
+    """args translated by (dx, dy): every pinned position moves, everything else is untouched. The
+    pair keys move by the world delta resolved into 'frame's axes, so an XZ sketch shifts only the
+    coordinate that is a world X and leaves the one that is a world Z alone."""
+    num = _place_num
+    delta = {"x": dx, "y": dy, None: 0.0}
+    du, dv = (delta[a] for a in _PLACE_FRAMES.get(frame or "", (None, None)))
+
+    def shift_seq(v):
+        if not isinstance(v, (list, tuple)) or len(v) < 2 or not (num(v[0]) and num(v[1])):
+            return v
+        return [v[0] + dx, v[1] + dy] + list(v[2:])
+
+    if callable(args):
+        return lambda ctx, _f=args: _place_shift(_f(ctx), dx, dy, frame, tool)
+    out = dict(args)
+    for kx, ky in _PLACE_PAIRS:
+        if (kx, ky) == ("x", "y") and tool in _PLACE_DELTA_TOOLS:
+            continue
+        if num(out.get(kx)) and num(out.get(ky)):
+            out[kx], out[ky] = out[kx] + du, out[ky] + dv
+    if out.get("kind") == "plane" and num(out.get("offset")):
+        out["offset"] += {"xz": dy, "yz": dx}.get(out.get("plane"), 0.0)
+    for key in _PLACE_XYZ:
+        if key in out:
+            out[key] = shift_seq(out[key])
+    for key in _PLACE_POINTS:
+        v = out.get(key)
+        if isinstance(v, (list, tuple)):
+            out[key] = [shift_seq(p) for p in v]
+    return out
+
+
+def _place_slots(program):
+    """Measure every chunk, then deal each movable one a cell of its own; return {chunk: (dx, dy)}.
+
+    Cells are dealt left to right in the order the acts build them, wrapping into a new row past
+    _FIELD_WIDTH, so the camera walks the field in the order the story runs.
+
+    Anything reaching into the origin neighbourhood stays exactly where it is: that is the
+    gyroscope, the vise built around it, the CAM stock and the fallback world, which are addressed
+    by scripts and by each other."""
+    box, order, locked = {}, [], set()
+    for _name, _pre, narr, _fb in program:
+        for step, chunk, _cursor, frame in _place_walk(narr):
+            args = step[1]
+            if chunk is None or not isinstance(args, dict):
+                continue
+            # A sketch on a GLOBAL origin plane is nailed to that plane: an XZ sketch is at y=0 and
+            # cannot be carried in y, so a chunk holding one can only move within the plane it is
+            # drawn on. Rather than translate it into a plane it does not live on - which is how a
+            # pipe cut ends up passing through empty space - such a chunk stays where it was authored.
+            if frame in ("xz", "yz") and any(
+                    _place_num(args.get(kx)) and _place_num(args.get(ky))
+                    for kx, ky in _PLACE_PAIRS):
+                locked.add(chunk)
+            for x, y in _place_points(args, frame, step[0]):
+                if chunk not in box:
+                    box[chunk] = [None, None, None, None]
+                    order.append(chunk)
+                b = box[chunk]
+                if x is not None:
+                    b[0] = x if b[0] is None else min(b[0], x)
+                    b[1] = x if b[1] is None else max(b[1], x)
+                if y is not None:
+                    b[2] = y if b[2] is None else min(b[2], y)
+                    b[3] = y if b[3] is None else max(b[3], y)
+    # a chunk drawn only on an edge-on plane constrains one axis; the other reads as zero extent at
+    # the origin, which is where that plane sits.
+    for b in box.values():
+        for i in (0, 1, 2, 3):
+            if b[i] is None:
+                b[i] = 0.0
+
+    # Cells are dealt a FAMILY at a time - SlotA..SlotH together - and a family that will not fit in
+    # what is left of the row starts the next one, so the frame _framed puts around a family never
+    # straddles a row break.
+    locked.update(c for c in _PLACE_ANCHORED if c in box)
+    for _name, _pre, narr, _fb in program:
+        for step, _chunk, cursor, _frame in _place_walk(narr):
+            if step[0] in _ORIGIN_RELATIVE_TOOLS:
+                named = [n for n in ((step[1].get("bodies") or []) if isinstance(step[1], dict)
+                                     else []) if isinstance(n, str)]
+                for c in [_CHUNK_OF.get(n, n) for n in named] + ([cursor] if cursor else []):
+                    if c in box:
+                        locked.add(c)
+    for chunk, (x0, x1, y0, y1) in box.items():
+        if x0 <= _PIN_HALF and -_PIN_HALF <= x1 and y0 <= _PIN_HALF and -_PIN_HALF <= y1:
+            locked.add(chunk)
+    for a, b in _PLACE_WITH.items():
+        if a in locked or b in locked:
+            locked |= {a, b}
+
+    families, welded = {}, {}
+    for chunk in order:
+        if chunk in locked:
+            continue
+        # a joint group is ONE cell: its members are collapsed to a single pseudo-chunk here and
+        # handed the same offset below, so the packer never deals a cell to a part a joint is about
+        # to move out of it.
+        lead = _JOINT_FAMILY.get(chunk)
+        if lead:
+            # the pseudo-chunk is prefixed so it can never collide with a real chunk name - the
+            # group's leader IS a real chunk, and reusing its name would make the group's cell and
+            # the leader's own cell the same entry.
+            weld = "~" + lead
+            welded.setdefault(weld, []).append(chunk)
+            if weld in box:
+                continue
+            box[weld] = list(box[chunk])
+            families.setdefault(_group_of(lead), []).append(weld)
+            continue
+        families.setdefault(_group_of(chunk), []).append(chunk)
+    # the welded cell has to hold every member's authored ground, or the joint group overflows it
+    for weld, members in welded.items():
+        for c in members:
+            b = box[c]
+            w = box[weld]
+            box[weld] = [min(w[0], b[0]), max(w[1], b[1]), min(w[2], b[2]), max(w[3], b[3])]
+
+    # The field starts beside the gyroscope and steps AROUND what cannot move, rather than being
+    # exiled to a band of its own - a scene twice as tall is not easier to watch. The obstacles are
+    # small and clustered (the origin world, and the strip of chunks nailed to an origin plane), so
+    # stepping past one costs a gap in a row, not a row.
+    blocked = [(box[c][0] - _FIELD_GUTTER, box[c][1] + _FIELD_GUTTER,
+                box[c][2] - _FIELD_GUTTER, box[c][3] + _FIELD_GUTTER) for c in locked]
+
+    def clear(cx, cy, w, h):
+        """The leftmost x at or after cx where a w x h cell at cy hits nothing, or None past the
+        row's end."""
+        while cx + w <= _FIELD_X0 + _FIELD_WIDTH:
+            hit = next((b for b in blocked
+                        if cx <= b[1] and b[0] <= cx + w and cy <= b[3] and b[2] <= cy + h), None)
+            if hit is None:
+                return cx
+            # a zero-width obstacle sits exactly at cx, so step past it, never onto it
+            cx = max(hit[1], cx + _FIELD_GUTTER)
+        return None
+
+    offsets, x, y, row_h = {}, _FIELD_X0, _FIELD_Y0, 0.0
+    for members in families.values():
+        span = sum(box[c][1] - box[c][0] + _FIELD_GUTTER for c in members) - _FIELD_GUTTER
+        if x > _FIELD_X0 and x + min(span, _FIELD_WIDTH) > _FIELD_X0 + _FIELD_WIDTH:
+            x, y, row_h = _FIELD_X0, y + row_h + _FIELD_GUTTER, 0.0
+        for chunk in members:
+            x0, x1, y0, y1 = box[chunk]
+            w, h = x1 - x0, y1 - y0
+            at = clear(x, y, w, h)
+            if at is None:
+                x, y, row_h = _FIELD_X0, y + row_h + _FIELD_GUTTER, 0.0
+                at = clear(x, y, w, h) or x
+            shift = (at - x0, y - y0)
+            # one offset for the whole welded group - the members keep their authored relative
+            # positions, so the assembly arrives in its cell already put together.
+            for c in welded.get(chunk, [chunk]):
+                offsets[c] = shift
+            x = at + w + _FIELD_GUTTER
+            row_h = max(row_h, h)
+    return offsets
+
+
+def _placed(steps, offsets):
+    """steps with every chunk translated into the slot _place_slots gave it."""
+    out = []
+    for step, chunk, _cursor, frame in _place_walk(steps):
+        off = offsets.get(chunk)
+        if off and (off[0] or off[1]):
+            step = (step[0], _place_shift(step[1], off[0], off[1], frame, step[0])) + tuple(step[2:])
+        out.append(step)
+    return out
+
+
+def _px(chunk, x):
+    """The world X an authored X ends up at, once 'chunk' is placed. A read-back that asserts WHERE
+    geometry landed - the copy that must sit 100 mm right of the original, the slot whose arc
+    centres must be 52 mm apart at a known place - has to ask, because the chunk moved. Asserting a
+    bare authored number instead is how a layout change turns a real check into a false failure."""
+    return x + _SLOTS.get(chunk, (0.0, 0.0))[0]
+
+
+def _py(chunk, y):
+    """The world Y an authored Y ends up at, once 'chunk' is placed. See _px."""
+    return y + _SLOTS.get(chunk, (0.0, 0.0))[1]
 
 
 # --- the build, as ACTS: one recognizable gyroscope, end to end, in one unsaved document -------
@@ -1211,26 +2489,55 @@ _SKELETON = [
     # Each derived parameter's expected value is what the DESIGN evaluates the expression to off the
     # 120 mm driver above it - so the read-back proves Fusion resolved the reference, not that the
     # expression text was accepted (the CAM parameter store accepts a bogus name unevaluated).
-    ("param_add", {"name": "GimbalDia", "expression": "120 mm"}, _param_added("GimbalDia", 120), None),
+    ("param_add", {"name": "GimbalDia", "expression": "120 mm",
+                   "comment": "The one driver: every ring, bore and pin below derives from it"},
+     _param_added("GimbalDia", 120), None),
     ("param_add", {"name": "RotorR", "expression": "GimbalDia / 5"}, _param_added("RotorR", 24), None),
-    ("param_add", {"name": "InnerBoreR", "expression": "GimbalDia / 4"}, _param_added("InnerBoreR", 30), None),
+    # A RULE, not a ratio: the radial band each ring is cut from scales with the gimbal but stops
+    # at a floor, so shrinking the driver thins the rings only until they reach a width that can
+    # still be made and still hold a pin bore. Every bore below is the ring's OD less this band, so
+    # the section is stated once and the two rings cannot drift to different widths.
+    ("param_add", {"name": "RingBand", "expression": "max(GimbalDia * 0.05; 4 mm)",
+                   "comment": "Radial width of a gimbal ring - floored so it stays makeable"},
+     _param_added("RingBand", 6), None),
     ("param_add", {"name": "InnerOD", "expression": "GimbalDia * 0.3"}, _param_added("InnerOD", 36), None),
-    ("param_add", {"name": "OuterBoreR", "expression": "GimbalDia * 0.35"}, _param_added("OuterBoreR", 42), None),
+    ("param_add", {"name": "InnerBoreR", "expression": "InnerOD - RingBand",
+                   "comment": "Inner ring bore - its OD less one band"},
+     _param_added("InnerBoreR", 30), None),
     ("param_add", {"name": "OuterOD", "expression": "GimbalDia * 0.4"}, _param_added("OuterOD", 48), None),
+    ("param_add", {"name": "OuterBoreR", "expression": "OuterOD - RingBand",
+                   "comment": "Outer ring bore - its OD less one band"},
+     _param_added("OuterBoreR", 42), None),
     ("param_add", {"name": "FrameOpenR", "expression": "GimbalDia * 0.45"}, _param_added("FrameOpenR", 54), None),
     ("param_add", {"name": "FramePlateR", "expression": "GimbalDia * 0.55"}, _param_added("FramePlateR", 66), None),
     ("param_set_favorite", {"name": "GimbalDia", "favorite": True}, _param_favorited("GimbalDia"), None),
-    ("param_get", {}, _params_listed("GimbalDia", "RotorR", "InnerBoreR", "InnerOD", "OuterBoreR",
-                                     "OuterOD", "FrameOpenR", "FramePlateR"), None),
-    # the eight-part cast, each its own component; Pedestal NESTED inside the Frame.
+    ("param_get", {}, _params_listed("GimbalDia", "RotorR", "RingBand", "InnerBoreR", "InnerOD",
+                                     "OuterBoreR", "OuterOD", "FrameOpenR", "FramePlateR"), None),
+    # THE EIGHT-PART CAST, BUILT AS THE NESTED CHAIN IT IS. A stage owns its own parts: the pedestal
+    # belongs to the frame, the inner ring hangs inside the outer, the shaft is carried by the inner
+    # ring and the rotor spins on the shaft. Nesting at CREATION rather than re-parenting afterwards
+    # costs nothing and moves nothing - a child created with no placement of its own inherits its
+    # parent's frame, and every part here is built on the world origin - while a flat row of eight
+    # siblings would say the mechanism has no stages at all.
+    # It also collapses what ACT 8 has to strip: deleting InnerRing:1 takes the shaft and the rotor
+    # with it, and Frame:1 takes the pedestal.
+    # Carrier stays at the ROOT deliberately - it is the part the vise grips and the one survivor of
+    # ACT 8, so it must not be inside anything that gets deleted.
     ("model_create_component", {"name": "Frame", "activate": True}, _made_component, None),
     ("model_create_component", {"name": "Pedestal", "parent": "Frame", "activate": True},
      _made_component, None),
     ("model_create_component", {"name": "Carrier", "activate": True}, _made_component, None),
     ("model_create_component", {"name": "OuterRing", "activate": True}, _made_component, None),
     ("model_create_component", {"name": "InnerRing", "activate": True}, _made_component, None),
-    ("model_create_component", {"name": "Rotor", "activate": True}, _made_component, None),
-    ("model_create_component", {"name": "RotorShaft", "activate": True}, _made_component, None),
+    # A JOINT YOU INTEND TO DRIVE WANTS TWO SIBLINGS. Measured twice on this mechanism: nesting the
+    # rotor inside the shaft it turns on left CrankAxis reading -0.0 against a commanded 30 deg
+    # through its motion link, and nesting the inner ring inside the outer left PivotInner reading
+    # back 25 at the drive and 0 at the next assembly_get - the solver put it back. So the rings stay
+    # siblings and the inner ring keeps its own parts (rotor and shaft) instead.
+    ("model_create_component", {"name": "RotorShaft", "parent": "InnerRing", "activate": True},
+     _made_component, None),
+    ("model_create_component", {"name": "Rotor", "parent": "InnerRing", "activate": True},
+     _made_component, None),
     ("model_create_component", {"name": "Crank", "activate": True}, _made_component, None),
     # the SHARED SKELETON on the root: two in-plane axes (construction) + the yaw axis as a 3D line.
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
@@ -1244,6 +2551,9 @@ _SKELETON = [
                              "sketch_name": "Skeleton", "is_construction": True}, "ok", None),
     ("sketch_add_3d_line", {"x1": 0, "y1": 0, "z1": -70, "x2": 0, "y2": 0, "z2": 70,
                             "sketch_name": "Skeleton"}, "ok", None),
+    # the camera has been fitted to an EMPTY document since the overture - the skeleton is the
+    # first thing in the world worth looking at.
+    _watch_all(),
     ("sketch_constrain", {"constraint": "horizontal", "entity_one": "line:0",
                           "sketch_name": "Skeleton"}, "ok", None),
     ("sketch_dimension", {"dim_type": "distance", "entity_one": "point:0", "entity_two": "point:1",
@@ -1254,7 +2564,13 @@ _SKELETON = [
     # the carrier hub's plane sits BELOW the rotor sweep (vertical zoning) - construction proves here.
     ("model_construction", {"kind": "plane", "plane": "xy", "offset": -40, "name": "CarrierHubPlane"},
      _datum_plane("xy"), None),
-    # concentric ring bands, each dimensioned to a PARAMETER so the resize walks them.
+    # Concentric ring bands on ONE plane, which is what a gimbal looks like AT REST - the rings
+    # only leave that plane when a pivot is driven. What makes them a gimbal rather than a stack of
+    # washers is the PINS below: each ring hangs from its parent on an axis lying IN the ring plane,
+    # and the two pin axes are perpendicular (X for the outer, Y for the inner). A prior eval's
+    # visual review found rings that could not nest, and the cause was VERTICAL pins - the inner
+    # ring swung in-plane like a door instead of tilting - not the shared plane.
+    # Each band is dimensioned to a PARAMETER so the resize walks them.
     ("design_activate_component", {"occurrence": "OuterRing:1"}, "ok", None),
     ("sketch_create", {"plane": "xy", "name": "OuterRingSketch"}, "ok", None),
     ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 48, "sketch_name": "OuterRingSketch"}, "ok", None),
@@ -1274,6 +2590,54 @@ _SKELETON = [
     ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 54, "sketch_name": "FrameSketch"}, "ok", None),
     ("sketch_dimension", {"dim_type": "radius", "entity_one": "circle:0", "sketch_name": "FrameSketch", "value": "FramePlateR"}, "ok", None),
     ("sketch_dimension", {"dim_type": "radius", "entity_one": "circle:1", "sketch_name": "FrameSketch", "value": "FrameOpenR"}, "ok", None),
+    _watch_all(),                       # the three concentric ring bands are drawn
+    # THE PIVOT PINS - what turns three concentric bands into a gimbal. Each pair lies IN the ring
+    # plane and bridges the gap between one band's OD and its parent's ID, and the two pairs are
+    # PERPENDICULAR: X carries the outer ring in the frame, Y carries the inner ring in the outer.
+    # Sketched on the plane NORMAL to their own axis (yz for an X pin, xz for a Y pin) and extruded
+    # along it, so the pin is a rod on the axis its joint turns about - a pin standing along Z
+    # instead lets a ring swing in-plane like a door, which is the failure a prior eval's review
+    # traced. Each spans its gap EXACTLY, band face to band face: a pin that reaches INTO the bands
+    # is how a graded model seats one, but that needs a bore in each, and undrilled bands would
+    # simply read as interference.
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("model_create_component", {"name": "PinOuterXpos", "activate": True}, _made_component, None),
+    ("model_construction", {"kind": "plane", "plane": "yz", "offset": "OuterOD", "name": "PinOXpPlane"},
+     _datum_plane("yz"), None),
+    ("sketch_create", {"plane": "PinOXpPlane", "name": "PinOXpS"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 3,
+                             "sketch_name": "PinOXpS"}, "ok", None),
+    ("model_extrude", {"sketch_name": "PinOXpS", "profile_index": 0,
+                   "distance": "FrameOpenR - OuterOD"}, _extruded, None),
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("model_create_component", {"name": "PinOuterXneg", "activate": True}, _made_component, None),
+    ("model_construction", {"kind": "plane", "plane": "yz", "offset": "-OuterOD", "name": "PinOXnPlane"},
+     _datum_plane("yz"), None),
+    ("sketch_create", {"plane": "PinOXnPlane", "name": "PinOXnS"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 3,
+                             "sketch_name": "PinOXnS"}, "ok", None),
+    ("model_extrude", {"sketch_name": "PinOXnS", "profile_index": 0,
+                   "distance": "-(FrameOpenR - OuterOD)"}, _extruded, None),
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("model_create_component", {"name": "PinInnerYpos", "activate": True}, _made_component, None),
+    ("model_construction", {"kind": "plane", "plane": "xz", "offset": "InnerOD", "name": "PinIYpPlane"},
+     _datum_plane("xz"), None),
+    ("sketch_create", {"plane": "PinIYpPlane", "name": "PinIYpS"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 3,
+                             "sketch_name": "PinIYpS"}, "ok", None),
+    ("model_extrude", {"sketch_name": "PinIYpS", "profile_index": 0,
+                   "distance": "OuterBoreR - InnerOD"}, _extruded, None),
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("model_create_component", {"name": "PinInnerYneg", "activate": True}, _made_component, None),
+    ("model_construction", {"kind": "plane", "plane": "xz", "offset": "-InnerOD", "name": "PinIYnPlane"},
+     _datum_plane("xz"), None),
+    ("sketch_create", {"plane": "PinIYnPlane", "name": "PinIYnS"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 3,
+                             "sketch_name": "PinIYnS"}, "ok", None),
+    ("model_extrude", {"sketch_name": "PinIYnS", "profile_index": 0,
+                   "distance": "-(OuterBoreR - InnerOD)"}, _extruded, None),
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    _watch(["PinOuterXpos:1", "PinInnerYpos:1"]),
     # the rotor EDGE-ON: a half-section on a plane containing the spin axis (X), for a revolve.
     ("design_activate_component", {"occurrence": "Rotor:1"}, "ok", None),
     ("sketch_create", {"plane": "xz", "name": "RotorSketch"}, "ok", None),
@@ -1311,6 +2675,7 @@ _SKELETON = [
     ("sketch_add_geometry", {"kind": "line", "x1": 60, "y1": 0, "x2": 60, "y2": 40, "sketch_name": "CrankPath"}, "ok", None),
     ("sketch_create", {"plane": "xy", "name": "CrankProf"}, "ok", None),
     ("sketch_add_geometry", {"kind": "circle", "cx": 60, "cy": 0, "radius": 4, "sketch_name": "CrankProf"}, "ok", None),
+    _watch_all(),                       # the skeleton is complete, crank and pedestal included
     # the engraved nameplate cameo.
     ("design_activate_component", {"occurrence": "Frame:1"}, "ok", None),
     ("sketch_create", {"plane": "xy", "name": "NamePlate"}, "ok", None),
@@ -1323,6 +2688,10 @@ _SKELETON = [
 # single natural gyroscope home (draft/mirror/patterns/hole/combine) ride cameo bodies in the SAME
 # document, so every one is exercised without contorting the mechanism.
 _SOLIDS = [
+    # The sketch acts have already drawn the whole scratch field by now, so a whole-model fit is a
+    # metre of scenery with the gyroscope a speck in it. Frame the ring sketches the extrudes below
+    # consume, and the rings appear inside the shot instead of off the edge of one.
+    _watch(["OuterRingSketch", "InnerRingSketch", "FrameSketch"]),
     # ring bands: extrude the ANNULUS profile (smallest-area region) symmetric about the ring plane.
     ("sketch_get", {"sketch_name": "OuterRingSketch"}, "ok", ("or_ring", lambda p: p["profiles"][-1]["handle"])),
     ("model_extrude", lambda c: {"sketch_name": "OuterRingSketch", "profile_index": _ctx_get(c, "or_ring", "outer ring annulus"), "distance": 4, "symmetric": True}, _extruded, None),
@@ -1330,6 +2699,46 @@ _SOLIDS = [
     ("model_extrude", lambda c: {"sketch_name": "InnerRingSketch", "profile_index": _ctx_get(c, "ir_ring", "inner ring annulus"), "distance": 4, "symmetric": True}, _extruded, None),
     ("sketch_get", {"sketch_name": "FrameSketch"}, "ok", ("fr_ring", lambda p: p["profiles"][-1]["handle"])),
     ("model_extrude", lambda c: {"sketch_name": "FrameSketch", "profile_index": _ctx_get(c, "fr_ring", "frame plate ring"), "distance": 4, "symmetric": True}, _extruded, None),
+    # EDGE TREATMENT ON THE RINGS. A gimbal ring is handled, and a band left with four square rims
+    # reads as a washer however well it is jointed. Each ring is broken on the rim a hand reaches
+    # first: the outer ring's OD, the inner ring's, and the frame's opening - a radius scaled from
+    # the band so it stays proportionate when the driver moves, floored well under half the band so
+    # it can never eat the section. find_geometry picks the rim by RADIUS, the one query that keeps
+    # naming the same edge after the driver changes.
+    ("param_add", {"name": "RingBreak", "expression": "RingBand / 6",
+                   "comment": "Rim break on a gimbal ring - proportional to the band it cuts"},
+     _param_added("RingBreak", 1), None),
+    # the rim radii come from the PARAMETERS that drove them, not from the numbers they happen to
+    # hold - the same three expressions the rings were built from, so the query cannot go stale.
+    ("param_get", {"name": "OuterOD"}, _param_read("OuterOD", 48),
+     ("outer_od", lambda p: p["parameter"]["value"])),
+    ("param_get", {"name": "InnerOD"}, _param_read("InnerOD", 36),
+     ("inner_od", lambda p: p["parameter"]["value"])),
+    ("param_get", {"name": "FrameOpenR"}, _param_read("FrameOpenR", 54),
+     ("frame_open", lambda p: p["parameter"]["value"])),
+    # model_fillet/model_chamfer take a NUMBER, not an expression, so the break is READ from the
+    # parameter that defines it rather than written twice - the parameter still states the rule and
+    # the feature still gets the value that rule produced.
+    ("param_get", {"name": "RingBreak"}, _param_read("RingBreak", 1),
+     ("ring_break", lambda p: p["parameter"]["value"])),
+    ("find_geometry", lambda c: {"target": "OuterRing", "kind": "circular_edge",
+                                 "radius": _ctx_get(c, "outer_od", "outer ring OD"),
+                                 "max_results": 2}, "ok", _fgn("or_rim")),
+    ("model_fillet", lambda c: {"edges": _ctx_get(c, "or_rim", "outer ring rim"),
+                                "radius": _ctx_get(c, "ring_break", "the ring rim break")},
+     _filleted, None),
+    ("find_geometry", lambda c: {"target": "InnerRing", "kind": "circular_edge",
+                                 "radius": _ctx_get(c, "inner_od", "inner ring OD"),
+                                 "max_results": 2}, "ok", _fgn("ir_rim")),
+    ("model_fillet", lambda c: {"edges": _ctx_get(c, "ir_rim", "inner ring rim"),
+                                "radius": _ctx_get(c, "ring_break", "the ring rim break")},
+     _filleted, None),
+    ("find_geometry", lambda c: {"target": "Frame", "kind": "circular_edge",
+                                 "radius": _ctx_get(c, "frame_open", "frame opening"),
+                                 "max_results": 2}, "ok", _fgn("fr_rim")),
+    ("model_chamfer", lambda c: {"edges": _ctx_get(c, "fr_rim", "frame opening rim"),
+                                 "distance": _ctx_get(c, "ring_break", "the ring rim break")},
+     _chamfered, None),
     # the rotor disc, REVOLVED about the spin axis; the shaft and carrier extruded.
     ("model_revolve", {"sketch_name": "RotorSketch", "profile_index": 0, "axis": "x", "angle_deg": 360},
      _revolved, None),
@@ -1368,7 +2777,8 @@ _SOLIDS = [
     ("model_sweep", {"profile": {"sketch": "CrankProf", "profile_index": 0}, "path": "sketch:CrankPath"},
      _swept, None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    ("view_set", {"action": "orient", "orientation": "iso-top-right"}, "ok", None),
+    # the machine is whole: frame IT for the colouring beats, not the metre-wide cameo grid.
+    _watch("Frame:1"),
     # EACH PART ITS OWN COLOR - the recording's signature look - and a physical material on the rotor.
     ("appearance_set", {"target": "Frame", "color": "#5E6AD2"}, "ok", None),
     ("appearance_set", {"target": "Pedestal", "color": "#8A94A6"}, "ok", None),
@@ -1405,6 +2815,139 @@ _SOLIDS = [
     # the blank name is its own guard, ahead of any lookup.
     ("pmi_edit", {"action": "hide", "annotation": ""}, "refused", None),
     ("pmi_delete", {"annotation": "PmiFlat"}, "refused", None),
+    # THE DATUM BENCH: one bored block, and every way the API knows of hanging a plane, an axis or a
+    # point off it. The modes divide by what they READ, so the bench has to carry all of it - six
+    # faces, the linear edges where they meet, the vertices where those meet, and a bore for the
+    # curved-face and circular-edge modes. Each row's receipt is the created datum's OWN geometry:
+    # every mode returns an object, and only the read-back distinguishes one that landed where the
+    # mode says from one that landed anywhere at all.
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("model_create_component", {"name": "DatumBench", "activate": True}, _made_component, None),
+    ("sketch_create", {"plane": "xy", "name": "DBPad"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "rectangle", "x1": 200, "y1": 0, "x2": 260, "y2": 40,
+                             "sketch_name": "DBPad"}, "ok", None),
+    ("model_extrude", {"sketch_name": "DBPad", "profile_index": 0, "distance": 20}, _extruded, None),
+    ("find_geometry", {"target": "DatumBench", "kind": "planar_face", "nearest_to": [230, 20, 20],
+                       "max_results": 1}, "ok", _fg("db_top")),
+    ("model_hole", lambda c: {"face": _ctx_get(c, "db_top", "bench top face"), "hole_type": "simple",
+                              "diameter": "10 mm", "extent": "through", "points": [[230, 20, 0]]},
+     _drilled(1), None),
+    # the reference set every mode below draws from, acquired once the bore exists so no handle is
+    # stale: the top face, the bore, its rim, two coplanar top edges, one vertical edge that MEETS
+    # one of them, and three top-face corners that form a triangle.
+    ("find_geometry", {"target": "DatumBench", "kind": "planar_face", "nearest_to": [230, 20, 20],
+                       "max_results": 1}, "ok", _fg("db_top2")),
+    ("find_geometry", {"target": "DatumBench", "kind": "cylinder_face", "nearest_to": [230, 20, 10],
+                       "max_results": 1}, "ok", _fg("db_bore")),
+    ("find_geometry", {"target": "DatumBench", "kind": "circular_edge", "nearest_to": [230, 20, 20],
+                       "max_results": 1}, "ok", _fg("db_rim")),
+    ("find_geometry", {"target": "DatumBench", "kind": "line_edge", "nearest_to": [230, 0, 20],
+                       "max_results": 1}, "ok", _fg("db_front")),
+    ("find_geometry", {"target": "DatumBench", "kind": "line_edge", "nearest_to": [230, 40, 20],
+                       "max_results": 1}, "ok", _fg("db_back")),
+    ("find_geometry", {"target": "DatumBench", "kind": "line_edge", "nearest_to": [200, 0, 10],
+                       "max_results": 1}, "ok", _fg("db_post")),
+    ("find_geometry", {"target": "DatumBench", "kind": "vertex", "nearest_to": [200, 0, 20],
+                       "max_results": 1}, "ok", _fg("db_c1")),
+    ("find_geometry", {"target": "DatumBench", "kind": "vertex", "nearest_to": [260, 0, 20],
+                       "max_results": 1}, "ok", _fg("db_c2")),
+    ("find_geometry", {"target": "DatumBench", "kind": "vertex", "nearest_to": [200, 40, 20],
+                       "max_results": 1}, "ok", _fg("db_c3")),
+    # the bore's seam vertex - a point that sits ON the cylindrical face, which is what a tangent
+    # plane needs. A box corner is not on the bore, and the tangency has nowhere to land.
+    ("find_geometry", {"target": "DatumBench", "kind": "vertex", "nearest_to": [230, 20, 20],
+                       "max_results": 1}, "ok", _fg("db_seam")),
+    # PLANES. at_angle swings the XY plane about a top edge; three_points spans the three corners;
+    # midplane splits XY and the top face, landing halfway up the block; two_edges spans the two
+    # coplanar top edges; tangent_at_point rests on the bore wall.
+    ("model_construction", lambda c: {"kind": "plane", "mode": "at_angle", "plane": "xy",
+                                      "edges": [_ctx_get(c, "db_front", "bench front top edge")],
+                                      "angle": 30, "name": "DBAngle"},
+     lambda p: _datum("plane")(p) and _measured("swung off the base plane's normal",
+                                                {"normal_changed": p.get("normal_changed")},
+                                                p.get("normal_changed") is True), None),
+    ("model_construction", lambda c: {"kind": "plane", "mode": "three_points",
+                                      "points": [_ctx_get(c, "db_c1", "bench corner 1"),
+                                                 _ctx_get(c, "db_c2", "bench corner 2"),
+                                                 _ctx_get(c, "db_c3", "bench corner 3")],
+                                      "name": "DBTri"}, _datum("plane"), None),
+    ("model_construction", lambda c: {"kind": "plane", "mode": "midplane", "plane": "xy",
+                                      "plane2": _ctx_get(c, "db_top2", "bench top face"),
+                                      "name": "DBMid"}, _datum("plane"), None),
+    ("model_construction", lambda c: {"kind": "plane", "mode": "two_edges",
+                                      "edges": [_ctx_get(c, "db_front", "bench front top edge"),
+                                                _ctx_get(c, "db_back", "bench back top edge")],
+                                      "name": "DBSpan"}, _datum("plane"), None),
+    ("model_construction", lambda c: {"kind": "plane", "mode": "tangent_at_point",
+                                      "face": _ctx_get(c, "db_bore", "bench bore"),
+                                      "points": [_ctx_get(c, "db_seam", "bench bore seam vertex")],
+                                      "name": "DBTangent"}, _datum("plane"), None),
+    # AXES. An edge IS an axis; two corners span one; the bore's own centreline; and the normal of
+    # the top face taken at a corner sitting on it.
+    ("model_construction", lambda c: {"kind": "axis", "mode": "edge",
+                                      "axis": _ctx_get(c, "db_front", "bench front top edge"),
+                                      "name": "DBEdgeAxis"}, _datum("axis"), None),
+    ("model_construction", lambda c: {"kind": "axis", "mode": "two_points",
+                                      "points": [_ctx_get(c, "db_c1", "bench corner 1"),
+                                                 _ctx_get(c, "db_c3", "bench corner 3")],
+                                      "name": "DBSpanAxis"}, _datum("axis"), None),
+    ("model_construction", lambda c: {"kind": "axis", "mode": "perpendicular_at_point",
+                                      "face": _ctx_get(c, "db_top2", "bench top face"),
+                                      "points": [_ctx_get(c, "db_c2", "bench corner 2")],
+                                      "name": "DBNormalAxis"},
+     lambda p: _datum("axis")(p) and _measured("axis along the face normal",
+                                               {"aligned": p.get("aligned_to_face_normal")},
+                                               p.get("aligned_to_face_normal") is True), None),
+    # a world axis through a coordinate is setByLine, which is DIRECT-edit-only - this design is
+    # parametric, so the mode is refused up front with the parametric routes named.
+    ("model_construction", {"kind": "axis", "mode": "world", "axis": "x", "x": 200, "y": 0, "z": 0,
+                            "name": "DBWorldAxis"}, "refused", None),
+    # POINTS. The bore rim's centre; the corner where a top edge meets the post below it; the origin
+    # the three world planes share; and where the post pierces XY.
+    ("model_construction", lambda c: {"kind": "point", "mode": "circle_center",
+                                      "edges": [_ctx_get(c, "db_rim", "bench bore rim")],
+                                      "name": "DBBoreCentre"}, _datum("point"), None),
+    ("model_construction", lambda c: {"kind": "point", "mode": "two_edges",
+                                      "edges": [_ctx_get(c, "db_front", "bench front top edge"),
+                                                _ctx_get(c, "db_post", "bench corner post")],
+                                      "name": "DBCorner"}, _datum("point"), None),
+    ("model_construction", {"kind": "point", "mode": "three_planes", "plane": "xy", "plane2": "xz",
+                            "plane3": "yz", "name": "DBOrigin"}, _datum("point"), None),
+    ("model_construction", lambda c: {"kind": "point", "mode": "edge_plane",
+                                      "edges": [_ctx_get(c, "db_post", "bench corner post")],
+                                      "plane": "xy", "name": "DBFoot"}, _datum("point"), None),
+    # the coordinate point is setByPoint - direct-edit-only for the same reason as the world axis.
+    ("model_construction", {"kind": "point", "mode": "coordinate", "x": 230, "y": 20, "z": 40,
+                            "name": "DBCoord"}, "refused", None),
+    # THE RELATION VOCABULARY, on the same block. Each relation reports a DIFFERENT measurement -
+    # an angle for the alignments, a distance for the fits - and the pairs here are chosen so the
+    # geometry, not the tool, settles the verdict: a face is flush with itself, a bore concentric
+    # with itself, the top face perpendicular to a wall it meets and touching it along that edge,
+    # and 20 mm clear of the floor below it.
+    ("find_geometry", {"target": "DatumBench", "kind": "planar_face", "nearest_to": [200, 20, 10],
+                       "max_results": 1}, "ok", _fg("db_wall")),
+    ("find_geometry", {"target": "DatumBench", "kind": "planar_face", "nearest_to": [230, 20, 0],
+                       "max_results": 1}, "ok", _fg("db_floor")),
+    ("model_measure_relation", lambda c: {"relation": "perpendicular",
+                                          "entity_a": _ctx_get(c, "db_top2", "bench top face"),
+                                          "entity_b": _ctx_get(c, "db_wall", "bench wall")},
+     _relation_passes("perpendicular"), None),
+    ("model_measure_relation", lambda c: {"relation": "flush",
+                                          "entity_a": _ctx_get(c, "db_top2", "bench top face"),
+                                          "entity_b": _ctx_get(c, "db_top2", "bench top face")},
+     _relation_read("flush", "normal_angle_deg"), None),
+    ("model_measure_relation", lambda c: {"relation": "concentric",
+                                          "entity_a": _ctx_get(c, "db_bore", "bench bore"),
+                                          "entity_b": _ctx_get(c, "db_bore", "bench bore")},
+     _relation_read("concentric", "center_distance"), None),
+    ("model_measure_relation", lambda c: {"relation": "touching",
+                                          "entity_a": _ctx_get(c, "db_top2", "bench top face"),
+                                          "entity_b": _ctx_get(c, "db_wall", "bench wall")},
+     _relation_read("touching", "min_distance"), None),
+    ("model_measure_relation", lambda c: {"relation": "clearance",
+                                          "entity_a": _ctx_get(c, "db_top2", "bench top face"),
+                                          "entity_b": _ctx_get(c, "db_floor", "bench floor")},
+     _relation_read("clearance", "min_distance"), None),
     # feature cameos on same-doc scratch bodies (no single natural gyroscope home for these verbs).
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     ("model_create_component", {"name": "FeatureCameo", "activate": True}, _made_component, None),
@@ -1468,11 +3011,31 @@ _SOLIDS = [
      lambda p: p.get("placement") == "plane_offsets", None),
     ("find_geometry", {"target": "FeatureCameo", "kind": "planar_face", "nearest_to": [220, 20, 20], "max_results": 1}, "ok", _fg("fc_body")),
     ("model_mirror", lambda c: {"bodies": [_ctx_get(c, "fc_body", "cameo body")], "plane": "yz"}, _mirrored, None),
-    ("model_pattern_rectangular", lambda c: {"bodies": [_ctx_get(c, "fc_body", "cameo body")], "quantity_one": 2, "spacing_one": 60, "direction_one": "y"}, _patterned("total_instances", 2), None),
-    ("model_pattern_circular", lambda c: {"bodies": [_ctx_get(c, "fc_body", "cameo body")], "quantity": 3, "total_angle_deg": 360, "axis": "z"}, _patterned("quantity", 3), None),
+    # a real GRID, not a row: two directions at once, spaced wider than the 40 mm pad so the
+    # instances stand clear of each other. 3 x 2 is also the read-back that catches a tool
+    # multiplying the directions wrongly - a row of 3 and a row of 6 both pass a bare "more than 1".
+    ("model_pattern_rectangular", lambda c: {"bodies": [_ctx_get(c, "fc_body", "cameo body")],
+                                             "quantity_one": 3, "spacing_one": 75, "direction_one": "x",
+                                             "quantity_two": 2, "spacing_two": 70, "direction_two": "y"},
+     _patterned("total_instances", 6), None),
+    # An axis OUTSIDE the part, so the pattern reads as an orbit rather than a body spun in place:
+    # two origin planes offset to cross 30 mm clear of the pad's -X edge, and their INTERSECTION is
+    # the axis. The world z axis would do the same job 200 mm away, swinging the copies across the
+    # whole scene and through the gyroscope.
+    ("model_construction", {"kind": "plane", "plane": "yz", "offset": 170, "name": "OrbitYZ"},
+     _datum_plane("yz"), None),
+    ("model_construction", {"kind": "plane", "plane": "xz", "offset": 20, "name": "OrbitXZ"},
+     _datum_plane("xz"), None),
+    ("model_construction", {"kind": "axis", "mode": "two_planes", "plane": "OrbitYZ",
+                            "plane2": "OrbitXZ", "name": "CameoOrbit"},
+     lambda p: bool(p.get("handle")), None),
+    ("model_pattern_circular", lambda c: {"bodies": [_ctx_get(c, "fc_body", "cameo body")],
+                                          "quantity": 4, "total_angle_deg": 360,
+                                          "axis": "CameoOrbit"},
+     lambda p: p.get("quantity") == 4 and p.get("axis") == "CameoOrbit", None),
     # pattern the cameo along one of its own line edges - the count is a read-back, never an echo.
     ("find_geometry", {"target": "FeatureCameo", "kind": "line_edge", "max_results": 1}, "ok", _fg("dc_edge")),
-    ("model_pattern_path", lambda c: {"bodies": [_ctx_get(c, "fc_body", "cameo body")], "path": [_ctx_get(c, "dc_edge", "path edge")], "quantity": 3, "distance": 12, "distance_type": "spacing"},
+    ("model_pattern_path", lambda c: {"bodies": [_ctx_get(c, "fc_body", "cameo body")], "path": [_ctx_get(c, "dc_edge", "path edge")], "quantity": 3, "distance": 55, "distance_type": "spacing"},
      lambda p: p.get("patterned") is True and p.get("quantity") == 3, None),
     # the pattern axis as a DATUM: the cameo's own bore defines a construction axis, whose published
     # handle is what the pattern turns about. The axis label is read back off the resolved entity, so
@@ -1772,6 +3335,47 @@ _MOTION = [
     ("joint_create_as_built", {"occurrence_one": "AsbPin:1", "occurrence_two": "AsbPlate:1",
                                "joint_type": "rigid"},
      _refused("over constrained"), None),
+    # THE JOINT BENCH: one grounded base, a STATION for every motion type spaced along it, and a
+    # flag-shaped indicator arm at each. The arm shape is the point - a disc turning about its own
+    # axis shows nothing, so every station carries a bar whose far end reads its position at a
+    # glance, and the stations are spread along the base so the seven motions stand side by side
+    # instead of on top of each other. Each arm is drawn OFF the base and its joint carries it to
+    # its station, so the mate itself is visible; the drive pass below then moves the ones that
+    # have a degree of freedom, which is the only way a motion type can be told from a label.
+    ("model_create_component", {"name": "JointBase", "activate": True}, _made_component, None),
+    ("sketch_create", {"plane": "xy", "name": "JBaseS"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "rectangle", "x1": 860, "y1": 300, "x2": 1190, "y2": 340,
+                             "sketch_name": "JBaseS"}, "ok", None),
+    ("model_extrude", {"sketch_name": "JBaseS", "profile_index": 0, "distance": 10},
+     _extruded, None),
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("appearance_set", {"target": "JointBase", "color": "#37474F"}, "ok", None),
+    # GROUNDED TO PARENT - the base is the fixed frame every station's motion is read against. An
+    # arm that moved because the base drifted would read as the joint working.
+    ("assembly_ground", {"occurrence": "JointBase:1", "ground_to_parent": True}, _grounded, None),
+] + _joint_bench() + [
+    # THE RETYPE, on a station that is already visible: one joint walked through every motion the
+    # tool carries, each retype witnessed by the design's own joint walk rather than by the writer,
+    # which publishes the type it was ASKED for. It ends back on the revolute it started as.
+    ("joint_edit", {"joint_name": "JRig", "joint_type": "revolute", "axis": "z"}, "ok", None),
+    ("assembly_get", {}, _joint_is("JRig", "revolute"), None),
+    ("joint_edit", {"joint_name": "JRig", "joint_type": "slider", "axis": "x"}, "ok", None),
+    ("assembly_get", {}, _joint_is("JRig", "slider"), None),
+    ("joint_edit", {"joint_name": "JRig", "joint_type": "cylindrical", "axis": "z"}, "ok", None),
+    ("assembly_get", {}, _joint_is("JRig", "cylindrical"), None),
+    ("joint_edit", {"joint_name": "JRig", "joint_type": "planar", "axis": "z"}, "ok", None),
+    ("assembly_get", {}, _joint_is("JRig", "planar"), None),
+    ("joint_edit", {"joint_name": "JRig", "joint_type": "ball"}, "ok", None),
+    ("assembly_get", {}, _joint_is("JRig", "ball"), None),
+    # pin_slot alone takes TWO frame directions - it rotates about one and slides along another, so
+    # the pair must differ.
+    ("joint_edit", {"joint_name": "JRig", "joint_type": "pin_slot", "axis": "z",
+                    "slide_axis": "y"}, "ok", None),
+    ("assembly_get", {}, _joint_is("JRig", "pin_slot"), None),
+    ("joint_edit", {"joint_name": "JRig", "joint_type": "pin_slot", "axis": "y",
+                    "slide_axis": "y"}, "refused", None),
+    ("joint_edit", {"joint_name": "JRig", "joint_type": "rigid"}, "ok", None),
+    ("assembly_get", {}, _joint_is("JRig", "rigid"), None),
     # COUPLE the crank to the rotor spin at ratio 2 - the DOF-fix step - across independent chains.
     ("joint_motion_link", {"joint_one": "CrankAxis", "joint_two": "Spin", "ratio": 2},
      _motion_linked("CrankAxis", "Spin", False), None),
@@ -1840,6 +3444,7 @@ _MOTION = [
     ("assembly_edit_contacts", {"action": "delete", "name": "NoSuchContactSet"}, "refused", None),
     ("assembly_edit_contacts", lambda c: {"action": "delete", "name": _ctx_get(c, "contact_set", "contact set name")},
      lambda p: p.get("deleted") is True, None),
+    _watch("Frame:1"),
     # DRIVE THE AXES ON CAMERA: yaw proves the no-take gate; both ring pivots and the crank ->
     # rotor 2:1 drive for real. Yaw CANNOT move in this scene - Carrier:1 rides the rigid group
     # with Frame:1 and the chain closes through Pedestal:1, so the solver holds it at 0 (measured:
@@ -1888,10 +3493,54 @@ _MOTION = [
     ("assembly_move", {"occurrence": "PoseCameo:1", "dx": 40}, _moved_occurrence(), None),
     ("assembly_capture_position", {"action": "capture"}, _captured, None),
 ]
-_MOTION += _box("ConA", ox=360) + _box("ConB", ox=360) + [
+_MOTION += _box("ConA", ox=360, tint="#E5533C") + _box("ConB", ox=360, tint="#1E88E5", shape="disc") + [
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     ("assembly_constrain", {"snap_one": "ConA:1:bottom", "snap_two": "ConB:1:top", "flipped": True}, _constrained, None),
     ("design_recompute", {}, "ok", None),
+] + _box("MateSeat", ox=460, tint="#6A1B9A") + _box("MateArm", ox=520, tint="#FDD835", shape="bar") + [
+    # ONE CONSTRAINT, SEVERAL RELATIONSHIPS - the table in Fusion's own Constrain Components dialog,
+    # where a single constraint FEATURE carries a row per geometry pair, each row with its own type,
+    # offset and angle. That is how Fusion actually locates a part: a set solved TOGETHER, because one
+    # face pair almost never fixes anything. The row above is the single-pair shorthand; this is the
+    # set form.
+    # The two rows take DIFFERENT freedoms, which is what makes the set solvable: a SEAT (the arm's
+    # underside onto the seat block's top face, 2 mm proud, flipped so the two faces oppose) and a
+    # TURN about it (30 deg between the two front faces). Two rows reaching for the SAME freedom
+    # over-constrain instead - measured on a live document: a face-to-face mate plus a concentric on
+    # one pair of discs computes with a WARNING, with and without the offset, and the tool refuses
+    # rather than leave a warned constraint in the design.
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("assembly_constrain", {"relationships": [
+        {"snap_one": "MateArm:1:bottom", "snap_two": "MateSeat:1:top", "flip": True, "offset": 2},
+        {"snap_one": "MateArm:1:front", "snap_two": "MateSeat:1:front", "angle_deg": 30},
+    ]},
+     # BOTH ROWS IN ONE NUMBER. The count is read off the CREATED constraint, never echoed - a
+     # constraint holding FEWER rows than were submitted is refused by the tool - and the rotation the
+     # tool measures for itself is 180 - 30: the seat row's flip and the turn row's angle composed.
+     # Neither row on its own produces 150.
+     lambda p: _constrained(p) and _measured(
+         "both relationship rows landed in ONE constraint, and both acted",
+         {"relationship_count": p.get("relationship_count"),
+          "relationships_submitted": p.get("relationships_submitted"),
+          "moved": p.get("moved")},
+         p.get("relationships_submitted") == 2 and p.get("relationship_count") >= 2
+         and any(_near(m.get("rotation_deg"), 150.0, 0.5)
+                 for m in (p.get("moved") or []))), None),
+    ("design_recompute", {}, "ok", None),
+    # THE TWO ROWS PROVEN BY THEIR EFFECTS, which is the only honest way to tell them apart: no read
+    # publishes a per-row TYPE (the dialog's Type column has no counterpart on the wire), so a count
+    # of two says two rows landed and nothing about what each one did. The arm's own bounding box
+    # says both. Its underside sits 2 mm above the seat block's 10 mm top face - the seat row, read on
+    # Z, the one axis the layout pass never moves - and a 34 x 10 mm bar turned 30 deg measures
+    # 34.45 x 25.66 across the world axes, which is the turn row and nothing else.
+    ("model_inspect", {"target": "MateArm:1"},
+     lambda p: _measured("the seat row holds the arm 2 mm proud of a 10 mm block, the turn row has "
+                         "it 30 deg off the world axes",
+                         {"min_z": (p.get("min_point") or {}).get("z"),
+                          "x": p.get("x"), "y": p.get("y")},
+                         _near((p.get("min_point") or {}).get("z"), 12.0, 0.05)
+                         and _near(p.get("x"), 34.445, 0.05)
+                         and _near(p.get("y"), 25.660, 0.05)), None),
     # RESTRUCTURE: two more crank instances (they share the Crank component's geometry), one of them
     # re-parented under the frame, then both removed so the mechanism is left as it was found. Fusion
     # numbers an instance from a per-component counter, so every path here is READ back, never a
@@ -1926,9 +3575,736 @@ _MOTION += _box("ConA", ox=360) + _box("ConB", ox=360) + [
 ]
 
 # --- ACT 4: DETAILS - fillet/chamfer the rings, section through the gimbal center (mirrors S4) -
+# The sketch TOOLS, as their own act: every sketch-tool beat that needs no solid, so the run
+# draws before it builds. What is missing from here is only what cannot be sketched in an empty
+# document - a dimension MEASURED to a model face, a text path REFUSED a model edge - and those
+# few beats stay in _DETAILS, next to the bodies they read.
+_SKETCHWORK = [
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    # sketch_edit_curve: one sketch per action, so no edit can perturb the next.
+    ("sketch_create", {"plane": "xy", "name": "EditTrim"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 600, "y1": 0, "x2": 700, "y2": 0,
+                             "sketch_name": "EditTrim"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 650, "y1": -50, "x2": 650, "y2": 50,
+                             "sketch_name": "EditTrim"}, "ok", None),
+    ("sketch_edit_curve", {"sketch_name": "EditTrim", "action": "trim", "entity_one": "line:0",
+                           "x1": 610, "y1": 0},
+     lambda p: [r.get("length") for r in p.get("resulting", [])] == [50.0], None),
+    ("sketch_create", {"plane": "xy", "name": "EditExt"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 600, "y1": 10, "x2": 630, "y2": 10,
+                             "sketch_name": "EditExt"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 680, "y1": -20, "x2": 680, "y2": 40,
+                             "sketch_name": "EditExt"}, "ok", None),
+    # extend returns an EMPTY collection on success, so the verdict is the curve's own length:
+    # 30 mm reaching the crossing line at x=680 makes it 80.
+    ("sketch_edit_curve", {"sketch_name": "EditExt", "action": "extend", "entity_one": "line:0",
+                           "x1": 628, "y1": 10},
+     lambda p: [r.get("length") for r in p.get("resulting", [])] == [80.0], None),
+    ("sketch_create", {"plane": "xy", "name": "EditSplit"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 600, "y1": 0, "x2": 700, "y2": 0,
+                             "sketch_name": "EditSplit"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 650, "y1": -50, "x2": 650, "y2": 50,
+                             "sketch_name": "EditSplit"}, "ok", None),
+    # both halves are 50 long and must carry DISTINCT ids - the two pieces share one entityToken,
+    # so an id resolved by token would report the same curve twice.
+    ("sketch_edit_curve", {"sketch_name": "EditSplit", "action": "split", "entity_one": "line:0",
+                           "x1": 650, "y1": 0},
+     lambda p: [r.get("length") for r in p.get("resulting", [])] == [50.0, 50.0]
+     and len({r.get("id") for r in p.get("resulting", [])}) == 2, None),
+    ("sketch_create", {"plane": "xy", "name": "EditCorner"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 600, "y1": 0, "x2": 660, "y2": 0,
+                             "sketch_name": "EditCorner"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 660, "y1": 0, "x2": 660, "y2": 40,
+                             "sketch_name": "EditCorner"}, "ok", None),
+    ("sketch_edit_curve", {"sketch_name": "EditCorner", "action": "fillet", "entity_one": "line:0",
+                           "x1": 655, "y1": 0, "entity_two": "line:1", "x2": 660, "y2": 5,
+                           "radius": 10},
+     lambda p: abs((p.get("resulting") or [{}])[0].get("length", 0) - 15.708) < 0.01, None),
+    ("sketch_create", {"plane": "xy", "name": "EditChamfer"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 600, "y1": 0, "x2": 660, "y2": 0,
+                             "sketch_name": "EditChamfer"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 660, "y1": 0, "x2": 660, "y2": 40,
+                             "sketch_name": "EditChamfer"}, "ok", None),
+    ("sketch_edit_curve", {"sketch_name": "EditChamfer", "action": "chamfer",
+                           "entity_one": "line:0", "x1": 655, "y1": 0, "entity_two": "line:1",
+                           "x2": 660, "y2": 5, "distance": 8},
+     lambda p: abs((p.get("resulting") or [{}])[0].get("length", 0) - 11.3137) < 0.01, None),
+    ("sketch_create", {"plane": "xy", "name": "EditOffset"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 600, "y1": 0, "x2": 700, "y2": 0,
+                             "sketch_name": "EditOffset"}, "ok", None),
+    # the direction point picks the side: above the line offsets to +y
+    ("sketch_edit_curve", {"sketch_name": "EditOffset", "action": "offset", "entity_one": "line:0",
+                           "x1": 650, "y1": 20, "distance": 15},
+     lambda p: p.get("curve_count_after") == 2, None),
+    ("sketch_edit_curve", {"sketch_name": "EditOffset", "action": "chamfer", "entity_one": "line:0",
+                           "x1": 650, "y1": 0, "entity_two": "line:1", "x2": 650, "y2": 15,
+                           "distance": 5}, "refused", None),
+    # sketch_move / sketch_copy: a transform is verified by COORDINATES, never by the API's bool -
+    # Sketch.move returns true for an entity a constraint held still. A two-line chain on its own
+    # clear band carries every beat below.
+    ("sketch_create", {"plane": "xy", "name": "XformSrc"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 600, "y1": 500, "x2": 650, "y2": 500,
+                             "sketch_name": "XformSrc"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 650, "y1": 500, "x2": 650, "y2": 540,
+                             "sketch_name": "XformSrc"}, "ok", None),
+    # the copied collection counts the copied ENDPOINTS as well as the curves - 6 entities for a
+    # two-line chain - so the target's own curve count is the honest read-back, and the new refs
+    # are identity-matched against the target's collections.
+    ("sketch_copy", {"sketch_name": "XformSrc", "entities": "line:0,line:1", "dx": 100},
+     lambda p: p.get("curve_count_after", 0) - p.get("curve_count_before", 0) == 2
+     and p.get("new_curves") == ["line:2", "line:3"]
+     and p.get("returned_entity_count") == 6, None),
+    # WHERE they landed: a count-only check passes a copy dropped on top of the original, so the
+    # copy is read back at its offset position (x 600 -> 700).
+    ("sketch_get", {"sketch_name": "XformSrc", "include_entities": True},
+     lambda p: any(abs((e.get("start") or {}).get("x", 0) - _px("XformSrc", 700)) < 0.01
+                   for e in (p.get("entities") or []) if e.get("type") == "line"), None),
+    # move the ORIGINAL: line:0 runs 600->650 at y=500 and must land at 620->670, y=530.
+    ("sketch_move", {"sketch_name": "XformSrc", "entities": "line:0", "dx": 20, "dy": 30},
+     lambda p: p.get("moved_entities") == ["line:0"] and not p.get("unmoved_entities"), None),
+    ("sketch_get", {"sketch_name": "XformSrc", "include_entities": True},
+     lambda p: any(abs((e.get("start") or {}).get("x", 0) - _px("XformSrc", 620)) < 0.01
+                   and abs((e.get("start") or {}).get("y", 0) - _py("XformSrc", 530)) < 0.01
+                   for e in (p.get("entities") or []) if e.get("type") == "line"), None),
+    # 180 deg about the line's OWN midpoint: the bounding box is identical afterwards and only the
+    # endpoints swap, so the move is seen by the endpoint fingerprint and by nothing coarser.
+    ("sketch_move", {"sketch_name": "XformSrc", "entities": "line:0", "rotation_deg": 180,
+                     "center_x": 645, "center_y": 530},
+     lambda p: p.get("moved_entities") == ["line:0"], None),
+    # a cross-sketch copy lands in the TARGET, whose count rises from zero.
+    ("sketch_create", {"plane": "xy", "name": "XformDst"}, "ok", None),
+    # ONE curve across into an empty target - and the note states the id rule that holds for a COPY:
+    # an added curve APPENDS, so the ids already in use keep their entities. Removing a curve is what
+    # RENUMBERS (sketch_edit_curve's rule), and saying so here would be wrong for this call.
+    ("sketch_copy", {"sketch_name": "XformSrc", "target_sketch": "XformDst",
+                     "entities": "line:1", "dx": 0, "dy": -60},
+     lambda p: p.get("target_sketch") == "XformDst" and p.get("curve_count_before") == 0
+     and p.get("curve_count_after") == 1
+     and "APPENDS" in (p.get("note") or "") and "RENUMBER" not in (p.get("note") or ""), None),
+    # a mirror asked for as a negative scale, and a transform that asks for nothing: neither runs.
+    ("sketch_move", {"sketch_name": "XformDst", "entities": "line:0", "scale_factor": -1},
+     "refused", None),
+    ("sketch_move", {"sketch_name": "XformDst", "entities": "line:0"}, "refused", None),
+    # the same copy inside a COMPONENT sketch - the occurrence-proxy seam. Sketch.copy hands back
+    # assembly-context proxies whose own tokens are NOT the landed curves', so a ref can only be
+    # named through each proxy's native entity: an empty 'new_curves' beside a count that rose is
+    # the seam breaking, and 'new_curves_complete' appears only when refs went missing.
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("model_create_component", {"name": "CopyComp", "activate": True}, _made_component, None),
+    ("sketch_create", {"plane": "xy", "name": "CompCopyS"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 1400, "y1": 0, "x2": 1450, "y2": 0,
+                             "sketch_name": "CompCopyS"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 1450, "y1": 0, "x2": 1450, "y2": 40,
+                             "sketch_name": "CompCopyS"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 1450, "y1": 40, "x2": 1400, "y2": 40,
+                             "sketch_name": "CompCopyS"}, "ok", None),
+    ("sketch_copy", {"sketch_name": "CompCopyS", "entities": "line:0,line:1,line:2", "dy": 60},
+     lambda p: p.get("new_curves") == ["line:3", "line:4", "line:5"]
+     and p.get("curve_count_after", 0) - p.get("curve_count_before", 0) == 3
+     and "new_curves_complete" not in p, None),
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    # autoConstrain takes the whole sketch: a loose rectangle flips is_fully_constrained to true,
+    # and the added counts are read off the sketch's own collections.
+    # THE CONSTRAINT BENCH - one scratch sketch carrying a spread of constraint kinds, several of
+    # them taking TWO operands, each verified by the sketch's own constrained-state read rather than
+    # by the call returning ok. Geometric constraints are what make a sketch a MODEL rather than a
+    # picture, and a surface that only ever ran 'auto' has never shown that.
+    ("sketch_create", {"plane": "xy", "name": "ConBench"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 600, "y1": 480, "x2": 680, "y2": 486,
+                             "sketch_name": "ConBench"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 600, "y1": 500, "x2": 676, "y2": 512,
+                             "sketch_name": "ConBench"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 700, "y1": 480, "x2": 706, "y2": 530,
+                             "sketch_name": "ConBench"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": 640, "cy": 545, "radius": 14,
+                             "sketch_name": "ConBench"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": 676, "cy": 545, "radius": 9,
+                             "sketch_name": "ConBench"}, "ok", None),
+    # HORIZONTAL takes one operand; the rest below each take two.
+    ("sketch_constrain", {"constraint": "horizontal", "entity_one": "line:0",
+                          "sketch_name": "ConBench"},
+     lambda p: p.get("applied") == "horizontal", None),
+    ("sketch_constrain", {"constraint": "parallel", "entity_one": "line:1",
+                          "entity_two": "line:0", "sketch_name": "ConBench"},
+     lambda p: p.get("applied") == "parallel", None),
+    ("sketch_constrain", {"constraint": "perpendicular", "entity_one": "line:2",
+                          "entity_two": "line:0", "sketch_name": "ConBench"},
+     lambda p: p.get("applied") == "perpendicular", None),
+    ("sketch_constrain", {"constraint": "equal", "entity_one": "circle:0",
+                          "entity_two": "circle:1", "sketch_name": "ConBench"},
+     lambda p: p.get("applied") == "equal", None),
+    # SYMMETRY takes three: the pair, and the line they mirror across.
+    ("sketch_constrain", {"constraint": "symmetry", "entity_one": "circle:0",
+                          "entity_two": "circle:1", "symmetry_line": "line:2",
+                          "sketch_name": "ConBench"},
+     lambda p: p.get("applied") == "symmetry" and p.get("symmetry_line") == "line:2", None),
+    # MIDPOINT puts a line's own end at the middle of another - a point-and-curve pair.
+    ("sketch_constrain", {"constraint": "midpoint", "entity_one": "line:1:start",
+                          "entity_two": "line:0", "sketch_name": "ConBench"},
+     lambda p: p.get("applied") == "midpoint", None),
+    # the state read is the verdict: the sketch is MORE constrained than it was, and the tool's
+    # own count of what it added is what says so - a call that returned ok and added nothing is a
+    # silent no-op, which is the failure this beat exists to catch.
+    ("sketch_get", {"sketch_name": "ConBench"},
+     lambda p: p.get("constraint_count", 0) >= 6, None),
+    # a constraint the geometry cannot satisfy is REFUSED by name, not silently dropped.
+    ("sketch_constrain", {"constraint": "tangent", "entity_one": "line:0",
+                          "entity_two": "line:1", "sketch_name": "ConBench"}, "refused", None),
+    # THE SECOND BENCH: the constraint kinds the first has no geometry for. Deliberately its own
+    # sketch - every curve on ConBench is already pinned by the constraints above, and stacking more
+    # onto them refuses as over-constrained instead of proving anything. Two ordering facts drive
+    # the refs: a fresh sketch owns its ORIGIN as point:0, so the first drawn point is point:1; and
+    # the kinds that CREATE curves run in sketches of their own, below, because a new curve renumbers
+    # every ref written after it.
+    ("sketch_create", {"plane": "xy", "name": "ConBench2"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 860, "y1": 480, "x2": 930, "y2": 486,
+                             "sketch_name": "ConBench2"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 945, "y1": 489, "x2": 1000, "y2": 495,
+                             "sketch_name": "ConBench2"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 860, "y1": 505, "x2": 866, "y2": 560,
+                             "sketch_name": "ConBench2"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 880, "y1": 505, "x2": 920, "y2": 511,
+                             "sketch_name": "ConBench2"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 880, "y1": 590, "x2": 920, "y2": 602,
+                             "sketch_name": "ConBench2"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "rectangle", "x1": 940, "y1": 505, "x2": 980, "y2": 545,
+                             "sketch_name": "ConBench2"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": 880, "cy": 660, "radius": 20,
+                             "sketch_name": "ConBench2"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": 884, "cy": 664, "radius": 10,
+                             "sketch_name": "ConBench2"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "spline", "points": [[920, 602], [950, 616], [980, 600]],
+                             "sketch_name": "ConBench2"}, "ok", None),
+    ("sketch_constrain", {"constraint": "vertical", "entity_one": "line:2",
+                          "sketch_name": "ConBench2"},
+     lambda p: p.get("applied") == "vertical", None),
+    ("sketch_constrain", {"constraint": "collinear", "entity_one": "line:1",
+                          "entity_two": "line:0", "sketch_name": "ConBench2"},
+     lambda p: p.get("applied") == "collinear", None),
+    ("sketch_constrain", {"constraint": "concentric", "entity_one": "circle:1",
+                          "entity_two": "circle:0", "sketch_name": "ConBench2"},
+     lambda p: p.get("applied") == "concentric", None),
+    # the spline continues the line it was drawn from, sharing that endpoint, and 'smooth' makes the
+    # join curvature-continuous - the one kind that needs a spline on at least one side.
+    ("sketch_constrain", {"constraint": "smooth", "entity_one": "spline:0",
+                          "entity_two": "line:4", "sketch_name": "ConBench2"},
+     lambda p: p.get("applied") == "smooth", None),
+    # the square's four lines told they ARE a polygon - equal lengths and equal angles in one
+    # constraint instead of six.
+    ("sketch_constrain", {"constraint": "polygon", "entities": "line:5,line:6,line:7,line:8",
+                          "sketch_name": "ConBench2"},
+     lambda p: p.get("applied") == "polygon", None),
+    # fix pins a curve where it sits; unfix releases the same one, so the pair is checkable as a
+    # pair - a 'fix' that silently did nothing leaves nothing for 'unfix' to find.
+    ("sketch_constrain", {"constraint": "fix", "entity_one": "line:3",
+                          "sketch_name": "ConBench2"},
+     lambda p: p.get("applied") == "fix", None),
+    ("sketch_constrain", {"constraint": "unfix", "entity_one": "line:3",
+                          "sketch_name": "ConBench2"},
+     lambda p: p.get("applied") == "unfix", None),
+    # THE POINT-PAIR KINDS, on four free stubs of their own. They take POINTS, and a bare 'point:N'
+    # counts every point the sketch owns - a line's own endpoints included - so 'point:1' on a
+    # sketch holding curves is the first line's start, not the first point drawn. Anchored refs name
+    # the endpoint directly, which is the whole reason the anchor form exists.
+    ("sketch_create", {"plane": "xy", "name": "PtBench"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 1060, "y1": 300, "x2": 1090, "y2": 306,
+                             "sketch_name": "PtBench"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 1110, "y1": 296, "x2": 1140, "y2": 304,
+                             "sketch_name": "PtBench"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 1060, "y1": 340, "x2": 1090, "y2": 348,
+                             "sketch_name": "PtBench"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 1066, "y1": 380, "x2": 1096, "y2": 388,
+                             "sketch_name": "PtBench"}, "ok", None),
+    # two stubs made LEVEL by their start points, and two made PLUMB by theirs - no curve is
+    # constrained either time, which is what separates these from plain horizontal/vertical.
+    ("sketch_constrain", {"constraint": "horizontal_points", "entity_one": "line:0:start",
+                          "entity_two": "line:1:start", "sketch_name": "PtBench"},
+     lambda p: p.get("applied") == "horizontal_points", None),
+    ("sketch_constrain", {"constraint": "vertical_points", "entity_one": "line:2:start",
+                          "entity_two": "line:3:start", "sketch_name": "PtBench"},
+     lambda p: p.get("applied") == "vertical_points", None),
+    # THE CREATOR KINDS. Each gets its own sketch: an offset lands NEW curves, so a second one
+    # written against the same sketch would be aimed at refs the first has already renumbered. The
+    # verdict is 'created_count' - a constraint that returned ok and drew nothing is the silent
+    # no-op these rows exist to catch.
+    ("sketch_create", {"plane": "xy", "name": "OffOne"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 860, "y1": 730, "x2": 940, "y2": 730,
+                             "sketch_name": "OffOne"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 940, "y1": 730, "x2": 940, "y2": 790,
+                             "sketch_name": "OffOne"}, "ok", None),
+    ("sketch_constrain", {"constraint": "offset", "entities": "line:0,line:1", "distance": 8,
+                          "sketch_name": "OffOne"},
+     lambda p: p.get("applied") == "offset" and p.get("created_count", 0) >= 2, None),
+    ("sketch_create", {"plane": "xy", "name": "OffTwo"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 960, "y1": 730, "x2": 1040, "y2": 730,
+                             "sketch_name": "OffTwo"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 1040, "y1": 730, "x2": 1040, "y2": 790,
+                             "sketch_name": "OffTwo"}, "ok", None),
+    # the two-sided form draws the offset on BOTH sides of the source, so it lands twice the curves.
+    ("sketch_constrain", {"constraint": "offset_two_sides", "entities": "line:0,line:1",
+                          "distance": 8, "sketch_name": "OffTwo"},
+     lambda p: p.get("applied") == "offset_two_sides" and p.get("created_count", 0) >= 4, None),
+    ("sketch_create", {"plane": "xy", "name": "CircPat"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "point", "cx": 900, "cy": 880, "sketch_name": "CircPat"},
+     "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": 940, "cy": 880, "radius": 6,
+                             "sketch_name": "CircPat"}, "ok", None),
+    # six around the drawn centre point: five NEW circles, the original not counted.
+    ("sketch_constrain", {"constraint": "circular_pattern", "entities": "circle:0",
+                          "entity_one": "point:1", "quantity": 6, "angle": 360,
+                          "sketch_name": "CircPat"},
+     lambda p: p.get("applied") == "circular_pattern" and p.get("created_count") == 5, None),
+    # THE DIMENSION BENCH: the sizing kinds the story's own sketches never need. Each one names a
+    # different pair of operand types, so each needs its own geometry - a circle pair sharing a
+    # centre, a line and a circle for the tangent measure, and an ellipse for the two radius kinds.
+    # Every row reads the LANDED value back: a dimension that attached to the wrong entity still
+    # returns ok, and only its measured number says so.
+    ("sketch_create", {"plane": "xy", "name": "DimBench"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 1060, "y1": 480, "x2": 1120, "y2": 500,
+                             "sketch_name": "DimBench"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": 1090, "cy": 560, "radius": 24,
+                             "sketch_name": "DimBench"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": 1090, "cy": 560, "radius": 12,
+                             "sketch_name": "DimBench"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 1140, "y1": 530, "x2": 1140, "y2": 590,
+                             "sketch_name": "DimBench"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "ellipse", "cx": 1090, "cy": 650, "radius": 30, "minor": 16,
+                             "sketch_name": "DimBench"}, "ok", None),
+    # the horizontal component of a slanted line's own span: 60 mm across, not its 63.2 mm length.
+    ("sketch_dimension", {"dim_type": "horizontal_distance", "entity_one": "line:0:start",
+                          "entity_two": "line:0:end", "sketch_name": "DimBench"},
+     _dim_measures(60.0), None),
+    ("sketch_dimension", {"dim_type": "diameter", "entity_one": "circle:0",
+                          "sketch_name": "DimBench"}, _dim_measures(48.0), None),
+    # the gap between two circles on one centre: 24 mm outer less 12 mm inner.
+    ("sketch_dimension", {"dim_type": "concentric_circle", "entity_one": "circle:0",
+                          "entity_two": "circle:1", "sketch_name": "DimBench"},
+     _dim_measures(12.0), None),
+    # line to the NEAR tangent of the circle: the line stands at x 1140, the circle's near side at
+    # 1090+24, so 26 mm.
+    ("sketch_dimension", {"dim_type": "tangent_distance", "entity_one": "line:1",
+                          "entity_two": "circle:0", "sketch_name": "DimBench"},
+     _dim_measures(26.0), None),
+    ("sketch_dimension", {"dim_type": "ellipse_major_radius", "entity_one": "ellipse:0",
+                          "sketch_name": "DimBench"}, _dim_measures(30.0), None),
+    ("sketch_dimension", {"dim_type": "ellipse_minor_radius", "entity_one": "ellipse:0",
+                          "sketch_name": "DimBench"}, _dim_measures(16.0), None),
+    ("sketch_create", {"plane": "xy", "name": "AutoCon"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "rectangle", "x1": 600, "y1": 560, "x2": 700, "y2": 600,
+                             "sketch_name": "AutoCon"}, "ok", None),
+    ("sketch_get", {"sketch_name": "AutoCon"},
+     lambda p: p.get("is_fully_constrained") is False, None),
+    ("sketch_constrain", {"constraint": "auto", "sketch_name": "AutoCon"},
+     lambda p: p.get("added_constraints", 0) + p.get("added_dimensions", 0) > 0
+     and p.get("is_fully_constrained") is True, None),
+    # a re-run on the constrained sketch adds nothing and is a clean no-op, not an error.
+    ("sketch_constrain", {"constraint": "auto", "sketch_name": "AutoCon"},
+     lambda p: p.get("added_dimensions") == 0 and p.get("added_constraints") == 0
+     and p.get("is_fully_constrained") is True, None),
+    # the SECOND solver option, on a sketch of its own - option1 above is the default and the one
+    # the payload names, so a request for the other has to come back named as the other or the knob
+    # was dropped on the way in.
+    ("sketch_create", {"plane": "xy", "name": "AutoCon2"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "rectangle", "x1": 720, "y1": 560, "x2": 820, "y2": 600,
+                             "sketch_name": "AutoCon2"}, "ok", None),
+    ("sketch_constrain", {"constraint": "auto", "sketch_name": "AutoCon2",
+                          "result_option": "option2"},
+     lambda p: p.get("result_option_requested") == "option2"
+     and p.get("added_constraints", 0) + p.get("added_dimensions", 0) > 0
+     and p.get("is_fully_constrained") is True, None),
+    # rectangular_pattern with distance_type='extent': 'distance' is the pattern's TOTAL span, so
+    # three instances 90 mm across sit at x 600 / 645 / 690 - the landed centre is the verdict, and
+    # a spacing read in centimetres would put the last one at 609.
+    ("sketch_create", {"plane": "xy", "name": "PatExtent"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": 600, "cy": 640, "radius": 5,
+                             "sketch_name": "PatExtent"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 600, "y1": 660, "x2": 700, "y2": 660,
+                             "sketch_name": "PatExtent"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 600, "y1": 660, "x2": 600, "y2": 760,
+                             "sketch_name": "PatExtent"}, "ok", None),
+    ("sketch_constrain", {"constraint": "rectangular_pattern", "sketch_name": "PatExtent",
+                          "entities": "circle:0", "entity_one": "line:0", "entity_two": "line:1",
+                          "quantity": 3, "distance": 90, "quantity_two": 1, "distance_two": 10,
+                          "distance_type": "extent"},
+     lambda p: p.get("distance_type") == "extent" and p.get("created_count", 0) == 2, None),
+    ("sketch_get", {"sketch_name": "PatExtent", "include_entities": True},
+     lambda p: abs(max((e.get("center") or {}).get("x", 0) for e in (p.get("entities") or [])
+                       if e.get("type") == "circle") - _px("PatExtent", 690.0)) < 0.01, None),
+    # per-instance suppression: a 3x2 pattern of one circle has 5 SUPPRESSIBLE instances (the
+    # original does not count), and the flags are read back off the CREATED constraint. A suppressed
+    # instance draws no curve, so 5 instances less 2 suppressed is 3 new curves - the count and the
+    # landed flags together are what an echoed payload cannot fake.
+    ("sketch_create", {"plane": "xy", "name": "PatSupp"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": 600, "cy": 800, "radius": 4,
+                             "sketch_name": "PatSupp"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 600, "y1": 820, "x2": 700, "y2": 820,
+                             "sketch_name": "PatSupp"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 600, "y1": 820, "x2": 600, "y2": 920,
+                             "sketch_name": "PatSupp"}, "ok", None),
+    ("sketch_constrain", {"constraint": "rectangular_pattern", "sketch_name": "PatSupp",
+                          "entities": "circle:0", "entity_one": "line:0", "entity_two": "line:1",
+                          "quantity": 3, "quantity_two": 2, "distance": 20, "distance_two": 20,
+                          "suppressed": [False, True, False, True, False]},
+     lambda p: p.get("suppressed_applied") == [False, True, False, True, False]
+     and p.get("created_count") == 3, None),
+    # the N-1 length IS the input's contract: 6 flags for a 3x2 counts the original, and the guard
+    # refuses it naming expected against got, before anything is created.
+    ("sketch_constrain", {"constraint": "rectangular_pattern", "sketch_name": "PatSupp",
+                          "entities": "circle:0", "entity_one": "line:0", "entity_two": "line:1",
+                          "quantity": 3, "quantity_two": 2, "distance": 20, "distance_two": 20,
+                          "suppressed": [False] * 6}, "refused", None),
+    # a knob whose input object exists on ONE constraint only is refused elsewhere, never dropped.
+    ("sketch_constrain", {"constraint": "horizontal", "sketch_name": "PatSupp",
+                          "entity_one": "line:0", "dimension_strategy": "chain"}, "refused", None),
+    # autoConstrain's four dimensioning-strategy setters are UNAVAILABLE on this build - the input
+    # object refuses the assignment ("This API is not currently available") - so the request is
+    # refused NAMING the knob that would not take, before autoConstrain runs and before anything is
+    # constrained. Plain constraint='auto' still solves (the beats above), and this beat is the one
+    # that fails loudly if a strategy is ever quietly dropped instead.
+    ("sketch_create", {"plane": "xy", "name": "AutoStrat"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "rectangle", "x1": 740, "y1": 800, "x2": 840, "y2": 850,
+                             "sketch_name": "AutoStrat"}, "ok", None),
+    ("sketch_constrain", {"constraint": "auto", "sketch_name": "AutoStrat",
+                          "dimension_strategy": "baseline", "linear_diameter_dims": "avoid"},
+     "refused", None),
+    # sketch_insert_svg: art from local disk into a FRESH sketch. importSVG ignores the file's own
+    # width/height and viewBox - 1 SVG user unit lands as 1/96 inch times 'scale' - so the 36-unit
+    # rectangle measures ~36 mm at scale=3.7795 and nothing else can produce that width. The art is
+    # placed AT the sketch origin, so this empty-before sketch's own box IS the art's size.
+    ("sketch_create", {"plane": "xy", "name": "SvgTarget"}, "ok", None),
+    ("sketch_insert_svg", {"file_path": SVG_PATH, "sketch_name": "SvgTarget", "scale": 3.7795},
+     lambda p: p.get("curves_added", 0) > 0 and p.get("sketch") == "SvgTarget"
+     and 30 < (p.get("sketch_extent") or {}).get("width", 0) < 42, None),
+    # SK-5's closure, through the TOOL: the 96-user-unit square at scale 1 is exactly one inch, and
+    # the art lands Y-DOWN from the sketch origin - so this empty-before sketch measures 25.4 mm
+    # square with its min y at -25.4. A y-up landing (or any scale drift) moves that number.
+    ("sketch_create", {"plane": "xy", "name": "Svg96"}, "ok", None),
+    ("sketch_insert_svg", {"file_path": SVG96_PATH, "sketch_name": "Svg96", "scale": 1},
+     _svg96_extent, None),
+    # importSVG RAISES on a path that is not a file and that raise rolls back the whole surrounding
+    # transaction, so the miss is named before Fusion is touched.
+    ("sketch_insert_svg", {"file_path": EXPORT_DIR + "/no_such_logo.svg",
+                           "sketch_name": "SvgTarget"}, "refused", None),
+    # Wave-3 sketch surface: the new curve kinds + dimension types, each asserting a read-back
+    # the payload could not echo (the degree clamp, the wedge rule, the offset rotation, and the
+    # API's own self-naming parallelism raises - all measured contracts).
+    ("sketch_create", {"plane": "xy", "name": "W3Curves"}, "ok", None),
+    # degree 5 over 3 control points: the API silently CLAMPS to n-1, and the payload publishes
+    # the BUILT degree read off the spline - 2 here is a live read-back, not an echo of the 5.
+    ("sketch_add_geometry", {"kind": "cv_spline", "points": [[740, 0], [760, 20], [780, 0]],
+                             "degree": 5, "sketch_name": "W3Curves"},
+     lambda p: p.get("degree") == 2, None),
+    ("sketch_add_geometry", {"kind": "cv_spline",
+                             "points": [[740, -40], [750, -20], [760, -40],
+                                        [770, -20], [780, -40], [790, -20]],
+                             "degree": 5, "sketch_name": "W3Curves"},
+     lambda p: p.get("degree") == 5, None),
+    # 'minor' omitted: the label reports the EFFECTIVE minor radius (major/2), never None.
+    ("sketch_add_geometry", {"kind": "ellipse", "cx": 830, "cy": 0, "radius": 20,
+                             "sketch_name": "W3Curves"},
+     lambda p: "minor=10" in (p.get("drawn") or ""), None),
+    # conic closed by its chord forms a profile that extrudes - the missing ref token is a
+    # reference gap only, and this proves the note's modelling claim end to end.
+    ("sketch_create", {"plane": "xy", "name": "W3Conic"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "conic", "x1": 740, "y1": 60, "x2": 780, "y2": 60,
+                             "cx": 760, "cy": 90, "rho": 0.6, "sketch_name": "W3Conic"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 740, "y1": 60, "x2": 780, "y2": 60,
+                             "sketch_name": "W3Conic"}, "ok", None),
+    ("model_extrude", {"sketch_name": "W3Conic", "profile_index": 0, "distance": 5}, _extruded, None),
+    ("sketch_create", {"plane": "xy", "name": "W3Earc"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "elliptical_arc", "cx": 840, "cy": 80, "radius": 30,
+                             "minor": 15, "sweep_deg": 180, "sketch_name": "W3Earc"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 870, "y1": 80, "x2": 810, "y2": 80,
+                             "sketch_name": "W3Earc"}, "ok", None),
+    ("model_extrude", {"sketch_name": "W3Earc", "profile_index": 0, "distance": 5}, _extruded, None),
+    # the coincident TRAP, on the success path where the caller who meant "centre this here" is:
+    # addCoincident(point, circle) succeeds and lands the point ON the rim, so the note has to say
+    # so - and it must NOT say so when the operand was a POINT, where the point really is centred.
+    ("sketch_create", {"plane": "xy", "name": "CoincTrap"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": 1500, "cy": 0, "radius": 20,
+                             "sketch_name": "CoincTrap"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "point", "cx": 1560, "cy": 0, "sketch_name": "CoincTrap"},
+     "ok", None),
+    ("sketch_add_geometry", {"kind": "point", "cx": 1560, "cy": 30, "sketch_name": "CoincTrap"},
+     "ok", None),
+    ("sketch_constrain", {"constraint": "coincident", "entity_one": "point:2",
+                          "entity_two": "circle:0", "sketch_name": "CoincTrap"},
+     lambda p: "ON that curve" in (p.get("note") or ""), None),
+    ("sketch_constrain", {"constraint": "coincident", "entity_one": "point:3",
+                          "entity_two": "point:1", "sketch_name": "CoincTrap"},
+     lambda p: "ON that curve" not in (p.get("note") or ""), None),
+    # sketch_set_text's PATH layouts: one scratch sketch holding a line and a closed circle, then
+    # text laid ALONG each and FITTED to the line. 'definition_type' is the created text's own
+    # objectType and 'mode_verified' says whether it matches the mode asked for, so a text that
+    # landed in another layout cannot pass as this one.
+    ("sketch_create", {"plane": "xy", "name": "TextPaths"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 1200, "y1": 0, "x2": 1300, "y2": 0,
+                             "sketch_name": "TextPaths"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": 1250, "cy": 60, "radius": 25,
+                             "sketch_name": "TextPaths"}, "ok", None),
+    ("sketch_set_text", {"text": "ALONG", "sketch_name": "TextPaths", "create": True,
+                         "mode": "along_path", "path": "line:0", "height": 5},
+     lambda p: p.get("mode_verified") is True
+     and str(p.get("definition_type") or "").endswith("AlongPathTextDefinition"), None),
+    # a CLOSED circle wraps the text right around the hole it marks - the headline path case.
+    ("sketch_set_text", {"text": "M8 CLEARANCE", "sketch_name": "TextPaths", "create": True,
+                         "mode": "along_path", "path": "circle:0", "align": "center", "height": 4},
+     lambda p: p.get("mode_verified") is True, None),
+    # fit_on_path spaces the characters over the whole path itself, so the payload carries neither
+    # 'align' nor 'character_spacing' - its definition object has no slot for either.
+    ("sketch_set_text", {"text": "FIT", "sketch_name": "TextPaths", "create": True,
+                         "mode": "fit_on_path", "path": "line:0", "height": 5},
+     lambda p: str(p.get("definition_type") or "").endswith("FitOnPathTextDefintion")
+     and "align" not in p and "character_spacing" not in p, None),
+    # cross-mode inputs: each is refused BY NAME rather than silently dropped, and nothing is created.
+    ("sketch_set_text", {"text": "X", "sketch_name": "TextPaths", "create": True,
+                         "mode": "fit_on_path", "path": "line:0", "align": "center"}, "refused", None),
+    ("sketch_set_text", {"text": "X", "sketch_name": "TextPaths", "create": True,
+                         "mode": "along_path", "path": "line:0", "x": 10}, "refused", None),
+    ("sketch_set_text", {"text": "X", "sketch_name": "TextPaths", "create": True,
+                         "mode": "multi_line", "path": "line:0"}, "refused", None),
+    # the layout inputs shape NEW text only: passing one to an EDIT is refused, never ignored.
+    ("sketch_set_text", {"text": "FIT", "sketch_name": "TextPaths", "angle_deg": 15},
+     "refused", None),
+    # FONT: the one input that reaches the API twice - onto the INPUT before a create, onto the
+    # SketchText itself on an edit. No API lists or validates the legal names, so Fusion's own
+    # "invalid input font name" raise IS the whole check, and each refusal hands that sentence on
+    # with the name it was given. Its own scratch sketch carries the whole run.
+    ("sketch_create", {"plane": "xy", "name": "FontProbe"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 1200, "y1": 200, "x2": 1300, "y2": 200,
+                             "sketch_name": "FontProbe"}, "ok", None),
+    # the font is read back off the LANDED text, not off the input, so 'font' here is what the
+    # created text reports - and nothing sits in 'requested', which is where an unread value goes.
+    ("sketch_set_text", {"text": "FONT", "sketch_name": "FontProbe", "create": True,
+                         "x": 1200, "y": 160, "height": 6, "font_name": "Arial"},
+     lambda p: p.get("font") == "Arial" and p.get("sketch_text_count") == 1
+     and "requested" not in p, None),
+    # the same font through a setAs* PLACEMENT: it is applied to the input before the placement
+    # call and survives it, which is what makes the along-path text report it too.
+    ("sketch_set_text", {"text": "ALONGFONT", "sketch_name": "FontProbe", "create": True,
+                         "mode": "along_path", "path": "line:0", "height": 5,
+                         "font_name": "Arial"},
+     lambda p: p.get("font") == "Arial" and p.get("sketch_text_count") == 2, None),
+    # a font this machine does not carry: the create raises at add() and the refusal names it.
+    ("sketch_set_text", {"text": "NOFONT", "sketch_name": "FontProbe", "create": True,
+                         "x": 1200, "y": 140, "height": 6,
+                         "font_name": "ZzNoSuchFont_MCP_Probe"}, "refused", None),
+    # font names are CASE-SENSITIVE at the API, so 'arial' is as unknown as any other miss.
+    ("sketch_set_text", {"text": "NOFONT", "sketch_name": "FontProbe", "create": True,
+                         "x": 1200, "y": 140, "height": 6, "font_name": "arial"}, "refused", None),
+    # the count is the proof the two refusals created nothing: this is the THIRD text in the
+    # sketch. It carries the no-font regression too - omit 'font_name' and no 'font' key is
+    # published at all, on the payload or on a record.
+    ("sketch_set_text", {"text": "NOFONTKEY", "sketch_name": "FontProbe", "create": True,
+                         "x": 1200, "y": 120, "height": 6},
+     lambda p: p.get("sketch_text_count") == 3 and "font" not in p, None),
+    # EDITING one text: the font goes on FIRST and each changed record carries the font that text
+    # reports back beside the string that landed.
+    ("sketch_set_text", {"text": "FONT2", "sketch_name": "FontProbe", "index": 0,
+                         "font_name": "Arial"},
+     lambda p: p["changed"][0].get("font") == "Arial"
+     and p["changed"][0].get("after") == "FONT2", None),
+    # the unknown name on an EDIT: because the font is applied ahead of the string, the refusal
+    # leaves this text's string untouched as well.
+    ("sketch_set_text", {"text": "FONT3", "sketch_name": "FontProbe", "index": 0,
+                         "font_name": "ZzNoSuchFont_MCP_Probe"}, "refused", None),
+    # the next edit answers normally, and its 'before' is what proves the refused call wrote
+    # nothing - the string is still the one the successful edit left.
+    ("sketch_set_text", {"text": "FONT4", "sketch_name": "FontProbe", "index": 0},
+     lambda p: p["changed"][0].get("before") == "FONT2"
+     and p["changed"][0].get("after") == "FONT4" and "font" not in p["changed"][0], None),
+    # sketch text is deleted by the SAME index sketch_set_text edits by: one text in its own sketch,
+    # deleted as 'text:0'. The deleted string and the collection count read back off the sketch are
+    # the verdict - a delete that removed nothing is an error, never a false ok.
+    ("sketch_create", {"plane": "xy", "name": "TextDel"}, "ok", None),
+    ("sketch_set_text", {"text": "SCRAP", "sketch_name": "TextDel", "create": True,
+                         "x": 1200, "y": 100, "height": 5}, "ok", None),
+    # SketchTexts.add APPENDS, so the SECOND text is 'text:1' - and deleting that index has to take
+    # the second one, never the first. The deleted STRING is what separates the two.
+    ("sketch_set_text", {"text": "SCRAP2", "sketch_name": "TextDel", "create": True,
+                         "x": 1200, "y": 80, "height": 5}, "ok", None),
+    # THE EDIT-PATH RESIZE, before those deletes and leaving their inputs untouched: 'height' on an
+    # EDIT writes SketchText.heightParameter and the glyph geometry follows it. The same string goes
+    # back in, so the string and the count the deletes below read are exactly what they were. The
+    # tool REFUSES a resize whose value landed while the box stayed put, so a green step here is
+    # itself the geometry-followed proof - what the predicate reads is the numbers it published.
+    ("sketch_set_text", {"text": "SCRAP2", "sketch_name": "TextDel", "index": 1, "height": 3},
+     lambda p: p.get("changed_count") == 1 and (lambda c:
+         c.get("height") == 3.0 and c.get("height_before") == 5.0
+         and c.get("before") == "SCRAP2" and c.get("after") == "SCRAP2"
+         and isinstance(c.get("measured_width"), (int, float)) and c["measured_width"] > 0
+         and isinstance(c.get("measured_height"), (int, float)) and c["measured_height"] > 0
+     )(p["changed"][0]), None),
+    ("sketch_delete_entity", {"sketch_name": "TextDel", "target": "text:1"},
+     lambda p: p.get("text") == "SCRAP2" and p.get("texts_before") == 2
+     and p.get("texts_after") == 1, None),
+    ("sketch_delete_entity", {"sketch_name": "TextDel", "target": "text:0"},
+     lambda p: p.get("text") == "SCRAP" and p.get("texts_before") == 1
+     and p.get("texts_after") == 0, None),
+    # the emptied sketch has no text at that index any more - the refusal names the index and count.
+    ("sketch_delete_entity", {"sketch_name": "TextDel", "target": "text:0"}, "refused", None),
+    # THE TEXT READ-BACK (the S6 gap): sketch_get's X-ray lists each SketchText at its text:<i>
+    # address with the string, the FONT (fontName is API-readable), the height in display units,
+    # and a sketch-space bounding box. FontProbe's final state pins all three record shapes at
+    # once: text:0 was edited to FONT4 (its Arial ride-along from the FONT2 edit stays), text:1 is
+    # the along-path ALONGFONT, text:2 was created with NO font and reads font None.
+    ("sketch_get", {"sketch_name": "FontProbe"},
+     lambda p: (p.get("counts") or {}).get("texts") == 3 and "entities" not in p, None),
+    # text:2 was created with NO font_name and still reads a real font (measured: the platform
+    # gives every text the app default) - so 'font' is a non-empty string on all three records.
+    ("sketch_get", {"sketch_name": "FontProbe", "include_entities": True},
+     lambda p: (lambda t: [r["id"] for r in t] == ["text:0", "text:1", "text:2"]
+                and t[0].get("text") == "FONT4" and t[0].get("font") == "Arial"
+                and isinstance(t[0].get("height"), (int, float)) and t[0]["height"] > 0
+                and t[1].get("text") == "ALONGFONT"
+                and t[2].get("text") == "NOFONTKEY"
+                and isinstance(t[2].get("font"), str) and t[2]["font"]
+                and "min" in (t[0].get("bounding_box") or {}))
+     ([e for e in p.get("entities", []) if e.get("type") == "text"]), None),
+    # THE SLOT FAMILY, one scratch sketch per shape in a clear band so every count is absolute.
+    # 'radius' is the HALF width throughout (the label carries the full width), each tailed
+    # constructor takes its tail POSITIONALLY, and the ladders differ per kind - which is what the
+    # cross-kind refusals below pin.
+    ("sketch_create", {"plane": "xy", "name": "SlotA"}, "ok", None),
+    # a three-point arc slot is built entirely out of SketchArcs - five of them, and its closed
+    # outline forms a profile. The only dimension it can create is the width one.
+    ("sketch_add_geometry", {"kind": "three_point_arc_slot", "x1": 1700, "y1": 900,
+                             "x2": 1800, "y2": 900, "cx": 1750, "cy": 930, "radius": 5,
+                             "create_width_dimension": True, "sketch_name": "SlotA"},
+     lambda p: p.get("curves_added") == 5 and p["sketch"]["arc_count"] == 5
+     and p["sketch"]["profile_count"] >= 1
+     and "three_point_arc_slot" in (p.get("drawn") or "") and "w=10" in (p.get("drawn") or ""), None),
+    # its arc is fixed by its three points, so it has no radius or angle to dimension - the flag
+    # that belongs to the centre-point kind is refused by name and points there.
+    ("sketch_add_geometry", {"kind": "three_point_arc_slot", "x1": 1700, "y1": 900,
+                             "x2": 1800, "y2": 900, "cx": 1750, "cy": 930, "radius": 5,
+                             "create_angle_dimension": True, "sketch_name": "SlotA"},
+     "refused", None),
+    # the centre-point arc slot in its four-argument form: centre, start, end, width.
+    ("sketch_create", {"plane": "xy", "name": "SlotB"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "center_point_arc_slot", "cx": 1700, "cy": 1000,
+                             "x1": 1750, "y1": 1000, "x2": 1700, "y2": 1050, "radius": 5,
+                             "sketch_name": "SlotB"},
+     lambda p: p.get("curves_added") == 5, None),
+    # the full ladder: a supplied arc_radius overrides the centre-to-start distance and the angle
+    # takes a unit-bearing expression, then each of the three flags gates its OWN dimension - so
+    # width + angle asked for and radius declined must land exactly two dimensions.
+    ("sketch_create", {"plane": "xy", "name": "SlotC"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "center_point_arc_slot", "cx": 1700, "cy": 1100,
+                             "x1": 1750, "y1": 1100, "x2": 1700, "y2": 1150, "radius": 5,
+                             "arc_radius": 30, "angle_deg": 45, "create_width_dimension": True,
+                             "create_radius_dimension": False, "create_angle_dimension": True,
+                             "sketch_name": "SlotC"},
+     lambda p: p.get("curves_added") == 5, None),
+    ("sketch_get", {"sketch_name": "SlotC", "include_entities": True},
+     lambda p: p.get("dimension_count") == 2
+     and any("diameter" in (d.get("type") or "") for d in p["dimensions"])
+     and any("angular" in (d.get("type") or "") for d in p["dimensions"])
+     and not any("radial" in (d.get("type") or "") for d in p["dimensions"]), None),
+    # an OVERALL slot measures tip to tip: its two points are the outer extremes, so the cap arc
+    # centres land inset by the half width - 60 mm tip to tip from centres 52 mm apart.
+    ("sketch_create", {"plane": "xy", "name": "SlotD"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "overall_slot", "x1": 1700, "y1": 1200, "x2": 1760, "y2": 1200,
+                             "radius": 4, "sketch_name": "SlotD"},
+     lambda p: p.get("curves_added") == 3 and "w=8" in (p.get("drawn") or ""), None),
+    ("sketch_get", {"sketch_name": "SlotD", "include_entities": True},
+     lambda p: sorted(round(e["center"]["x"], 3) for e in p["entities"] if e["type"] == "arc")
+     == [_px("SlotD", 1704.0), _px("SlotD", 1756.0)], None),
+    # the length and the angle are VALUES, not flags: passing either creates its own dimension and
+    # adds the fourth line, while the width dimension stays gated on its flag.
+    ("sketch_create", {"plane": "xy", "name": "SlotE"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "overall_slot", "x1": 1700, "y1": 1300, "x2": 1760, "y2": 1300,
+                             "radius": 4, "slot_length": 40, "angle_deg": 30,
+                             "create_width_dimension": True, "sketch_name": "SlotE"},
+     lambda p: p.get("curves_added") == 4, None),
+    ("sketch_get", {"sketch_name": "SlotE", "include_entities": True},
+     lambda p: p.get("dimension_count") == 3
+     and any("diameter" in (d.get("type") or "") for d in p["dimensions"])
+     and any("linear" in (d.get("type") or "") and abs((d.get("value") or 0) - 40.0) < 1e-3
+             for d in p["dimensions"])
+     and any("angular" in (d.get("type") or "") and "30" in (d.get("expression") or "")
+             for d in p["dimensions"]), None),
+    # the flag ALONE, with no tail: three lines and exactly the one dimension it asked for.
+    ("sketch_create", {"plane": "xy", "name": "SlotF"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "overall_slot", "x1": 1700, "y1": 1400, "x2": 1760, "y2": 1400,
+                             "radius": 4, "create_width_dimension": True, "sketch_name": "SlotF"},
+     lambda p: p.get("curves_added") == 3, None),
+    ("sketch_get", {"sketch_name": "SlotF", "include_entities": True},
+     lambda p: p.get("dimension_count") == 1, None),
+    # a CENTRE-point slot's length is the HALF length, centre to cap centre, and it is forwarded
+    # unhalved - so a cap centre lands exactly on the second point and the dimension reads 25.
+    ("sketch_create", {"plane": "xy", "name": "SlotG"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "center_point_slot", "x1": 1700, "y1": 1500,
+                             "x2": 1725, "y2": 1500, "radius": 3, "slot_length": 25,
+                             "sketch_name": "SlotG"},
+     lambda p: "half_len=25" in (p.get("drawn") or ""), None),
+    ("sketch_get", {"sketch_name": "SlotG", "include_entities": True},
+     lambda p: any(abs(e["center"]["x"] - _px("SlotG", 1725)) < 1e-3
+                   and abs(e["center"]["y"] - _py("SlotG", 1500)) < 1e-3
+                   for e in p["entities"] if e["type"] == "arc")
+     and any("linear" in (d.get("type") or "") and abs((d.get("value") or 0) - 25.0) < 1e-3
+             for d in p["dimensions"]), None),
+    # an angle with no length has nothing to sit on: refused naming both.
+    ("sketch_add_geometry", {"kind": "overall_slot", "x1": 1700, "y1": 1400, "x2": 1760, "y2": 1400,
+                             "radius": 4, "angle_deg": 30, "sketch_name": "SlotF"}, "refused", None),
+    # the linear kinds have no angle FLAG - the angular dimension comes from angle_deg itself.
+    ("sketch_add_geometry", {"kind": "overall_slot", "x1": 1700, "y1": 1400, "x2": 1760, "y2": 1400,
+                             "radius": 4, "slot_length": 40, "create_angle_dimension": True,
+                             "sketch_name": "SlotF"}, "refused", None),
+    # each cross-kind input is refused pointing at the kind that DOES carry it: arc_radius belongs
+    # to the centre-point ARC slot, slot_length to the straight ones - and the three-point arc slot
+    # has no radius argument at all, so its refusal must not offer arc_radius as the remedy.
+    ("sketch_add_geometry", {"kind": "center_point_slot", "x1": 1700, "y1": 1500,
+                             "x2": 1725, "y2": 1500, "radius": 3, "arc_radius": 30,
+                             "sketch_name": "SlotG"}, "refused", None),
+    ("sketch_add_geometry", {"kind": "center_point_arc_slot", "cx": 1700, "cy": 1000,
+                             "x1": 1750, "y1": 1000, "x2": 1700, "y2": 1050, "radius": 5,
+                             "slot_length": 40, "sketch_name": "SlotB"}, "refused", None),
+    ("sketch_add_geometry", {"kind": "three_point_arc_slot", "x1": 1700, "y1": 900,
+                             "x2": 1800, "y2": 900, "cx": 1750, "cy": 930, "radius": 5,
+                             "slot_length": 40, "sketch_name": "SlotA"}, "refused", None),
+    # the legacy centre-to-centre slot takes two centres and a width and nothing else: a tail would
+    # be dropped, so it is refused - and the bare call still draws.
+    ("sketch_create", {"plane": "xy", "name": "SlotH"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "slot", "x1": 1700, "y1": 1600, "x2": 1760, "y2": 1600,
+                             "radius": 4, "slot_length": 40, "sketch_name": "SlotH"},
+     "refused", None),
+    # the legacy form's own census: addCenterToCenterSlot lands 5 curves - 2 solid lines, 1
+    # CONSTRUCTION line (the centre-to-centre one) and 2 arc caps - and 'curves_added' counts the
+    # LINE collection's delta, so it reads 3. The note has to say which 5, because the number alone
+    # reads like a 3-curve slot.
+    ("sketch_add_geometry", {"kind": "slot", "x1": 1700, "y1": 1600, "x2": 1760, "y2": 1600,
+                             "radius": 4, "sketch_name": "SlotH"},
+     lambda p: p.get("curves_added") == 3
+     and "2 solid SketchLines" in (p.get("note") or "")
+     and "1 CONSTRUCTION SketchLine" in (p.get("note") or "")
+     and "2 SketchArc end caps" in (p.get("note") or ""), None),
+    # the independent read: three lines of which EXACTLY ONE is construction, plus the two arc caps.
+    ("sketch_get", {"sketch_name": "SlotH", "include_entities": True},
+     lambda p: len([e for e in p["entities"] if e["type"] == "line"]) == 3
+     and len([e for e in p["entities"] if e["type"] == "line" and e.get("construction")]) == 1
+     and len([e for e in p["entities"] if e["type"] == "arc"]) == 2, None),
+    # a POLYGON is built by the same SketchLines factory, so its side count is the delta.
+    ("sketch_create", {"plane": "xy", "name": "PolyHex"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "polygon", "cx": 1700, "cy": 1700, "radius": 20, "sides": 6,
+                             "sketch_name": "PolyHex"},
+     lambda p: p.get("curves_added") == 6, None),
+]
+
+
 _DETAILS = [
-    ("find_geometry", {"target": "OuterRing", "kind": "circular_edge", "max_results": 1}, "ok", _fg("or_edge")),
-    ("model_fillet", lambda c: {"edges": [_ctx_get(c, "or_edge", "outer ring edge")], "radius": 1}, _filleted, None),
+    # 1 mm fillets and chamfers on the rings - invisible at anything but ring scale.
+    # The BORE rim, asked for by the parameter that defines it. The OD rims took their break back in
+    # ACT 2, and a fillet's own tangent circle is not a corner - handing one back to model_fillet
+    # answers FILLET_NO_EDGE_FOUND - so an unfiltered 'first circular edge' on this ring now lands on
+    # geometry that cannot be filleted at all.
+    ("param_get", {"name": "OuterBoreR"}, _param_read("OuterBoreR", 42),
+     ("outer_bore", lambda p: p["parameter"]["value"])),
+    ("find_geometry", lambda c: {"target": "OuterRing", "kind": "circular_edge",
+                                 "radius": _ctx_get(c, "outer_bore", "the outer ring bore"),
+                                 "max_results": 1}, "ok", _fg("or_edge")),
+    ("model_fillet", lambda c: {"edges": [_ctx_get(c, "or_edge", "outer ring bore edge")],
+                                "radius": 1}, _filleted, None),
     ("find_geometry", {"target": "Frame", "kind": "circular_edge", "max_results": 1}, "ok", _fg("fr_edge")),
     ("model_chamfer", lambda c: {"edges": [_ctx_get(c, "fr_edge", "frame edge")], "distance": 1}, _chamfered, None),
     # the distance-and-angle definition with an explicit corner type. Both assertions are on values
@@ -1945,9 +4321,37 @@ _DETAILS = [
     ("sketch_create", {"plane": "xy", "name": "ShellS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 400, "y1": 0, "x2": 430, "y2": 30, "sketch_name": "ShellS"}, "ok", None),
     ("model_extrude", {"sketch_name": "ShellS", "profile_index": 0, "distance": 20}, _extruded, None),
-    _watch("ShellCap:1"),
     ("find_geometry", {"target": "ShellCap", "kind": "planar_face", "nearest_to": [415, 15, 20], "max_results": 1}, "ok", _fg("shell_top")),
     ("model_shell", lambda c: {"body_name": "ShellCap", "remove_faces": [_ctx_get(c, "shell_top", "shell top")], "thickness": 2}, _shelled, None),
+    # THE TWO-SIDED EXTENT, in its own component so nothing else's body census moves. Side one lands
+    # on extentOne and side two on extentTwo, each reporting the depth THAT side asked for, and the
+    # tool now compares them side by side - so an UNEQUAL pair is the shape that tells the compare
+    # apart from one reading a single number twice. The payload alone cannot show where the material
+    # went, hence the inspect below.
+    ("model_create_component", {"name": "TwoSideCap", "activate": True}, _made_component, None),
+    ("sketch_create", {"plane": "xy", "name": "TwoSideS"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "rectangle", "x1": 470, "y1": 0, "x2": 500, "y2": 30,
+                             "sketch_name": "TwoSideS"}, "ok", None),
+    # 'model_parameters' carrying BOTH distance and distance2 is the feature really holding two
+    # extents; an EMPTY unverified disclosure is the compare having judged both sides rather than
+    # skipping one (it names any side it could not judge).
+    ("model_extrude", {"sketch_name": "TwoSideS", "profile_index": 0, "extent": "two_side",
+                       "distance": 12, "distance2": 8},
+     lambda p: (p.get("extent") == "two_side" and p.get("distance") == 12.0
+                and p.get("distance2") == 8.0 and bool(p.get("result_bodies"))
+                and "distance" in (p.get("model_parameters") or {})
+                and "distance2" in (p.get("model_parameters") or {})
+                and "not depth-verified" not in (p.get("note") or "")), None),
+    # Where the material actually went: the sketch sits on z=0, so a correct two-sided extrude
+    # STRADDLES it 20 mm deep and UNEQUALLY. A symmetric 12/12 or 8/8 fails the inequality, a
+    # one-sided 20 fails the straddle, and a swap only changes which face is which - all three are
+    # payloads that would read identically above.
+    ("model_inspect", {"target": "TwoSideCap:1"},
+     lambda p: (p["min_point"]["z"] < -0.001 and p["max_point"]["z"] > 0.001
+                and abs((p["max_point"]["z"] - p["min_point"]["z"]) - 20) < 0.05
+                and abs(abs(p["max_point"]["z"]) - abs(p["min_point"]["z"])) > 3), None),
+    # back to the shell cameo's component, so every step after this lands where it did before.
+    ("design_activate_component", {"occurrence": "ShellCap:1"}, "ok", None),
     # THE WartPlane ROW carries the offset_from predicate - the sweep's only offset-plane call, so
     # it is where 'offset_from' gets read once against a real resolved origin plane: the payload
     # must name the PLANE ('XY'), never echo the 'xy' request token. The unit fake spells the name
@@ -1958,14 +4362,18 @@ _DETAILS = [
     ("design_delete_feature", {"feature": "WartPlane"}, "ok", None),
     # the three datum modes with no other route in the API: a plane rotated about a curved face's
     # own inferred axis, a plane pinned through a vertex, and a plane/point at a ratio along a path.
-    # RotorShaft is the cylinder sketched on yz at (0,0), so its axis is X through the origin and
-    # every plane built about it has its origin ON that axis (y = z = 0, measured behaviour).
-    ("find_geometry", {"target": "RotorShaft", "kind": "cylinder_face", "max_results": 1}, "ok", _fg("cd_cyl")),
+    # The angled plane is built on the DATUM BENCH's bore, not on the gyroscope's shaft. A datum
+    # plane is an infinite visual object and the shaft sits at the world origin - which is where the
+    # vise is later built around the machined part, so a plane hung there leans across the fixture
+    # for the rest of the run. The bench is out on the field with its own cell and its own frame.
     ("model_construction", lambda c: {"kind": "plane", "mode": "at_angle_on_face",
-                                      "face": _ctx_get(c, "cd_cyl", "shaft face"),
-                                      "plane": "xz", "angle": 30, "name": "ShaftAnglePlane"},
+                                      "face": _ctx_get(c, "db_bore", "bench bore"),
+                                      "plane": "xz", "angle": 30, "name": "BenchAnglePlane"},
+     # the bore's axis is Z through the bench's own centre, so the plane contains that axis and its
+     # origin sits ON it - asked through _px/_py because the layout moves the bench.
      lambda p: p.get("contains_face_axis") is True and p.get("angle_deg") == 30
-     and abs(p["geometry"]["origin"]["y"]) < 1e-6 and abs(p["geometry"]["origin"]["z"]) < 1e-6, None),
+     and _near(p["geometry"]["origin"]["x"], _px("DatumBench", 230.0), 1e-3)
+     and _near(p["geometry"]["origin"]["y"], _py("DatumBench", 20.0), 1e-3), None),
     ("find_geometry", {"target": "ShellCap", "kind": "vertex", "max_results": 1}, "ok", _fg("cd_vert")),
     ("model_construction", lambda c: {"kind": "plane", "mode": "offset_through_point", "plane": "xy",
                                       "points": [_ctx_get(c, "cd_vert", "shell vertex")],
@@ -1982,8 +4390,9 @@ _DETAILS = [
                                       "path": _ctx_get(c, "cd_edge", "datum path edge"),
                                       "at": 0.5, "name": "MidPathPlane"},
      lambda p: p.get("at_ratio") == 0.5
-     and abs(p["geometry"]["origin"]["x"] - 415) < 1e-3
-     and abs(p["geometry"]["origin"]["y"]) < 1e-3 and abs(p["geometry"]["origin"]["z"]) < 1e-3
+     and abs(p["geometry"]["origin"]["x"] - _px("ShellCap", 415)) < 1e-3
+     and abs(p["geometry"]["origin"]["y"] - _py("ShellCap", 0)) < 1e-3
+     and abs(p["geometry"]["origin"]["z"]) < 1e-3
      and p.get("landed", {}).get("distance") == "0.5"
      and "path_length" not in p and "beyond_path" not in p
      and "not clamped" not in (p.get("note") or ""), None),
@@ -1992,8 +4401,9 @@ _DETAILS = [
                                       "path": _ctx_get(c, "cd_edge", "datum path edge"),
                                       "at": 0.25, "name": "QuarterPathPoint"},
      lambda p: p.get("at_ratio") == 0.25
-     and abs(abs(p["geometry"]["at"]["x"] - 415) - 7.5) < 1e-3
-     and abs(p["geometry"]["at"]["y"]) < 1e-3 and abs(p["geometry"]["at"]["z"]) < 1e-3, None),
+     and abs(abs(p["geometry"]["at"]["x"] - _px("ShellCap", 415)) - 7.5) < 1e-3
+     and abs(p["geometry"]["at"]["y"] - _py("ShellCap", 0)) < 1e-3
+     and abs(p["geometry"]["at"]["z"]) < 1e-3, None),
     # setByPath RAISES on a proportional value outside 0-1 and the raise rolls back the whole
     # transaction, so the range is refused before the call - and the next call still answers.
     ("model_construction", lambda c: {"kind": "point", "mode": "on_path",
@@ -2135,6 +4545,7 @@ _DETAILS = [
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 470, "y1": 0, "x2": 490, "y2": 20,
                              "sketch_name": "ScaleS"}, "ok", None),
     ("model_extrude", {"sketch_name": "ScaleS", "profile_index": 0, "distance": 20}, _extruded, None),
+    _watch("ScaleBlock:1"),
     ("find_geometry", {"target": "ScaleBlock", "kind": "planar_face", "nearest_to": [480, 10, 20],
                        "max_results": 1}, "ok", _fg("scale_top")),
     ("model_offset_face", lambda c: {"faces": [_ctx_get(c, "scale_top", "block top")],
@@ -2147,16 +4558,23 @@ _DETAILS = [
      _param_added("TiltProbe", 30, units="deg"), None),
     # a solid body's volume IS readable, so the verdict is the measured ratio and the skip flag is
     # absent - its presence would mean the check fell back to "the geometry moved".
+    # A SCALE IS ORIGIN-RELATIVE: it multiplies coordinates measured from the world origin, so a
+    # block authored at x=470 doubles to x=940 - it grows AND travels, right out of the frame it was
+    # framed in. Every scale that moves it is followed by a fresh frame, or the operation the viewer
+    # came to watch happens off screen.
     ("model_scale", {"bodies": ["ScaleBlock"], "factor": 2},
      lambda p: p.get("scale_check") == "volume_ratio"
      and abs(p.get("volume_ratio", 0) - 8.0) < 1e-6 and "volume_check_skipped" not in p, None),
+    _watch("ScaleBlock:1"),
     ("model_scale", {"bodies": ["ScaleBlock"], "x_factor": 3, "y_factor": 2, "z_factor": 1},
      lambda p: abs(p.get("expected_volume_ratio", 0) - 6.0) < 1e-6, None),
+    _watch("ScaleBlock:1"),
     ("model_scale", {"bodies": ["ScaleBlock"], "factor": "NoSuchParamXyz * 2"}, "refused", None),
     ("model_scale", {"bodies": ["ScaleBlock"], "factor": "5 mm"}, "refused", None),
     ("model_scale", {"bodies": ["ScaleBlock"], "factor": "TiltProbe"}, "refused", None),
     ("model_scale", {"bodies": ["ScaleBlock"], "factor": "ShrinkProbe"},
      lambda p: abs(p.get("expected_volume_ratio", 0) - 0.125) < 1e-6, None),
+    _watch("ScaleBlock:1"),
     ("find_geometry", {"target": "ScaleBlock", "kind": "vertex", "max_results": 1}, "ok",
      _fg("scale_vtx")),
     ("model_scale", lambda c: {"bodies": ["ScaleBlock"], "factor": 1.5,
@@ -2199,7 +4617,7 @@ _DETAILS = [
      lambda p: p.get("name") == "TwiceBody", None),
     ("model_inspect", {"target": "TwiceBody"}, _extent_measured, None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    ("design_add_instance", {"component": "TwicePlaced", "x": 1960, "y": 200, "units": "mm"},
+    ("design_add_instance", {"component": "TwicePlaced", "x": 40, "y": 0, "units": "mm"},
      lambda p: p.get("created") is True, ("twice_b", lambda p: p["full_path"])),
     ("model_move", {"mode": "along_entity", "bodies": ["TwicePlaced"], "axis": "y", "distance": 5},
      _refused("placed 2 times", "TwicePlaced:1"), None),
@@ -2285,580 +4703,12 @@ _DETAILS = [
      lambda p: p.get("internal") is True and p.get("location") == "low"
      and p.get("length") == 10, None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    # sketch_edit_curve: one sketch per action, so no edit can perturb the next.
-    ("sketch_create", {"plane": "xy", "name": "EditTrim"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 600, "y1": 0, "x2": 700, "y2": 0,
-                             "sketch_name": "EditTrim"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 650, "y1": -50, "x2": 650, "y2": 50,
-                             "sketch_name": "EditTrim"}, "ok", None),
-    ("sketch_edit_curve", {"sketch_name": "EditTrim", "action": "trim", "entity_one": "line:0",
-                           "x1": 610, "y1": 0},
-     lambda p: [r.get("length") for r in p.get("resulting", [])] == [50.0], None),
-    ("sketch_create", {"plane": "xy", "name": "EditExt"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 600, "y1": 10, "x2": 630, "y2": 10,
-                             "sketch_name": "EditExt"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 680, "y1": -20, "x2": 680, "y2": 40,
-                             "sketch_name": "EditExt"}, "ok", None),
-    # extend returns an EMPTY collection on success, so the verdict is the curve's own length:
-    # 30 mm reaching the crossing line at x=680 makes it 80.
-    ("sketch_edit_curve", {"sketch_name": "EditExt", "action": "extend", "entity_one": "line:0",
-                           "x1": 628, "y1": 10},
-     lambda p: [r.get("length") for r in p.get("resulting", [])] == [80.0], None),
-    ("sketch_create", {"plane": "xy", "name": "EditSplit"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 600, "y1": 0, "x2": 700, "y2": 0,
-                             "sketch_name": "EditSplit"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 650, "y1": -50, "x2": 650, "y2": 50,
-                             "sketch_name": "EditSplit"}, "ok", None),
-    # both halves are 50 long and must carry DISTINCT ids - the two pieces share one entityToken,
-    # so an id resolved by token would report the same curve twice.
-    ("sketch_edit_curve", {"sketch_name": "EditSplit", "action": "split", "entity_one": "line:0",
-                           "x1": 650, "y1": 0},
-     lambda p: [r.get("length") for r in p.get("resulting", [])] == [50.0, 50.0]
-     and len({r.get("id") for r in p.get("resulting", [])}) == 2, None),
-    ("sketch_create", {"plane": "xy", "name": "EditCorner"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 600, "y1": 0, "x2": 660, "y2": 0,
-                             "sketch_name": "EditCorner"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 660, "y1": 0, "x2": 660, "y2": 40,
-                             "sketch_name": "EditCorner"}, "ok", None),
-    ("sketch_edit_curve", {"sketch_name": "EditCorner", "action": "fillet", "entity_one": "line:0",
-                           "x1": 655, "y1": 0, "entity_two": "line:1", "x2": 660, "y2": 5,
-                           "radius": 10},
-     lambda p: abs((p.get("resulting") or [{}])[0].get("length", 0) - 15.708) < 0.01, None),
-    ("sketch_create", {"plane": "xy", "name": "EditChamfer"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 600, "y1": 0, "x2": 660, "y2": 0,
-                             "sketch_name": "EditChamfer"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 660, "y1": 0, "x2": 660, "y2": 40,
-                             "sketch_name": "EditChamfer"}, "ok", None),
-    ("sketch_edit_curve", {"sketch_name": "EditChamfer", "action": "chamfer",
-                           "entity_one": "line:0", "x1": 655, "y1": 0, "entity_two": "line:1",
-                           "x2": 660, "y2": 5, "distance": 8},
-     lambda p: abs((p.get("resulting") or [{}])[0].get("length", 0) - 11.3137) < 0.01, None),
-    ("sketch_create", {"plane": "xy", "name": "EditOffset"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 600, "y1": 0, "x2": 700, "y2": 0,
-                             "sketch_name": "EditOffset"}, "ok", None),
-    # the direction point picks the side: above the line offsets to +y
-    ("sketch_edit_curve", {"sketch_name": "EditOffset", "action": "offset", "entity_one": "line:0",
-                           "x1": 650, "y1": 20, "distance": 15},
-     lambda p: p.get("curve_count_after") == 2, None),
-    ("sketch_edit_curve", {"sketch_name": "EditOffset", "action": "chamfer", "entity_one": "line:0",
-                           "x1": 650, "y1": 0, "entity_two": "line:1", "x2": 650, "y2": 15,
-                           "distance": 5}, "refused", None),
-    # sketch_move / sketch_copy: a transform is verified by COORDINATES, never by the API's bool -
-    # Sketch.move returns true for an entity a constraint held still. A two-line chain on its own
-    # clear band carries every beat below.
-    ("sketch_create", {"plane": "xy", "name": "XformSrc"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 600, "y1": 500, "x2": 650, "y2": 500,
-                             "sketch_name": "XformSrc"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 650, "y1": 500, "x2": 650, "y2": 540,
-                             "sketch_name": "XformSrc"}, "ok", None),
-    # the copied collection counts the copied ENDPOINTS as well as the curves - 6 entities for a
-    # two-line chain - so the target's own curve count is the honest read-back, and the new refs
-    # are identity-matched against the target's collections.
-    ("sketch_copy", {"sketch_name": "XformSrc", "entities": "line:0,line:1", "dx": 100},
-     lambda p: p.get("curve_count_after", 0) - p.get("curve_count_before", 0) == 2
-     and p.get("new_curves") == ["line:2", "line:3"]
-     and p.get("returned_entity_count") == 6, None),
-    # WHERE they landed: a count-only check passes a copy dropped on top of the original, so the
-    # copy is read back at its offset position (x 600 -> 700).
-    ("sketch_get", {"sketch_name": "XformSrc", "include_entities": True},
-     lambda p: any(abs((e.get("start") or {}).get("x", 0) - 700) < 0.01
-                   for e in (p.get("entities") or []) if e.get("type") == "line"), None),
-    # move the ORIGINAL: line:0 runs 600->650 at y=500 and must land at 620->670, y=530.
-    ("sketch_move", {"sketch_name": "XformSrc", "entities": "line:0", "dx": 20, "dy": 30},
-     lambda p: p.get("moved_entities") == ["line:0"] and not p.get("unmoved_entities"), None),
-    ("sketch_get", {"sketch_name": "XformSrc", "include_entities": True},
-     lambda p: any(abs((e.get("start") or {}).get("x", 0) - 620) < 0.01
-                   and abs((e.get("start") or {}).get("y", 0) - 530) < 0.01
-                   for e in (p.get("entities") or []) if e.get("type") == "line"), None),
-    # 180 deg about the line's OWN midpoint: the bounding box is identical afterwards and only the
-    # endpoints swap, so the move is seen by the endpoint fingerprint and by nothing coarser.
-    ("sketch_move", {"sketch_name": "XformSrc", "entities": "line:0", "rotation_deg": 180,
-                     "center_x": 645, "center_y": 530},
-     lambda p: p.get("moved_entities") == ["line:0"], None),
-    # a cross-sketch copy lands in the TARGET, whose count rises from zero.
-    ("sketch_create", {"plane": "xy", "name": "XformDst"}, "ok", None),
-    # ONE curve across into an empty target - and the note states the id rule that holds for a COPY:
-    # an added curve APPENDS, so the ids already in use keep their entities. Removing a curve is what
-    # RENUMBERS (sketch_edit_curve's rule), and saying so here would be wrong for this call.
-    ("sketch_copy", {"sketch_name": "XformSrc", "target_sketch": "XformDst",
-                     "entities": "line:1", "dx": 0, "dy": -60},
-     lambda p: p.get("target_sketch") == "XformDst" and p.get("curve_count_before") == 0
-     and p.get("curve_count_after") == 1
-     and "APPENDS" in (p.get("note") or "") and "RENUMBER" not in (p.get("note") or ""), None),
-    # a mirror asked for as a negative scale, and a transform that asks for nothing: neither runs.
-    ("sketch_move", {"sketch_name": "XformDst", "entities": "line:0", "scale_factor": -1},
-     "refused", None),
-    ("sketch_move", {"sketch_name": "XformDst", "entities": "line:0"}, "refused", None),
-    # the same copy inside a COMPONENT sketch - the occurrence-proxy seam. Sketch.copy hands back
-    # assembly-context proxies whose own tokens are NOT the landed curves', so a ref can only be
-    # named through each proxy's native entity: an empty 'new_curves' beside a count that rose is
-    # the seam breaking, and 'new_curves_complete' appears only when refs went missing.
-    ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    ("model_create_component", {"name": "CopyComp", "activate": True}, _made_component, None),
-    ("sketch_create", {"plane": "xy", "name": "CompCopyS"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 1400, "y1": 0, "x2": 1450, "y2": 0,
-                             "sketch_name": "CompCopyS"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 1450, "y1": 0, "x2": 1450, "y2": 40,
-                             "sketch_name": "CompCopyS"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 1450, "y1": 40, "x2": 1400, "y2": 40,
-                             "sketch_name": "CompCopyS"}, "ok", None),
-    ("sketch_copy", {"sketch_name": "CompCopyS", "entities": "line:0,line:1,line:2", "dy": 60},
-     lambda p: p.get("new_curves") == ["line:3", "line:4", "line:5"]
-     and p.get("curve_count_after", 0) - p.get("curve_count_before", 0) == 3
-     and "new_curves_complete" not in p, None),
-    ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    # autoConstrain takes the whole sketch: a loose rectangle flips is_fully_constrained to true,
-    # and the added counts are read off the sketch's own collections.
-    ("sketch_create", {"plane": "xy", "name": "AutoCon"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "rectangle", "x1": 600, "y1": 560, "x2": 700, "y2": 600,
-                             "sketch_name": "AutoCon"}, "ok", None),
-    ("sketch_get", {"sketch_name": "AutoCon"},
-     lambda p: p.get("is_fully_constrained") is False, None),
-    ("sketch_constrain", {"constraint": "auto", "sketch_name": "AutoCon"},
-     lambda p: p.get("added_constraints", 0) + p.get("added_dimensions", 0) > 0
-     and p.get("is_fully_constrained") is True, None),
-    # a re-run on the constrained sketch adds nothing and is a clean no-op, not an error.
-    ("sketch_constrain", {"constraint": "auto", "sketch_name": "AutoCon"},
-     lambda p: p.get("added_dimensions") == 0 and p.get("added_constraints") == 0
-     and p.get("is_fully_constrained") is True, None),
-    # rectangular_pattern with distance_type='extent': 'distance' is the pattern's TOTAL span, so
-    # three instances 90 mm across sit at x 600 / 645 / 690 - the landed centre is the verdict, and
-    # a spacing read in centimetres would put the last one at 609.
-    ("sketch_create", {"plane": "xy", "name": "PatExtent"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "circle", "cx": 600, "cy": 640, "radius": 5,
-                             "sketch_name": "PatExtent"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 600, "y1": 660, "x2": 700, "y2": 660,
-                             "sketch_name": "PatExtent"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 600, "y1": 660, "x2": 600, "y2": 760,
-                             "sketch_name": "PatExtent"}, "ok", None),
-    ("sketch_constrain", {"constraint": "rectangular_pattern", "sketch_name": "PatExtent",
-                          "entities": "circle:0", "entity_one": "line:0", "entity_two": "line:1",
-                          "quantity": 3, "distance": 90, "quantity_two": 1, "distance_two": 10,
-                          "distance_type": "extent"},
-     lambda p: p.get("distance_type") == "extent" and p.get("created_count", 0) == 2, None),
-    ("sketch_get", {"sketch_name": "PatExtent", "include_entities": True},
-     lambda p: abs(max((e.get("center") or {}).get("x", 0) for e in (p.get("entities") or [])
-                       if e.get("type") == "circle") - 690.0) < 0.01, None),
-    # per-instance suppression: a 3x2 pattern of one circle has 5 SUPPRESSIBLE instances (the
-    # original does not count), and the flags are read back off the CREATED constraint. A suppressed
-    # instance draws no curve, so 5 instances less 2 suppressed is 3 new curves - the count and the
-    # landed flags together are what an echoed payload cannot fake.
-    ("sketch_create", {"plane": "xy", "name": "PatSupp"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "circle", "cx": 600, "cy": 800, "radius": 4,
-                             "sketch_name": "PatSupp"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 600, "y1": 820, "x2": 700, "y2": 820,
-                             "sketch_name": "PatSupp"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 600, "y1": 820, "x2": 600, "y2": 920,
-                             "sketch_name": "PatSupp"}, "ok", None),
-    ("sketch_constrain", {"constraint": "rectangular_pattern", "sketch_name": "PatSupp",
-                          "entities": "circle:0", "entity_one": "line:0", "entity_two": "line:1",
-                          "quantity": 3, "quantity_two": 2, "distance": 20, "distance_two": 20,
-                          "suppressed": [False, True, False, True, False]},
-     lambda p: p.get("suppressed_applied") == [False, True, False, True, False]
-     and p.get("created_count") == 3, None),
-    # the N-1 length IS the input's contract: 6 flags for a 3x2 counts the original, and the guard
-    # refuses it naming expected against got, before anything is created.
-    ("sketch_constrain", {"constraint": "rectangular_pattern", "sketch_name": "PatSupp",
-                          "entities": "circle:0", "entity_one": "line:0", "entity_two": "line:1",
-                          "quantity": 3, "quantity_two": 2, "distance": 20, "distance_two": 20,
-                          "suppressed": [False] * 6}, "refused", None),
-    # a knob whose input object exists on ONE constraint only is refused elsewhere, never dropped.
-    ("sketch_constrain", {"constraint": "horizontal", "sketch_name": "PatSupp",
-                          "entity_one": "line:0", "dimension_strategy": "chain"}, "refused", None),
-    # autoConstrain's four dimensioning-strategy setters are UNAVAILABLE on this build - the input
-    # object refuses the assignment ("This API is not currently available") - so the request is
-    # refused NAMING the knob that would not take, before autoConstrain runs and before anything is
-    # constrained. Plain constraint='auto' still solves (the beats above), and this beat is the one
-    # that fails loudly if a strategy is ever quietly dropped instead.
-    ("sketch_create", {"plane": "xy", "name": "AutoStrat"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "rectangle", "x1": 740, "y1": 800, "x2": 840, "y2": 850,
-                             "sketch_name": "AutoStrat"}, "ok", None),
-    ("sketch_constrain", {"constraint": "auto", "sketch_name": "AutoStrat",
-                          "dimension_strategy": "baseline", "linear_diameter_dims": "avoid"},
-     "refused", None),
-    # sketch_insert_svg: art from local disk into a FRESH sketch. importSVG ignores the file's own
-    # width/height and viewBox - 1 SVG user unit lands as 1/96 inch times 'scale' - so the 36-unit
-    # rectangle measures ~36 mm at scale=3.7795 and nothing else can produce that width. The art is
-    # placed AT the sketch origin, so this empty-before sketch's own box IS the art's size.
-    ("sketch_create", {"plane": "xy", "name": "SvgTarget"}, "ok", None),
-    ("sketch_insert_svg", {"file_path": SVG_PATH, "sketch_name": "SvgTarget", "scale": 3.7795},
-     lambda p: p.get("curves_added", 0) > 0 and p.get("sketch") == "SvgTarget"
-     and 30 < (p.get("sketch_extent") or {}).get("width", 0) < 42, None),
-    # SK-5's closure, through the TOOL: the 96-user-unit square at scale 1 is exactly one inch, and
-    # the art lands Y-DOWN from the sketch origin - so this empty-before sketch measures 25.4 mm
-    # square with its min y at -25.4. A y-up landing (or any scale drift) moves that number.
-    ("sketch_create", {"plane": "xy", "name": "Svg96"}, "ok", None),
-    ("sketch_insert_svg", {"file_path": SVG96_PATH, "sketch_name": "Svg96", "scale": 1},
-     _svg96_extent, None),
-    # importSVG RAISES on a path that is not a file and that raise rolls back the whole surrounding
-    # transaction, so the miss is named before Fusion is touched.
-    ("sketch_insert_svg", {"file_path": EXPORT_DIR + "/no_such_logo.svg",
-                           "sketch_name": "SvgTarget"}, "refused", None),
-    # Wave-3 sketch surface: the new curve kinds + dimension types, each asserting a read-back
-    # the payload could not echo (the degree clamp, the wedge rule, the offset rotation, and the
-    # API's own self-naming parallelism raises - all measured contracts).
-    ("sketch_create", {"plane": "xy", "name": "W3Curves"}, "ok", None),
-    # degree 5 over 3 control points: the API silently CLAMPS to n-1, and the payload publishes
-    # the BUILT degree read off the spline - 2 here is a live read-back, not an echo of the 5.
-    ("sketch_add_geometry", {"kind": "cv_spline", "points": [[740, 0], [760, 20], [780, 0]],
-                             "degree": 5, "sketch_name": "W3Curves"},
-     lambda p: p.get("degree") == 2, None),
-    ("sketch_add_geometry", {"kind": "cv_spline",
-                             "points": [[740, -40], [750, -20], [760, -40],
-                                        [770, -20], [780, -40], [790, -20]],
-                             "degree": 5, "sketch_name": "W3Curves"},
-     lambda p: p.get("degree") == 5, None),
-    # 'minor' omitted: the label reports the EFFECTIVE minor radius (major/2), never None.
-    ("sketch_add_geometry", {"kind": "ellipse", "cx": 830, "cy": 0, "radius": 20,
-                             "sketch_name": "W3Curves"},
-     lambda p: "minor=10" in (p.get("drawn") or ""), None),
-    # conic closed by its chord forms a profile that extrudes - the missing ref token is a
-    # reference gap only, and this proves the note's modelling claim end to end.
-    ("sketch_create", {"plane": "xy", "name": "W3Conic"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "conic", "x1": 740, "y1": 60, "x2": 780, "y2": 60,
-                             "cx": 760, "cy": 90, "rho": 0.6, "sketch_name": "W3Conic"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 740, "y1": 60, "x2": 780, "y2": 60,
-                             "sketch_name": "W3Conic"}, "ok", None),
-    ("model_extrude", {"sketch_name": "W3Conic", "profile_index": 0, "distance": 5}, _extruded, None),
-    ("sketch_create", {"plane": "xy", "name": "W3Earc"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "elliptical_arc", "cx": 840, "cy": 80, "radius": 30,
-                             "minor": 15, "sweep_deg": 180, "sketch_name": "W3Earc"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 870, "y1": 80, "x2": 810, "y2": 80,
-                             "sketch_name": "W3Earc"}, "ok", None),
-    ("model_extrude", {"sketch_name": "W3Earc", "profile_index": 0, "distance": 5}, _extruded, None),
-    # the angular wedge rule: a horizontal and a 60 deg line crossing far from the origin. The
-    # measured contract dims the wedge FACING THE SKETCH ORIGIN - 60 deg, not the 120 supplement.
-    ("sketch_create", {"plane": "xy", "name": "W3Dims"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 900, "y1": 100, "x2": 920, "y2": 100,
-                             "sketch_name": "W3Dims"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 905, "y1": 91.34, "x2": 915, "y2": 108.66,
-                             "sketch_name": "W3Dims"}, "ok", None),
-    ("sketch_dimension", {"dim_type": "angle", "entity_one": "line:0", "entity_two": "line:1",
-                          "sketch_name": "W3Dims"},
-     lambda p: "deg" in (p.get("value") or "")
-     and abs(float((p.get("value") or "0 x").split()[0]) - 60) < 0.1, None),
-    # offset with a NON-parallel second line: the constraint ROTATES it parallel (geometry moves,
-    # no raise) and the note says so.
-    ("sketch_add_geometry", {"kind": "line", "x1": 940, "y1": 100, "x2": 960, "y2": 100,
-                             "sketch_name": "W3Dims"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 940, "y1": 110, "x2": 960, "y2": 113,
-                             "sketch_name": "W3Dims"}, "ok", None),
-    ("sketch_dimension", {"dim_type": "offset", "entity_one": "line:2", "entity_two": "line:3",
-                          "sketch_name": "W3Dims"},
-     lambda p: "ROTAT" in (p.get("note") or ""), None),
-    # linear_diameter with the same shape REFUSES - the API's own parallelism sentence surfaces.
-    ("sketch_add_geometry", {"kind": "line", "x1": 980, "y1": 100, "x2": 1000, "y2": 100,
-                             "sketch_name": "W3Dims"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 980, "y1": 110, "x2": 1000, "y2": 114,
-                             "sketch_name": "W3Dims"}, "ok", None),
-    ("sketch_dimension", {"dim_type": "linear_diameter", "entity_one": "line:4",
-                          "entity_two": "line:5", "sketch_name": "W3Dims"}, "refused", None),
-    # line/point vs a MODEL face: the ShellCap outer -X wall sits on the x=400 plane, 620 mm from
-    # a line at x=1020. The value is read back off the parameter; the surface label is the
-    # RESOLVED entity, so 'BRepFace' proves the payload is not echoing the handle string.
-    ("find_geometry", {"target": "ShellCap", "kind": "planar_face", "nearest_to": [400, 15, 10],
-                       "max_results": 1}, "ok", _fg("w3_wall")),
-    ("sketch_add_geometry", {"kind": "line", "x1": 1020, "y1": 100, "x2": 1020, "y2": 140,
-                             "sketch_name": "W3Dims"}, "ok", None),
-    ("sketch_dimension", lambda c: {"dim_type": "line_to_surface", "entity_one": "line:6",
-                                    "surface": _ctx_get(c, "w3_wall", "shell wall"),
-                                    "sketch_name": "W3Dims"},
-     lambda p: "mm" in (p.get("value") or "")
-     and abs(float((p.get("value") or "0 x").split()[0]) - 620) < 0.1
-     and p.get("surface") == "BRepFace", None),
-    # a line NOT parallel to that wall refuses with the API's self-naming error.
-    ("sketch_add_geometry", {"kind": "line", "x1": 1040, "y1": 100, "x2": 1060, "y2": 100,
-                             "sketch_name": "W3Dims"}, "ok", None),
-    ("sketch_dimension", lambda c: {"dim_type": "line_to_surface", "entity_one": "line:7",
-                                    "surface": _ctx_get(c, "w3_wall", "shell wall"),
-                                    "sketch_name": "W3Dims"}, "refused", None),
-    # anchored on line:7 (undimensioned - the refused line_to_surface left it free): dimensioning
-    # line:6's own endpoint against the same wall it is dimensioned to over-constrains the sketch.
-    ("sketch_dimension", lambda c: {"dim_type": "point_to_surface", "entity_one": "line:7:start",
-                                    "surface": _ctx_get(c, "w3_wall", "shell wall"),
-                                    "sketch_name": "W3Dims"},
-     lambda p: p.get("surface") == "BRepFace", None),
-    # shared-resolver regression: the point dim's resolver allows curved faces; the constrain
-    # tool rides the same _inputs.resolve_surface, so a cylinder accepted here and refused for
-    # line_on_surface pins the allow_curved split. Fresh sketch: the origin point is point:0,
-    # so the drawn point is point:1.
-    ("sketch_create", {"plane": "xy", "name": "W3Pt"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "point", "cx": 1080, "cy": 100,
-                             "sketch_name": "W3Pt"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 1080, "y1": 120, "x2": 1100, "y2": 120,
-                             "sketch_name": "W3Pt"}, "ok", None),
-    ("sketch_constrain", lambda c: {"constraint": "coincident_to_surface", "entity_one": "point:1",
-                                    "surface": _ctx_get(c, "post_wall", "thread post wall"),
-                                    "sketch_name": "W3Pt"},
-     lambda p: p.get("surface") == "BRepFace", None),
-    ("sketch_constrain", lambda c: {"constraint": "line_on_surface", "entity_one": "line:0",
-                                    "surface": _ctx_get(c, "post_wall", "thread post wall"),
-                                    "sketch_name": "W3Pt"}, "refused", None),
-    # the coincident TRAP, on the success path where the caller who meant "centre this here" is:
-    # addCoincident(point, circle) succeeds and lands the point ON the rim, so the note has to say
-    # so - and it must NOT say so when the operand was a POINT, where the point really is centred.
-    ("sketch_create", {"plane": "xy", "name": "CoincTrap"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "circle", "cx": 1500, "cy": 0, "radius": 20,
-                             "sketch_name": "CoincTrap"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "point", "cx": 1560, "cy": 0, "sketch_name": "CoincTrap"},
-     "ok", None),
-    ("sketch_add_geometry", {"kind": "point", "cx": 1560, "cy": 30, "sketch_name": "CoincTrap"},
-     "ok", None),
-    ("sketch_constrain", {"constraint": "coincident", "entity_one": "point:2",
-                          "entity_two": "circle:0", "sketch_name": "CoincTrap"},
-     lambda p: "ON that curve" in (p.get("note") or ""), None),
-    ("sketch_constrain", {"constraint": "coincident", "entity_one": "point:3",
-                          "entity_two": "point:1", "sketch_name": "CoincTrap"},
-     lambda p: "ON that curve" not in (p.get("note") or ""), None),
-    # sketch_set_text's PATH layouts: one scratch sketch holding a line and a closed circle, then
-    # text laid ALONG each and FITTED to the line. 'definition_type' is the created text's own
-    # objectType and 'mode_verified' says whether it matches the mode asked for, so a text that
-    # landed in another layout cannot pass as this one.
-    ("sketch_create", {"plane": "xy", "name": "TextPaths"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 1200, "y1": 0, "x2": 1300, "y2": 0,
-                             "sketch_name": "TextPaths"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "circle", "cx": 1250, "cy": 60, "radius": 25,
-                             "sketch_name": "TextPaths"}, "ok", None),
-    ("sketch_set_text", {"text": "ALONG", "sketch_name": "TextPaths", "create": True,
-                         "mode": "along_path", "path": "line:0", "height": 5},
-     lambda p: p.get("mode_verified") is True
-     and str(p.get("definition_type") or "").endswith("AlongPathTextDefinition"), None),
-    # a CLOSED circle wraps the text right around the hole it marks - the headline path case.
-    ("sketch_set_text", {"text": "M8 CLEARANCE", "sketch_name": "TextPaths", "create": True,
-                         "mode": "along_path", "path": "circle:0", "align": "center", "height": 4},
-     lambda p: p.get("mode_verified") is True, None),
-    # fit_on_path spaces the characters over the whole path itself, so the payload carries neither
-    # 'align' nor 'character_spacing' - its definition object has no slot for either.
-    ("sketch_set_text", {"text": "FIT", "sketch_name": "TextPaths", "create": True,
-                         "mode": "fit_on_path", "path": "line:0", "height": 5},
-     lambda p: str(p.get("definition_type") or "").endswith("FitOnPathTextDefintion")
-     and "align" not in p and "character_spacing" not in p, None),
     # a model EDGE handle as the path: the placement call accepts it and Fusion then rejects the
     # add, so the guard refuses it up front and points at sketch_project.
     ("sketch_set_text", lambda c: {"text": "EDGE", "sketch_name": "TextPaths", "create": True,
                                    "mode": "along_path",
                                    "path": _ctx_get(c, "cd_edge", "a model edge handle")},
      "refused", None),
-    # cross-mode inputs: each is refused BY NAME rather than silently dropped, and nothing is created.
-    ("sketch_set_text", {"text": "X", "sketch_name": "TextPaths", "create": True,
-                         "mode": "fit_on_path", "path": "line:0", "align": "center"}, "refused", None),
-    ("sketch_set_text", {"text": "X", "sketch_name": "TextPaths", "create": True,
-                         "mode": "along_path", "path": "line:0", "x": 10}, "refused", None),
-    ("sketch_set_text", {"text": "X", "sketch_name": "TextPaths", "create": True,
-                         "mode": "multi_line", "path": "line:0"}, "refused", None),
-    # the layout inputs shape NEW text only: passing one to an EDIT is refused, never ignored.
-    ("sketch_set_text", {"text": "FIT", "sketch_name": "TextPaths", "angle_deg": 15},
-     "refused", None),
-    # FONT: the one input that reaches the API twice - onto the INPUT before a create, onto the
-    # SketchText itself on an edit. No API lists or validates the legal names, so Fusion's own
-    # "invalid input font name" raise IS the whole check, and each refusal hands that sentence on
-    # with the name it was given. Its own scratch sketch carries the whole run.
-    ("sketch_create", {"plane": "xy", "name": "FontProbe"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 1200, "y1": 200, "x2": 1300, "y2": 200,
-                             "sketch_name": "FontProbe"}, "ok", None),
-    # the font is read back off the LANDED text, not off the input, so 'font' here is what the
-    # created text reports - and nothing sits in 'requested', which is where an unread value goes.
-    ("sketch_set_text", {"text": "FONT", "sketch_name": "FontProbe", "create": True,
-                         "x": 1200, "y": 160, "height": 6, "font_name": "Arial"},
-     lambda p: p.get("font") == "Arial" and p.get("sketch_text_count") == 1
-     and "requested" not in p, None),
-    # the same font through a setAs* PLACEMENT: it is applied to the input before the placement
-    # call and survives it, which is what makes the along-path text report it too.
-    ("sketch_set_text", {"text": "ALONGFONT", "sketch_name": "FontProbe", "create": True,
-                         "mode": "along_path", "path": "line:0", "height": 5,
-                         "font_name": "Arial"},
-     lambda p: p.get("font") == "Arial" and p.get("sketch_text_count") == 2, None),
-    # a font this machine does not carry: the create raises at add() and the refusal names it.
-    ("sketch_set_text", {"text": "NOFONT", "sketch_name": "FontProbe", "create": True,
-                         "x": 1200, "y": 140, "height": 6,
-                         "font_name": "ZzNoSuchFont_MCP_Probe"}, "refused", None),
-    # font names are CASE-SENSITIVE at the API, so 'arial' is as unknown as any other miss.
-    ("sketch_set_text", {"text": "NOFONT", "sketch_name": "FontProbe", "create": True,
-                         "x": 1200, "y": 140, "height": 6, "font_name": "arial"}, "refused", None),
-    # the count is the proof the two refusals created nothing: this is the THIRD text in the
-    # sketch. It carries the no-font regression too - omit 'font_name' and no 'font' key is
-    # published at all, on the payload or on a record.
-    ("sketch_set_text", {"text": "NOFONTKEY", "sketch_name": "FontProbe", "create": True,
-                         "x": 1200, "y": 120, "height": 6},
-     lambda p: p.get("sketch_text_count") == 3 and "font" not in p, None),
-    # EDITING one text: the font goes on FIRST and each changed record carries the font that text
-    # reports back beside the string that landed.
-    ("sketch_set_text", {"text": "FONT2", "sketch_name": "FontProbe", "index": 0,
-                         "font_name": "Arial"},
-     lambda p: p["changed"][0].get("font") == "Arial"
-     and p["changed"][0].get("after") == "FONT2", None),
-    # the unknown name on an EDIT: because the font is applied ahead of the string, the refusal
-    # leaves this text's string untouched as well.
-    ("sketch_set_text", {"text": "FONT3", "sketch_name": "FontProbe", "index": 0,
-                         "font_name": "ZzNoSuchFont_MCP_Probe"}, "refused", None),
-    # the next edit answers normally, and its 'before' is what proves the refused call wrote
-    # nothing - the string is still the one the successful edit left.
-    ("sketch_set_text", {"text": "FONT4", "sketch_name": "FontProbe", "index": 0},
-     lambda p: p["changed"][0].get("before") == "FONT2"
-     and p["changed"][0].get("after") == "FONT4" and "font" not in p["changed"][0], None),
-    # sketch text is deleted by the SAME index sketch_set_text edits by: one text in its own sketch,
-    # deleted as 'text:0'. The deleted string and the collection count read back off the sketch are
-    # the verdict - a delete that removed nothing is an error, never a false ok.
-    ("sketch_create", {"plane": "xy", "name": "TextDel"}, "ok", None),
-    ("sketch_set_text", {"text": "SCRAP", "sketch_name": "TextDel", "create": True,
-                         "x": 1200, "y": 100, "height": 5}, "ok", None),
-    # SketchTexts.add APPENDS, so the SECOND text is 'text:1' - and deleting that index has to take
-    # the second one, never the first. The deleted STRING is what separates the two.
-    ("sketch_set_text", {"text": "SCRAP2", "sketch_name": "TextDel", "create": True,
-                         "x": 1200, "y": 80, "height": 5}, "ok", None),
-    ("sketch_delete_entity", {"sketch_name": "TextDel", "target": "text:1"},
-     lambda p: p.get("text") == "SCRAP2" and p.get("texts_before") == 2
-     and p.get("texts_after") == 1, None),
-    ("sketch_delete_entity", {"sketch_name": "TextDel", "target": "text:0"},
-     lambda p: p.get("text") == "SCRAP" and p.get("texts_before") == 1
-     and p.get("texts_after") == 0, None),
-    # the emptied sketch has no text at that index any more - the refusal names the index and count.
-    ("sketch_delete_entity", {"sketch_name": "TextDel", "target": "text:0"}, "refused", None),
-    # THE TEXT READ-BACK (the S6 gap): sketch_get's X-ray lists each SketchText at its text:<i>
-    # address with the string, the FONT (fontName is API-readable), the height in display units,
-    # and a sketch-space bounding box. FontProbe's final state pins all three record shapes at
-    # once: text:0 was edited to FONT4 (its Arial ride-along from the FONT2 edit stays), text:1 is
-    # the along-path ALONGFONT, text:2 was created with NO font and reads font None.
-    ("sketch_get", {"sketch_name": "FontProbe"},
-     lambda p: (p.get("counts") or {}).get("texts") == 3 and "entities" not in p, None),
-    # text:2 was created with NO font_name and still reads a real font (measured: the platform
-    # gives every text the app default) - so 'font' is a non-empty string on all three records.
-    ("sketch_get", {"sketch_name": "FontProbe", "include_entities": True},
-     lambda p: (lambda t: [r["id"] for r in t] == ["text:0", "text:1", "text:2"]
-                and t[0].get("text") == "FONT4" and t[0].get("font") == "Arial"
-                and isinstance(t[0].get("height"), (int, float)) and t[0]["height"] > 0
-                and t[1].get("text") == "ALONGFONT"
-                and t[2].get("text") == "NOFONTKEY"
-                and isinstance(t[2].get("font"), str) and t[2]["font"]
-                and "min" in (t[0].get("bounding_box") or {}))
-     ([e for e in p.get("entities", []) if e.get("type") == "text"]), None),
-    # THE SLOT FAMILY, one scratch sketch per shape in a clear band so every count is absolute.
-    # 'radius' is the HALF width throughout (the label carries the full width), each tailed
-    # constructor takes its tail POSITIONALLY, and the ladders differ per kind - which is what the
-    # cross-kind refusals below pin.
-    ("sketch_create", {"plane": "xy", "name": "SlotA"}, "ok", None),
-    # a three-point arc slot is built entirely out of SketchArcs - five of them, and its closed
-    # outline forms a profile. The only dimension it can create is the width one.
-    ("sketch_add_geometry", {"kind": "three_point_arc_slot", "x1": 1700, "y1": 900,
-                             "x2": 1800, "y2": 900, "cx": 1750, "cy": 930, "radius": 5,
-                             "create_width_dimension": True, "sketch_name": "SlotA"},
-     lambda p: p.get("curves_added") == 5 and p["sketch"]["arc_count"] == 5
-     and p["sketch"]["profile_count"] >= 1
-     and "three_point_arc_slot" in (p.get("drawn") or "") and "w=10" in (p.get("drawn") or ""), None),
-    # its arc is fixed by its three points, so it has no radius or angle to dimension - the flag
-    # that belongs to the centre-point kind is refused by name and points there.
-    ("sketch_add_geometry", {"kind": "three_point_arc_slot", "x1": 1700, "y1": 900,
-                             "x2": 1800, "y2": 900, "cx": 1750, "cy": 930, "radius": 5,
-                             "create_angle_dimension": True, "sketch_name": "SlotA"},
-     "refused", None),
-    # the centre-point arc slot in its four-argument form: centre, start, end, width.
-    ("sketch_create", {"plane": "xy", "name": "SlotB"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "center_point_arc_slot", "cx": 1700, "cy": 1000,
-                             "x1": 1750, "y1": 1000, "x2": 1700, "y2": 1050, "radius": 5,
-                             "sketch_name": "SlotB"},
-     lambda p: p.get("curves_added") == 5, None),
-    # the full ladder: a supplied arc_radius overrides the centre-to-start distance and the angle
-    # takes a unit-bearing expression, then each of the three flags gates its OWN dimension - so
-    # width + angle asked for and radius declined must land exactly two dimensions.
-    ("sketch_create", {"plane": "xy", "name": "SlotC"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "center_point_arc_slot", "cx": 1700, "cy": 1100,
-                             "x1": 1750, "y1": 1100, "x2": 1700, "y2": 1150, "radius": 5,
-                             "arc_radius": 30, "angle_deg": 45, "create_width_dimension": True,
-                             "create_radius_dimension": False, "create_angle_dimension": True,
-                             "sketch_name": "SlotC"},
-     lambda p: p.get("curves_added") == 5, None),
-    ("sketch_get", {"sketch_name": "SlotC", "include_entities": True},
-     lambda p: p.get("dimension_count") == 2
-     and any("diameter" in (d.get("type") or "") for d in p["dimensions"])
-     and any("angular" in (d.get("type") or "") for d in p["dimensions"])
-     and not any("radial" in (d.get("type") or "") for d in p["dimensions"]), None),
-    # an OVERALL slot measures tip to tip: its two points are the outer extremes, so the cap arc
-    # centres land inset by the half width - 60 mm tip to tip from centres 52 mm apart.
-    ("sketch_create", {"plane": "xy", "name": "SlotD"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "overall_slot", "x1": 1700, "y1": 1200, "x2": 1760, "y2": 1200,
-                             "radius": 4, "sketch_name": "SlotD"},
-     lambda p: p.get("curves_added") == 3 and "w=8" in (p.get("drawn") or ""), None),
-    ("sketch_get", {"sketch_name": "SlotD", "include_entities": True},
-     lambda p: sorted(round(e["center"]["x"], 3) for e in p["entities"] if e["type"] == "arc")
-     == [1704.0, 1756.0], None),
-    # the length and the angle are VALUES, not flags: passing either creates its own dimension and
-    # adds the fourth line, while the width dimension stays gated on its flag.
-    ("sketch_create", {"plane": "xy", "name": "SlotE"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "overall_slot", "x1": 1700, "y1": 1300, "x2": 1760, "y2": 1300,
-                             "radius": 4, "slot_length": 40, "angle_deg": 30,
-                             "create_width_dimension": True, "sketch_name": "SlotE"},
-     lambda p: p.get("curves_added") == 4, None),
-    ("sketch_get", {"sketch_name": "SlotE", "include_entities": True},
-     lambda p: p.get("dimension_count") == 3
-     and any("diameter" in (d.get("type") or "") for d in p["dimensions"])
-     and any("linear" in (d.get("type") or "") and abs((d.get("value") or 0) - 40.0) < 1e-3
-             for d in p["dimensions"])
-     and any("angular" in (d.get("type") or "") and "30" in (d.get("expression") or "")
-             for d in p["dimensions"]), None),
-    # the flag ALONE, with no tail: three lines and exactly the one dimension it asked for.
-    ("sketch_create", {"plane": "xy", "name": "SlotF"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "overall_slot", "x1": 1700, "y1": 1400, "x2": 1760, "y2": 1400,
-                             "radius": 4, "create_width_dimension": True, "sketch_name": "SlotF"},
-     lambda p: p.get("curves_added") == 3, None),
-    ("sketch_get", {"sketch_name": "SlotF", "include_entities": True},
-     lambda p: p.get("dimension_count") == 1, None),
-    # a CENTRE-point slot's length is the HALF length, centre to cap centre, and it is forwarded
-    # unhalved - so a cap centre lands exactly on the second point and the dimension reads 25.
-    ("sketch_create", {"plane": "xy", "name": "SlotG"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "center_point_slot", "x1": 1700, "y1": 1500,
-                             "x2": 1725, "y2": 1500, "radius": 3, "slot_length": 25,
-                             "sketch_name": "SlotG"},
-     lambda p: "half_len=25" in (p.get("drawn") or ""), None),
-    ("sketch_get", {"sketch_name": "SlotG", "include_entities": True},
-     lambda p: any(abs(e["center"]["x"] - 1725) < 1e-3 and abs(e["center"]["y"] - 1500) < 1e-3
-                   for e in p["entities"] if e["type"] == "arc")
-     and any("linear" in (d.get("type") or "") and abs((d.get("value") or 0) - 25.0) < 1e-3
-             for d in p["dimensions"]), None),
-    # an angle with no length has nothing to sit on: refused naming both.
-    ("sketch_add_geometry", {"kind": "overall_slot", "x1": 1700, "y1": 1400, "x2": 1760, "y2": 1400,
-                             "radius": 4, "angle_deg": 30, "sketch_name": "SlotF"}, "refused", None),
-    # the linear kinds have no angle FLAG - the angular dimension comes from angle_deg itself.
-    ("sketch_add_geometry", {"kind": "overall_slot", "x1": 1700, "y1": 1400, "x2": 1760, "y2": 1400,
-                             "radius": 4, "slot_length": 40, "create_angle_dimension": True,
-                             "sketch_name": "SlotF"}, "refused", None),
-    # each cross-kind input is refused pointing at the kind that DOES carry it: arc_radius belongs
-    # to the centre-point ARC slot, slot_length to the straight ones - and the three-point arc slot
-    # has no radius argument at all, so its refusal must not offer arc_radius as the remedy.
-    ("sketch_add_geometry", {"kind": "center_point_slot", "x1": 1700, "y1": 1500,
-                             "x2": 1725, "y2": 1500, "radius": 3, "arc_radius": 30,
-                             "sketch_name": "SlotG"}, "refused", None),
-    ("sketch_add_geometry", {"kind": "center_point_arc_slot", "cx": 1700, "cy": 1000,
-                             "x1": 1750, "y1": 1000, "x2": 1700, "y2": 1050, "radius": 5,
-                             "slot_length": 40, "sketch_name": "SlotB"}, "refused", None),
-    ("sketch_add_geometry", {"kind": "three_point_arc_slot", "x1": 1700, "y1": 900,
-                             "x2": 1800, "y2": 900, "cx": 1750, "cy": 930, "radius": 5,
-                             "slot_length": 40, "sketch_name": "SlotA"}, "refused", None),
-    # the legacy centre-to-centre slot takes two centres and a width and nothing else: a tail would
-    # be dropped, so it is refused - and the bare call still draws.
-    ("sketch_create", {"plane": "xy", "name": "SlotH"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "slot", "x1": 1700, "y1": 1600, "x2": 1760, "y2": 1600,
-                             "radius": 4, "slot_length": 40, "sketch_name": "SlotH"},
-     "refused", None),
-    # the legacy form's own census: addCenterToCenterSlot lands 5 curves - 2 solid lines, 1
-    # CONSTRUCTION line (the centre-to-centre one) and 2 arc caps - and 'curves_added' counts the
-    # LINE collection's delta, so it reads 3. The note has to say which 5, because the number alone
-    # reads like a 3-curve slot.
-    ("sketch_add_geometry", {"kind": "slot", "x1": 1700, "y1": 1600, "x2": 1760, "y2": 1600,
-                             "radius": 4, "sketch_name": "SlotH"},
-     lambda p: p.get("curves_added") == 3
-     and "2 solid SketchLines" in (p.get("note") or "")
-     and "1 CONSTRUCTION SketchLine" in (p.get("note") or "")
-     and "2 SketchArc end caps" in (p.get("note") or ""), None),
-    # the independent read: three lines of which EXACTLY ONE is construction, plus the two arc caps.
-    ("sketch_get", {"sketch_name": "SlotH", "include_entities": True},
-     lambda p: len([e for e in p["entities"] if e["type"] == "line"]) == 3
-     and len([e for e in p["entities"] if e["type"] == "line" and e.get("construction")]) == 1
-     and len([e for e in p["entities"] if e["type"] == "arc"]) == 2, None),
-    # a POLYGON is built by the same SketchLines factory, so its side count is the delta.
-    ("sketch_create", {"plane": "xy", "name": "PolyHex"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "polygon", "cx": 1700, "cy": 1700, "radius": 20, "sides": 6,
-                             "sketch_name": "PolyHex"},
-     lambda p: p.get("curves_added") == 6, None),
     # design_remove_feature: cast a scratch body, remove it (the census is the verdict), then
     # delete the Remove feature - the body comes back, which is the reversibility the note claims.
     ("model_create_component", {"name": "RmScratch", "activate": True}, _made_component, None),
@@ -2888,7 +4738,6 @@ _DETAILS = [
     # measured volume direction: 'mode' echoes the sign of the depth and the call is refused when
     # the material moved the other way.
     *_box("EmbossBlock", ox=600, oy=100),
-    _watch("EmbossBlock:1"),
     ("model_construction", {"kind": "plane", "plane": "xy", "offset": 10, "name": "EmbPlane"},
      _datum_plane("xy"), None),
     ("find_geometry", {"target": "EmbossBlock", "kind": "planar_face", "nearest_to": [610, 110, 10],
@@ -2926,11 +4775,20 @@ _DETAILS = [
      and (p.get("bodies_added") or p.get("volume_change_cm3")), None),
     # join is a BODY-mode setting and 'joined' is read off the created feature, never echoed. The
     # body is named through a FRESH face handle: the mirrored emboss re-cut the one taken above.
+    # A JOIN NEEDS THE TWO HALVES TO TOUCH, and the mirror plane is what decides whether they do.
+    # About an ORIGIN plane this block's reflection lands 200 mm away with nothing between them:
+    # Fusion keeps the feature, makes a second body and marks it "Could not join, multiple bodies
+    # created" - a timeline WARNING left in the finished document, which the 'joined' flag alone does
+    # not catch because the SETTING was honoured even though the join was not. Mirroring about the
+    # block's own +X face gives the reflection that face to fuse across, and the volume the tool
+    # measures for itself is what says it fused rather than landing beside it.
+    ("model_construction", {"kind": "plane", "plane": "yz", "offset": 620, "name": "EmbJoinPlane"},
+     _datum_plane("yz"), None),
     ("find_geometry", {"target": "EmbossBlock", "kind": "planar_face", "nearest_to": [610, 110, 10],
                        "max_results": 1}, "ok", _fg("emb_body")),
     ("model_mirror", lambda c: {"bodies": [_ctx_get(c, "emb_body", "the emboss block body")],
-                                "plane": "xz", "join": True},
-     lambda p: p.get("joined") is True, None),
+                                "plane": "EmbJoinPlane", "join": True},
+     lambda p: p.get("joined") is True and _mirrored(p), None),
     ("model_mirror", lambda c: {"features": [_ctx_get(c, "emb_feat", "the emboss feature")],
                                 "plane": "EmbMirrorPlane", "join": True}, "refused", None),
     # model_replace_face: a scratch block whose top face is replaced by an OPEN sheet sitting above
@@ -2942,7 +4800,6 @@ _DETAILS = [
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 660, "y1": 0, "x2": 690, "y2": 30,
                              "sketch_name": "ReplS"}, "ok", None),
     ("model_extrude", {"sketch_name": "ReplS", "profile_index": 0, "distance": 20}, _extruded, None),
-    _watch("ReplBlock:1"),
     # the replacement rides its own component so one find_geometry names it without ambiguity, and
     # surface_extrude reads is_solid=false back off the result - which is what makes it a legal
     # target. Symmetric, so the sheet spans the block whichever way the extrude runs.
@@ -2990,7 +4847,6 @@ _DETAILS = [
     ("model_pipe", {"path": "sketch:PipeRunPath", "section_size": 10, "wall_thickness": 1.5},
      lambda p: p.get("hollow") is True and abs((p.get("wall_thickness") or 0) - 1.5) < 1e-6
      and "capped_ends" not in p, None),
-    _watch("PipeRun:1"),
     ("model_create_component", {"name": "PipeHalf", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xz", "name": "PipeHalfPath"}, "ok", None),
     ("sketch_add_geometry", {"kind": "line", "x1": 760, "y1": 0, "x2": 760, "y2": 40,
@@ -3094,32 +4950,106 @@ _DETAILS = [
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     # Section view: cut through the gimbal center, then clear.
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    ("view_set", {"action": "orient", "orientation": "iso-top-right"}, "ok", None),
+    _watch("Frame:1"),
     ("view_section", {"action": "cut", "plane": "yz", "offset": 0}, "ok", None),
-    ("view_screenshot", {"view": "front", "width": 500, "height": 400}, "ok", None),
+    ("view_screenshot", {"width": 500, "height": 400}, "ok", None),
     ("view_section", {"action": "clear"}, "ok", None),
     ("view_screenshot_multi", {"views": ["front", "top"], "width": 400, "height": 300}, "ok", None),
     # THE RASTER WRITER (NEW-13): file_path also writes the rendered PNG to disk - the extension is
     # appended, the landed file is verified non-zero, and path + size are published beside the
     # inline image. The fleet's only raster writer, which is what feeds drawing_insert_image.
-    ("view_screenshot", {"view": "iso-top-right", "width": 400, "height": 300,
+    ("view_screenshot", {"width": 400, "height": 300,
                          "file_path": r"C:\Users\phili\AppData\Local\Temp\eval_sweep_exports\w4_shot"},
      lambda p: "w4_shot.png" in str(p) and "size_bytes=" in str(p), None),
     # a second write to the SAME path lands without a refusal - the overwrite behaviour that makes
     # this tool write-kind (and puts it behind the write guard below).
-    ("view_screenshot", {"view": "iso-top-right", "width": 200, "height": 150,
+    ("view_screenshot", {"width": 200, "height": 150,
                          "file_path": r"C:\Users\phili\AppData\Local\Temp\eval_sweep_exports\w4_shot"},
      lambda p: "w4_shot.png" in str(p) and "size_bytes=" in str(p), None),
     ("view_screenshot", {"width": 200, "height": 150,
                          "file_path": r"C:\Users\phili\AppData\Local\Temp\eval_sweep_exports\w4_shot",
                          "expect_document": "ZzNoSuchDocument"},
      _refused("active_document_changed"), None),
+    # The dimension/constraint beats that measure TO a model face sit at the end of the act,
+    # not in the middle of the modelling: they are sketch work, and they are here only
+    # because a face is what they measure against.
+    # the angular wedge rule: a horizontal and a 60 deg line crossing far from the origin. The
+    # measured contract dims the wedge FACING THE SKETCH ORIGIN - 60 deg, not the 120 supplement.
+    ("sketch_create", {"plane": "xy", "name": "W3Dims"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 900, "y1": 100, "x2": 920, "y2": 100,
+                             "sketch_name": "W3Dims"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 905, "y1": 91.34, "x2": 915, "y2": 108.66,
+                             "sketch_name": "W3Dims"}, "ok", None),
+    ("sketch_dimension", {"dim_type": "angle", "entity_one": "line:0", "entity_two": "line:1",
+                          "sketch_name": "W3Dims"},
+     lambda p: "deg" in (p.get("value") or "")
+     and abs(float((p.get("value") or "0 x").split()[0]) - 60) < 0.1, None),
+    # offset with a NON-parallel second line: the constraint ROTATES it parallel (geometry moves,
+    # no raise) and the note says so.
+    ("sketch_add_geometry", {"kind": "line", "x1": 940, "y1": 100, "x2": 960, "y2": 100,
+                             "sketch_name": "W3Dims"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 940, "y1": 110, "x2": 960, "y2": 113,
+                             "sketch_name": "W3Dims"}, "ok", None),
+    ("sketch_dimension", {"dim_type": "offset", "entity_one": "line:2", "entity_two": "line:3",
+                          "sketch_name": "W3Dims"},
+     lambda p: "ROTAT" in (p.get("note") or ""), None),
+    # linear_diameter with the same shape REFUSES - the API's own parallelism sentence surfaces.
+    ("sketch_add_geometry", {"kind": "line", "x1": 980, "y1": 100, "x2": 1000, "y2": 100,
+                             "sketch_name": "W3Dims"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 980, "y1": 110, "x2": 1000, "y2": 114,
+                             "sketch_name": "W3Dims"}, "ok", None),
+    ("sketch_dimension", {"dim_type": "linear_diameter", "entity_one": "line:4",
+                          "entity_two": "line:5", "sketch_name": "W3Dims"}, "refused", None),
+    # line/point vs a MODEL face: the ShellCap outer -X wall sits on the x=400 plane, 620 mm from
+    # a line at x=1020. The value is read back off the parameter; the surface label is the
+    # RESOLVED entity, so 'BRepFace' proves the payload is not echoing the handle string.
+    ("find_geometry", {"target": "ShellCap", "kind": "planar_face", "nearest_to": [400, 15, 10],
+                       "max_results": 1}, "ok", _fg("w3_wall")),
+    ("sketch_add_geometry", {"kind": "line", "x1": 1020, "y1": 100, "x2": 1020, "y2": 140,
+                             "sketch_name": "W3Dims"}, "ok", None),
+    ("sketch_dimension", lambda c: {"dim_type": "line_to_surface", "entity_one": "line:6",
+                                    "surface": _ctx_get(c, "w3_wall", "shell wall"),
+                                    "sketch_name": "W3Dims"},
+     lambda p: "mm" in (p.get("value") or "")
+     and abs(float((p.get("value") or "0 x").split()[0])
+             - abs(_px("W3Dims", 1020) - _px("ShellCap", 400))) < 0.1
+     and p.get("surface") == "BRepFace", None),
+    # a line NOT parallel to that wall refuses with the API's self-naming error.
+    ("sketch_add_geometry", {"kind": "line", "x1": 1040, "y1": 100, "x2": 1060, "y2": 100,
+                             "sketch_name": "W3Dims"}, "ok", None),
+    ("sketch_dimension", lambda c: {"dim_type": "line_to_surface", "entity_one": "line:7",
+                                    "surface": _ctx_get(c, "w3_wall", "shell wall"),
+                                    "sketch_name": "W3Dims"}, "refused", None),
+    # anchored on line:7 (undimensioned - the refused line_to_surface left it free): dimensioning
+    # line:6's own endpoint against the same wall it is dimensioned to over-constrains the sketch.
+    ("sketch_dimension", lambda c: {"dim_type": "point_to_surface", "entity_one": "line:7:start",
+                                    "surface": _ctx_get(c, "w3_wall", "shell wall"),
+                                    "sketch_name": "W3Dims"},
+     lambda p: p.get("surface") == "BRepFace", None),
+    # shared-resolver regression: the point dim's resolver allows curved faces; the constrain
+    # tool rides the same _inputs.resolve_surface, so a cylinder accepted here and refused for
+    # line_on_surface pins the allow_curved split. Fresh sketch: the origin point is point:0,
+    # so the drawn point is point:1.
+    ("sketch_create", {"plane": "xy", "name": "W3Pt"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "point", "cx": 1080, "cy": 100,
+                             "sketch_name": "W3Pt"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 1080, "y1": 120, "x2": 1100, "y2": 120,
+                             "sketch_name": "W3Pt"}, "ok", None),
+    ("sketch_constrain", lambda c: {"constraint": "coincident_to_surface", "entity_one": "point:1",
+                                    "surface": _ctx_get(c, "post_wall", "thread post wall"),
+                                    "sketch_name": "W3Pt"},
+     lambda p: p.get("surface") == "BRepFace", None),
+    ("sketch_constrain", lambda c: {"constraint": "line_on_surface", "entity_one": "line:0",
+                                    "surface": _ctx_get(c, "post_wall", "thread post wall"),
+                                    "sketch_name": "W3Pt"}, "refused", None),
 ]
 
 # --- ACT 6: THE RESIZE - the parametric resize check (mirrors scenario S6) ---------------------
 # Bump the one driving diameter; the whole gyroscope grows. Read the rings back before and after.
 _RESIZE = [
-    ("view_screenshot", {"view": "iso-top-right", "width": 400, "height": 300}, "ok", None),
+    # the resize walks the whole mechanism - frame it so the parts are seen to move.
+    _watch("Frame:1"),
+    ("view_screenshot", {"width": 400, "height": 300}, "ok", None),
     ("sketch_get", {"sketch_name": "OuterRingSketch"}, "ok", None),   # before
     ("param_set", {"name": "GimbalDia", "expression": "160 mm"},
      _param_set_to("GimbalDia", 160), None),
@@ -3130,7 +5060,7 @@ _RESIZE = [
     # anchored at the shared center, it HOLDS position through the recompute - the anchor CAM binds.
     # Either ACT 3 path (narrative or scratch fallback) builds a JO by that name.
     ("assembly_get", {"include": ["joint_origins"]}, _joint_origins_listed("StockCenter"), None),
-    ("view_screenshot", {"view": "iso-top-right", "width": 400, "height": 300}, "ok", None),
+    ("view_screenshot", {"width": 400, "height": 300}, "ok", None),
     ("param_set", {"name": "GimbalDia", "expression": "120 mm"},
      _param_set_to("GimbalDia", 120), None),   # restore
     ("design_recompute", {}, "ok", None),
@@ -3217,8 +5147,66 @@ _FINALE = [
     ("model_extrude", {"sketch_name": "NoSuchSketch", "distance": 5}, "refused", None),   # guard probe
     ("param_set", {"name": "", "expression": "1"}, "refused", None),                      # guard probe
     ("view_switch_workspace", {"workspace": "design"}, "ok", None),
-    ("view_set", {"action": "orient", "orientation": "iso-top-right"}, "ok", None),
+    # CAM hid the sketch folders for the machining movement; the design is a sketch-bearing
+    # story again from here, and the FINALE always runs, so this is where they come back.
+    ("view_set", {"action": "display", "categories": ["sketches"], "visible": True},
+     lambda p: p.get("visible") is True, None),
+    # the machined part in its fixture - the gyroscope itself was stripped away in ACT 8, so the
+    # end state IS the vise holding the stock the Carrier was cut from
+    _watch(["ViseBase:1", "STOCK:1"]),
     ("view_screenshot_multi", {"views": ["iso-top-right", "front"], "width": 500, "height": 400}, "ok", None),
+    # THE VIEW VERBS, all on the finished fixture. ONE framed orient sets the subject; every preset
+    # after it carries fit=false and no focus, so the camera ROTATES about what is already framed
+    # instead of re-fitting per preset. That is the difference between a turntable and ten separate
+    # zoom-outs - the vise stays the same size in the same place and only the angle changes. It also
+    # keeps the tour silent: the runner shoots a frame for a camera row that names a focus, so ten
+    # focused orients would write ten near-identical screenshots.
+    # The tour opens with a snapshot and closes on 'restore', which is what makes it checkable -
+    # camera, style and every visibility bulb come back to the state the tour started from.
+    ("view_set", {"action": "snapshot"}, "ok", None),
+    ("view_set", {"action": "orient", "orientation": "front", "focus": ["ViseBase:1", "STOCK:1"]},
+     "ok", None),
+    ("view_set", {"action": "orient", "orientation": "back", "fit": False}, "ok", None),
+    ("view_set", {"action": "orient", "orientation": "left", "fit": False}, "ok", None),
+    ("view_set", {"action": "orient", "orientation": "right", "fit": False}, "ok", None),
+    ("view_set", {"action": "orient", "orientation": "top", "fit": False}, "ok", None),
+    ("view_set", {"action": "orient", "orientation": "bottom", "fit": False}, "ok", None),
+    ("view_set", {"action": "orient", "orientation": "iso-top-left", "fit": False}, "ok", None),
+    ("view_set", {"action": "orient", "orientation": "iso-bottom-right", "fit": False}, "ok", None),
+    ("view_set", {"action": "orient", "orientation": "iso-bottom-left", "fit": False}, "ok", None),
+    ("view_set", {"action": "orient", "orientation": "iso-top-right", "fit": False}, "ok", None),
+    # every visual style the tool offers, held on the one hero angle. 'current' on view_screenshot is
+    # the no-move capture - the only way to shoot what the camera already frames, since a NAMED view
+    # refits the whole model.
+    ("view_set", {"action": "style", "style": "wireframe"}, "ok", None),
+    ("view_set", {"action": "style", "style": "wireframe-edges"}, "ok", None),
+    ("view_set", {"action": "style", "style": "wireframe-hidden-edges"}, "ok", None),
+    ("view_set", {"action": "style", "style": "shaded-hidden-edges"}, "ok", None),
+    ("view_set", {"action": "style", "style": "shaded"}, "ok", None),
+    ("view_screenshot", {"view": "current", "width": 500, "height": 400}, "ok", None),
+    ("view_set", {"action": "style", "style": "shaded-edges"}, "ok", None),
+    # visibility, in the order that leaves nothing hidden behind: isolate the stock, hide one jaw,
+    # show it again, then drop the isolation. Each verb reports what it reached.
+    ("view_set", {"action": "isolate", "target": "STOCK:1"}, "ok", None),
+    ("view_set", {"action": "clear_isolation"}, "ok", None),
+    ("view_set", {"action": "hide", "target": "JawL:1"}, "ok", None),
+    ("view_set", {"action": "show", "target": "JawL:1"}, "ok", None),
+    # a persistent Named View: parked, listed among the document's own, and re-applied.
+    ("view_set", {"action": "save_view", "view_name": "SweepHero"}, "ok", None),
+    # the camera has to LEAVE the saved view for re-applying it to prove anything - in place, so the
+    # proof does not cost a fit-to-whole-model on the way out and another on the way back.
+    ("view_set", {"action": "orient", "orientation": "bottom", "fit": False}, "ok", None),
+    ("view_set", {"action": "apply_view", "view_name": "SweepHero"}, "ok", None),
+    ("view_set", {"action": "list_views"},
+     lambda p: "SweepHero" in [v.get("name") for v in (p.get("named_views") or [])], None),
+    ("view_set", {"action": "restore"}, "ok", None),
+    # one contact sheet, four presets. This tool walks the camera per view and fits each one, so its
+    # cost on screen is one zoom-out per view in the list - a seven-view sheet and an 'all' sheet
+    # behind it read as the camera coming loose right at the end of the run. Four is enough to show
+    # the sheet is a sheet; the orientation vocabulary is already covered by the turntable above,
+    # which pays nothing to do it.
+    ("view_screenshot_multi", {"views": ["back", "bottom", "left", "iso-bottom-left"],
+                               "width": 300, "height": 240}, "ok", None),
     # THE RENAMES, last: a rename invalidates every row that names its target, so they run once the
     # build is done. A two-body cameo carries the dedupe beat - it needs a SIBLING pair, and the
     # machined part is a component of one body.
@@ -3309,6 +5297,61 @@ _FINALE = [
     ("design_get", {"include": ["appearances"], "library": "Fusion Appearance Library",
                     "name_filter": "paint", "max_results": 5}, "ok", None),
     ("design_get", {"include": ["appearances"], "library": "NoSuchLibrary"}, "refused", None),
+    # EVERY neutral-CAD format the exporter declares, one file per factory, each measured ON DISK -
+    # a build missing a factory, or one that reports success and writes nothing, fails here rather
+    # than at whoever opens the file. The formats ImportManager can read then come straight back in
+    # with the format named EXPLICITLY: doc_insert_import refuses a format that contradicts the
+    # file's extension, so naming it checks that the extension the exporter chose is the one the
+    # importer expects.
+    ("design_export", {"format": "iges", "file_path": EXPORT_DIR + "/fmt_carrier",
+                       "target": "CarrierBar"}, _exported_bytes, None),
+    # SAT is deliberately NOT here. Measured on this build: the FIRST createSATExportOptions export
+    # in a Fusion session writes its file, and every one after it returns false having written
+    # nothing - on any target, in a fresh document holding one box, and into a directory no .sat has
+    # ever been written to, while IGES and SMT through the same call shape keep working in that same
+    # session. The tool reports the failure honestly, which is the behaviour that matters; what the
+    # sweep cannot do is assert an outcome that depends on whether anything exported SAT earlier.
+    ("design_export", {"format": "smt", "file_path": EXPORT_DIR + "/fmt_carrier",
+                       "target": "CarrierBar"}, _exported_bytes, None),
+    ("design_export", {"format": "f3d", "file_path": EXPORT_DIR + "/fmt_carrier",
+                       "target": "CarrierBar"}, _exported_bytes, None),
+    ("design_export", {"format": "obj", "file_path": EXPORT_DIR + "/fmt_carrier",
+                       "target": "CarrierBar"}, _exported_bytes, None),
+    ("design_export", {"format": "3mf", "file_path": EXPORT_DIR + "/fmt_carrier",
+                       "target": "CarrierBar"}, _exported_bytes, None),
+    # USD lands as .usdz whatever extension the path carries - Fusion appends its own - so the tool
+    # publishes the path it actually wrote.
+    ("design_export", {"format": "usd", "file_path": EXPORT_DIR + "/fmt_carrier",
+                       "target": "CarrierBar"},
+     lambda p: _exported_bytes(p) is True and str(p.get("file_path", "")).endswith(".usdz"), None),
+    # STL with the units baked in: the one format carrying its own unit, so the knob is set and read
+    # back off the options object that LANDED. The single-file path publishes 'options_applied' -
+    # the split path's 'options_requested' is the per-file split's own key, and reading that one
+    # here would assert nothing about this file.
+    ("design_export", {"format": "stl", "file_path": EXPORT_DIR + "/fmt_carrier_in",
+                       "target": "CarrierBar", "stl_units": "in", "stl_binary": False},
+     lambda p: _exported_bytes(p) is True
+     and (p.get("options_applied") or {}).get("stl_units") == "in"
+     and (p.get("options_applied") or {}).get("stl_binary") is False, None),
+    # the 2D branch: a sketch written as DXF, then read back onto a named plane as sketches.
+    ("design_export", {"format": "dxf", "file_path": EXPORT_DIR + "/fmt_twin",
+                       "dxf_sketch": "TwinA"}, _exported_bytes, None),
+    ("doc_insert_import", {"file_path": EXPORT_DIR + "/fmt_twin.dxf", "format": "dxf",
+                           "plane": "xy"}, _imported_sketches, None),
+    # SVG lands in an EXISTING sketch (there is no component-level SVG import), so one is made for it.
+    ("sketch_create", {"plane": "xy", "name": "SvgImport"}, "ok", None),
+    ("doc_insert_import", {"file_path": SVG_PATH, "format": "svg", "sketch": "SvgImport"},
+     _imported_curves, None),
+    # NO further solid re-imports. An import lands its geometry at the coordinates the FILE carries,
+    # so re-importing a part into the design it came from drops a second copy exactly on top of the
+    # original - measured: one per format left FIVE coincident Carriers on the machined part, which
+    # is the one thing the CAM shot is of. The STEP round trip above is the story's visible proof
+    # that a written file reads back; every other format is proven by its own measured bytes on
+    # disk, which costs the scene nothing. Restoring an import here means giving it somewhere to
+    # land that is not on top of the part.
+    # the contradiction the explicit format exists to catch, on a file that is certainly there.
+    ("doc_insert_import", {"file_path": EXPORT_DIR + "/fmt_carrier.smt", "format": "step"},
+     "refused", None),
     # DRAWING GUARDS: every one of these is settled before the tool looks for a cloud source, so
     # they run on the story document exactly as they would on a saved one, and each refuses for the
     # reason it names with no drawing created. The creation path itself is cloud-tier (it needs a
@@ -3392,9 +5435,9 @@ _SOLIDS_FB = (
 # ACT 3 fallback: the proven 12-box joint/assembly fixture.
 _MOTION_FB = (
     [("design_activate_component", {"occurrence": "root"}, "ok", None)]
-    + _box("JA") + _box("JB") + _box("JC", ox=100) + _box("JD", ox=100) + _box("JE") + _box("JF")
-    + _box("JG") + _box("JH") + _box("JK") + _box("JL") + _box("JM") + _box("JN")
-    + _box("JP") + _box("JQ")
+    + _box("JA", tint="#E5533C") + _box("JB", tint="#1E88E5", shape="disc") + _box("JC", ox=100, tint="#E5533C") + _box("JD", ox=100, tint="#1E88E5", shape="disc") + _box("JE", tint="#E5533C") + _box("JF", tint="#1E88E5", shape="disc")
+    + _box("JG", tint="#E5533C") + _box("JH", tint="#1E88E5", shape="disc") + _box("JK", tint="#E5533C") + _box("JL", tint="#1E88E5", shape="disc") + _box("JM", tint="#E5533C") + _box("JN", tint="#1E88E5", shape="disc")
+    + _box("JP", tint="#E5533C") + _box("JQ", tint="#1E88E5", shape="disc")
     + [
         ("design_activate_component", {"occurrence": "root"}, "ok", None),
         ("assembly_ground", {"occurrence": "JB:1", "ground_to_parent": True}, _grounded, None),
@@ -3451,7 +5494,7 @@ _DETAILS_FB = (
         ("design_delete_occurrence", {"occurrence": "FbJunk:1"}, "ok", None),
         ("design_activate_component", {"occurrence": "root"}, "ok", None),
         ("view_section", {"action": "cut", "plane": "xy", "offset": 5}, "ok", None),
-        ("view_screenshot", {"view": "front", "width": 400, "height": 300}, "ok", None),
+        ("view_screenshot", {"width": 400, "height": 300}, "ok", None),
         ("view_section", {"action": "clear"}, "ok", None),
         ("view_screenshot_multi", {"views": ["front", "top"], "width": 300, "height": 250}, "ok", None),
     ]
@@ -3498,12 +5541,10 @@ _MACHINING = [
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     ("find_geometry", {"target": "SRev", "kind": "cylinder_face", "max_results": 1}, "ok", _fg("srev_face")),
     ("surface_thicken", lambda c: {"faces": [_ctx_get(c, "srev_face", "surface face")], "thickness": 2}, "ok", None),
-    _watch("SRev:1"),
     ("model_create_component", {"name": "Surf", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "SurfS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 200, "y1": 200, "x2": 240, "y2": 230, "sketch_name": "SurfS"}, "ok", None),
     ("surface_extrude", {"sketch_name": "SurfS", "distance": 15}, "ok", None),
-    _watch("Surf:1"),
     ("find_geometry", {"target": "Surf", "kind": "planar_face", "max_results": 1}, "ok", _fg("surf_face")),
     ("surface_offset", lambda c: {"faces": [_ctx_get(c, "surf_face", "surface face")], "distance": 3}, "ok", None),
     ("surface_offset", lambda c: {"faces": [_ctx_get(c, "surf_face", "surface face")], "distance": 0}, "ok", None),
@@ -3533,7 +5574,6 @@ _MACHINING = [
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 700, "y1": 200, "x2": 740, "y2": 230,
                              "sketch_name": "SAlignS"}, "ok", None),
     ("surface_extrude", {"sketch_name": "SAlignS", "distance": 15}, "ok", None),
-    _watch("SAlign:1"),
     ("find_geometry", {"target": "SAlign", "kind": "line_edge", "nearest_to": [720, 215, 15],
                        "max_results": 3}, "ok", _fgn("salign_edges")),
     ("surface_extend", lambda c: {"edges": _ctx_get(c, "salign_edges", "aligned sheet edges"),
@@ -3550,7 +5590,6 @@ _MACHINING = [
     ("sketch_create", {"plane": "xy", "name": "SD1"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 300, "y1": 200, "x2": 320, "y2": 220, "sketch_name": "SD1"}, "ok", None),
     ("model_extrude", {"sketch_name": "SD1", "profile_index": 0, "distance": 10}, _extruded, None),
-    _watch("SDel:1"),
     ("find_geometry", {"target": "SDel", "kind": "planar_face", "nearest_to": [310, 210, 10], "max_results": 1}, "ok", _fg("sdel_top")),
     ("surface_delete_face", lambda c: {"faces": [_ctx_get(c, "sdel_top", "top face")], "heal": False}, "ok", None),
     ("find_geometry", {"target": "SDel", "kind": "line_edge", "nearest_to": [310, 210, 10], "max_results": 4}, "ok", _fgn("sdel_rim")),
@@ -3617,7 +5656,6 @@ _MACHINING = [
     ("sketch_add_geometry", {"kind": "line", "x1": 900, "y1": 0, "x2": 940, "y2": 0,
                              "sketch_name": "RuledS"}, "ok", None),
     ("surface_extrude", {"sketch_name": "RuledS", "distance": 30}, "ok", None),
-    _watch("Ruled:1"),
     ("find_geometry", {"target": "Ruled", "kind": "line_edge", "nearest_to": [920, 0, 30],
                        "max_results": 1}, "ok", _fg("ruled_edge")),
     # tangent continues the parent face's own plane past the rim, landing ONE new open body.
@@ -3655,7 +5693,6 @@ _MACHINING = [
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 980, "y1": 200, "x2": 1020, "y2": 240,
                              "sketch_name": "RuledSolidS"}, "ok", None),
     ("model_extrude", {"sketch_name": "RuledSolidS", "profile_index": 0, "distance": 20}, _extruded, None),
-    _watch("RuledSolid:1"),
     ("find_geometry", {"target": "RuledSolid", "kind": "line_edge", "nearest_to": [1000, 200, 20],
                        "max_results": 1}, "ok", _fg("ruled_solid_edge")),
     ("surface_create_ruled", lambda c: {"edges": [_ctx_get(c, "ruled_solid_edge", "a box top edge")],
@@ -3669,7 +5706,6 @@ _MACHINING = [
     ("sketch_create", {"plane": "xy", "name": "Sp1"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 400, "y1": 200, "x2": 440, "y2": 240, "sketch_name": "Sp1"}, "ok", None),
     ("model_extrude", {"sketch_name": "Sp1", "profile_index": 0, "distance": 20}, _extruded, None),
-    _watch("Spl:1"),
     ("model_construction", {"kind": "plane", "plane": "xz", "offset": 220, "name": "SplMid"},
      _datum_plane("xz"), None),
     ("find_geometry", {"target": "Spl", "kind": "planar_face", "nearest_to": [420, 220, 20], "max_results": 1}, "ok", _fg("spl_body")),
@@ -3678,7 +5714,6 @@ _MACHINING = [
     ("sketch_create", {"plane": "xy", "name": "St1"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 500, "y1": 200, "x2": 520, "y2": 220, "sketch_name": "St1"}, "ok", None),
     ("model_extrude", {"sketch_name": "St1", "profile_index": 0, "distance": 10}, _extruded, None),
-    _watch("Stc:1"),
     ("find_geometry", {"target": "Stc", "kind": "planar_face", "nearest_to": [510, 210, 10], "max_results": 1}, "ok", _fg("stc_body")),
     ("model_unstitch", lambda c: {"target": _ctx_get(c, "stc_body", "unstitch body"), "chain": False}, _unstitched, None),
     ("find_geometry", {"target": "Stc", "kind": "planar_face", "nearest_to": [510, 210, 0], "max_results": 1}, "ok", _fg("stc_f1")),
@@ -3686,17 +5721,12 @@ _MACHINING = [
     ("model_stitch", lambda c: {"bodies": [_ctx_get(c, "stc_f1", "stitch a"), _ctx_get(c, "stc_f2", "stitch b")]}, _stitched, None),
     ("model_base_feature", {"action": "start", "base_feature": "BF1"}, _base_feature_open, None),
     ("model_base_feature", {"action": "finish", "base_feature": "BF1"}, _base_feature_closed, None),
-] + _box("ArrP1", ox=200, oy=350) + _box("ArrP2", ox=260, oy=350) + [
-    ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    ("sketch_create", {"plane": "xy", "name": "ArrB"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "rectangle", "x1": 100, "y1": 400, "x2": 500, "y2": 600, "sketch_name": "ArrB"}, "ok", None),
-    ("model_arrange", {"boundary_sketch": "ArrB", "shapes": ["ArrP1:1", "ArrP2:1"], "solver": "rectangular", "spacing": 5}, _arranged(2), None),
+] + [
     # compute_holder needs a body + a cyl-face axis + a planar end-datum.
     ("model_create_component", {"name": "HolderPart", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "HP1"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 600, "y1": 200, "x2": 640, "y2": 220, "sketch_name": "HP1"}, "ok", None),
     ("model_extrude", {"sketch_name": "HP1", "profile_index": 0, "distance": 10}, _extruded, None),
-    _watch("HolderPart:1"),
     ("find_geometry", {"target": "HolderPart", "kind": "planar_face", "nearest_to": [620, 210, 10], "max_results": 1}, "ok", _fg("hp_top")),
     # hole points ride the face's LOCAL frame = the model origin projected onto the face, so
     # on-pad coordinates are the world x,y (same measured fact as the FeatureCameo hole).
@@ -3708,11 +5738,80 @@ _MACHINING = [
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
 ]
 
+# ACT 7b: NESTING - model_arrange as a FUNCTION of its boundary. It runs after the
+# parametric resize on purpose: the solver restructures the parts it nests under new
+# Envelope occurrences, and that is not a thing to hand to an act that recomputes the
+# whole assembly.
+_NESTING = _box("ArrP1", ox=200, oy=350) + [
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    # THREE DIFFERENT shapes to nest, not two of the same box: a square pad, a long bar and a disc.
+    # A nest that only ever sees one footprint proves nothing about the solver.
+    ("model_create_component", {"name": "ArrP2", "activate": True}, _made_component, None),
+    ("sketch_create", {"plane": "xy", "name": "ArrP2S"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "rectangle", "x1": 260, "y1": 350, "x2": 320, "y2": 368,
+                             "sketch_name": "ArrP2S"}, "ok", None),
+    ("model_extrude", {"sketch_name": "ArrP2S", "profile_index": 0, "distance": 10}, _extruded, None),
+    ("model_create_component", {"name": "ArrP3", "activate": True}, _made_component, None),
+    ("sketch_create", {"plane": "xy", "name": "ArrP3S"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": 350, "cy": 359, "radius": 16,
+                             "sketch_name": "ArrP3S"}, "ok", None),
+    ("model_extrude", {"sketch_name": "ArrP3S", "profile_index": 0, "distance": 10}, _extruded, None),
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    # a SECOND bar, so the nest carries repeats as well as variety - four shapes from three
+    # components. The instance number is Fusion's to pick, so it is read back, never predicted.
+    ("design_add_instance", {"component": "ArrP2", "x": 0, "y": -35, "units": "mm"},
+     lambda p: p.get("created") is True and str(p.get("full_path", "")).startswith("ArrP2:"),
+     ("arr_bar2", lambda p: p["full_path"])),
+    # The boundary is a HEXAGON, not a rectangle: a true-shape nest against a slanted wall is the
+    # case a box boundary cannot show. Its six lines are line:0..line:5, which is what the reshape
+    # below scales.
+    ("sketch_create", {"plane": "xy", "name": "ArrB"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "polygon", "cx": 300, "cy": 500, "radius": 120, "sides": 6,
+                             "sketch_name": "ArrB"},
+     lambda p: p.get("curves_added") == 6, None),
+    _watch(["ArrB", "ArrP1:1", "ArrP2:1", "ArrP3:1"]),
+    # TRUE-SHAPE, because the boundary is a hexagon: the rectangular solver nests bounding boxes and
+    # refuses a non-rectangular envelope outright (ARRANGE_ERROR_ENVELOPE_INVALIDRECTANGULAR), which
+    # is exactly what a slanted wall is for. The solver places COPIES under an Envelope occurrence
+    # and leaves the named inputs where they were, so the nested part is picked out of what the call
+    # PUBLISHED - and it is that copy the reshape below is measured on.
+    ("model_arrange", lambda c: {"boundary_sketch": "ArrB",
+                                 "shapes": ["ArrP1:1", "ArrP2:1",
+                                            _ctx_get(c, "arr_bar2", "the second bar"), "ArrP3:1"],
+                                 "solver": "true_shape", "spacing": 5},
+     _arranged(4), ("nest_disc", lambda p: next(o for o in p["new_occurrences"]
+                                                if "+ArrP3:" in o))),
+    ("model_inspect", lambda c: {"target": _ctx_get(c, "nest_disc", "the nested disc")},
+     _extent_measured, ("nest_y0", _recall("nest_y0", lambda p: p["center"]["y"]))),
+    _dwell(2.0),
+    # RESHAPE the boundary: the Arrange feature RECOMPUTES off its boundary sketch, so the nest is a
+    # FUNCTION of the envelope rather than a one-time placement. Solving again would not show this -
+    # a second identical arrange stacks another coincident copy set (measured, and the tool says so).
+    # The proof is the nested disc having MOVED, read back off its own bounding box.
+    ("sketch_move", {"sketch_name": "ArrB",
+                     "entities": "line:0,line:1,line:2,line:3,line:4,line:5",
+                     "scale_factor": 0.65, "center_x": 300, "center_y": 500},
+     lambda p: len(p.get("moved_entities") or []) == 6 and not p.get("unmoved_entities"), None),
+    ("model_inspect", lambda c: {"target": _ctx_get(c, "nest_disc", "the nested disc")},
+     lambda p: _measured("the nest re-solved off the smaller boundary",
+                         {"y_before": _RECALL.get("nest_y0"),
+                          "y_now": p.get("center", {}).get("y")},
+                         abs(p["center"]["y"] - _RECALL["nest_y0"]) > 1.0), None),
+    _dwell(2.0),
+]
+
+
 # ACT 7: MESH - a scratch solid becomes a mesh, then the mesh family works it (one mesh per op).
 _MESH = [
     ("model_create_component", {"name": "Msh", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "MshS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 200, "y1": 300, "x2": 220, "y2": 320, "sketch_name": "MshS"}, "ok", None),
+    # FRAME BEFORE THE FIRST BODY, on the sketch that is about to become one. The automatic camera
+    # row lands on a chunk's first body, which means the body appears while the camera is still on
+    # whatever the previous act was doing - and this act's sketch was drawn back in the sketch phase,
+    # so nothing has brought the camera here since. Framing the sketch first is what makes the mesh
+    # source appear IN shot instead of somewhere off screen.
+    _watch("MshS"),
     ("model_extrude", {"sketch_name": "MshS", "profile_index": 0, "distance": 10}, _extruded, None),
     _watch("Msh:1"),
     ("find_geometry", {"target": "Msh", "kind": "planar_face", "nearest_to": [210, 310, 10], "max_results": 1}, "ok", _fg("msh_body")),
@@ -3722,6 +5821,10 @@ _MESH = [
     ("sketch_add_geometry", {"kind": "circle", "cx": 260, "cy": 360, "radius": 15, "sketch_name": "MshCyl"}, "ok", None),
     ("model_extrude", {"sketch_name": "MshCyl", "profile_index": 0, "distance": 20}, _extruded, None),
     ("find_geometry", {"target": "Msh", "kind": "cylinder_face", "nearest_to": [260, 360, 10], "max_results": 1}, "ok", _fg("cyl_body")),
+    # Every mesh below is cast from a body inside Msh, so the camera goes there and STAYS there for
+    # the whole family - a mesh is created, reduced, remeshed, cut and smoothed without any step
+    # that makes a sketch or a component, so nothing in the framing pass would otherwise move it.
+    _watch("Msh:1"),
     ("save_as_mesh", lambda c: {"body": _ctx_get(c, "cyl_body", "cyl body"), "name": "MRED", "quality": "high"}, "ok", None),
     ("save_as_mesh", lambda c: {"body": _ctx_get(c, "msh_body", "box body"), "name": "MA", "quality": "low"}, "ok", None),
     ("save_as_mesh", lambda c: {"body": _ctx_get(c, "msh_body", "box body"), "name": "MC", "quality": "low"}, "ok", None),
@@ -3740,6 +5843,7 @@ _MESH = [
      and p.get("changed") is not None, None),
     # the cut's own effect evidence, mirrored into the receipt: the triangle count moved, or (a
     # fill that replaces as many triangles as it removed) the mesh's area/volume did.
+    _watch("Msh:1"),
     ("mesh_plane_cut", {"mesh": "MD", "plane": "MshMid", "cut_type": "trim"},
      lambda p: p.get("fill") == "minimal" and p.get("triangles_before") and p.get("triangles_after")
      and (p["triangles_after"] != p["triangles_before"]
@@ -3758,7 +5862,29 @@ _MESH = [
     # it is the same file the mesh_insert beat below re-imports.
     ("mesh_export", {"target": "MA", "file_path": EXPORT_DIR + "/eval_mesh", "format": "stl"},
      lambda p: (p.get("size_bytes") or 0) > 0 and p.get("file_exists") is True, None),
-    ("mesh_insert", {"file_path": EXPORT_DIR + "/eval_mesh.stl", "name": "MshIns"}, "ok", None),
+    # THE RE-IMPORT GETS ITS OWN COMPONENT, and the mesh act goes back to Msh afterwards.
+    # mesh_insert does NOT land the mesh where the file's own geometry sits: measured on the live
+    # document, a mesh exported from (770,875) came back at (30,34) - near the world origin, a metre
+    # from every other body in Msh. Inside Msh that one stray body stretched the component's
+    # bounding box to 815 x 916 mm, so every camera row framing 'Msh:1' fitted THAT instead of the
+    # 75 mm of mesh work, and the whole mesh act was watched from the far zoom.
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("model_create_component", {"name": "MshIn", "activate": True}, _made_component, None),
+    # units='mm' because that is what the FILE holds: the mesh_export beat above named no unit, and
+    # mesh_export's stl_units default is mm. Stated rather than left to mesh_insert's own default,
+    # so the round trip below pins mesh_export's default alone - reading it back at mesh_insert's
+    # default too would pass on any pair of defaults that happen to match. Importing the file
+    # at the wrong unit divides every coordinate by 25.4, and a mesh a fortieth of its size lands a
+    # fortieth of its distance from the origin too - measured, near the world origin and inside
+    # whatever is parked there, not out on the field where it was exported from. The size read-back
+    # below is what makes that a failure instead of a surprise.
+    ("mesh_insert", {"file_path": EXPORT_DIR + "/eval_mesh.stl", "name": "MshIns",
+                     "units": "mm"}, "ok", None),
+    # the round trip measured END TO END: the re-imported mesh is the size of the mesh that was
+    # written - measured 74.99 x 74.99 x 20.0 on a finished run. A size, not a position: the layout
+    # moves the bench, and 25.4 is the only thing this is looking for.
+    ("model_inspect", {"target": "MshIns"}, _mesh_round_trip(75.0, 20.0), None),
+    ("design_activate_component", {"occurrence": "Msh:1"}, "ok", None),
     # repair on a HEALTHY mesh: nothing of that kind to fix is an honest success, not a failure, and
     # the payload must say so rather than claim a repair. Then a rebuild, whose density is read back
     # off the feature's own parameter - the request is never echoed.
@@ -3769,6 +5895,29 @@ _MESH = [
     ("mesh_repair", {"mesh": "MFIX", "repair_type": "rebuild", "rebuild_method": "fast",
                      "density": 32},
      lambda p: p.get("density") == 32.0 and "density_unverified" not in p, None),
+    # the rest of the rebuild vocabulary on the same mesh - each method re-triangulates it a
+    # different way, and each row reads its own density back off the feature's ModelParameter rather
+    # than echoing the request, so a method that quietly fell back to another is visible.
+    ("mesh_repair", {"mesh": "MFIX", "repair_type": "rebuild",
+                     "rebuild_method": "preserve_sharp_edges", "density": 40},
+     _rebuilt("preserve_sharp_edges", 40.0), None),
+    # 'offset' is accepted by the accurate method ALONE - it is the deviation that method solves to.
+    ("mesh_repair", {"mesh": "MFIX", "repair_type": "rebuild", "rebuild_method": "accurate",
+                     "density": 48, "offset": 0.2}, _rebuilt("accurate", 48.0), None),
+    ("mesh_repair", {"mesh": "MFIX", "repair_type": "rebuild", "rebuild_method": "blocky",
+                     "density": 24}, _rebuilt("blocky", 24.0), None),
+    ("mesh_repair", {"mesh": "MFIX", "repair_type": "rebuild", "rebuild_method": "adaptive",
+                     "density": 32}, _rebuilt("adaptive", 32.0), None),
+    ("mesh_repair", {"mesh": "MFIX", "repair_type": "rebuild",
+                     "rebuild_method": "adaptive_preserve_sharp_edges", "density": 32},
+     _rebuilt("adaptive_preserve_sharp_edges", 32.0), None),
+    # the offset/method pairing, refused rather than dropped, on the method it does not belong to.
+    ("mesh_repair", {"mesh": "MFIX", "repair_type": "rebuild", "rebuild_method": "blocky",
+                     "density": 24, "offset": 0.2}, "refused", None),
+    # 'wrap' shrink-wraps the mesh closed. It is not a rebuild, so it takes none of the rebuild
+    # knobs - handing it one is refused by name.
+    ("mesh_repair", {"mesh": "MFIX", "repair_type": "wrap"},
+     lambda p: p.get("repaired") is True and p.get("repair_type") == "wrap", None),
     ("mesh_repair", {"mesh": "MFIX", "repair_type": "close_holes", "density": 32}, "refused", None),
     # A repair that finds nothing of its kind is an honest success, and the payload has to say so
     # rather than claim a repair - 'changed' empty is that statement. A mesh straight out of
@@ -3839,9 +5988,12 @@ _GYRO_PARTS = {"Frame:1", "Pedestal:1", "Carrier:1", "OuterRing:1", "InnerRing:1
 
 
 def _gyro_rest_clean(p):
+    # Fusion writes a nested path with '+' ("OuterRing:1+InnerRing:1"), so the leaf is what the
+    # membership test wants - splitting on '/' alone leaves every nested part unmatched and quietly
+    # exempts it from the gate.
     for i in p.get("measured", {}).get("interferences", []):
-        a = (i.get("occurrence_one") or "").split("/")[-1]
-        b = (i.get("occurrence_two") or "").split("/")[-1]
+        a = (i.get("occurrence_one") or "").replace("/", "+").split("+")[-1]
+        b = (i.get("occurrence_two") or "").replace("/", "+").split("+")[-1]
         if a in _GYRO_PARTS and b in _GYRO_PARTS and sorted([a, b]) != ["Rotor:1", "RotorShaft:1"]:
             return False
     return True
@@ -3854,11 +6006,16 @@ _REDUCE = [
     ("view_switch_workspace", {"workspace": "design"}, "ok", None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
 ] + [
+    # ONLY what the vise would be built THROUGH. The vise occupies x[-70,70] y[-52,52] around the
+    # Carrier, so the mechanism sharing that ground has to go; every other cameo sits in a cell of
+    # its own out on the field (the layout pass guarantees it, and the layout lint enforces it), so
+    # deleting those cleared nothing and only made the run spend a second each on them.
     ("design_delete_occurrence", {"occurrence": occ}, "ok", None)
-    for occ in ("Crank:1", "RotorShaft:1", "Rotor:1", "InnerRing:1", "OuterRing:1",
+    for occ in ("Crank:1",
+                "InnerRing:1",       # takes the nested RotorShaft and Rotor with it
+                "OuterRing:1",
                 "Frame:1",           # takes the nested Pedestal with it
-                "FeatureCameo:1", "CombineCameo:1", "PinCameo:1", "BoreCameo:1",
-                "PoseCameo:1", "ConA:1", "ConB:1", "ShellCap:1")
+                "FeatureCameo:1")
 ] + [
     # the root Skeleton sketch (the construction axis crosses) goes too - the fixture scene
     # shows the PART, not the build scaffolding.
@@ -3872,11 +6029,14 @@ _REDUCE = [
 
 # ACT 9: VISE FIXTURE - the eval-proven self-centering vise modeled around the Carrier.
 # Geometry contract (all mm, Carrier occupies x[-50,50] hub y[-14,14] z[-32,-26]):
-#   STOCK    x[-55,55] y[-18,18] z[-35,-23]  - real margin all around (the adaptive's material)
+#   STOCK    x[-55,55] y[-18,18] z[-41,-23]  - real margin all around (the adaptive's material)
 #   ViseBase x[-70,70] y[-52,52] z[-69,-49]
-#   Jaw seat z=-35 (the stock's underside rests level with the seat ledge)
+#   Jaw seat z=-49..-41 (the stock's underside rests level with the seat ledge)
 #   Jaw grip faces OPEN at y=-/+21; stock sides at y=-/+18 -> each jaw closes 3mm to contact
-#   Jaw lips top out at z=-27 -> the stock rides 4mm PROUD of the jaws (machinist seating)
+#   Jaw lips top out at z=-34, and the CARRIER inside the stock spans z[-32,-26] - so the part
+#   being machined stands entirely ABOVE the jaws. That is the whole reason the stock is 18 mm
+#   thick rather than 12: a cutter reaching a part level with the jaw tops fouls the fixture, so
+#   the grip is taken low on the billet and every machined surface is clear above it.
 
 def _plate(comp, sketch, z_offset, x1, y1, x2, y2, height):
     """Component + its own build plane at z_offset + one rectangle, extruded up by height.
@@ -3910,19 +6070,33 @@ def _second_plate(comp, sketch, z_offset, x1, y1, x2, y2, height):
 
 
 _VISE = (
-    _plate("ViseBase", "VBase", -69, -70, -52, 70, 52, 20)
+    # THE STOCK FIRST, dressed before any of the fixture exists. It is the billet the vise is built
+    # AROUND, and its look has to be settled before the jaws are there to close on it - a stock that
+    # changes appearance halfway through the clamping reads as the clamping doing it.
+    _plate("STOCK", "StockS", -41, -55, -18, 55, 18, 18)
+    + [
+        ("design_activate_component", {"occurrence": "root"}, "ok", None),
+        ("appearance_set", {"target": "STOCK", "color": "#8D6E63"}, "ok", None),
+        # HALF translucent, so the Carrier inside stays visible through the billet it is cut from -
+        # the whole point of the fixture shot is the part in the stock in the vise, and an opaque
+        # billet hides the part. Opacity here is the browser's Opacity Control (Component.opacity),
+        # NOT the appearance's transparency: the two are unrelated, and a fully opaque colour still
+        # renders see-through under an opacity override. Read back off what actually RENDERS, since
+        # the override is inherited from parent components.
+        ("appearance_set", {"target": "STOCK:1", "opacity": 50},
+         lambda p: p.get("opacity_rendered") == 50, None),
+    ]
+    + _plate("ViseBase", "VBase", -69, -70, -52, 70, 52, 20)
     # JawL: lower seat block up to the seat ledge (z=-35), then the gripping lip above it.
-    + _plate("JawL", "JLseat", -49, -30, -37, 30, -15, 14)
-    + _second_plate("JawL", "JLlip", -35, -30, -37, 30, -21, 8)
-    + _plate("JawR", "JRseat", -49, -30, 15, 30, 37, 14)
-    + _second_plate("JawR", "JRlip", -35, -30, 21, 30, 37, 8)
-    + _plate("STOCK", "StockS", -35, -55, -18, 55, 18, 12)
+    + _plate("JawL", "JLseat", -49, -30, -37, 30, -15, 8)
+    + _second_plate("JawL", "JLlip", -41, -30, -37, 30, -21, 7)
+    + _plate("JawR", "JRseat", -49, -30, 15, 30, 37, 8)
+    + _second_plate("JawR", "JRlip", -41, -30, 21, 30, 37, 7)
 ) + [
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     ("appearance_set", {"target": "ViseBase", "color": "#455A64"}, "ok", None),
     ("appearance_set", {"target": "JawL", "color": "#E5533C"}, "ok", None),
     ("appearance_set", {"target": "JawR", "color": "#E5533C"}, "ok", None),
-    ("appearance_set", {"target": "STOCK", "color": "#8D6E63"}, "ok", None),
     # the fixture skeleton: base grounded, each jaw a NAMED slider on the base. Every component
     # here has its origin at the WORLD origin (geometry is drawn in world coordinates), so the
     # ':origin' snap aligns already-aligned frames - a positional no-op, no teleport - and the
@@ -3932,8 +6106,10 @@ _VISE = (
                       "joint_type": "slider", "axis": "y", "name": "SlideL"}, _jointed("SlideL"), None),
     ("joint_create", {"occurrence_one": "JawR:1:origin", "occurrence_two": "ViseBase:1:origin",
                       "joint_type": "slider", "axis": "y", "name": "SlideR"}, _jointed("SlideR"), None),
-    # the stock in the vise, the part in the stock - both as-built rigid (no motion).
-    ("joint_create_as_built", {"occurrence_one": "STOCK:1", "occurrence_two": "ViseBase:1"}, _as_built, None),
+    # the part in the stock, as-built rigid - the billet and what will be cut out of it are one
+    # piece until the cutter says otherwise. The stock is NOT jointed to the base: a billet welded to
+    # the vise body is not being held by anything, and the jaws closing on it would prove nothing.
+    # What holds it is the grip, captured below once the jaws have actually closed.
     ("joint_create_as_built", {"occurrence_one": "Carrier:1", "occurrence_two": "STOCK:1"}, _as_built, None),
     # SELF-CENTERING: couple the two sliders at ratio -1 (on real sliders the platform accepts
     # slider-slider links - live-verified). A negative ratio is applied as a REVERSED coupling of
@@ -3943,9 +6119,9 @@ _VISE = (
     # drive ONE jaw closed by its 3mm approach; the link must bring the OTHER jaw in too.
     ("joint_drive", {"joint_name": "SlideL", "distance": 3}, _driven_slide(3), None),
     # GRIP VERIFIED BY MEASURE, not by trust: each jaw's gripping face touches its stock side.
-    ("find_geometry", {"target": "JawL", "kind": "planar_face", "nearest_to": [0, -18, -31],
+    ("find_geometry", {"target": "JawL", "kind": "planar_face", "nearest_to": [0, -18, -37],
                        "max_results": 1}, "ok", _fg("jawL_grip")),
-    ("find_geometry", {"target": "JawR", "kind": "planar_face", "nearest_to": [0, 18, -31],
+    ("find_geometry", {"target": "JawR", "kind": "planar_face", "nearest_to": [0, 18, -37],
                        "max_results": 1}, "ok", _fg("jawR_grip")),
     ("model_measure_between", lambda c: {"a": _ctx_get(c, "jawL_grip", "JawL grip face"),
                                          "b": "STOCK"},
@@ -3953,16 +6129,71 @@ _VISE = (
     ("model_measure_between", lambda c: {"a": _ctx_get(c, "jawR_grip", "JawR grip face"),
                                          "b": "STOCK"},
      lambda p: p.get("distance", 99) <= 0.1, None),
+    # A DRIVE LEAVES A TRANSIENT POSE, and a joint create is REFUSED while one is pending (it would
+    # silently revert it). So the clamped pose is recorded into the timeline first - which is also
+    # the right order physically: the jaws are closed, that closure is what the grip joint captures.
+    ("assembly_capture_position", {"action": "capture"}, _captured, None),
+    # THE GRIP ITSELF, captured only now that both faces measure closed onto the billet: an as-built
+    # joint mates two occurrences WHERE THEY ALREADY ARE, so taking it here records the clamped pose
+    # rather than creating it. ONE jaw takes the joint - the slider and its motion link are what
+    # bring the other side in, and jointing the stock to both jaws would close the loop twice and be
+    # refused as over constrained (measured).
+    ("joint_create_as_built", {"occurrence_one": "STOCK:1", "occurrence_two": "JawL:1",
+                               "name": "GripL"},
+     lambda p: _as_built(p) and _measured("the grip joint names the jaw it was taken on",
+                                          {"joint": p.get("joint")}, p.get("joint") == "GripL"), None),
     ("assembly_inspect_interference", {}, _interference_measured, None),
-    ("view_set", {"action": "orient", "orientation": "iso-top-right"}, "ok", None),
-    ("view_screenshot", {"view": "iso-top-right", "width": 500, "height": 400}, "ok", None),
+    _watch(["ViseBase:1", "STOCK:1"]),
+    ("view_screenshot", {"width": 500, "height": 400}, "ok", None),
 ]
+
+
+# cam_reorder's ok payload is moved/position/reference - the three arguments the call was handed,
+# echoed back. The one thing the call establishes is that Fusion ALLOWED the move (a moveBefore
+# returning false is an error), and a bare "ok" carries that in full - so a predicate over those
+# keys would add no evidence while moving the tool into the bucket the receipt calls evidence-
+# carrying. Reading the order back needs its own cam_get(include=['operations']) step.
+_REORDER_PARKED = ("payload echoes the request arguments; the move-allowed gate is what a bare ok "
+                   "already proves - the ORDER needs a cam_get read-back step")
+
+
+def _op_created(setup, strategy):
+    """A created CAM operation. ONE key here is a read: 'operation' is op.name off the operation
+    the platform added, read after the setup's own count went up. 'setup' and 'strategy' are the
+    call's own arguments echoed back, and 'generation_started' is a constant False on this branch -
+    they are asserted because a payload that mismatches the request is a wrong payload, not because
+    either was measured."""
+    def check(p):
+        return _measured(f"a '{strategy}' operation created in '{setup}'",
+                         {"operation": p.get("operation"), "setup": p.get("setup"),
+                          "strategy": p.get("strategy"),
+                          "generation_started": p.get("generation_started")},
+                         bool(p.get("operation")) and p.get("setup") == setup
+                         and p.get("strategy") == strategy
+                         and p.get("generation_started") is False)
+    return check
+
+
+def _toolpath_shown(action, key, fit=False):
+    """One operation's toolpath displayed: the operation NAME the tool resolved (compared with the
+    name the PLATFORM published when the op was created - a literal here would be a guess) and
+    whether the camera fit applied ('fit' reads true only after the viewport call returned)."""
+    def check(p):
+        want = _RECALL.get(key)
+        return _measured(f"{action} the operation created as {want!r}",
+                         {"action": p.get("action"), "operation": p.get("operation"),
+                          "fit": p.get("fit")},
+                         p.get("action") == action and want is not None
+                         and p.get("operation") == want and p.get("fit") is fit)
+    return check
 
 
 # ACT 10a: CAM on the REAL part in the REAL fixture - job built and generated. The scratch-stock
 # rows remain as this act's fallback, so the CAM family stays covered when the story world
 # could not build.
 _CAM_STORY = [
+    # the machining region: the part seated in the vise, which is what every CAM beat acts on.
+    _watch("STOCK:1"),
     # a scratch sketch inside the Carrier footprint, drawn while Design is still the active
     # workspace: the geometry the 'sketch' selection takes, which is a WHOLE sketch (SketchSelection
     # accepts sketches, not their curves and not their profiles).
@@ -3970,6 +6201,11 @@ _CAM_STORY = [
     ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 10,
                              "sketch_name": "CamContourSketch"}, "ok", None),
     ("view_switch_workspace", {"workspace": "manufacture"}, "ok", None),
+    # CAM is looked at, not sketched in: drop the sketch clutter design-wide for the whole
+    # machining movement. The FOLDER bulb, so no entity's own visibility is disturbed and a
+    # sketch the CAM selection already holds by name is unaffected. Put back in the FINALE.
+    ("view_set", {"action": "display", "categories": ["sketches"], "visible": False},
+     lambda p: p.get("visible") is False, None),
     ("cam_get", {}, "ok", None),
     # two document tools: a mill for the milling ops, a 3mm drill for the bolt circle.
     ("cam_edit_tools", {"action": "add", "scope": "document",
@@ -4014,7 +6250,43 @@ _CAM_STORY = [
     ("cam_edit_tools", {"action": "remove_preset", "scope": "document", "tool": 0,
                         "preset": {"name": "Sweep35"}},
      lambda p: "Sweep35" not in p["presets"], None),
-    ("cam_create_setup", {"models": ["Carrier"], "name": "DemoSetup"}, "ok", None),
+    # THE READ SIDE of the same library: the summary census, the same census NARROWED by tool type
+    # (the filter has to actually drop rows, not just be echoed back), and one tool's full parameter
+    # list - the deeper read the summary points at.
+    ("cam_edit_tools", {"action": "list", "scope": "document"},
+     lambda p: p.get("tool_count", 0) >= 4 and "filtered_by_type" not in p,
+     ("doc_tool_count", _recall("doc_tool_count", lambda p: p["tool_count"]))),
+    ("cam_edit_tools", {"action": "list", "scope": "document", "tool_type": "drill"},
+     lambda p: p.get("filtered_by_type") == "drill" and p.get("tool_count", 0) >= 1
+     and all("drill" in str(t.get("type") or "").lower() for t in p["tools"]), None),
+    ("cam_edit_tools", {"action": "parameters", "scope": "document", "tool": 0},
+     lambda p: p.get("tool") == 0 and p.get("parameter_count", 0) > 0
+     and all(r.get("name") for r in p["parameters"]), None),
+    # the LOCAL scope with no 'library' named lists the libraries THERE, not tools - the same action
+    # answering a different question because the scope changed.
+    ("cam_edit_tools", {"action": "list", "scope": "local"},
+     lambda p: p.get("scope") == "local" and isinstance(p.get("libraries"), list), None),
+    # the document library is the document's own and cannot host a NEW one - refused by name rather
+    # than quietly creating it somewhere else.
+    ("cam_edit_tools", {"action": "create_library", "scope": "document", "library": "SweepLib"},
+     "refused", None),
+    # a fifth tool added and taken straight back out. 'remove' renumbers everything after the index
+    # it takes, so it takes the LAST one - behind every tool the operations below select by number -
+    # and the library's own count is what says the removal landed.
+    ("cam_edit_tools", {"action": "add", "scope": "document",
+                        "add_tools": [{"from_type": "ball end mill"}]}, "ok", None),
+    ("cam_edit_tools", lambda c: {"action": "remove", "scope": "document",
+                                  "remove_indices": [_ctx_get(c, "doc_tool_count",
+                                                              "the document tool count")]},
+     lambda p: p.get("removed") == 1, None),
+    ("cam_edit_tools", lambda c: {"action": "list", "scope": "document"},
+     lambda p: p.get("tool_count") == _RECALL.get("doc_tool_count"), None),
+    # the setup lands under the name it was asked for (read back off the created Setup, and it is
+    # re-listed before the payload is built), holding the model it was given and no operations yet.
+    ("cam_create_setup", {"models": ["Carrier"], "name": "DemoSetup"},
+     lambda p: p["created"] is True and p["setup_name"] == "DemoSetup"
+     and p["operation_type"] == "milling" and p["model_count"] >= 1
+     and p["operation_count"] == 0, None),
     # the REAL stock solid and the REAL fixture bodies - the shop-template selection shape.
     ("cam_edit_setup", {"setup": "DemoSetup", "stock": ["STOCK"],
                         "fixtures": ["ViseBase", "JawL", "JawR"]}, "ok", None),
@@ -4053,14 +6325,21 @@ _CAM_STORY = [
     # a created operation is the PLATFORM'S to pick, so the adaptive's name is taken from what the
     # create PUBLISHED and every later row addresses it through ctx - a literal would be a guess.
     ("cam_create_operation", {"setup": "DemoSetup", "strategy": "face",
-                              "tool_scope": "document", "tool_index": 0, "generate": False}, "ok", None),
+                              "tool_scope": "document", "tool_index": 0, "generate": False},
+     _op_created("DemoSetup", "face"),
+     ("face_op", _recall("face_op", lambda p: p["operation"]))),
     ("cam_create_operation", {"setup": "DemoSetup", "strategy": "adaptive",
                               "tool_scope": "document", "tool_index": 0, "generate": False},
-     "ok", ("adaptive_op", lambda p: p["operation"])),
+     _op_created("DemoSetup", "adaptive"),
+     ("adaptive_op", _recall("adaptive_op", lambda p: p["operation"]))),
     ("cam_create_operation", {"setup": "DemoSetup", "strategy": "contour2d",
-                              "tool_scope": "document", "tool_index": 0, "generate": False}, "ok", None),
+                              "tool_scope": "document", "tool_index": 0, "generate": False},
+     _op_created("DemoSetup", "contour2d"),
+     ("contour_op", _recall("contour_op", lambda p: p["operation"]))),
     ("cam_create_operation", {"setup": "DemoSetup", "strategy": "drill",
-                              "tool_scope": "document", "tool_index": 1, "generate": False}, "ok", None),
+                              "tool_scope": "document", "tool_index": 1, "generate": False},
+     _op_created("DemoSetup", "drill"),
+     ("drill_op", _recall("drill_op", lambda p: p["operation"]))),
     ("cam_get", {"include": ["operations"], "setup": "DemoSetup"}, "ok", None),
     ("find_geometry", {"target": "STOCK", "kind": "planar_face", "nearest_to": [0, 0, -23],
                        "max_results": 1}, "ok", _fg("stock_top")),
@@ -4124,25 +6403,49 @@ _CAM_STORY = [
     # REFUSED: the slice's units guard - the one refusal that fires whether or not results exist,
     # since every length in a point row crosses the wire scaled out of CM.
     ("cam_get", {"include": ["inspection"], "units": "furlongs"}, "refused", None),
-    ("cam_edit_operation", {"operation": "Face1", "parameters": {"tool_feedCutting": "1200"}}, "ok", None),
+    # the feed edit is read BACK off the parameter: 'after' is the expression the platform stored,
+    # which a set that did not take leaves at the tool's default.
+    ("cam_edit_operation", {"operation": "Face1", "parameters": {"tool_feedCutting": "1200"}},
+     lambda p: p["edited"] is True and p["updated_count"] == 1
+     and p["changed"][0]["name"] == "tool_feedCutting"
+     and "1200" in str(p["changed"][0]["after"]), None),
     ("cam_reorder", lambda c: {"entity": _ctx_get(c, "adaptive_op", "the created adaptive op"),
-                               "position": "before", "reference": "Face1"}, "ok", None),
-    ("cam_activate_setup", {"setup": "DemoSetup"}, "ok", None),
+                               "position": "before", "reference": "Face1"},
+     Parked(_REORDER_PARKED), None),
+    # 'activated' is Setup.name read back AFTER the isActive gate - the tool errors when the setup
+    # reads inactive, so the name here is the setup that actually became active.
+    ("cam_activate_setup", {"setup": "DemoSetup"},
+     lambda p: p["activated"] == "DemoSetup", None),
+    # two DIFFERENT strategies must differ somewhere: a zero-difference diff would mean the two
+    # names resolved to one operation. Both names are read back off the resolved operations.
     ("cam_compare_operations", lambda c: {"operation_a": "Face1",
                                           "operation_b": _ctx_get(c, "adaptive_op",
                                                                   "the created adaptive op")},
-     "ok", None),
+     lambda p: p["operation_a"] == _RECALL.get("face_op")
+     and p["operation_b"] == _RECALL.get("adaptive_op")
+     and p["difference_count"] >= 1 and all(d["parameter"] for d in p["differences"]), None),
     # FOLDERS: organize the job the way a shop sheet reads - milling vs drilling.
-    ("cam_edit_folders", {"action": "create", "setup": "DemoSetup", "name": "Milling"}, "ok", None),
-    ("cam_edit_folders", {"action": "create", "setup": "DemoSetup", "name": "Drilling"}, "ok", None),
+    ("cam_edit_folders", {"action": "create", "setup": "DemoSetup", "name": "Milling"},
+     lambda p: p["created"] is True and p["folder"] == "Milling" and p["setup"] == "DemoSetup",
+     None),
+    ("cam_edit_folders", {"action": "create", "setup": "DemoSetup", "name": "Drilling"},
+     lambda p: p["created"] is True and p["folder"] == "Drilling" and p["setup"] == "DemoSetup",
+     None),
+    # 'moved' counts only the moveInto calls that returned true - the first one that does not is an
+    # error naming what had already moved, so the count IS the operations that landed in the folder.
     ("cam_edit_folders", lambda c: {"action": "move", "setup": "DemoSetup", "folder": "Milling",
                                     "operations": ["Face1",
                                                    _ctx_get(c, "adaptive_op",
                                                             "the created adaptive op"),
-                                                   "2D Contour1"]}, "ok", None),
+                                                   "2D Contour1"]},
+     lambda p: p["moved"] == 3 and p["into"] == "Milling" and len(p["operations"]) == 3, None),
     ("cam_edit_folders", {"action": "move", "setup": "DemoSetup", "folder": "Drilling",
-                          "operations": ["Drill1"]}, "ok", None),
-    ("cam_show_toolpath", {"action": "list"}, "ok", None),
+                          "operations": ["Drill1"]},
+     lambda p: p["moved"] == 1 and p["into"] == "Drilling", None),
+    ("cam_show_toolpath", {"action": "list"},
+     lambda p: p["action"] == "list" and p["operation_count"] >= 4
+     and len(p["operations"]) == p["operation_count"]
+     and all(r["op"] for r in p["operations"]), None),
     # the validity verdict BEFORE generation: false, with the not-yet-generated ops named; a scoped
     # check resolves through the shared resolver and a bogus scope is refused listing what exists.
     ("cam_inspect_toolpaths", {},
@@ -4153,10 +6456,25 @@ _CAM_STORY = [
     # over-cap request is CLAMPED to it (200) rather than answered with a flood.
     ("cam_inspect_toolpaths", {"max_results": 10000},
      lambda p: len(p["measured"]["not_valid"]) <= 200, None),
-    ("cam_generate", {"target": "DemoSetup", "skip_valid": False}, "ok", None),
+    # 'target' is the RESOLVED node's kind beside the name asked for, so it is what says the name
+    # reached a setup rather than an operation of the same name; the handle is what the poll below
+    # would read, and skip_valid is the flag this launch actually ran under.
+    ("cam_generate", {"target": "DemoSetup", "skip_valid": False},
+     lambda p: p["launched"] is True and p["target"] == "setup 'DemoSetup'"
+     and p["skip_valid"] is False and bool(p["handle"]), None),
     # generation completion is gated by the bounded poll run() performs after this act (an
     # errored op or an EMPTY toolpath - a 'valid' op that cuts nothing - fails the run).
 ]
+
+def _tmpl_names(node):
+    """Every template NAME in a cam_get(include=['templates']) tree, folders recursed - the witness
+    a template teardown is read against, since the slice reports a folder tree rather than a flat
+    list."""
+    names = [t.get("name") for t in (node.get("templates") or [])]
+    for sub in (node.get("folders") or []):
+        names.extend(_tmpl_names(sub))
+    return names
+
 
 # ACT 10b: CAM read-back + deliverables on the generated job - toolpath shown, NC posted,
 # template saved and re-applied.
@@ -4165,23 +6483,165 @@ _CAM_DELIVER = [
     # it); the not-valid breakdown is empty.
     ("cam_inspect_toolpaths", {"scope": "DemoSetup"},
      lambda p: p["passed"] is True and p["measured"]["not_valid"] == [], None),
+    # the tally's scope is an INPUT: include_suppressed=true widens it back to every operation.
+    # tolerance_used names the tally's set and the VERDICT's set separately because they differ -
+    # CAM's own check counts suppressed operations whatever this flag says - so a scoped call whose
+    # verdict came from checkToolpath reports the verdict as covering all of them either way.
+    # Nothing is suppressed yet, so this pins the flag's plumbing; the FILTERING itself is exercised
+    # at the end of this act, where a real suppression exists to filter.
+    ("cam_inspect_toolpaths", {"scope": "DemoSetup", "include_suppressed": True},
+     lambda p: p["tolerance_used"]["tally_counts"] == "all_operations"
+     and p["tolerance_used"]["verdict_counts"] == "all_operations"
+     and p["measured"]["suppressed_excluded"] == 0, None),
     ("cam_get", {"include": ["operations"], "setup": "DemoSetup"}, "ok", None),
-    ("cam_show_toolpath", {"action": "isolate", "operation": "Face1", "fit": True}, "ok", None),
-    ("view_screenshot", {"view": "iso-top-right", "width": 500, "height": 400}, "ok", None),
-    ("cam_show_toolpath", {"action": "hide_all"}, "ok", None),
+    # the reverse lookup, which only has an answer once operations exist: which of them use the mill
+    # this job was cut with. It is document-scope ONLY - a shared library has no operations - so the
+    # local scope is refused rather than answered with an empty list that would read as "none use
+    # it". The turning tool, added for the from_type census and never selected, is the other half:
+    # its own answer must be zero, or 'where_used' is not looking at operations at all.
+    ("cam_edit_tools", {"action": "where_used", "scope": "document", "tool": 0},
+     lambda p: p.get("tool") == 0 and p.get("operation_count", 0) >= 1
+     and len(p.get("operations") or []) == p["operation_count"], None),
+    ("cam_edit_tools", {"action": "where_used", "scope": "document", "tool": 2},
+     lambda p: p.get("operation_count") == 0 and "not used" in (p.get("note") or ""), None),
+    ("cam_edit_tools", {"action": "where_used", "scope": "local", "tool": 0}, "refused", None),
+    # THE TOOLPATH REVEAL. Every path off, then each strategy alone and held long enough to watch -
+    # face, adaptive, contour, drill - and finally all four together, left ON. Each is addressed by
+    # the name the platform PUBLISHED at create time, through ctx: the default name of an operation
+    # is Fusion's to pick, so a literal here would be a guess.
+    # Every generated path off first: hidden_count counts the bulbs that read back false, and a
+    # bulb that did not take is reported as a toggle_failure instead of being counted.
+    ("cam_show_toolpath", {"action": "hide_all"},
+     lambda p: p["action"] == "hide_all" and p["hidden_count"] >= 1
+     and "toggle_failures" not in p, None),
+    _dwell(1.0),
+    ("cam_show_toolpath", lambda c: {"action": "isolate", "operation": _ctx_get(c, "face_op", "the face op"),
+                                     "fit": True}, _toolpath_shown("isolate", "face_op", fit=True), None),
+    ("view_screenshot", {"width": 500, "height": 400}, "ok", None),
+    _dwell(2.5),
+    ("cam_show_toolpath", lambda c: {"action": "isolate", "operation": _ctx_get(c, "adaptive_op", "the adaptive op"),
+                                     "fit": True}, _toolpath_shown("isolate", "adaptive_op", fit=True), None),
+    _dwell(2.5),
+    ("cam_show_toolpath", lambda c: {"action": "isolate", "operation": _ctx_get(c, "contour_op", "the contour op"),
+                                     "fit": True}, _toolpath_shown("isolate", "contour_op", fit=True), None),
+    _dwell(2.5),
+    ("cam_show_toolpath", lambda c: {"action": "isolate", "operation": _ctx_get(c, "drill_op", "the drill op"),
+                                     "fit": True}, _toolpath_shown("isolate", "drill_op", fit=True), None),
+    _dwell(2.5),
+    # all four on together - the machined part as the act leaves it.
+    ("cam_show_toolpath", lambda c: {"action": "show", "operation": _ctx_get(c, "face_op", "the face op")},
+     _toolpath_shown("show", "face_op"), None),
+    ("cam_show_toolpath", lambda c: {"action": "show", "operation": _ctx_get(c, "adaptive_op", "the adaptive op")},
+     _toolpath_shown("show", "adaptive_op"), None),
+    ("cam_show_toolpath", lambda c: {"action": "show", "operation": _ctx_get(c, "contour_op", "the contour op")},
+     _toolpath_shown("show", "contour_op"), None),
+    ("cam_show_toolpath", lambda c: {"action": "show", "operation": _ctx_get(c, "drill_op", "the drill op")},
+     _toolpath_shown("show", "drill_op"), None),
+    _dwell(3.0),
+    # the deliverable itself: the tool errors unless a non-stub file LANDED, so the payload's file
+    # rows are the proof - each one stat'd on disk - and 'scope' is the resolved node's kind.
     ("cam_post", {"scope": "DemoSetup", "post": "haas", "post_scope": "local",
-                  "output_folder": EXPORT_DIR + "/nc", "program_name": "1001"}, "ok", None),
+                  "output_folder": EXPORT_DIR + "/nc", "program_name": "1001"},
+     lambda p: p["posted"] is True and p["scope"] == "setup" and p["program_name"] == "1001"
+     and p["file_count"] == len(p["files"]) and p["file_count"] >= 1
+     and all(f["size_bytes"] > 0 for f in p["files"]), None),
     # the sheet file must LAND (the API's bool answers before the async write completes)
     ("cam_generate_setup_sheet", {"scope": "DemoSetup", "output_folder": EXPORT_DIR + "/sheets"},
      lambda p: p.get("generated") is True and p.get("size_bytes", 0) > 0, None),
-    ("cam_set_nc_comment", {"comment": "GYRO sweep"}, "ok", None),
-    ("cam_save_template", {"template_name": "GyroTmpl", "setup": "DemoSetup",
-                           "operations": "Face1", "location": "local"}, "ok", None),
-    ("cam_create_setup", {"models": ["Carrier"], "name": "Setup2"}, "ok", None),
-    ("cam_apply_template", {"setup": "Setup2", "template_name": "GyroTmpl",
-                            "location": "local", "generate": "skip"}, "ok", None),
+    # comment_after is the parameter re-read after the write, per program - the value the G-code
+    # header will carry, not the value the call was handed.
+    ("cam_set_nc_comment", {"comment": "GYRO sweep"},
+     lambda p: p["set"] is True and p["programs_changed"] >= 1
+     and all(r["comment_after"] == "GYRO sweep" for r in p["programs"]), None),
+    # the saved template names the operation it was bundled from (read off the Operation objects the
+    # names resolved to) and carries the url a template loaded back from - the tool refuses the save
+    # when nothing loads from what importTemplate returned.
+    ("cam_save_template", {"template_name": TEMPLATE_NAME, "setup": "DemoSetup",
+                           "operations": "Face1", "location": "local"},
+     lambda p: p["saved"] is True and p["template"] == TEMPLATE_NAME
+     and p["operation_count"] == 1 and p["operations"] == [_RECALL.get("face_op")]
+     and bool(p["template_url"]), None),
+    ("cam_create_setup", {"models": ["Carrier"], "name": "Setup2"},
+     lambda p: p["created"] is True and p["setup_name"] == "Setup2"
+     and p["operation_count"] == 0, None),
+    # Setup2 holds NO operations at this instant - the template lands on it in the next beat. A
+    # setup with zero operations is the one CAM.checkToolpath raises on, so this is the document
+    # -level read taken with an empty setup present: it must ANSWER, carrying the disclosure key
+    # for what it left out, instead of failing the whole read on the one empty setup. The count
+    # itself is not asserted - it is only non-zero when checkAllToolpaths raised and the per-setup
+    # fallback ran, which is the document's business, not this beat's.
+    ("cam_inspect_toolpaths", {},
+     lambda p: isinstance(p["passed"], bool) and "empty_setups_excluded" in p["measured"], None),
+    # operations_added is the setup's OWN allOperations count across the apply - the read the tool
+    # refuses on when it does not rise - beside the template and setup names read off the resolved
+    # objects, which is what says the by-name search reached the template this run saved.
+    ("cam_apply_template", {"setup": "Setup2", "template_name": TEMPLATE_NAME,
+                            "location": "local", "generate": "skip"},
+     lambda p: p["applied"] is True and p["template"] == TEMPLATE_NAME
+     and p["setup"] == "Setup2" and (p["operations_added"] or 0) >= 1, None),
+    # entity_type is the resolved node's kind: it is what says an OPERATION went, not the setup or
+    # folder a shared name could have reached.
     ("cam_delete", lambda c: {"entity": _ctx_get(c, "adaptive_op", "the created adaptive op")},
-     "ok", None),
+     lambda p: p["deleted"] is True and p["entity"] == _RECALL.get("adaptive_op")
+     and p["entity_type"] == "operation", None),
+    # SUPPRESSION, last of the job edits: the flag is a WRITE here, and it is what gives
+    # include_suppressed's FILTERING its live reading. It sits after the post, the setup sheet and
+    # the template because suppressing DISCARDS the operation's toolpath - here that costs no later
+    # beat - and the restore below carries LITERAL arguments and an end-state predicate, so it runs
+    # and passes whatever the three steps in between did.
+    ("cam_inspect_toolpaths", {"scope": "DemoSetup"},
+     lambda p: p["measured"]["suppressed_excluded"] == 0
+     and p["measured"]["states"]["suppressed"] == 0,
+     ("active_ops_before", _recall("active_ops_before",
+                                   lambda p: p["measured"]["states"]["total"]))),
+    ("cam_edit_operation", {"operation": "Drill1", "suppressed": True},
+     lambda p: p["is_suppressed"] is True and p["was_suppressed"] is False
+     and p["had_toolpath"] is True and p["has_toolpath"] is False, None),
+    # the FILTERED read: one operation fewer in the tally than the baseline counted, the suppressed
+    # bucket empty because the suppressed op was left OUT of the tally, and the excluded count
+    # naming what it left out.
+    ("cam_inspect_toolpaths", {"scope": "DemoSetup"},
+     lambda p: p["measured"]["suppressed_excluded"] == 1
+     and p["measured"]["states"]["suppressed"] == 0
+     and p["measured"]["states"]["total"] == _RECALL.get("active_ops_before") - 1
+     and p["tolerance_used"]["tally_counts"] == "active_operations", None),
+    # the same read WIDENED: every operation back in the tally, the suppressed one counted in its
+    # own bucket. The pair is the filter - one flag, two different sets over one job.
+    ("cam_inspect_toolpaths", {"scope": "DemoSetup", "include_suppressed": True},
+     lambda p: p["measured"]["states"]["total"] == _RECALL.get("active_ops_before")
+     and p["measured"]["states"]["suppressed"] == 1
+     and p["measured"]["suppressed_excluded"] == 0, None),
+    ("cam_edit_operation", {"operation": "Drill1", "suppressed": False},
+     lambda p: p["is_suppressed"] is False, None),
+    # TEARDOWN of the two things this run leaves outside the document. The guard first, on the asset
+    # while it still exists: a confirm_name that does not match the resolved name is refused. Then
+    # the delete, judged on its own read-backs, and the library read as the independent witness: the
+    # read that lists the asset when it arrives must not list it now. Both sit after every beat that
+    # USES them - the machine after the post, the template after cam_apply_template - so a delete
+    # that fails costs no earlier step.
+    #
+    # The TEMPLATE is saved and deleted inside this one list. The MACHINE is not: it is created in
+    # ACT 10a's narrative and deleted here in ACT 10b's, and the two acts route on INDEPENDENT
+    # preconditions - so a run that takes 10a's narrative and 10b's fallback leaves the machine in
+    # the Local library with nothing to remove it. The run stamp BOUNDS that leak rather than
+    # closing it: what is left behind is one uniquely-named machine, which no later run collides
+    # with. A delete beat in the fallback list cannot close it either - when 10a fell back too,
+    # nothing was ever created, so one step would have to be a refusal on one route and a success on
+    # the other, and a step written to accept both asserts nothing.
+    ("cam_delete_machine", {"name": MACHINE_NAME, "confirm_name": "NotThisMachine"},
+     "refused", None),
+    ("cam_delete_machine", {"name": MACHINE_NAME, "confirm_name": MACHINE_NAME},
+     lambda p: p["deleted"] is True and p["machine"] == MACHINE_NAME
+     and p["resolves_after_delete"] is False, None),
+    ("cam_get", {"include": ["machines"], "vendor": "SweepCo"},
+     lambda p: not any(m["name"] == MACHINE_NAME for m in p["machines"]["machines"]), None),
+    ("cam_delete_template", {"name": TEMPLATE_NAME, "confirm_name": "NotThisTemplate"},
+     "refused", None),
+    ("cam_delete_template", {"name": TEMPLATE_NAME, "confirm_name": TEMPLATE_NAME},
+     lambda p: p["deleted"] is True and p["template"] == TEMPLATE_NAME
+     and p["loads_after_delete"] is False and p["location"] == "local", None),
+    ("cam_get", {"include": ["templates"], "template_location": "local"},
+     lambda p: TEMPLATE_NAME not in _tmpl_names(p["templates"]["tree"]), None),
     ("design_export", {"format": "step", "file_path": EXPORT_DIR + "/gyro_export",
                        "target": "Carrier"}, "ok", None),
     # the SPLIT path writes one file per top-level occurrence, each through its OWN options object -
@@ -4241,9 +6701,17 @@ _CAM = (
     + [
         _watch("GyroStock:1"),
         ("view_switch_workspace", {"workspace": "manufacture"}, "ok", None),
+        # CAM is looked at, not sketched in: drop the sketch clutter design-wide for the whole
+        # machining movement. The FOLDER bulb, so no entity's own visibility is disturbed and a
+        # sketch the CAM selection already holds by name is unaffected. Put back in the FINALE.
+        ("view_set", {"action": "display", "categories": ["sketches"], "visible": False},
+         lambda p: p.get("visible") is False, None),
         ("cam_get", {}, "ok", None),
         ("cam_edit_tools", {"action": "add", "scope": "document", "add_tools": [{"from_type": "flat end mill"}]}, "ok", None),
-        ("cam_create_setup", {"models": ["GyroStock"], "name": "Setup1"}, "ok", None),
+        ("cam_create_setup", {"models": ["GyroStock"], "name": "Setup1"},
+         lambda p: p["created"] is True and p["setup_name"] == "Setup1"
+         and p["operation_type"] == "milling" and p["model_count"] >= 1
+         and p["operation_count"] == 0, None),
         # THE ASSOCIATIVE SEAM ON CAMERA: bind the setup's WCS to the StockCenter Joint Origin (ACT 3
         # created it; either path). The row is hard-gated - cam_edit_setup errors when the JO binds
         # zero entities - and the bound_entities read-back lands in ctx as the receipt's evidence.
@@ -4266,40 +6734,81 @@ _CAM = (
             "job_stockFixedY": "{0} mm".format(_ctx_get(c, "gimbal_mm", "GimbalDia in mm") / 4),
             "job_stockFixedZ": "{0} mm".format(_ctx_get(c, "gimbal_mm", "GimbalDia in mm") / 8)}},
          "ok", None),
-        ("cam_create_operation", {"setup": "Setup1", "strategy": "face", "tool_scope": "document", "tool_index": 0, "generate": False}, "ok", None),
+        # the face op's name is the platform's to pick here too, and two later beats address it -
+        # so it rides ctx exactly as its adaptive sibling does.
+        ("cam_create_operation", {"setup": "Setup1", "strategy": "face", "tool_scope": "document", "tool_index": 0, "generate": False},
+         _op_created("Setup1", "face"),
+         ("face_op", _recall("face_op", lambda p: p["operation"]))),
         # the adaptive's default name comes from the platform, so it rides ctx here too.
         ("cam_create_operation", {"setup": "Setup1", "strategy": "adaptive", "tool_scope": "document", "tool_index": 0, "generate": False},
-         "ok", ("adaptive_op", lambda p: p["operation"])),
+         _op_created("Setup1", "adaptive"),
+         ("adaptive_op", _recall("adaptive_op", lambda p: p["operation"]))),
         ("cam_get", {"include": ["operations"], "setup": "Setup1"}, "ok", None),
         ("find_geometry", {"target": "GyroStock", "kind": "planar_face", "nearest_to": [710, 10, 10], "max_results": 1}, "ok", _fg("cam_top")),
         ("cam_select_geometry", lambda c: {"operation": "Face1", "selection": "face", "handles": [_ctx_get(c, "cam_top", "cam top face")], "generate": False}, "ok", None),
-        ("cam_edit_operation", {"operation": "Face1", "parameters": {"tool_feedCutting": "1200"}}, "ok", None),
+        ("cam_edit_operation", {"operation": "Face1", "parameters": {"tool_feedCutting": "1200"}},
+         lambda p: p["edited"] is True and p["updated_count"] == 1
+         and p["changed"][0]["name"] == "tool_feedCutting"
+         and "1200" in str(p["changed"][0]["after"]), None),
         ("cam_edit_setup", {"setup": "Setup1", "models": ["GyroStock"]}, "ok", None),
-        ("cam_edit_folders", {"action": "create", "setup": "Setup1", "name": "Folder1"}, "ok", None),
+        ("cam_edit_folders", {"action": "create", "setup": "Setup1", "name": "Folder1"},
+         lambda p: p["created"] is True and p["folder"] == "Folder1"
+         and p["setup"] == "Setup1", None),
         ("cam_reorder", lambda c: {"entity": _ctx_get(c, "adaptive_op", "the created adaptive op"),
-                                   "position": "before", "reference": "Face1"}, "ok", None),
-        ("cam_activate_setup", {"setup": "Setup1"}, "ok", None),
+                                   "position": "before", "reference": "Face1"},
+         Parked(_REORDER_PARKED), None),
+        ("cam_activate_setup", {"setup": "Setup1"},
+         lambda p: p["activated"] == "Setup1", None),
         ("cam_compare_operations", lambda c: {"operation_a": "Face1",
                                               "operation_b": _ctx_get(c, "adaptive_op",
                                                                       "the created adaptive op")},
-         "ok", None),
-        ("cam_show_toolpath", {"action": "list"}, "ok", None),
-        ("cam_generate", {"target": "Setup1", "skip_valid": False}, "ok", None),
+         lambda p: p["operation_a"] == _RECALL.get("face_op")
+         and p["operation_b"] == _RECALL.get("adaptive_op")
+         and p["difference_count"] >= 1 and all(d["parameter"] for d in p["differences"]), None),
+        ("cam_show_toolpath", {"action": "list"},
+         lambda p: p["action"] == "list" and p["operation_count"] >= 2
+         and len(p["operations"]) == p["operation_count"]
+         and all(r["op"] for r in p["operations"]), None),
+        ("cam_generate", {"target": "Setup1", "skip_valid": False},
+         lambda p: p["launched"] is True and p["target"] == "setup 'Setup1'"
+         and p["skip_valid"] is False and bool(p["handle"]), None),
         ("cam_get_status", {"target": "Setup1"}, "ok", None),
     ]
 )
 
 # ACT 10b fallback: deliverables on the scratch job.
 _CAM_FB_DELIVER = [
-    ("cam_post", {"scope": "Setup1", "post": "haas", "post_scope": "local", "output_folder": EXPORT_DIR + "/nc", "program_name": "1001"}, "ok", None),
+    ("cam_post", {"scope": "Setup1", "post": "haas", "post_scope": "local", "output_folder": EXPORT_DIR + "/nc", "program_name": "1001"},
+     lambda p: p["posted"] is True and p["scope"] == "setup" and p["program_name"] == "1001"
+     and p["file_count"] == len(p["files"]) and p["file_count"] >= 1
+     and all(f["size_bytes"] > 0 for f in p["files"]), None),
     ("cam_generate_setup_sheet", {"scope": "Setup1", "output_folder": EXPORT_DIR + "/sheets"},
      lambda p: p.get("generated") is True and p.get("size_bytes", 0) > 0, None),
-    ("cam_set_nc_comment", {"comment": "GYRO sweep"}, "ok", None),
-    ("cam_save_template", {"template_name": "GyroTmpl", "setup": "Setup1", "operations": "Face1", "location": "local"}, "ok", None),
-    ("cam_create_setup", {"models": ["GyroStock"], "name": "Setup2"}, "ok", None),
-    ("cam_apply_template", {"setup": "Setup2", "template_name": "GyroTmpl", "location": "local", "generate": "skip"}, "ok", None),
+    ("cam_set_nc_comment", {"comment": "GYRO sweep"},
+     lambda p: p["set"] is True and p["programs_changed"] >= 1
+     and all(r["comment_after"] == "GYRO sweep" for r in p["programs"]), None),
+    ("cam_save_template", {"template_name": TEMPLATE_NAME, "setup": "Setup1", "operations": "Face1", "location": "local"},
+     lambda p: p["saved"] is True and p["template"] == TEMPLATE_NAME
+     and p["operation_count"] == 1 and p["operations"] == [_RECALL.get("face_op")]
+     and bool(p["template_url"]), None),
+    ("cam_create_setup", {"models": ["GyroStock"], "name": "Setup2"},
+     lambda p: p["created"] is True and p["setup_name"] == "Setup2"
+     and p["operation_count"] == 0, None),
+    ("cam_apply_template", {"setup": "Setup2", "template_name": TEMPLATE_NAME, "location": "local", "generate": "skip"},
+     lambda p: p["applied"] is True and p["template"] == TEMPLATE_NAME
+     and p["setup"] == "Setup2" and (p["operations_added"] or 0) >= 1, None),
     ("cam_delete", lambda c: {"entity": _ctx_get(c, "adaptive_op", "the created adaptive op")},
-     "ok", None),
+     lambda p: p["deleted"] is True and p["entity"] == _RECALL.get("adaptive_op")
+     and p["entity_type"] == "operation", None),
+    # the same teardown as the narrative branch, in the branch that saved the template: the guard
+    # while the asset still exists, the delete on its own read-backs, then the library as witness.
+    ("cam_delete_template", {"name": TEMPLATE_NAME, "confirm_name": "NotThisTemplate"},
+     "refused", None),
+    ("cam_delete_template", {"name": TEMPLATE_NAME, "confirm_name": TEMPLATE_NAME},
+     lambda p: p["deleted"] is True and p["template"] == TEMPLATE_NAME
+     and p["loads_after_delete"] is False, None),
+    ("cam_get", {"include": ["templates"], "template_location": "local"},
+     lambda p: TEMPLATE_NAME not in _tmpl_names(p["templates"]["tree"]), None),
     ("design_export", {"format": "step", "file_path": EXPORT_DIR + "/gyro_export", "target": "GyroStock"}, "ok", None),
     ("doc_insert_import", {"file_path": EXPORT_DIR + "/gyro_export.step"}, _imported, None),
 ]
@@ -4308,25 +6817,94 @@ _CAM_FB_DELIVER = [
 # (name, precondition, narrative, fallback). A precondition read that ERRORS routes the act to its
 # fallback (its tools are still covered, each marked "(fallback fixture)"). None precondition = an
 # opening/cameo act that always runs its narrative.
-ACTS = [
+_ACT_PROGRAM = [
     ("ACT 0 - OVERTURE", None, _OVERTURE, None),
-    ("ACT 1 - SKELETON + PARAMETERS", None, _SKELETON, None),
+    # SKETCH. The parametric skeleton and every sketch the story builds on, then the sketch TOOLS -
+    # trim, offset, pattern, dimension, constrain, text, the slot kinds - on scratch sketches of
+    # their own. Both run before anything is solid, which is the order the work is done in.
+    ("ACT 1 - SKETCH + PARAMETERS", None, _SKELETON, None),
+    ("ACT 1b - SKETCH TOOLS", None, _SKETCHWORK, []),
+    # CREATE. Material appears: solids from the skeleton, then surface bodies, then mesh bodies.
     ("ACT 2 - SOLIDS", ("sketch_get", {"sketch_name": "OuterRingSketch"}), _SOLIDS, _SOLIDS_FB),
-    ("ACT 3 - MOTION", ("find_geometry", {"target": "OuterRing", "kind": "cylinder_face", "max_results": 1}), _MOTION, _MOTION_FB),
-    ("ACT 4 - DETAILS", ("find_geometry", {"target": "OuterRing", "kind": "circular_edge", "max_results": 1}), _DETAILS, _DETAILS_FB),
-    ("ACT 5 - MACHINING PREP", None, _MACHINING, None),
-    ("ACT 6 - RESIZE", ("sketch_get", {"sketch_name": "OuterRingSketch"}), _RESIZE, _RESIZE_FB),
-    ("ACT 7 - MESH", None, _MESH, None),
-    # the story's third movement: strip to the machinable part, model the vise around it, and
-    # machine the REAL part in the REAL fixture. Each act's precondition routes to a fallback
-    # (empty when the act's tools are all covered by earlier acts) so a broken story world still
-    # yields a complete per-tool ledger - on the scratch-stock fixtures.
+    ("ACT 3 - SURFACES", None, _MACHINING, None),
+    ("ACT 4 - MESH", None, _MESH, None),
+    # MODIFY. Existing material is cut, rounded, patterned and drafted.
+    ("ACT 5 - DETAILS", ("find_geometry", {"target": "OuterRing", "kind": "circular_edge", "max_results": 1}), _DETAILS, _DETAILS_FB),
+    # ASSEMBLE. The parts are jointed, grounded, related and driven.
+    ("ACT 6 - MOTION", ("find_geometry", {"target": "OuterRing", "kind": "cylinder_face", "max_results": 1}), _MOTION, _MOTION_FB),
+    # RE-DRIVE. The parametric resize walks the WHOLE assembled mechanism, so it reads state only
+    # assembly produces: the StockCenter joint origin holding position through the recompute, and a
+    # rest pose whose only overlap is the intended press fit. It runs after MOTION for that reason.
+    ("ACT 7 - RESIZE", ("sketch_get", {"sketch_name": "OuterRingSketch"}), _RESIZE, _RESIZE_FB),
+    # NEST. Last, because the arrange solver restructures what it nests under Envelope occurrences.
+    ("ACT 7b - NESTING", None, _NESTING, []),
+    # MACHINE. Strip to the machinable part, model the vise around it, and machine the REAL part in
+    # the REAL fixture. Each act's precondition routes to a fallback (empty when the act's tools are
+    # all covered by earlier acts) so a broken story world still yields a complete per-tool ledger -
+    # on the scratch-stock fixtures.
     ("ACT 8 - REDUCE TO THE PART", ("model_inspect", {"target": "Carrier:1"}), _REDUCE, []),
     ("ACT 9 - VISE FIXTURE", ("model_inspect", {"target": "Carrier:1"}), _VISE, []),
     ("ACT 10a - CAM: JOB + GENERATE", ("model_inspect", {"target": "STOCK:1"}), _CAM_STORY, _CAM),
     ("ACT 10b - CAM: DELIVERABLES", ("cam_get", {"include": ["operations"], "setup": "DemoSetup"}), _CAM_DELIVER, _CAM_FB_DELIVER),
     ("FINALE", None, _FINALE, None),
 ]
+
+# Every sketch that can be drawn on bare origin planes is drawn in ACT 1c, before anything is
+# solid - the acts after it model, they do not sketch. The acts named here keep their own steps: the
+# two sketch acts are already sketch-first, the OVERTURE has no geometry, and the vise draws every
+# profile on a datum plane derived from the part it is being built around.
+_SKETCH_PHASE, _ACT_PROGRAM = _sketches_first(
+    _ACT_PROGRAM, after=("ACT 0 - OVERTURE", "ACT 1 - SKETCH + PARAMETERS", "ACT 1b - SKETCH TOOLS",
+                         "ACT 9 - VISE FIXTURE"))
+_ACT_PROGRAM = (_ACT_PROGRAM[:3]
+                + [("ACT 1c - EVERY OTHER SKETCH", None, _SKETCH_PHASE, [])]
+                + _ACT_PROGRAM[3:])
+
+# Every act runs through the layout pass and then the framing pass, so a part added to the story
+# later gets a slot of its own and a camera row without anyone remembering to give it either. Only
+# the narrative is laid out: a fallback act rebuilds a story-less world at the origin, and the two
+# never run together.
+_SLOTS = _place_slots(_ACT_PROGRAM)
+
+# ...then walk the sketch phase in reading order. This runs AFTER the cells are dealt because it
+# needs to know which sketches got one: an origin-anchored sketch has no cell and sits a metre from
+# the field, so it is drawn with the others of its kind rather than in the middle of a row. The
+# re-order preserves the packer's order over the placed chunks, so _SLOTS stays true.
+_ACT_PROGRAM = [(name, pre, (_sketch_reading_order(narr, _SLOTS) if "ACT 1c" in name else narr), fb)
+                for name, pre, narr, fb in _ACT_PROGRAM]
+
+
+def _placed_boxes(program, slots):
+    """{chunk: [x0, x1, y0, y1]} once every chunk is in its slot - what the framing pass reads to
+    tell whether the next subject is already on screen."""
+    box = {}
+    for _name, _pre, narr, _fb in program:
+        for step, chunk, _cursor, frame in _place_walk(_placed(narr, slots), home_out=_CHUNK_OF):
+            if chunk is None or not isinstance(step[1], dict):
+                continue
+            for x, y in _place_points(step[1], frame, step[0]):
+                b = box.setdefault(chunk, [None, None, None, None])
+                if x is not None:
+                    b[0] = x if b[0] is None else min(b[0], x)
+                    b[1] = x if b[1] is None else max(b[1], x)
+                if y is not None:
+                    b[2] = y if b[2] is None else min(b[2], y)
+                    b[3] = y if b[3] is None else max(b[3], y)
+    return {c: [v if v is not None else 0.0 for v in b] for c, b in box.items()}
+
+
+_PLACED_BOX.update(_placed_boxes(_ACT_PROGRAM, _SLOTS))
+_COMPONENTS.update(s[1]["name"] for _n, _p, narr, _f in _ACT_PROGRAM for s in narr
+                   if s[0] == "model_create_component" and isinstance(s[1], dict) and s[1].get("name"))
+_PATTERNED.update(c for _n, _p, narr, _f in _ACT_PROGRAM
+                  for st, c, _cur, _fr in _place_walk(narr)
+                  if st[0].startswith("model_pattern_") and c)
+_SKETCH_PLANE.update({s[1]["name"]: s[1].get("plane") for _n, _p, narr, _f in _ACT_PROGRAM
+                      for s in narr if s[0] == "sketch_create" and isinstance(s[1], dict)
+                      and s[1].get("name") and s[1].get("plane") in _PLANE_VIEW})
+
+ACTS = [(name, pre, _framed(_placed(narr, _SLOTS)), _framed(fb) if fb is not None else fb)
+        for name, pre, narr, fb in _ACT_PROGRAM]
 
 # Post-act hook run() fires after an act completes: the bounded generation poll between the CAM
 # job act and its deliverables.
@@ -4337,7 +6915,8 @@ POLL_AFTER = {
 # STEPS: the flat union of every act's narrative + fallback steps - the coverage ledger the
 # completeness lint reads (every registered tool must appear as some step's tool). run() iterates
 # ACTS (choosing narrative or fallback per act); STEPS exists so the lint sees the whole surface.
-STEPS = [s for _, _, narr, fb in ACTS for s in (list(narr) + list(fb or []))]
+STEPS = [s for _, _, narr, fb in ACTS for s in (list(narr) + list(fb or []))
+         if s[0] != _DWELL]
 
 # STORY: each covered tool's ledger shot-list note - the receipt doubles as the demo's shot list.
 STORY = {
@@ -4349,7 +6928,12 @@ STORY = {
     "sys_get_api_doc": "read the RevolveFeatures API doc",
     "view_list_workspaces": "list the workspaces available",
     "view_set": ("orient the camera to the iso hero angle, with the perspective angle carried "
-                 "through to the camera and read back. SKIPPED(rig): the snapshot/restore "
+                 "through to the camera and read back; then the whole verb set on the finished "
+                 "fixture - snapshot, a turntable through every camera preset (one framed orient "
+                 "sets the subject, the rest rotate about it with fit=false), every visual style, "
+                 "isolate/hide/show/clear_isolation, a persistent Named View saved, found in the "
+                 "document's own list and re-applied, and restore putting camera, style and every "
+                 "bulb back where the tour started. SKIPPED(rig): the snapshot/restore "
                  "truncation beats (truncated + occurrence_cap) need an assembly with more "
                  "occurrences than the cap, and the story document stays well under it"),
     "sys_get_selection": "expected refusal: nothing is selected yet",
@@ -4387,7 +6971,13 @@ STORY = {
                          "suppress two instances of a 3x2 pattern with the landed flags and the "
                          "curve count both read back; the N-1 flag length, a knob on the wrong "
                          "constraint, and the dimensioning strategies this build does not carry "
-                         "all refused"),
+                         "all refused. Then the second bench, carrying the kinds the first has no "
+                         "geometry for: vertical, collinear and concentric; a spline made "
+                         "curvature-continuous with the line it continues; the two point-pair "
+                         "kinds; a square told it is a polygon; fix and unfix on one curve; and "
+                         "the three CREATOR kinds - one-sided and two-sided offset, and a "
+                         "six-around circular pattern - each in a sketch of its own with the "
+                         "curves it drew counted"),
     "sketch_move": ("shift a line by a known offset and read the new coordinates back, then spin it "
                     "180 deg about its own midpoint - the swap only the endpoints show; the "
                     "negative-scale mirror and the empty transform refused"),
@@ -4400,11 +6990,17 @@ STORY = {
                           "square at scale 1 whose measured extent pins BOTH halves of that "
                           "landing - one inch square, and Y-DOWN from the sketch origin (min y "
                           "-25.4 mm); the missing file refused"),
-    "sketch_dimension": "drive ring/rotor radii by parameter expression",
+    "sketch_dimension": ("drive ring/rotor radii by parameter expression; the wedge angle facing "
+                         "the sketch origin; offset against a non-parallel line (rotated, and the "
+                         "note says so) with linear_diameter refusing the same shape; line and "
+                         "point measured to a model face; then the dimension bench - a slanted "
+                         "line's horizontal span, a diameter, the gap between two circles on one "
+                         "centre, a line to a circle's near tangent, and an ellipse's two radii - "
+                         "each read back as a measured number, not a call that returned ok"),
     "sketch_get": "read the skeleton and ring profiles back",
     "sketch_delete_entity": ("delete a helper constraint; count drops - then a sketch text by its "
                              "index, the deleted string reported back, and the empty index refused"),
-    "model_construction": ("offset the carrier hub plane below the rotor sweep; an AXIS on a cameo bore whose published handle the circular pattern turns about; a plane at 30 deg about the shaft's own axis (origin pinned to the axis) and a plane through a cap vertex; then the ON-PATH surface on one measured 30 mm cap edge - a proportional plane and point reading their ratio back with no extent published, an absolute placement inside the path, one before the start and one far past the end (both accepted, both disclosed against the measured length), the boundary exactly at the length, an expression placement whose model parameter is named for param_set, a to-object plane carrying distance AND offset off the path and a second one landing inside a two-edge chained path, and the summed length of that chain; the out-of-range proportional value and to_object on the point kind refused"),
+    "model_construction": ("offset the carrier hub plane below the rotor sweep; an AXIS on a cameo bore whose published handle the circular pattern turns about; a plane at 30 deg about the shaft's own axis (origin pinned to the axis) and a plane through a cap vertex; then the ON-PATH surface on one measured 30 mm cap edge - a proportional plane and point reading their ratio back with no extent published, an absolute placement inside the path, one before the start and one far past the end (both accepted, both disclosed against the measured length), the boundary exactly at the length, an expression placement whose model parameter is named for param_set, a to-object plane carrying distance AND offset off the path and a second one landing inside a two-edge chained path, and the summed length of that chain; the out-of-range proportional value and to_object on the point kind refused. Then the datum bench - one bored block carrying every reference the remaining modes read: a plane swung 30 deg about a top edge, one spanning three corners, one splitting the block at mid-height, one spanning two coplanar edges and one resting tangent on the bore wall; an axis on an edge, one spanning two corners and one along the top face's own normal; and points at the bore centre, at a corner where two edges meet, at the three world planes' shared origin and where an edge pierces XY. The world axis and the coordinate point are refused up front - both are setByLine/setByPoint, direct-edit-only, and this design is parametric"),
     "sketch_set_text": ("engrave the FUSION ESSENTIALS nameplate; then the path layouts - text "
                         "along a line and wrapped around a closed circle, and fitted to a line - "
                         "each checked against the created text's own definition objectType; a model "
@@ -4468,7 +7064,11 @@ STORY = {
     "model_set_material": "assign the rotor a physical steel material",
     "find_geometry": "acquire the face/edge/body handles the build consumes",
     "model_measure_between": "measure the outer-ring-to-inner-ring gap",
-    "model_measure_relation": "read rotor/shaft coaxiality",
+    "model_measure_relation": ("read rotor/shaft coaxiality; then the rest of the vocabulary on "
+                               "the datum bench, each reporting its OWN measurement - the top face "
+                               "perpendicular to a wall it meets and touching it along that edge, "
+                               "flush with itself, the bore concentric with itself, and 20 mm "
+                               "clear of the floor below"),
     "model_inspect": "read the rotor's volume back",
     "pmi_create": ("aim a flatness note at the frame plate and a hole note at a carrier bore, and "
                    "meet the extension gate PMI authoring sits behind on this build"),
@@ -4501,13 +7101,23 @@ STORY = {
                               "as-built pair anchored on their shared face, read back through "
                               "assembly_get and driven to prove the DOF, with the missing-anchor "
                               "and rigid-plus-anchor refusals"),
-    "joint_edit": "set rotation limits on the yaw",
+    "joint_edit": ("set rotation limits on the yaw; then walk one scratch joint through every "
+                   "motion the tool offers - rigid to revolute, slider, cylindrical, planar, ball "
+                   "and pin_slot - each retype witnessed by the design's own joint walk rather "
+                   "than by the writer, the mismatched pin_slot axis pair refused, and the bench "
+                   "left on a revolute that actually drives"),
     "joint_motion_link": "couple the crank to the rotor spin at 2:1; the vise jaws at -1 (self-centering)",
     "joint_drive": "drive every axis, the crank -> rotor 2:1, then ONE vise jaw (the link closes the other)",
     "assembly_get": "read the joint wiring, driven angles, and the StockCenter anchor back",
     "assembly_move": "pose a scratch cameo occurrence",
     "assembly_capture_position": "status, discard the pending pose, re-arm and capture",
-    "assembly_constrain": "flush-constrain a scratch cameo pair",
+    "assembly_constrain": ("flush-constrain a scratch cameo pair through the single-pair shorthand; "
+                           "then the SET form - one constraint feature carrying two relationship "
+                           "rows of different inferred types, a face-to-face mate at a 2 mm offset "
+                           "with the normals flipped plus a concentric one on the same two discs, "
+                           "which is how Fusion's own Constrain dialog locates a part. The count "
+                           "read off the CREATED constraint is what says both rows live in the one "
+                           "feature - the tool refuses a constraint holding fewer than submitted"),
     "design_add_instance": ("place two more crank instances and read the landed paths back, the "
                             "second naming the component while two of it already stand; the "
                             "self-nesting target refused"),
@@ -4547,8 +7157,12 @@ STORY = {
     "design_remove_feature": "remove a scratch body and its occurrence; deleting each Remove brings them back",
     "design_delete_occurrence": "delete a scratch occurrence",
     "view_section": "section cut through the gimbal center",
-    "view_screenshot": "capture the sectioned mechanism",
-    "view_screenshot_multi": "capture the front and top beauty shots",
+    "view_screenshot": ("capture the sectioned mechanism; write the same path twice to show the "
+                        "overwrite, and refuse a write against a document that is not active; and "
+                        "shoot view='current' - the no-move capture, the only way to keep a frame "
+                        "the camera already holds, since a NAMED view refits the whole model"),
+    "view_screenshot_multi": ("capture the front and top beauty shots; then a four-view contact "
+                              "sheet, the camera restored afterwards"),
     "surface_revolve": ("revolve a prep sheet; and the half-disc that closes into the ball joint's "
                         "sphere"),
     "surface_fill": ("seal a closed revolved sphere surface into a solid, the volume measured "
@@ -4578,7 +7192,10 @@ STORY = {
     "model_unstitch": "unstitch a scratch box's faces",
     "model_stitch": "re-stitch two faces",
     "model_base_feature": "open and close a base-feature scope",
-    "model_arrange": "nest two scratch parts in a boundary",
+    "model_arrange": ("nest a square pad, a bar, a disc and a second pad inside a HEXAGON boundary, "
+                      "then scale the boundary and solve again - the same four parts re-nest, which "
+                      "is the arrangement being a function of the boundary rather than a one-time "
+                      "placement"),
     "model_compute_holder": "compute a CAM tool holder (read)",
     "save_as_mesh": "mesh a scratch solid (one per destructive op)",
     "mesh_get": "read the mesh back",
@@ -4596,7 +7213,10 @@ STORY = {
                     "the density read back off the feature, stitch-and-remove a fresh mesh TWICE - "
                     "the first welds its duplicate vertices, the second finds nothing of its kind "
                     "to fix and the note has to say so rather than claim a repair - and refuse "
-                    "density on a non-rebuild. SKIPPED(rig): the close_holes refusal on a mesh that "
+                    "density on a non-rebuild; then every other rebuild method with its own "
+                    "density read back off the feature, 'offset' accepted by the accurate method "
+                    "and refused on the rest, and a shrink-wrap close. SKIPPED(rig): the "
+                    "close_holes refusal on a mesh that "
                     "stays open needs an UNFIXABLE open mesh, which nothing in this document can "
                     "build - every mesh here is watertight by construction"),
     "mesh_shell": ("hollow a scratch mesh - the volume DROPS, the body still reads watertight and "
@@ -4623,7 +7243,14 @@ STORY = {
                 "probed: the empty state with its reason named, a scope that invents no measure, "
                 "and the units refusal"),
     "cam_edit_tools": ("add mill/drill/turning/center-drill tools; preset add/remove round-trip "
-                       "with unit, refusal, and rollback gates"),
+                       "with unit, refusal, and rollback gates; the summary census and the same "
+                       "census narrowed by tool type, one tool's full parameter list, and the "
+                       "LOCAL scope answering with libraries instead of tools; a fifth tool added "
+                       "and removed with the count read back; and once the job is generated, "
+                       "where_used naming the operations that cut with the mill and reporting NONE "
+                       "for the turning tool nothing selected. The document library refuses to "
+                       "host a new library and where_used refuses a shared scope - a shared "
+                       "library has no operations, so an empty list there would read as 'none'"),
     "cam_create_setup": "create the milling setup on the Carrier in the vise",
     "cam_create_operation": "create the face, adaptive, silhouette, and drill operations",
     "cam_select_geometry": ("select the stock-top face, both silhouette branches (setup models and "
@@ -4634,9 +7261,15 @@ STORY = {
                             "Fusion process terminating); its 'pocket_filter_applied' publishes the "
                             "diameter/depth bounds in the CALLER'S own units, with "
                             "'pocket_filter_units' naming them beside the numbers"),
-    "cam_edit_operation": "edit the face operation's feed",
+    "cam_edit_operation": ("edit the face operation's feed; then park the drill operation and "
+                           "restore it - the suppression WRITE, with hasToolpath read back on both "
+                           "sides of the set so the discarded toolpath is reported, not implied"),
     "cam_create_machine": ("build a run-stamped 3-axis machine into the Local library, find it in "
                            "the catalog, assign it to the setup, and refuse the duplicate name"),
+    "cam_delete_machine": ("take the run's own machine back out of the Local library: the "
+                           "confirm_name mismatch refused while it still exists, then the delete "
+                           "proved by the library walk, the name re-resolve, and the catalog read "
+                           "that listed it when it arrived"),
     "cam_edit_setup": "real stock + vise fixture bodies; WCS bound to the stock-center JO (bound read back); Haas VF-2 assigned",
     "cam_edit_folders": "organize the job into Milling and Drilling folders",
     "cam_reorder": "reorder the adaptive before the face op",
@@ -4649,19 +7282,38 @@ STORY = {
                      "poll after this act, never by a sleep inside the call"),
     "cam_inspect_toolpaths": ("verdict false with named ops before generation, scoped check, "
                               "bogus-scope refusal, an over-cap max_results clamped to the tool's "
-                              "own row ceiling, verdict true after generation"),
+                              "own row ceiling, verdict true after generation, include_suppressed "
+                              "widening the tally while the verdict's own set is reported apart "
+                              "from it, a document-level answer taken with an empty setup present, "
+                              "and the FILTERING measured against a real suppression - the tally "
+                              "one operation shorter with the excluded count naming what it left "
+                              "out, then the same read widened to count it in its own bucket"),
     "cam_get_status": "poll the generation to completion (empty toolpaths fail)",
     "cam_post": "post the NC program to disk",
     "cam_generate_setup_sheet": "write the machinist setup sheet with the file-landed gate",
     "cam_set_nc_comment": "stamp the NC program comment",
-    "cam_save_template": "save the setup as a local CAM template",
+    "cam_save_template": ("save the setup as a run-stamped local CAM template - the stamp is what "
+                          "keeps two overlapping runs off one name, since this tool always writes "
+                          "a NEW template"),
     "cam_apply_template": "apply the template to a second setup",
+    "cam_delete_template": ("take the run's own template back out of the Local library: the "
+                            "confirm_name mismatch refused while it still exists, then the delete "
+                            "proved by the library's asset walk and by nothing loading from the "
+                            "deleted url, and the templates slice that listed it when it arrived "
+                            "read back as no longer holding it"),
     "cam_delete": "delete a scratch operation; count diff",
     "design_export": ("export the machined part to STEP, then the whole design SPLIT per component "
                       "to STL with stl_binary read back off the options object the split path "
                       "created for each file - the branch that would otherwise report a clean "
-                      "export while dropping the format knob"),
-    "doc_insert_import": "re-import that STEP from disk into the live design",
+                      "export while dropping the format knob; then every remaining format one file "
+                      "at a time, each measured ON DISK rather than trusted to the API's success "
+                      "bool, USD publishing the .usdz path Fusion appended for itself, STL with "
+                      "its units baked in, and a sketch out through the 2D DXF branch"),
+    "doc_insert_import": ("re-import that STEP from disk into the live design; then the DXF back "
+                          "onto a plane as sketches, an SVG into a sketch made for it, and IGES / "
+                          "SMT / f3d as solids - each with the format named explicitly, "
+                          "which is what makes the last row (a format contradicting its file's "
+                          "extension) a refusal instead of a silent mis-read"),
     "design_set_name": ("rename the machined part and re-find it by the name that landed, rename a "
                         "cameo occurrence with its instance name following, give a twin body the "
                         "name its sibling holds so the deduped '(1)' is what gets published, and "
@@ -4858,7 +7510,18 @@ def check(root=None, verified_path=None):
     return 0
 
 
-def run_steps(steps, ctx, trace=False, sleep_s=0.1, on_result=None):
+def _shoot(label, out_dir, seq):
+    """Capture the CURRENT view to out_dir. Used by --shots after each framing row: the frame ratio
+    being arithmetically right is not evidence the view shows the thing - only looking is. Returns
+    the path written, or None (a shot that fails is never worth failing the sweep over)."""
+    safe_label = re.sub(r"[^A-Za-z0-9_.-]", "_", label)[:60]
+    path = os.path.join(out_dir, f"{seq:04d}_{safe_label}.png")
+    is_error, _ = call("view_screenshot", {"width": 640, "height": 460, "file_path": path})
+    return None if is_error else path
+
+
+def run_steps(steps, ctx, trace=False, sleep_s=STEP_SLEEP_S, on_result=None, timings=None,
+              shots_dir=None):
     """The ONE (tool, args, expect, save) step engine - every live harness judges its steps here,
     so the status vocabulary cannot fork: pass / pass* / expected-refusal / FAIL / blocked.
     'pass*' means a passing step whose saved-value extraction failed - a payload-shape mismatch
@@ -4866,9 +7529,16 @@ def run_steps(steps, ctx, trace=False, sleep_s=0.1, on_result=None):
     NOTE_MAX characters of its payload (the keys that diagnose it sit late), a passing refusal
     REFUSAL_NOTE_MAX. Yields nothing early:
     returns the full row list; 'on_result' (tool, status, note) fires per step for a consumer
-    that prints as it goes."""
+    that prints as it goes. 'timings', when given, accumulates {tool: (seconds, calls)} over the
+    wire calls - the sweep runs against a 600 s shell ceiling, so where its time goes has to be
+    measurable rather than guessed at."""
     rows = []
-    for tool, args, expect, save in steps:
+    for step in steps:
+        if _leaves_no_row(step):
+            # a showcase beat: hold the view, judge nothing, and leave no row - it is not a tool.
+            time.sleep(step[1]["seconds"])
+            continue
+        tool, args, expect, save = step
         # A Parked wrapper carries a ledger reason, never a judgement: the step is judged by the
         # expectation inside it exactly as if that expectation had been passed bare.
         expect = _unparked(expect)
@@ -4882,7 +7552,11 @@ def run_steps(steps, ctx, trace=False, sleep_s=0.1, on_result=None):
         if trace:
             # flushed per step so a hard Fusion crash still names its killer in the log
             print(f"    -> {tool} {json.dumps(arguments)[:120]}", flush=True)
+        t0 = time.time()
         is_error, payload = call(tool, arguments)
+        if timings is not None:
+            spent, count = timings.get(tool, (0.0, 0))
+            timings[tool] = (spent + time.time() - t0, count + 1)
         if isinstance(expect, _Refusal):
             # a refusal whose WORDS are the assertion: the error must carry every fragment, so a
             # guard refusing for another reason fails the row instead of passing as "refused".
@@ -4920,8 +7594,20 @@ def run_steps(steps, ctx, trace=False, sleep_s=0.1, on_result=None):
         rows.append((tool, status, note))
         if on_result:
             on_result(*rows[-1])
-        time.sleep(sleep_s)
+        if shots_dir and tool == "view_set" and status == "pass" and arguments.get("focus"):
+            f = arguments["focus"]
+            _shoot("-".join(f) if isinstance(f, list) else str(f), shots_dir, len(rows))
+        if sleep_s:
+            time.sleep(sleep_s)
     return rows
+
+
+def judged_steps(steps):
+    """The steps run_steps produces a ROW for, in order - which is what pairs positionally with
+    those rows. A row-less step (today only a _dwell, which holds the view and is judged by
+    nothing) would otherwise shift the pairing: every expectation after it gets credited to a LATER
+    step's tool, so a bare "ok" reads as covered and a value predicate is lost."""
+    return [s for s in steps if not _leaves_no_row(s)]
 
 
 def _precondition_holds(pre):
@@ -4932,12 +7618,13 @@ def _precondition_holds(pre):
     return not is_error
 
 
-def run(write_json, keep_open=False, trace=False):
+def run(write_json, keep_open=False, trace=False, shots_dir=None):
     health = health_gate()
     print(f"server ok: {health.get('server')} v{health.get('version', '?')}")
     all_tools = registered_tools()
 
     ctx, rows, notes, act_modes = {}, [], {}, []
+    timings, act_seconds, run_started = {}, [], time.time()
     # the tools whose PASSING step read a value off the payload - run_steps returns exactly one row
     # per step, in order, so a row is paired back with the expectation that judged it.
     valued = set()
@@ -4949,9 +7636,14 @@ def run(write_json, keep_open=False, trace=False):
             mode, steps = "fallback", fallback
         act_modes.append((name, mode))
         print(f"\n-- {name} [{mode}] --")
+        act_started = time.time()
         if keep_open and name == "FINALE":
             steps = [s for s in steps if s[0] != "doc_close"]
-        for step, (tool, status, note) in zip(steps, run_steps(steps, ctx, trace=trace)):
+        # judged_steps, not the act's raw list, is what pairs with the rows below - see its
+        # docstring for what a dwell does to the pairing.
+        for step, (tool, status, note) in zip(judged_steps(steps),
+                                              run_steps(steps, ctx, trace=trace, timings=timings,
+                                                        shots_dir=shots_dir)):
             rows.append((tool, status, note))
             if status in ("pass", "pass*") and predicate_kind(step[2]) == "value":
                 valued.add(tool)
@@ -4962,6 +7654,7 @@ def run(write_json, keep_open=False, trace=False):
                 notes[tool] = (story + " (fallback fixture)").strip() if mode == "fallback" else story
         if name in POLL_AFTER:
             poll_generation(rows, notes, POLL_AFTER[name][mode], valued=valued)
+        act_seconds.append((name, time.time() - act_started))
     if keep_open:
         print("\n--keep-open: the story document is left open for inspection.")
 
@@ -5002,6 +7695,28 @@ def run(write_json, keep_open=False, trace=False):
         if s != "covered":
             print(f"  {tool:32} {s}")
 
+    # WHERE THE SECONDS WENT. The sweep has to finish inside a 600 s shell call, so the run
+    # publishes its own budget rather than leaving the next person to guess: the total, the slowest
+    # acts, and the tools that spent the most wire time - with a per-call average, which is what
+    # separates a tool that is CALLED a lot from a tool that is SLOW.
+    elapsed = time.time() - run_started
+    print(f"\n== elapsed: {elapsed:.0f}s for {len(rows)} steps "
+          f"({STEP_SLEEP_S * len(rows):.0f}s of it the inter-step sleep)")
+    for nm, secs in sorted(act_seconds, key=lambda r: -r[1])[:5]:
+        print(f"  {secs:7.1f}s  {nm}")
+    print("  slowest tools (total / calls / per call):")
+    for tool, (secs, count) in sorted(timings.items(), key=lambda kv: -kv[1][0])[:8]:
+        print(f"  {secs:7.1f}s  {count:4} x {secs / max(count, 1):5.2f}s  {tool}")
+    # THE BUDGET IS PART OF THE RESULT, not a note for the next person. Every agent runs this through
+    # a shell tool that is killed at 600 s, so a sweep that creeps past the budget is one nobody can
+    # run - and a timeout kills the process without a receipt, which reads as a broken tool rather
+    # than a slow sweep. Failing here turns that into a named result with the act breakdown above it.
+    over_budget = elapsed > _RUNTIME_BUDGET_S
+    if over_budget:
+        print(f"\nOVER BUDGET: {elapsed:.0f}s exceeds the {_RUNTIME_BUDGET_S:.0f}s ceiling "
+              f"({_SHELL_TIMEOUT_S:.0f}s is where the shell tool kills it). The act and tool "
+              f"breakdowns above name where it went - cut there, or drop a dwell.")
+
     n_narr = sum(1 for _, m in act_modes if m == "narrative")
     n_fb = sum(1 for _, m in act_modes if m == "fallback")
     print(f"\n== acts: {n_narr} narrative / {n_fb} fallback (of {len(act_modes)})")
@@ -5011,7 +7726,7 @@ def run(write_json, keep_open=False, trace=False):
     # pass* blocks the receipt: the payload did not carry a key the step contract expected - a
     # payload-shape mismatch is a real signal, not a pass.
     fails = [r for r in rows if r[1] in ("FAIL", "blocked", "pass*")]
-    if fails:
+    if fails or over_budget:
         print("\nVERIFIED_TOOLS.md NOT rewritten - resolve the FAIL/blocked/pass* steps first.")
     else:
         src_hash = source_hash()
@@ -5028,7 +7743,7 @@ def run(write_json, keep_open=False, trace=False):
         with open(path, "w", encoding="utf-8") as fh:
             json.dump({"steps": rows, "ledger": ledger, "acts": act_modes, "server": health}, fh, indent=2)
         print(f"\nwrote {path}")
-    return 1 if fails else 0
+    return 1 if (fails or over_budget) else 0
 
 
 if __name__ == "__main__":
@@ -5037,7 +7752,14 @@ if __name__ == "__main__":
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--keep-open", action="store_true",
                     help="leave the story document open at the end instead of discarding it")
+    ap.add_argument("--shots", metavar="DIR", default=None,
+                    help="write a PNG of the framed view after every framing row, so the framing "
+                         "can be judged by looking instead of by trusting its ratio")
     ap.add_argument("--trace", action="store_true",
                     help="print each step (flushed) before it runs, so a Fusion crash names its killer")
     args = ap.parse_args()
-    sys.exit(check() if args.check else run(args.json, keep_open=args.keep_open, trace=args.trace))
+    shots = args.shots
+    if shots:
+        os.makedirs(shots, exist_ok=True)
+    sys.exit(check() if args.check else run(args.json, keep_open=args.keep_open, trace=args.trace,
+                                            shots_dir=shots))

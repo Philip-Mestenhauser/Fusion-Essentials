@@ -26,6 +26,7 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from . import _common
+from . import _geom
 from . import _inputs
 from . import _outputs
 
@@ -385,6 +386,57 @@ def _min_distance_cm(ea, eb):
     return value, mr, None
 
 
+def _distance_evidence(mr, inv, units):
+    """The evidence block the two distance relations share: the units and the measurement API's own
+    closest-point pair. The distance itself lands after _plane_bound has had its say on it."""
+    return {"units": units,
+            "closest_point_on_a": _common.ptxyz(safe(lambda: mr.positionOne), inv),
+            "closest_point_on_b": _common.ptxyz(safe(lambda: mr.positionTwo), inv)}
+
+
+def _plane_bound(ea, ka, eb, kb, d_cm, inv, units, measured):
+    """(the distance in cm to judge the relation on, the sentence to append to the note) for a pair
+    that may be two PARALLEL PLANAR faces, folding that pair's evidence into `measured`.
+
+    Two parallel planar faces are the pair whose measured distance can be the separation between
+    their PLANES rather than the gap between the bounded faces: a clearance judged on it reads
+    tighter than the parts are, and a touching verdict on it is not proven. _geom.parallel_plane_facts
+    owns both the proof and the sentence; anything else is left exactly as measured."""
+    if ka != "face" or kb != "face":
+        return d_cm, ""
+    facts = _geom.parallel_plane_facts(ea, eb, d_cm, inv, units)
+    if facts is None:
+        return d_cm, ""
+    measured["plane_separation"] = _fmt(facts["separation_cm"] * inv)
+    if not facts["bounded"]:
+        measured["plane_separation_only"] = True
+        if facts["lateral_offset_untested"]:
+            measured["lateral_offset_untested"] = True
+        return d_cm, " " + facts["note"]
+    measured["min_distance_is_lower_bound"] = True
+    measured["closest_point_on_a"] = None
+    measured["closest_point_on_b"] = None
+    return facts["distance_cm"], " " + facts["note"]
+
+
+def _subtree_tail(ea, ka, eb, kb, measured, inv, units):
+    """The sentence to append to the note for a pair where either target holds child occurrences,
+    folding what was read about them into `measured` - and "" for a pair with nothing nested.
+
+    The two DISTANCE relations are where this can arrive: an occurrence is measured on its OWN
+    bodies (measured - a parent 90 mm away holding a child at 40 answers 90), so a clearance verdict
+    on a parent PASSES on a subtree that does not clear, and _geom.subtree_facts measures each child
+    on its own to say so. The axis/plane/center relations refuse a whole occurrence before they
+    measure anything, so a target with children never reaches one of their verdicts.
+    _geom.subtree_facts owns the read and the wording, exactly as _plane_bound leaves the
+    parallel-plane pair to _geom."""
+    facts = _geom.subtree_facts((("entity_a", ea, ka), ("entity_b", eb, kb)), inv, units)
+    if facts is None:
+        return ""
+    measured["targets_with_children"] = facts["targets"]
+    return " " + facts["note"]
+
+
 def _rel_concentric(ea, ka, eb, kb, tol_cm, tol_deg, inv, units):
     ca, la = _circle_center(ea, ka)
     cb, lb = _circle_center(eb, kb)
@@ -418,6 +470,10 @@ def _rel_clearance(ea, ka, eb, kb, tol_cm, tol_deg, inv, units):
     d_cm, mr, err = _min_distance_cm(ea, eb)
     if err:
         return err
+    measured = _distance_evidence(mr, inv, units)
+    d_cm, tail = _plane_bound(ea, ka, eb, kb, d_cm, inv, units, measured)
+    tail += _subtree_tail(ea, ka, eb, kb, measured, inv, units)
+    measured["min_distance"] = _fmt(d_cm * inv)
     passed = bool(d_cm >= tol_cm)
     verdict = "PASS" if passed else "FAIL"
     body = (f"parts clear by {_fmt(d_cm * inv)} {units}" if passed
@@ -425,11 +481,9 @@ def _rel_clearance(ea, ka, eb, kb, tol_cm, tol_deg, inv, units):
     return ok({
         "relation": "clearance",
         "passed": passed,
-        "measured": {"min_distance": _fmt(d_cm * inv), "units": units,
-                     "closest_point_on_a": _common.ptxyz(safe(lambda: mr.positionOne), inv),
-                     "closest_point_on_b": _common.ptxyz(safe(lambda: mr.positionTwo), inv)},
+        "measured": measured,
         "tolerance_used": {"min_clearance": _fmt(tol_cm * inv), "units": units},
-        "note": f"{verdict}: {body} (required clearance {_fmt(tol_cm * inv)} {units}).",
+        "note": f"{verdict}: {body} (required clearance {_fmt(tol_cm * inv)} {units})." + tail,
     })
 
 
@@ -437,6 +491,10 @@ def _rel_touching(ea, ka, eb, kb, tol_cm, tol_deg, inv, units):
     d_cm, mr, err = _min_distance_cm(ea, eb)
     if err:
         return err
+    measured = _distance_evidence(mr, inv, units)
+    d_cm, tail = _plane_bound(ea, ka, eb, kb, d_cm, inv, units, measured)
+    tail += _subtree_tail(ea, ka, eb, kb, measured, inv, units)
+    measured["min_distance"] = _fmt(d_cm * inv)
     passed = bool(d_cm <= tol_cm)
     verdict = "PASS" if passed else "FAIL"
     note = (f"{verdict}: gap is {_fmt(d_cm * inv)} {units} (tol {_fmt(tol_cm * inv)} for touching).")
@@ -448,11 +506,9 @@ def _rel_touching(ea, ka, eb, kb, tol_cm, tol_deg, inv, units):
     return ok({
         "relation": "touching",
         "passed": passed,
-        "measured": {"min_distance": _fmt(d_cm * inv), "units": units,
-                     "closest_point_on_a": _common.ptxyz(safe(lambda: mr.positionOne), inv),
-                     "closest_point_on_b": _common.ptxyz(safe(lambda: mr.positionTwo), inv)},
+        "measured": measured,
         "tolerance_used": {"max_gap": _fmt(tol_cm * inv), "units": units},
-        "note": note,
+        "note": note + tail,
     })
 
 

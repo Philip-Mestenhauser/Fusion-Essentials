@@ -8,7 +8,7 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import iter_collection, ok, error, safe
-from ._cam_common import clamp_rows, get_cam, find_operation
+from ._cam_common import clamp_rows, get_cam, resolve_cam_node
 
 
 _DIFFERENCES_CAP = 200   # two operations can differ across hundreds of CAM parameters; bound the rows
@@ -24,12 +24,18 @@ def compare_operations_handler(operation_a: str = "", operation_b: str = "",
     if err:
         return error(err)
 
-    op_a, avail_a = find_operation(cam, operation_a)
-    op_b, avail_b = find_operation(cam, operation_b)
-    if not op_a:
-        return _op_miss_error(operation_a, avail_a)
-    if not op_b:
-        return _op_miss_error(operation_b, avail_b)
+    # The shared resolver words both misses: a name nothing carries lists the operations, and a name
+    # SEVERAL carry is refused naming each one's '<name>#<n>' address - the spelling THIS input
+    # resolves, since the same resolver reads it back. This tool has no scope input to offer, so the
+    # ordinal address is the only way through it can name, and re-rolling the refusal here could
+    # only offer a rename.
+    node_a, err_a = resolve_cam_node(cam, operation_a, kinds=("operation",), label="operation")
+    if err_a:
+        return error(err_a)
+    node_b, err_b = resolve_cam_node(cam, operation_b, kinds=("operation",), label="operation")
+    if err_b:
+        return error(err_b)
+    op_a, op_b = node_a.obj, node_b.obj
 
     params_a, titles_a = _operation_params(op_a)
     params_b, titles_b = _operation_params(op_b)
@@ -68,18 +74,6 @@ def compare_operations_handler(operation_a: str = "", operation_b: str = "",
     return ok(out)
 
 
-def _op_miss_error(name, available):
-    """Word find_operation's (None, available). A DUPLICATED name comes back as each duplicate's
-    'Setup / op' path (leaf == the searched name) - that is ambiguity, not absence, so say so and
-    list the paths; a true miss stays not-found."""
-    want = (name or "").strip().lower()
-    paths = [a for a in available if a and a.split(" / ")[-1].strip().lower() == want]
-    if paths:
-        return error(f"'{name}' is ambiguous - {len(paths)} operations share that name: "
-                     f"{', '.join(paths)}. Rename the target so its name is unique, then retry.")
-    return error(f"Operation not found: '{name}'.")
-
-
 def _operation_params(op):
     """Read an operation's CAM parameters keyed by NAME: (values, titles) where values is
     {name: expression} and titles is {name: title} for display. Keyed by NAME because a parameter's
@@ -115,13 +109,15 @@ _compare_tool = (
             "Compare two CAM operations by name and report which parameters differ, with the value on "
             "each side. Use to see what makes one machining strategy different from a similar one. Also "
             "reports the tool each uses and how many parameters match. 'differences' is capped "
-            "(max_results, default 200); 'truncated' flags a hit cap."
+            f"(max_results, default {_DIFFERENCES_CAP}); 'truncated' flags a hit cap."
         ),
         input_param_name="operation_a",
         input_param_description="Name of the first operation.",
     )
     .add_input_property("operation_b", {"type": "string", "description": "Name of the second operation."})
-    .add_input_property("max_results", {"type": "integer", "description": "Cap on the 'differences' array returned (default 200, max 400)."})
+    .add_input_property("max_results", {"type": "integer", "description":
+            f"Cap on the 'differences' array returned (default {_DIFFERENCES_CAP}, "
+            f"max {_DIFFERENCES_CEILING})."})
     .strict_schema()
 )
 compare_operations_item = Item.create_tool_item(

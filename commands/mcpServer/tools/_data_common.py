@@ -79,7 +79,14 @@ def _split_path(path):
 
 
 def _child_folder_by_name(folder, name):
-    """Return the immediate child folder matching name (case-insensitive), or None."""
+    """Return the immediate child folder matching name (case-insensitive), or None.
+
+    First match is CORRECT here: folder names are UNIQUE within a container, so the first match is
+    the only match. `dataFolders.add()` with a name a sibling already carries raises
+    `3 : CB_NAE - Another object with the same name already exists in this container` - the
+    container itself enforces it, below this server's own pre-check. A FILE name carries no such
+    rule: see doc_lifecycle._file_in_folder_by_name, which refuses that ambiguity instead.
+    """
     want = (name or "").strip().lower()
     try:
         for f in folder.dataFolders.asArray():

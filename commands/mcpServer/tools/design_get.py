@@ -583,6 +583,7 @@ def _fingerprint(design):
     if root is None:
         return None
     body_total, sketch_total = _common.design_wide_counts(design)
+    walk = _common.occurrence_walk(design)
     fp = {
         "bodies": body_total,
         "sketches": sketch_total,
@@ -593,13 +594,21 @@ def _fingerprint(design):
         # null, never 0, when neither walk enumerated: root.allOccurrences RAISES on a design holding
         # an unresolved external reference, and safe(read, 0) published that failure as "no
         # occurrences" on a multi-part assembly.
-        "occurrences": _common.occurrence_walk(design).total,
+        "occurrences": walk.total,
         # asBuiltJoints is a separate collection from joints; count both or as-built joints read as 0
         "joints": safe(lambda: root.joints.count, 0) + safe(lambda: root.asBuiltJoints.count, 0),
         # userParameters = the ones an agent can drive; modelParameters includes internal ones it can't.
         "parameters": safe(lambda: design.userParameters.count, 0),
     }
-    return {k: v for k, v in fp.items() if v}   # omit zero counts (single-component, no joints, ...)
+    out = {k: v for k, v in fp.items() if v}   # omit zero counts (single-component, no joints, ...)
+    # The truthy filter drops 'occurrences' for TWO different reads - a design that holds no placed
+    # instance (total 0) and one whose census could not be taken at all (total None) - and a missing
+    # key cannot tell them apart. So the walk that answered is published beside them: 'unreadable'
+    # is the hole (NEITHER root.allOccurrences nor the component.occurrences fallback enumerated,
+    # so the absent count is UNKNOWN, not zero), and the other two values say a census was really
+    # taken. Same key and same vocabulary as find_geometry / assembly_get / workspace_orient.
+    out["occurrences_walk"] = walk.method
+    return out
 
 
 # The action tools for each content class the fingerprint can report. Only classes that are PRESENT and
@@ -724,6 +733,14 @@ def handler(include=None, max_depth: int = 3, component: str = "", tree_bodies: 
                        "timeline and 'timeline_params' adds each feature's own parameters (a "
                        "fillet's radius); 'library'/'name_filter'/'max_results' the catalog; "
                        "'attribute_group' (required) / 'attribute_key' the attributes.")
+    # A census nothing could be read from leaves 'occurrences' out of contents entirely, which reads
+    # exactly like a design holding no placed instance. The marker beside it is what tells the two
+    # apart, so the unreadable one is stated in words as well.
+    if (out.get("contents") or {}).get("occurrences_walk") == _common.WALK_UNREADABLE:
+        out["note"] = (out.get("note", "")
+                       + " contents.occurrences_walk='unreadable': NEITHER root.allOccurrences nor "
+                         "the component.occurrences fallback enumerated, so the occurrence count is "
+                         "missing because it is UNKNOWN, not because the design holds none.").strip()
     return ok(out)
 
 
@@ -762,7 +779,8 @@ tool = (
                            "| materials | appearances | attributes (a list or comma-string). Omit "
                            "for the orientation slice."})
     .add_input_property("max_depth", {"type": "integer",
-            "description": "Tree depth when include=tree (default 3, max 8)."})
+            "description": f"Tree depth when include=tree (default {_TREE_DEFAULT_DEPTH}, "
+                           f"max {_TREE_MAX_DEPTH})."})
     .add_input_property("component", {"type": "string",
             "description": "Start the tree at this component/occurrence name (include=tree)."})
     .add_input_property("tree_bodies", {"type": "boolean",

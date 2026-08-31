@@ -472,6 +472,27 @@ class TestLoft:
         assert owner_lf.last_input is not None     # the OWNER built the loft
         assert active_lf.last_input is None        # NOT the active component (the bSet trap)
 
+    def test_the_component_scope_is_declared_beside_the_kinds_scope(self):
+        # SKETCH-6: a {sketch, profile_index} element addresses a sketch by name, and the refusal's
+        # way forward may only name an input this strict schema takes - so the kind's scope_input
+        # and the declared property ship together.
+        sd = load_tool("_sketch_detail")
+        assert so._LOFT_PROFILES.scope_input == "component"
+        assert so.loft_tool.input_schema["properties"]["component"] == sd.COMPONENT_SCOPE[1]
+
+    def test_the_component_scope_reaches_the_profile_resolve(self, monkeypatch):
+        # a declared property the resolve never sees is a remedy the tool then ignores.
+        seen = {}
+
+        def _resolve(raw, component=""):
+            seen["component"] = component
+            return None, "refused"
+
+        _install(_FakeFeatures(loft=_FakeLoftFeatures()), handle_map={})
+        monkeypatch.setattr(so._LOFT_PROFILES, "resolve", _resolve)
+        so.loft_handler(profiles=["H0", "H1"], component="Frame")
+        assert seen == {"component": "Frame"}
+
 
 # ── STITCH ────────────────────────────────────────────────────────────────────
 

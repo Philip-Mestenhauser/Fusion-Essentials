@@ -43,6 +43,15 @@ active design, missing/ambiguous target) alongside the happy path. If a tool rea
 attribute the mocks don't model yet, add it to `install_mock_adsk()` (or a `.cast` pass-through)
 once, in the harness, rather than re-mocking it per test.
 
+**Deleting an attribute off the shared `adsk` mock does not reliably undo itself.** `monkeypatch`
+cannot restore a `Mock` child it marked `_deleted`, so the deletion can outlive the test: one
+`monkeypatch.delattr(adsk.fusion, "DistanceUnits")` passed on its own and took 9 unrelated tests down
+under randomized order. Many tests here do delete an `adsk` member to cover a "this build lacks it"
+branch and are fine - the boundary between those and the one that leaked is not established, and
+whole ENUM FAMILIES the shared fakes read are the known-bad case. So: prefer another route to that
+branch (an unknown key, a `getattr` default, a `safe()` that returns the default). If you delete
+anyway, run `-p randomly` over the full suite before believing it.
+
 For each test ask: **what specific, plausible bug would this catch?** If the only answer is "the
 function was deleted," it is decoration — assert the value that would change if the logic were wrong.
 A test may only pin behavior that is CORRECT: pinning a wrong result (e.g. a first-match resolver's

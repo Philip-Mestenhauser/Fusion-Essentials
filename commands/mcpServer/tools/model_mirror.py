@@ -54,17 +54,29 @@ def _build_collection(entities, labels):
 def _census_hosts(entity, comp):
     """The components a mirror's new geometry can land in: the source object's OWN component and the
     component the feature is built in. Resolved ONCE before the mutation and counted twice - a census
-    re-derived afterwards compares two different collections (see _common.census_host)."""
+    re-derived afterwards compares two different collections (see _common.census_host).
+
+    A component whose identity does not read against the census (same_component answers None) is
+    recorded as an UNKNOWN host - a None entry, which makes _body_total answer None. Neither
+    alternative is defensible from a comparison that was not made: de-duplicating it drops a
+    component the mirror can land in, and appending it counts one component twice, doubling the
+    before/after delta the effect check reads."""
     host = _common.census_host(entity, comp)
     hosts = [host] if host is not None else []
-    if comp is not None and not any(_common.same_component(h, comp) for h in hosts):
-        hosts.append(comp)
-    return hosts
+    if comp is None:
+        return hosts
+    verdicts = [_common.same_component(h, comp) for h in hosts]
+    if any(v is True for v in verdicts):
+        return hosts                       # comp is already counted by one of the hosts
+    if any(v is None for v in verdicts):
+        return hosts + [None]              # unknown: the body count cannot judge this mirror
+    return hosts + [comp]
 
 
 def _body_total(hosts):
     """Total BRep bodies across the census hosts, or None when any host's count is unreadable (an
-    unreadable census is not a zero - it means the effect cannot be judged from the count)."""
+    unreadable census is not a zero - it means the effect cannot be judged from the count). An
+    UNKNOWN host (None, from _census_hosts) counts as exactly that unreadable case."""
     counts = [_common.body_count(h) for h in hosts]
     if not counts or any(c is None for c in counts):
         return None
@@ -76,14 +88,19 @@ def _volume_sample(entities, feature_mode):
     mirror - the bodies the source features act on. Read BEFORE the mutation; the after-total is read
     off the feature's own bodies, never off these references again.
 
-    Deduped by entityToken, never identity: the measured body accessors (face.body, edge.body) hand
-    back a FRESH proxy on every read, so an id()-keyed dedupe counts one body many times."""
+    De-duplicated by _common.native_identity, the physical-body key. Python identity SPLITS one body
+    - the measured body accessors (face.body, edge.body) hand back a FRESH proxy on every read - and
+    counts its volume into the starting total twice. The WRAPPER's own entityToken MERGES two bodies
+    instead: a token is DOCUMENT-LOCAL (measured - two bodies reached through two x-refs of one
+    design read byte-identical tokens), so a source body drops out and the starting total is short by
+    its volume. The `or id(b)` last resort keys an identity-less body apart from every other one - it
+    over-counts, never merges."""
     if not feature_mode:
         return list(entities)
     out, seen = [], set()
     for ent in entities:
         for b in _common.iter_collection(safe(lambda ent=ent: ent.bodies)):
-            key = safe(lambda b=b: b.entityToken) or id(b)
+            key = _common.native_identity(b) or id(b)
             if key not in seen:
                 seen.add(key)
                 out.append(b)

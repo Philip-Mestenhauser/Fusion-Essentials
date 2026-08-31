@@ -21,6 +21,7 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives import registry
 from ._common import ok, error, safe
+from . import _assert
 from . import _common
 from . import _cam_common
 from . import _inputs
@@ -254,19 +255,43 @@ def _timeline_rollup(design):
 
 
 def _joint_rollup(design):
-    """(joint_count, broken_joints[names]) over the FULL joint walk (_joints.all_joints: root AND every
-    sub-component, joints AND asBuiltJoints) - a root-only count would hide a broken sub-component or
-    as-built joint. A joint is BROKEN only when it failed to COMPUTE: healthState 1 (warning) or 2
-    (error). healthState 3 (SUPPRESSED) is intentional - the author parked it (e.g. an alternate joint
-    in a fixture template) - so it is NOT broken. Same signal assembly_get surfaces, rolled to a
-    count + names here."""
-    broken = []
+    """(joint_count, broken_joints[names], health_unknown count) over the FULL joint walk
+    (_joints.all_joints: root AND every sub-component, joints AND asBuiltJoints) - a root-only count
+    would hide a sub-component's joints and the design's as-built ones.
+
+    Each joint's state is read through _assert.compute_state - the ONE entity-plus-timelineObject
+    pairing assembly_get's rows and joint_create's read-back share - so an as-built joint, which
+    answers no healthState of its own, is counted off the timeline item that does answer, and the
+    orientation rollup and the deeper read cannot disagree on one design. A joint that answered
+    'unknown' is counted in the third value: never among the broken names, never folded into an
+    implied healthy."""
+    broken, unknown = [], 0
     joints = _joints.all_joints(design)
     for idx, j in enumerate(joints):
-        hs = safe(lambda j=j: j.healthState)
-        if hs in (1, 2):                            # warning/error only; 3=suppressed is intentional
+        state, _failure = _assert.compute_state(j)
+        if state == "broken":
             broken.append(safe(lambda j=j: j.name) or f"#{idx}")
-    return len(joints), broken
+        elif state == "unknown":
+            unknown += 1
+    return len(joints), broken, unknown
+
+
+def _relation_rollup(design):
+    """(broken_relations[names], health_unknown count) over the shared relation walk
+    (_relations.all_relations - rigid groups, motion links and assembly constraints, root and every
+    sub-component). The same _assert.compute_state read as the joints, for the same reason: a
+    RigidGroup answers no healthState of its own and is readable only through its timeline item. A
+    relation that answered 'unknown' is counted in the second value, never as broken and never as
+    healthy."""
+    broken, unknown = [], 0
+    for kind in ("rigid_group", "motion_link", "constraint"):
+        for rel, _owner in _relations.all_relations(design, kind):
+            state, _failure = _assert.compute_state(rel)
+            if state == "broken":
+                broken.append(safe(lambda rel=rel: rel.name) or f"({kind})")
+            elif state == "unknown":
+                unknown += 1
+    return broken, unknown
 
 
 def _grounded_count(root):
@@ -340,24 +365,165 @@ def _xref_health(doc):
     return (n or 0), ood
 
 
+_EMPTY_NAME_CAP = 8
+
+
+# The walk builds its parent chain top-down, so it is acyclic; the cap only stops a hand-built node
+# whose chain loops from spinning the climb below.
+_MAX_BREADCRUMB_HOPS = 64
+
+
+def _op_breadcrumb(node):
+    """The walk's 'Setup / Folder / Operation' path for ONE operation node, or '' where ANY level of
+    it answered NOTHING or answered an EMPTY name.
+
+    What it returns is a WHOLE path: every segment of it is a name that read AND is non-empty, this
+    operation's own and each container up to its setup. Both of the withheld cases put a segment
+    that names no container into the address - the shared walk joins _cam_common._UNREAD_SEGMENT for
+    the level that did not read and the empty string itself for the level that read '' - and half an
+    address is no address for a row an agent is meant to pass back, so neither ships. The two are
+    still DIFFERENT reads, and only the walk keeps them apart; this is the one place they are
+    deliberately treated alike.
+
+    The chain is checked through the walk's own PARENT LINKS - each level's raw `name` read - never
+    by reading the joined string back, which is why a container literally named 'None' or
+    '(name unread)' passes unharmed. told_apart keeps the row's plain name for the ''."""
+    hop, hops = node, 0
+    while hop is not None:
+        if not hop.name or hops > _MAX_BREADCRUMB_HOPS:
+            return ""
+        hop, hops = hop.parent, hops + 1
+    return node.path
+
+
+def _empty_labels(rows):
+    """The discriminator each empty operation is told apart by, one for one over `rows`
+    ([(name, path, position)]) - what _common.told_apart substitutes for a repeated name.
+
+    The path is the container-preserving 'Setup / Folder / Operation' breadcrumb the shared CAM walk
+    builds. It separates every pair the tree itself separates - which the setup name alone does not,
+    since an operation name is unique only within a setup and folders nest inside one. Two
+    operations of one name in ONE container share even that path, so a row whose path another empty
+    row also carries takes the POSITION the operation holds in this read's walk beside it: the walk
+    numbers the operations it reaches in order, so no two rows carry the same one. That position is
+    what this read HOLDS - it addresses nothing outside this payload, which is why it is spent only
+    on the rows the path cannot separate.
+
+    A row whose path did not read gets '', and told_apart keeps its plain name for it."""
+    per_path = {}
+    for _name, path, _position in rows:
+        per_path[path] = per_path.get(path, 0) + 1
+    out = []
+    for name, path, position in rows:
+        if not path:
+            out.append((name, ""))
+        elif per_path[path] > 1:
+            out.append((name, f"{path} (operation {position})"))
+        else:
+            out.append((name, path))
+    return out
+
+
 def _cam_summary(doc):
-    """(has_cam, {setups, total_operations, ungenerated_operations}) WITHOUT switching to Manufacture.
-    itemByProductType('CAMProductType') is None when the document has no CAM data."""
+    """(has_cam, {setups, total_operations, ungenerated_operations, errored_operations,
+    suppressed_operations, empty_toolpath_operations, empty_toolpaths, operations_unread})
+    WITHOUT switching to Manufacture. itemByProductType('CAMProductType') is None when the
+    document has no CAM data.
+
+    Buckets through the shared op_primary_state, so every op lands in exactly one count and
+    "needs generating" means exactly the out-of-date and no-toolpath states. A missing hasToolpath
+    alone is NOT that: a SUPPRESSED op has no toolpath by design, and a generated op can finish
+    with an EMPTY one (state IsValid, isToolpathValid true, hasToolpath false) - measured together
+    as 65 suppressed + 13 empty on a job where nothing was ungenerated, which counting hasToolpath
+    alone reported as 78 needing generation. An ERRORED op is its own count: generating again will
+    not clear it.
+
+    Walks each setup through the shared _cam_common.tree_nodes rather than setup.allOperations:
+    allOperations flattens the folder-nested operations and DROPS the folder objects, so the
+    breadcrumb an empty row is named by exists only in the container-preserving walk. The setup's
+    own allOperations.count stays the census the walk is checked against."""
     cam, _ = _cam_common.get_cam()
     if not cam:
         return False, None
     setups = safe(lambda: cam.setups)
     n_setups = safe(lambda: setups.count, 0) if setups else 0
-    total_ops = ungenerated = 0
+    total_ops = ungenerated = errored = suppressed = empty = 0
+    unread = 0
+    unread_unknown = 0
+    empty_rows = []
+    position = 0
     for s in _common.iter_collection(setups):
-        ops = safe(lambda s=s: s.allOperations)
-        total_ops += (safe(lambda: ops.count, 0) if ops else 0) or 0
-        for op in _common.iter_collection(ops):
-            # an op with no valid toolpath still needs generating
-            if not safe(lambda op=op: op.hasToolpath, False):
+        walked = 0
+        nodes = safe(lambda s=s: [n for n in _cam_common.tree_nodes(s) if n.kind == "operation"])
+        for node in (nodes or []):
+            facts = _cam_common.op_state_facts(node.obj)
+            walked += 1
+            position += 1
+            state = _cam_common.op_primary_state(facts)
+            if state == "suppressed":
+                suppressed += 1
+            elif state == "error":
+                errored += 1
+            elif state in ("out_of_date", "no_toolpath"):
                 ungenerated += 1
-    return True, {"setups": n_setups or 0, "total_operations": total_ops,
-    "ungenerated_operations": ungenerated}
+            elif _cam_common.is_empty_toolpath(facts):
+                empty += 1
+                empty_rows.append((facts["name"], _op_breadcrumb(node), position))
+        total_ops += walked
+        # The census check: the walk SKIPS an item(i) that raises - and answers nothing at all when
+        # it raises outright - so a short walk is indistinguishable from a small setup without
+        # comparing against the setup's own flat count of the same operations.
+        declared = _common.counted(lambda s=s: s.allOperations.count)
+        if declared is None:
+            unread_unknown += 1
+        elif walked < declared:
+            unread += declared - walked
+    out = {"setups": n_setups or 0, "total_operations": total_ops,
+           "ungenerated_operations": ungenerated, "errored_operations": errored,
+           "suppressed_operations": suppressed, "empty_toolpath_operations": empty}
+    if empty_rows:
+        # told_apart judges over EVERY empty operation and the cap is applied after, so a listed
+        # name that repeats only outside the cap is still replaced by its own breadcrumb.
+        out["empty_toolpaths"] = _common.told_apart(_empty_labels(empty_rows))[:_EMPTY_NAME_CAP]
+    # Present only when the census is INCOMPLETE, so the counts above are never read as a full
+    # tally of a job whose operations did not all answer.
+    if unread:
+        out["operations_unread"] = unread
+    if unread_unknown:
+        out["setups_with_unreadable_operation_count"] = unread_unknown
+    return True, out
+
+
+def _cam_pointer(cam):
+    """The cam pointer's state clause: what to do next about the toolpaths, from the counts the
+    summary bucketed - the ERRORED ops first (generating again will not clear them), then the
+    ungenerated ones, then the generated-but-empty ones (which no amount of generating will fill),
+    then the parked ones. An incomplete census never reads as a clean bill."""
+    if not cam:
+        return "toolpaths look generated."
+    unread = cam.get("operations_unread") or cam.get("setups_with_unreadable_operation_count")
+    incomplete = (" Some operations did not read - the counts are incomplete." if unread else "")
+    if cam.get("errored_operations"):
+        return (f"{cam['errored_operations']} operation(s) have ERRORS - cam_get("
+                "include=['operations']) for the text; regenerating will not clear them."
+                + incomplete)
+    if cam.get("ungenerated_operations"):
+        return f"{cam['ungenerated_operations']} operation(s) need generating." + incomplete
+    parked = (f" {cam['suppressed_operations']} suppressed."
+              if cam.get("suppressed_operations") else "")
+    if cam.get("empty_toolpath_operations"):
+        listed = [n for n in (cam.get("empty_toolpaths") or []) if n]
+        names = ", ".join(listed)
+        # the names are capped; say so with a clause rather than a trailing ellipsis, which ran
+        # into the sentence's own full stop as '....'
+        if names and len(listed) < cam["empty_toolpath_operations"]:
+            names += f" (first {len(listed)} of {cam['empty_toolpath_operations']})"
+        return (f"toolpaths are generated; {cam['empty_toolpath_operations']} produced an EMPTY "
+                f"toolpath (nothing to cut)" + (f": {names}." if names else ".")
+                + parked + incomplete)
+    if unread:
+        return ("the operation census is incomplete - some operations did not read." + parked)
+    return "toolpaths look generated." + parked
 
 
 def handler() -> dict:
@@ -428,16 +594,11 @@ def handler() -> dict:
     errors, warnings, suppressed, markers, tl_total = _timeline_rollup(design)
     marker_pos, marker_count = _common.timeline_marker(design)
     rolled_back = bool(marker_pos is not None and marker_count and marker_pos < marker_count)
-    joint_count, broken_joints = _joint_rollup(design)
+    joint_count, broken_joints, joints_unknown = _joint_rollup(design)
     # Relation health folded into the FIRST-CALL rollup (measured: a failed assembly constraint
     # left this read healthy while only a deeper include=['relations'] slice named it - the
     # orientation read must not under-report health a deeper read exposes).
-    broken_relations = []
-    for kind in ("rigid_group", "motion_link", "constraint"):
-        for rel, _owner in _relations.all_relations(design, kind):
-            hs = safe(lambda rel=rel: rel.healthState)
-            if hs in (1, 2):
-                broken_relations.append(safe(lambda rel=rel: rel.name) or f"({kind})")
+    broken_relations, relations_unknown = _relation_rollup(design)
     grounded = _grounded_count(root)
     digest, top_level = _browser_digest(root, occ_walk)
     has_cam, cam = _cam_summary(doc)
@@ -486,6 +647,15 @@ def handler() -> dict:
         "is_healthy": (errors == 0 and not broken_joints and not broken_relations
                        and not out_of_date and not rolled_back and not unresolved),
     }
+    # Present only when a compute state did NOT read, so the two lists above are never taken for a
+    # complete census. A joint/relation whose state NEITHER it nor its timeline item answered is
+    # counted neither broken nor healthy, and is_healthy - a verdict over the entities that HAVE a
+    # state - makes no claim about it; reading its silence as broken would be a false alarm exactly
+    # where the read declines to make a claim.
+    if joints_unknown:
+        out["health"]["joints_health_unknown"] = joints_unknown
+    if relations_unknown:
+        out["health"]["relations_health_unknown"] = relations_unknown
     # The noun is IN the key: this counts referenced DOCUMENTS (Document.documentReferences), while
     # doc_get(include=['xref_tree']).reference_link_count counts reference LINKS (one per referencing
     # occurrence plus one per derive feature) - the two legitimately differ on one document.
@@ -552,9 +722,7 @@ def handler() -> dict:
             f"({', '.join(out_of_date[:5])}). Stale references show the wrong geometry (and miss newer "
             "features); refresh before relying on, machining, or inserting this part.")
     if has_cam:
-        pointers["cam"] = ("cam_get() for the machining job; "
-                           + (f"{cam['ungenerated_operations']} operation(s) need generating."
-                              if cam and cam.get("ungenerated_operations") else "toolpaths look generated."))
+        pointers["cam"] = "cam_get() for the machining job; " + _cam_pointer(cam)
     out["pointers"] = _drop_unregistered_pointers(pointers)
 
     # State the facts (what was found) and point at the check, rather than emitting an "unhealthy"
@@ -587,6 +755,18 @@ def handler() -> dict:
     if warnings:
         verdict += (f"{warnings} timeline WARNING(s) present (not errors) - "
                     "design_get(include=['timeline']) lists which. ")
+    # A withheld state is stated out loud: is_healthy is silent about it, so the count would
+    # otherwise read as part of a clean bill.
+    if joints_unknown or relations_unknown:
+        unknown_bits = []
+        if joints_unknown:
+            unknown_bits.append(f"{joints_unknown} joint(s) (joints_health_unknown)")
+        if relations_unknown:
+            unknown_bits.append(
+                f"{relations_unknown} assembly relation(s) (relations_health_unknown)")
+        verdict += (" and ".join(unknown_bits) + " published NO compute state - neither the entity "
+                    "nor its timeline item answered one - so they are counted neither broken nor "
+                    "healthy and is_healthy makes no claim about them. ")
     if unresolved:
         verdict += (
             "An UNRESOLVED reference means reading that occurrence's component RAISES, so the source "

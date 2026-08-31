@@ -187,6 +187,71 @@ class TestPredicateKind:
         assert [r[0] for r in rows] == ["a_get", "b_get", "c_get", "d_get"]
         assert [r[1] for r in rows] == ["pass", "pass", "blocked", "FAIL"]
 
+    def test_judged_steps_and_run_steps_agree_on_every_step_kind(self, monkeypatch):
+        # The by-position pairing needs these two lists to be the same length, and each decides
+        # what yields a row through _leaves_no_row. A second row-less step kind taught to one site
+        # alone would shift the pairing again with every other test here still green.
+        monkeypatch.setattr(tool_verify, "call", lambda tool, args: (False, {"n": 1}))
+        monkeypatch.setattr(tool_verify.time, "sleep", lambda s: None)
+        steps = [
+            ("bare_ok", {}, "ok", None),
+            tool_verify._dwell(0),
+            ("value_pred", {}, lambda p: p["n"] == 1, None),
+            ("refusal", {}, "refused", None),
+            ("blocked", lambda ctx: {"x": ctx["missing"]}, "ok", None),
+            ("failing", {}, lambda p: p["n"] == 99, None),
+            ("with_save", {}, "ok", ("k", lambda p: p["n"])),
+            tool_verify._dwell(0),
+        ]
+        assert len(tool_verify.judged_steps(steps)) == len(tool_verify.run_steps(steps, {}))
+
+    def test_a_dwell_does_not_shift_predicate_attribution(self, monkeypatch):
+        # A _dwell is judged by nothing and leaves no row, so it is the one step that can break the
+        # by-position pairing: run over the act's raw list and every expectation after a dwell is
+        # credited to a LATER step's tool - a bare "ok" reads as covered and a value predicate is
+        # lost. judged_steps is what the pairing runs over.
+        monkeypatch.setattr(tool_verify, "call", lambda tool, args: (False, {"n": 1}))
+        monkeypatch.setattr(tool_verify.time, "sleep", lambda s: None)
+        steps = [
+            ("a_get", {}, "ok", None),
+            tool_verify._dwell(0),
+            ("b_get", {}, "ok", None),
+            ("c_get", {}, lambda p: p["n"] == 1, None),
+        ]
+        rows = tool_verify.run_steps(steps, {})
+        paired = [(row[0], tool_verify.predicate_kind(step[2]))
+                  for step, row in zip(tool_verify.judged_steps(steps), rows)]
+        assert paired == [("a_get", "call"), ("b_get", "call"), ("c_get", "value")]
+
+    def test_run_credits_covered_to_the_tool_whose_own_step_read_a_value(self, monkeypatch):
+        # The pairing AT ITS CALL SITE, over a one-act program holding the shape that breaks it: a
+        # dwell between the bare-ok rows and the value predicate. Whichever list run() pairs with
+        # the rows decides the ledger, so this is what a revert to zip(steps, ...) has to fail.
+        ledger = {}
+
+        def fake_write(rows, version, date, src_hash, notes=None, act_modes=None):
+            ledger.update(rows)
+            return "VERIFIED_TOOLS.md"
+
+        monkeypatch.setattr(tool_verify, "call", lambda tool, args: (False, {"n": 1}))
+        monkeypatch.setattr(tool_verify.time, "sleep", lambda s: None)
+        monkeypatch.setattr(tool_verify, "health_gate", lambda: {"server": "ok", "version": "t"})
+        monkeypatch.setattr(tool_verify, "registered_tools", lambda: ["a_get", "b_get", "c_get"])
+        monkeypatch.setattr(tool_verify, "source_hash", lambda *a, **k: "0" * 64)
+        monkeypatch.setattr(tool_verify, "write_verified", fake_write)
+        monkeypatch.setattr(tool_verify, "POLL_AFTER", {})
+        monkeypatch.setattr(tool_verify, "EXCLUDED", {})
+        monkeypatch.setattr(tool_verify, "STORY", {})
+        monkeypatch.setattr(tool_verify, "ACTS", [("ACT T", None, [
+            ("a_get", {}, "ok", None),
+            tool_verify._dwell(0),
+            ("b_get", {}, "ok", None),
+            ("c_get", {}, lambda p: p["n"] == 1, None),
+        ], None)])
+
+        assert tool_verify.run(write_json=False) == 0
+        assert ledger == {"a_get": "called", "b_get": "called", "c_get": "covered"}
+
     def test_every_steps_row_classifies_and_no_constant_predicate_hides_in_them(self):
         # A callable in STEPS that never READS INTO its payload would be counted 'covered' on this
         # run while proving nothing; there are none, and this is what keeps it that way. Every

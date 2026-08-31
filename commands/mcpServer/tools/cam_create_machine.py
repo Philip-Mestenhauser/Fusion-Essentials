@@ -3,7 +3,7 @@
 
 """Create a machine in the LOCAL machine library from one of Fusion's machine templates, named so
 cam_edit_setup(machine=...) can assign it. Creation lives on adsk.cam.Machine as statics -
-MachineLibrary itself exposes no create method."""
+MachineLibrary itself exposes no create method. cam_delete_machine is the other half."""
 
 import adsk.cam
 
@@ -17,7 +17,7 @@ from . import _inputs
 # machine_catalog walk is deliberately NOT used here: an unfiltered walk reads capabilities on every
 # bundled machine (measured ~46s over 982 machines - past the 30s handler cap), while the resolver's
 # query is filtered and fast; both read the same Local + Fusion360 locations.
-from ._cam_common import machine_kinds, resolve_machine
+from ._cam_common import machine_kinds, machine_library, machine_location, resolve_machine
 
 # Wire value -> the adsk.cam.MachineTemplate member it builds from. The template fixes the new
 # machine's kinematics tree; a member this Fusion version does not expose is refused by name.
@@ -32,15 +32,6 @@ _TEMPLATES = {
 }
 _TEMPLATE = _inputs.Choice("template", options=list(_TEMPLATES), default="generic_3_axis",
                            description="The machine template the new machine is built from.")
-
-def _machine_library():
-    """The shared MachineLibrary - it hangs off CAMManager.get().libraryManager, not the document's
-    CAM product, so no open CAM job is needed. Returns (library, None) or (None, error)."""
-    lib = safe(lambda: adsk.cam.CAMManager.get().libraryManager.machineLibrary)
-    if lib is None:
-        return None, "Could not access the machine library (CAMManager.libraryManager.machineLibrary)."
-    return lib, None
-
 
 # resolve_machine's no-match error opens with this - the ONE outcome that proves the name is FREE.
 # Any other resolver answer (a hit, an ambiguity refusal, a library error) means the name is not
@@ -68,19 +59,7 @@ def _name_clash(lib, name):
         if (value or "").strip().lower() == want:
             rung = key
             break
-    # Which location holds it: one FILTERED Local query (query_machines searches Local first, so a
-    # Local hit with this machine's id means Local; otherwise it came from the bundled Fusion360).
-    location = "fusion360"
-    fid = safe(lambda: found.id)
-    try:
-        loc = adsk.cam.LibraryLocations.LocalLibraryLocation
-        for m in (lib.createQuery(loc, vendor, model).execute() or []):
-            if safe(lambda m=m: m.id) == fid:
-                location = "local"
-                break
-    except Exception:
-        location = "local or fusion360"
-    return found, rung, location, None
+    return found, rung, machine_location(lib, found), None
 
 
 def _write_field(machine, prop, value):
@@ -111,7 +90,7 @@ def handler(name: str = "", template: str = "generic_3_axis", vendor: str = "") 
     if member is None:
         return error(f"This Fusion version's MachineTemplate has no '{_TEMPLATES[key]}' member.")
 
-    lib, lerr = _machine_library()
+    lib, lerr = machine_library()
     if lerr:
         return error(lerr)
 
@@ -187,7 +166,7 @@ def handler(name: str = "", template: str = "generic_3_axis", vendor: str = "") 
     note = ("Machine created and re-resolved through the query cam_edit_setup assigns from - the "
             f"same read the cam_get(include=['machines']) catalog is built on. Assign it: "
             f"cam_edit_setup(setup=..., machine='{label}'). It persists in the local machine "
-            "library - this server has no tool that removes a machine.")
+            f"library until cam_delete_machine(name='{label}') removes it.")
     if has_sim:
         note += (" It carries a simulation model, which the assignment refuses - pass "
                  "machine_strip_simulation=true to cam_edit_setup.")

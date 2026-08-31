@@ -86,7 +86,8 @@ def _moved(before, after):
     return any(abs(bv - av) > _MOVE_EPS_CM for b, a in pairs for bv, av in zip(b, a))
 
 
-def _prepare(sketch_name, entities, units, dx, dy, rotation_deg, center_x, center_y, scale_factor):
+def _prepare(sketch_name, entities, units, dx, dy, rotation_deg, center_x, center_y, scale_factor,
+             component=""):
     """Everything both tools need before the mutation: (design, sketch, ents, refs, coll, matrix,
     unit, error_result)."""
     blank = (None,) * 7
@@ -98,9 +99,10 @@ def _prepare(sketch_name, entities, units, dx, dy, rotation_deg, center_x, cente
     design = _common.design()
     if not design:
         return blank + (error("No active design. Create or open a document first (see doc_new)."),)
-    sketch, requested, ambiguous = _common.find_or_recent_sketch(design, sketch_name)
-    if ambiguous:
-        return blank + (error(ambiguous),)
+    sketch, requested, refusal = _sketch_detail.scoped_or_recent_sketch(
+        design, sketch_name, component)
+    if refusal:
+        return blank + (error(refusal),)
     if not sketch:
         if requested:
             return blank + (error(f"No sketch named '{requested}'. Available: " + (
@@ -204,10 +206,12 @@ def _requested(unit, dx, dy, rotation_deg, scale_factor):
 
 
 def move_handler(sketch_name: str = "", entities: str = "", units: str = "mm", dx=None, dy=None,
-                 rotation_deg=None, center_x=None, center_y=None, scale_factor=None) -> dict:
+                 rotation_deg=None, center_x=None, center_y=None, scale_factor=None,
+                 component: str = "") -> dict:
     """See MOVE_DESCRIPTION."""
     design, sketch, ents, refs, coll, matrix, unit, err = _prepare(
-        sketch_name, entities, units, dx, dy, rotation_deg, center_x, center_y, scale_factor)
+        sketch_name, entities, units, dx, dy, rotation_deg, center_x, center_y, scale_factor,
+        component)
     if err:
         return err
 
@@ -271,10 +275,12 @@ def move_handler(sketch_name: str = "", entities: str = "", units: str = "mm", d
 
 def copy_handler(sketch_name: str = "", entities: str = "", target_sketch: str = "",
                  units: str = "mm", dx=None, dy=None, rotation_deg=None, center_x=None,
-                 center_y=None, scale_factor=None) -> dict:
+                 center_y=None, scale_factor=None, component: str = "",
+                 target_component: str = "") -> dict:
     """See COPY_DESCRIPTION."""
     design, sketch, ents, refs, coll, matrix, unit, err = _prepare(
-        sketch_name, entities, units, dx, dy, rotation_deg, center_x, center_y, scale_factor)
+        sketch_name, entities, units, dx, dy, rotation_deg, center_x, center_y, scale_factor,
+        component)
     if err:
         return err
 
@@ -282,9 +288,12 @@ def copy_handler(sketch_name: str = "", entities: str = "", target_sketch: str =
     want_target = (target_sketch or "").strip()
     target = sketch
     if want_target:
-        target, ambiguous = _common.find_sketch(design, want_target)
-        if ambiguous:
-            return error(ambiguous)
+        # The destination gets its own scope: it is a SECOND by-name sketch reference, and a copy
+        # into a name two components carry has to be able to say which one without renaming either.
+        target, refusal = _sketch_detail.scoped_sketch(design, want_target, target_component,
+                                                       "target_component")
+        if refusal:
+            return error(refusal)
         if target is None:
             return error(f"No sketch named '{want_target}' for 'target_sketch'. Available: " + (
                 ", ".join(n for n in _common.all_sketch_names(design) if n) or "(none)"))
@@ -377,22 +386,30 @@ def _wire(tool):
 move_tool = _wire(
     Tool.create_simple(name="sketch_move", description=MOVE_DESCRIPTION)
     .add_input_property("sketch_name", {"type": "string",
-            "description": "Sketch holding them (default: most recent)."}))
+            "description": "Sketch holding them (default: most recent)."})
+    .add_input_property(*_sketch_detail.COMPONENT_SCOPE))
 copy_tool = _wire(
     Tool.create_simple(name="sketch_copy", description=COPY_DESCRIPTION)
     .add_input_property("sketch_name", {"type": "string",
             "description": "Sketch holding them (default: most recent)."})
+    .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
     .add_input_property("target_sketch", {"type": "string",
-            "description": "Sketch to copy INTO (default: the same sketch)."}))
+            "description": "Sketch to copy INTO (default: the same sketch)."})
+    .add_input_property(*_sketch_detail.component_scope("target_component",
+                                                        narrows="target_sketch")))
 
 move_item = Item.create_tool_item(tool=move_tool, write="write", handler=move_handler,
                                   run_on_main_thread=True,
-                                  postconditions=[_assert.SketchCurvesChanged()])
-# A cross-sketch copy leaves the SOURCE untouched, so the effect is verified on the TARGET.
+                                  postconditions=[_assert.SketchCurvesChanged(
+                                      scope_keys=("component",))])
+# A cross-sketch copy leaves the SOURCE untouched, so the effect is verified on the TARGET. Each
+# name is paired with the scope that narrows THAT reference - 'target_sketch' with
+# 'target_component' - so the fingerprint reads the sketch the copy wrote, never the source's.
 copy_item = Item.create_tool_item(tool=copy_tool, write="write", handler=copy_handler,
                                   run_on_main_thread=True,
                                   postconditions=[_assert.SketchCurvesChanged(
-                                      keys=("target_sketch", "sketch_name"))])
+                                      keys=("target_sketch", "sketch_name"),
+                                      scope_keys=("target_component", "component"))])
 
 
 def register_tool():

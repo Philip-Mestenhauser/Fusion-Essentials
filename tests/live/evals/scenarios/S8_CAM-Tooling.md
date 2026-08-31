@@ -8,14 +8,11 @@ fixture: P7-Template (the S7 artifact) OPENED as the active document by the orch
 budget:
   max_tool_calls: 110
   max_tokens: 225000
+skill: parametric-cad-design
 substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
 perturbations: none (baseline)
 expected_refusals: none
 ---
-
-> NEEDS-RUN - UNMEASURED WORDING: the material-engagement postcondition below has not been
-> exercised by a blind executor, so the budget is a provisional pin, not a measurement. This
-> banner stands until a blind run measures this wording.
 
 # S8 - CAM tooling: four tools, two setups, computing operations
 
@@ -128,9 +125,7 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
   tool-vs-feature numbers, and re-issue those reads when grading; the isolated-toolpath
   screenshots are the second channel, not the proof. An executor that cannot find a read for a
   height or a tool diameter and says so under SURFACED is a WIRE finding, not a silent FAIL.
-- Budget: the last measured run (Agent-executor harness) was 58 calls, PASS incl. two
-  skeleton-defect repairs that S7's postconditions now prevent; the four-operation engagement
-  reads (parameters + tool per op, the material numbers, the isolated screenshots) add to that, so
-  110 calls / 225k output tokens is a provisional pin - recalibrate at the first measured run of
-  this wording. cam_get's setup rows read the WCS back (origin/orientation
+- Budget: 110 calls / 225k. A blind run_eval under the skill measures this scenario at 65 calls /
+  57k output tokens - 59% and 25% of those pins. The headroom is deliberate: the CAM stage's cost
+  swings with how many operations need regenerating. cam_get's setup rows read the WCS back (origin/orientation
   mode + bound entities), so grade that postcondition from the typed read.

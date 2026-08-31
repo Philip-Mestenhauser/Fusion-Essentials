@@ -19,7 +19,7 @@ from ._common import error, ok, safe
 from ._cam_common import clamp_rows
 from . import _common
 from ._common import target_component as _target_component
-from . import _export          # component_by_name - the one design-wide by-name component walk
+from . import _export          # find_component - the one design-wide by-name component resolve
 from . import _inputs
 from .design_mode import run_in_base_feature
 
@@ -39,6 +39,11 @@ _VALID_EXTS = (".stl", ".obj", ".3mf")
 # synchronously (the only public path) yet annotate the result so a caller/orchestrator can adopt a
 # fire-and-poll wrapper. Modest meshes return cleanly inside the window.
 _SLOW_TRI_THRESHOLD = 250_000
+
+# mesh_get's row cap: the default a caller who names none gets, and the ceiling max_results cannot
+# lift past (every mesh row crosses the wire). The names follow clamp_rows' own two parameters.
+_MESH_ROWS_DEFAULT = 50
+_MESH_ROWS_CEILING = 200
 
 
 # ── mesh-unit mapping (the import API takes a MeshUnits enum, not a scale factor) ────────────────
@@ -172,7 +177,8 @@ def _iter_meshes(comp):
 
 # ── mesh_get ────────────────────────────────────────────────────────────────────────────────────
 
-def mesh_get_handler(target: str = "", max_results: int = 50, units: str = "mm") -> dict:
+def mesh_get_handler(target: str = "", max_results: int = _MESH_ROWS_DEFAULT,
+                     units: str = "mm") -> dict:
     """List the MeshBody objects in a component (target name) or the whole design (target='')."""
     design = _common.design()
     if not design:
@@ -197,11 +203,19 @@ def mesh_get_handler(target: str = "", max_results: int = 50, units: str = "mm")
             if c is not None and c not in comps:
                 comps.append(c)
     else:
-        # A named COMPONENT (the one design-wide by-name component walk), else an OCCURRENCE through
-        # the shared ambiguity-refusing resolver: an occurrence name is not unique (two sub-assemblies
-        # each hold a 'Bolt:1'), so a name several instances answer to is REFUSED with its candidates
-        # rather than listing whichever component the walk reached first.
-        found = _export.component_by_name(design, name)
+        # A named COMPONENT (the one design-wide by-name component resolve), else an OCCURRENCE
+        # through the shared ambiguity-refusing resolver: neither name is unique (two sub-assemblies
+        # each hold a 'Bolt:1'; two components can carry one name), so a name several answer to is
+        # REFUSED rather than listing whichever the walk reached first.
+        found, comp_err = _export.find_component(design, name)
+        if comp_err:
+            # The occurrence vocabulary just below is what still resolves here, so the refusal
+            # points at it. It offers no find_geometry handle: find_geometry mints face/edge/vertex
+            # handles, and the occurrence step refuses a handle pointing at anything but an
+            # occurrence (its own handle form, from design_get's tree, does resolve).
+            return error(comp_err + " List one instance's meshes by its occurrence "
+                         "name/fullPathName (design_get(include=['tree']) lists the instances), or "
+                         "pass target='' to scan the whole design.")
         if found is None:
             occ, occ_err = _inputs._resolve_occurrence("target", name)
             if occ is not None:
@@ -225,7 +239,7 @@ def mesh_get_handler(target: str = "", max_results: int = 50, units: str = "mm")
             meshes.append(_mesh_summary(mb, inv_scale=inv_scale))
 
     total = len(meshes)
-    cap = clamp_rows(max_results, 50, 200)   # every row crosses the wire; the cap cannot be lifted past 200
+    cap = clamp_rows(max_results, _MESH_ROWS_DEFAULT, _MESH_ROWS_CEILING)
     meshes_out = meshes[:cap]
     truncated = total > len(meshes_out)
 
@@ -321,7 +335,16 @@ def mesh_insert_handler(file_path: str = "", target_component: str = "",
     comp = _target_component(design)
     tc = (target_component or "").strip() if isinstance(target_component, str) else ""
     if tc:
-        picked = _export.component_by_name(design, tc)   # the one design-wide by-name component walk
+        # The one design-wide by-name component resolve: a name several components carry is REFUSED
+        # here rather than importing the mesh into whichever one the walk reached first.
+        picked, comp_err = _export.find_component(design, tc)
+        if comp_err:
+            # This is the one site with no second vocabulary - target_component takes a name and
+            # nothing else - so the remedy is the ACTIVE component, which design_activate_component
+            # sets from an occurrence (that kind addresses one instance by fullPathName).
+            return error(comp_err + " Omit target_component to import into the ACTIVE component, "
+                         "and set which that is with design_activate_component (it takes the "
+                         "occurrence, so it can name one of them).")
         if picked is None:
             return error(f"No component named '{tc}' to import into. Omit target_component to use the "
     "active component, or list components with design_get(include=['tree']).")
@@ -712,7 +735,13 @@ def mesh_to_brep_handler(mesh: str = "", method: str = "prismatic", resolution: 
     # modes this tool runs in. Snapshot the BRep bodies BEFORE the add so the before/after comparison
     # is valid whether add returns a feature (parametric) or None (non-parametric).
     def _brep_snapshot():
-        return [(safe(lambda b=b: b.entityToken), safe(lambda b=b: b.name), b)
+        # (physical-body key, name, handle, body). The DIFF keys on _common.native_identity, never on
+        # the wrapper's own token: each read of the collection mints a fresh wrapper, and a proxy and
+        # its native carry DIFFERENT tokens (measured), so a wrapper-token key reports a body that was
+        # already there as newly converted. The published HANDLE stays the WRAPPER's own token - that
+        # is the string that resolves back to this reference.
+        return [(_common.native_identity(b), safe(lambda b=b: b.name),
+                 safe(lambda b=b: b.entityToken), b)
                 for b in _common.iter_collection(safe(lambda: comp.bRepBodies))]
 
     def inner_op(base_feature):
@@ -759,7 +788,7 @@ def mesh_to_brep_handler(mesh: str = "", method: str = "prismatic", resolution: 
         except Exception as e:
             return error(f"Could not configure the mesh-convert input: {e}")
 
-        before_tokens = {t for (t, _n, _b) in _brep_snapshot() if t is not None}
+        before_keys = {k for (k, _n, _h, _b) in _brep_snapshot() if k is not None}
 
         # Mutation - direct call, no safe. Only an EXCEPTION is a hard failure.
         try:
@@ -769,7 +798,7 @@ def mesh_to_brep_handler(mesh: str = "", method: str = "prismatic", resolution: 
     "A common cause is a non-watertight or very dense mesh." + _face_groups_hint)
         # The open BaseFeature can never be re-found once the scope closes, so its name is captured
         # HERE - it is what explains a null feature to the caller.
-        return {"feat": feat, "before_tokens": before_tokens,
+        return {"feat": feat, "before_keys": before_keys,
     "base_feature_name": safe(lambda: base_feature.name) if base_feature else None}
 
     result, scope_err = run_in_base_feature(design, comp, inner_op)
@@ -779,7 +808,7 @@ def mesh_to_brep_handler(mesh: str = "", method: str = "prismatic", resolution: 
         return result # inner_op returned a _common.error
 
     feat = result["feat"]
-    before_tokens = result["before_tokens"]
+    before_keys = result["before_keys"]
     bf_name = result["base_feature_name"]
 
     brep_bodies = []
@@ -792,9 +821,9 @@ def mesh_to_brep_handler(mesh: str = "", method: str = "prismatic", resolution: 
     # Non-parametric path (feat is None) OR a feature with no readable .bodies: diff the component's
     # BRep bodies - the NEW body(ies) are the conversion result.
     if not brep_bodies:
-        for (tok, name, b) in _brep_snapshot():
-            if tok is None or tok not in before_tokens:
-                brep_bodies.append({"name": name, "handle": tok})
+        for (key, name, handle, _b) in _brep_snapshot():
+            if key is None or key not in before_keys:
+                brep_bodies.append({"name": name, "handle": handle})
 
     if not brep_bodies:
         # No feature AND no new BRep body appeared -> a REAL failure. Keep the face-groups hint.
@@ -833,9 +862,9 @@ mesh_get_tool = (
             "target), edit with mesh_reduce / mesh_remesh, convert with mesh_to_brep, remove "
             "with mesh_delete. 'volume' reads 0.0 on a mesh that is not watertight (it encloses "
             "nothing) and null only when the field could not be read. 'meshes' is "
-            "capped (max_results, default 50); 'truncated' flags when the cap was hit."))
+            f"capped (max_results, default {_MESH_ROWS_DEFAULT}); 'truncated' flags when the cap was hit."))
     .add_input_property("target", {"type": "string", "description": "Component/occurrence name to scan, or '' for the whole design."})
-    .add_input_property("max_results", {"type": "integer", "description": "Cap on the 'meshes' array returned (default 50, max 200)."})
+    .add_input_property("max_results", {"type": "integer", "description": f"Cap on the 'meshes' array returned (default {_MESH_ROWS_DEFAULT}, max {_MESH_ROWS_CEILING})."})
     .add_input_property(_MEASURE_UNITS.name, _MEASURE_UNITS.schema())
     .strict_schema()
 )

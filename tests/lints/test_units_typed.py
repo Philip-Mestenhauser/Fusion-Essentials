@@ -8,8 +8,8 @@ belongs in the typed surface an agent must consume to call the tool, not asserte
 string that nothing checks. A numeric input whose description names a unit (mm/cm/inch) while its
 owning tool exposes no 'units' selector is a unit fact stranded in prose: an agent that learned
 "pass units=cm" from a sibling tool gets a silently wrong-by-a-factor result with no feedback. The
-fix is to pair the number with the Distance + UnitField kinds from _inputs.py (which add the 'units'
-selector), so the unit is declared and resolved rather than asserted.
+remedy is to pair the number with the Distance + UnitField kinds from _inputs.py (which add the
+'units' selector), so the unit is declared and resolved rather than asserted.
 
 Flags a number (or array-of-number) input property whose description names a unit while its tool
 declares no 'units' input. The shrink-only _EXEMPT table carries any input where a fixed, non-agent-

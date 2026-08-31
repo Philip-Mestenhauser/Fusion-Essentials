@@ -48,15 +48,23 @@ class TestKpName:
 
 def _call(anchor="coordinates", target="at", x=0, y=0, z=0,
           sketch_name="", entity_index=0, keypoint=None, design=None, comp=None,
-          geometry_handle=None, bbox_target=None, orient_axis="z", flip=False, meta=None):
+          geometry_handle=None, bbox_target=None, orient_axis="z", flip=False, meta=None,
+          sketch_component=""):
     # Signature: (design, comp, anchor, target, x_cm, y_cm, z_cm,
     #             sketch_name, entity_index, keypoint, geometry_handle,
-    #             bbox_target, orient_axis, flip, meta)
+    #             bbox_target, orient_axis, flip, meta, sketch_component)
     return jo._geometry_from_args(
         design or SimpleNamespace(), comp or SimpleNamespace(),
         anchor, target, x, y, z, sketch_name, entity_index, keypoint, geometry_handle,
-        bbox_target, orient_axis, flip, meta,
+        bbox_target, orient_axis, flip, meta, sketch_component,
     )
+
+
+def _stub_scoped_sketch(monkeypatch, answer):
+    """Point the by-name sketch resolve at a fixed (sketch, refusal) answer. It is reached through
+    _sketch_detail, the home of the 'sketch_component' scope this anchor narrows by."""
+    monkeypatch.setattr(jo._sketch_detail, "scoped_sketch",
+                        lambda design, name, component, input_name="component": answer)
 
 
 class TestGeometryFromArgsValidation:
@@ -72,7 +80,7 @@ class TestGeometryFromArgsValidation:
 
     def test_sketch_line_missing_sketch_errors(self, monkeypatch):
         # sketch_name given, but no such sketch exists -> clear "no sketch named" error.
-        monkeypatch.setattr(jo, "find_sketch", lambda design, name: (None, None))
+        _stub_scoped_sketch(monkeypatch, (None, None))
         g, desc, err = _call(anchor="sketch_line", sketch_name="Ghost")
         assert g is None
         assert "Ghost" in err
@@ -81,10 +89,37 @@ class TestGeometryFromArgsValidation:
         # Several sketches carrying the name is a REFUSAL naming each owning component - calling
         # that "No sketch named 'Shared'" would state the opposite of what the walk read.
         refusal = "2 sketches are named 'Shared' ('Shared' in Root, 'Shared' in Frame)"
-        monkeypatch.setattr(jo, "find_sketch", lambda design, name: (None, refusal))
+        _stub_scoped_sketch(monkeypatch, (None, refusal))
         g, desc, err = _call(anchor="sketch_line", sketch_name="Shared")
         assert g is None
         assert err == refusal and "No sketch named" not in err
+
+    def test_the_sketch_scope_is_declared_on_the_wire_beside_component(self):
+        # the schema is strict, so a handler parameter no property declares is unreachable. Both
+        # scopes are declared, and each keeps its own meaning.
+        sd = load_tool("_sketch_detail")
+        props = jo.tool.input_schema["properties"]
+        assert props["sketch_component"] == sd.component_scope("sketch_component",
+                                                               narrows="sketch_name")[1]
+        # this tool carries a SECOND, differently-scoped component input, so the description has to
+        # name the reference this one narrows rather than the family's generic wording
+        assert "'sketch_name'" in props["sketch_component"]["description"]
+        assert props["sketch_component"] != props["component"]
+
+    def test_the_sketch_scope_is_its_own_input_not_the_receiving_component(self, monkeypatch):
+        # 'component' names the occurrence RECEIVING the joint origin; the sketch the JO anchors on
+        # is narrowed by 'sketch_component'. Borrowing one for the other would resolve the anchor
+        # against the wrong component whenever the two differ.
+        seen = {}
+
+        def _scoped(design, name, component, input_name="component"):
+            seen["component"] = component
+            seen["input_name"] = input_name
+            return None, None
+
+        monkeypatch.setattr(jo._sketch_detail, "scoped_sketch", _scoped)
+        _call(anchor="sketch_line", sketch_name="S", sketch_component="Frame")
+        assert seen == {"component": "Frame", "input_name": "sketch_component"}
 
     def test_sketch_line_index_out_of_range_errors(self, monkeypatch):
         # A sketch exists with 1 line; asking for index 5 must be rejected.
@@ -93,7 +128,7 @@ class TestGeometryFromArgsValidation:
                 sketchLines=SimpleNamespace(count=1)
             )
         )
-        monkeypatch.setattr(jo, "find_sketch", lambda design, name: (one_line, None))
+        _stub_scoped_sketch(monkeypatch, (one_line, None))
         g, desc, err = _call(anchor="sketch_line", sketch_name="S", entity_index=5)
         assert g is None
         assert "out of range" in err
@@ -239,8 +274,12 @@ class _FakeJointOrigins:
 
 
 class _FakeComp:
-    def __init__(self, name="Comp1"):
+    # entityToken, because _common.same_component compares on it: the landed-component read-back
+    # and the active-component disclosure both refuse to claim anything about a pair they cannot
+    # identify. A test that wants that state deletes the attribute.
+    def __init__(self, name="Comp1", token=None):
         self.name = name
+        self.entityToken = token if token is not None else f"TOKEN:{name}"
         self.sketches = _FakeSketches()
         self.xYConstructionPlane = object()
         self.originConstructionPoint = object()     # the stable anchor for anchor=coordinates
@@ -824,7 +863,7 @@ class TestActiveComponentDisclosure:
         # the guard covers coordinates the tool computes; a sketch/geometry anchor carries none, so a
         # moved component still gets its joint origin (the platform decides a cross-component anchor).
         _, sub, _ = _install_with_sub(monkeypatch, transform=_moved(5.0))
-        monkeypatch.setattr(jo, "find_sketch", lambda design, name: (SimpleNamespace(
+        _stub_scoped_sketch(monkeypatch, (SimpleNamespace(
             sketchPoints=SimpleNamespace(count=1, item=lambda i: "PT")), None))
         out = _payload(jo.handler(anchor="sketch_point", sketch_name="S", entity_index=0,
                                   component="Sub:1"))
@@ -869,10 +908,34 @@ class TestActiveComponentDisclosure:
         assert rolled["back"] is True
 
     def test_an_unverifiable_landing_is_disclosed_not_claimed(self, monkeypatch):
-        # parentComponent unreadable: the payload still names the component that was asked for, but
-        # says the landing was not verified rather than implying it was.
+        # parentComponent unreadable - the WEAKER of the two unknowns, because 'component' then
+        # repeats the caller's own ask. The payload must say so in words, not just in a flag: a
+        # reader taking 'component' at face value is reading back the request.
         _, sub, _ = _install_with_sub(monkeypatch)
         sub.jointOrigins.owner = None               # the created JO reports no parentComponent
         out = _payload(jo.handler(anchor="coordinates", target="origin", component="Sub:1"))
         assert out["component"] == "Sub"
         assert out["component_verified"] is False
+        assert "UNVERIFIED" in out["note"]
+        assert "did not read at all" in out["note"]      # names WHICH read failed
+        assert "repeats the requested 'Sub'" in out["note"]
+
+    def test_a_landing_that_cannot_be_MATCHED_is_disclosed_and_not_rolled_back(self, monkeypatch):
+        # The JO's parentComponent READS, but same_component cannot tell it from the requested
+        # component (no token). Rolling back here would delete a created origin over an unreadable
+        # token, so it stands - with component_verified false and a note saying which read failed.
+        _design, sub, _ = _install_with_sub(monkeypatch)
+        rolled = {"back": False}
+        real_add = sub.jointOrigins.add
+
+        def _tokenless_add(jo_input):
+            origin = real_add(jo_input)
+            origin.parentComponent = _FakeComp("Sub", token=None)
+            del origin.parentComponent.entityToken       # nothing identifies it
+            origin.deleteMe = lambda: rolled.__setitem__("back", True) or True
+            return origin
+        monkeypatch.setattr(sub.jointOrigins, "add", _tokenless_add)
+        out = _payload(jo.handler(anchor="coordinates", target="origin", component="Sub:1"))
+        assert out["component_verified"] is False
+        assert "UNVERIFIED" in out["note"]
+        assert rolled["back"] is False               # the created origin was kept

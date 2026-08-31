@@ -10,6 +10,8 @@ tested in test_inputs.py, not here.
 import json
 from types import SimpleNamespace
 
+import adsk.core
+
 from conftest import load_tool
 
 joint = load_tool("joint_create_edit")
@@ -720,8 +722,10 @@ class TestFaceExtentAndPlanar:
         assert joint._face_extent(f, 2) == (0.0, 0.0)
 
     def test_is_planar_true_only_for_surface_type_zero(self):
-        planar = SimpleNamespace(geometry=SimpleNamespace(surfaceType=0))
-        cyl = SimpleNamespace(geometry=SimpleNamespace(surfaceType=3))
+        planar = SimpleNamespace(geometry=SimpleNamespace(
+            surfaceType=adsk.core.SurfaceTypes.PlaneSurfaceType))
+        cyl = SimpleNamespace(geometry=SimpleNamespace(
+            surfaceType=adsk.core.SurfaceTypes.CylinderSurfaceType))
         assert joint._is_planar(planar) is True
         assert joint._is_planar(cyl) is False
 
@@ -1193,7 +1197,9 @@ def _face_bag(items, count=None):
 
 
 def _snap_face(surface_type, *, area=1.0, proxy=None):
-    """One face: its surface type (0 = planar, 3 = cylinder), its area, and what proxying yields."""
+    """One face: its surface type, its area, and what proxying yields. Surface types come from the
+    MEASURED enum (adsk.core.SurfaceTypes) - Cylinder is 1 and 3 is Sphere, so a fake built on a
+    hand-typed 3 describes a sphere and lets a cylinder-picker that never matched look correct."""
     return SimpleNamespace(geometry=SimpleNamespace(surfaceType=surface_type), area=area,
                            createForAssemblyContext=lambda occ, _p=proxy: _p)
 
@@ -1242,12 +1248,32 @@ class TestResolveSnapEntity:
         assert ent is None and err == "'Boom:1' body has no faces."
 
     def test_cylinder_snap_picks_the_cylindrical_face_and_proxies_it(self, monkeypatch):
-        self._wire(monkeypatch, _snap_occurrence(
-            faces=_face_bag([_snap_face(0, proxy="FLAT"), _snap_face(3, proxy="CYL")])))
+        st = adsk.core.SurfaceTypes
+        self._wire(monkeypatch, _snap_occurrence(faces=_face_bag([
+            _snap_face(st.PlaneSurfaceType, proxy="FLAT"),
+            _snap_face(st.CylinderSurfaceType, proxy="CYL")])))
         assert joint._resolve_snap_entity(None, "Boom:1", "cylinder") == ("CYL", "cylinder", None)
 
+    def test_cylinder_snap_takes_a_cone_too(self, monkeypatch):
+        # a tapered pin is round and seats the same way - the pair joint_at_geometry accepts.
+        st = adsk.core.SurfaceTypes
+        self._wire(monkeypatch, _snap_occurrence(faces=_face_bag([
+            _snap_face(st.PlaneSurfaceType, proxy="FLAT"),
+            _snap_face(st.ConeSurfaceType, proxy="CONE")])))
+        assert joint._resolve_snap_entity(None, "Boom:1", "cylinder") == ("CONE", "cylinder", None)
+
+    def test_cylinder_snap_does_not_match_a_sphere(self, monkeypatch):
+        # SphereSurfaceType is 3; a picker hand-typed against that integer matches spheres and
+        # reports every real cylinder as having no cylindrical face.
+        st = adsk.core.SurfaceTypes
+        self._wire(monkeypatch, _snap_occurrence(faces=_face_bag([
+            _snap_face(st.SphereSurfaceType, proxy="BALL")])))
+        ent, kind, err = joint._resolve_snap_entity(None, "Boom:1", "cylinder")
+        assert ent is None and err == "'Boom:1' has no cylindrical face to snap to."
+
     def test_cylinder_snap_on_a_body_with_no_cylinder_is_refused(self, monkeypatch):
-        self._wire(monkeypatch, _snap_occurrence(faces=_face_bag([_snap_face(0)])))
+        self._wire(monkeypatch, _snap_occurrence(
+            faces=_face_bag([_snap_face(adsk.core.SurfaceTypes.PlaneSurfaceType)])))
         ent, kind, err = joint._resolve_snap_entity(None, "Boom:1", "cylinder")
         assert ent is None and err == "'Boom:1' has no cylindrical face to snap to."
 

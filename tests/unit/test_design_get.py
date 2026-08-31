@@ -83,6 +83,23 @@ class TestDefaultSlice:
         out = _payload(dg.handler())
         assert "param_get" in out["pointers"]["parameters"]
 
+    def test_an_unreadable_census_is_said_in_words_as_well_as_in_the_marker(self, monkeypatch,
+                                                                           stub_slices):
+        # The count is absent from contents either way, so an agent reading the default sees the
+        # same shape for "no instances" and "the census failed". The note carries the second case.
+        monkeypatch.setattr(dg, "_fingerprint",
+                            lambda d: {"bodies": 2, "occurrences_walk": "unreadable"})
+        out = _payload(dg.handler())
+        assert "occurrences_walk='unreadable'" in out["note"]
+        assert "UNKNOWN, not because the design holds none" in out["note"]
+
+    def test_a_census_that_was_taken_adds_no_such_sentence(self, monkeypatch, stub_slices):
+        # the sentence is a DISCLOSURE of a hole, not a caption on every read
+        monkeypatch.setattr(dg, "_fingerprint",
+                            lambda d: {"bodies": 2, "occurrences_walk": "recursed"})
+        out = _payload(dg.handler())
+        assert "unreadable" not in out["note"]
+
     def test_default_no_pointers_when_only_obvious_content(self, monkeypatch, stub_slices):
         # stub_slices' fingerprint is bodies+sketches only (obvious), and no CAM -> no pointers block.
         monkeypatch.setattr(dg, "_has_cam", lambda d: False)
@@ -218,6 +235,61 @@ class _OccColl:
         return iter(self._items)
 
 
+class _PlainColl:
+    """A counted collection that also hands its items back by index - what the occurrence census
+    walks when it cannot use allOccurrences."""
+    def __init__(self, items=()):
+        self._items = list(items)
+        self.count = len(self._items)
+
+    def item(self, i):
+        return self._items[i]
+
+
+class _BlindRoot:
+    """A root whose occurrence census cannot be taken AT ALL: reading allOccurrences RAISES (the
+    measured unresolved-external-reference state) and the component-local `occurrences` fallback
+    raises with it. The state that must reach the wire as UNKNOWN, never as zero."""
+    def __init__(self, joints=0, asbuilt=0):
+        from types import SimpleNamespace
+        c = lambda n: SimpleNamespace(count=n)
+        self.name = "Root"
+        self.bRepBodies = c(0)
+        self.sketches = c(0)
+        self.joints = c(joints)
+        self.asBuiltJoints = c(asbuilt)
+
+    @property
+    def allOccurrences(self):
+        raise RuntimeError("2 : InternalValidationError : occ")
+
+    @property
+    def occurrences(self):
+        raise RuntimeError("2 : InternalValidationError : occ")
+
+
+class _RecursedRoot(_BlindRoot):
+    """allOccurrences raises, but the component-local `occurrences` still enumerates - so the census
+    IS taken, by the fallback walk, and the count it reports is real."""
+    def __init__(self, n=2, **kw):
+        super().__init__(**kw)
+        from types import SimpleNamespace
+        self._kids = [SimpleNamespace(
+            name=f"C{i}:1", fullPathName=f"C{i}:1", childOccurrences=_PlainColl(),
+            component=SimpleNamespace(name=f"C{i}", occurrences=_PlainColl())) for i in range(n)]
+
+    @property
+    def occurrences(self):
+        return _PlainColl(self._kids)
+
+
+def _design_around(root):
+    """A design whose only content is `root` - the shape `_fingerprint` reads its counts off."""
+    from types import SimpleNamespace
+    return SimpleNamespace(rootComponent=root, userParameters=SimpleNamespace(count=0),
+                           allComponents=_PlainColl([root]))
+
+
 class TestFingerprint:
     """The content fingerprint (`_fingerprint`) - the 'what IS this model' counts in the default slice."""
 
@@ -250,7 +322,27 @@ class TestFingerprint:
 
     def test_zero_counts_omitted(self):
         fp = dg._fingerprint(self._design(bodies=1, defs=1))     # root is the only definition
-        assert fp == {"bodies": 1}                 # no joints/sketches/components/parameters when zero
+        # no joints/sketches/components/parameters when zero; the census marker rides beside them,
+        # since it is what says whether an ABSENT count was counted or never read
+        assert fp == {"bodies": 1, "occurrences_walk": "allOccurrences"}
+
+    def test_an_unreadable_census_is_distinguishable_from_a_design_with_no_instances(self):
+        # The truthy filter drops 'occurrences' for BOTH reads - a design holding no placed instance
+        # (total 0) and one whose census could not be taken (total None) - so the missing key alone
+        # reports a hole in the read as a single-component design. occurrences_walk is what tells
+        # them apart on the wire.
+        empty = dg._fingerprint(self._design(bodies=1))
+        blind = dg._fingerprint(_design_around(_BlindRoot()))
+        assert "occurrences" not in empty and "occurrences" not in blind
+        assert empty["occurrences_walk"] == "allOccurrences"
+        assert blind["occurrences_walk"] == "unreadable"
+
+    def test_the_fallback_walk_reports_a_real_count_and_names_itself(self):
+        # allOccurrences raising is not the census failing: the component-local recursion answers,
+        # so the count is real - and the marker still says which walk produced it, because a
+        # recursed census is not the same evidence as the fast one.
+        fp = dg._fingerprint(_design_around(_RecursedRoot(n=2)))
+        assert fp["occurrences"] == 2 and fp["occurrences_walk"] == "recursed"
 
     def test_components_counts_definitions_not_instances(self):
         # a component instanced 5 times is ONE definition: 'components' counts definitions, and

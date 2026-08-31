@@ -101,17 +101,20 @@ def handler(target: str = "", tools=None, operation: str = "join",
     if lerr:
         return error(lerr)
 
-    # same-body guard: compared by _common.native_token, never by Python identity alone - the API
+    # same-body guard: compared by _common.native_identity, never by Python identity alone - the API
     # mints a FRESH wrapper per access (live-measured on face.body/edge.body), so `is` can read False
-    # for two references to the same physical body and the guard would never fire. The NATIVE token,
-    # because the target and a tool can name one body through DIFFERENT wrappers ('Jaw' - a
+    # for two references to the same physical body and the guard would never fire. The NATIVE half of
+    # that key, because the target and a tool can name one body through DIFFERENT wrappers ('Jaw' - a
     # single-body COMPONENT name - resolving to the native, 'Pin' / 'Jaw:1:Pin' to that occurrence's
-    # proxy), whose own tokens differ - in either direction. Same shape as mesh_combine's guard.
-    tgt_token = _common.native_token(tgt)
+    # proxy), whose own tokens differ - in either direction. The SOURCE-DOCUMENT half, because a
+    # token is document-local: two bodies reached through two x-refs answer one token (measured), and
+    # keyed on that alone this guard REFUSES a legitimate combine of two distinct bodies. Same shape
+    # as mesh_combine's guard.
+    tgt_key = _common.native_identity(tgt)
     coll = adsk.core.ObjectCollection.create()
     for b in tool_bodies:
-        b_token = _common.native_token(b)
-        if b is tgt or (tgt_token and b_token and b_token == tgt_token):
+        b_key = _common.native_identity(b)
+        if b is tgt or (tgt_key and b_key and b_key == tgt_key):
             return error("A tool body is the same as the target - pick distinct bodies.")
         coll.add(b)
     if coll.count == 0:

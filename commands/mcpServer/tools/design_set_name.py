@@ -79,10 +79,22 @@ def handler(target: str = "", new_name: str = "") -> dict:
     # caught, so it must never be attempted. same_component, never `is`: component identity is
     # measured NEVER stable (root is design.rootComponent reads False), so an identity check would
     # silently never fire.
-    if kind == "component" and _common.same_component(entity, safe(lambda: design.rootComponent)):
-        return error(f"'{safe(lambda: entity.name)}' is the ROOT component and Fusion refuses to "
-                     "rename it ('root component name cannot be changed') - its name IS the document "
-                     "name. Rename the document instead (doc_save_as), or target a body/sub-component.")
+    if kind == "component":
+        is_root = _common.same_component(entity, safe(lambda: design.rootComponent))
+        if is_root is True:
+            return error(f"'{safe(lambda: entity.name)}' is the ROOT component and Fusion refuses to "
+                         "rename it ('root component name cannot be changed') - its name IS the "
+                         "document name. Rename the document instead (doc_save_as), or target a "
+                         "body/sub-component.")
+        if is_root is None:
+            # The guard exists because the platform's refusal aborts the enclosing transaction even
+            # when caught, so an unproven not-root cannot be attempted: the rename is refused here
+            # instead of risking that abort.
+            return error(f"Whether '{addressed}' is this design's ROOT component could not be read, "
+                         "and the platform's refusal to rename the root aborts the enclosing "
+                         "transaction even when it is caught - so this rename was not attempted. "
+                         "Target a body or a sub-component by name, or rename the document with "
+                         "doc_save_as.")
 
     previous = safe(lambda: entity.name)
     instances = _instances_of(design, entity) if kind == "component" else []

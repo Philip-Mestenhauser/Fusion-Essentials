@@ -275,6 +275,136 @@ ROWS = [
 """,
     },
     {
+        "id": "asbuilt-rigidgroup-health-via-timeline",
+        "claim": ("AsBuiltJoint and RigidGroup raise AttributeError on BOTH healthState and "
+                  "errorOrWarningMessage while each one's timelineObject answers both - health "
+                  "for these two types is readable only through the timeline item"),
+        "encoded_in": ("_assert.py compute_state / compute_failure safe-guarded entity reads; "
+                       "tests/unit/test_assembly_get.py TimelineObject-answers comment; "
+                       "tests/unit/test_assembly_joints_advanced.py poison-read comment"),
+        "body": """
+    root = des.rootComponent
+    tr = adsk.core.Matrix3D.create()
+    occs = []
+    for nm in ("HlA", "HlB", "HlC", "HlD"):
+        occ = root.occurrences.addNewComponent(tr)
+        c = occ.component
+        c.name = nm
+        sk = c.sketches.add(c.xYConstructionPlane)
+        sk.sketchCurves.sketchCircles.addByCenterRadius(
+            adsk.core.Point3D.create(0.0, 0.0, 0.0), 0.5)
+        c.features.extrudeFeatures.addSimple(
+            sk.profiles.item(0), adsk.core.ValueInput.createByReal(0.5),
+            adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+        occs.append(occ)
+    geo = adsk.fusion.JointGeometry.createByPoint(
+        occs[1].component.originConstructionPoint.createForAssemblyContext(occs[1]))
+    ji = root.asBuiltJoints.createInput(occs[0], occs[1], geo)
+    ji.setAsRevoluteJointMotion(adsk.fusion.JointDirections.ZAxisJointDirection)
+    abj = root.asBuiltJoints.add(ji)
+    # The rigid group takes the OTHER pair: grouping the jointed pair raises
+    # "A joint in system exists for the provided input. System will be over constrained".
+    coll = adsk.core.ObjectCollection.create()
+    coll.add(occs[2])
+    coll.add(occs[3])
+    rg = root.rigidGroups.add(coll, True)
+    def health_probe(ent):
+        raises = 0
+        for attr in ("healthState", "errorOrWarningMessage"):
+            try:
+                getattr(ent, attr)
+            except AttributeError:
+                raises += 1
+        t = ent.timelineObject
+        hs = t.healthState
+        msg = t.errorOrWarningMessage
+        return raises, isinstance(hs, int) and not isinstance(hs, bool), isinstance(msg, str)
+    j_raises, j_hs, j_msg = health_probe(abj)
+    g_raises, g_hs, g_msg = health_probe(rg)
+    emit(j_raises == 2 and g_raises == 2 and j_hs and j_msg and g_hs and g_msg,
+         "asbuilt-rigidgroup-health-via-timeline: asbuilt raises=" + str(j_raises)
+         + "/2 timeline hs_int=" + str(j_hs) + " msg_str=" + str(j_msg)
+         + "; rigidgroup raises=" + str(g_raises) + "/2 timeline hs_int="
+         + str(g_hs) + " msg_str=" + str(g_msg))
+""",
+    },
+    {
+        "id": "evaluateexpression-returns-internal-cm",
+        "claim": ("UnitsManager.evaluateExpression returns the value in INTERNAL units (cm) "
+                  "regardless of the units argument - that argument only names the unit a BARE "
+                  "number in the expression is read in, never the output unit"),
+        "encoded_in": ("_inputs.length_value_input value_cm (the read-back compare's unit "
+                       "convention); tests/unit/test_inputs.py + test_model_fillet_chamfer.py "
+                       "expression fakes, which answer in cm"),
+        "body": """
+    um = des.unitsManager
+    a = um.evaluateExpression("13 mm", "mm")
+    b = um.evaluateExpression("1 cm", "mm")
+    c = um.evaluateExpression("2", "mm")
+    emit(abs(a - 1.3) < 1e-9 and abs(b - 1.0) < 1e-9 and abs(c - 0.2) < 1e-9,
+         "evaluateexpression-returns-internal-cm: '13 mm'->" + str(a) + " (expect 1.3) '1 cm'->"
+         + str(b) + " (expect 1.0) bare '2' under a mm units arg->" + str(c) + " (expect 0.2)")
+""",
+    },
+    {
+        "id": "extrude-extent-distance-reads-requested-cm",
+        "claim": ("An extrude's extentOne.distance.value reads back the REQUESTED distance in "
+                  "internal cm across the extent forms model_extrude sets: symmetric+taper "
+                  "(SymmetricExtentDefinition, the per-side number), one-sided+taper, two_side "
+                  "(extentOne carries side one, extentTwo side two, both positive, no swap), a "
+                  "cut that bottoms out inside its target (the requested value, never clipped), "
+                  "and a NEGATIVE distance (the requested SIGN kept, -15 mm reads -1.5)"),
+        "encoded_in": ("model_extrude's distance read-back compare (want_distance_cm vs "
+                       "extentOne.distance.value); surface_create._landed_depth, the same contract"),
+        "need_box": True,
+        "body": """
+    root = des.rootComponent
+    feats = root.features.extrudeFeatures
+    F = adsk.fusion.FeatureOperations
+    V = adsk.core.ValueInput
+    def profile_at(cx):
+        sk = root.sketches.add(root.xYConstructionPlane)
+        sk.sketchCurves.sketchCircles.addByCenterRadius(
+            adsk.core.Point3D.create(cx, 0.0, 0.0), 0.4)
+        return sk.profiles.item(0)
+    i1 = feats.createInput(profile_at(3.0), F.NewBodyFeatureOperation)
+    i1.setSymmetricExtent(V.createByReal(1.0), False, V.createByString("3 deg"))
+    f1 = feats.add(i1)
+    sym_type = type(f1.extentOne).__name__
+    sym_v = f1.extentOne.distance.value
+    i2 = feats.createInput(profile_at(6.0), F.NewBodyFeatureOperation)
+    i2.setOneSideExtent(adsk.fusion.DistanceExtentDefinition.create(V.createByReal(1.0)),
+                        adsk.fusion.ExtentDirections.PositiveExtentDirection,
+                        V.createByString("3 deg"))
+    f2 = feats.add(i2)
+    one_v = f2.extentOne.distance.value
+    i3 = feats.createInput(profile_at(9.0), F.NewBodyFeatureOperation)
+    i3.setTwoSidesDistanceExtent(V.createByReal(1.0), V.createByReal(0.5))
+    f3 = feats.add(i3)
+    two_a = f3.extentOne.distance.value
+    two_b = f3.extentTwo.distance.value
+    skc = root.sketches.add(root.xYConstructionPlane)
+    skc.sketchCurves.sketchCircles.addByCenterRadius(
+        adsk.core.Point3D.create(0.5, 0.5, 0.0), 0.2)
+    i4 = feats.createInput(skc.profiles.item(0), F.CutFeatureOperation)
+    i4.setDistanceExtent(False, V.createByReal(0.3))
+    f4 = feats.add(i4)
+    cut_v = f4.extentOne.distance.value
+    i5 = feats.createInput(profile_at(12.0), F.NewBodyFeatureOperation)
+    i5.setDistanceExtent(False, V.createByReal(-1.5))
+    f5 = feats.add(i5)
+    neg_v = f5.extentOne.distance.value
+    ok_all = (sym_type == "SymmetricExtentDefinition" and abs(sym_v - 1.0) < 1e-9
+              and abs(one_v - 1.0) < 1e-9 and abs(two_a - 1.0) < 1e-9
+              and abs(two_b - 0.5) < 1e-9 and abs(cut_v - 0.3) < 1e-9
+              and abs(neg_v + 1.5) < 1e-9)
+    emit(ok_all, "extrude-extent-distance-reads-requested-cm: sym(" + sym_type + ")="
+         + str(sym_v) + " oneT=" + str(one_v) + " two=" + str(two_a) + "/" + str(two_b)
+         + " cut_into_box=" + str(cut_v) + " neg=" + str(neg_v)
+         + " (expect 1.0 / 1.0 / 1.0,0.5 / 0.3 / -1.5)")
+""",
+    },
+    {
         "id": "joint-drive-moves-occurrence-one",
         "claim": ("Driving an as-built slider displaces occurrenceONE: with occurrenceTwo locked to "
                   "its parent, occurrenceOne's transform2 translation moves by +the commanded value "
@@ -621,6 +751,106 @@ ROWS = [
 """,
     },
     {
+        "id": "camera-viewextents-is-linear-not-area",
+        "claim": "Camera.viewExtents is a LINEAR extent, not an area: with the LIMITING screen axis held fixed, a model N times taller fits to a value ~N times larger, not ~N squared. The SDK words it 'the area of the view', which is why this is measured rather than read",
+        "encoded_in": "view_set.py _frame_ratio (the ratio multiplies viewExtents unsquared) and its point-of-use comment; view_screenshot.py's zoom, which scales the same property; test_view_set.py TestFocusFraming ratio expectations",
+        "facts_on_pass": {"behavior.camera_view_extents_is_linear": True},
+        "body": """
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        des = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        root = des.rootComponent
+        vp = app.activeViewport
+
+        # A 1 cm square post of a given height. Growing only the HEIGHT, on a front camera, on a
+        # viewport wider than it is tall, keeps BOTH fits limited by the same screen axis - which
+        # is the whole point: a first attempt at this row left the camera wherever the document had
+        # it, so an iso-ish view spread the growth across both screen axes and the ratio came back
+        # 5.22, neither linear (10.98) nor area (120.6). A ratio is only meaningful between two fits
+        # limited by the SAME axis (which the sibling row measures).
+        def post(height):
+            sk = root.sketches.add(root.xYConstructionPlane)
+            sk.sketchCurves.sketchLines.addTwoPointRectangle(
+                adsk.core.Point3D.create(0.0, 0.0, 0.0), adsk.core.Point3D.create(1.0, 1.0, 0.0))
+            root.features.extrudeFeatures.addSimple(
+                sk.profiles.item(0), adsk.core.ValueInput.createByReal(height),
+                adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+
+        def spans():
+            bb = root.boundingBox
+            return (bb.maxPoint.x - bb.minPoint.x, bb.maxPoint.z - bb.minPoint.z,
+                    (bb.maxPoint.z + bb.minPoint.z) / 2.0)
+
+        def fit_front():
+            across, up, mid = spans()
+            cam = vp.camera                      # front: x across the screen, z up it
+            cam.upVector = adsk.core.Vector3D.create(0.0, 0.0, 1.0)
+            cam.target = adsk.core.Point3D.create(0.5, 0.0, mid)
+            cam.eye = adsk.core.Point3D.create(0.5, -100.0, mid)
+            cam.isFitView = True
+            vp.camera = cam
+            return vp.camera.viewExtents
+
+        post(2.0)
+        w0, h0, _ = spans()
+        e0 = fit_front()
+        post(20.0)                               # same 1 cm footprint, ten times taller
+        w1, h1, _ = spans()
+        e1 = fit_front()
+        aspect = float(vp.width) / vp.height
+        model_ratio = h1 / h0
+        ext_ratio = e1 / e0
+        # both fits must be HEIGHT-limited or the comparison is meaningless - assert it, do not
+        # assume it, since that assumption is exactly what the first version of this row got wrong
+        height_limited = (w0 / h0) < aspect and (w1 / h1) < aspect
+        emit(height_limited and abs(ext_ratio - model_ratio) < model_ratio * 0.2,
+             "camera-viewextents-is-linear-not-area: height " + ("%.3f" % h0) + "->" + ("%.3f" % h1)
+             + " (x" + ("%.2f" % model_ratio) + ") extents " + ("%.3f" % e0) + "->" + ("%.3f" % e1)
+             + " (x" + ("%.2f" % ext_ratio) + ") area_would_be x"
+             + ("%.1f" % (model_ratio * model_ratio))
+             + " height_limited=" + repr(height_limited) + " aspect=" + ("%.3f" % aspect))
+    finally:
+        tmp.close(False)
+""",
+    },
+    {
+        "id": "camera-viewextents-follows-limiting-axis",
+        "claim": "Camera.viewExtents after a fit tracks whichever SCREEN AXIS limited that fit - the height for a tall model, the width for a wide one - so it is not the view width and a framing ratio cannot be taken against a world box's own spans",
+        "encoded_in": "view_set.py _frame_ratio, which reconstructs the FRAME from the viewport aspect (vp.width/vp.height) instead of dividing by the world box; test_view_set.py test_a_flat_world_is_measured_against_the_frame_not_its_own_height",
+        "facts_on_pass": {"behavior.camera_view_extents_follows_limiting_axis": True},
+        "body": """
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        des = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        root = des.rootComponent
+        vp = app.activeViewport
+        # a tall, thin post: 1 cm across, 10 cm up - so the FIT is limited by the height, and a
+        # value that tracked the width could not possibly hold the model
+        sk = root.sketches.add(root.xYConstructionPlane)
+        sk.sketchCurves.sketchLines.addTwoPointRectangle(
+            adsk.core.Point3D.create(0.0, 0.0, 0.0), adsk.core.Point3D.create(1.0, 1.0, 0.0))
+        root.features.extrudeFeatures.addSimple(
+            sk.profiles.item(0), adsk.core.ValueInput.createByReal(10.0),
+            adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+        cam = vp.camera                       # front: x runs across the screen, z up it
+        cam.eye = adsk.core.Point3D.create(0.5, -50.0, 5.0)
+        cam.target = adsk.core.Point3D.create(0.5, 0.0, 5.0)
+        cam.upVector = adsk.core.Vector3D.create(0.0, 0.0, 1.0)
+        cam.isFitView = True
+        vp.camera = cam
+        ext = vp.camera.viewExtents
+        bb = root.boundingBox
+        across = bb.maxPoint.x - bb.minPoint.x
+        up = bb.maxPoint.z - bb.minPoint.z
+        emit(abs(ext - up) < up * 0.3 and ext > across * 2.0,
+             "camera-viewextents-follows-limiting-axis: across=" + ("%.3f" % across)
+             + " up=" + ("%.3f" % up) + " extents=" + ("%.3f" % ext)
+             + " (tracks the taller axis, not the width)")
+    finally:
+        tmp.close(False)
+""",
+    },
+    {
         "id": "meshbody-volume-open-returns-zero",
         "claim": "MeshBody.volume on a mesh that is NOT closed RETURNS 0.0 - it does not raise; a null volume in a payload therefore means the field could not be read at all, never 'the mesh is open'",
         "encoded_in": "mesh_ops.py _mesh_summary/mesh_get note+description; mesh_shell.py _closed (the reason the closure flag is sampled at both ends); tests/conftest.py's shared MeshBody fake, which reads this BEHAVIOR flag rather than hard-coding it; test_mesh_ops.py's own MeshBody",
@@ -735,6 +965,70 @@ ROWS = [
          and T.GenericFFF == 6,
          "enum-cam-machine-template: " + str(len(members)) + " members lathe="
          + str(T.GenericLathe) + " fff=" + str(T.GenericFFF))
+""",
+    },
+    {
+        "id": "enum-distance-units-collides-with-factory",
+        "claim": "DistanceUnits.MillimeterDistanceUnits == 0 AND a freshly created STLExportOptions reads unitType == 0 - the mm member IS the factory value, so a set-then-read-back of unitType cannot tell an assignment that took from one that never happened, and only for that member. What the file is actually written in is a SEPARATE row this one asserts nothing about: stl-export-unittype-is-sticky-session-state (this body creates an options object and never exports). The automatic enum sweep cannot see this family - its name ends in none of the ...Types/...States/...Modes suffixes the scrape matches - so it is pinned here or nowhere",
+        "encoded_in": "_export.py STL_UNIT_MEMBERS + applied_pair (the pre-read this collision forces); mesh_export.py _apply_stl_units; design_export.py _configure_export_options; tests/unit/test_mesh_export.py + test_design_export.py collision fakes",
+        "body": """
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        des = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        root = des.rootComponent
+        U = adsk.fusion.DistanceUnits
+        dump_enum("fusion.DistanceUnits", U)
+        # An options object needs real geometry to be created against; 1 cm cube, never exported.
+        sk = root.sketches.add(root.xYConstructionPlane)
+        sk.sketchCurves.sketchLines.addTwoPointRectangle(
+            adsk.core.Point3D.create(0.0, 0.0, 0.0), adsk.core.Point3D.create(1.0, 1.0, 0.0))
+        root.features.extrudeFeatures.addSimple(
+            sk.profiles.item(0), adsk.core.ValueInput.createByReal(1.0),
+            adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+        # createSTLExportOptions validates the DIRECTORY at creation (a bare filename raises
+        # "3 : The selected folder does not exist"), so the path must sit in a real folder.
+        import os, tempfile
+        opts = des.exportManager.createSTLExportOptions(
+            root, os.path.join(tempfile.gettempdir(), "unused_measure_units.stl"))
+        factory = opts.unitType
+        emit(U.MillimeterDistanceUnits == 0 and factory == U.MillimeterDistanceUnits
+             and factory != U.InchDistanceUnits,
+             "enum-distance-units-collides-with-factory: mm=" + str(U.MillimeterDistanceUnits)
+             + " in=" + str(U.InchDistanceUnits)
+             + " factory unitType=" + str(factory))
+    finally:
+        tmp.close(False)
+""",
+    },
+    {
+        "id": "enum-mesh-refinement-collides-with-factory",
+        "claim": "MeshRefinementSettings.MeshRefinementMedium == 1 AND a freshly created STLExportOptions reads meshRefinement == 1 - the MEDIUM member is the factory value, and medium is mesh_export's DEFAULT refinement, so a set-then-read-back cannot bite on the most-travelled request. MeshRefinementHigh == 0 is a FALSY member, so a `not member` guard rejects the highest density. Unlike unitType this read DOES determine the written file (measured on STL and OBJ: untouched and explicit-medium byte-identical and reproducible, high and low each distinct), which is why refinement publishes no verification flag. The automatic enum sweep cannot see this family - its name ends in none of the suffixes the scrape matches - so it is pinned here or nowhere",
+        "encoded_in": "mesh_export.py _REFINEMENTS + _apply_refinement (which drops the pair's 'changed' half on the strength of this); _export.py applied_pair's per-knob note; tests/unit/test_mesh_export.py _refine_member",
+        "body": """
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        des = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        root = des.rootComponent
+        R = adsk.fusion.MeshRefinementSettings
+        dump_enum("fusion.MeshRefinementSettings", R)
+        sk = root.sketches.add(root.xYConstructionPlane)
+        sk.sketchCurves.sketchLines.addTwoPointRectangle(
+            adsk.core.Point3D.create(0.0, 0.0, 0.0), adsk.core.Point3D.create(1.0, 1.0, 0.0))
+        root.features.extrudeFeatures.addSimple(
+            sk.profiles.item(0), adsk.core.ValueInput.createByReal(1.0),
+            adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+        import os, tempfile
+        opts = des.exportManager.createSTLExportOptions(
+            root, os.path.join(tempfile.gettempdir(), "unused_measure_refinement.stl"))
+        factory = opts.meshRefinement
+        emit(R.MeshRefinementMedium == 1 and R.MeshRefinementHigh == 0
+             and factory == R.MeshRefinementMedium,
+             "enum-mesh-refinement-collides-with-factory: medium="
+             + str(R.MeshRefinementMedium) + " high=" + str(R.MeshRefinementHigh)
+             + " low=" + str(R.MeshRefinementLow)
+             + " factory meshRefinement=" + str(factory))
+    finally:
+        tmp.close(False)
 """,
     },
     {
@@ -960,6 +1254,7 @@ ROWS = [
     counts.append(dump_shape("Occurrence", occ))
     counts.append(dump_shape("Vector3D", adsk.core.Vector3D.create(1.0, 0.0, 0.0)))
     counts.append(dump_shape("Point3D", adsk.core.Point3D.create(0.0, 0.0, 0.0)))
+    counts.append(dump_shape("Matrix3D", adsk.core.Matrix3D.create()))
     counts.append(dump_shape("BoundingBox3D", body.boundingBox))
     counts.append(dump_shape("ObjectCollection", adsk.core.ObjectCollection.create()))
     vp = app.activeViewport
@@ -984,8 +1279,353 @@ ROWS = [
     counts.append(dump_shape("Cone", adsk.core.Cone.create(
         adsk.core.Point3D.create(0.0, 0.0, 0.0), adsk.core.Vector3D.create(0.0, 0.0, 1.0),
         0.5, 0.3)))
-    emit(len(counts) == 20 and all(c > 0 for c in counts),
+    emit(len(counts) == 21 and all(c > 0 for c in counts),
          "shape-dump-design-world: " + str(len(counts)) + " types, min attrs " + str(min(counts)))
+""",
+    },
+    {
+        "id": "matrix3d-invert-singular-answers-true-and-corrupts",
+        "claim": ("Matrix3D.invert() on a SINGULAR matrix returns True and leaves the matrix "
+                  "corrupted (nan/inf entries) - the False return every careful caller gates on "
+                  "is a decline the singular case never produces, so the gate is defensive, not "
+                  "a singularity detector; rigid occurrence transforms cannot be singular, which "
+                  "is why the callers' math stays sound"),
+        "encoded_in": ("model_inspect._measuring_axes and model_hole._world_lift invert() gates; "
+                       "tests/conftest.py FakeMatrix3D invertible=False contract"),
+        "body": """
+    import math
+    m = adsk.core.Matrix3D.create()
+    ok_set = m.setWithArray([1.0, 0.0, 0.0, 2.0,
+                             0.0, 1.0, 0.0, 3.0,
+                             0.0, 0.0, 0.0, 1.0,
+                             0.0, 0.0, 0.0, 1.0])
+    before = list(m.asArray())
+    r = m.invert()
+    after = list(m.asArray())
+    corrupted = (before != after) and any(
+        (isinstance(v, float) and (math.isnan(v) or math.isinf(v))) for v in after)
+    emit(bool(ok_set) and r is True and corrupted,
+         "matrix3d-invert-singular-answers-true-and-corrupts: setWithArray=" + str(ok_set)
+         + " invert_returned=" + str(r) + " corrupted_to_nan_inf=" + str(corrupted))
+""",
+    },
+    {
+        "id": "closed-document-wrapper-reads",
+        "claim": ("Two never-saved documents both answer name 'Untitled' (nothing disambiguates "
+                  "them), their root components answer BYTE-IDENTICAL entityTokens, and Document "
+                  "itself exposes no entityToken; a CLOSED document's held wrapper still reads "
+                  "isValid False and compares == False against a live document without raising - "
+                  "the exact reads _write_guard.document_key prunes and matches by"),
+        "encoded_in": ("_write_guard.py document_key / prune_closed_documents docstrings; "
+                       "tests/unit/test_view_set.py _DocWrapper + _SHARED_ROOT_TOKEN; "
+                       "cam_generate.py same-name wire note"),
+        "body": """
+    DT = adsk.core.DocumentTypes.FusionDesignDocumentType
+    d1 = app.documents.add(DT)
+    d2 = app.documents.add(DT)
+    try:
+        same_name = (d1.name == d2.name)
+        t1 = adsk.fusion.FusionDocument.cast(d1).design.rootComponent.entityToken
+        t2 = adsk.fusion.FusionDocument.cast(d2).design.rootComponent.entityToken
+        no_ent = not hasattr(d1, "entityToken")
+        d1.close(False)
+        v = d1.isValid
+        eq = (d1 == app.activeDocument)
+        emit(same_name and t1 == t2 and no_ent and v is False and eq is False,
+             "closed-document-wrapper-reads: names_same=" + str(same_name)
+             + " root_tokens_identical=" + str(t1 == t2) + " token=" + repr(t1)
+             + " document_has_entityToken=" + str(not no_ent)
+             + " closed_isValid=" + repr(v) + " closed_eq_active=" + repr(eq))
+    finally:
+        try:
+            d2.close(False)
+        except Exception:
+            pass
+""",
+    },
+    {
+        "id": "closed-document-name-raises",
+        "claim": ("Reading .name on a CLOSED document's held wrapper raises RuntimeError "
+                  "'An API Object refers to a deleted Object' - and the raise can escape "
+                  "try/except and abort the script (catchability varies by session)"),
+        "encoded_in": ("_write_guard.py name-read comment in document_key; "
+                       "tests/unit/test_view_set.py _DocWrapper raises contract"),
+        "expect": "raise_or_abort",
+        "body": """
+    DT = adsk.core.DocumentTypes.FusionDesignDocumentType
+    d1 = app.documents.add(DT)
+    d1.close(False)
+    try:
+        n = d1.name
+        emit(False, "closed-document-name-raises: answered " + repr(n) + " with no raise")
+    except Exception as e:
+        emit(type(e).__name__ == "RuntimeError" and "deleted Object" in str(e),
+             "closed-document-name-raises: raised catchably " + type(e).__name__
+             + ": " + str(e)[:60])
+""",
+    },
+    {
+        "id": "sketchtext-heightparameter-settable-geometry-follows",
+        "claim": ("SketchText.heightParameter.value accepts a WRITE (0.8 set to 0.4 reads back "
+                  "0.4) and the glyph geometry FOLLOWS proportionally (the boundingBox width "
+                  "halves with the height) - so an edit-path resize / fit-to-width is "
+                  "measure-and-rescale on the live text, not a delete-and-recreate"),
+        "encoded_in": ("sketch_set_text's edit path (the _CREATE_ONLY contract this measurement "
+                       "unblocks rewording); _sketch_detail's heightParameter read"),
+        "body": """
+    root = des.rootComponent
+    sk = root.sketches.add(root.xYConstructionPlane)
+    ipt = sk.sketchTexts.createInput2("Fit Me", 0.8)
+    placed = ipt.setAsMultiLine(
+        adsk.core.Point3D.create(0.0, 0.0, 0.0),
+        adsk.core.Point3D.create(4.8, 0.8, 0.0),
+        adsk.core.HorizontalAlignments.LeftHorizontalAlignment,
+        adsk.core.VerticalAlignments.BottomVerticalAlignment, 0)
+    st = sk.sketchTexts.add(ipt)
+    w_before = st.boundingBox.maxPoint.x - st.boundingBox.minPoint.x
+    st.heightParameter.value = 0.4
+    v = st.heightParameter.value
+    w_after = st.boundingBox.maxPoint.x - st.boundingBox.minPoint.x
+    ratio = (w_after / w_before) if w_before else 0.0
+    emit(bool(placed) and abs(v - 0.4) < 1e-9 and abs(ratio - 0.5) < 0.02,
+         "sketchtext-heightparameter-settable-geometry-follows: height 0.8->set 0.4 reads "
+         + str(v) + " width " + str(round(w_before, 4)) + "->" + str(round(w_after, 4))
+         + " ratio " + str(round(ratio, 4)) + " (expect ~0.5)")
+""",
+    },
+    {
+        "id": "stl-export-unittype-is-sticky-session-state",
+        "claim": ("The unit an STL export lands in is STICKY SESSION STATE, not a property of the "
+                  "document and not readable anywhere: an export that leaves unitType UNTOUCHED "
+                  "writes the unit of the LAST EXPLICIT unitType assignment made in the Fusion "
+                  "session, and that carries ACROSS DOCUMENTS (a brand-new document inherits it). "
+                  "unitType reads 0 BEFORE every assignment regardless of what the file will be "
+                  "written in, so no read of a fresh options object names the unit. The read-BACK "
+                  "after an assignment is a different read and it DOES return the assigned member "
+                  "(inch reads 3, cm reads 1), which is what makes applied_pair's post-read gate "
+                  "able to confirm a non-mm request - only the mm member collides with the "
+                  "factory 0. NOT measured by this row's legs, and recorded as an OBSERVATION "
+                  "rather than an assertion, because a script cannot restart Fusion to test it: "
+                  "the value read mm on the first export after a restart, which is how this "
+                  "masquerades as 'the document's units' or as a fixed inch default depending on "
+                  "what ran earlier in the session. Measured on a 1 cm cube: explicit "
+                  "mm -> 10.0, untouched after it -> 10.0, explicit inch -> 0.393701, untouched "
+                  "after it -> 0.393701. Both files are the same BYTE LENGTH (a binary STL of a "
+                  "fixed triangle count always is), so a size comparison cannot tell them apart "
+                  "while every coordinate differs by 25.4x. Consequence: a writer that does not "
+                  "SET unitType inherits the unit from an unrelated earlier export"),
+        "encoded_in": ("_export.STL_UNIT_MEMBERS / stl_unit_enum and every STL writer that bakes "
+                       "unitType; mesh_export's stl_units note"),
+        "need_box": True,
+        "body": """
+    import struct, tempfile, os
+    um = des.unitsManager
+    em = des.exportManager
+    mm = um.convert(1.0, "cm", "mm")
+    inch = um.convert(1.0, "cm", "in")
+
+    # Every leg SETS before it observes, so the row proves the stickiness rather than inheriting
+    # it: a row that merely read the untouched export would report whatever an earlier export in
+    # this Fusion session happened to leave behind, and would pass or fail by luck of ordering.
+    # Both reads are captured because they answer DIFFERENT questions: the read on a fresh options
+    # object never names the unit the file will get, while the read-BACK after an assignment does
+    # return the member assigned - which is what lets applied_pair's post-read gate confirm a
+    # non-mm request. Reporting only the first would read as a claim about both.
+    backreads = []
+
+    def leg(label, unit_member):
+        p = os.path.join(tempfile.gettempdir(), "measure_sticky_" + label + ".stl")
+        o = em.createSTLExportOptions(body, p)
+        try:
+            r = o.unitType
+        except Exception as exc:
+            r = "unreadable(" + type(exc).__name__ + ")"
+        if unit_member is not None:
+            o.unitType = unit_member
+            backreads.append((label, unit_member, safe_read(o)))
+        em.execute(o)
+        raw = open(p, "rb").read()
+        os.remove(p)
+        tris = struct.unpack("<I", raw[80:84])[0]
+        big = 0.0
+        pos = 84
+        for _ in range(tris):
+            vals = struct.unpack("<12fH", raw[pos:pos+50])
+            pos += 50
+            for v in vals[3:12]:
+                if abs(v) > big:
+                    big = abs(v)
+        return r, big, len(raw)
+
+    def safe_read(o):
+        try:
+            return o.unitType
+        except Exception as exc:
+            return "unreadable(" + type(exc).__name__ + ")"
+
+    U = adsk.fusion.DistanceUnits
+    r1, set_mm, size_mm = leg("set-mm", U.MillimeterDistanceUnits)
+    r2, after_mm, _ = leg("untouched-after-mm", None)
+    r3, set_in, size_in = leg("set-inch", U.InchDistanceUnits)
+    r4, after_in, _ = leg("untouched-after-inch", None)
+    # Left at mm deliberately: this row MUTATES session state every other STL export inherits, so
+    # it restores the post-restart default rather than leaving the session on inches.
+    leg("restore-mm", U.MillimeterDistanceUnits)
+
+    follows = abs(after_mm - mm) < 1e-3 and abs(after_in - inch) < 1e-3
+    assigns = abs(set_mm - mm) < 1e-3 and abs(set_in - inch) < 1e-3
+    reads_zero = r1 == 0 and r2 == 0 and r3 == 0 and r4 == 0
+    # The read-BACK returns what was assigned - the inch leg is the one that matters, since mm
+    # collides with the factory 0 and so proves nothing on its own.
+    backs_match = all(got == want for _lbl, want, got in backreads)
+    inch_back = [got for lbl, _w, got in backreads if lbl == "set-inch"]
+    emit(follows and assigns and reads_zero and backs_match and size_mm == size_in,
+         "stl-export-unittype-is-sticky-session-state:"
+         + " set_mm=" + str(round(set_mm, 6)) + " untouched_after_mm=" + str(round(after_mm, 6))
+         + " (both expect " + str(round(mm, 6)) + ")"
+         + " set_inch=" + str(round(set_in, 6)) + " untouched_after_inch=" + str(round(after_in, 6))
+         + " (both expect " + str(round(inch, 6)) + ")"
+         + " reads_before_assign=" + str([r1, r2, r3, r4]) + " (all expect 0)"
+         + " read_back_after_assign_matches=" + str(backs_match)
+         + " inch_reads_back=" + str(inch_back) + " (expect [3], NOT 0)"
+         + " same_byte_length=" + str(size_mm == size_in) + " at " + str(size_mm))
+""",
+    },
+    {
+        "id": "stl-unittype-read-poisoned-by-units-toggle",
+        "claim": ("Assigning Design.fusionUnitsManager.distanceDisplayUnits POISONS "
+                  "STLExportOptions.unitType's READ for that document: the read then raises "
+                  "RuntimeError '3 : unexpected document units' and does NOT recover when the "
+                  "display units are put back to what they were. A document that was never "
+                  "toggled reads 0. So unitType's read can fail outright, not merely mislead - "
+                  "any code reading it needs safe(), and no writer may infer the file's unit "
+                  "from it"),
+        "encoded_in": ("_export.applied_pair's unitType handling and mesh_export's "
+                       "_apply_stl_unit read-back"),
+        "body": """
+    # Its OWN document, closed at the end: the toggle is not reversible within a document, so
+    # doing it in the runner's shared document would poison every later row that reads unitType.
+    import tempfile, os
+    doc = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        d2 = adsk.fusion.Design.cast(app.activeProduct)
+        b = make_box(d2, "PoisonProbe")
+        em = d2.exportManager
+        path = os.path.join(tempfile.gettempdir(), "measure_poison.stl")
+        before = em.createSTLExportOptions(b, path).unitType
+        um = d2.fusionUnitsManager
+        was = um.distanceDisplayUnits
+        um.distanceDisplayUnits = adsk.fusion.DistanceUnits.InchDistanceUnits
+        um.distanceDisplayUnits = was
+        restored = um.distanceDisplayUnits == was
+        try:
+            after = em.createSTLExportOptions(b, path).unitType
+            raised = ""
+        except Exception as exc:
+            after = None
+            raised = type(exc).__name__ + ": " + str(exc)[:80]
+        emit(before == 0 and after is None and "unexpected document units" in raised
+             and restored,
+             "stl-unittype-read-poisoned-by-units-toggle: read_before_toggle=" + str(before)
+             + " (expect 0) display_units_restored=" + str(restored)
+             + " read_after_restore=" + (repr(raised) if raised else str(after))
+             + " (expect a raise naming unexpected document units)")
+    finally:
+        doc.close(False)
+""",
+    },
+    {
+        "id": "cam-machine-library-deleteasset",
+        "claim": ("machineLibrary.importMachine stores a loaded machine into the Local location "
+                  "under a new name and machineAtURL loads it back; the stored asset's "
+                  "URL.leafName carries the FILE EXTENSION ('MeasureDeleteMe.mch') while the "
+                  "machine name does not - the shape the delete matcher's stem compare exists "
+                  "for; deleteAsset(url) then returns True and a re-walk of childAssetURLs no "
+                  "longer lists the asset. Self-cleaning: the machine this row imports is the "
+                  "one it deletes"),
+        "encoded_in": ("cam_create_machine.py handler importMachine/machineAtURL gates + "
+                       "cam_delete_machine.py handler deleteAsset read-backs"),
+        "body": """
+    libs = adsk.cam.CAMManager.get().libraryManager
+    lib = libs.machineLibrary
+    f360 = adsk.cam.LibraryLocations.Fusion360LibraryLocation
+    local_loc = adsk.cam.LibraryLocations.LocalLibraryLocation
+    local = lib.urlByLocation(local_loc)
+    src = (lib.createQuery(f360, "", "").execute() or [None])[0]
+    if src is None:
+        emit(False, "cam-machine-library-deleteasset: no bundled machine to import - inconclusive")
+        return
+    url = lib.importMachine(src, local, "MeasureDeleteMe")
+    stored = bool(url)
+    leaf = url.leafName if stored else ""
+    leaf_has_ext = leaf == "MeasureDeleteMe.mch"
+    loaded = stored and (lib.machineAtURL(url) is not None)
+    ok = stored and lib.deleteAsset(url)
+    still = stored and any(
+        u.leafName == leaf for u in lib.childAssetURLs(local))
+    emit(stored and leaf_has_ext and loaded and ok is True and not still,
+         "cam-machine-library-deleteasset: stored=" + str(stored) + " leafName=" + repr(leaf)
+         + " (expect the .mch extension) loaded_back=" + str(loaded)
+         + " deleteAsset=" + str(ok) + " still_listed=" + str(still))
+""",
+    },
+    {
+        "id": "cam-machine-query-keyed-on-model",
+        "claim": ("The machine-library query is keyed on vendor/model and CANNOT reach a stored "
+                  "machine by a description that is not its model - query by the description "
+                  "returns 0 hits while query by the model returns the machine and the full local "
+                  "walk contains it. A post-delete re-resolve by such a label therefore proves "
+                  "nothing; the asset walk is the load-bearing read-back. Self-cleaning: the "
+                  "machine this row imports is the one it deletes"),
+        "encoded_in": ("cam_delete_machine.py handler's no-evidence sentence and point-of-use "
+                       "comment; cam_create_machine.py's create side writing the name onto model"),
+        "body": """
+    libs = adsk.cam.CAMManager.get().libraryManager
+    lib = libs.machineLibrary
+    f360 = adsk.cam.LibraryLocations.Fusion360LibraryLocation
+    local_loc = adsk.cam.LibraryLocations.LocalLibraryLocation
+    local = lib.urlByLocation(local_loc)
+    src = (lib.createQuery(f360, "", "").execute() or [None])[0]
+    if src is None:
+        emit(False, "cam-machine-query-keyed-on-model: no bundled machine - inconclusive")
+        return
+    src.description = "MeasureQKey"
+    # model/vendor left as the source's: the description is deliberately NOT the model
+    url = lib.importMachine(src, local, "MeasureQKey")
+    try:
+        stored = lib.machineAtURL(url)
+        by_desc = len(lib.createQuery(local_loc, "", "MeasureQKey").execute() or [])
+        by_model = lib.createQuery(local_loc, "", stored.model).execute() or []
+        model_reaches = any(m.description == "MeasureQKey" for m in by_model)
+        walk_has = any(m.description == "MeasureQKey"
+                       for m in (lib.createQuery(local_loc, "", "").execute() or []))
+        emit(by_desc == 0 and model_reaches and walk_has,
+             "cam-machine-query-keyed-on-model: by_description_hits=" + str(by_desc)
+             + " (expect 0) by_model_reaches=" + str(model_reaches)
+             + " full_walk_contains=" + str(walk_has))
+    finally:
+        lib.deleteAsset(url)
+""",
+    },
+    {
+        "id": "construction-offset-value-reads-signed-cm",
+        "claim": ("A ConstructionPlaneOffsetDefinition's offset ModelParameter .value reads the "
+                  "requested offset in SIGNED internal cm (-12 mm requested reads -1.2) - the "
+                  "read a construction-offset read-back compare gates on"),
+        "encoded_in": ("model_construction's offset read-back compare; the MODEL-2 measurement "
+                       "trail (the on_path form stores distance and offset as separate "
+                       "parameters)"),
+        "body": """
+    root = des.rootComponent
+    pi = root.constructionPlanes.createInput()
+    ok_set = pi.setByOffset(root.xYConstructionPlane, adsk.core.ValueInput.createByReal(-1.2))
+    plane = root.constructionPlanes.add(pi)
+    d = plane.definition
+    v = d.offset.value
+    emit(bool(ok_set) and type(d).__name__ == "ConstructionPlaneOffsetDefinition"
+         and abs(v + 1.2) < 1e-9,
+         "construction-offset-value-reads-signed-cm: definition=" + type(d).__name__
+         + " offset.value=" + repr(v) + " (expect -1.2 for a -12 mm request)")
 """,
     },
     {
@@ -1116,6 +1756,233 @@ ROWS = [
     emit(same and len(unc) == 1,
          "thread-designation-multi-type-identity: " + "; ".join(detail)
          + "; 1/4-20 UNC carriers=" + str(len(unc)))
+""",
+    },
+    {
+        "id": "min-distance-parallel-planes-is-plane-separation",
+        "claim": ("measureMinimumDistance between two PARALLEL PLANAR faces that do not overlap "
+                  "laterally returns the separation between their PLANES, not the minimum between "
+                  "the bounded faces (2.0 cm reported where the faces' nearest points are "
+                  "sqrt(13) cm apart); a Point3D lying on a planar face's plane but outside its "
+                  "boundary reads 0.0 from that face; a PERPENDICULAR pair and a COPLANAR pair "
+                  "both return the bounded minimum. Plus the two co-space facts the correction "
+                  "rests on: a face's boundingBox brackets its own plane origin along the normal "
+                  "axis, and that holds for assembly-context PROXY faces of DIFFERENT occurrences, "
+                  "whose plane separation reproduces the API's own number"),
+        "encoded_in": ("_geom.py parallel_plane_facts (the bounded-gap measure and its read-back "
+                       "gate) and _comparable_boxes (the one-space precondition); test__geom.py "
+                       "TestParallelPlaneFacts + TestBoxComparabilityPrecondition; the "
+                       "parallel-pair tests in test_model_measure_between.py and "
+                       "test_model_measure_relation.py"),
+        "body": """
+    root = des.rootComponent
+    mm = app.measureManager
+
+    def plate(x0, x1, height, name):
+        sk = root.sketches.add(root.xYConstructionPlane)
+        sk.sketchCurves.sketchLines.addTwoPointRectangle(
+            adsk.core.Point3D.create(x0, 0.0, 0.0), adsk.core.Point3D.create(x1, 1.0, 0.0))
+        ext = root.features.extrudeFeatures.addSimple(
+            sk.profiles.item(0), adsk.core.ValueInput.createByReal(height),
+            adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+        b = ext.bodies.item(0)
+        b.name = name
+        return b
+
+    def cube(comp, size):
+        sk = comp.sketches.add(comp.xYConstructionPlane)
+        sk.sketchCurves.sketchLines.addTwoPointRectangle(
+            adsk.core.Point3D.create(0.0, 0.0, 0.0), adsk.core.Point3D.create(size, size, 0.0))
+        comp.features.extrudeFeatures.addSimple(
+            sk.profiles.item(0), adsk.core.ValueInput.createByReal(size),
+            adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+
+    def face_where(body, axis, coord):
+        # Sign-agnostic, like lowest_planar and brackets below. Measured on 2705.1.4 on this rig:
+        # the four SIDE faces read OUTWARD normals (x=4 reads -1, x=5 reads +1), while the two
+        # faces parallel to the originating SKETCH PLANE both read that plane's normal (0,0,+1),
+        # the bottom one included. Only the AXIS the normal runs along holds in both cases. The
+        # plane origin's coordinate on that axis is what picks between the two parallel faces,
+        # since every point of a plane x = k has x = k; the sign never carried the selection.
+        for i in range(body.faces.count):
+            f = body.faces.item(i)
+            g = f.geometry
+            if g.surfaceType != adsk.core.SurfaceTypes.PlaneSurfaceType:
+                continue
+            if abs(abs(getattr(g.normal, axis)) - 1.0) < 1e-9 and abs(getattr(g.origin, axis) - coord) < 1e-9:
+                return f
+        return None
+
+    def lowest_planar(body):
+        pick = None
+        for i in range(body.faces.count):
+            f = body.faces.item(i)
+            g = f.geometry
+            if g.surfaceType != adsk.core.SurfaceTypes.PlaneSurfaceType or abs(g.normal.z) < 0.5:
+                continue
+            if pick is None or g.origin.z < pick.geometry.origin.z:
+                pick = f
+        return pick
+
+    def brackets(face):
+        # The co-space test the bounded measure needs: a face's own box must contain its own plane
+        # origin along the normal axis, or the two reads are not in one frame.
+        g = face.geometry
+        bb = face.boundingBox
+        axis = "x" if abs(g.normal.x) > 0.5 else ("y" if abs(g.normal.y) > 0.5 else "z")
+        lo = getattr(bb.minPoint, axis)
+        hi = getattr(bb.maxPoint, axis)
+        o = getattr(g.origin, axis)
+        return lo - 1e-6 <= o <= hi + 1e-6
+
+    # Plate A spans x 0..1, z 0..1; B spans x 4..5, z 0..3; C spans x 8..9, z 0..1. A's and B's TOP
+    # faces sit on parallel planes 2 cm apart and 3 cm apart along x, so the bounded minimum is
+    # sqrt(3^2 + 2^2) = 3.6056. A's and C's tops are COPLANAR 7 cm apart - the case the API gets
+    # RIGHT, so a probe of coplanar faces alone REFUTES this defect.
+    a = plate(0.0, 1.0, 1.0, "MeasPlateA")
+    b = plate(4.0, 5.0, 3.0, "MeasPlateB")
+    c = plate(8.0, 9.0, 1.0, "MeasPlateC")
+    top_a = face_where(a, "z", 1.0)
+    top_b = face_where(b, "z", 3.0)
+    top_c = face_where(c, "z", 1.0)
+    side_b = face_where(b, "x", 4.0)
+    if top_a is None or top_b is None or top_c is None or side_b is None:
+        emit(False, "face pick failed: a=" + repr(top_a is not None) + " b=" + repr(top_b is not None)
+             + " c=" + repr(top_c is not None) + " side=" + repr(side_b is not None))
+    else:
+        par = mm.measureMinimumDistance(top_a, top_b).value
+        perp = mm.measureMinimumDistance(top_a, side_b).value
+        cop = mm.measureMinimumDistance(top_a, top_c).value
+        pt = mm.measureMinimumDistance(adsk.core.Point3D.create(10.0, 0.5, 1.0), top_a).value
+        emit(abs(par - 2.0) < 1e-6, "parallel pair: API " + str(par) + " = plane separation 2.0, "
+             "bounded minimum " + str((13.0) ** 0.5))
+        emit(abs(perp - 3.0) < 1e-6, "perpendicular pair: API " + str(perp) + " = bounded (3.0)")
+        emit(abs(cop - 7.0) < 1e-6, "COPLANAR pair: API " + str(cop) + " = bounded (7.0)")
+        emit(abs(pt) < 1e-6, "point on the plane 9 cm outside the boundary: " + str(pt) + " (0.0)")
+        emit(brackets(top_a), "native face: its box brackets its own plane origin")
+
+    m1 = adsk.core.Matrix3D.create()
+    o1 = root.occurrences.addNewComponent(m1)
+    m2 = adsk.core.Matrix3D.create()
+    m2.translation = adsk.core.Vector3D.create(10.0, 4.0, 2.0)
+    o2 = root.occurrences.addNewComponent(m2)
+    cube(o1.component, 2.0)
+    cube(o2.component, 2.0)
+    p1 = lowest_planar(o1.bRepBodies.item(0))
+    p2 = lowest_planar(o2.bRepBodies.item(0))
+    if p1 is None or p2 is None:
+        emit(False, "proxy face pick failed")
+    else:
+        sep = abs(p2.geometry.origin.z - p1.geometry.origin.z)
+        api = mm.measureMinimumDistance(p1, p2).value
+        emit(brackets(p1) and brackets(p2),
+             "proxy faces of DIFFERENT occurrences: each box brackets its own plane origin")
+        emit(abs(api - sep) < 1e-6, "two proxies: plane separation " + str(sep)
+             + " reproduces the API's " + str(api) + " - one coordinate space")
+""",
+    },
+    {
+        "id": "min-distance-position-order-parallel-faces",
+        "claim": ("MeasureResults.positionOne is documented as the point on the FIRST entity, and "
+                  "for two PARALLEL PLANAR faces it comes back on the SECOND: measured on a 1 cm "
+                  "box, a = top (z=1) and b = bottom (z=0) reads positionOne z=0 and positionTwo "
+                  "z=1, and swapping the two arguments swaps the pair with them. A NON-PARALLEL "
+                  "pair that is APART keeps the documented order in BOTH argument orders, so the "
+                  "order alone cannot carry the labels. The non-parallel leg is what discriminates: "
+                  "a perpendicular pair of ONE body TOUCHES, and a 0-distance pair returns the same "
+                  "point twice, which agrees with either order and proves nothing"),
+        "encoded_in": ("model_measure_between._points_on, which labels the pair by MEASURING each "
+                       "point against 'a' instead of trusting positionOne/positionTwo order; "
+                       "test_model_measure_between.py TestClosestPointLabelBinding"),
+        "need_box": True,
+        "body": """
+    root = des.rootComponent
+    mm = app.measureManager
+
+    def plate(x0, x1, height, name):
+        sk = root.sketches.add(root.xYConstructionPlane)
+        sk.sketchCurves.sketchLines.addTwoPointRectangle(
+            adsk.core.Point3D.create(x0, 0.0, 0.0), adsk.core.Point3D.create(x1, 1.0, 0.0))
+        ext = root.features.extrudeFeatures.addSimple(
+            sk.profiles.item(0), adsk.core.ValueInput.createByReal(height),
+            adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+        b = ext.bodies.item(0)
+        b.name = name
+        return b
+
+    def face_where(body, axis, coord):
+        # Sign-agnostic: measured, the two faces parallel to the originating SKETCH PLANE both read
+        # that plane's normal (0,0,+1), the BOTTOM one included - so only the AXIS the normal runs
+        # along holds. The plane origin's coordinate on that axis picks between the two.
+        for i in range(body.faces.count):
+            f = body.faces.item(i)
+            g = adsk.core.Plane.cast(f.geometry)
+            if g is None:
+                continue
+            n = g.normal
+            on_axis = abs(getattr(n, axis)) > 0.5
+            if on_axis and abs(getattr(g.origin, axis) - coord) < 1e-6:
+                return f
+        return None
+
+    other = plate(4.0, 5.0, 2.0, "OrderPlate")
+    top = face_where(body, "z", 1.0)
+    bottom = face_where(body, "z", 0.0)
+    side = face_where(other, "x", 4.0)
+    if top is None or bottom is None or side is None:
+        emit(False, "face pick failed: top=" + repr(top is not None)
+             + " bottom=" + repr(bottom is not None) + " side=" + repr(side is not None))
+    else:
+        # PARALLEL, 1 cm apart: the point labelled positionOne must land on the SECOND argument.
+        p = mm.measureMinimumDistance(top, bottom)
+        q = mm.measureMinimumDistance(bottom, top)
+        emit(abs(p.positionOne.z - 0.0) < 1e-6 and abs(p.positionTwo.z - 1.0) < 1e-6,
+             "parallel a=top b=bottom: positionOne z=" + str(p.positionOne.z)
+             + " (expect 0.0, on b) positionTwo z=" + str(p.positionTwo.z) + " (expect 1.0, on a)")
+        emit(abs(q.positionOne.z - 1.0) < 1e-6 and abs(q.positionTwo.z - 0.0) < 1e-6,
+             "parallel a=bottom b=top: positionOne z=" + str(q.positionOne.z)
+             + " (expect 1.0, on b) positionTwo z=" + str(q.positionTwo.z) + " (expect 0.0, on a)")
+        # NON-PARALLEL and APART (3 cm along x): the documented order HOLDS in both orders. Keyed on
+        # x, because both nearest points share z here and z would not tell the two faces apart.
+        r = mm.measureMinimumDistance(top, side)
+        s = mm.measureMinimumDistance(side, top)
+        emit(abs(r.positionOne.x - 1.0) < 1e-6 and abs(r.positionTwo.x - 4.0) < 1e-6,
+             "non-parallel a=top b=side: positionOne x=" + str(r.positionOne.x)
+             + " (expect 1.0, on a) positionTwo x=" + str(r.positionTwo.x) + " (expect 4.0, on b)")
+        emit(abs(s.positionOne.x - 4.0) < 1e-6 and abs(s.positionTwo.x - 1.0) < 1e-6,
+             "non-parallel a=side b=top: positionOne x=" + str(s.positionOne.x)
+             + " (expect 4.0, on a) positionTwo x=" + str(s.positionTwo.x) + " (expect 1.0, on b)")
+        emit(r.value > 1e-6 and s.value > 1e-6,
+             "non-parallel pair is APART: " + str(r.value) + " - a 0-distance pair returns one "
+             "point twice and would agree with either order")
+""",
+    },
+    {
+        "id": "profile-centroid-component-local",
+        "claim": "Profile.areaProperties().centroid reads in the profile's own COMPONENT-LOCAL frame, not world: on a component placed at x=5.0 cm, a 2.0x1.0 cm rectangle at that component's sketch origin reports centroid (1.0, 0.5, 0) - world would read 6.0. The assembly-context PROXY (Sketch.createForAssemblyContext) reports the IDENTICAL point, so a native sketch and a proxied one put their centroids in one space",
+        "encoded_in": "_sketch_detail._profiles - the published 'centroid' and the composite handle's locator; _inputs._refind_profile, whose design-wide scan matches a locator centroid against this same local read; test__sketch_detail.py test_profile_centroid_scales_linearly",
+        "body": """
+    root = des.rootComponent
+    m = adsk.core.Matrix3D.create()
+    m.translation = adsk.core.Vector3D.create(5.0, 0.0, 0.0)
+    occ = root.occurrences.addNewComponent(m)
+    placed_x = occ.transform2.translation.x
+    comp = occ.component
+    sk = comp.sketches.add(comp.xYConstructionPlane)
+    sk.sketchCurves.sketchLines.addTwoPointRectangle(
+        adsk.core.Point3D.create(0.0, 0.0, 0.0), adsk.core.Point3D.create(2.0, 1.0, 0.0))
+    native = sk.profiles.item(0).areaProperties().centroid
+    proxy = sk.createForAssemblyContext(occ).profiles.item(0).areaProperties().centroid
+    # The placement read-back first: an occurrence that did NOT move would make (1.0, 0.5, 0) the
+    # world answer too, and the row would pass without discriminating the two frames.
+    placed = abs(placed_x - 5.0) < 1e-6
+    local = (abs(native.x - 1.0) < 1e-6 and abs(native.y - 0.5) < 1e-6 and abs(native.z) < 1e-6)
+    same = (abs(proxy.x - native.x) < 1e-6 and abs(proxy.y - native.y) < 1e-6
+            and abs(proxy.z - native.z) < 1e-6)
+    emit(placed and local and same, "profile-centroid-component-local: occurrence at x="
+         + str(placed_x) + " native (" + str(native.x) + "," + str(native.y) + ","
+         + str(native.z) + ") proxy (" + str(proxy.x) + "," + str(proxy.y) + ","
+         + str(proxy.z) + ") - world would read x=6.0")
 """,
     },
     {
@@ -1295,6 +2162,69 @@ ROWS = [
 """,
     },
     {
+        "id": "cam-checktoolpath-raises-on-empty-setup",
+        "claim": ("CAM.checkToolpath RAISES ('3 : The operations are not CAM objects') on a Setup "
+                  "whose operations.count is 0, and returns a bool for a populated setup in the "
+                  "same session - emptiness, not the document, is the discriminator"),
+        "encoded_in": "cam_inspect_toolpaths.py _document_verdict/_scoped_verdict empty-setup split; tests/unit/test_cam_inspect_toolpaths.py TestEmptySetups",
+        "needs": "cam",
+        "body": """
+    cam = adsk.cam.CAM.cast(app.activeDocument.products.itemByProductType("CAMProductType"))
+    populated = None
+    for i in range(cam.setups.count):
+        if cam.setups.item(i).name == "MeasureSetup":
+            populated = cam.setups.item(i)
+    # A fresh empty setup in the same document; removed again below so no later row sees it.
+    si = cam.setups.createInput(adsk.cam.OperationTypes.MillingOperation)
+    empty = cam.setups.add(si)
+    empty.name = "MeasureEmpty"
+    try:
+        raised = None
+        try:
+            cam.checkToolpath(empty)
+            raised = False
+        except Exception as e:
+            raised = True
+            msg = str(e)
+        populated_answered = isinstance(cam.checkToolpath(populated), bool)
+        emit(raised is True and populated_answered,
+             "cam-checktoolpath-raises-on-empty-setup: empty raised=" + str(raised)
+             + (" msg=" + msg[:60] if raised else "")
+             + " populated_answers_bool=" + str(populated_answered))
+    finally:
+        empty.deleteMe()
+""",
+    },
+    {
+        "id": "cam-suppress-discards-toolpath",
+        "claim": ("Setting Operation.isSuppressed True flips hasToolpath True -> False on a "
+                  "generated op - suppressing DISCARDS the toolpath rather than hiding it, which is "
+                  "why a suppressed op cannot post"),
+        "encoded_in": "cam_inspect_toolpaths.py _split_suppressed + the three wire sentences on the ACTIVE default",
+        "needs": "cam",
+        "body": """
+    cam = adsk.cam.CAM.cast(app.activeDocument.products.itemByProductType("CAMProductType"))
+    op = None
+    for i in range(cam.setups.count):
+        if cam.setups.item(i).name == "MeasureSetup":
+            for x in cam.setups.item(i).allOperations:
+                o = adsk.cam.Operation.cast(x)
+                if o is not None and o.name == "Face2":
+                    op = o
+    before = op.hasToolpath
+    op.isSuppressed = True
+    try:
+        during = op.hasToolpath
+    finally:
+        op.isSuppressed = False
+    after_flag = op.isSuppressed
+    emit(before is True and during is False and after_flag is False,
+         "cam-suppress-discards-toolpath: hasToolpath before=" + str(before)
+         + " suppressed=" + str(during) + " unsuppressed_flag_restored=" + str(after_flag)
+         + " (the toolpath itself may need regeneration after unsuppression - not asserted)")
+""",
+    },
+    {
         "id": "cam-errored-op-state-pair",
         "claim": ("An op whose generation FAULTS (top height below bottom height) reads hasError "
                   "True with operationState NoToolpath (3), hasToolpath False and isValid True - "
@@ -1344,6 +2274,473 @@ ROWS = [
          "cam-errored-op-state-pair: " + base + " errored=(hasError " + repr(op.hasError)
          + ", operationState " + str(op.operationState) + ", hasToolpath " + repr(op.hasToolpath)
          + ", isValid " + repr(op.isValid) + ") error=" + repr(lines[0] if lines else ""))
+""",
+    },
+    {
+        "id": "cam-machine-spindle-max-readable",
+        "claim": ("A machine's spindle maximum and axis travels are readable through the SUPPORTED "
+                  "route Machine.elements -> defaultItemByType(KinematicsMachineElement."
+                  "staticTypeId()) -> parts (a tree of MachinePart, each with an optional .axis / "
+                  ".spindle / .toolStation): part.spindle.maxSpeed is rpm, and "
+                  "part.axis.physicalRange.min/.max is CM on a LinearMachineAxisType axis. "
+                  "Assigning that machine to Setup.machine needs clearSimulationModel() on the "
+                  "resolved copy first whenever its hasSimulationModel reads True, and the same "
+                  "numbers then read back through Setup.machine"),
+        "encoded_in": ("_cam_common.kinematics_parts / machine_limits / machine_spindle_max and "
+                       "tests/unit/test__cam_common.py TestMachineLimits, whose fake machine "
+                       "carries 12000 rpm and 762/406/508 mm travels; the strip-then-assign path "
+                       "in cam_edit_setup and tests/unit/test_cam_edit_setup.py "
+                       "TestMachineStripSimulation"),
+        "needs": "cam",
+        "body": """
+    cam = adsk.cam.CAM.cast(app.activeDocument.products.itemByProductType("CAMProductType"))
+    lib = adsk.cam.CAMManager.get().libraryManager.machineLibrary
+    type_id = adsk.cam.KinematicsMachineElement.staticTypeId()
+
+    def limits(m):
+        # the supported route only - Machine.kinematics is flagged not officially supported
+        el = m.elements.defaultItemByType(type_id)
+        if el is None:
+            found = m.elements.itemsByType(type_id)
+            el = found[0] if found else None
+        if el is None:
+            return None, []
+        parts, stack = [], [(el.parts, 0)]
+        while stack:
+            coll, depth = stack.pop()
+            for i in range(coll.count):
+                p = coll.item(i)
+                parts.append(p)
+                if depth < 8:
+                    stack.append((p.children, depth + 1))
+        rpm, axes = None, []
+        for p in parts:
+            if p.spindle is not None and p.spindle.maxSpeed > 0:
+                rpm = p.spindle.maxSpeed if rpm is None else max(rpm, p.spindle.maxSpeed)
+            if p.axis is not None:
+                r = p.axis.physicalRange
+                axes.append((p.axis.name,
+                             p.axis.axisType == adsk.cam.MachineAxisTypes.LinearMachineAxisType,
+                             r.isInfinite, r.min, r.max))
+        return rpm, axes
+
+    candidates = []
+    for loc in (adsk.cam.LibraryLocations.LocalLibraryLocation,
+                adsk.cam.LibraryLocations.Fusion360LibraryLocation):
+        for vendor in ("Haas", ""):
+            try:
+                candidates.extend(lib.createQuery(loc, vendor, "").execute() or [])
+            except Exception:
+                pass
+        if candidates:
+            break
+    picked, rpm, axes = None, None, []
+    for m in candidates[:250]:
+        rpm, axes = limits(m)
+        if rpm:
+            picked = m
+            break
+    if picked is None:
+        emit(False, "cam-machine-spindle-max-readable: no library machine in "
+             + str(len(candidates)) + " carried a kinematics spindle - inconclusive")
+        return
+    linear = [a for a in axes if a[1] and not a[2]]
+    setup = None
+    for i in range(cam.setups.count):
+        if cam.setups.item(i).name == "MeasureSetup":
+            setup = cam.setups.item(i)
+    # Setup.machine refuses a machine that still carries a simulation model, so the model is
+    # cleared from the RESOLVED COPY first - the one assignment path cam_edit_setup drives. The
+    # kinematics comparison below is what says whether clearing it costs the numbers.
+    sim = picked.hasSimulationModel
+    if sim:
+        picked.clearSimulationModel()
+    stripped = picked.hasSimulationModel
+    setup.machine = picked
+    through = setup.machine        # a TRANSIENT COPY per the API doc, not the object just set
+    assigned = through is not None and through.description == picked.description
+    rpm2, axes2 = limits(through)
+    emit(rpm > 0 and len(linear) >= 1 and stripped is False and assigned and rpm2 == rpm
+         and len(axes2) == len(axes),
+         "cam-machine-spindle-max-readable: " + str(picked.description) + " maxSpeed=" + str(rpm)
+         + " rpm, axes=" + ", ".join(a[0] + ("(linear " + str(round((a[4] - a[3]) * 10.0, 1))
+                                             + "mm)" if a[1] and not a[2] else
+                                             "(infinite)" if a[2] else "(rotary)") for a in axes)
+         + " hasSimulationModel " + repr(sim) + " -> " + repr(stripped)
+         + " assigned=" + repr(assigned) + " through-setup maxSpeed=" + str(rpm2))
+""",
+    },
+    {
+        "id": "cam-toolpreset-per-operation",
+        "claim": ("Operation.toolPreset reads the preset the operation USES (null when it runs "
+                  "none), and ToolPreset.name / ToolPreset.id both read as non-empty strings on "
+                  "it. With the operation's tool BOUND to a variable, that tool's preset LIST "
+                  "reads: .presets answers .count as an int and .item(i).name as a string - no "
+                  "tool library lookup in between"),
+        "encoded_in": ("cam_get._slice_tool's active_preset + preset_names and "
+                       "_cam_common._operation_summary's per-row preset; "
+                       "tests/unit/test_cam_get.py TestToolSlicePresets, "
+                       "tests/unit/test__cam_common.py TestOperationRowContext"),
+        "needs": "cam",
+        "body": """
+    cam = adsk.cam.CAM.cast(app.activeDocument.products.itemByProductType("CAMProductType"))
+    op = None
+    for i in range(cam.setups.count):
+        if cam.setups.item(i).name == "MeasureSetup":
+            op = adsk.cam.Operation.cast(cam.setups.item(i).allOperations.item(0))
+    active = op.toolPreset                      # the preset it RUNS, and legitimately null
+    active_name = None if active is None else active.name
+    active_id = None if active is None else active.id
+    # An op that runs no preset leaves nothing to read .name/.id off, so that half reports as
+    # untested rather than being asserted against a null.
+    names_read = (None if active is None else
+                  (isinstance(active_name, str) and isinstance(active_id, str)
+                   and len(active_id) > 0))
+    # The LIST the op can choose from - the read cam_get publishes as preset_names. The tool is
+    # BOUND to a variable for the whole read, the shape cam_get._slice_tool uses; item(0).name is
+    # read because a count alone does not prove the rows read.
+    tool = op.tool
+    presets = tool.presets
+    n = presets.count
+    first = presets.item(0).name if n else None
+    # The same collection off an UNBOUND temporary is NOT read here, and must not be: it raises
+    # '3 : Invalid transient tool', and that raise takes the whole Python.Run command down even
+    # inside try/except - the traceback comes back with no frame from this script at all, only
+    # executeTextCommand's. A try/except around it does not make it observable; it makes the row
+    # unrunnable. Measure the difference from OUTSIDE a script if it is ever wanted.
+    emit(isinstance(n, int) and not isinstance(n, bool)
+         and (n == 0 or isinstance(first, str))
+         and names_read is not False,
+         "cam-toolpreset-per-operation: op.toolPreset=" + repr(active_name)
+         + " name/id=" + repr(names_read)
+         + "; bound: count=" + repr(n) + " item0=" + repr(first)
+         + ("" if active is not None else " (op runs no preset - name/id untested)")
+         + ("" if n else " (tool has no presets - that half untested)"))
+""",
+    },
+    {
+        "id": "cam-op-spindle-speed-vs-machine-max",
+        "claim": ("An operation's tool_spindleSpeed CAMParameter reads as a NUMBER through "
+                  ".value.value, in the same rpm unit as MachineSpindle.maxSpeed: setting the "
+                  "expression to 24999 reads back 24999.0. With a machine assigned, that machine's "
+                  "kinematics spindle maximum reads as a number off Setup.machine, so the two "
+                  "sides of the over-max comparison are both readable numbers - WHICH WAY the "
+                  "comparison lands is a property of the machine in the library, not of the API, "
+                  "and is reported rather than asserted"),
+        "encoded_in": ("_cam_common.op_spindle_speed / spindle_check, whose "
+                       "spindle_over_machine_max flag publishes the comparison as fact; "
+                       "tests/unit/test__cam_common.py TestSpindleCheck"),
+        "needs": "cam",
+        "body": """
+    cam = adsk.cam.CAM.cast(app.activeDocument.products.itemByProductType("CAMProductType"))
+    setup, op = None, None
+    for i in range(cam.setups.count):
+        if cam.setups.item(i).name == "MeasureSetup":
+            setup = cam.setups.item(i)
+            op = adsk.cam.Operation.cast(setup.allOperations.item(0))
+    p = op.parameters.itemByName("tool_spindleSpeed")
+    if p is None:
+        emit(False, "cam-op-spindle-speed-vs-machine-max: the op carries no tool_spindleSpeed"
+             " parameter - inconclusive")
+        return
+    before = p.expression
+    native = p.value.value
+    native_is_number = isinstance(native, float) or isinstance(native, int)
+    now, rpm, has_machine = None, None, False
+    try:
+        p.expression = "24999"
+        now = p.value.value
+        # the machine's own maximum, off the SAME kinematics route the comparison uses
+        m = setup.machine
+        has_machine = m is not None
+        if m is not None:
+            el = m.elements.defaultItemByType(adsk.cam.KinematicsMachineElement.staticTypeId())
+            if el is None:
+                found = m.elements.itemsByType(adsk.cam.KinematicsMachineElement.staticTypeId())
+                el = found[0] if found else None
+            stack = [(el.parts, 0)] if el is not None else []
+            while stack:
+                coll, depth = stack.pop()
+                for i in range(coll.count):
+                    part = coll.item(i)
+                    if part.spindle is not None and part.spindle.maxSpeed > 0:
+                        rpm = (part.spindle.maxSpeed if rpm is None
+                               else max(rpm, part.spindle.maxSpeed))
+                    if depth < 8:
+                        stack.append((part.children, depth + 1))
+    finally:
+        # the traversal above can raise; every later row reads this same operation, so the
+        # 24999 this row wrote is undone whether or not the measurement completed
+        p.expression = before
+    reads_back = native_is_number and now is not None and abs(now - 24999.0) < 1e-6
+    restored = p.expression == before
+    over = None if rpm is None else (now > rpm)
+    # A machine IS assigned, so its maximum has to read as a number - that, not the direction of
+    # the comparison, is what makes spindle_over_machine_max computable at all. Asserting the
+    # direction would assert a fact about whichever library machine got picked.
+    comparable = isinstance(rpm, (int, float)) and not isinstance(rpm, bool)
+    emit(reads_back and restored and (not has_machine or comparable),
+         "cam-op-spindle-speed-vs-machine-max: native=" + repr(native) + " expression="
+         + repr(before) + " set-24999 read .value.value=" + repr(now) + " machine max="
+         + repr(rpm) + " over=" + repr(over) + " restored=" + repr(restored)
+         + ("" if comparable else
+            " (a machine is assigned but its kinematics carries no spindle maximum)"
+            if has_machine else " (no machine assigned - the comparison half is untested)"))
+""",
+    },
+    {
+        "id": "cam-machining-time-excludes-suppressed",
+        "claim": ("CAM.getMachiningTime over an ObjectCollection of NON-suppressed generated "
+                  "operations returns a time, and the SAME collection with a suppressed operation "
+                  "added fails ('Machining time could not be calculated') - the suppressed "
+                  "operation, not an empty toolpath, is what breaks the call"),
+        "encoded_in": ("_cam_common._timeable_ops / get_machining_time_handler and "
+                       "tests/unit/test__cam_common.py TestMachiningTimeExcludesSuppressed"),
+        "needs": "cam",
+        "expect": "raise_or_abort",
+        "body": """
+    import time as _t
+    cam = adsk.cam.CAM.cast(app.activeDocument.products.itemByProductType("CAMProductType"))
+    ops = []
+    for i in range(cam.setups.count):
+        if cam.setups.item(i).name == "MeasureSetup":
+            for x in cam.setups.item(i).allOperations:
+                o = adsk.cam.Operation.cast(x)
+                if o is not None:
+                    ops.append(o)
+
+    def _generate(o):
+        f = cam.generateToolpath(o)
+        n = 0
+        while not f.isGenerationCompleted and n < 600:
+            adsk.doEvents()
+            _t.sleep(0.1)
+            n += 1
+        return f.isGenerationCompleted
+
+    for o in ops:
+        o.isSuppressed = False
+        if not _generate(o):
+            emit(False, "cam-machining-time-excludes-suppressed: generation did not complete in"
+                 " 60s - inconclusive, rerun")
+            return
+    clean = adsk.core.ObjectCollection.create()
+    for o in ops:
+        clean.add(o)
+    good = cam.getMachiningTime(clean, 100.0, 10.58, 1.5).machiningTime
+    emit(good > 0, "cam-machining-time-excludes-suppressed: " + str(len(ops))
+         + " unsuppressed ops timed at " + str(round(good, 2)) + "s")
+    # Now the misuse: the SAME operations with one suppressed. The failure arrives through
+    # Fusion's text-command channel and can take the whole script invocation down, so the
+    # verdict above is printed first and a script-level abort confirms the claim too. The
+    # unsuppress runs in a finally: a raise from the call must not leave a parked operation
+    # behind for the rest of the sweep, and neither must an abort that unwinds through here.
+    ops[-1].isSuppressed = True
+    try:
+        mixed = adsk.core.ObjectCollection.create()
+        for o in ops:
+            mixed.add(o)
+        try:
+            bad = cam.getMachiningTime(mixed, 100.0, 10.58, 1.5).machiningTime
+            emit(False, "cam-machining-time-excludes-suppressed: a suppressed op in the collection"
+                 " still returned " + str(round(bad, 2)) + "s - the exclusion is unnecessary")
+        except Exception as exc:
+            emit(True, "cam-machining-time-excludes-suppressed: suppressed op in the collection ->"
+                 " " + str(exc).strip().splitlines()[0])
+    finally:
+        ops[-1].isSuppressed = False
+""",
+    },
+    {
+        "id": "cam-template-library-deleteasset",
+        "claim": ("templateLibrary.importTemplate stores a template built from live operations "
+                  "into the Local location under a leafName whose STEM is the template's name; "
+                  "templateAtURL loads it back; deleteAsset(url) returns True and a re-walk of "
+                  "childAssetURLs no longer lists it - the ASSET WALK is what confirms the "
+                  "delete, and it is the read cam_delete_template rests its claim on. "
+                  "templateAtURL on the DELETED address is not part of that proof: it raises "
+                  "rather than answering null (cam-templateaturl-raises-on-deleted-url). "
+                  "Self-cleaning: the template this row imports is the one it deletes"),
+        "encoded_in": ("cam_templates.py delete_template_handler read-backs and its "
+                       "sibling-inference comment; save-side importTemplate gates"),
+        "needs": "cam",
+        "body": """
+    # Each step names itself before it runs: the runner truncates a traceback's inner frame, so a
+    # bare raise here reports a line number that cannot be resolved back to a step.
+    stage = "start"
+    try:
+        stage = "resolve-cam"
+        cam = adsk.cam.CAM.cast(
+            app.activeDocument.products.itemByProductType("CAMProductType"))
+        stage = "find-setup"
+        setup = None
+        for i in range(cam.setups.count):
+            if cam.setups.item(i).name == "MeasureSetup":
+                setup = cam.setups.item(i)
+        stage = "collect-ops"
+        ops = [adsk.cam.Operation.cast(x) for x in setup.allOperations]
+        ops = [o for o in ops if o is not None][:1]
+        stage = "createFromOperations(" + str(len(ops)) + " ops)"
+        result = adsk.cam.CAMTemplate.createFromOperations(ops)
+        # The live API is self-contradictory here: the docstring says a CAMTemplate returns, the
+        # annotation says list[Operation] - so the return is DESCRIBED and type-GATED rather than
+        # assumed. Handing importTemplate a non-CAMTemplate aborts the whole invocation, taking
+        # every printed verdict with it, so the shape is proven before it is passed on.
+        shape = type(result).__name__
+        if isinstance(result, list):
+            shape += "[" + str(len(result)) + "]"
+            shape += " of " + (type(result[0]).__name__ if result else "-")
+        tmpl = adsk.cam.CAMTemplate.cast(result)
+        if tmpl is None and isinstance(result, list) and result:
+            tmpl = adsk.cam.CAMTemplate.cast(result[0])
+        if tmpl is None:
+            emit(False, "cam-template-library-deleteasset: createFromOperations returned "
+                 + shape + " - no CAMTemplate casts out of it, so the import is not attempted")
+            return
+        stage = "set-name (returned " + shape + ")"
+        tmpl.name = "MeasureTmplDel"
+        stage = "library"
+        lib = adsk.cam.CAMManager.get().libraryManager.templateLibrary
+        local = lib.urlByLocation(adsk.cam.LibraryLocations.LocalLibraryLocation)
+        stage = "importTemplate"
+        url = lib.importTemplate(tmpl, local)
+        stored = bool(url)
+        leaf = url.leafName if stored else ""
+        stem = leaf.rpartition(".")[0] if "." in leaf else leaf
+        stem_matches = stem == "MeasureTmplDel"
+        stage = "templateAtURL"
+        loaded = stored and (lib.templateAtURL(url) is not None)
+        stage = "deleteAsset"
+        ok = stored and lib.deleteAsset(url)
+        stage = "re-walk"
+        still = stored and any(u.leafName == leaf for u in lib.childAssetURLs(local))
+        # templateAtURL is NOT called on the deleted url here: it raises rather than answering
+        # null, and that raise aborts the whole invocation - the separate
+        # cam-templateaturl-raises-on-deleted-url row proves it. The asset WALK is the read this
+        # delete is confirmed by, which is the same read cam_delete_template rests its claim on.
+        emit(stored and stem_matches and loaded and ok is True and not still,
+             "cam-template-library-deleteasset: stored=" + str(stored) + " leaf=" + repr(leaf)
+             + " stem_matches_name=" + str(stem_matches) + " loaded_back=" + str(loaded)
+             + " deleteAsset=" + str(ok) + " still_listed=" + str(still))
+    except Exception as exc:
+        emit(False, "cam-template-library-deleteasset: RAISED at stage '" + stage + "': "
+             + type(exc).__name__ + ": " + str(exc)[:160])
+""",
+    },
+    {
+        "id": "cam-templateaturl-raises-on-deleted-url",
+        "claim": ("CAMTemplateLibrary.templateAtURL does NOT honour its own docstring's 'Returns "
+                  "null if the specified template does not exist' for a url whose asset was just "
+                  "deleted: it raises RuntimeError '3 : Given URL does not point to a template', "
+                  "and the raise can escape try/except and abort the script. So a delete's "
+                  "read-back cannot ask this to confirm absence - the asset WALK must - and any "
+                  "caller reading it needs safe()"),
+        "encoded_in": ("cam_templates.py delete_template_handler's safe()-wrapped loads_after "
+                       "read and the comment naming the asset walk as the load-bearing leg"),
+        "needs": "cam",
+        "expect": "raise_or_abort",
+        "body": """
+    cam = adsk.cam.CAM.cast(app.activeDocument.products.itemByProductType("CAMProductType"))
+    setup = None
+    for i in range(cam.setups.count):
+        if cam.setups.item(i).name == "MeasureSetup":
+            setup = cam.setups.item(i)
+    ops = [adsk.cam.Operation.cast(x) for x in setup.allOperations]
+    ops = [o for o in ops if o is not None][:1]
+    result = adsk.cam.CAMTemplate.createFromOperations(ops)
+    tmpl = adsk.cam.CAMTemplate.cast(result)
+    if tmpl is None and isinstance(result, list) and result:
+        tmpl = adsk.cam.CAMTemplate.cast(result[0])
+    if tmpl is None:
+        emit(False, "cam-templateaturl-raises-on-deleted-url: no CAMTemplate to import")
+        return
+    tmpl.name = "MeasureTmplRaise"
+    lib = adsk.cam.CAMManager.get().libraryManager.templateLibrary
+    local = lib.urlByLocation(adsk.cam.LibraryLocations.LocalLibraryLocation)
+    url = lib.importTemplate(tmpl, local)
+    if not url or not lib.deleteAsset(url):
+        emit(False, "cam-templateaturl-raises-on-deleted-url: could not stage a deleted url")
+        return
+    # The misuse: the asset at this url is gone. A null return here would REFUTE the claim.
+    try:
+        r = lib.templateAtURL(url)
+        emit(False, "cam-templateaturl-raises-on-deleted-url: returned " + repr(r)
+             + " with no raise - the docstring's null contract holds after all")
+    except Exception as e:
+        emit(type(e).__name__ == "RuntimeError",
+             "cam-templateaturl-raises-on-deleted-url: raised catchably "
+             + type(e).__name__ + ": " + str(e)[:80])
+""",
+    },
+    {
+        "id": "cam-ncprogram-filtered-ops-tie-by-operationid",
+        "claim": ("An adsk.cam.Operation carries NO entityToken (the read raises AttributeError) "
+                  "- but an Operation from NCProgram.filteredOperations still ties to the same "
+                  "operation reached through the setup walk: operationId matches and == is True "
+                  "for every filtered op paired by name with its walked twin, while wrapper "
+                  "identity 'is' does not carry it"),
+        "encoded_in": ("_cam_common._program_posted_ops position note - filteredOperations hands "
+                       "back Operations with no walk, and operationId is the measured tie a "
+                       "breadcrumb beside the position discriminator would run on"),
+        "needs": "cam",
+        "body": """
+    import time as _t
+    cam = adsk.cam.CAM.cast(app.activeDocument.products.itemByProductType("CAMProductType"))
+    setup = None
+    for i in range(cam.setups.count):
+        if cam.setups.item(i).name == "MeasureSetup":
+            setup = cam.setups.item(i)
+    walked = [adsk.cam.Operation.cast(x) for x in setup.allOperations]
+    walked = [o for o in walked if o is not None]
+    def _generate(o):
+        f = cam.generateToolpath(o)
+        n = 0
+        while not f.isGenerationCompleted and n < 600:
+            adsk.doEvents()
+            _t.sleep(0.1)
+            n += 1
+        return f.isGenerationCompleted
+    for o in walked:
+        o.isSuppressed = False
+        if not o.hasToolpath and not _generate(o):
+            emit(False, "cam-ncprogram-filtered-ops-tie-by-operationid: generation did not"
+                 " complete in 60s - inconclusive, rerun")
+            return
+    no_token = 0
+    for o in walked:
+        try:
+            o.entityToken
+        except AttributeError:
+            no_token += 1
+    nc_input = cam.ncPrograms.createInput()
+    nc_input.displayName = "MeasureNC"
+    # NCProgramInput.operations is a vector<OperationBase> setter: a plain Python LIST,
+    # never an ObjectCollection (which raises) - same fact cam_post._operations_collection pins.
+    nc_input.operations = list(walked)
+    prog = cam.ncPrograms.add(nc_input)
+    try:
+        filtered = [adsk.cam.Operation.cast(x) for x in prog.filteredOperations]
+        filtered = [o for o in filtered if o is not None]
+        pairs = 0
+        id_ties = 0
+        eq_ties = 0
+        is_ties = 0
+        for f in filtered:
+            for w in walked:
+                if w.name == f.name:
+                    pairs += 1
+                    if f.operationId == w.operationId:
+                        id_ties += 1
+                    if f == w:
+                        eq_ties += 1
+                    if f is w:
+                        is_ties += 1
+        emit(no_token == len(walked) and pairs > 0 and id_ties == pairs and eq_ties == pairs,
+             "cam-ncprogram-filtered-ops-tie-by-operationid: no-entityToken=" + str(no_token)
+             + "/" + str(len(walked)) + " name-paired=" + str(pairs) + " operationId-ties="
+             + str(id_ties) + " eq-ties=" + str(eq_ties) + " wrapper-is-ties=" + str(is_ties))
+    finally:
+        prog.deleteMe()
 """,
     },
 ]
@@ -1468,7 +2865,10 @@ def _judge(row, is_error, payload):
     if is_error:
         if row.get("expect") == "raise_or_abort":
             return "PASS", "script aborted at the misuse (the raise escaped try/except)"
-        return "ERROR", str(payload)[:160]
+        # NOT truncated: this is a traceback, and the frame that names the defect is the LAST one.
+        # The console line slices for width on its own; --json keeps the whole thing, which is the
+        # only way to read why a row raised without re-running it by hand.
+        return "ERROR", str(payload)
     lines = _verdict_lines(payload)
     fails = [ln[5:] for ln in lines if ln.startswith("FAIL ")]
     if fails:
@@ -1685,7 +3085,7 @@ def check():
     return 0
 
 
-def run_measurements(write_json):
+def run_measurements(write_json, only=None):
     fusion_version = _fusion_version()
     if "sys_execute_script" not in registered_tools():
         sys.exit("sys_execute_script is not registered - enable allow_execute_api_script in the "
@@ -1705,6 +3105,8 @@ def run_measurements(write_json):
     cam_world = {"built": False, "err": None}
     try:
         for row in ROWS:
+            if only and row["id"] not in only:
+                continue
             if row.get("needs") == "cam" and not cam_world["built"]:
                 cam_world["err"] = _build_cam_world()
                 cam_world["built"] = True
@@ -1729,9 +3131,18 @@ def run_measurements(write_json):
     finally:
         _close_scratch(scratch)
     stamp_date = time.strftime("%Y-%m-%d")
-    write_ledger(results, fusion_version, stamp_date)
-    print("\nwrote {0} (stamp: Fusion {1}, {2})".format(LEDGER, fusion_version, stamp_date))
-    if all(s == "PASS" for _, s, _ in results):
+    # The ledger and live_api_facts.py describe ONE run and are written on the same condition:
+    # a partial or failing run leaves both at the last complete run, so the stamp never claims
+    # rows a dead script channel prevented from executing.
+    if only:
+        # A subset run measures a subset. Writing the ledger from it would republish the whole
+        # file from the handful of rows that ran, deleting every row the filter skipped - the
+        # all-PASS gate cannot see the difference between "skipped" and "absent".
+        print("\n{0} and live_api_facts.py NOT rewritten - this was a --only run of {1} row(s). "
+              "Run the full sweep to republish.".format(os.path.basename(LEDGER), len(results)))
+    elif all(s == "PASS" for _, s, _ in results):
+        write_ledger(results, fusion_version, stamp_date)
+        print("\nwrote {0} (stamp: Fusion {1}, {2})".format(LEDGER, fusion_version, stamp_date))
         print("wrote {0} ({1} enum families, {2} behavior flags, {3} shaped types)".format(
             write_api_facts(facts, fusion_version, stamp_date, shapes),
             sum(1 for k in facts if k.startswith("enums.")) and len(
@@ -1739,7 +3150,10 @@ def run_measurements(write_json):
             sum(1 for k in facts if k.startswith("behavior.")),
             len(shapes)))
     else:
-        print("live_api_facts.py NOT rewritten - resolve the non-PASS rows first.")
+        failed = [r["id"] for r, s, _ in results if s != "PASS"]
+        print("\n{0} and live_api_facts.py NOT rewritten - {1} non-PASS row(s): {2}".format(
+            os.path.basename(LEDGER), len(failed), ", ".join(failed[:12])
+            + (", ..." if len(failed) > 12 else "")))
     if write_json:
         results_dir = os.path.join(os.path.dirname(LEDGER), "results")
         os.makedirs(results_dir, exist_ok=True)
@@ -1756,5 +3170,11 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--only", metavar="ID", action="append",
+                    help="Run only the row(s) with this id; repeatable. A row's full traceback is "
+                         "truncated in the sweep's summary line, so this is how you read one. A "
+                         "partial run NEVER rewrites the ledger - the all-PASS gate sees the "
+                         "skipped rows as absent, not as passing.")
     args = ap.parse_args()
-    sys.exit(check() if args.check else run_measurements(args.json))
+    sys.exit(check() if args.check
+             else run_measurements(args.json, only=set(args.only) if args.only else None))

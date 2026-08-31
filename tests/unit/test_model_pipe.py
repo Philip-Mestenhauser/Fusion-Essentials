@@ -15,9 +15,9 @@ import adsk.core
 import adsk.fusion
 import pytest
 
-from conftest import (BRepBody, MakeComp, assert_no_active_design, error_message, install,
-                      load_tool, make_design, make_sketch, make_sketch_curve, payload,
-                      _NamedCollection)
+from conftest import (BRepBody, MakeComp, assert_no_active_design, body_proxy, error_message,
+                      install, load_tool, make_design, make_sketch, make_sketch_curve,
+                      make_source_document, payload, _NamedCollection)
 
 mp = load_tool("model_pipe")
 
@@ -441,6 +441,79 @@ class TestHonesty:
                          target_bodies=["Missing"])
         assert "Missing" in error_message(res)
         assert pf.last is None
+
+
+# ── the watched-body census keys on the PHYSICAL body, not on a wrapper token ──
+
+# The x-ref shape, measured on a host holding two x-refs of one design: two DISTINCT bodies read one
+# byte-identical entityToken while their source documents' lineage ids differ. A body and its own
+# occurrence proxy are the other half - one physical body reading two different wrapper tokens.
+_URN_XREF = "urn:adsk.wipprod:dm.lineage:K3I2nkywRlaWPHJexysOdA"
+_URN_HOST = "urn:adsk.wipprod:dm.lineage:N_QoPrrrSJmF__f9BZV86A"
+_SHARED_TOKEN = "/vB+AAEAAwAAAAAAAAAAAAAA"
+
+
+def _component_in_document(name, urn):
+    """A component in the document whose lineage id is `urn` - the chain a body's source document is
+    read through (parentComponent -> parentDesign -> parentDocument -> dataFile.id)."""
+    return MakeComp(name=name, parent_design=make_source_document(urn))
+
+
+class TestWatchedBodiesKeyOnPhysicalIdentity:
+    def test_two_participants_sharing_a_document_local_token_are_both_watched(self, monkeypatch):
+        # An entityToken is DOCUMENT-LOCAL, so keyed on it the second participant is dropped from
+        # the watched set and the cut that removed ITS material is reported as "no volume changed".
+        monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
+        standing = BRepBody("Rail", volume=8.0, entity_token=_SHARED_TOKEN,
+                            parent_component=_component_in_document("Host", _URN_HOST))
+        moved = BRepBody("Frame", volume=12.0, entity_token=_SHARED_TOKEN,
+                         parent_component=_component_in_document("Xref", _URN_XREF))
+        assert standing.entityToken == moved.entityToken      # the tokens really collide
+
+        def _cut(_comp):
+            moved.volume = 9.0
+
+        _wire(tokens={"RAIL": standing, "FRAME": moved}, effect=_cut)
+        out = payload(mp.handler(path="sketch:Spine", section_size=20, operation="cut",
+                                 target_bodies=["RAIL", "FRAME"]))
+        assert out["volume_delta_cm3"] == -3.0
+        assert out["scoped_to_bodies"] == ["Rail", "Frame"]
+
+    def test_one_body_reached_natively_and_through_its_proxy_is_watched_once(self, monkeypatch):
+        # The other direction: the host's own collection and the participant list reach ONE physical
+        # body, whose two wrappers carry different tokens. Watched twice, its volume change is
+        # counted twice and the published delta is double what the cut actually removed.
+        monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
+        host = _component_in_document("Host", _URN_HOST)
+        block = BRepBody("Block", volume=12.0, entity_token=_SHARED_TOKEN, parent_component=host)
+        host.bRepBodies = _NamedCollection([block])
+        proxy = body_proxy(block, types.SimpleNamespace(name="Block:1"))
+        assert proxy.entityToken != block.entityToken         # the wrappers really differ
+
+        def _cut(_comp):
+            block.volume = 9.0
+
+        _wire(tokens={"PROXY": proxy}, effect=_cut)
+        out = payload(mp.handler(path="sketch:Spine", section_size=20, operation="cut",
+                                 target_bodies=["PROXY"]))
+        assert out["volume_delta_cm3"] == -3.0
+
+    def test_two_bodies_with_no_readable_identity_are_watched_separately(self, monkeypatch):
+        # The `or id(b)` last resort: two bodies nothing can be identified from must over-count
+        # rather than merge, or the one that moved drops out of the census entirely.
+        monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
+        standing = BRepBody("Rail", volume=8.0)
+        moved = BRepBody("Frame", volume=12.0)
+        for b in (standing, moved):
+            del b.entityToken
+
+        def _cut(_comp):
+            moved.volume = 9.0
+
+        _wire(tokens={"RAIL": standing, "FRAME": moved}, effect=_cut)
+        out = payload(mp.handler(path="sketch:Spine", section_size=20, operation="cut",
+                                 target_bodies=["RAIL", "FRAME"]))
+        assert out["volume_delta_cm3"] == -3.0
 
 
 # ── direct mode: no feature object, so the body census decides ──────────────

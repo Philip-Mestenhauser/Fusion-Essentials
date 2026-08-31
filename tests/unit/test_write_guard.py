@@ -627,3 +627,377 @@ class TestOpenDocumentsActiveFlag:
         self._app(monkeypatch, [_Hostile("h1", "Bracket")], active)
         rows = _REAL_OPEN_DOCUMENTS()
         assert rows[0]["is_active"] is False
+
+
+# ── document_key: the identity a store that outlives one MCP call remembers a document by ──────────
+
+
+class _DocHandle:
+    """One read of a document handle. Models the CLOSED-document behaviour as measured: after the
+    document closes, a handle handed out earlier compares UNEQUAL to every live document (the
+    comparison answers False, it does NOT raise) and isValid reads False."""
+
+    def __init__(self, opened):
+        self._opened = opened
+        # A never-saved document answers dataFile None (measured - it does not raise); only a saved
+        # one hands back a DataFile, and an EMPTY id models one whose id will not read.
+        self.dataFile = _FakeDataFile(opened.urn) if opened.urn is not None else None
+
+    @property
+    def isValid(self):
+        return self._opened.is_open
+
+    def __eq__(self, other):
+        if not self._opened.is_open:
+            return False
+        return isinstance(other, _DocHandle) and other._opened is self._opened
+
+    # Not hashable, like the wrapper it stands in for: anything keying a dict/set on a document
+    # instead of comparing handles has to fail loudly here rather than silently mis-key.
+    __hash__ = None
+
+
+class _MuteValidityHandle(_DocHandle):
+    """A handle whose isValid will not read - the branch an unreadable flag must NOT evict on."""
+
+    @property
+    def isValid(self):
+        raise RuntimeError("isValid could not be read")
+
+    __hash__ = None
+
+
+class _UnreadableComparisonHandle(_DocHandle):
+    """A handle whose `==` will not read - an ARBITRARY unreadable comparison, claiming nothing
+    about any particular platform state (a closed document's handle compares False, it does not
+    raise). It drives the safe() default: a comparison that cannot be read is not a match."""
+
+    def __eq__(self, other):
+        raise RuntimeError("the comparison could not be read")
+
+    __hash__ = None
+
+
+class _OpenDoc:
+    """One open document, handing back a FRESH handle on every read - what the real API does
+    (_open_documents carries the live measurement: `is` reads False for the one active document
+    across two reads while `==` reads True). Two handles of THIS document compare equal; handles
+    of a different _OpenDoc never do.
+
+    `urn` is settable after construction: each handle snapshots it at read time, which is how a
+    document that answers no data-file id and later answers one is modelled without the document
+    ever closing."""
+
+    def __init__(self, name="Untitled", urn=None, handle_class=_DocHandle):
+        self.name = name
+        self.urn = urn
+        self.handle_class = handle_class
+        self.is_open = True
+
+    def handle(self):
+        return self.handle_class(self)
+
+    def close(self):
+        """Close it. Handles already handed out (the registry holds one) stay reachable as Python
+        objects and go invalid, which is what a closed Fusion document leaves behind."""
+        self.is_open = False
+
+
+class _RewrappingApp:
+    """An app whose activeDocument read mints a NEW handle every time, like the real one."""
+
+    def __init__(self, opened=None):
+        self.opened = opened
+
+    @property
+    def activeDocument(self):
+        return None if self.opened is None else self.opened.handle()
+
+
+class TestDocumentKey:
+    """The ONE key a store outliving a single MCP call remembers a document by - a view snapshot, a
+    driven-joint registry, a live generation. Its two halves are the lineage urn for a saved
+    document and, for one with no readable data-file id, a per-instance token matched by document
+    HANDLE, since a never-saved document's NAME is not an identity (two open ones both answer
+    'Untitled', measured live) and a name key hands one document's stored state to another.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolated_key_registry(self, monkeypatch):
+        """The registry and its counter are module-level SESSION state shared by every consumer, so
+        a test asserting on minted tokens has to start both from empty."""
+        monkeypatch.setattr(wg, "_UNSAVED_DOC_SEQ", 0)
+        wg._UNSAVED_DOC_KEYS.clear()
+        yield
+        wg._UNSAVED_DOC_KEYS.clear()
+
+    def test_a_saved_document_keys_on_its_lineage_urn(self, monkeypatch):
+        monkeypatch.setattr(wg, "app", _RewrappingApp(_OpenDoc("Bracket", urn="urn:lineage:1")))
+        assert wg.document_key() == "urn:lineage:1"
+        assert wg._UNSAVED_DOC_KEYS == []          # a document with an id needs nothing minted
+
+    def test_a_data_file_whose_id_will_not_read_takes_a_per_instance_key(self, monkeypatch):
+        # An EMPTY id is not an identity - keying on it would put every such document in one bucket.
+        monkeypatch.setattr(wg, "app", _RewrappingApp(_OpenDoc("Shared", urn="")))
+        assert wg.document_key() == "unsaved:1"
+
+    def test_the_same_unsaved_document_keeps_one_key_across_calls(self, monkeypatch):
+        # The match is `==`, not `is`: every activeDocument read hands back a NEW handle, and a
+        # second key for one document would split its own stored state in half.
+        monkeypatch.setattr(wg, "app", _RewrappingApp(_OpenDoc("Untitled")))
+        assert wg.document_key() == wg.document_key() == "unsaved:1"
+        assert len(wg._UNSAVED_DOC_KEYS) == 1
+
+    def test_two_unsaved_documents_sharing_a_name_get_different_keys(self, monkeypatch):
+        # THE BITE: both are named 'Untitled' and neither has a dataFile, so a NAME key hands both
+        # the same string - and one document's stored state becomes reachable from the other.
+        app = _RewrappingApp(_OpenDoc("Untitled"))
+        monkeypatch.setattr(wg, "app", app)
+        first = wg.document_key()
+        app.opened = _OpenDoc("Untitled")                  # a DIFFERENT document, same name
+        assert wg.document_key() != first
+        assert len(wg._UNSAVED_DOC_KEYS) == 2
+
+    def test_no_readable_document_is_not_a_key(self, monkeypatch):
+        monkeypatch.setattr(wg, "app", _FakeApp(active_raises=True))
+        assert wg.document_key() is None
+        assert wg._UNSAVED_DOC_KEYS == []                  # and it mints nothing to hand out
+
+    def test_a_comparison_that_will_not_read_is_not_a_match(self, monkeypatch):
+        # The safe() default. This handle's `==` raises - an ARBITRARY unreadable comparison (a
+        # CLOSED document's handle answers False, it does not raise). A comparison nobody could read
+        # is not evidence of a match, so the next document mints its own key instead of inheriting.
+        app = _RewrappingApp(_OpenDoc("Untitled", handle_class=_UnreadableComparisonHandle))
+        monkeypatch.setattr(wg, "app", app)
+        first = wg.document_key()
+        app.opened = _OpenDoc("Untitled")
+        assert wg.document_key() != first
+
+    def test_a_closed_document_is_evicted_and_cannot_hand_its_key_on(self, monkeypatch):
+        # isValid False is the only thing that evicts. The next unsaved document must get a NEW
+        # token, never the closed one's - inheriting it would inherit that document's stored state.
+        gone = _OpenDoc("Untitled")
+        app = _RewrappingApp(gone)
+        monkeypatch.setattr(wg, "app", app)
+        first = wg.document_key()
+        gone.close()                                       # the tab is closed
+        app.opened = _OpenDoc("Untitled")
+        assert wg.document_key() != first
+        assert len(wg._UNSAVED_DOC_KEYS) == 1              # the dead handle was dropped
+
+    def test_several_closed_documents_are_all_evicted_in_one_pass(self, monkeypatch):
+        # The eviction walks the registry BACKWARDS so a deletion cannot slide the next entry past
+        # the cursor, and so the index it holds stays inside a list that is shrinking under it. Only
+        # a registry holding MORE THAN ONE dead entry tells the two walks apart: a forward walk
+        # skips the entry that slid into the freed slot and then indexes past the end, raising
+        # IndexError out of document_key() and so out of every consumer's handler. A --keep-open
+        # session full of scratch documents produces exactly this shape.
+        first, second, live = _OpenDoc("Untitled"), _OpenDoc("Untitled"), _OpenDoc("Untitled")
+        app = _RewrappingApp()
+        monkeypatch.setattr(wg, "app", app)
+        keys = []
+        for opened in (first, second, live):
+            app.opened = opened
+            keys.append(wg.document_key())
+        assert len(wg._UNSAVED_DOC_KEYS) == 3 and len(set(keys)) == 3
+        first.close()
+        second.close()                                     # two dead entries, adjacent, at the front
+        app.opened = live
+        assert wg.document_key() == keys[2]                # the survivor keeps its own key
+        assert [k for _d, k in wg._UNSAVED_DOC_KEYS] == [keys[2]]
+
+    def test_a_closed_document_is_evicted_by_a_read_taken_while_a_SAVED_one_is_active(self, monkeypatch):
+        # The way a scratch document actually closes is that another document takes the foreground,
+        # and that document is usually a saved one - which keys on its data-file id and never
+        # reaches the unsaved scan. So the prune has to run before that branch returns, or the dead
+        # entry and every consumer's state under its key survive the whole add-in session.
+        gone = _OpenDoc("Untitled")
+        app = _RewrappingApp(gone)
+        monkeypatch.setattr(wg, "app", app)
+        heard = []
+        monkeypatch.setattr(wg, "_KEY_EVICTION_LISTENERS", [heard.append])
+        key = wg.document_key()
+        gone.close()
+        app.opened = _OpenDoc("Bracket", urn="urn:lineage:1")      # a SAVED document takes over
+        assert wg.document_key() == "urn:lineage:1"
+        assert wg._UNSAVED_DOC_KEYS == []                          # the dead entry went
+        assert heard == [key]                                      # and its holder was told which
+
+    def test_an_unreadable_is_valid_does_not_evict(self, monkeypatch):
+        # Only a definite False evicts: an isValid that will not read proves nothing about the
+        # document, and dropping a LIVE document's key would mint it a second one.
+        app = _RewrappingApp(_OpenDoc("Untitled", handle_class=_MuteValidityHandle))
+        monkeypatch.setattr(wg, "app", app)
+        first = wg.document_key()
+        assert wg.document_key() == first
+        assert len(wg._UNSAVED_DOC_KEYS) == 1
+
+    def test_a_saved_document_first_seen_saved_registers_and_announces_nothing(self, monkeypatch):
+        # The other side of the rename: a document that already answers an id when it is first seen
+        # was never minted a key, so there is no old key to carry anything from. Announcing here
+        # would tell every consumer to move state off a key it never used.
+        heard = []
+        monkeypatch.setattr(wg, "_KEY_RENAME_LISTENERS", [lambda *a: heard.append(a)])
+        monkeypatch.setattr(wg, "app", _RewrappingApp(_OpenDoc("Bracket", urn="urn:lineage:1")))
+        assert wg.document_key() == wg.document_key() == "urn:lineage:1"
+        assert wg._UNSAVED_DOC_KEYS == [] and heard == []
+
+    def test_every_listener_hears_every_evicted_key(self, monkeypatch):
+        # The registry is SHARED, so whichever consumer's read happens to trigger the prune must
+        # drop what ALL of them parked under that key. A listener told only about its own caller's
+        # prune leaves the other consumers' state stranded under a key nothing matches again.
+        heard_a, heard_b = [], []
+        monkeypatch.setattr(wg, "_KEY_EVICTION_LISTENERS", [])
+        wg.on_key_evicted(heard_a.append)
+        wg.on_key_evicted(heard_b.append)
+        gone_one, gone_two = _OpenDoc("Untitled"), _OpenDoc("Untitled")
+        app = _RewrappingApp()
+        monkeypatch.setattr(wg, "app", app)
+        keys = []
+        for opened in (gone_one, gone_two):
+            app.opened = opened
+            keys.append(wg.document_key())
+        assert heard_a == []                               # nothing closed yet, nothing evicted
+        gone_one.close()
+        gone_two.close()
+        app.opened = _OpenDoc("Untitled")
+        wg.document_key()
+        assert sorted(heard_a) == sorted(keys)
+        assert heard_b == heard_a
+
+
+class TestKeyRename:
+    """A key that changes while its document stays OPEN - the other thing that happens to a key.
+
+    A never-saved document keys on a minted token; the moment it is saved, dataFile.id reads and the
+    key becomes that id. Nothing about that is a close, so the eviction listeners never fire, and a
+    store still keyed on the superseded token holds state no live document keys to again - a view
+    snapshot that can no longer be restored, a driven-joint entry that stops arming a crash guard.
+    The change is announced instead, and BOTH keys name the same open document, so a consumer moves
+    state rather than dropping it.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolated(self, monkeypatch):
+        """The registry, the mint counter and the listener list are all shared session state."""
+        monkeypatch.setattr(wg, "_UNSAVED_DOC_SEQ", 0)
+        monkeypatch.setattr(wg, "_KEY_RENAME_LISTENERS", [])
+        wg._UNSAVED_DOC_KEYS.clear()
+        yield
+        wg._UNSAVED_DOC_KEYS.clear()
+
+    def _heard(self):
+        """A listener registered the way a consumer registers one, collecting (old, new) pairs."""
+        pairs = []
+        wg.on_key_renamed(lambda old, new: pairs.append((old, new)))
+        return pairs
+
+    def test_a_save_re_keys_the_open_document_and_announces_it(self, monkeypatch):
+        # THE BITE: one open document, first with no data-file id and then with one. The key it
+        # answers changes, and without the announcement every consumer's state stays parked under
+        # the token nothing keys to again.
+        heard = self._heard()
+        doc = _OpenDoc("Untitled")
+        monkeypatch.setattr(wg, "app", _RewrappingApp(doc))
+        assert wg.document_key() == "unsaved:1"
+        doc.urn = "urn:lineage:saved"                      # doc_save_as lands; the id now reads
+        assert wg.document_key() == "urn:lineage:saved"
+        assert heard == [("unsaved:1", "urn:lineage:saved")]
+
+    def test_the_second_flip_is_announced_from_the_key_it_last_held(self, monkeypatch):
+        # The id may not arrive settled - IF a path form answers before the lineage urn (PROBE
+        # NEEDED, KEY-2). The mechanism is tested regardless of what triggers a second flip: the
+        # entry is REWRITTEN rather than dropped at the first, so the second is announced as
+        # (path form -> urn). Announcing it as (unsaved:1 -> urn) would tell every consumer to move
+        # state off a key it stopped using one call ago, and leave it under the path form.
+        heard = self._heard()
+        doc = _OpenDoc("Untitled")
+        monkeypatch.setattr(wg, "app", _RewrappingApp(doc))
+        assert wg.document_key() == "unsaved:1"
+        doc.urn = "a.b.c:/Projects/Bracket.f3d"
+        assert wg.document_key() == "a.b.c:/Projects/Bracket.f3d"
+        doc.urn = "urn:lineage:saved"
+        assert wg.document_key() == "urn:lineage:saved"
+        assert heard == [("unsaved:1", "a.b.c:/Projects/Bracket.f3d"),
+                         ("a.b.c:/Projects/Bracket.f3d", "urn:lineage:saved")]
+
+    def test_a_key_that_did_not_change_announces_nothing(self, monkeypatch):
+        # Repeated reads of one saved document are the common case; an announcement per call would
+        # have every consumer re-addressing state on every read of every key.
+        heard = self._heard()
+        doc = _OpenDoc("Untitled")
+        monkeypatch.setattr(wg, "app", _RewrappingApp(doc))
+        wg.document_key()
+        doc.urn = "urn:lineage:saved"
+        wg.document_key()
+        for _ in range(3):
+            assert wg.document_key() == "urn:lineage:saved"
+        assert heard == [("unsaved:1", "urn:lineage:saved")]      # exactly one, not four
+
+    def test_the_renamed_document_keeps_ONE_registry_entry(self, monkeypatch):
+        # The entry is rewritten in place. A second entry for the same document would let it answer
+        # two keys depending on which the scan reached first, splitting its own stored state.
+        doc = _OpenDoc("Untitled")
+        monkeypatch.setattr(wg, "app", _RewrappingApp(doc))
+        wg.document_key()
+        doc.urn = "urn:lineage:saved"
+        wg.document_key()
+        assert [k for _d, k in wg._UNSAVED_DOC_KEYS] == ["urn:lineage:saved"]
+
+    def test_every_listener_hears_the_rename(self, monkeypatch):
+        # The registry is SHARED: whichever consumer's read triggers the flip must move what ALL of
+        # them parked there. A listener told only about its own caller's flip leaves the other
+        # consumers' state stranded under a key nothing answers again.
+        first, second = self._heard(), self._heard()
+        doc = _OpenDoc("Untitled")
+        monkeypatch.setattr(wg, "app", _RewrappingApp(doc))
+        wg.document_key()
+        doc.urn = "urn:lineage:saved"
+        wg.document_key()
+        assert first == [("unsaved:1", "urn:lineage:saved")] and second == first
+
+    def test_an_id_that_stops_reading_keeps_the_key_the_document_holds(self, monkeypatch):
+        # An id that will not read is not evidence the document went back to having none. Falling
+        # through to a fresh mint here would strand the state parked under the key it already
+        # answers - the very defect the announcement exists to prevent, reintroduced by it.
+        heard = self._heard()
+        doc = _OpenDoc("Untitled")
+        monkeypatch.setattr(wg, "app", _RewrappingApp(doc))
+        wg.document_key()
+        doc.urn = "urn:lineage:saved"
+        assert wg.document_key() == "urn:lineage:saved"
+        doc.urn = None                                     # the dataFile read goes quiet
+        assert wg.document_key() == "urn:lineage:saved"    # not a new token, not a second entry
+        assert heard == [("unsaved:1", "urn:lineage:saved")]
+        assert len(wg._UNSAVED_DOC_KEYS) == 1
+
+    def test_a_different_document_does_not_inherit_the_renamed_key(self, monkeypatch):
+        # The rename rewrites ONE entry, matched by handle. A second never-saved document mints its
+        # own token: inheriting the renamed one would hand it the first document's stored state.
+        doc = _OpenDoc("Untitled")
+        app = _RewrappingApp(doc)
+        monkeypatch.setattr(wg, "app", app)
+        wg.document_key()
+        doc.urn = "urn:lineage:saved"
+        assert wg.document_key() == "urn:lineage:saved"
+        app.opened = _OpenDoc("Untitled")                  # a DIFFERENT never-saved document
+        assert wg.document_key() == "unsaved:2"
+
+    def test_closing_a_renamed_document_evicts_the_key_it_last_held(self, monkeypatch):
+        # Eviction reports the key the closed document ANSWERED, not the token minted for it: a
+        # consumer that moved its state on the rename holds it under the new key, and naming the
+        # superseded token would leave that state parked behind a closed document forever.
+        evicted = []
+        monkeypatch.setattr(wg, "_KEY_EVICTION_LISTENERS", [evicted.append])
+        self._heard()
+        doc = _OpenDoc("Untitled")
+        app = _RewrappingApp(doc)
+        monkeypatch.setattr(wg, "app", app)
+        wg.document_key()
+        doc.urn = "urn:lineage:saved"
+        wg.document_key()
+        doc.close()
+        app.opened = _OpenDoc("Untitled")
+        wg.document_key()
+        assert evicted == ["urn:lineage:saved"]
+        assert wg._UNSAVED_DOC_KEYS and [k for _d, k in wg._UNSAVED_DOC_KEYS] == ["unsaved:2"]

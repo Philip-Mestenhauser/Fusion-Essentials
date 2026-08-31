@@ -246,7 +246,11 @@ class FakeDesignDraw:
 
     @staticmethod
     def _component(name, sketch, planes):
-        return SimpleNamespace(name=name, sketches=FakeSketches(sketch),
+        # entityToken, because _common.same_component compares on it and answers None without one -
+        # and the assembly-context lift REFUSES an owner it cannot tell from the root rather than
+        # hand back a component-local datum Fusion would reject.
+        return SimpleNamespace(name=name, entityToken=f"TOKEN:{name}",
+                               sketches=FakeSketches(sketch),
                                constructionPlanes=_NamedCollection(list(planes)),
                                xYConstructionPlane=_datum("XY"),
                                xZConstructionPlane=_datum("XZ"),
@@ -1439,8 +1443,10 @@ class TestCreateFrameParity:
         s.xDirection = SimpleNamespace(x=1.0, y=0.0, z=0.0)
         s.yDirection = SimpleNamespace(x=0.0, y=0.0, z=-1.0)
         # Root-owned: local IS world. A sketch whose component is instanced several times gets the
-        # component-local frame instead (test__sketch_detail's TestFrameSpace).
-        root = SimpleNamespace(name="Root")
+        # component-local frame instead (test__sketch_detail's TestFrameSpace). The token is the
+        # design root's own - two wrappers of one root component measured share one entityToken,
+        # and that is what same_component compares.
+        root = SimpleNamespace(name="Root", entityToken="TOKEN:Root")
         root.parentDesign = SimpleNamespace(rootComponent=root)
         s.parentComponent = root
         return s
@@ -1581,7 +1587,7 @@ class TestSharedSketchNameRefused:
     def test_add_geometry_refuses_with_its_owners(self, monkeypatch):
         _install_draw(monkeypatch, FakeSketch("S"))
         monkeypatch.setattr(sk._common, "find_or_recent_sketch",
-                            lambda d, n: (None, n, self._REFUSAL))
+                            lambda d, n, remedy=None: (None, n, self._REFUSAL))
         res = sk.add_sketch_geometry_handler(kind="circle", sketch_name="S", cx=0, cy=0, radius=5)
         assert res["isError"] is True
         assert res["message"] == self._REFUSAL and "No sketch named" not in res["message"]
@@ -1589,7 +1595,7 @@ class TestSharedSketchNameRefused:
     def test_draw_3d_line_refuses_with_its_owners(self, monkeypatch):
         _install_draw(monkeypatch, FakeSketch("S"))
         monkeypatch.setattr(sk._common, "find_or_recent_sketch",
-                            lambda d, n: (None, n, self._REFUSAL))
+                            lambda d, n, remedy=None: (None, n, self._REFUSAL))
         res = sk.draw_3d_line_handler(sketch_name="S", x2=1, y2=1, z2=1)
         assert res["isError"] is True
         assert res["message"] == self._REFUSAL and "No sketch named" not in res["message"]
@@ -1597,7 +1603,8 @@ class TestSharedSketchNameRefused:
     def test_a_name_no_sketch_carries_still_says_not_found(self, monkeypatch):
         # The refusal must not swallow the ordinary miss - they are different readings.
         _install_draw(monkeypatch, FakeSketch("S"))
-        monkeypatch.setattr(sk._common, "find_or_recent_sketch", lambda d, n: (None, n, None))
+        monkeypatch.setattr(sk._common, "find_or_recent_sketch",
+                            lambda d, n, remedy=None: (None, n, None))
         res = sk.add_sketch_geometry_handler(kind="circle", sketch_name="Nope", cx=0, cy=0, radius=5)
         assert res["isError"] is True and "No sketch named 'Nope'" in res["message"]
 
@@ -1636,3 +1643,144 @@ class TestSketchNameReporting:
         out = _payload(sk.add_sketch_geometry_handler(kind="circle", sketch_name=" ",
                                                       cx=0, cy=0, radius=5))
         assert out["sketch_name"] == "Only"
+
+
+# ── the 'component' SCOPE on the two DRAW tools ─────────────────────────────────────────────────
+# Fusion numbers sketches per component from 1, so two components each holding a "Sketch1" is the
+# norm. The design-wide refusal is right to refuse, and it names 'component' as the way through: a
+# rename is no remedy for a component that came in with a REFERENCED document, since that means
+# editing another document. These drive the REAL _common walk: the filter is the thing under test.
+
+class _ScopedDesign:
+    """Two (or more) components, each holding its OWN sketch collection.
+
+    Both components hold a sketch of the SAME name on purpose - that is the only fixture in which
+    the identity filter actually runs. Two DIFFERENT names would resolve design-wide with no scope
+    involved and the test would pass against unscoped code."""
+
+    def __init__(self, pairs):
+        comps = [SimpleNamespace(name=name, sketches=_NamedCollection(list(sketches)),
+                                 constructionPlanes=_NamedCollection([]),
+                                 xYConstructionPlane=_datum("XY"),
+                                 xZConstructionPlane=_datum("XZ"),
+                                 yZConstructionPlane=_datum("YZ"))
+                 for name, sketches in pairs]
+        self.rootComponent = comps[0]
+        self.allComponents = _NamedCollection(comps)
+        self.activeComponent = comps[0]
+        self.rootComponent.allOccurrences = []
+
+    def component(self, name):
+        return self.allComponents.itemByName(name)
+
+
+def _install_scoped(monkeypatch, pairs):
+    """Point sketch_core at a multi-component design. Both design seams are patched (the handler's
+    own _common and the one _inputs resolves through), inside monkeypatch so each undoes itself."""
+    import adsk.fusion, adsk.core
+    design = _ScopedDesign(pairs)
+    monkeypatch.setattr(sk, "app", SimpleNamespace(activeProduct=design))
+    monkeypatch.setattr(sk._common, "app", sk.app)
+    monkeypatch.setattr(sk._inputs._common, "app", sk.app)
+    monkeypatch.setattr(adsk.fusion.Design, "cast",
+                        lambda x: x if isinstance(x, _ScopedDesign) else None)
+    monkeypatch.setattr(adsk.core.Point3D, "create",
+                        lambda x, y, z: type("P", (), {"x": x, "y": y, "z": z})())
+    return design
+
+
+@pytest.fixture
+def shared_name(monkeypatch):
+    """'Sketch1' in BOTH components. The two sketches start with DIFFERENT curve counts (Alpha has
+    one line already, Beta none), so a call that reached the wrong one is visible in the counts and
+    not merely in a name that both sketches share."""
+    alpha, beta = FakeSketch("Sketch1"), FakeSketch("Sketch1")
+    alpha.sketchLines._land(1)
+    design = _install_scoped(monkeypatch, [("Alpha", [alpha]), ("Beta", [beta])])
+    return design, alpha, beta
+
+
+class TestDrawComponentScope:
+    def test_unscoped_shared_name_still_refuses_and_names_the_scope_input(self, shared_name):
+        # The refusal must not weaken to a first-match now a scope exists, and its way forward must
+        # be an input this tool ACCEPTS - "rename one" is a change to another document.
+        _d, alpha, beta = shared_name
+        res = sk.add_sketch_geometry_handler(kind="circle", sketch_name="Sketch1",
+                                             cx=0, cy=0, radius=5)
+        assert res["isError"] is True
+        assert "2 sketches are named 'Sketch1'" in res["message"]
+        assert "'component'" in res["message"] and "Rename one" not in res["message"]
+        assert alpha.sketchCircles.count == 0 and beta.sketchCircles.count == 0
+
+    def test_the_scope_draws_into_THAT_components_sketch_and_no_other(self, shared_name):
+        _d, alpha, beta = shared_name
+        out = _payload(sk.add_sketch_geometry_handler(kind="circle", sketch_name="Sketch1",
+                                                      component="Beta", cx=1, cy=2, radius=5))
+        assert out["drawn"] == "circle c=(1,2) r=5"
+        assert beta.sketchCircles.count == 1 and alpha.sketchCircles.count == 0
+
+    def test_the_other_component_is_reachable_by_the_same_call(self, shared_name):
+        # The pair proves the scope SELECTS rather than always answering the first hit.
+        _d, alpha, beta = shared_name
+        _payload(sk.add_sketch_geometry_handler(kind="circle", sketch_name="Sketch1",
+                                                component="Alpha", cx=1, cy=2, radius=5))
+        assert alpha.sketchCircles.count == 1 and beta.sketchCircles.count == 0
+
+    def test_a_component_the_design_does_not_hold_is_refused(self, shared_name):
+        _d, alpha, beta = shared_name
+        res = sk.add_sketch_geometry_handler(kind="circle", sketch_name="Sketch1",
+                                             component="Gamma", cx=0, cy=0, radius=5)
+        assert res["isError"] is True and "No component named 'Gamma'" in res["message"]
+        assert alpha.sketchCircles.count == 0 and beta.sketchCircles.count == 0
+
+    def test_a_scope_that_does_not_hold_the_sketch_is_refused_naming_who_does(self, monkeypatch):
+        alpha = FakeSketch("Plate")
+        design = _install_scoped(monkeypatch, [("Alpha", [alpha]), ("Beta", [])])
+        assert design.component("Beta") is not None
+        res = sk.add_sketch_geometry_handler(kind="circle", sketch_name="Plate",
+                                             component="Beta", cx=0, cy=0, radius=5)
+        assert res["isError"] is True
+        assert "'Beta'" in res["message"] and "'Alpha'" in res["message"]
+        assert alpha.sketchCircles.count == 0
+
+    def test_a_wrong_component_is_refused_even_when_the_sketch_name_is_UNIQUE(self, monkeypatch):
+        # The decision this pins: a scope that was passed is VALIDATED, never dropped because the
+        # name happened to identify one sketch on its own. An input a caller can get wrong without
+        # being told is a trap - the draw would land in Alpha while the call said Beta.
+        alpha = FakeSketch("OnlyOne")
+        _install_scoped(monkeypatch, [("Alpha", [alpha]), ("Beta", [])])
+        res = sk.add_sketch_geometry_handler(kind="circle", sketch_name="OnlyOne",
+                                             component="Beta", cx=0, cy=0, radius=5)
+        assert res["isError"] is True
+        assert alpha.sketchCircles.count == 0
+
+    def test_a_blank_name_with_a_scope_takes_THAT_components_most_recent_sketch(self, monkeypatch):
+        # A scope silently ignored here would draw into the ACTIVE component instead of the named
+        # one - the same wrong-sketch write the scope exists to prevent.
+        first, second = FakeSketch("A1"), FakeSketch("B2")
+        _install_scoped(monkeypatch, [("Alpha", [first]), ("Beta", [second])])
+        out = _payload(sk.add_sketch_geometry_handler(kind="circle", sketch_name="",
+                                                      component="Beta", cx=0, cy=0, radius=5))
+        assert out["sketch_name"] == "B2"
+        assert second.sketchCircles.count == 1 and first.sketchCircles.count == 0
+
+    def test_a_blank_name_scoped_to_a_component_with_no_sketches_is_refused(self, monkeypatch):
+        _install_scoped(monkeypatch, [("Alpha", [FakeSketch("A1")]), ("Beta", [])])
+        res = sk.add_sketch_geometry_handler(kind="circle", sketch_name="",
+                                             component="Beta", cx=0, cy=0, radius=5)
+        assert res["isError"] is True and "holds no sketches" in res["message"]
+
+    def test_3d_line_scope_reaches_the_named_components_sketch(self, shared_name):
+        _d, alpha, beta = shared_name
+        before_alpha = alpha.sketchLines.count
+        out = _payload(sk.draw_3d_line_handler(sketch_name="Sketch1", component="Beta",
+                                               x2=1, y2=1, z2=1))
+        assert out["sketch_name"] == "Sketch1"
+        assert beta.sketchLines.count == 1 and alpha.sketchLines.count == before_alpha
+
+    def test_3d_line_unscoped_shared_name_refuses_and_names_the_scope_input(self, shared_name):
+        _d, alpha, beta = shared_name
+        res = sk.draw_3d_line_handler(sketch_name="Sketch1", x2=1, y2=1, z2=1)
+        assert res["isError"] is True
+        assert "2 sketches are named 'Sketch1'" in res["message"] and "'component'" in res["message"]
+        assert beta.sketchLines.count == 0

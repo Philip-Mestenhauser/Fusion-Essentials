@@ -407,10 +407,38 @@ class TestSvgImport:
         design = make_design(sketches=[_sketch("Logo")])
         _design, _mgr, calls = wire(design=design)
         refusal = "2 sketches are named 'Logo' ('Logo' in Root, 'Logo' in Frame)"
-        monkeypatch.setattr(mod._common, "find_or_recent_sketch", lambda d, n: (None, n, refusal))
+        monkeypatch.setattr(mod._sketch_detail, "scoped_or_recent_sketch",
+                            lambda d, n, c, input_name="component": (None, n, refusal))
         msg = error_message(mod.handler(file_path=cad("logo.svg"), sketch="Logo"))
         assert msg == refusal and "No sketch named" not in msg
         assert calls["targets"] == []          # nothing was imported
+
+    def test_the_svg_scope_is_declared_on_the_wire_beside_into_component(self):
+        # the schema is strict, so a handler parameter no property declares is unreachable. Both
+        # scopes are declared, and each keeps its own meaning.
+        sd = load_tool("_sketch_detail")
+        props = mod.tool.input_schema["properties"]
+        assert props["sketch_component"] == sd.component_scope("sketch_component",
+                                                               narrows="sketch")[1]
+        # 'into_component' is a second, differently-scoped component input, so this one names the
+        # reference it narrows instead of the family's generic wording
+        assert "'sketch'" in props["sketch_component"]["description"]
+        assert props["sketch_component"] != props["into_component"]
+
+    def test_the_svg_scope_is_its_own_input_not_into_component(self, wire, cad, monkeypatch):
+        # 'into_component' names where a DXF's new sketches or a solid's occurrence LAND; an SVG
+        # goes into a sketch that already exists, so its scope is 'sketch_component'.
+        wire(design=make_design(sketches=[_sketch("Logo")]))
+        seen = {}
+
+        def _scoped(d, n, c, input_name="component"):
+            seen.update(component=c, input_name=input_name)
+            return None, n, "refused"
+
+        monkeypatch.setattr(mod._sketch_detail, "scoped_or_recent_sketch", _scoped)
+        mod.handler(file_path=cad("logo.svg"), sketch="Logo", into_component="Carrier",
+                    sketch_component="Frame")
+        assert seen == {"component": "Frame", "input_name": "sketch_component"}
 
     def test_a_sketch_that_gained_no_curve_is_an_error(self, wire, cad):
         design = make_design(sketches=[_sketch("Logo")])

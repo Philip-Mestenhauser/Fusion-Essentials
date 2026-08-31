@@ -8,8 +8,8 @@ are set on the CombineInput.
 import json
 import types
 
-from conftest import (_NamedCollection, assert_no_active_design, body_proxy, entity_proxy, go_stale,
-                      load_tool)
+from conftest import (_NamedCollection, MakeComp, assert_no_active_design, body_proxy, entity_proxy,
+                      go_stale, load_tool, make_source_document)
 
 cb = load_tool("model_combine")
 
@@ -230,6 +230,83 @@ class TestGuards:
                                                      bRepBodies=_NamedCollection([proxy]))]
         assert proxy.entityToken != native.entityToken
         res = cb.handler(target="A", tools=["Comp:A"])
+        assert res["isError"] is True and "same as the target" in res["message"]
+        assert cf.add_calls == 0
+
+
+class TestXrefBodiesAreNotTheSameBody:
+    """Two DISTINCT bodies, one in each of two x-ref'd documents, answering ONE entityToken.
+
+    An entityToken is DOCUMENT-LOCAL (measured on a host holding two x-refs of one design: the two
+    'Frame' bodies read byte-identical tokens), so a same-body guard keyed on the token alone refuses
+    a legitimate combine of two different bodies - and the caller cannot act on that refusal, since
+    neither body's token is theirs to change from the host document."""
+
+    _URN_A = "urn:adsk.wipprod:dm.lineage:K3I2nkywRlaWPHJexysOdA"
+    _URN_B = "urn:adsk.wipprod:dm.lineage:N_QoPrrrSJmF__f9BZV86A"
+    _SHARED_TOKEN = "/vB+AAEAAwAAAAAAAAAAAAAA"
+
+    def _in_document(self, name, urn):
+        """A component in the document with lineage id `urn` - the chain a body's source document is
+        read through (parentComponent -> parentDesign -> parentDocument -> dataFile.id)."""
+        return MakeComp(name=name, parent_design=make_source_document(urn))
+
+    def _two_xrefs(self):
+        cf = _install(["A", "B"])
+        comp = cb._inputs._common.target_component(None)
+        a, b = comp.bRepBodies._b
+        a.entityToken = b.entityToken = self._SHARED_TOKEN
+        a.parentComponent = self._in_document("P2a-Gimbal", self._URN_A)
+        b.parentComponent = self._in_document("P3-Gimbal", self._URN_B)
+        return cf, a, b
+
+    def test_the_x_ref_fixture_really_models_the_collision(self):
+        # Both halves must be real: without the token collision the guard was never going to fire,
+        # and without two different documents there would be nothing to tell the bodies apart by.
+        _cf, a, b = self._two_xrefs()
+        assert a is not b and a.entityToken == b.entityToken
+        assert (a.parentComponent.parentDesign.parentDocument.dataFile.id
+                != b.parentComponent.parentDesign.parentDocument.dataFile.id)
+
+    def test_a_combine_of_the_two_is_NOT_refused_as_a_self_combine(self):
+        cf, _a, _b = self._two_xrefs()
+        res = cb.handler(target="A", tools=["B"])
+        assert "same as the target" not in (res.get("message") or "")
+        assert cf.add_calls == 1                     # the combine actually ran
+
+    def test_a_genuine_self_combine_INSIDE_one_document_is_still_refused(self):
+        # The other direction: the document half must not weaken the guard where it is right. Both
+        # references now read one token AND one source document.
+        cf = _install(["A", "B"])
+        comp = cb._inputs._common.target_component(None)
+        comp.bRepBodies._b[0].parentComponent = self._in_document("P2a-Gimbal", self._URN_A)
+        res = cb.handler(target="A", tools=["A"])
+        assert res["isError"] is True and "same as the target" in res["message"]
+        assert cf.add_calls == 0
+
+    def test_two_bodies_with_NO_readable_identity_are_not_taken_for_one_body(self):
+        # An unreadable identity is None, and two Nones are not a match. Without the truthiness gate
+        # on both keys these two DISTINCT bodies compare equal and get the same false self-combine
+        # refusal - reached through the unreadable path instead of the x-ref one.
+        cf = _install(["A", "B"])
+        comp = cb._inputs._common.target_component(None)
+        for body in comp.bRepBodies._b:
+            del body.entityToken
+        res = cb.handler(target="A", tools=["B"])
+        assert "same as the target" not in (res.get("message") or "")
+        assert cf.add_calls == 1
+
+    def test_a_native_and_its_PROXY_inside_a_saved_document_are_still_refused(self):
+        # The same-body pair the token half exists for, now with a readable document at both ends:
+        # the proxy resolves to the native, so both halves of the key are read off one body.
+        cf = _install(["A", "B"])
+        comp = cb._inputs._common.target_component(None)
+        comp.bRepBodies._b[0].parentComponent = self._in_document("P2a-Gimbal", self._URN_A)
+        native = comp.bRepBodies.itemByName("A")
+        proxy = body_proxy(native, types.SimpleNamespace(name="Jaw:1", fullPathName="Jaw:1"))
+        comp.allOccurrences = [types.SimpleNamespace(name="Jaw:1", fullPathName="Jaw:1",
+                                                     bRepBodies=_NamedCollection([proxy]))]
+        res = cb.handler(target="Comp:A", tools=["A"])
         assert res["isError"] is True and "same as the target" in res["message"]
         assert cf.add_calls == 0
 

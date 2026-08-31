@@ -16,10 +16,11 @@ import adsk.fusion
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import error, ok, safe, scale, find_sketch
+from ._common import error, ok, safe, scale
 from . import _common
 from . import _inputs
 from . import _assert
+from . import _sketch_detail
 
 app = adsk.core.Application.get()
 
@@ -42,7 +43,7 @@ _SHAPES = _inputs.OccurrenceRefList("shapes", required=False,
 
 
 def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_shape",
-            spacing: float = 0.0, units: str = "mm") -> dict:
+            spacing: float = 0.0, units: str = "mm", boundary_component: str = "") -> dict:
     """See TOOL_DESCRIPTION."""
     k = scale(units)
     if k is None:
@@ -55,12 +56,15 @@ def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_sha
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")
 
-    # Whole-design resolve (active component first) so the boundary sketch can live in an activated
+    # Whole-design resolve (every component, no preference among them) so the boundary sketch can live in an activated
     # sub-component, not only the root component; a name SEVERAL sketches carry is refused naming
-    # each owning component rather than reported as missing.
-    sketch, ambiguous = find_sketch(design, (boundary_sketch or "").strip())
-    if ambiguous:
-        return error(ambiguous)
+    # each owning component rather than reported as missing. 'boundary_component' narrows that walk
+    # to one component's own sketches, and is the input the refusal names - the scope is spelled
+    # for the BOUNDARY because that is the only sketch this tool resolves by name.
+    sketch, refusal = _sketch_detail.scoped_sketch(design, (boundary_sketch or "").strip(),
+                                                   boundary_component, "boundary_component")
+    if refusal:
+        return error(refusal)
     if not sketch:
         return error(f"No sketch named '{boundary_sketch}' for the boundary. Use sketch_get.")
     profiles = safe(lambda: sketch.profiles)
@@ -172,6 +176,10 @@ tool = (
     Tool.create_simple(name="model_arrange", description=TOOL_DESCRIPTION)
     .add_input_property("boundary_sketch", {"type": "string",
             "description": "Name of the sketch whose profile is the boundary envelope."})
+    .add_input_property("boundary_component", {"type": "string",
+            "description": "The component holding 'boundary_sketch', when two components carry that "
+                           "name (Fusion numbers sketches per component from 1). A component name, "
+                           "or an occurrence fullPathName/handle from design_get(include=['tree'])."})
     .add_input_property(*_SHAPES.as_property())
     .add_input_property(*_SOLVER.as_property())
     .add_input_property("spacing", {"type": "number",

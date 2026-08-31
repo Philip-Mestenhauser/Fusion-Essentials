@@ -24,11 +24,12 @@ import adsk.fusion
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe, find_sketch, all_sketch_names, resolve_entity_ref
+from ._common import ok, error, safe, all_sketch_names, resolve_entity_ref
 from . import _common
 # The readable handle on a SketchText's string is textParameter.expression, which holds it QUOTED -
 # _unquote is sketch_set_text's own reader for it, imported rather than re-rolled here.
 from ._sketch_detail import unquote_text as _unquote
+from . import _sketch_detail
 
 app = adsk.core.Application.get()
 
@@ -85,22 +86,24 @@ def _unverified_delete(ref, noun, before):
                  "sketch_get before deleting more.")
 
 
-def handler(sketch_name: str = "", target: str = "") -> dict:
+def handler(sketch_name: str = "", target: str = "", component: str = "") -> dict:
     # Dispatch '<type>:<index>': curves/points via the shared resolve_entity_ref, constraints via a
     # local index into geometricConstraints; both paths gate on a before/after collection count.
     design = _common.design()
     if not design:
         return error("No active design.")
 
-    # Resolve across the whole design (active component first) so a sketch in an activated
+    # Resolve across the whole design (every component, no preference among them) so a sketch in an activated
     # sub-component is reachable, matching sketch_constrain / the rest of the family. A name SEVERAL
-    # components' sketches carry is refused with them named - a delete cannot pick one blind.
-    sketch, ambiguous = find_sketch(design, (sketch_name or "").strip())
-    if ambiguous:
-        return error(ambiguous)
+    # components' sketches carry is refused with them named - a delete cannot pick one blind - and
+    # the refusal names 'component', which narrows the walk to one component's own sketches.
+    wanted = (sketch_name or "").strip()
+    sketch, refusal = _sketch_detail.scoped_sketch(design, wanted, component)
+    if refusal:
+        return error(refusal)
     if not sketch:
         names = all_sketch_names(design)
-        return error(f"No sketch named '{sketch_name}'. Available: "
+        return error(f"No sketch named '{wanted}'. Available: "
                      + (", ".join(n for n in names if n) or "(none)") + ". Use sketch_get.")
 
     ref = (target or "").strip().lower()
@@ -236,8 +239,9 @@ tool = (
         name="sketch_delete_entity",
         description=TOOL_DESCRIPTION,
         input_param_name="sketch_name",
-        input_param_description="The sketch holding the entity (resolved design-wide, active component first).",
+        input_param_description="The sketch holding the entity (resolved design-wide across every component; a name several sketches carry is refused).",
     )
+    .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
     .add_input_property("target", {"type": "string",
             "description": "The entity to delete as '<type>:<index>' - line | arc | circle | ellipse | "
                            "point | spline | cv_spline | fixed_spline | constraint | text (e.g. "

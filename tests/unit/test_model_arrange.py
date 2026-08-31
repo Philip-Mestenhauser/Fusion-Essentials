@@ -11,6 +11,7 @@ import json
 from types import SimpleNamespace
 
 import adsk.fusion
+import pytest
 
 from conftest import assert_no_active_design, load_tool
 
@@ -197,7 +198,8 @@ class TestBoundary:
         # is built; calling it "No sketch named 'Boundary'" says the opposite of what the walk read.
         _design, af = _install([FakeSketch("Boundary")], ["A:1"])
         refusal = "2 sketches are named 'Boundary' ('Boundary' in Root, 'Boundary' in Frame)"
-        monkeypatch.setattr(ar, "find_sketch", lambda design, name: (None, refusal))
+        monkeypatch.setattr(ar._common, "find_sketch",
+                            lambda design, name, remedy=None: (None, refusal))
         res = ar.handler(boundary_sketch="Boundary", shapes="A:1")
         assert res["isError"] is True
         assert res["message"] == refusal and "No sketch named" not in res["message"]
@@ -207,6 +209,139 @@ class TestBoundary:
         _install([FakeSketch("Empty", profile_count=0)], ["A:1"])
         res = ar.handler(boundary_sketch="Empty", shapes="A:1")
         assert res["isError"] is True and "profile" in res["message"].lower()
+
+
+# ── the 'boundary_component' SCOPE ───────────────────────────────────────────
+# Fusion numbers sketches per component from 1, so two components each holding a "Boundary" is the
+# norm. The design-wide walk REFUSES that name and points at this input: a rename is no remedy for
+# a component that arrived inside a referenced document. The scope is spelled for the BOUNDARY
+# because that is the only sketch this tool resolves by name.
+
+class _TaggedProfiles(FakeProfiles):
+    """Profiles that say WHICH sketch they came from. The shared FakeProfiles hands back the same
+    ('profile', 0) tuple for every sketch, so an envelope read against it cannot tell two
+    same-named sketches apart - and a test that cannot discriminate proves nothing here."""
+
+    def __init__(self, tag, n=1):
+        super().__init__(n)
+        self._tag = tag
+
+    def item(self, i):
+        return (self._tag, i)
+
+
+class _NamedComp:
+    def __init__(self, name, sketches):
+        self.name = name
+        self.sketches = FakeSketches(sketches)
+
+
+class _MultiArrangeDesign(FakeDesign):
+    """Root plus one more named component, each with its OWN sketches. allComponents lives on the
+    DESIGN, which is the collection the shared by-name walk asks."""
+
+    def __init__(self, pairs, occurrences, af):
+        super().__init__([], occurrences, af)
+        comps = [_NamedComp(n, s) for n, s in pairs]
+        self.rootComponent.name = comps[0].name
+        self.rootComponent.sketches = comps[0].sketches
+        self.allComponents = FakeSketches([self.rootComponent] + comps[1:])
+        self.activeComponent = self.rootComponent
+
+
+@pytest.fixture
+def multi(monkeypatch):
+    def _do(pairs, occ_names=("A:1",)):
+        import adsk.fusion, adsk.core
+        af = FakeArrangeFeatures()
+        design = _MultiArrangeDesign(pairs, [FakeOcc(n) for n in occ_names], af)
+        af.design = design
+        monkeypatch.setattr(ar, "app", type("A", (), {"activeProduct": design})())
+        monkeypatch.setattr(ar._common, "app", ar.app)
+        monkeypatch.setattr(adsk.fusion.Design, "cast",
+                            lambda x: x if isinstance(x, FakeDesign) else None)
+        monkeypatch.setattr(adsk.core.ValueInput, "createByReal", lambda v: ("real", v))
+        monkeypatch.setattr(adsk.core.ValueInput, "createByString", lambda s: ("str", s))
+        return design, af
+    return _do
+
+
+class TestBoundaryComponentScope:
+    def _shared(self, multi):
+        """ONE name across TWO components, with different profile counts (Alpha 2, Beta 1) so the
+        envelope that answered is readable rather than assumed from a shared name."""
+        alpha_sk, beta_sk = FakeSketch("Boundary"), FakeSketch("Boundary")
+        alpha_sk.profiles = _TaggedProfiles("alpha", 2)
+        beta_sk.profiles = _TaggedProfiles("beta", 1)
+        design, af = multi([("Alpha", [alpha_sk]), ("Beta", [beta_sk])])
+        return design, af, alpha_sk, beta_sk
+
+    def test_the_unscoped_shared_name_refuses_and_names_the_scope_input(self, multi):
+        _design, af, _a, _b = self._shared(multi)
+        res = ar.handler(boundary_sketch="Boundary", shapes="A:1")
+        assert res["isError"] is True
+        assert "2 sketches are named 'Boundary'" in res["message"]
+        assert "'boundary_component'" in res["message"] and "Rename one" not in res["message"]
+        assert af.last_input is None and af.added is False
+
+    def test_the_scope_uses_THAT_components_boundary_profile(self, multi):
+        _design, af, alpha_sk, beta_sk = self._shared(multi)
+        _payload(ar.handler(boundary_sketch="Boundary", boundary_component="Beta", shapes="A:1"))
+        assert af.last_input.envelope.profiles == [("beta", 0)]
+
+    def test_the_sibling_component_is_reachable_by_the_same_call(self, multi):
+        _design, af, alpha_sk, _b = self._shared(multi)
+        _payload(ar.handler(boundary_sketch="Boundary", boundary_component="Alpha", shapes="A:1"))
+        assert af.last_input.envelope.profiles == [("alpha", 0)]
+
+    def test_an_unknown_component_is_refused_before_the_arrange(self, multi):
+        _design, af, _a, _b = self._shared(multi)
+        res = ar.handler(boundary_sketch="Boundary", boundary_component="Gamma", shapes="A:1")
+        assert res["isError"] is True and "No component named 'Gamma'" in res["message"]
+        assert af.last_input is None and af.added is False
+
+    def test_a_wrong_component_is_refused_even_when_the_name_is_UNIQUE(self, multi):
+        # The scope is VALIDATED: a dropped one nests against Alpha's envelope on a call that
+        # named Beta, and nothing tells the caller which boundary was used.
+        _design, af = multi([("Alpha", [FakeSketch("OnlyOne")]), ("Beta", [])])
+        res = ar.handler(boundary_sketch="OnlyOne", boundary_component="Beta", shapes="A:1")
+        assert res["isError"] is True and "'Beta'" in res["message"]
+        assert af.last_input is None and af.added is False
+
+    def test_the_scoped_MISS_names_boundary_component_never_the_bare_component(self, multi):
+        # This tool declares a STRICT schema and carries NO 'component' input, so a refusal naming
+        # 'component' hands the caller a retry its own schema rejects.
+        _design, af = multi([("Alpha", [FakeSketch("Boundary")]), ("Beta", [FakeSketch("Other")])])
+        res = ar.handler(boundary_sketch="Boundary", boundary_component="Beta", shapes="A:1")
+        assert res["isError"] is True
+        assert "holds no sketch named 'Boundary'" in res["message"]
+        assert "'boundary_component'" in res["message"]
+        assert "'component'" not in res["message"]
+        assert af.last_input is None and af.added is False
+
+    def test_an_AMBIGUOUS_boundary_component_names_boundary_component(self, monkeypatch):
+        # The occurrence-path remedy names the input this tool actually accepts.
+        import adsk.fusion, adsk.core
+        af = FakeArrangeFeatures()
+        a = _NamedComp("Frame", [FakeSketch("Boundary")])
+        b = _NamedComp("Frame", [FakeSketch("Boundary")])
+        design = _MultiArrangeDesign([("Root", [])], [FakeOcc("A:1")], af)
+        design.allComponents = FakeSketches([design.rootComponent, a, b])
+        design.rootComponent.allOccurrences += [
+            SimpleNamespace(fullPathName="P2-Gimbal:1+Frame:1", name="Frame:1", component=a),
+            SimpleNamespace(fullPathName="P3-Gimbal:1+Frame:1", name="Frame:1", component=b)]
+        af.design = design
+        monkeypatch.setattr(ar, "app", type("A", (), {"activeProduct": design})())
+        monkeypatch.setattr(ar._common, "app", ar.app)
+        monkeypatch.setattr(adsk.fusion.Design, "cast",
+                            lambda x: x if isinstance(x, FakeDesign) else None)
+        monkeypatch.setattr(adsk.core.ValueInput, "createByReal", lambda v: ("real", v))
+        res = ar.handler(boundary_sketch="Boundary", boundary_component="Frame", shapes="A:1")
+        assert res["isError"] is True
+        assert "2 components match 'Frame'" in res["message"]
+        assert "'boundary_component' also takes an occurrence fullPathName" in res["message"]
+        assert "'component'" not in res["message"]
+        assert af.last_input is None and af.added is False
 
 
 # ── shapes ───────────────────────────────────────────────────────────────────

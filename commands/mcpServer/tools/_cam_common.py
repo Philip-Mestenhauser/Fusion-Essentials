@@ -6,6 +6,7 @@ cam_get and the CAM action/poll tools (cam_get_status, cam_activate_setup, ...) 
 
 import collections
 import json
+import math
 import re
 import time
 
@@ -13,21 +14,46 @@ import adsk.core
 import adsk.cam
 import adsk.fusion
 
-from ._common import CM_TO_UNIT, measured, ok, error, iter_collection, safe
-from ._write_guard import _active_identity   # the one active-document identity read
+from ._common import (CM_TO_UNIT, counted, measured, named_with_remainder, ok, error,
+                      iter_collection, read_flag, safe, told_apart)
+from ._write_guard import (_active_identity, document_key,   # the one active-document identity read,
+                           on_key_renamed)                   # the one key a cross-call store
+                                                             # remembers a document by, and the
+                                                             # announcement when that key changes
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
 MAP_BLURB = ("get_cam (the shared CAM-product resolver every CAM tool calls) + walk_cam_tree / "
              "resolve_cam_node (the ONE CAM tree traversal + by-name resolver every CAM tool targets "
              "through: case-insensitive EXACT, a miss lists the available names, a DUPLICATED name is "
-             "REFUSED naming each hit's setup path; kinds=/setup= scope it) + operations_under (the "
+             "REFUSED naming each hit's '<name>#<n>' address - the form the SAME input takes to pick "
+             "one, since a setup's path is its own bare name and discriminates nothing - beside the "
+             "path that tells an operation apart or the operation count that tells a setup apart; "
+             "kinds=/setup= scope it) + owning_setup (the "
+             "Setup OBJECT one CamNode sits under, climbed through the walk's own parent links - "
+             "never by re-resolving node.setup by NAME, since setup names can collide) + "
+             "operations_under (the "
              "ops nested under one setup/folder/pattern) + find_setup (a (setup, available_names, "
-             "error) wrapper handing back the resolver's refusal verbatim) + find_operation (the "
-             "(obj, available_names) wrapper over the same resolver) + expression_error (the post-set "
+             "error) wrapper handing back the resolver's refusal verbatim) + operation_nodes_under "
+             "(the operations under ONE setup/folder/pattern node as CamNodes, walked from that "
+             "node's own path - the form a caller that NAMES its operations on the wire takes, "
+             "since the object-only operations_under drops the breadcrumb that tells two "
+             "same-named operations apart) + operation_nodes (the "
+             "ONE operation pool every by-name operation resolve and available-name listing reads "
+             "off) + find_operation (the "
+             "(obj, available_names) wrapper over the same resolver) + resolve_operation (the "
+             "unscoped resolve handing back the refusal AND that same available list off ONE walk, "
+             "for a caller wording a narrower remedy of its own) + expression_error (the post-set "
              "CAMParameter evaluation read-back every CAM param editor gates on) + live_readiness "
-             "(the one CAM job-health signal) + ready_verdict / first_line (the ONE postable-verdict "
+             "(the one CAM job-health signal) + setup_blockers / blocked_setup_records (the ONE read "
+             "of a setup's OWN post prerequisites - today no_machine_selected, when Setup.machine "
+             "reads no label - and its [{name, blocked_by}] projection over a list of setups; "
+             "cam_get's setups slice, its machine slice and every readiness verdict consume this "
+             "one read, so they cannot answer 'is this postable' off different inputs) + "
+             "ready_verdict / first_line (the ONE postable-verdict "
              "sentence every readiness surface emits - it demotes 'ready to post' whenever active-op "
-             "warnings > 0, naming the first warning op and line, so no scoped or summary re-roll "
+             "warnings > 0, naming the first warning op and line, and WITHHOLDS it entirely while "
+             "any setup in scope carries a blocked_by, naming that setup and the remedy on file for "
+             "its code, so no scoped or summary re-roll "
              "can overstate) + op_state_facts / op_primary_state / validity_basis "
              "(the shared per-op lifecycle read, its one mutually-exclusive bucket classifier, and "
              "the Manufacture-workspace trust gate every op-state rollup reads) + clamp_rows (the "
@@ -35,19 +61,42 @@ MAP_BLURB = ("get_cam (the shared CAM-product resolver every CAM tool calls) + w
              "result is held inside 1..ceiling, so no caller can lift a wire cap) + register_future "
              "(the ONE async-generation registration - it mints the handle cam_get_status reads and "
              "keeps the GenerateToolpathFuture referenced, which is what stops Fusion abandoning the "
-             "background work; every launch path registers here) + machine_catalog / resolve_machine "
+             "background work, and stamps the launch document's _write_guard.document_key so a status "
+             "read can tell the generating document from the active one even when neither was ever "
+             "saved; every launch path registers here) + machine_catalog / resolve_machine "
              "/ machine_label / machine_ident / machine_kinds / query_machines (the ONE "
              "machine-library catalog read and the ONE by-name machine resolver - exact LABEL match "
              "first, ambiguity REFUSED - that an assignment and a machine create both run through; "
              "machine_kinds is the per-machine capabilities read, the expensive part of a catalog "
              "row, for a caller that needs ONE machine's kinds without a 46s unfiltered walk) + "
+             "machine_library / machine_location (the ONE MachineLibrary handle - it hangs off "
+             "CAMManager.libraryManager, so no open CAM job is needed - and the ONE 'which location "
+             "holds this machine' read, a single FILTERED Local query answering local / fusion360, "
+             "or 'local or fusion360' when that query itself failed and the two cannot be told "
+             "apart; the create's clash report and the delete's local-only gate read the same "
+             "answer) + "
              "parse_parameters (the ONE "
              "{name: expression} / 'name=value, ...' parameter-request parser both CAM parameter "
              "editors validate their request through) + walk_library_folders / library_assets / "
              "library_children (the ONE CAM library folder-tree walk - tool, post and template "
              "libraries all nest folders under a location root, so every walk is bounded on depth "
              "AND folder count and each site passes its own leaf op; library_assets is the "
-             "collect-the-child-asset-urls projection over it)")
+             "collect-the-child-asset-urls projection over it) + asset_leaf / asset_key / "
+             "asset_leaf_keys / assets_named (the ONE 'which asset answers to this name' matcher "
+             "every library DELETE resolves its target on: a stored leafName carries the file "
+             "EXTENSION the object's own name does not, so an asset answers to its whole leafName "
+             "AND to its stem - the part before the LAST dot - both compared EXACTLY, since a "
+             "substring match here deletes the neighbour whose name merely starts the same; "
+             "assets_named is the deduped-by-url hit list over a wanted-name set) + "
+             "is_empty_toolpath (the ONE "
+             "'generated but cut nothing' test over op_state_facts - has_toolpath read False AND "
+             "is_toolpath_valid read True on a valid op; an UNREADABLE flag answers False, never "
+             "'empty') + kinematics_parts / machine_limits / machine_spindle_max (the ONE "
+             "Machine.elements -> kinematics -> parts walk and the spindle-max / axis-travel / "
+             "tool-station projections over it - never Machine.kinematics, never the -1 "
+             "machine_dimension_x/y/z setup parameters; a 0 or infinite field is omitted, never a "
+             "limit of 0) + spindle_check (the ONE op-asks vs machine-allows rpm comparison: True "
+             "only when the op asks for MORE, None with a marker naming the unreadable side)")
 
 app = adsk.core.Application.get()
 
@@ -164,39 +213,72 @@ def setup_names(cam):
 
 # One node of the CAM tree. kind is STRUCTURAL - which collection yielded the node ('setup' /
 # 'operation' / 'folder' / 'pattern') - so no type-name sniffing is needed. path is the
-# 'Setup / Folder / Op' breadcrumb an ambiguity refusal names its candidates by.
-CamNode = collections.namedtuple("CamNode", ["obj", "kind", "name", "setup", "path"])
+# 'Setup / Folder / Op' breadcrumb an ambiguity refusal names its candidates by, and `parent` is the
+# node that CONTAINED this one: the structural answer to "which folder is this op in", which the
+# joined path cannot give back (a setup or folder whose own name contains ' / ' splits wrong).
+CamNode = collections.namedtuple("CamNode", ["obj", "kind", "name", "setup", "path", "parent"],
+                                 defaults=(None,))
 
 
-def _walk_children(parent, setup_name, path, out):
+# The segment a breadcrumb carries for a level whose own name did NOT read. The walk joins whatever
+# each level answered, and a None joined into an f-string prints the literal 'None' - a segment
+# nothing tells apart from a container actually NAMED that, so the path reads as a complete address
+# to a container that was never identified. This marker is the disclosure instead: the path states
+# that a level did not read rather than naming one.
+#
+# The decision is made on the READ answering None - never on a string match against the joined path -
+# so a container whose real name is the string 'None' keeps its own segment untouched.
+_UNREAD_SEGMENT = "(name unread)"
+
+
+def _segment(name):
+    """One breadcrumb segment for a level whose name read `name`: that name, or _UNREAD_SEGMENT when
+    the read answered None (it raised, or the property itself answered None). Every level of every
+    path the walk builds goes through this, so no surface can publish an address whose missing
+    segment is invisible."""
+    return _UNREAD_SEGMENT if name is None else name
+
+
+def _walk_children(parent, setup_name, path, out, parent_node=None):
     """Collect CamNodes for everything nested under `parent` (a Setup/CAMFolder/CAMPattern).
     `.operations` lists only the DIRECT children, and setup.allOperations flattens folder children
     while DROPPING the folder/pattern containers (verified live) - so containers are reachable only
     by recursing `.folders`/`.patterns` explicitly, which nest. A parent exposing no `.operations`
-    collection degrades to its allOperations flatten (operations only)."""
+    collection degrades to its allOperations flatten (operations only).
+
+    Each level's own segment goes through _segment, so a name that did not read is DISCLOSED in the
+    path instead of printing as the literal 'None'. `name` still carries the raw read (None when it
+    did not answer), which is what a consumer deciding per LEVEL - workspace_orient._op_breadcrumb -
+    climbs the parent links for."""
     ops = safe(lambda: parent.operations)
     if ops is not None:
         for o in iter_collection(ops):
             nm = safe(lambda o=o: o.name)
-            out.append(CamNode(o, "operation", nm, setup_name, f"{path} / {nm}"))
+            out.append(CamNode(o, "operation", nm, setup_name,
+                               f"{path} / {_segment(nm)}", parent_node))
         for kind, getter in (("folder", lambda: parent.folders),
                              ("pattern", lambda: parent.patterns)):
             for c in iter_collection(safe(getter)):
                 nm = safe(lambda c=c: c.name)
-                child_path = f"{path} / {nm}"
-                out.append(CamNode(c, kind, nm, setup_name, child_path))
-                _walk_children(c, setup_name, child_path, out)
+                child_path = f"{path} / {_segment(nm)}"
+                child_node = CamNode(c, kind, nm, setup_name, child_path, parent_node)
+                out.append(child_node)
+                _walk_children(c, setup_name, child_path, out, child_node)
         return
     for o in iter_collection(safe(lambda: parent.allOperations)):
         op = adsk.cam.Operation.cast(o)
         if op is not None:
             nm = safe(lambda op=op: op.name)
-            out.append(CamNode(op, "operation", nm, setup_name, f"{path} / {nm}"))
+            out.append(CamNode(op, "operation", nm, setup_name,
+                               f"{path} / {_segment(nm)}", parent_node))
 
 
 def _setup_node(s):
+    # The setup is the ROOT segment of every path under it, so it is disclosed the same way: a setup
+    # whose name did not read leaves the marker rather than an empty leading segment, which would
+    # make ' / Op' read as an operation with no container at all.
     nm = safe(lambda: s.name)
-    return CamNode(s, "setup", nm, nm, nm or "")
+    return CamNode(s, "setup", nm, nm, _segment(nm), None)
 
 
 def tree_nodes(setup_obj):
@@ -204,13 +286,13 @@ def tree_nodes(setup_obj):
     anywhere under it - the setup-scoped slice of walk_cam_tree."""
     node = _setup_node(setup_obj)
     nodes = [node]
-    _walk_children(setup_obj, node.name, node.path, nodes)
+    _walk_children(setup_obj, node.name, node.path, nodes, node)
     return nodes
 
 
 def walk_cam_tree(cam):
-    """Every node of the CAM tree as CamNode(obj, kind, name, setup, path): each Setup plus all
-    operations/folders/patterns nested anywhere under it. The ONE traversal every CAM tool walks
+    """Every node of the CAM tree as CamNode(obj, kind, name, setup, path, parent): each Setup plus
+    all operations/folders/patterns nested anywhere under it. The ONE traversal every CAM tool walks
     and resolves names over."""
     nodes = []
     for s in setups(cam):
@@ -218,41 +300,201 @@ def walk_cam_tree(cam):
     return nodes
 
 
-def resolve_cam_node(cam, name, kinds=("operation",), setup=None, label=None):
+def operation_nodes(cam):
+    """Every OPERATION node of the CAM tree - the ONE operation pool, walk_cam_tree filtered to
+    kind == 'operation'. Every by-name operation resolve, every available-name listing and every
+    duplicate breadcrumb is read off this one filter, so two of them cannot answer from different
+    censuses of the same tree."""
+    return [n for n in walk_cam_tree(cam) if n.kind == "operation"]
+
+
+# The address that picks ONE of several nodes sharing a name: '<name>#<n>', n counting from 1 over
+# the same-named nodes in the walk's own order - the order the ambiguity refusal lists them in. It
+# exists because a SETUP's path is its own bare name (_setup_node), so two same-named setups are
+# told apart by nothing the tree publishes, and the only other way out of the refusal would be
+# renaming one, which needs the address the caller does not have.
+_ORDINAL_SEP = "#"
+
+
+def _ordinal_address(want):
+    """('<base name>', <1-based ordinal>) when `want` is spelled '<name>#<n>', else (want, None).
+
+    Split on the LAST separator, so a node whose own name carries one ('Op#3') is still addressable
+    as 'Op#3#2' - splitting on the first would read the base as 'Op' and the ordinal as '3#2', which
+    is not a number, and the address would resolve nothing. Same rule as _inputs._split_text_ref."""
+    base, sep, tail = want.rpartition(_ORDINAL_SEP)
+    if sep and base.strip() and tail.strip().isdigit():
+        return base.strip(), int(tail.strip())
+    return want, None
+
+
+def _ordinal_reading(pool, asked):
+    """How `asked` reads as a '<name>#<n>' address over `pool`: (the node it addresses or None, the
+    base name, the ordinal or None, every node named `base`)."""
+    base, ordinal = _ordinal_address(asked)
+    if ordinal is None:
+        return None, base, None, []
+    same = [n for n in pool if (n.name or "").lower() == base.lower()]
+    hit = same[ordinal - 1] if 1 <= ordinal <= len(same) else None
+    return hit, base, ordinal, same
+
+
+def _candidate_label(node, ordinal):
+    """One row of an ambiguity refusal: the '<name>#<n>' address that resolves THIS node, plus the
+    fact that tells it from its namesakes. An operation/folder/pattern is told apart by its
+    'Setup / item' path; a setup's path is its own bare name, so the number of operations under it
+    is named instead."""
+    addr = f"{node.name}{_ORDINAL_SEP}{ordinal}"
+    if node.kind != "setup":
+        return f"{addr} (at {node.path})"
+    n = len(operations_under(node.obj))
+    return f"{addr} ({n} operation{'' if n == 1 else 's'})"
+
+
+def _free_sibling_addresses(pool, same):
+    """The '<name>#<n>' addresses over `same` that no node in `pool` CARRIES as a literal name.
+
+    A literal name wins over the ordinal address in this resolver, so an address some node is
+    actually NAMED reaches that node instead of the sibling it counts to - it is no handle on the
+    sibling, and is left out."""
+    carried = {(n.name or "").lower() for n in pool}
+    return [addr for addr in (f"{n.name}{_ORDINAL_SEP}{i}" for i, n in enumerate(same, 1))
+            if addr.lower() not in carried]
+
+
+def resolve_cam_node(cam, name, kinds=("operation",), setup=None, label=None, nodes=None):
     """The ONE by-name resolver over the CAM tree: case-insensitive EXACT match on nodes whose kind
     is in `kinds`, optionally scoped to one setup object (`setup`, in which case `cam` is unused).
     Returns (CamNode, None) for the unique hit. 0 hits -> (None, error listing the available names).
-    2+ hits -> REFUSED: (None, error naming the count and each duplicate's 'Setup / item' path) -
-    operation names legitimately collide across setups, so a first (or last) match silently targets
-    the wrong entity. `label` is the noun the error uses (defaults to the kinds joined with '/')."""
+    2+ hits -> REFUSED: (None, error naming the count and each duplicate's '<name>#<n>' address,
+    which is what the caller retries with) - operation names legitimately collide across setups, so
+    a first (or last) match silently targets the wrong entity. `label` is the noun the error uses
+    (defaults to the kinds joined with '/').
+
+    `nodes` lets a caller that ALREADY walked the tree hand its own node list in (unscoped only, and
+    `cam` then goes unused): the resolve and whatever else that caller builds off its pool then
+    describe ONE census of the tree, and the walk runs once."""
     if setup is not None:
         nodes = tree_nodes(setup)
+    elif nodes is not None:
+        pass                                  # the caller's own walk, reused rather than repeated
     elif set(kinds) == {"setup"}:
         nodes = [_setup_node(s) for s in setups(cam)]
     else:
         nodes = walk_cam_tree(cam)
     label = label or "/".join(kinds)
-    want = (name or "").strip().lower()
+    asked = (name or "").strip()
+    want = asked.lower()
     pool = [n for n in nodes if n.kind in kinds]
     matches = [n for n in pool if (n.name or "").lower() == want]
+    addressed, base, ordinal, same = _ordinal_reading(pool, asked)
     if not matches:
+        # A literal name wins over the ordinal address: the plain match above runs first, so a node
+        # actually NAMED 'Face#2' resolves by its own name, and '#n' is read only where no node
+        # carries that spelling.
+        if addressed is not None:
+            return addressed, None
+        if ordinal is not None and same:
+            rows = [_candidate_label(n, i) for i, n in enumerate(same, 1)]
+            return None, (f"'{asked}' addresses item {ordinal} of the {len(same)} named "
+                          f"'{base}', which are numbered 1 to {len(same)}. Address one of: "
+                          f"{named_with_remainder(rows)}.")
         available = [n.name for n in pool if n.name]
+        # Capped by NAME COUNT, with the remainder COUNTED - never by character, which can end the
+        # list mid-name and print a spelling no caller can pass back.
         return None, (f"No {label} named '{name}'. Available: "
-                      f"{', '.join(available)[:300] or '(none)'}.")
+                      f"{named_with_remainder(available) or '(none)'}.")
+    if len(matches) == 1 and addressed is not None and addressed is not matches[0]:
+        # Both readings resolve, to DIFFERENT nodes: one node CARRIES this exact name while another
+        # is item <n> of a same-named set. The ambiguity refusal below hands back '<name>#<n>'
+        # addresses, so a design also holding a node named one of them can be asked a question with
+        # two true answers - and answering with either is the first-match this resolver refuses
+        # everywhere else. No spelling on this input separates them, so nothing is picked.
+        #
+        # The way out: the ordinal reading dies once fewer than `ordinal` nodes carry `base`, after
+        # which the literal match below returns. That takes `need` renames, and each one leaves the
+        # same-named set one item SHORTER. Performed HIGHEST-ordinal-first, every address still to
+        # come is a number the shrunken set still holds - by construction, since each later address
+        # is smaller than the one just used and the set lost exactly one item - so the list stays
+        # performable to its end. Lowest-first does not: renaming the FIRST of three leaves two,
+        # and the '#3' printed beside it then addresses nothing. What dissolves the reading is the
+        # COUNT falling below `ordinal`, so renaming ANY `need` of the same-named ones does it, whichever
+        # of them each address reaches - which is why that is all the sentence promises.
+        #
+        # PROBE NEEDED (CAM-33): whether the walk hands the survivors back in the same relative
+        # order after a rename is unmeasured, so no address here is offered as reaching the same
+        # item it named when the list was printed - only as reaching one of the items named `base`.
+        #
+        # Only addresses no node carries as a literal name are offered - the others reach the node
+        # wearing that spelling, not the sibling - so a remedy ships only where `need` are free.
+        free = _free_sibling_addresses(pool, same)
+        need = len(same) - ordinal + 1
+        chosen = list(reversed(free[-need:])) if len(free) >= need else []
+        remedy = ""
+        if need == 1 and chosen:
+            remedy = (f" Rename any ONE of the items named '{base}', addressed here as "
+                      f"{named_with_remainder(free)}, so fewer than {ordinal} carry '{base}' - "
+                      f"'{asked}' then reads only as the {label} carrying it.")
+        elif chosen:
+            remedy = (f" Rename {need} of the items named '{base}' - {named_with_remainder(chosen)}"
+                      f" - in the order given, so fewer than {ordinal} carry '{base}' and '{asked}' "
+                      f"then reads only as the {label} carrying it. Take them in that order: each "
+                      f"rename leaves one FEWER item named '{base}', and the highest number first "
+                      "keeps every address still to come inside the set that remains.")
+        return None, (f"'{asked}' reads two ways here: the {label} CARRYING that name, and item "
+                      f"{ordinal} of the {len(same)} named '{base}' "
+                      f"({_candidate_label(addressed, ordinal)}). Both exist, so the address does "
+                      "not identify one." + remedy)
     if len(matches) > 1:
+        rows = [_candidate_label(n, i) for i, n in enumerate(matches, 1)]
         return None, (f"'{name}' is ambiguous - {len(matches)} CAM items share that name: "
-                      f"{', '.join(n.path for n in matches)}. Rename the target so its name is "
-                      "unique, then retry.")
+                      f"{named_with_remainder(rows)}. Retry with one of those '<name>#<n>' "
+                      "addresses; the number counts the items of that name in the order listed "
+                      "here.")
     return matches[0], None
+
+
+def operation_nodes_under(node):
+    """Every operation CamNode nested anywhere under one setup/folder/pattern NODE - the scoped
+    counterpart of operation_nodes, walked from that node's OWN setup name and path so each row
+    keeps the 'Setup / ... / op' breadcrumb.
+
+    That breadcrumb is the only thing separating two operations of one name, and the object-only
+    projection below drops it: a scoped listing built from bare Operations prints the shared name
+    twice. A caller that only needs the objects calls operations_under; a caller that NAMES the
+    operations on the wire takes this."""
+    nodes = []
+    _walk_children(node.obj, node.setup, node.path, nodes, node)
+    return [n for n in nodes if n.kind == "operation"]
 
 
 def operations_under(parent):
     """Every real Operation nested anywhere under one setup/folder/pattern - the scoped leaf
     projection of the shared walk (a 'show this folder' / 'poll this setup' collects ops through
-    it instead of re-walking)."""
+    it instead of re-walking). Takes the OBJECT, so it is reachable with no node in hand; a caller
+    holding the node and naming the results takes operation_nodes_under."""
     nodes = []
     _walk_children(parent, None, "", nodes)
     return [n.obj for n in nodes if n.kind == "operation"]
+
+
+# The walk builds the parent chain, so it is acyclic by construction; the hop cap is only there so
+# a hand-built node can never spin the climb below forever.
+_MAX_PARENT_HOPS = 64
+
+
+def owning_setup(node):
+    """The Setup OBJECT a CamNode sits under - the node itself when it IS a setup, else the setup
+    its parent chain ends at, or None when the chain does not reach one. Read from the walk's own
+    parent links, never by re-resolving node.setup by NAME: setup names can collide, so a by-name
+    round trip can refuse (or answer with a different setup) for a node already in hand."""
+    seen = 0
+    while node is not None and seen <= _MAX_PARENT_HOPS:
+        if node.kind == "setup":
+            return node.obj
+        node = node.parent
+        seen += 1
+    return None
 
 
 def find_setup(cam, name):
@@ -269,10 +511,19 @@ def find_setup(cam, name):
 
 
 def walk_operations(cam):
-    """Every real Operation across every setup, folder/pattern-nested INCLUDED - the operation
-    projection of walk_cam_tree, so 'which operations exist' is answered by the same traversal
+    """Every real Operation across every setup, folder/pattern-nested INCLUDED - the object
+    projection of operation_nodes, so 'which operations exist' is answered by the same traversal
     everywhere."""
-    return [n.obj for n in walk_cam_tree(cam) if n.kind == "operation"]
+    return [n.obj for n in operation_nodes(cam)]
+
+
+def _operation_listing(pool, name):
+    """The available list an operation miss carries, read off an ALREADY-WALKED operation pool:
+    each duplicate's 'Setup / op' breadcrumb when several operations share `name`, every operation
+    name otherwise. The ONE rule, so find_operation and resolve_operation cannot list differently."""
+    want = (name or "").strip().lower()
+    dupes = [n for n in pool if (n.name or "").lower() == want]
+    return [n.path for n in dupes] if len(dupes) > 1 else [n.name for n in pool]
 
 
 def find_operation(cam, name):
@@ -280,14 +531,22 @@ def find_operation(cam, name):
     (None, available_names). A DUPLICATED name is REFUSED: (None, each duplicate's 'Setup / op'
     path) so even a caller's plain not-found error surfaces the collision; a true miss returns
     every operation name. resolve_cam_node is the same resolver with the full refusal message."""
-    nodes = [n for n in walk_cam_tree(cam) if n.kind == "operation"]
+    pool = operation_nodes(cam)
     want = (name or "").strip().lower()
-    matches = [n for n in nodes if (n.name or "").lower() == want]
-    if len(matches) == 1:
-        return matches[0].obj, [n.name for n in nodes]
-    if len(matches) > 1:
-        return None, [n.path for n in matches]
-    return None, [n.name for n in nodes]
+    matches = [n for n in pool if (n.name or "").lower() == want]
+    return (matches[0].obj if len(matches) == 1 else None), _operation_listing(pool, name)
+
+
+def resolve_operation(cam, name, label="operation"):
+    """(node, error, available) - the unscoped operation resolve for a caller that ALSO needs
+    find_operation's available list, to word a narrower remedy in its own input vocabulary.
+
+    ONE walk answers both: the resolve and the list are read off the SAME operation_nodes pool, so
+    a remedy built from the list cannot describe a different census than the refusal it accompanies,
+    and an unscoped miss walks the tree once instead of twice."""
+    pool = operation_nodes(cam)
+    node, err = resolve_cam_node(cam, name, kinds=("operation",), label=label, nodes=pool)
+    return node, err, _operation_listing(pool, name)
 
 
 def first_line(text) -> str:
@@ -338,7 +597,27 @@ def op_state_facts(op) -> dict:
         "is_generating": bool(safe(lambda: op.isGenerating, False)),
         "operation_state": safe(lambda: op.operationState),
         "generating_progress": safe(lambda: op.generatingProgress),
+        # The toolpath pair is read through read_flag (True/False/None): an op that GENERATED and
+        # produced no toolpath is told from one that never generated by these two flags together
+        # (is_empty_toolpath), and a coerced False on an unreadable flag would invent that state.
+        "has_toolpath": read_flag(lambda: op.hasToolpath),
+        "is_toolpath_valid": read_flag(lambda: op.isToolpathValid),
     }
+
+
+def is_empty_toolpath(facts: dict) -> bool:
+    """True for the EMPTY class: an operation that generated and produced no toolpath - it cuts
+    nothing, yet it is not out of date and it is not suppressed.
+
+    Measured as its own state bucket on a 99-operation job: 21 ops read (state IsValid,
+    isToolpathValid True, hasToolpath True), 13 read (state IsValid, isToolpathValid True,
+    hasToolpath False) and 65 read suppressed - no overlap. So an empty op is machine-readable
+    from the flags alone; nothing has to match warning text. Classifies from op_state_facts (which
+    reads both toolpath flags honestly), so an UNREADABLE flag answers False here rather than
+    inventing the state."""
+    return (op_primary_state(facts) == "valid"
+            and facts.get("is_toolpath_valid") is True
+            and facts.get("has_toolpath") is False)
 
 
 def op_state_tally(ops) -> dict:
@@ -405,18 +684,84 @@ def _warning_phrase(sample) -> str:
     return f"'{sample['name']}'" + (f" - {text}" if text else " (warning text unreadable).")
 
 
-def ready_verdict(measure: str, warned: int, warning_sample) -> str:
+# The setup-level blocker vocabulary: each code is a state the read VERIFIED, beside the tool that
+# clears it. The remedy is looked up per code so a verdict never names a fix for a code it did not
+# read. 'no_machine_selected' is minted when the setup's machine reads no label at all.
+_SETUP_BLOCKER_REMEDY = {"no_machine_selected": "cam_edit_setup assigns a machine"}
+
+
+def setup_blockers(setup) -> list:
+    """The verified setup-level blocker codes for ONE setup, present-and-empty when none.
+
+    The ONE place a setup's own post prerequisites are read, so cam_get's setups slice, its machine
+    slice and every readiness verdict judge one setup off the SAME facts."""
+    return [] if machine_label(safe(lambda: setup.machine)) else ["no_machine_selected"]
+
+
+def blocked_setup_records(setup_objs) -> list:
+    """[{name, blocked_by}] for the setups that carry a blocker - the shape a readiness signal
+    publishes and ready_verdict words its clause from. Setups with none are simply absent."""
+    rows = []
+    for s in setup_objs or []:
+        codes = setup_blockers(s)
+        if codes:
+            rows.append({"name": safe(lambda s=s: s.name), "blocked_by": codes})
+    return rows
+
+
+# How many blocked setups a verdict NAMES; the rest ride as a count, so the sentence stays one line.
+# ready_verdict slices the named rows once and hands the SAME slice to the phrase and the remedy,
+# which is what stops a fix being offered for a blocker the sentence never printed.
+_BLOCKED_ROWS_NAMED = 1
+
+
+def _blocked_phrase(named, total: int) -> str:
+    """The 'name (codes)' clause a verdict names its blocked setups by: the rows in `named` plus a
+    count of the `total` it left out. A setup whose name will not read is described rather than
+    quoted blank."""
+    first = named[0] if named else {}
+    name = (first.get("name") or "").strip()
+    shown = f"'{name}'" if name else "a setup whose name did not read"
+    codes = ", ".join(c for c in (first.get("blocked_by") or []) if c) or "code unreported"
+    more = total - len(named)
+    return f"{shown} ({codes})" + (f" and {more} more" if more > 0 else "")
+
+
+def _blocked_remedies(blocked) -> str:
+    """The remedy clause for the codes actually PRINTED, deduped in first-seen order. A code with no
+    known remedy contributes none - the verdict names a fix only where one is on file.
+
+    It is handed the same rows _blocked_phrase names, never the whole blocked list: a second code in
+    the table would otherwise let the sentence carry a remedy for a blocker it never printed."""
+    codes = [c for row in (blocked or []) for c in (row.get("blocked_by") or [])]
+    remedies = list(dict.fromkeys(_SETUP_BLOCKER_REMEDY[c] for c in codes
+                                  if c in _SETUP_BLOCKER_REMEDY))
+    return (" " + "; ".join(remedies) + ".") if remedies else ""
+
+
+def ready_verdict(measure: str, warned: int, warning_sample, blocked=None) -> str:
     """The ONE 'this scope is postable' sentence - built here for EVERY readiness surface
     (live_readiness's document signal, cam_get_status's scoped poll, cam_get's operations summary),
-    so no surface can emit a plain 'ready to post' over a job carrying warnings.
+    so no surface can emit a plain 'ready to post' over a job carrying warnings or a BLOCKED setup.
 
     `measure` is the caller's own count clause ("3 of 3 active ops valid") - each surface counts a
     different thing and keeps its own noun; the VERDICT that clause earns is this function's.
+
+    `blocked` is blocked_setup_records over the setups in the caller's scope. Op state alone cannot
+    earn 'ready to post': a setup can hold nothing but valid ops and still carry a blocked_by the
+    setups projection reports. What that costs the post is not read here, so the verdict states the
+    blocker and withholds the claim rather than asserting the job will fail.
 
     A WARNED op does NOT block: the job is still postable, so this is never demoted to a blocker.
     But an op can bucket as valid and carry a warning meaning it cut nothing (measured: a
     geometry-less 2D Contour reads isToolpathValid True with hasToolpath False), which a plain
     'ready to post' hides - so the count is stated and the first warning named instead."""
+    if blocked:
+        named = list(blocked)[:_BLOCKED_ROWS_NAMED]     # the rows the sentence actually prints
+        also = f" {warned} active op(s) also carry warnings." if warned else ""
+        return (f"{measure}, but {len(blocked)} setup(s) carry blocked_by: "
+                f"{_blocked_phrase(named, len(blocked))}"
+                f" - 'ready to post' is NOT established.{also}" + _blocked_remedies(named))
     if not warned:
         return f"{measure} - ready to post."
     return (f"{measure}, {warned} with WARNINGS - postable, but read the warnings first: "
@@ -432,7 +777,11 @@ def live_readiness():
 
     Returns (signal, None) or (None, reason). signal:
       {valid, out_of_date, errored, generating, suppressed, warnings, total, active,
-       setups_errored, programs_errored, readiness, samples:{op,setup,program,warning}}
+       setups_errored, programs_errored, setups_blocked, readiness,
+       samples:{op,setup,program,warning}}
+    setups_blocked is the per-setup blocked_by (setup_blockers) the setups projection publishes -
+    read HERE too, so the verdict and cam_get's setup rows answer 'is this job postable' off one
+    input set.
     Each level carries ONE sample (name + first error line) - the disclosure signal; the full per-item
     texture is cam_get(include=['operations'/'nc_programs']). 'active' is the op currently computing.
     An ERRORED op is its OWN bucket: it has a parameter/geometry fault and will NEVER finish generating,
@@ -450,11 +799,13 @@ def live_readiness():
         samples["op"] = tally["op_sample"]
         samples["warning"] = tally["warning_sample"]
         setups_errored = 0
-        for s in setups(cam):
+        setup_objs = setups(cam)
+        for s in setup_objs:
             if safe(lambda s=s: s.hasError, False):
                 setups_errored += 1
                 if samples["setup"] is None:
                     samples["setup"] = {"name": safe(lambda s=s: s.name), "error": first_error_line(s)}
+        blocked = blocked_setup_records(setup_objs)
         programs_errored = 0
         progs = safe(lambda: cam.ncPrograms)
         for i in range(safe(lambda: progs.count, 0) if progs else 0):
@@ -477,7 +828,7 @@ def live_readiness():
                      + " have errors - the job will not post until fixed.")
     elif active_total and valid == active_total:
         readiness = ready_verdict(f"{valid} of {active_total} active ops valid",
-                                  warned, samples["warning"])
+                                  warned, samples["warning"], blocked)
     elif active_total:
         readiness = f"{valid} of {active_total} active ops valid - run cam_generate to finish the rest."
     else:
@@ -486,6 +837,7 @@ def live_readiness():
             "suppressed": tally["suppressed"], "warnings": warned, "total": tally["total"],
             "active": tally["active"],
             "setups_errored": setups_errored, "programs_errored": programs_errored,
+            "setups_blocked": blocked,
             "readiness": readiness, "samples": samples}, None
 
 
@@ -672,10 +1024,9 @@ def get_cam_setups_handler() -> dict:
                                                  ("stock_solids", stock)) if names is None]
             if unreadable:
                 setups[-1]["model_lists_unreadable"] = unreadable
-            # Setup-level prerequisite: a setup with no machine can't be posted. Verified
-            # state, present-and-empty.
-            setups[-1]["blocked_by"] = ([] if machine_label(safe(lambda: s.machine))
-                                        else ["no_machine_selected"])
+            # The setup's own post prerequisites, through the shared read every readiness verdict
+            # also consumes. Verified state, present-and-empty.
+            setups[-1]["blocked_by"] = setup_blockers(s)
     except Exception as e:
         return error(f"Could not read setups: {e}")
 
@@ -759,6 +1110,21 @@ def _attach_setup_invalidation(rec, setup):
     if machine_changed:
         rec["machine_out_of_date"] = True
 
+# The spindle marker a SUPPRESSED row carries in place of the comparison: it was not made, and
+# 'not made' is a different fact from either answer or from a number that would not read.
+_SUPPRESSED_NOT_COMPARED = "suppressed_not_compared"
+
+_OPERATIONS_NOTE = (
+    "Per row: 'path' is the Setup / Folder / Operation breadcrumb and 'folder' the container the op "
+    "sits in, which reads beside is_suppressed; 'preset' is the tool preset this op uses, which two "
+    "ops sharing one tool can differ on. 'spindle_over_machine_max' compares the op's "
+    "tool_spindleSpeed against the setup's machine_spindle_max_rpm: true is over it, false is at or "
+    "under it, and null means one of the two could not be read - 'spindle_check' names which side. "
+    "A SUPPRESSED op is excluded from posting, so it is NOT compared at all: its row carries "
+    "spindle_check 'suppressed_not_compared' and no flag. summary.spindle_over_machine_max_count "
+    "counts the ACTIVE rows that are over.")
+
+
 def get_cam_operations_handler(setup: str = "") -> dict:
     """Operations across all setups, or just the named setup (`setup`)."""
     cam, err = get_cam()
@@ -779,13 +1145,22 @@ def get_cam_operations_handler(setup: str = "") -> dict:
     result_setups = []
     try:
         for s in target_setups:
-            ops, ops_truncated = _operations_in(s)
-            result_setups.append({
+            # Read the setup's machine maximum ONCE - every op row under it is compared against
+            # this same number, so the per-op flags cannot quote different maxima.
+            machine_max = machine_spindle_max(safe(lambda s=s: s.machine))
+            ops, ops_truncated = _operations_in(s, machine_max)
+            # This setup's own blockers ride into the verdict: op state alone cannot earn
+            # 'ready to post' while the setup projection reports a blocked_by for the same setup.
+            blocked = blocked_setup_records([s])
+            rec = {
             "setup": safe(lambda s=s: s.name),
-            "summary": _operations_summary(ops),    # exception-first rollup BEFORE the full list
+            "summary": _operations_summary(ops, blocked),   # exception-first rollup BEFORE the list
             "operations": ops,
             "operations_truncated": ops_truncated,
-            })
+            }
+            if machine_max is not None:
+                rec["machine_spindle_max_rpm"] = machine_max
+            result_setups.append(rec)
     except Exception as e:
         return error(f"Could not read operations: {e}")
 
@@ -801,6 +1176,7 @@ def get_cam_operations_handler(setup: str = "") -> dict:
     "setup_count": len(result_setups),
     "setups": result_setups,
     "tools_used": [{"tool": k, "operation_count": v} for k, v in tools_used.items()],
+    "note": _OPERATIONS_NOTE,
     })
 
 
@@ -816,18 +1192,24 @@ def validity_basis():
     return "unverified_design_workspace"
 
 
-def _operations_summary(op_records) -> dict:
+def _operations_summary(op_records, setup_blocked=None) -> dict:
     """Exception-first rollup of an operations list. states = the count tally over each row's own
     'state' - which _operation_summary derives through op_primary_state, so this tally and the
     per-setup op_states rollup are the SAME classification and cannot contradict each other;
     exceptions = only ACTIVE ops that block (suppressed ops never block); readiness = a factual
     next-action string, gated by validity_basis (no toolpath verdict unless Manufacture-verified)
-    and worded by the shared ready_verdict, so a warned job never reads plainly ready here either."""
+    and worded by the shared ready_verdict, so a warned job - or one whose SETUP carries a
+    blocked_by (`setup_blocked`, from blocked_setup_records) - never reads plainly ready here
+    either. The name keeps the SETUP-level list apart from each row's own op-level `blocked`.
+
+    spindle_over_machine_max_count is the same active-only scoping over the rows' spindle flag: a
+    suppressed row carries no flag to count, so the aggregate and the rows agree by construction."""
     states = {}
     exceptions = []
     active_total = 0
     valid_active = 0
     warned = 0
+    over_spindle = 0
     warning_sample = None
     for r in op_records:
         st = r.get("state")
@@ -835,6 +1217,11 @@ def _operations_summary(op_records) -> dict:
         if r.get("is_suppressed"):
             continue                              # suppressed = excluded from posting; not active, not blocking
         active_total += 1
+        # Counted past the same suppressed skip the rest of this rollup uses, so the aggregate
+        # covers exactly the rows that carry a comparison. `is True` only: a null is a comparison
+        # that could not be made, and counting it would state a number the reads do not support.
+        if r.get("spindle_over_machine_max") is True:
+            over_spindle += 1
         # Counted through the SAME predicate live_readiness counts by (the record carries the facts
         # it reads), so the two surfaces can never disagree about which warnings demote a verdict.
         if counts_as_warning(r):
@@ -857,11 +1244,13 @@ def _operations_summary(op_records) -> dict:
     basis = validity_basis()
     summary = {"states": states, "active_count": active_total, "exceptions": exceptions,
                "validity_basis": basis}
+    if over_spindle:
+        summary["spindle_over_machine_max_count"] = over_spindle   # active rows only; absent = none
     if basis == "manufacture_verified":
         if active_total and valid_active == active_total and not exceptions:
             summary["readiness"] = ready_verdict(
                 f"{active_total} of {active_total} active ops have valid toolpaths",
-                warned, warning_sample)
+                warned, warning_sample, setup_blocked)
         else:
             summary["readiness"] = (f"{valid_active} of {active_total} active ops have valid toolpaths - "
                                     "resolve the exceptions (run cam_generate) before posting.")
@@ -872,31 +1261,62 @@ def _operations_summary(op_records) -> dict:
 
 
 
-def _operations_in(setup_obj) -> tuple:
-    """(ops, truncated) - summarize the immediate operations of a setup (folders/patterns flattened),
-    capped at _MAX_ITEMS. truncated means INCOMPLETE: the cap was hit OR the walk raised."""
+def _operations_in(setup_obj, machine_max=None) -> tuple:
+    """(ops, truncated) - summarize the operations under a setup with their folder breadcrumb,
+    capped at _MAX_ITEMS. truncated means INCOMPLETE: the cap was hit OR the walk raised.
+
+    Drives the shared _walk_children (what tree_nodes is built on) rather than setup.allOperations:
+    allOperations flattens the folder-nested ops and DROPS the folder objects, so the breadcrumb
+    every row publishes as 'path' and the folder each row names exist only in the
+    container-preserving walk. It calls _walk_children directly rather than tree_nodes because a
+    walk that dies part-way has to leave its partial rows behind, which needs the caller to own the
+    output list."""
     ops = []
     truncated = False
+    root = _setup_node(setup_obj)
+    nodes = [root]
     try:
-        coll = setup_obj.allOperations  # includes nested folders/patterns
-        for i, op in enumerate(coll):
+        # _walk_children appends AS it walks, so a walk that dies mid-iteration leaves the nodes it
+        # already reached in the list instead of taking them down with it. root is passed as the
+        # parent node, exactly as tree_nodes passes it - it is what each row's folder is read from.
+        _walk_children(setup_obj, root.name, root.path, nodes, root)
+    except Exception:
+        truncated = True
+    # The completeness check the container-preserving walk needs: allOperations is the setup's own
+    # flat count of the SAME operations, so a walk that came back with fewer read short (a
+    # collection that stopped answering item(i) yields survivors silently) and its list is
+    # INCOMPLETE, never the full read.
+    expected = counted(lambda: setup_obj.allOperations.count)
+    walked = sum(1 for n in nodes if n.kind == "operation")
+    if expected is not None and walked < expected:
+        truncated = True
+    try:
+        for i, node in enumerate(n for n in nodes if n.kind == "operation"):
             if i >= _MAX_ITEMS:
                 truncated = True
                 break
-            # Only real operations have a tool; folders/patterns are skipped by the
+            # Only real operations have a tool; a container that slipped through is skipped by the
             # cast returning None.
-            operation = adsk.cam.Operation.cast(op)
+            operation = adsk.cam.Operation.cast(node.obj)
             if not operation:
                 continue
-            ops.append(_operation_summary(operation))
+            ops.append(_operation_summary(operation, machine_max, node))
     except Exception:
-        # A walk that dies mid-iteration left an INCOMPLETE list - flagged, never passed off
-        # as the full read.
+        # A row read that dies left an INCOMPLETE list - flagged, never passed off as the full read.
         truncated = True
     return ops, truncated
 
 
-def _operation_summary(op) -> dict:
+def _folder_of(node):
+    """The name of the folder/pattern an operation sits IN, or None for an op parked directly under
+    the setup. Read from the walk's own PARENT NODE, never by splitting the breadcrumb: a setup or
+    folder whose name contains ' / ' would split into a folder that does not exist."""
+    if node is None or node.parent is None:
+        return None
+    return node.parent.name if node.parent.kind in ("folder", "pattern") else None
+
+
+def _operation_summary(op, machine_max=None, node=None) -> dict:
     tool_desc = None
     try:
         t = op.tool
@@ -954,6 +1374,34 @@ def _operation_summary(op) -> dict:
     summary["blocked_by"] = blocked
     if requires:
         summary["requires"] = requires
+    # WHERE it sits: the breadcrumb the shared walk already computed, and the owning folder beside
+    # is_suppressed (the folder NAME is where the shop declares why an op is parked).
+    if node is not None:
+        summary["path"] = node.path
+        folder = _folder_of(node)
+        if folder:
+            summary["folder"] = folder
+    # The tool PRESET this op uses - two ops can share one tool and run DIFFERENT presets
+    # (measured), which the tool description alone cannot tell apart.
+    preset = safe(lambda: op.toolPreset)
+    summary["preset"] = safe(lambda preset=preset: preset.name) if preset is not None else None
+    # Does the op ask its spindle for more than the machine allows? Both numbers ride along on the
+    # rows where the answer is not a plain 'no', so the comparison is checkable, not just asserted.
+    # A SUPPRESSED op is excluded from posting, so what it asks for never reaches the machine: its
+    # comparison is WITHHELD rather than answered, and the marker says that is why - the same
+    # active-ops scoping the readiness rollups apply, in the one place the flag is built.
+    if summary["is_suppressed"]:
+        summary["spindle_check"] = _SUPPRESSED_NOT_COMPARED
+        return summary
+    over, requested, marker = spindle_check(op, machine_max)
+    summary["spindle_over_machine_max"] = over
+    if over is not False:
+        if requested is not None:
+            summary["spindle_rpm"] = requested
+        if machine_max is not None:
+            summary["machine_max_rpm"] = machine_max
+    if marker:
+        summary["spindle_check"] = marker
     return summary
 
 def get_setup_references_handler(setup: str = "") -> dict:
@@ -1076,8 +1524,15 @@ def get_tool_list_handler() -> dict:
                 entry = tools.setdefault(desc, {"operations": [], "setups": set()})
                 # Qualify with the setup: the same op NAME can exist in two setups, so a bare-name list
                 # reads as a duplicate-bug when it's really one op per setup. "setup / op" disambiguates.
+                #
+                # BOTH halves go through _segment - the same disclosure every walked breadcrumb takes.
+                # A name that did not read would otherwise join as the literal 'None' or, on the
+                # unqualified branch, cross the wire as a bare null inside a list of strings while
+                # still counting in operation_count. Every row here came out of a setup, so every row
+                # is qualified: the marker names the half that did not read instead of dropping the
+                # setup and leaving a row that looks like a document with one setup.
                 op_name = safe(lambda: operation.name)
-                entry["operations"].append(f"{s_name} / {op_name}" if s_name else op_name)
+                entry["operations"].append(f"{_segment(s_name)} / {_segment(op_name)}")
                 if s_name:
                     entry["setups"].add(s_name)
     except Exception as e:
@@ -1094,30 +1549,114 @@ def get_tool_list_handler() -> dict:
 
     return ok({"distinct_tool_count": len(tool_list), "tools": tool_list})
 
-def _has_valid_toolpath(setup) -> bool:
-    """True if any operation under `setup` has a valid generated toolpath (the precondition
-    getMachiningTime needs; without it the API fails uncatchably)."""
-    try:
-        for op in setup.allOperations:
-            o = adsk.cam.Operation.cast(op)
-            if o and safe(lambda: o.isToolpathValid, False):
-                return True
-    except Exception:
-        pass
-    return False
+def _timeable_ops(setup_obj) -> tuple:
+    """(ops, suppressed_count) - the setup's operations with the SUPPRESSED ones held back.
+
+    getMachiningTime fails with "Machining time could not be calculated" whenever a suppressed
+    operation is inside the target: measured on one job with three targets - the Setup object
+    (17 active + 35 suppressed) failed, a collection of 21 valid ops returned 5700.6 s, the same
+    21 plus the 65 suppressed ones failed again, and the 21 plus 13 EMPTY-toolpath ops returned
+    5700.6 s. So the suppressed ops are what breaks the call and the empty ones are harmless."""
+    ops, suppressed = [], 0
+    for raw in operations_under(setup_obj):
+        op = adsk.cam.Operation.cast(raw)
+        if op is None:
+            continue
+        if safe(lambda op=op: op.isSuppressed, False):
+            suppressed += 1
+            continue
+        ops.append(op)
+    return ops, suppressed
 
 
-def get_machining_time_handler(setup: str = "") -> dict:
-    """Estimated machining time for the whole doc, or one setup (`setup`)."""
+def _any_valid_toolpath(ops) -> bool:
+    """True if any op in the list has a valid generated toolpath (the precondition getMachiningTime
+    needs; without it the API fails uncatchably)."""
+    return any(safe(lambda o=o: o.isToolpathValid, False) for o in ops)
+
+
+def _op_collection(ops):
+    """(collection, added) - an ObjectCollection carrying `ops`, the target getMachiningTime takes
+    in place of the Setup object. `added` is how many actually went in (ObjectCollection.add answers
+    whether it took the item), so a partial collection is never timed as if it held everything.
+    (None, 0) when the collection could not be created."""
+    coll = safe(lambda: adsk.core.ObjectCollection.create())
+    if coll is None:
+        return None, 0
+    added = 0
+    for op in ops:
+        if safe(lambda op=op: coll.add(op), False):
+            added += 1
+    return coll, added
+
+
+_TIME_OP_CAP = 200    # one getMachiningTime call per op; bound the per-turn cost on a large job
+
+_TIME_NOTE = (
+    "Estimate at 100% feed, ~250 in/min (10.58 cm/s) rapid, 1.5s tool changes. Rapid feed is the "
+    "machine's traverse rate, not the cutting feed. SUPPRESSED operations are left out of the "
+    "timed collection - the call fails outright when one is in the target (measured) - and "
+    "excluded_suppressed counts what each setup left out. Per-operation figures do NOT sum to "
+    "their setup total (measured on a 34-operation job: 5445.6 s summed against a 5700.6 s "
+    "aggregate, each per-op call reporting 0 tool changes against the aggregate's 17). BOTH "
+    "numbers are published per setup, so the gap is visible on THIS job instead of inferred: "
+    "machining_time_seconds is the ONE getMachiningTime call over the whole operation collection, "
+    "operations_time_sum_seconds is the sum of the per-operation calls that returned a figure, and "
+    "operations_time_summed is how many rows that sum covers. So read a per-op number as that "
+    "operation's own estimate, not as a decomposition of the setup total, and expect the two "
+    "totals to differ. With operations_truncated set the row cap stopped the per-op pass, so the "
+    "sum covers only the rows present. A row marked "
+    "empty_toolpath carries no time: measured, an operation with no toolpath cannot be timed on "
+    "its own, though it is harmless inside the setup's collection, which times fine.")
+
+
+def _op_time_rows(cam, ops, args, factor) -> tuple:
+    """(rows, truncated) - one getMachiningTime call per operation carrying a valid toolpath.
+    Distances are cm off MachiningTime and are scaled to the caller's unit.
+
+    An EMPTY-toolpath op is named, not called: measured on a 34-operation job, every one of the 13
+    ops reading hasToolpath False raised '3 : Machining time could not be calculated.' on a per-op
+    call, while all 21 holding a toolpath returned a time - and the same 13 are harmless inside the
+    setup's collection, which timed fine. So the state is reported from the flags instead of from a
+    platform error the read can predict."""
+    rows = []
+    for op in ops:
+        facts = op_state_facts(op)
+        if not (is_empty_toolpath(facts) or safe(lambda op=op: op.isToolpathValid, False)):
+            continue
+        if len(rows) >= _TIME_OP_CAP:      # bounds EVERY row, timed or named
+            return rows, True
+        if is_empty_toolpath(facts):
+            rows.append({"operation": facts["name"], "empty_toolpath": True})
+            continue
+        try:
+            mt = cam.getMachiningTime(op, *args)
+        except Exception as e:
+            rows.append({"operation": safe(lambda op=op: op.name), "error": str(e)})
+            continue
+        rows.append({"operation": safe(lambda op=op: op.name),
+                     "machining_time_seconds": measured(lambda: mt.machiningTime, 1.0, 1),
+                     "feed_distance": measured(lambda: mt.feedDistance, factor, 1),
+                     "rapid_distance": measured(lambda: mt.rapidDistance, factor, 1)})
+    return rows, False
+
+
+def get_machining_time_handler(setup: str = "", units: str = "mm") -> dict:
+    """Estimated machining time for the whole doc, or one setup (`setup`), per setup and per op."""
     cam, err = get_cam()
     if err:
         return error(err)
+    unit = (units or "mm").strip().lower()
+    factor = CM_TO_UNIT.get(unit)
+    if factor is None:
+        return error(f"Unknown units '{units}'. Valid: mm, cm, in.")
 
     # feedScale/rapidFeed/toolChangeTime (API-doc units: percent, cm/s, s) are INERT on Fusion
     # 2704 (measured: cam-machining-time-knobs in tests/live/VERIFIED_API_FACTS.md).
     feed_scale = 100.0          # 100% of programmed feed
     rapid_feed = 10.58          # ~250 in/min = 635 cm/min = 10.58 cm/s
     tool_change = 1.5           # seconds
+    args = (feed_scale, rapid_feed, tool_change)
 
     targets = []  # (label, object)
     if (setup or "").strip():
@@ -1132,37 +1671,66 @@ def get_machining_time_handler(setup: str = "") -> dict:
     results = []
     grand = 0.0
     for label, obj in targets:
-        # PRECONDITION: getMachiningTime needs at least one VALID toolpath. With none (ungenerated /
-        # out-of-date ops) it fails through Fusion's text-command channel - NOT a catchable Python
-        # exception, so the try/except below can't save it. Check the readable flag first and report
-        # the observed state instead of crashing.
-        if not _has_valid_toolpath(obj):
-            results.append({"setup": label,
-                "error": "No generated toolpath to time - every operation is out-of-date or "
-                         "ungenerated. Run cam_generate (in the Manufacture workspace), then retry."})
+        ops, suppressed = _timeable_ops(obj)
+        # PRECONDITIONS, both measured: getMachiningTime needs at least one VALID toolpath in the
+        # target, and the target must hold no SUPPRESSED operation (_timeable_ops holds those back).
+        # Inside this handler the failure DOES raise catchably - measured, 13 per-op calls on one
+        # job raised '3 : Machining time could not be calculated.' and the call carried on - but
+        # through sys_execute_script the same failure took the whole invocation down, so the
+        # preconditions are checked BEFORE the call rather than left to the try/except below.
+        if not _any_valid_toolpath(ops):
+            results.append({"setup": label, "excluded_suppressed": suppressed,
+                "error": "No generated toolpath to time - every unsuppressed operation is "
+                         "out-of-date or ungenerated. Run cam_generate (in the Manufacture "
+                         "workspace), then retry."})
+            continue
+        collection, added = _op_collection(ops)
+        if collection is None or added < len(ops):
+            results.append({"setup": label, "excluded_suppressed": suppressed,
+                "error": f"Could not build the operation collection to time: {added} of "
+                         f"{len(ops)} unsuppressed operations went in."})
             continue
         try:
-            mt = cam.getMachiningTime(obj, feed_scale, rapid_feed, tool_change)
+            mt = cam.getMachiningTime(collection, *args)
             secs = safe(lambda: mt.machiningTime, 0.0) or 0.0
             grand += secs
-            results.append({
+            rec = {
         "setup": label,
             "machining_time_seconds": round(secs, 1),
             "machining_time_hms": _hms(secs),
             "feed_time_seconds": round(safe(lambda: mt.totalFeedTime, 0.0) or 0.0, 1),
             "rapid_time_seconds": round(safe(lambda: mt.totalRapidTime, 0.0) or 0.0, 1),
             "tool_changes": safe(lambda: mt.toolChangeCount, 0),
-            })
+            "feed_distance": measured(lambda: mt.feedDistance, factor, 1),
+            "rapid_distance": measured(lambda: mt.rapidDistance, factor, 1),
+            # What the timed collection HELD, so the number is read against a known set.
+            "timed_operations": added,
+            "excluded_suppressed": suppressed,
+            }
+            rows, truncated = _op_time_rows(cam, ops, args, factor)
+            rec["operations"] = rows
+            # BOTH totals, side by side. The aggregate above is ONE getMachiningTime call over the
+            # whole collection; this is the sum of the per-operation calls that returned a figure.
+            # They disagree (measured - see _TIME_NOTE), so neither is derived from the other and
+            # the count says what the sum actually covers: an empty-toolpath row and a row whose
+            # own call errored contribute nothing, and the row cap can stop the pass early.
+            timed = [r["machining_time_seconds"] for r in rows
+                     if isinstance(r.get("machining_time_seconds"), (int, float))]
+            rec["operations_time_sum_seconds"] = round(sum(timed), 1)
+            rec["operations_time_summed"] = len(timed)
+            if truncated:
+                rec["operations_truncated"] = True
+            results.append(rec)
         except Exception as e:
-            results.append({"setup": label, "error": str(e)})
+            results.append({"setup": label, "excluded_suppressed": suppressed, "error": str(e)})
 
     return ok({
             "setup_count": len(results),
         "total_machining_time_seconds": round(grand, 1),
         "total_machining_time_hms": _hms(grand),
         "setups": results,
-    "note": ("Estimate at 100% feed, ~250 in/min (10.58 cm/s) rapid, 1.5s tool changes. "
-            "Rapid feed is the machine's traverse rate, not the cutting feed."),
+        "units": unit,
+    "note": _TIME_NOTE,
     "assumptions": {"feed_scale_percent": feed_scale,
             "rapid_feed_cm_per_s": rapid_feed,
             "tool_change_seconds": tool_change},
@@ -1175,6 +1743,60 @@ def _hms(seconds) -> str:
     except Exception:
         return "0:00:00"
     return f"{s // 3600}:{(s % 3600) // 60:02d}:{s % 60:02d}"
+
+_NC_PROGRAM_NOTE = (
+    "posted_operations is NCProgram.filteredOperations - the operations the program actually posts, "
+    "which is a different list from 'operation_count' (NCProgram.operations, measured holding a "
+    "single entry, the setup). An operation whose toolpath is EMPTY is in that posted list "
+    "(measured: 17 posted operations on a program, empty ones among them), so "
+    "empty_toolpath_count is how many would post with nothing to cut and empty_toolpaths names "
+    "them, capped. A name several posted operations share is rendered with its POSITION in the "
+    "posted list beside it, so no row of that list addresses two operations.")
+
+_NC_EMPTY_NAME_CAP = 20
+
+
+def _posted_row_label(name, position):
+    """What ONE empty posted operation is named by where its name is not its own: the position it
+    holds in filteredOperations, stated so the number reads as what it is.
+
+    That position is what this read HOLDS. filteredOperations hands back Operations with no walk
+    beside them, and nothing read here attributes one of them to a CamNode, so the 'Setup / op'
+    breadcrumb the tree-walking listings are named by is not available here and is not claimed. ''
+    where the name did not read - told_apart keeps the row's own name for an empty discriminator."""
+    return f"{name} (posted operation {position})" if name else ""
+
+
+def _program_posted_ops(nc) -> dict:
+    """{posted_operations, empty_toolpaths?} for ONE NC program, off filteredOperations - the list
+    that expands the program's setup into the operations it really posts. {} when the property does
+    not read, so nothing is claimed about a program whose list is unreadable.
+
+    A program's posted list can draw operations from several setups and an operation name is unique
+    only within one, so the empty rows are rendered through _common.told_apart: a name only one row
+    carries stays that name - the spelling a caller passes to cam_get or cam_generate - and a name
+    SEVERAL rows carry is replaced by _posted_row_label."""
+    ops = safe(lambda: list(nc.filteredOperations))
+    if ops is None:
+        return {}
+    out = {"posted_operations": len(ops)}
+    empty_rows = []
+    empty_count = 0
+    for position, raw in enumerate(ops[:_MAX_ITEMS], 1):
+        op = adsk.cam.Operation.cast(raw)
+        if op is None:
+            continue
+        facts = op_state_facts(op)
+        if is_empty_toolpath(facts):
+            empty_count += 1
+            empty_rows.append((facts["name"], _posted_row_label(facts["name"], position)))
+    out["empty_toolpath_count"] = empty_count
+    if empty_rows:
+        # told_apart judges over EVERY empty row and the cap is applied after, so a listed name
+        # whose namesake falls outside the cap is still replaced. The count is the total.
+        out["empty_toolpaths"] = told_apart(empty_rows)[:_NC_EMPTY_NAME_CAP]
+    return out
+
 
 def get_nc_programs_handler() -> dict:
     """List the document's NC programs with their reliably-readable details.
@@ -1205,6 +1827,7 @@ def get_nc_programs_handler() -> dict:
                 entry["operation_count"] = len(nc.operations)
             except Exception:
                 pass
+            entry.update(_program_posted_ops(nc))
             # Report the actual post parameters as-is (whatever the post exposes).
             params = safe(lambda: nc.postParameters)
             if params is not None:
@@ -1222,7 +1845,8 @@ def get_nc_programs_handler() -> dict:
     except Exception as e:
         return error(f"Could not read NC programs: {e}")
 
-    return ok({"nc_program_count": len(programs), "nc_programs": programs})
+    return ok({"nc_program_count": len(programs), "nc_programs": programs,
+               "note": _NC_PROGRAM_NOTE})
 
 # ---------------------------------------------------------------------------
 # Inspection results - the recorded surface-inspection (probing) measurements read by
@@ -1487,6 +2111,23 @@ _GENERATIONS = {}
 _HANDLE_SEQ = [0]
 
 
+def _carry_generation_keys(old_key, new_key):
+    """Re-stamp every live generation launched under a document key that just changed (a save
+    re-keys an open document - see _write_guard.on_key_renamed).
+
+    A launch handle survives a stale key on its own (the launch DOCUMENT is kept beside it and
+    _same_document falls through to handle equality), so this is not what keeps a status read
+    correct - it is what keeps the stored key TRUE, so the fallback covers the one call that
+    detects a flip rather than every call after it.
+    """
+    for entry in _GENERATIONS.values():
+        if entry.get("doc_key") == old_key:
+            entry["doc_key"] = new_key
+
+
+on_key_renamed(_carry_generation_keys)
+
+
 def register_future(future, target, scope, skip_valid, target_name=""):
     """Mint a handle and register a live generation Future - the ONE registration path every launch
     goes through (cam_generate, plus the inline launches in cam_select_geometry and
@@ -1494,9 +2135,30 @@ def register_future(future, target, scope, skip_valid, target_name=""):
     belongs to, so a later status read taken while another document is active reports the Future's
     own progress instead of the wrong document's tallies. Returns (handle, total).
 
+    That record is document_key, not the lineage urn alone: a never-saved document HAS no urn, so a
+    urn-only record leaves every launch from a scratch document unidentifiable and its status read
+    falls back to the Future alone rather than the per-op tallies it could read. The key answers for
+    a never-saved document too (a per-instance token matched by document handle). doc_name /
+    doc_urn stay beside it because the payload NAMES the generating document from them. All three
+    launch sites register here, so all three are bound the same way.
+
     target_name is the RAW setup/folder/operation name a scoped launch resolved to (omit it for a
     whole-document launch): a status read settles this handle's completion on THAT target's own
-    operations, so a second generation running beside it cannot keep this handle incomplete."""
+    operations, so a second generation running beside it cannot keep this handle incomplete.
+
+    'doc' is the launch document itself, kept beside that key because the key is derived from what
+    reads on the document and the DOCUMENT outlives the derivation. document_key prefers a readable
+    data-file id, and that id does not arrive settled: dataFile.id may answer a path-form string
+    before the lineage urn resolves, so ONE launch document saved mid-generation can answer a
+    different key MORE THAN ONCE - the minted per-instance token, then whatever the id reads first,
+    then the urn. Each of those flips is announced (_carry_generation_keys below re-stamps this
+    entry), and through every one of them the same open document still compares equal by HANDLE -
+    the comparison document_key already matches a never-saved document on - so _same_document
+    answers on the re-stamped key from the call after a flip, and on the handle during the call
+    that detected it.
+
+    PROBE NEEDED (KEY-2): the transient path-form id is stated here as the MECHANISM this fallback
+    covers, not as a ledger fact - no measure_api row records it yet."""
     _HANDLE_SEQ[0] += 1
     handle = f"gen{_HANDLE_SEQ[0]}"
     total = safe(lambda: future.numberOfOperations, None)
@@ -1511,6 +2173,8 @@ def register_future(future, target, scope, skip_valid, target_name=""):
         "total": total,
         "doc_name": doc_name,
         "doc_urn": doc_urn,
+        "doc_key": document_key(),
+        "doc": safe(lambda: app.activeDocument),
     }
     return handle, total
 
@@ -1528,6 +2192,31 @@ _MACHINE_LOCATIONS = ("LocalLibraryLocation", "Fusion360LibraryLocation")
 # additive printers, so an unfiltered read floods - machine_type narrows to the relevant kind).
 _MACHINE_KINDS = {"milling": "isMillingSupported", "turning": "isTurningSupported",
                   "cutting": "isCuttingSupported", "additive": "isAdditiveSupported"}
+
+
+def machine_library():
+    """The shared MachineLibrary - it hangs off CAMManager.get().libraryManager, not the document's
+    CAM product, so no open CAM job is needed. Returns (library, None) or (None, error)."""
+    lib = safe(lambda: adsk.cam.CAMManager.get().libraryManager.machineLibrary)
+    if lib is None:
+        return None, "Could not access the machine library (CAMManager.libraryManager.machineLibrary)."
+    return lib, None
+
+
+def machine_location(lib, machine):
+    """Which library location holds `machine`: 'local', 'fusion360', or 'local or fusion360' when
+    the Local query itself failed and the two cannot be told apart. ONE FILTERED Local query -
+    query_machines searches Local first, so a Local hit carrying this machine's id means Local."""
+    vendor, model = (safe(lambda: machine.vendor) or ""), (safe(lambda: machine.model) or "")
+    fid = safe(lambda: machine.id)
+    try:
+        loc = adsk.cam.LibraryLocations.LocalLibraryLocation
+        for m in (lib.createQuery(loc, vendor, model).execute() or []):
+            if safe(lambda m=m: m.id) == fid:
+                return "local"
+    except Exception:
+        return "local or fusion360"
+    return "fusion360"
 
 
 def machine_kinds(m):
@@ -1554,6 +2243,235 @@ def machine_label(m):
 def machine_ident(m):
     """(label, vendor, model) for a Machine - label is the readable name (description or 'vendor model')."""
     return machine_label(m), (safe(lambda: m.vendor) or ""), (safe(lambda: m.model) or "")
+
+
+# ── the machine's own limits: spindle speed + axis travels, off its kinematics tree ────────────────
+#
+# The route is Machine.elements -> the KinematicsMachineElement -> .parts (a TREE: each MachinePart
+# carries .children plus an optional .axis / .spindle / .toolStation). Machine.kinematics reaches
+# the same tree in one step and the bindings flag it "not officially supported", so it is never read
+# here. Measured on a library Haas A-axis machine: 7 parts, spindle maxSpeed 12000 rpm, X/Y/Z ranges
+# 76.2/40.6/50.8 cm and an A axis whose range reads isInfinite.
+_MACHINE_PART_DEPTH = 8       # the kinematics tree nests one part per axis; bound the recursion
+_MACHINE_PART_CAP = 200
+
+# MachineAxis.physicalRange is documented in CM for a linear axis and RADIANS for a rotary one, so
+# the axis TYPE decides the unit a travel can be reported in. A build carrying neither member leaves
+# the kind None and the range is published unconverted rather than in a guessed unit.
+_AXIS_KINDS = (("linear", "LinearMachineAxisType"), ("rotary", "RotaryMachineAxisType"))
+
+
+def _axis_kind(axis_type):
+    """'linear' / 'rotary' for a MachineAxis.axisType value, or None when it matches neither."""
+    if axis_type is None:
+        return None
+    for label, member in _AXIS_KINDS:
+        if axis_type == safe(lambda member=member: getattr(adsk.cam.MachineAxisTypes, member)):
+            return label
+    return None
+
+
+def _finite(value):
+    """A number only when it is FINITE. An unbounded axis range reads -inf/+inf, and infinity is not
+    a travel (nor valid JSON for a strict client), so it is dropped in favour of is_infinite."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def kinematics_parts(machine):
+    """Every MachinePart under the machine's kinematics element, flattened, or None when the machine
+    exposes no kinematics element at all (which is a different answer from a machine whose tree is
+    empty). Bounded on depth and part count."""
+    elements = safe(lambda: machine.elements)
+    if elements is None:
+        return None
+    type_id = safe(lambda: adsk.cam.KinematicsMachineElement.staticTypeId())
+    if not type_id:
+        return None
+    element = safe(lambda: elements.defaultItemByType(type_id))
+    if element is None:
+        # defaultItemByType answers only for the element whose id is the default one; a machine that
+        # carries the type under another id is still reachable through the filtered list.
+        items = safe(lambda: elements.itemsByType(type_id)) or []
+        element = items[0] if items else None
+    if element is None:
+        return None
+    out = []
+    _walk_machine_parts(safe(lambda: element.parts), 0, out)
+    return out
+
+
+def _walk_machine_parts(parts, depth, out):
+    for p in iter_collection(parts):
+        if len(out) >= _MACHINE_PART_CAP:
+            return
+        out.append(p)
+        if depth < _MACHINE_PART_DEPTH:
+            _walk_machine_parts(safe(lambda p=p: p.children), depth + 1, out)
+
+
+def _spindle_records(parts) -> list:
+    """{max_rpm, min_rpm} for every spindle in the parts list, highest maxSpeed first. A maxSpeed of
+    0 is not a speed anything can be compared against, so it reads as None (never as a limit of 0)
+    and sorts last."""
+    rows = []
+    for part in (parts or []):
+        sp = safe(lambda part=part: part.spindle)
+        if sp is None:
+            continue
+        rpm = measured(lambda sp=sp: sp.maxSpeed)
+        rows.append({"max_rpm": (rpm if rpm else None),
+                     "min_rpm": measured(lambda sp=sp: sp.minSpeed)})
+    rows.sort(key=lambda r: (r["max_rpm"] is None, -(r["max_rpm"] or 0.0)))
+    return rows
+
+
+def machine_spindle_max(machine):
+    """The machine's highest readable spindle maxSpeed in rpm, or None when no spindle answers one -
+    the one number the per-operation over-max comparison is made against, so the machine slice and
+    that comparison can never quote different maxima."""
+    if machine is None:
+        return None
+    rows = _spindle_records(kinematics_parts(machine))
+    return rows[0]["max_rpm"] if rows else None
+
+
+def _axis_record(axis, factor, unit):
+    """One axis row: its name, kind, and travel in `unit` when the kind says the range is a length."""
+    kind = _axis_kind(safe(lambda: axis.axisType))
+    rec = {"name": safe(lambda: axis.name), "kind": kind,
+           "has_limits": read_flag(lambda: axis.hasLimits)}
+    rng = safe(lambda: axis.physicalRange)
+    if rng is None:
+        return rec
+    infinite = read_flag(lambda: rng.isInfinite)
+    rec["is_infinite"] = infinite
+    # read at full precision and round ONCE, at the end: rounding radians to 6 places first turns
+    # a half-turn into 180.00002 deg.
+    lo, hi = _finite(measured(lambda: rng.min, 1.0, 12)), _finite(measured(lambda: rng.max, 1.0, 12))
+    if lo is None or hi is None:
+        return rec
+    if kind == "linear":
+        rec["travel"] = round((hi - lo) * factor, 6)
+        rec["range"] = [round(lo * factor, 6), round(hi * factor, 6)]
+        rec["units"] = unit
+    elif kind == "rotary":
+        rec["travel_deg"] = round(math.degrees(hi - lo), 6)
+        rec["range_deg"] = [round(math.degrees(lo), 6), round(math.degrees(hi), 6)]
+    else:
+        # No decodable axis type: the range is published as the API returned it, with no unit
+        # claimed - MachineAxis documents cm for a linear axis and radians for a rotary one.
+        rec["range_raw"] = [lo, hi]
+    return rec
+
+
+def machine_limits(machine, factor, unit) -> dict:
+    """{spindle, axes, tool_stations, kinematics_readable} for ONE machine - the spindle speed range
+    and per-axis travels its kinematics tree carries."""
+    parts = kinematics_parts(machine)
+    if parts is None:
+        return {"kinematics_readable": False, "spindle": None, "axes": []}
+    spindles = _spindle_records(parts)
+    out = {"kinematics_readable": True, "spindle": (spindles[0] if spindles else None), "axes": []}
+    if len(spindles) > 1:
+        out["spindle_count"] = len(spindles)     # 'spindle' is the fastest of them
+    stations = []
+    for part in parts:
+        ax = safe(lambda part=part: part.axis)
+        if ax is not None:
+            out["axes"].append(_axis_record(ax, factor, unit))
+        st = safe(lambda part=part: part.toolStation)
+        if st is not None:
+            row = {}
+            # A zero on a tool station is what an UNSET field reads as on a library machine
+            # definition (measured: maxToolDiameter and maxToolLength both 0.0 on a machine whose
+            # spindle maxSpeed read 12000), so a zero is never published as a limit of zero. The cm
+            # scale below follows the axis ranges, which ARE measured cm on the same machine; no
+            # machine reading a NON-zero station has been found to exercise it (PROBE NEEDED).
+            for key, getter in (("max_tool_diameter", lambda st=st: st.maxToolDiameter),
+                                ("max_tool_length", lambda st=st: st.maxToolLength)):
+                value = measured(getter, factor)
+                if value:
+                    row[key] = value
+            if row:
+                row["units"] = unit
+                stations.append(row)
+    if stations:
+        out["tool_stations"] = stations
+    return out
+
+
+_MACHINE_SLICE_NOTE = (
+    "Spindle and axis limits come from the machine's kinematics parts (Machine.elements -> the "
+    "kinematics element -> parts). A setup parameter named machine_dimension_x/y/z is a different "
+    "number - measured -1 on a job whose axes read 762/406/508 mm - so it is never read as a "
+    "travel. A tool-station or spindle field reading 0 is left out rather than published as a "
+    "limit of 0.")
+
+
+def get_machine_limits_handler(setup: str = "", units: str = "mm") -> dict:
+    """Per setup: the assigned machine's spindle speed range and per-axis travels."""
+    cam, err = get_cam()
+    if err:
+        return error(err)
+    unit = (units or "mm").strip().lower()
+    factor = CM_TO_UNIT.get(unit)
+    if factor is None:
+        return error(f"Unknown units '{units}'. Valid: mm, cm, in.")
+
+    want = (setup or "").strip()
+    if want:
+        node, rerr = resolve_cam_node(cam, want, kinds=("setup",), label="setup")
+        if rerr:
+            return error(rerr)
+        targets = [(node.name, node.obj)]
+    else:
+        targets = [(safe(lambda s=s: s.name), s) for s in setups(cam)]
+
+    rows = []
+    for label, s in targets:
+        m = safe(lambda s=s: s.machine)
+        rec = {"setup": label, "machine": machine_label(m)}
+        if m is None:
+            rec["kinematics_readable"] = False
+            rec["blocked_by"] = setup_blockers(s)   # the shared code vocabulary, minted once
+        else:
+            rec.update(machine_limits(m, factor, unit))
+        rows.append(rec)
+    return ok({"setup_count": len(rows), "setups": rows, "units": unit,
+               "note": _MACHINE_SLICE_NOTE})
+
+
+# ── the op-asks-for vs machine-allows comparison the machine slice makes possible ─────────────────
+
+_OP_SPINDLE_PARAM = "tool_spindleSpeed"
+
+
+def op_spindle_speed(op):
+    """The spindle speed ONE operation asks for, off its own tool_spindleSpeed CAM parameter (where
+    its tool preset's speed lands), or None when that parameter is absent or does not read."""
+    params = safe(lambda: op.parameters)
+    if params is None:
+        return None
+    p = safe(lambda: params.itemByName(_OP_SPINDLE_PARAM))
+    if p is None:
+        return None
+    return measured(lambda: p.value.value)
+
+
+def spindle_check(op, machine_max):
+    """(over, requested, marker) for one operation against its machine's spindle maximum.
+
+    over is True only when the operation asks for MORE than the maximum - a request AT the maximum
+    is not over it. Either number unreadable answers None with a marker naming which side, never a
+    coerced False; the marker is what tells "checked and fine" from "could not be checked"."""
+    if machine_max is None:
+        return None, None, "machine_max_unavailable"
+    requested = op_spindle_speed(op)
+    if requested is None:
+        return None, None, "op_spindle_speed_unreadable"
+    return requested > machine_max, requested, None
 
 
 def query_machines(lib, vendor, model):
@@ -1773,3 +2691,49 @@ def library_assets(lib, root, max_depth=_LIBRARY_MAX_DEPTH, max_folders=_LIBRARY
     truncated = walk_library_folders(lib, root, visit, max_depth=max_depth,
                                      max_folders=max_folders)
     return assets, truncated
+
+
+# ── addressing ONE asset in a library by name - the substrate every library DELETE resolves on ────
+
+
+def asset_key(url):
+    """One asset url's identity for de-duplication - its string form, or the object itself when the
+    url does not stringify (two urls for one asset must not read as two candidates)."""
+    return safe(lambda: url.toString()) or url
+
+
+def asset_leaf(url):
+    """One asset url's leafName as stored, stripped - '' when it does not read."""
+    return (safe(lambda: url.leafName) or "").strip()
+
+
+def asset_leaf_keys(url):
+    """The names ONE asset answers to, lowercased: its leafName as stored, and its STEM - the part
+    before the LAST dot.
+
+    MEASURED live: a stored asset's leafName carries the file extension
+    ('SweepMach3Axis 20260830-194520.mch') while the machine's own name does not, so comparing the
+    name against the whole leafName finds nothing at all. The STEM is compared rather than the name
+    plus a hardcoded extension because the extension is the library's to choose, and the whole
+    leafName is kept in the set so an asset stored WITHOUT one still matches. Both are EXACT
+    comparisons - a substring match here would delete 'SweepMach3Axis Mk2.mch' for
+    'SweepMach3Axis'."""
+    leaf = asset_leaf(url).lower()
+    keys = {leaf}
+    stem = leaf.rpartition(".")[0]
+    if stem:
+        keys.add(stem)
+    return keys
+
+
+def assets_named(assets, wanted):
+    """The assets one of whose names - leafName as stored, or its stem - EXACTLY matches
+    (case-insensitively) one of `wanted`, deduped by url."""
+    keys, hits = set(), []
+    for a in assets:
+        if asset_leaf_keys(a) & wanted:
+            key = asset_key(a)
+            if key not in keys:
+                keys.add(key)
+                hits.append(a)
+    return hits

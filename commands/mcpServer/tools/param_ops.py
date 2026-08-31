@@ -24,6 +24,39 @@ app = adsk.core.Application.get()
 _MAX_PARAMS = 2000
 
 
+def _owner_facts(p) -> dict:
+    """The maker of a MODEL parameter, as the row's own keys - {} when the parameter has none.
+
+    A ModelParameter carries .createdBy (the Feature / Joint / JointOrigin / sketch dimension that
+    made it) and .role (the slot it fills on that owner - 'Distance', 'alignAngle', ...). A
+    UserParameter has NO createdBy and the read raises, so the missing attribute IS the guard and no
+    type test is needed. Only a key that actually read is emitted: an owner whose name will not read
+    is absent from the row, never a stand-in string. The owner's Python class name is the same
+    identity design_get's timeline pairing reads it under; it is the one key that cannot fail."""
+    owner = safe(lambda: p.createdBy)
+    if owner is None:
+        return {}
+    out = {}
+    name = safe(lambda: owner.name)
+    if isinstance(name, str) and name:
+        out["owner"] = name
+    out["owner_type"] = type(owner).__name__
+    # An owner that lives in a sketch (a dimension) carries parentSketch; a feature has no such
+    # attribute and the read raises, which is what leaves the key off a feature's row.
+    sketch = safe(lambda: owner.parentSketch.name)
+    if isinstance(sketch, str) and sketch:
+        out["owner_sketch"] = sketch
+    role = safe(lambda: p.role)
+    if isinstance(role, str) and role:
+        out["role"] = role
+    return out
+
+
+_OWNER_NOTE = ("Model parameter rows carry their maker: 'owner' (its name), 'owner_type', "
+               "'owner_sketch' when the owner lives in a sketch, and 'role' - the slot the "
+               "parameter fills on that owner. A key that did not read is absent from the row.")
+
+
 def _param_summary(p, units_manager=None) -> dict:
     if units_manager is None:
         d = _common.design()
@@ -31,6 +64,9 @@ def _param_summary(p, units_manager=None) -> dict:
     unit = safe(lambda: p.unit)
     out = {
     "name": safe(lambda: p.name),
+    # A model parameter's expression is readable but not INTERPRETABLE without the feature/sketch
+    # it drives, and a design with no user parameters has this list as its only parameter view.
+    **_owner_facts(p),
     "expression": safe(lambda: p.expression),
     "unit": unit,
     "comment": safe(lambda: p.comment),
@@ -119,6 +155,10 @@ def handler(name: str = "", include_model_parameters: bool = False) -> dict:
             pass
         payload["model_parameter_count"] = len(model_params)
         payload["model_parameters"] = model_params
+        # Advertised only when a row actually carries owner keys - a note describing keys that are
+        # not there would send a caller looking for them.
+        if any("owner_type" in row for row in model_params):
+            payload["note"] = _OWNER_NOTE
 
     return ok(payload)
 

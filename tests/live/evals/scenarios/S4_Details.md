@@ -6,16 +6,21 @@ fixture: P3-Gimbal (the S3 artifact - the jointed, motion-linked gyroscope at re
   PINNED first. The agent details the LIVING mechanism and saves AS A NEW document (P4-Gimbal);
   P3-Gimbal's cloud version must remain untouched. Missing fixture = ask - never create a project.
 budget:
-  max_tool_calls: 85
-  max_tokens: 115000
+  max_tool_calls: 98
+  max_tokens: 136000
+skill: parametric-cad-design
 substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
 perturbations: none (baseline)
 expected_refusals: none
 ---
 
-> NEEDS-RUN - UNMEASURED WORDING: the split swing-clearance grade below (interference for ADDED
-> material, a measured gap for the HOLES) has not been exercised by a blind executor, so the budget
-> is a provisional pin, not a measurement. This banner stands until a blind run measures it.
+> OPEN DEFECT - the swing-clearance postcondition below CANNOT FAIL as written.
+> The pedestal sits below the ring plane and its top is a live flush contact with the carrier, so
+> the only mechanism-preserving place for a boss is the base at z <= -32 - geometrically remote
+> from every ring's swept envelope. A CORRECTLY placed boss can never overlap a ring at any pose,
+> and the contacts the sweep does find are the pre-existing ring-carrier collisions S3
+> characterised. Re-site this postcondition onto a feature that shares the rings' envelope, or
+> name where the boss must go, BEFORE trusting a PASS on it.
 
 # S4 - Details: real-part features on a living mechanism
 
@@ -133,6 +138,6 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
   pairs, proving it bites and locating the true limit - and this clause makes that protocol
   required instead of optional diligence.
 - Staging: doc_open S3 artifact BY URN, confirm active; run the block. Budget: the last
-  measured run (Agent-executor harness) was 58 calls, PASS incl. the out-of-range probe; the
-  measured hole-clearance reads add to that, so 85 calls / 115k output tokens is a provisional
-  pin - recalibrate at the first measured run of this wording.
+  blind run_eval under the skill measures this scenario at 78 calls / 109k output tokens, which
+  ran tight against an 85/115k pin at 92% and 95%. 98 calls / 136k is that measurement plus ~25%
+  headroom.

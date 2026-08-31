@@ -281,6 +281,13 @@ class TestMeasuredExtent:
         for declared in mod.RETURNS:
             assert declared.assert_present(out) == "", declared.key
 
+    def test_the_postcondition_reads_the_same_component_scope_the_handler_imports_into(self, mod):
+        # the handler narrows its by-name resolve with 'component'; a fingerprint that did not
+        # would read a different sketch whenever that name is shared, and disclose an unconfirmed
+        # import over curves that landed.
+        post, = mod.item.handler.__wrapped__.__assert_postconditions__
+        assert post.keys == ("sketch_name",) and post.scope_keys == ("component",)
+
     def test_the_declared_postcondition_convicts_an_import_that_added_nothing(self, mod, sketch):
         kind = load_tool("_assert").SketchCurvesChanged()
         before = kind.capture({"sketch_name": "Plate"})
@@ -336,7 +343,8 @@ class TestSketchResolution:
         # calling it "No sketch named 'Plate'" states the opposite of what the walk read.
         plate, label = two_sketches
         refusal = "2 sketches are named 'Plate' ('Plate' in Root, 'Plate' in Frame)"
-        monkeypatch.setattr(mod._common, "find_or_recent_sketch", lambda d, n: (None, n, refusal))
+        monkeypatch.setattr(mod._common, "find_or_recent_sketch",
+                            lambda d, n, remedy=None: (None, n, refusal))
         msg = error_message(mod.handler(file_path=svg, sketch_name="Plate"))
         assert msg == refusal and "No sketch named" not in msg
         assert plate.sketchCurves.count == 1 and label.sketchCurves.count == 0   # nothing landed
@@ -349,3 +357,61 @@ class TestSketchResolution:
         monkeypatch.setattr(mod._common, "design", lambda: None)
         monkeypatch.setattr(mod._inputs._common, "design", lambda: None)
         assert "design" in error_message(mod.handler(file_path=svg)).lower()
+
+
+# ── the 'component' SCOPE ────────────────────────────────────────────────────
+# Fusion numbers sketches per component from 1, so two components each holding a "Plate" is the
+# norm. Unscoped the walk REFUSES that name and points at 'component': a rename is impossible for a
+# component that arrived inside a referenced document, so it is no remedy. The REAL walk runs here.
+
+@pytest.fixture
+def shared_name(mod):
+    """One name in TWO components with DIFFERENT starting curve counts (Alpha 2, Beta 0), so the
+    sketch the SVG landed in is readable from the counts rather than from a shared name."""
+    from conftest import MakeComp
+    alpha_sk = make_sketch("Plate", lines=[make_sketch_curve("A0"), make_sketch_curve("A1")])
+    beta_sk = make_sketch("Plate", lines=[])
+    alpha = MakeComp(name="Alpha", sketches=[alpha_sk])
+    beta = MakeComp(name="Beta", sketches=[beta_sk])
+    install(mod, make_design(comp=alpha, all_components=[alpha, beta]))
+    _wire(alpha_sk, _importer([], adds=3))
+    _wire(beta_sk, _importer([], adds=3))
+    return alpha_sk, beta_sk
+
+
+class TestComponentScope:
+    def test_the_unscoped_shared_name_refuses_and_names_the_scope_input(self, mod, shared_name,
+                                                                        svg):
+        alpha_sk, beta_sk = shared_name
+        msg = error_message(mod.handler(file_path=svg, sketch_name="Plate"))
+        assert "2 sketches are named 'Plate'" in msg
+        assert "'component'" in msg and "Rename one" not in msg
+        assert alpha_sk.sketchCurves.count == 2 and beta_sk.sketchCurves.count == 0
+
+    def test_the_scope_imports_into_THAT_components_sketch(self, mod, shared_name, svg):
+        alpha_sk, beta_sk = shared_name
+        out = payload(mod.handler(file_path=svg, sketch_name="Plate", component="Beta"))
+        assert out["sketch"] == "Plate"
+        assert beta_sk.sketchCurves.count == 3 and alpha_sk.sketchCurves.count == 2
+
+    def test_the_sibling_component_is_reachable_by_the_same_call(self, mod, shared_name, svg):
+        alpha_sk, beta_sk = shared_name
+        payload(mod.handler(file_path=svg, sketch_name="Plate", component="Alpha"))
+        assert alpha_sk.sketchCurves.count == 5 and beta_sk.sketchCurves.count == 0
+
+    def test_an_unknown_component_is_refused_before_the_import(self, mod, shared_name, svg):
+        alpha_sk, beta_sk = shared_name
+        msg = error_message(mod.handler(file_path=svg, sketch_name="Plate", component="Gamma"))
+        assert "No component named 'Gamma'" in msg
+        assert alpha_sk.sketchCurves.count == 2 and beta_sk.sketchCurves.count == 0
+
+    def test_a_wrong_component_is_refused_even_when_the_name_is_UNIQUE(self, mod, svg):
+        # The scope is VALIDATED: a dropped one imports into Alpha on a call that named Beta.
+        from conftest import MakeComp
+        alpha_sk = make_sketch("OnlyOne", lines=[])
+        alpha = MakeComp(name="Alpha", sketches=[alpha_sk])
+        beta = MakeComp(name="Beta", sketches=[])
+        install(mod, make_design(comp=alpha, all_components=[alpha, beta]))
+        _wire(alpha_sk, _importer([], adds=3))
+        msg = error_message(mod.handler(file_path=svg, sketch_name="OnlyOne", component="Beta"))
+        assert "'Beta'" in msg and alpha_sk.sketchCurves.count == 0

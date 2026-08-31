@@ -198,6 +198,53 @@ class _NoRefineOptions(FakeExportOptions):
         object.__setattr__(self, k, v)
 
 
+class _NoUnitOptions(FakeExportOptions):
+    """STL options that DROP the unitType write and keep the factory value: the set is accepted
+    silently and the read-back still answers something else, so _apply_stl_units returns None - the
+    unit never landed. The dropped set is the only condition modelled."""
+
+    def __init__(self, kind, geom, path):
+        super().__init__(kind, geom, path)
+        object.__setattr__(self, "unitType", "FACTORY_DEFAULT")
+
+    def __setattr__(self, k, v):
+        if k == "unitType":
+            return
+        object.__setattr__(self, k, v)
+
+
+def _refine_member(key):
+    """The MeshRefinementSettings member for a refinement key, off the mock - never a hand-typed
+    sentinel, so a measured int (MeshRefinementHigh is 0) flows through unchanged."""
+    return getattr(mx.adsk.fusion.MeshRefinementSettings, mx._REFINEMENTS[key])
+
+
+def _options_holding(des, attr, value, factory_name, kind, drop_write=True):
+    """Point ONE create*Options factory at options whose FACTORY value for 'attr' ALREADY reads
+    'value', optionally dropping the write.
+
+    This is the live shape of the two requests whose read-back cannot bite: measured, a fresh
+    options object reads unitType 0 and MillimeterDistanceUnits IS 0, and reads meshRefinement 1
+    and MeshRefinementMedium IS 1 - so the property answers the requested value whether the
+    assignment took or never happened."""
+    class _Opts(FakeExportOptions):
+        def __init__(self, k, geom, path):
+            super().__init__(k, geom, path)
+            object.__setattr__(self, attr, value)
+
+        def __setattr__(self, k, v):
+            if k == attr and drop_write:
+                return
+            object.__setattr__(self, k, v)
+
+    def _opt(geom, path):
+        rec = _Opts(kind, geom, path)
+        des.exportManager.calls.append(rec)
+        return rec
+    setattr(des.exportManager, factory_name, _opt)
+    return _Opts
+
+
 class FakeExportManager:
     """Records which create*Options ran + the geometry, and that execute ran (writing a fake file)."""
     def __init__(self):
@@ -281,8 +328,9 @@ def _wire_adsk():
     adsk.fusion.MeshBody = MeshBody
     adsk.fusion.BaseFeature = FakeBaseFeature
     # export refinement + tessellation-quality enums
-    mrs = adsk.fusion.MeshRefinementSettings
-    mrs.MeshRefinementHigh = "RHIGH"; mrs.MeshRefinementMedium = "RMED"; mrs.MeshRefinementLow = "RLOW"
+    # MeshRefinementSettings members are NOT hand-seeded: they come off the mock (measured values
+    # once live_api_facts carries the family), and every assertion below reads them by name through
+    # _refine_member so a real int - MeshRefinementHigh is 0, a FALSY member - reads identically.
     tmo = adsk.fusion.TriangleMeshQualityOptions
     tmo.LowQualityTriangleMesh = 8; tmo.NormalQualityTriangleMesh = 11
     tmo.HighQualityTriangleMesh = 13; tmo.VeryHighQualityTriangleMesh = 15
@@ -442,7 +490,7 @@ class TestExportTarget:
 
     def test_component_name_fallback_target(self, tmp_path):
         # a MULTI-body component NAME falls back to the whole component: the shared BodyRef refuses
-        # to pick one of its bodies, so component_by_name resolves it as the export geometry
+        # to pick one of its bodies, so find_component resolves it as the export geometry
         _wire_adsk()
         root = FakeComp("Root", bodies=[BRepBody("Body1")])
         sub = FakeComp("SubPart", bodies=[BRepBody("Inner"), BRepBody("Outer")])
@@ -464,6 +512,24 @@ class TestExportTarget:
                                          file_path=str(tmp_path / "p.obj")))
         assert des.exportManager.calls[-1].geom is inner
         assert "body" in out["target"].lower() and "Inner" in out["target"]
+
+    def test_duplicate_component_name_refused_not_exported(self, tmp_path):
+        # two components named 'SubPart': the name picks neither, so the export refuses instead of
+        # writing whichever the design-wide walk reached first
+        _wire_adsk()
+        root = FakeComp("Root", bodies=[BRepBody("Body1")])
+        a = FakeComp("SubPart", bodies=[BRepBody("Inner"), BRepBody("Outer")])
+        b = FakeComp("SubPart", bodies=[BRepBody("Left"), BRepBody("Right")])
+        des = _install(FakeDesign(root, all_comps=[root, a, b]))
+        res = mx.export_handler(format="obj", target="SubPart",
+                                file_path=str(tmp_path / "p.obj"))
+        assert res["isError"] is True
+        assert "2 components match 'SubPart'" in res["message"]
+        # the remedies named are the two this tool still resolves after the component step
+        assert "occurrence name/fullPathName" in res["message"]
+        assert "find_geometry" in res["message"]
+        assert "rename" not in res["message"].lower()
+        assert des.exportManager.calls == []              # nothing was exported
 
     def test_occurrence_by_name_target(self, tmp_path):
         # a name that is neither a body nor a component resolves via the allOccurrences scan
@@ -536,7 +602,7 @@ class TestExportRefinement:
         out = _payload(mx.export_handler(format="obj", refinement="high",
                                          file_path=str(tmp_path / "p.obj")))
         # the options object carried the high refinement enum
-        assert des.exportManager.calls[-1].meshRefinement == "RHIGH"
+        assert des.exportManager.calls[-1].meshRefinement == _refine_member("high")
         # it LANDED, so applied and requested agree
         assert out["refinement"] == "high"
         assert out["refinement_requested"] == "high"
@@ -584,7 +650,10 @@ class TestExportRefinement:
         _wire_adsk()
         des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
         note = self._no_refine_export(des, tmp_path)["note"].lower()
-        for guess in ("stl", "carry no meshrefinement", "carries no meshrefinement",
+        # the guessed CAUSES, not the bare format name: 'stl_units' legitimately names this export's
+        # unit knob in the same note, and a substring ban on 'stl' would red on a correct payload.
+        for guess in ("stl format", "stl options", "stl export options carry",
+                      "carry no meshrefinement", "carries no meshrefinement",
                       "does not support", "default density"):
             assert guess not in note, guess
 
@@ -597,8 +666,328 @@ class TestExportRefinement:
         assert out["refinement"] == "low"
         assert "did NOT land" not in out["note"]
 
+    def _refine_options_holding(self, des, member, drop_write=True):
+        """OBJ options whose factory meshRefinement ALREADY reads 'member' - the live 'medium'
+        shape. OBJ so the note carries the density prose alone, with no STL unit sentence in it."""
+        return _options_holding(des, "meshRefinement", member, "createOBJExportOptions", "obj",
+                                drop_write)
+
+    def test_a_refinement_the_options_already_read_is_still_reported_as_landed(self, tmp_path):
+        # The density the read-back cannot attribute to THIS assignment - the options object reads
+        # it before the set and the write is DROPPED. Reported as landed anyway, and that is
+        # correct: measured, the value meshRefinement READS determines the file that gets written
+        # (untouched and explicit-medium are byte-identical), so the caller does get 'medium'. This
+        # is the knob where the unit's disclosure would be noise, and it must NOT appear.
+        _wire_adsk()
+        des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
+        self._refine_options_holding(des, _refine_member("medium"))
+        out = _payload(mx.export_handler(format="obj", refinement="medium",
+                                         file_path=str(tmp_path / "p.obj")))
+        assert out["refinement"] == "medium"
+        assert "refinement_verified" not in out
+        assert "UNVERIFIED" not in out["note"] and "did NOT land" not in out["note"]
+
+    def test_a_refinement_the_options_did_not_already_read_lands_as_requested(self, tmp_path):
+        # The other side of the same pre-read: the property held a DIFFERENT density before the
+        # set. Both sides report the same way for this knob - only the unit splits them.
+        _wire_adsk()
+        des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
+        self._refine_options_holding(des, _refine_member("medium"), drop_write=False)
+        out = _payload(mx.export_handler(format="obj", refinement="high",
+                                         file_path=str(tmp_path / "p.obj")))
+        assert out["refinement"] == "high"
+        assert des.exportManager.calls[-1].meshRefinement == _refine_member("high")
+        assert "UNVERIFIED" not in out["note"]
+
+    def test_a_dropped_refinement_write_is_caught_where_the_read_back_can_see_it(self, tmp_path):
+        # The post-read is this knob's whole guard, so it has to bite where it can: the write is
+        # dropped and the property holds a density OTHER than the one asked for, which reads back
+        # as a miss. THE mechanism test for _applied_pair's after-comparison.
+        _wire_adsk()
+        des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
+        self._refine_options_holding(des, _refine_member("medium"))
+        out = _payload(mx.export_handler(format="obj", refinement="high",
+                                         file_path=str(tmp_path / "p.obj")))
+        assert out["refinement"] is None
+        assert "did NOT land" in out["note"]
+
+    def test_the_defaulted_refinement_is_reported_as_landed_with_no_disclosure(self, tmp_path):
+        # The most-travelled path: measured, the factory meshRefinement IS the member this tool
+        # defaults to. It reports as landed with no caveat, because the read determines the file.
+        # Read through the Choice's own default, so a change to it moves this test, not hides it.
+        _wire_adsk()
+        des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
+        default = mx._EXPORT_REFINE.default
+        self._refine_options_holding(des, _refine_member(default))
+        out = _payload(mx.export_handler(format="obj", file_path=str(tmp_path / "p.obj")))
+        assert out["refinement"] == default
+        assert "refinement_verified" not in out
+        assert "UNVERIFIED" not in out["note"] and "did NOT land" not in out["note"]
+
 
 # â”€â”€ mesh_export: split_by_component (one mesh file per top-level occurrence) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+class TestExportStlUnits:
+    """The STL file's UNIT. STLExportOptions.unitType left untouched writes INCHES (measured) while
+    mesh_insert's own default is mm, so an export that named no unit came back a 25.4th of its size.
+    mesh_export therefore ASSIGNS mm when nothing is asked for - the unit mesh_insert defaults to -
+    and publishes the unit the options object read back either way."""
+
+    def _stl_options_class(self, des, cls, only_for=None):
+        """Point the STL options factory at 'cls' (for the named occurrences only, when given)."""
+        names = set(only_for or ())
+
+        def _stl_opt(geom, path):
+            use = cls if (not names or getattr(geom, "name", "") in names) else FakeExportOptions
+            rec = use("stl", geom, path)
+            des.exportManager.calls.append(rec)
+            return rec
+        des.exportManager.createSTLExportOptions = _stl_opt
+
+    def test_an_omitted_unit_is_the_one_the_schema_advertises(self, tmp_path):
+        # The schema's advertised default and the unit the writer ASSIGNS are one value: a handler
+        # default drifting from the Choice's would advertise one unit while writing another, which
+        # every other test here - each naming its own literal - would pass straight over.
+        advertised = mx._EXPORT_UNITS.default
+        assert f"Default {advertised}." in mx._EXPORT_UNITS.schema()["description"]
+        _wire_adsk()
+        des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
+        out = _payload(mx.export_handler(format="stl", file_path=str(tmp_path / "p.stl")))
+        assert des.exportManager.calls[-1].unitType is getattr(
+            mx.adsk.fusion.DistanceUnits, mx._export.STL_UNIT_MEMBERS[advertised])
+        assert out["options_applied"]["stl_units"] == advertised
+        assert out["options_requested"]["stl_units"] == advertised
+
+    def test_omitting_the_unit_writes_mm_the_unit_mesh_insert_defaults_to(self, tmp_path):
+        # mm, NOT the property's own untouched value (which writes inches, measured): the two tools'
+        # defaults have to name one unit or an export/import round trip that asks for nothing
+        # divides every coordinate by 25.4.
+        _wire_adsk()
+        des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
+        out = _payload(mx.export_handler(format="stl", file_path=str(tmp_path / "p.stl")))
+        assert des.exportManager.calls[-1].unitType is mx.adsk.fusion.DistanceUnits.MillimeterDistanceUnits
+        assert out["options_applied"]["stl_units"] == "mm"
+        assert out["options_requested"]["stl_units"] == "mm"
+
+    def test_omitting_the_unit_on_the_live_factory_shape_still_lands_mm(self, tmp_path):
+        # The measured live shape of the OMITTED case: unitType already reads MillimeterDistanceUnits
+        # (it is 0, the value a fresh options object holds), so the pre-read half of _export's
+        # applied_pair is what separates it from an explicit unit - the value lands, and
+        # options_verified is false because the read-back could not have failed.
+        _wire_adsk()
+        des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
+        self._stl_options_holding(des, mx.adsk.fusion.DistanceUnits.MillimeterDistanceUnits)
+        out = _payload(mx.export_handler(format="stl", file_path=str(tmp_path / "p.stl")))
+        assert out["options_applied"]["stl_units"] == "mm"
+        assert out["options_verified"]["stl_units"] is False
+        assert "mesh_insert units='mm'" in out["note"]
+
+    def test_a_requested_unit_overrides_the_default(self, tmp_path):
+        # INCHES asked for explicitly - the discriminating twin of the omitted case above. A handler
+        # that ignored 'stl_units' and always wrote its default would pass that test and fail this.
+        _wire_adsk()
+        des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
+        out = _payload(mx.export_handler(format="stl", stl_units="in",
+                                         file_path=str(tmp_path / "p.stl")))
+        assert des.exportManager.calls[-1].unitType is mx.adsk.fusion.DistanceUnits.InchDistanceUnits
+        assert out["options_applied"]["stl_units"] == "in"
+        assert out["options_requested"]["stl_units"] == "in"
+
+    def test_the_note_names_the_unit_to_re_import_with(self, tmp_path):
+        # the whole point of the row: the unit is on the wire, in the vocabulary mesh_insert takes.
+        _wire_adsk()
+        _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
+        out = _payload(mx.export_handler(format="stl", stl_units="mm",
+                                         file_path=str(tmp_path / "p.stl")))
+        assert "read back units 'mm'" in out["note"]
+        assert "mesh_insert units='mm'" in out["note"]
+
+    def test_bad_unit_rejected_by_the_choice(self, tmp_path):
+        _wire_adsk()
+        des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
+        res = mx.export_handler(format="stl", stl_units="parsecs",
+                                file_path=str(tmp_path / "p.stl"))
+        assert res["isError"] is True and "stl_units" in res["message"]
+        assert des.exportManager.calls == []               # nothing was exported
+
+    def test_obj_reports_no_unit(self, tmp_path):
+        # STL is the only format this tool bakes a unit into, so an OBJ export must not publish a
+        # unit key or a unit sentence - a reported unit nothing was written from is a false claim.
+        _wire_adsk()
+        _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
+        out = _payload(mx.export_handler(format="obj", file_path=str(tmp_path / "p.obj")))
+        assert "options_applied" not in out and "options_requested" not in out
+        assert "options_verified" not in out
+        assert "units" not in out["note"]
+
+    def test_a_unit_asked_for_on_a_non_stl_format_is_refused_naming_it(self, tmp_path):
+        # Dropping it silently would hand back a file whose unit nothing states - the defect this
+        # input exists to close. The refusal names the value AND the format it was asked with.
+        _wire_adsk()
+        des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
+        res = mx.export_handler(format="obj", stl_units="mm", file_path=str(tmp_path / "p.obj"))
+        assert res["isError"] is True
+        assert "'mm'" in res["message"] and "format=obj" in res["message"]
+        assert des.exportManager.calls == []               # nothing was written
+
+    def test_an_omitted_unit_on_a_non_stl_format_is_not_refused(self, tmp_path):
+        # the refusal keys on what the CALLER asked for, not on the Choice's default - an OBJ export
+        # that never mentioned a unit must still run.
+        _wire_adsk()
+        _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
+        out = _payload(mx.export_handler(format="obj", file_path=str(tmp_path / "p.obj")))
+        assert out["exported"] is True
+
+    def test_a_unit_that_never_landed_is_published_null_not_as_the_request(self, tmp_path):
+        # The request must never masquerade as the effect: the options object kept its own value, so
+        # 'options_applied' is null and only 'options_requested' echoes what was asked for.
+        _wire_adsk()
+        des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
+        self._stl_options_class(des, _NoUnitOptions)
+        out = _payload(mx.export_handler(format="stl", file_path=str(tmp_path / "p.stl")))
+        assert out["options_applied"]["stl_units"] is None
+        assert out["options_requested"]["stl_units"] == "mm"
+        assert out["options_verified"]["stl_units"] is False   # no landed value to be backed
+        assert "did NOT land" in out["note"] and "unconfirmed" in out["note"]
+        assert "read back units" not in out["note"]        # never both sentences
+
+    def test_an_unlanded_unit_note_attributes_no_cause(self, tmp_path):
+        # WHY the set did not stick, and which unit the writer then used, are not readable here - so
+        # the sentence must not name inches, a format, or a missing property as the reason.
+        _wire_adsk()
+        des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
+        self._stl_options_class(des, _NoUnitOptions)
+        note = _payload(mx.export_handler(format="stl",
+                                          file_path=str(tmp_path / "p.stl")))["note"].lower()
+        for guess in ("inch", "factory default", "does not support", "carries no unittype"):
+            assert guess not in note, guess
+
+    def _stl_options_holding(self, des, unit_member, drop_write=True):
+        """STL options whose factory unitType ALREADY reads 'unit_member' - the live 'mm' shape."""
+        return _options_holding(des, "unitType", unit_member, "createSTLExportOptions", "stl",
+                                drop_write)
+
+    def test_a_unit_the_options_already_read_is_published_unverified(self, tmp_path):
+        # THE VACUOUS GUARD. The options object reads the requested unit BEFORE the set and the
+        # write is DROPPED, so set-then-read-back answers exactly what it answers when the
+        # assignment takes. The payload must publish that the claim is unbacked instead of
+        # presenting the same equality it publishes for a unit the property did not already hold.
+        _wire_adsk()
+        des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
+        self._stl_options_holding(des, mx.adsk.fusion.DistanceUnits.MillimeterDistanceUnits)
+        out = _payload(mx.export_handler(format="stl", stl_units="mm",
+                                         file_path=str(tmp_path / "p.stl")))
+        assert out["options_applied"]["stl_units"] == "mm"
+        assert out["options_verified"]["stl_units"] is False
+        assert "already read 'mm' BEFORE it was set" in out["note"]
+        assert "read back units" not in out["note"]     # the verified sentence must NOT appear
+
+    def test_a_unit_the_options_did_not_already_read_is_published_verified(self, tmp_path):
+        # The other side of the same read: the property held a DIFFERENT unit before the set, so
+        # equality after it could have failed - and did not. This is a real verification, and it
+        # keeps its verified sentence.
+        _wire_adsk()
+        des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
+        self._stl_options_holding(des, mx.adsk.fusion.DistanceUnits.MillimeterDistanceUnits,
+                                  drop_write=False)
+        out = _payload(mx.export_handler(format="stl", stl_units="in",
+                                         file_path=str(tmp_path / "p.stl")))
+        assert out["options_applied"]["stl_units"] == "in"
+        assert out["options_verified"]["stl_units"] is True
+        assert "read back units 'in'" in out["note"]
+        assert "UNVERIFIED" not in out["note"]
+
+    def test_a_dropped_write_is_caught_where_the_read_back_can_see_it(self, tmp_path):
+        # Same dropped write as the unverified case, asked for a unit the property does NOT already
+        # hold: there the read-back bites, so nothing landed and nothing is verified.
+        _wire_adsk()
+        des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
+        self._stl_options_holding(des, mx.adsk.fusion.DistanceUnits.MillimeterDistanceUnits)
+        out = _payload(mx.export_handler(format="stl", stl_units="in",
+                                         file_path=str(tmp_path / "p.stl")))
+        assert out["options_applied"]["stl_units"] is None
+        assert out["options_verified"]["stl_units"] is False
+        assert "did NOT land" in out["note"]
+
+    def test_the_unverified_unit_sentence_claims_nothing_about_the_file(self, tmp_path):
+        # What the WRITER did with an options object that reads the unit either way is not readable
+        # here, so the sentence must not say the file is in the unit - it names it as the request.
+        _wire_adsk()
+        des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
+        self._stl_options_holding(des, mx.adsk.fusion.DistanceUnits.MillimeterDistanceUnits)
+        note = _payload(mx.export_handler(format="stl", stl_units="mm",
+                                          file_path=str(tmp_path / "p.stl")))["note"].lower()
+        for guess in ("the file is in", "written in mm", "the file was written", "the writer used",
+                      "landed"):
+            assert guess not in note, guess
+        assert "the unit that was asked for" in note
+
+    def test_a_split_publishes_the_unverified_unit_per_file_and_counts_it(self, tmp_path):
+        # per FILE, like options_applied: each file got its own options object, so each carries its
+        # own evidence - and the note counts the files rather than claiming the unit for them.
+        _wire_adsk()
+        des = _install(FakeDesign(FakeComp("Root", occurrences=[FakeOcc("A:1"), FakeOcc("B:1")])))
+        self._stl_options_holding(des, mx.adsk.fusion.DistanceUnits.MillimeterDistanceUnits)
+        out = _payload(mx.export_handler(format="stl", stl_units="mm", file_path=str(tmp_path),
+                                         split_by_component=True))
+        assert [f["options_applied"] for f in out["files"]] == [{"stl_units": "mm"},
+                                                                {"stl_units": "mm"}]
+        assert [f["options_verified"] for f in out["files"]] == [{"stl_units": False},
+                                                                 {"stl_units": False}]
+        assert "UNVERIFIED for 2 of the 2 exported file(s)" in out["note"]
+        assert "read back units" not in out["note"]
+
+    def test_a_build_without_the_distance_units_member_publishes_null(self, tmp_path, monkeypatch):
+        # No DistanceUnits member for the key -> nothing is assigned at all, and the payload says
+        # null rather than reporting a unit the options object never held.
+        _wire_adsk()
+        des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
+        monkeypatch.setattr(mx._export, "stl_unit_enum", lambda key: None)
+        out = _payload(mx.export_handler(format="stl", file_path=str(tmp_path / "p.stl")))
+        assert not hasattr(des.exportManager.calls[-1], "unitType")
+        assert out["options_applied"]["stl_units"] is None
+        assert "did NOT land" in out["note"]
+
+    def test_each_split_stl_file_carries_the_unit_that_landed_for_it(self, tmp_path):
+        _wire_adsk()
+        des = _install(FakeDesign(FakeComp("Root", occurrences=[FakeOcc("A:1"), FakeOcc("B:1")])))
+        out = _payload(mx.export_handler(format="stl", stl_units="cm", file_path=str(tmp_path),
+                                         split_by_component=True))
+        assert [f["options_applied"] for f in out["files"]] == [{"stl_units": "cm"},
+                                                                {"stl_units": "cm"}]
+        assert [f["options_verified"] for f in out["files"]] == [{"stl_units": True},
+                                                                 {"stl_units": True}]
+        assert out["options_requested"] == {"stl_units": "cm"}
+        assert all(c.unitType is mx.adsk.fusion.DistanceUnits.CentimeterDistanceUnits
+                   for c in des.exportManager.calls)
+        assert "did NOT land" not in out["note"]
+        assert "read back units 'cm'" in out["note"]       # the split note names it too
+
+    def test_a_split_counts_only_the_files_the_unit_missed(self, tmp_path):
+        # the MIXED case: one file's options kept the unit and one did not, so the per-file key
+        # differs between them and the note names the count rather than all files.
+        _wire_adsk()
+        des = _install(FakeDesign(FakeComp("Root", occurrences=[FakeOcc("A:1"), FakeOcc("B:1")])))
+        self._stl_options_class(des, _NoUnitOptions, only_for=["B:1"])
+        out = _payload(mx.export_handler(format="stl", file_path=str(tmp_path),
+                                         split_by_component=True))
+        by_occ = {f["occurrence"]: f["options_applied"]["stl_units"] for f in out["files"]}
+        assert by_occ == {"A:1": "mm", "B:1": None}
+        assert {f["occurrence"]: f["options_verified"]["stl_units"] for f in out["files"]} == {
+            "A:1": True, "B:1": False}
+        assert "stl_units 'mm' did NOT land for 1 of the 2 exported file(s)" in out["note"]
+        # ...and the landed-unit sentence must NOT also appear. Both at once would tell a caller
+        # its files re-import at 'in' while one of them has no confirmed unit at all.
+        assert "read back units" not in out["note"]
+
+    def test_a_split_of_a_non_stl_format_reports_no_unit_at_all(self, tmp_path):
+        _wire_adsk()
+        _install(FakeDesign(FakeComp("Root", occurrences=[FakeOcc("A:1")])))
+        out = _payload(mx.export_handler(format="3mf", file_path=str(tmp_path),
+                                         split_by_component=True))
+        assert "options_requested" not in out
+        assert "options_applied" not in out["files"][0]
+
 
 class TestExportSplitByComponent:
     def test_one_file_per_occurrence(self, tmp_path):
@@ -697,7 +1086,21 @@ class TestExportSplitByComponent:
                                          split_by_component=True))
         assert out["refinement_requested"] == "low"
         assert [f["refinement"] for f in out["files"]] == ["low", "low"]
-        assert all(c.meshRefinement == "RLOW" for c in des.exportManager.calls)
+        assert all(c.meshRefinement == _refine_member("low") for c in des.exportManager.calls)
+
+    def test_a_split_reports_a_density_the_options_already_read_as_landed(self, tmp_path):
+        # split mode carries the same per-knob interpretation as the single-target path: every
+        # file's options object already read 'medium' and dropped the write, and every file still
+        # reports it landed, with no caveat - the read determines the file.
+        _wire_adsk()
+        des = _install(FakeDesign(FakeComp("Root", occurrences=[FakeOcc("A:1"), FakeOcc("B:1")])))
+        _options_holding(des, "meshRefinement", _refine_member("medium"),
+                         "createSTLExportOptions", "stl")
+        out = _payload(mx.export_handler(format="stl", refinement="medium", file_path=str(tmp_path),
+                                         split_by_component=True))
+        assert [f["refinement"] for f in out["files"]] == ["medium", "medium"]
+        assert all("refinement_verified" not in f for f in out["files"])
+        assert "UNVERIFIED" not in out["note"] and "did NOT land" not in out["note"]
 
     def test_a_split_file_whose_refinement_was_dropped_is_null_not_the_request(self, tmp_path):
         # The request must never masquerade as the effect in split mode either: the read-back

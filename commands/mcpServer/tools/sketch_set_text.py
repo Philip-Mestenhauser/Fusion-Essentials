@@ -16,12 +16,13 @@ app = adsk.core.Application.get()
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import error, ok, safe, scale, find_sketch, all_sketch_names
+from ._common import error, ok, safe, scale, all_sketch_names
 from . import _common
 from . import _inputs
 # The SketchText readers live in _sketch_detail (the shared sketch X-ray helper) - a tool imports
 # from a helper, never the reverse.
 from ._sketch_detail import font_read_back as _font_read_back, unquote_text as _unquote
+from . import _sketch_detail
 
 _MAX = 500
 
@@ -56,12 +57,12 @@ _DEFINITION_READBACKS = {
 }
 
 # Inputs that only shape NEW text; passing one with create=false would silently do nothing. Each
-# defaults to None, so a supplied value is detectable and can be REFUSED. 'height' is one of them:
-# an edit writes textParameter.expression and fontName and nothing else, so a height passed with
-# create=false never reaches the text. 'units' stays exempt - it carries a non-None default a
-# caller cannot be told apart from, and it only scales 'height'.
+# defaults to None, so a supplied value is detectable and can be REFUSED. 'height' is NOT one of
+# them: SketchText.heightParameter takes a write on an existing text and the glyphs follow it
+# (measured), so an edit resizes. 'units' stays exempt - it carries a non-None default a caller
+# cannot be told apart from, and it only scales 'height'.
 _CREATE_ONLY = ("mode", "path", "above_path", "align", "character_spacing", "angle_deg",
-                "flip_h", "flip_v", "x", "y", "height")
+                "flip_h", "flip_v", "x", "y")
 
 # The height a create uses when the caller names none, in 'units'. The input itself defaults to
 # None so a supplied height is detectable at edit time; the create path applies this instead.
@@ -85,7 +86,7 @@ def _refuse_create_only(supplied):
     if not named:
         return ""
     return (", ".join(f"'{n}'" for n in named) + " shape NEW text only, so add create=true - "
-            "editing changes the displayed string and its font, and nothing else. To change an "
+            "editing changes the displayed string, its font and its 'height'. To change an "
             "existing text's layout or rotation, create a replacement.")
 
 
@@ -233,8 +234,103 @@ def _definition_facts(st, mode, index, sketch_name):
     return facts, ""
 
 
+def _measured_extents(st, f):
+    """(width, height) of a landed SketchText in display units, or (None, None) when the box or a
+    corner will not read.
+
+    The x and y extents of SketchText.boundingBox, read AFTER the text exists and scaled by `f`
+    (cm -> display units). It is a measurement of the text that landed, not a prediction: the
+    len(text) * height figure that sizes the multi_line box is an estimate for the box, and nothing
+    is claimed here beyond what the box reported."""
+    bb = safe(lambda: st.boundingBox)
+    lo = safe(lambda: bb.minPoint) if bb is not None else None
+    hi = safe(lambda: bb.maxPoint) if bb is not None else None
+    vals = [safe(lambda o=o, c=c: getattr(o, c)) for o in (lo, hi) for c in ("x", "y")]
+    if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in vals):
+        return None, None
+    x0, y0, x1, y1 = vals
+    return round((x1 - x0) * f, 6), round((y1 - y0) * f, 6)
+
+
+def _height_read_cm(st):
+    """A SketchText's own height in internal cm, or None when no number reads. heightParameter.value
+    is the live read (SketchText.height is retired) - the same one _sketch_detail's text record
+    publishes. None withholds a verdict rather than judging the text against a zero it never said."""
+    v = safe(lambda: st.heightParameter.value)
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return float(v)
+    return None
+
+
+# The band a landed height may differ from the requested one by and still be the same size: both
+# numbers are internal cm - one this tool scaled from 'units', one a ModelParameter reports - so it
+# absorbs their float representation, not a real size difference.
+_HEIGHT_MATCH_TOL_CM = 1e-6
+
+# A box extent that moved by less than this SHARE of its own size did not move. Relative, because a
+# label whose box runs 20 cm carries proportionally more read noise than one 0.5 cm wide; the 1 cm
+# floor keeps a small box from being judged against a band narrower than the reads themselves.
+_BOX_MOVED_REL = 1e-6
+
+
+def _box_moved(before, after):
+    """True when a box extent moved beyond the read noise a box that size carries, False when it sat
+    still, None when either read is unavailable - so an unreadable box makes NO claim either way."""
+    if before is None or after is None:
+        return None
+    return abs(after - before) > _BOX_MOVED_REL * max(1.0, abs(before))
+
+
+def _apply_height(st, want_cm, sk_name, k, units):
+    """Resize ONE existing sketch text to `want_cm` (internal cm) and prove it landed. Returns
+    (record, error) - the record is the height read back plus the box measured afterwards.
+
+    TWO reads gate the write, because either alone passes over a resize that did nothing.
+    heightParameter.value must report the requested height; and where that value actually MOVED, the
+    text's own boundingBox must have moved with it - measured, the glyph geometry follows the height
+    proportionally (halving the height halves the box width), so a value that landed over a frozen
+    box is a resize that did not happen. A box that will not read makes no claim, and a height that
+    did not change is not expected to move anything."""
+    before_cm = _height_read_cm(st)
+    w0, h0 = _measured_extents(st, 1.0)
+    try:
+        st.heightParameter.value = want_cm
+    except Exception as e:
+        return None, f"Could not set the height of sketch text in '{sk_name}': {e}."
+    after_cm = _height_read_cm(st)
+    if after_cm is None:
+        return None, (f"Setting the height of sketch text in '{sk_name}' cannot be confirmed - its "
+                      "heightParameter did not read back a number after the write, so whether the "
+                      "text resized is not known.")
+    if abs(after_cm - want_cm) > _HEIGHT_MATCH_TOL_CM:
+        return None, (f"Setting the height of sketch text in '{sk_name}' did not take - its "
+                      f"heightParameter reads back {round(after_cm / k, 6)} {units}, not the "
+                      f"requested {round(want_cm / k, 6)} {units}.")
+    w1, h1 = _measured_extents(st, 1.0)
+    verdicts = [_box_moved(w0, w1), _box_moved(h0, h1)]
+    if any(v is True for v in verdicts):
+        moved = True
+    elif all(v is False for v in verdicts):
+        moved = False
+    else:
+        moved = None
+    resized = before_cm is not None and abs(after_cm - before_cm) > _HEIGHT_MATCH_TOL_CM
+    if resized and moved is False:
+        return None, (f"Setting the height of sketch text in '{sk_name}' landed the value but the "
+                      f"text did not resize - heightParameter reads {round(after_cm / k, 6)} "
+                      f"{units} where it read {round(before_cm / k, 6)} before, while its "
+                      f"boundingBox reads {round(w1 / k, 6)} x {round(h1 / k, 6)} {units}, "
+                      f"unchanged from the {round(w0 / k, 6)} x {round(h0 / k, 6)} it read before.")
+    rec = {"height": round(after_cm / k, 6),
+           "height_before": None if before_cm is None else round(before_cm / k, 6)}
+    if w1 is not None:
+        rec["measured_width"] = round(w1 / k, 6)
+        rec["measured_height"] = round(h1 / k, 6)
+    return rec, ""
+
+
 def _create_text(design, text, sketch_name, height, x, y, units, mode, path, above_path,
-                 align, character_spacing, angle_deg, flip_h, flip_v, font_name):
+                 align, character_spacing, angle_deg, flip_h, flip_v, font_name, component=""):
     """Create a new SketchText in the named sketch, in one of the three layout modes. WRITES."""
     if not (sketch_name or "").strip():
         return error("create=true needs 'sketch_name' - the sketch to add the text to (create one "
@@ -268,14 +364,17 @@ def _create_text(design, text, sketch_name, height, x, y, units, mode, path, abo
             return error("'character_spacing' must be a number - the percent change from the "
                          "default spacing (0 = default, 50 = half again as wide).")
 
-    # Resolve across the whole design (active component first) - a sketch created in an activated
-    # sub-component must be a valid text target, not only one in the root component.
-    sk, ambiguous = find_sketch(design, sketch_name.strip())
-    if ambiguous:
-        return error(ambiguous)
+    # Resolve across the whole design (every component, no preference among them) - a sketch created
+    # in an activated sub-component must be a valid text target, not only one in the root component,
+    # and a name several components carry is refused rather than resolved to one of them, with
+    # 'component' named as the way to say which one.
+    wanted = sketch_name.strip()
+    sk, refusal = _sketch_detail.scoped_sketch(design, wanted, component)
+    if refusal:
+        return error(refusal)
     if not sk:
         names = all_sketch_names(design)
-        return error(f"No sketch named '{sketch_name}'. Available: "
+        return error(f"No sketch named '{wanted}'. Available: "
                      + (", ".join(n for n in names if n) or "(none)")
                      + ". Create it first with sketch_create.")
 
@@ -370,6 +469,11 @@ def _create_text(design, text, sketch_name, height, x, y, units, mode, path, abo
                 "circle wraps the text right around it. Extrude/emboss the sketch to engrave it, "
                 "or edit the string later with sketch_set_text (without create).")
     note += _READ_BACK_POINTER
+    measured_w, measured_h = _measured_extents(st, 1.0 / k)
+    if measured_w is not None:
+        note += (" measured_width/measured_height are the x and y extents of the created text's own "
+                 f"boundingBox, in {units}, read off it after it landed - check them against the "
+                 "space the label has to fit before embossing.")
     out = {
     "created": True,
     "sketch": safe(lambda: sk.name),
@@ -380,6 +484,9 @@ def _create_text(design, text, sketch_name, height, x, y, units, mode, path, abo
     "definition_type": facts["definition_type"],
     "mode_verified": facts["mode_verified"],
     }
+    if measured_w is not None:
+        out["measured_width"] = measured_w
+        out["measured_height"] = measured_h
     if mode == "multi_line":
         out["position"] = {"x": px, "y": py, "units": units}
     else:
@@ -409,36 +516,50 @@ def _quote(text):
     return "'" + str(text).replace("'", "\\'") + "'"
 
 
-def _iter_sketch_texts(design, sketch_name):
-    """Yield (component_name, sketch_name, sketch_text) for the target sketch(es)."""
-    want = (sketch_name or "").strip()
-    for comp in safe(lambda: design.allComponents, []) or []:
+def _texts_in_sketch(sk, comp_name):
+    """Yield (component_name, sketch_name, sketch_text) for ONE sketch. ``comp_name`` is the owning
+    component's name as its caller read it, so the record names where the text lives.
+
+    A text's INDEX within its sketch is its address (the 'index' input picks the Nth text, and it is
+    the same index sketch_delete_entity('text:<index>') deletes by), so this stays a positional walk:
+    iter_collection drops an unreadable text, which would slide every later text onto the wrong
+    index. item(j) is guarded the same way - a stale text proxy burns its slot (st None) instead of
+    raising the whole walk away."""
+    sk_name = safe(lambda: sk.name) or ""
+    texts = safe(lambda: sk.sketchTexts)
+    if not texts:
+        return
+    for j in range(safe(lambda texts=texts: texts.count, 0)):
+        yield comp_name, sk_name, safe(lambda texts=texts, j=j: texts.item(j))
+
+
+def _iter_sketch_texts(design, only_component=None):
+    """Yield (component_name, sketch_name, sketch_text) for EVERY sketch in scope - the no-name
+    edit ("update every sketch text"), design-wide or narrowed to ``only_component``, the
+    ALREADY-RESOLVED component a 'component' scope selected.
+
+    It carries no name filter, and that is the point: a NAMED edit resolves its ONE sketch through
+    _sketch_detail.scoped_sketch - the resolver every sibling by-name sketch write uses, which
+    refuses a name several components carry - and walks that sketch alone. A second by-name match
+    here would be a resolver the refusal never passed through."""
+    comps = [only_component] if only_component is not None else (
+        safe(lambda: design.allComponents, []) or [])
+    for comp in comps:
         try:
             sketches = comp.sketches
         except Exception:
             continue
+        comp_name = safe(lambda comp=comp: comp.name)
         for sk in _common.iter_collection(sketches):
-            sk_name = safe(lambda sk=sk: sk.name) or ""
-            if want and sk_name != want:
-                continue
-            texts = safe(lambda sk=sk: sk.sketchTexts)
-            if not texts:
-                continue
-            # A text's INDEX within its sketch is its address (the 'index' input picks the Nth text,
-            # and it is the same index sketch_delete_entity('text:<index>') deletes by), so this stays
-            # a positional walk: iter_collection drops an unreadable text, which would slide every
-            # later text onto the wrong index. item(j) is guarded the same way - a stale text proxy
-            # burns its slot (st None) instead of raising the whole walk away.
-            for j in range(safe(lambda texts=texts: texts.count, 0)):
-                yield (safe(lambda comp=comp: comp.name), sk_name,
-                       safe(lambda texts=texts, j=j: texts.item(j)))
+            yield from _texts_in_sketch(sk, comp_name)
 
 
 def handler(text: str = "", sketch_name: str = "", index: int = -1,
             create: bool = False, height: float = None, x: float = None, y: float = None,
             units: str = "mm", mode: str = "", path: str = "", above_path: bool = None,
             align: str = "", character_spacing: float = None, angle_deg: float = None,
-            flip_h: bool = None, flip_v: bool = None, font_name: str = "") -> dict:
+            flip_h: bool = None, flip_v: bool = None, font_name: str = "",
+            component: str = "") -> dict:
     """See TOOL_DESCRIPTION."""
     if text is None:
         return error("Provide 'text' - the string to display.")
@@ -455,21 +576,62 @@ def handler(text: str = "", sketch_name: str = "", index: int = -1,
                             _DEFAULT_HEIGHT if height is None else height,
                             x, y, units, mode_key, path,
                             above_path, align, character_spacing, angle_deg, flip_h, flip_v,
-                            font_name)
+                            font_name, component)
 
     cerr = _refuse_create_only(zip(_CREATE_ONLY, (mode, path, above_path, align,
                                                   character_spacing, angle_deg, flip_h, flip_v,
-                                                  x, y, height)))
+                                                  x, y)))
     if cerr:
         return error(cerr)
 
-    targets = list(_iter_sketch_texts(design, sketch_name))
+    # 'height' RESIZES on the edit path: heightParameter takes a write and the glyphs follow it
+    # (measured). Guarded here, once, before any text is touched - a bad unit or a non-positive
+    # height must not land the string on some texts and then refuse.
+    k = scale(units)
+    if k is None:
+        return error(f"Unknown units '{units}'. Use mm, cm, or in.")
+    height_cm = None
+    if _given(height):
+        try:
+            h = float(height)
+        except Exception:
+            return error("'height' must be a number (text height in 'units').")
+        if h <= 0:
+            return error("'height' must be > 0.")
+        height_cm = h * k
+
+    # The name is stripped before it is resolved, so the stripped form is the name that was searched
+    # for - the one both the miss and the no-match error quote.
+    want = (sketch_name or "").strip()
+    scope = (component or "").strip()
+    if want:
+        # A NAMED edit acts on ONE sketch, resolved through the same helper the create path and
+        # every sibling by-name sketch write use. A sketch name is unique only WITHIN a component
+        # (Fusion numbers sketches per component from 1), so a name several components carry is
+        # REFUSED - naming 'component' as the input that says which one - instead of writing the
+        # new string into each of them and reporting the total as success. A scope that WAS passed
+        # is resolved and validated there too, so a wrong component refuses even where the name
+        # would have identified one sketch on its own.
+        sk, refusal = _sketch_detail.scoped_sketch(design, want, scope)
+        if refusal:
+            return error(refusal)
+        targets = ([] if sk is None
+                   else list(_texts_in_sketch(sk, safe(lambda: sk.parentComponent.name))))
+    else:
+        # No name: every sketch text in the design, or in the scoped component alone.
+        scoped_comp = None
+        if scope:
+            scoped_comp, _occ, scope_error = _sketch_detail.scope_component(design, scope)
+            if scope_error:
+                return error(scope_error)
+        targets = list(_iter_sketch_texts(design, scoped_comp))
     if not targets:
-        if (sketch_name or "").strip():
-            return error(f"No sketch text found in a sketch named '{sketch_name}'. (Use "
+        where = f" inside component '{scope}'" if scope else ""
+        if want:
+            return error(f"No sketch text found in a sketch named '{want}'{where}. (Use "
     "sketch_get to list sketches; the text must live in a sketch with "
     "that exact name.)")
-        return error("No sketch text found in the active design.")
+        return error(f"No sketch text found{where or ' in the active design'}.")
 
     want_index = int(index) if index is not None else -1
     changed = []
@@ -483,9 +645,9 @@ def handler(text: str = "", sketch_name: str = "", index: int = -1,
         if len(changed) >= _MAX:
             truncated = True
             break
-        k = per_sketch_counter.get((comp_name, sk_name), 0)
-        per_sketch_counter[(comp_name, sk_name)] = k + 1
-        if want_index >= 0 and k != want_index:
+        nth = per_sketch_counter.get((comp_name, sk_name), 0)
+        per_sketch_counter[(comp_name, sk_name)] = nth + 1
+        if want_index >= 0 and nth != want_index:
             skipped += 1
             continue
         if st is None:
@@ -493,7 +655,7 @@ def handler(text: str = "", sketch_name: str = "", index: int = -1,
             # read - editing it blind is impossible, and silently skipping a SELECTED index would
             # report success over a hole.
             if want_index >= 0:
-                return error(f"Sketch text {k} in '{sk_name}' could not be read (a stale or "
+                return error(f"Sketch text {nth} in '{sk_name}' could not be read (a stale or "
                              "deleted text proxy holds that index). Re-read the sketch with "
                              "sketch_get(include_entities=true) and retry with a readable index."
                              + _already_changed(changed))
@@ -542,10 +704,20 @@ def handler(text: str = "", sketch_name: str = "", index: int = -1,
         record = {"component": comp_name, "sketch": sk_name, "before": before, "after": after}
         if _given(font_name):
             record["font"] = font_now
+        if height_cm is not None:
+            # The resize goes LAST: the string write moves the glyph box on its own, and the
+            # geometry gate below can only attribute a box that moved to the height when the string
+            # is already settled.
+            hrec, herr = _apply_height(st, height_cm, sk_name, k, units)
+            if herr:
+                return error(herr + f" Its string WAS set to '{text}' before the resize was "
+                             "checked, so that one text carries the new string at its old size."
+                             + _already_changed(changed))
+            record.update(hrec)
         changed.append(record)
 
     if not changed:
-        return error(f"No sketch text matched index {want_index} in sketch '{sketch_name}'.")
+        return error(f"No sketch text matched index {want_index} in sketch '{want}'.")
 
     # Force a recompute so DOWNSTREAM features rebuild against the new text. Changing
     # textParameter.expression updates the sketch, but a feature that consumes the text (e.g. an
@@ -573,6 +745,14 @@ def handler(text: str = "", sketch_name: str = "", index: int = -1,
     if _given(font_name):
         out["note"] += (f" Each entry's 'font' is what the text reports after applying "
                         f"'{font_name}'.")
+    if height_cm is not None:
+        out["note"] += (f" Each entry's 'height' is what the text's heightParameter reports after "
+                        f"the resize, in {units}, beside the 'height_before' it read.")
+        # The box keys are omitted for a text whose boundingBox would not read, so the sentence that
+        # names them is gated on the same read the create path gates its own on.
+        if any("measured_width" in c for c in changed):
+            out["note"] += (" 'measured_width'/'measured_height' are its boundingBox read back "
+                            "afterwards - check them against the space the label has to fit.")
     if truncated:
         out["note"] += f" Hit the {_MAX}-edit cap - not every match was updated; narrow with 'sketch_name'/'index' and call again."
     return ok(out)
@@ -584,8 +764,9 @@ TOOL_DESCRIPTION = (
 "to one text in it (omit both to update EVERY sketch text); each text's before/after is "
 "reported. Creating: 'mode' boxes the text at (x,y) (multi_line) or runs it along the sketch "
 "curve named by 'path' - along_path keeps normal glyph spacing, fit_on_path stretches the string "
-"over the whole curve, and a CLOSED path such as a circle wraps the text around it. Read sketch "
-"names and curve ids with sketch_get."
+"over the whole curve, and a CLOSED path such as a circle wraps the text around it. A create "
+"reports the landed text's measured width, the number to check a label against the space it must "
+"fit. Read sketch names and curve ids with sketch_get."
 )
 
 tool = (
@@ -597,15 +778,17 @@ tool = (
     )
     .add_input_property("sketch_name", {"type": "string",
             "description": "Only update sketch texts in the sketch with this name (omit = all)."})
+    .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
     .add_input_property("index", {"type": "integer",
             "description": "If a sketch has multiple texts, the 0-based one to update (default all)."})
     .add_input_property("create", {"type": "boolean",
             "description": "CREATE new text instead of editing: add it to 'sketch_name' at (x,y) with 'height'. Default false."})
     .add_input_property("height", {"type": "number",
-            "description": "Text height in 'units', for NEW text only (default 5). An edit changes the string and font and nothing else, so a height passed with create=false is REFUSED rather than ignored."})
+            "description": "Text height in 'units' (new text defaults to 5). On an EDIT it RESIZES the existing text: the landed height and the text's re-measured bounding box come back per entry."})
     .add_input_property("x", {"type": "number", "description": "Text X in 'units' (multi_line only): with align left/center/right it is the text's left edge / center / right edge."})
     .add_input_property("y", {"type": "number", "description": "Text Y in 'units' (multi_line only): the BOTTOM of the text box - extra lines stack upward from it."})
-    .add_input_property(*_inputs.units_property(description="Units for text height (create only)."))
+    .add_input_property(*_inputs.units_property(
+        description="Scales 'height' on create AND on edit, and names the unit the reported height and bounding box come back in."))
     .add_input_property(*_MODE.as_property())
     .add_input_property("path", {"type": "string",
             "description": "Curve the text follows, '<type>:<index>' from the same sketch."})

@@ -192,3 +192,117 @@ class TestJointOriginRootTest:
         obj, err = jt.jo_assembly_proxy(des, _JO(), sub)
         assert obj is None and "instanced 2 times" in err
         assert jt.jo_reference_names(des, _JO(), sub) == ["Arm:1:Frame", "Arm:2:Frame"]
+
+
+# ── component_world_matrix: which transform carries a component's own frame into world ─────────────
+
+def _placed(path, comp, matrix, context=None):
+    """An occurrence placing `comp`: transform2 (the COMPOSED component-to-world matrix) and the
+    assemblyContext that makes a nested one reachable from its parent."""
+    return type("Occ", (), {"fullPathName": path, "name": path.split("+")[-1],
+                            "component": comp, "transform2": matrix,
+                            "assemblyContext": context})()
+
+
+class TestComponentWorldMatrix:
+    """The placement ladder ``jo_assembly_proxy`` walks, answering with a MATRIX. Its consumer
+    (model_inspect's oriented box) hands those axes to getOrientedBoundingBox, which reads them in
+    the same space as the geometry it is given - so an instance picked at random here measures a
+    part against another instance's orientation."""
+
+    def _des(self, root):
+        return type("D", (), {"rootComponent": root})()
+
+    def test_the_root_components_frame_is_world(self, monkeypatch):
+        # identity, not None: the root frame IS world, so a root-owned frame needs no lift and must
+        # not be mistaken for an unplaceable one.
+        import adsk.core
+        monkeypatch.setattr(adsk.core.Matrix3D, "create", staticmethod(lambda: "IDENTITY"),
+                            raising=False)
+        root = _Root()
+        assert jt.component_world_matrix(self._des(root), _Root()) == "IDENTITY"
+
+    def test_a_component_placed_once_answers_with_that_occurrences_transform(self):
+        sub = type("Sub", (), {"name": "Arm", "entityToken": "ARM"})()
+        root = _Root([_placed("Arm:1", sub, "M1")])
+        assert jt.component_world_matrix(self._des(root), sub) == "M1"
+
+    def test_a_component_placed_twice_answers_None_with_no_context(self):
+        # two placements, two orientations, and nothing in hand says which one is being measured -
+        # picking either would publish one instance's frame under the other's name.
+        sub = type("Sub", (), {"name": "Arm", "entityToken": "ARM"})()
+        root = _Root([_placed("Arm:1", sub, "M1"), _placed("Arm:2", sub, "M2")])
+        assert jt.component_world_matrix(self._des(root), sub) is None
+
+    def test_a_context_occurrence_picks_ITS_instance_out_of_several(self):
+        sub = type("Sub", (), {"name": "Arm", "entityToken": "ARM"})()
+        first, second = _placed("Arm:1", sub, "M1"), _placed("Arm:2", sub, "M2")
+        root = _Root([first, second])
+        assert jt.component_world_matrix(self._des(root), sub, second) == "M2"
+
+    def test_the_context_walk_climbs_to_an_ANCESTOR_occurrence(self):
+        # a nested proxy's assemblyContext is the INNERMOST occurrence; the component whose frame is
+        # wanted may sit further up the path, and only the chain reaches it.
+        arm = type("Sub", (), {"name": "Arm", "entityToken": "ARM"})()
+        boss = type("Sub", (), {"name": "Boss", "entityToken": "BOSS"})()
+        outer = _placed("Arm:1", arm, "M1")
+        inner = _placed("Arm:1+Boss:1", boss, "M2", context=outer)
+        root = _Root([])                              # the by-component lookup answers nothing
+        assert jt.component_world_matrix(self._des(root), arm, inner) == "M1"
+
+    def test_a_context_that_places_a_different_component_does_not_answer_for_it(self):
+        # the chain is a lookup, not a fallback: an unrelated occurrence's transform would lift the
+        # axes into a frame nothing in the request named.
+        arm = type("Sub", (), {"name": "Arm", "entityToken": "ARM"})()
+        other = type("Sub", (), {"name": "Plate", "entityToken": "PLATE"})()
+        root = _Root([_placed("Arm:1", arm, "M1"), _placed("Arm:2", arm, "M2")])
+        assert jt.component_world_matrix(self._des(root), arm, _placed("Plate:1", other, "MX")) is None
+
+    def test_a_component_not_placed_at_all_answers_None(self):
+        sub = type("Sub", (), {"name": "Arm", "entityToken": "ARM"})()
+        assert jt.component_world_matrix(self._des(_Root([])), sub) is None
+
+    def test_a_missing_component_or_design_answers_None(self):
+        sub = type("Sub", (), {"name": "Arm", "entityToken": "ARM"})()
+        assert jt.component_world_matrix(self._des(_Root([])), None) is None
+        assert jt.component_world_matrix(type("D", (), {"rootComponent": None})(), sub) is None
+
+    def test_the_COMPOSED_transform2_is_the_matrix_read_not_the_LOCAL_one(self):
+        # transform2 is the composed component-to-world matrix; transform is the LOCAL one and
+        # composes no parent. They agree only while every ancestor is identity - exactly the case
+        # a fixture defining just one of them cannot tell apart - and the nested-occurrence lift
+        # this helper feeds is where they differ.
+        sub = type("Sub", (), {"name": "Arm", "entityToken": "ARM"})()
+        occ = type("Occ", (), {"name": "Arm:1", "fullPathName": "Arm:1", "component": sub,
+                               "assemblyContext": None,
+                               "transform2": "COMPOSED", "transform": "LOCAL"})()
+        assert jt.component_world_matrix(self._des(_Root([occ])), sub) == "COMPOSED"
+        assert jt.component_world_matrix(self._des(_Root([])), sub, occ) == "COMPOSED"
+
+    def test_an_UNREADABLE_transform2_answers_None_and_does_not_fall_back_to_the_local_matrix(self):
+        # The contract is "no single placement answers" -> None, and the caller reads None as
+        # "refuse" or "make no judgement". transform composes no parent, so on a nested occurrence
+        # it names a DIFFERENT frame: handing it back answers with a matrix this function's own
+        # docstring calls wrong, in a slot a caller trusts as world. Both legs must hold it.
+        sub = type("Sub", (), {"name": "Arm", "entityToken": "ARM"})()
+
+        class _Occ:
+            name = fullPathName = "Arm:1"
+            component = sub
+            assemblyContext = None
+            transform = "LOCAL"
+
+            @property
+            def transform2(self):
+                raise RuntimeError("transform2 unavailable")
+        occ = _Occ()
+        assert jt.component_world_matrix(self._des(_Root([occ])), sub) is None   # placed-once leg
+        assert jt.component_world_matrix(self._des(_Root([])), sub, occ) is None  # context leg
+
+    def test_a_context_chain_that_loops_still_terminates(self):
+        # assemblyContext is read off a live proxy; a cycle there would hang the read that every
+        # oriented measurement makes.
+        arm = type("Sub", (), {"name": "Arm", "entityToken": "ARM"})()
+        looper = type("Occ", (), {"name": "L", "component": None})()
+        looper.assemblyContext = looper
+        assert jt.component_world_matrix(self._des(_Root([])), arm, looper) is None

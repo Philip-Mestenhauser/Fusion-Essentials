@@ -28,6 +28,23 @@ _MODULES = ("fusion", "cam", "core", "drawing")
 _COLLECTIONS = frozenset(k.rsplit(".", 1)[0] for k in api_surface.FACTORIES)
 
 
+def _factories_by_method():
+    out = {}
+    for key, cls in api_surface.FACTORIES.items():
+        out.setdefault(key.rsplit(".", 1)[1], set()).add(cls)
+    return out
+
+
+# The factory methods whose declarations ALL return the SAME input class. The receiver then adds
+# nothing, which is what resolves a collection reached through a PARAMETER - nothing in its own file
+# binds one. The filter reads RETURNED CLASSES, not declaring collections: a method several
+# collections declare still resolves as long as they agree on what it hands back, and only a method
+# whose declarations DISAGREE is dropped. `createInput` is the one that matters - 89 declarations
+# returning 88 different classes - so it names no class, and a resolved name can never be a
+# same-named factory on some other one.
+_UNIQUE_FACTORIES = {m: next(iter(v)) for m, v in _factories_by_method().items() if len(v) == 1}
+
+
 def _collection_class(attr_name):
     """'meshCombineFeatures' -> the 'module.MeshCombineFeatures' key api_surface knows, or None."""
     cls = attr_name[:1].upper() + attr_name[1:]
@@ -70,7 +87,8 @@ def _collection_vars(nodes):
 def _factory_target(call, coll_vars=None):
     """The 'module.Class' a `<collection>.createInput(...)` call returns, or None. The collection is
     reached either inline (`comp.features.meshRepairFeatures.createInput`) or through a local
-    variable bound earlier in the module (`feats = comp.features.meshRepairFeatures`)."""
+    variable bound earlier in the module (`feats = comp.features.meshRepairFeatures`) - and where
+    neither reads, through _UNIQUE_FACTORIES on the method name alone."""
     call = _unwrap(call)
     if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Attribute):
         return None
@@ -82,7 +100,7 @@ def _factory_target(call, coll_vars=None):
     elif isinstance(owner, ast.Name) and coll_vars:
         coll = coll_vars.get(owner.id)
     if coll is None:
-        return None
+        return _UNIQUE_FACTORIES.get(method)
     return api_surface.FACTORIES.get(f"{coll}.{method}")
 
 
@@ -153,15 +171,92 @@ def _scopes(tree):
     return scopes
 
 
-def _bindings(nodes, coll_vars):
+def _builder_returns(tree):
+    """function name -> {position: 'module.Class'} for every function in the module that BUILDS a
+    FeatureInput and hands it back. `position` is the index in a returned TUPLE, or None for a bare
+    return.
+
+    `return holes.createSimpleInput(d), None` is this repo's builder idiom - the input paired with
+    the error that would have replaced it - so the caller binds the input through a TUPLE target.
+    A walk that reads only the factory call site sees no input in the CALLER at all, and clears
+    every setter on it."""
+    out = {}
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        found = {}
+        stack = list(fn.body)
+        while stack:
+            node = stack.pop()
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue          # its returns belong to that function's own entry
+            if isinstance(node, ast.Return) and node.value is not None:
+                value = _unwrap(node.value)
+                if isinstance(value, ast.Tuple):
+                    for i, elt in enumerate(value.elts):
+                        cls = _factory_target(elt)
+                        if cls:
+                            found[i] = cls
+                else:
+                    cls = _factory_target(value)
+                    if cls:
+                        found[None] = cls
+            stack.extend(ast.iter_child_nodes(node))
+        if found:
+            out[fn.name] = found
+    return out
+
+
+def _returned_positions(value, builders):
+    """{position: 'module.Class'} for whatever `value` evaluates to - a call to a local builder, or
+    a tuple written out at the assignment itself. Empty when nothing there builds an input."""
+    value = _unwrap(value)
+    if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
+        return builders.get(value.func.id) or {}
+    out = {}
+    if isinstance(value, ast.Tuple):
+        for i, elt in enumerate(value.elts):
+            cls = _factory_target(elt)
+            if cls:
+                out[i] = cls
+    return out
+
+
+def _bindings(nodes, coll_vars, builders=None):
+    """variable -> 'module.Class' for every FeatureInput bound in ONE scope, through any of the
+    three shapes a tool uses: `inp = <collection>.createXInput(...)`, `inp = _build(...)` where
+    _build returns one, and `inp, err = _build(...)` where it returns the (input, error) pair."""
+    builders = builders or {}
     bound = {}
     for node in nodes:
-        if isinstance(node, ast.Assign) and len(node.targets) == 1 \
-                and isinstance(node.targets[0], ast.Name):
-            target = _factory_target(node.value, coll_vars)
-            if target:
-                bound[node.targets[0].id] = target
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if isinstance(target, ast.Name):
+            cls = _factory_target(node.value, coll_vars) \
+                or _returned_positions(node.value, builders).get(None)
+            if cls:
+                bound[target.id] = cls
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            positions = _returned_positions(node.value, builders)
+            for i, elt in enumerate(target.elts):
+                cls = positions.get(i)
+                if cls and isinstance(elt, ast.Name):
+                    bound[elt.id] = cls
     return bound
+
+
+def input_scopes(tree):
+    """(nodes, {var: 'module.Class'}) for every scope in ONE module that binds a FeatureInput.
+
+    The ONE place the two lints over this corpus decide what holds an input, so a shape one of them
+    learns to follow cannot stay invisible to the other."""
+    builders = _builder_returns(tree)
+    for nodes, enclosing in _scopes(tree):
+        visible = enclosing + nodes
+        bound = _bindings(visible, _collection_vars(visible), builders)
+        if bound:
+            yield nodes, bound
 
 
 def _offenders_in(path):
@@ -171,12 +266,7 @@ def _offenders_in(path):
     The tree comes from _corpus, shared with every other lint that parses the same file, and this
     walk only READS it: the two dict writes below are keyed BY a node's value, never onto a node."""
     offenders = []
-    tree = _corpus.tree(path)
-    for nodes, enclosing in _scopes(tree):
-        visible = enclosing + nodes
-        bound = _bindings(visible, _collection_vars(visible))
-        if not bound:
-            continue
+    for nodes, bound in input_scopes(_corpus.tree(path)):
         for lineno, var, prop in _named_assignments_in(nodes):
             cls = bound.get(var)
             if cls is None:

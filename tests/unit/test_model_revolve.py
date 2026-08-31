@@ -101,8 +101,12 @@ class FakeRevFeatures:
 
 
 class FakeComp:
-    def __init__(self, sketches, rf):
+    # Every live component answers an entityToken, and _common.same_component compares on it: the
+    # assembly-context lift REFUSES an owner it cannot identify rather than guess whether a native
+    # entity needs proxying. A test that wants that state deletes the attribute.
+    def __init__(self, sketches, rf, token="TOKEN:Comp"):
         self.name = "Comp"
+        self.entityToken = token
         self.sketches = FakeSketches(sketches)
         self.features = type("F", (), {"revolveFeatures": rf})()
         self.xConstructionAxis = ("axis", "x")
@@ -152,6 +156,27 @@ class TestGuards:
         _install([FakeSketch("S")])
         res = rv.handler(sketch_name="Nope")
         assert res["isError"] is True and "No sketch named 'Nope'" in res["message"]
+
+    def test_the_component_scope_is_declared_on_the_wire(self):
+        # the schema is strict, so a handler parameter no property declares is refused before it
+        # reaches the handler - the scope would be unreachable and its refusal would name it anyway.
+        sd = load_tool("_sketch_detail")
+        assert rv.revolve_tool.input_schema["properties"]["component"] == sd.COMPONENT_SCOPE[1]
+
+    def test_the_component_scope_reaches_the_sketch_resolve(self, monkeypatch):
+        # a sketch name two components carry is refused, and 'component' is the way through - the
+        # remedy the refusal names, so it has to be the one the resolver is actually given.
+        _install([FakeSketch("S")])
+        seen = {}
+
+        def _scoped(design, name, component, input_name="component"):
+            seen.update(component=component, input_name=input_name)
+            return None, name, "refused"
+
+        monkeypatch.setattr(rv._sketch_detail, "scoped_or_recent_sketch", _scoped)
+        res = rv.handler(sketch_name="S", component="Frame")
+        assert res["isError"] is True and res["message"] == "refused"
+        assert seen == {"component": "Frame", "input_name": "component"}
 
     def test_a_padded_name_reports_the_name_the_walk_searched_for(self):
         # the resolver STRIPS the name before searching, so the miss quotes the stripped form -
@@ -394,7 +419,7 @@ class TestAxisFromGeometry:
 
 class TestCrossComponentAxis:
     def test_native_face_from_another_component_is_proxied_into_its_occurrence(self, wire):
-        other = FakeComp([], FakeRevFeatures())
+        other = FakeComp([], FakeRevFeatures(), token="TOKEN:PartB")
         other.name = "PartB"
         f = _cylindrical_face(owner=other)
         proxied = _cylindrical_face()
@@ -407,7 +432,7 @@ class TestCrossComponentAxis:
         assert out["axis"] == "BRepFace"
 
     def test_component_placed_twice_is_refused_with_both_paths(self, wire):
-        other = FakeComp([], FakeRevFeatures())
+        other = FakeComp([], FakeRevFeatures(), token="TOKEN:PartB")
         other.name = "PartB"
         f = _cylindrical_face(owner=other)
         f.createForAssemblyContext = lambda occ: _cylindrical_face()
@@ -420,7 +445,7 @@ class TestCrossComponentAxis:
         assert rf.last_input is None             # refused before any feature transaction opened
 
     def test_proxy_that_cannot_be_built_is_refused_not_passed_native(self, wire):
-        other = FakeComp([], FakeRevFeatures())
+        other = FakeComp([], FakeRevFeatures(), token="TOKEN:PartB")
         other.name = "PartB"
         f = _cylindrical_face(owner=other)
         f.createForAssemblyContext = lambda occ: None      # the context could not be built
@@ -431,7 +456,7 @@ class TestCrossComponentAxis:
         assert rf.last_input is None and rf.add_calls == 0
 
     def test_unplaced_component_is_refused(self, wire):
-        other = FakeComp([], FakeRevFeatures())
+        other = FakeComp([], FakeRevFeatures(), token="TOKEN:PartB")
         other.name = "PartB"
         rf = wire([FakeSketch("Ring")], tokens={"CYL": _cylindrical_face(owner=other)})
         res = rv.handler(sketch_name="Ring", axis="CYL")

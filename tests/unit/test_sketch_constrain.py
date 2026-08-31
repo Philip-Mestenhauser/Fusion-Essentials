@@ -763,6 +763,94 @@ class TestEntityAnchors:
         assert args[1].name == "C0C"
 
 
+# ── the 'component' SCOPE ────────────────────────────────────────────────────
+# Fusion numbers sketches per component from 1, so two components each holding a "Sketch1" is the
+# norm rather than a corner. The design-wide walk is right to REFUSE that name, and the refusal
+# names 'component' as the way through: a component that arrived inside a referenced document is
+# not renameable from here, so a rename is no remedy. These drive the REAL walk and scope filter.
+
+class _MultiComp:
+    def __init__(self, name, sketches):
+        self.name = name
+        self.sketches = FakeSketches(sketches)
+        self.xYConstructionPlane = FakePlane("XY")
+
+
+class _MultiDesign:
+    """Several named components, each with its OWN sketches collection - the shape the scope filter
+    is asked about. `allComponents` is a DESIGN property, which is what all_components walks."""
+    def __init__(self, comps):
+        self.rootComponent = comps[0]
+        self.allComponents = _Coll(comps)
+        self.activeComponent = comps[0]
+        self.rootComponent.allOccurrences = []
+
+
+@pytest.fixture
+def install_multi(monkeypatch):
+    def _do(pairs):
+        design = _MultiDesign([_MultiComp(n, s) for n, s in pairs])
+        monkeypatch.setattr(sc, "app", type("A", (), {"activeProduct": design})())
+        monkeypatch.setattr(sc._common, "app", sc.app)
+        monkeypatch.setattr(adsk.fusion.Design, "cast",
+                            lambda x: x if isinstance(x, _MultiDesign) else None)
+        return design
+    return _do
+
+
+@pytest.fixture
+def shared_name(install_multi):
+    """One name, TWO components. The two sketches carry different geometry (Alpha two lines, Beta
+    one line and one circle) so which one a call reached is readable from the constraint that
+    landed - a fixture with two DIFFERENT names would never run the filter at all."""
+    alpha = FakeSketch("Sketch1", lines=[FakeCurve("A0", "line"), FakeCurve("A1", "line")])
+    beta = FakeSketch("Sketch1", lines=[FakeCurve("B0", "line")],
+                      circles=[FakeCurve("BC", "circle")])
+    install_multi([("Alpha", [alpha]), ("Beta", [beta])])
+    return alpha, beta
+
+
+class TestComponentScope:
+    def test_the_unscoped_shared_name_refuses_and_names_the_scope_input(self, shared_name):
+        alpha, beta = shared_name
+        res = sc.handler(constraint="horizontal", sketch_name="Sketch1", entity_one="line:0")
+        assert res["isError"] is True
+        assert "2 sketches are named 'Sketch1'" in res["message"]
+        assert "'component'" in res["message"] and "Rename one" not in res["message"]
+        assert alpha.geometricConstraints.calls == [] and beta.geometricConstraints.calls == []
+
+    def test_the_scope_constrains_THAT_components_sketch(self, shared_name):
+        alpha, beta = shared_name
+        _payload(sc.handler(constraint="horizontal", sketch_name="Sketch1", component="Beta",
+                            entity_one="line:0"))
+        assert beta.geometricConstraints.calls[0][1][0] is beta.sketchCurves.sketchLines.item(0)
+        assert alpha.geometricConstraints.calls == []
+
+    def test_the_sibling_component_is_reachable_by_the_same_call(self, shared_name):
+        alpha, beta = shared_name
+        _payload(sc.handler(constraint="horizontal", sketch_name="Sketch1", component="Alpha",
+                            entity_one="line:0"))
+        assert alpha.geometricConstraints.calls[0][1][0] is alpha.sketchCurves.sketchLines.item(0)
+        assert beta.geometricConstraints.calls == []
+
+    def test_an_unknown_component_is_refused(self, shared_name):
+        alpha, beta = shared_name
+        res = sc.handler(constraint="horizontal", sketch_name="Sketch1", component="Gamma",
+                         entity_one="line:0")
+        assert res["isError"] is True and "No component named 'Gamma'" in res["message"]
+        assert alpha.geometricConstraints.calls == [] and beta.geometricConstraints.calls == []
+
+    def test_a_wrong_component_is_refused_even_when_the_name_is_UNIQUE(self, install_multi):
+        # A scope that was passed is VALIDATED, never dropped because the walk would have resolved
+        # anyway: otherwise the constraint lands in Alpha while the call named Beta.
+        alpha = FakeSketch("OnlyOne", lines=[FakeCurve("A0", "line")])
+        install_multi([("Alpha", [alpha]), ("Beta", [])])
+        res = sc.handler(constraint="horizontal", sketch_name="OnlyOne", component="Beta",
+                         entity_one="line:0")
+        assert res["isError"] is True and "'Beta'" in res["message"]
+        assert alpha.geometricConstraints.calls == []
+
+
 # ── single line ──────────────────────────────────────────────────────────────
 
 class TestSingleLine:
@@ -1444,6 +1532,56 @@ class TestSketchPatterns:
         assert pin.one[2] == "9.0 cm" and pin.two[2] == "9.0 cm"
         assert pin.one[1] == 3 and pin.two[1] == 2
 
+    def _rect_with(self, s, cls):
+        """Drive a rectangular pattern whose input is `cls` - the seam a refusing setter arrives on."""
+        s.geometricConstraints.createRectangularPatternInput = cls
+        return sc.handler(constraint="rectangular_pattern", sketch_name="S", entities="circle:0",
+                          entity_one="line:0", entity_two="line:1", quantity=3, distance=10,
+                          quantity_two=2, distance_two=5)
+
+    def test_a_refused_first_direction_is_an_honest_error(self, install):
+        # setDirectionOne/Two are declared bool. A False that is not read runs straight on to
+        # addRectangularPattern, which builds the pattern off a direction that never landed.
+        s = _two_line_sketch(); install(s)
+
+        class _RefusesOne(FakeRectPatternInput):
+            def setDirectionOne(self, entity, quantity, distance):
+                return False
+
+        res = self._rect_with(s, _RefusesOne)
+        assert res["isError"] is True and "setDirectionOne returned false" in res["message"]
+        assert s.geometricConstraints.calls == []
+
+    def test_a_refused_second_direction_is_an_honest_error(self, install):
+        # the two directions are separate calls, so each needs its own read and its own sentence
+        s = _two_line_sketch(); install(s)
+
+        class _RefusesTwo(FakeRectPatternInput):
+            def setDirectionTwo(self, entity, quantity, distance):
+                return False
+
+        res = self._rect_with(s, _RefusesTwo)
+        assert res["isError"] is True and "setDirectionTwo returned false" in res["message"]
+        assert s.geometricConstraints.calls == []
+
+    def test_a_direction_answer_that_read_as_nothing_is_not_a_refusal(self, install):
+        # the exact boundary of `is False`. The bindings declare setDirectionOne/Two -> bool, and
+        # gen_api_surface subtracts any name that returns non-bool ANYWHERE, so a live call answers
+        # True or False and nothing else; the calls are direct rather than wrapped in safe(), so a
+        # platform failure raises instead of answering None. A non-bool is therefore unreachable in
+        # production and is pinned here only as the boundary - against the real bindings `is False`
+        # and `not` cannot differ.
+        s = _two_line_sketch(); install(s)
+
+        class _Mute(FakeRectPatternInput):
+            def setDirectionOne(self, *args):
+                super().setDirectionOne(*args); return None
+            def setDirectionTwo(self, *args):
+                super().setDirectionTwo(*args); return None
+
+        out = _payload(self._rect_with(s, _Mute))
+        assert out["created_count"] == 5
+
     def test_rectangular_direction_entities_default_to_none(self, install):
         # a null direction entity means the sketch X axis / 90 degrees to direction one
         s = _two_line_sketch(); install(s)
@@ -2035,3 +2173,21 @@ class TestEveryConstraintCarriesItsOperandRule:
         res = sc.handler(constraint="symmetry", sketch_name="S", entity_one="line:0",
                          symmetry_line="line:1")
         assert res["isError"] is True and "entity_two" in res["message"]
+
+
+class TestNamedSketchMiss:
+    def test_reports_the_name_the_walk_searched_for_not_the_raw_input(self, install):
+        # the name is STRIPPED before the walk, so echoing the raw input quotes a name nothing
+        # ever looked for - and the caller retries against a sketch that was never missing.
+        install(_two_line_sketch())
+        res = sc.handler(constraint="parallel", sketch_name="  Ghost  ",
+                         entity_one="line:0", entity_two="line:1")
+        assert res["isError"] is True
+        assert "No sketch named 'Ghost'" in res["message"]
+        assert "'  Ghost  '" not in res["message"]
+
+    def test_the_miss_still_lists_what_is_there(self, install):
+        install(_two_line_sketch())
+        res = sc.handler(constraint="parallel", sketch_name="Ghost",
+                         entity_one="line:0", entity_two="line:1")
+        assert "Available: S" in res["message"]

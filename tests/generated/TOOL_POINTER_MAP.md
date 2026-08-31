@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 184  |  **description breadcrumbs:** 680  |  **note/error breadcrumbs:** 483
+**Tools:** 186  |  **description breadcrumbs:** 702  |  **note/error breadcrumbs:** 489
   |  **guidance smells flagged:** 4
 ## Blindspots to engineer
 
@@ -17,8 +17,8 @@ close orphans, factor duplicated guards into shared helpers.
 **Read/Acquire (6)** - higher concern, a check-your-work tool nothing points to:
   `cam_inspect_toolpaths`, `drawing_get`, `model_compute_holder`, `model_measure_relation`, `sys_get_api_doc`, `view_screenshot_multi`
 
-**Edit (32)** - usually leaf actions, scan for genuine gaps:
-  `cam_activate_setup`, `cam_create_machine`, `cam_delete`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `design_configure`, `design_remove_feature`, `design_set_name`, `doc_insert_derive`, `drawing_add_sketch`, `drawing_dimension`, `mesh_repair`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_draft`, `model_pipe`, `model_replace_face`, `model_scale`, `model_set_material`, `model_thread`, `sketch_edit_curve`, `sketch_project`, `surface_create_ruled`, `surface_delete_face`, `surface_fill`, `surface_untrim`, `sys_reload_addin`
+**Edit (31)** - usually leaf actions, scan for genuine gaps:
+  `cam_activate_setup`, `cam_delete`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `design_configure`, `design_remove_feature`, `design_set_name`, `doc_insert_derive`, `drawing_add_sketch`, `drawing_dimension`, `mesh_repair`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_draft`, `model_pipe`, `model_replace_face`, `model_scale`, `model_set_material`, `model_thread`, `sketch_edit_curve`, `sketch_project`, `surface_create_ruled`, `surface_delete_face`, `surface_fill`, `surface_untrim`, `sys_reload_addin`
 
 ### Duplicated guard strings (>=4 copies = factor into a shared _common helper)
 - **53x** across 40 module(s): "No active design. Create or open a document first (see doc_new)."
@@ -27,22 +27,23 @@ close orphans, factor duplicated guards into shared helpers.
 - **8x** across 5 module(s): "No active design with components."
 - **6x** across 3 module(s): "Could not create output directory '"
 - **5x** across 4 module(s): "'. Use: new, join, cut, intersect."
+- **5x** across 5 module(s): "Fusion declined to delete '"
 - **5x** across 5 module(s): "is not available on this Fusion version."
 - **5x** across 1 module(s): "setMotionData reported success on '"
 - **4x** across 3 module(s): "No active design (open a document with design geometry)."
 
 ### Hubs (most breadcrumbs lead here - the connective tissue)
 - `doc_new`  <- 95  (desc 10, note 85)
-- `find_geometry`  <- 87  (desc 61, note 26)
-- `view_screenshot`  <- 55  (desc 21, note 34)
+- `find_geometry`  <- 88  (desc 61, note 27)
+- `view_screenshot`  <- 56  (desc 22, note 34)
+- `design_get`  <- 45  (desc 20, note 25)
 - `design_delete_feature`  <- 41  (desc 20, note 21)
-- `design_get`  <- 39  (desc 13, note 26)
-- `sketch_create`  <- 35  (desc 18, note 17)
+- `sketch_create`  <- 36  (desc 19, note 17)
+- `cam_get`  <- 35  (desc 22, note 13)
 - `data_get`  <- 33  (desc 19, note 14)
-- `cam_get`  <- 31  (desc 20, note 11)
-- `sketch_get`  <- 31  (desc 14, note 17)
+- `sketch_get`  <- 32  (desc 14, note 18)
+- `assembly_get`  <- 25  (desc 12, note 13)
 - `model_inspect`  <- 25  (desc 8, note 17)
-- `assembly_get`  <- 24  (desc 12, note 12)
 - `doc_open`  <- 24  (desc 7, note 17)
 
 ## The guidance surface (every note the agent can be told)
@@ -63,16 +64,15 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - body(ies) of this occurrence do NOT carry the new appearance (
 - ) - each still reads the one named in 'bodies_not_reached'; color those directly (target = the body).
 - body(ies) could not be compared, so the color is UNCONFIRMED there - see 'unverified_bodies'.
-- cannot be delivered by this tool, so it is refused rather than reported as applied. Only opacity=
-- is accepted. This tool sets an appearance's COLOR, and a Fusion appearance's transparency is its Prism material class (interior_model plus transparent_color / transparent_distance / transparent_ior...
 - No active design with geometry.
-- 'opacity' must be an integer, and only
-- (opaque) is accepted.
+- is outside 0-100. It is a PERCENT - the browser's Opacity Control - not a 0-255 color alpha.
 - has no bodies to color.
+- Opacity override applied - the browser's 'Opacity Control'.
 - Could not apply appearance to any body of
 - Assignment was accepted but
 - still reads appearance '
 - ' - the override did not take.
+- 'opacity' must be a whole percent from 0 (invisible) to 100 (opaque).
 - Could not apply appearance to
 - body(ies) - each still reads a different appearance (
 - ). Color the bodies directly (target = the body name).
@@ -300,13 +300,10 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - differences was capped at
 - ; raise max_results to see the rest.
 - Provide both 'operation_a' and 'operation_b' (operation names).
-- Operation not found: '
-- operations share that name:
-- . Rename the target so its name is unique, then retry.
 
 ### `cam_create_machine`
 - Machine created and re-resolved through the query cam_edit_setup assigns from - the same read the cam_get(include=['machines']) catalog is built on. Assign it: cam_edit_setup(setup=..., machine='
-- '). It persists in the local machine library - this server has no tool that removes a machine.
+- '). It persists in the local machine library until cam_delete_machine(name='
 - Provide 'name' - the new machine's name. It becomes Machine.description, the label cam_edit_setup(machine=...) resolves an assignment by.
 - This Fusion version's MachineTemplate has no '
 - machine library reaches '
@@ -355,6 +352,82 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ' still resolves in the CAM tree - the delete did not take. Re-read with cam_get.
 - CAM entity removed - verified gone by a re-resolve over the tree. (design_delete_* don't reach CAM - this is the CAM-side delete.)
 
+### `cam_delete_machine`
+- Machine deleted from the Local machine library: its asset '
+- ' is gone from a re-walk of the library's own assets. That is the whole claim - no setup was read here, so this says nothing about a setup that already carries this machine; cam_get's default setup...
+- Provide 'name' - the machine to delete, as cam_get(include=['machines']) lists it.
+- Provide 'confirm_name' - the machine's exact name again, as a safety confirmation. Machine deletion is not undoable from this server.
+- This tool deletes from the LOCAL library only (the machines this Fusion install ships with are not yours to remove), so nothing was deleted.
+- The Local machine library query failed, so whether '
+- ' is reached from the local or fusion360 library could not be read.
+- ' is reached from the
+- machine library, not the Local one.
+- Name mismatch - refusing to delete. '
+- ' resolves to the machine '
+- ', but confirm_name was '
+- '. Pass confirm_name='
+- ' if you really mean this machine.
+- Could not resolve the Local machine library location, so the machine's asset cannot be addressed. Nothing was deleted.
+- The walk hit its own bound, so this list is incomplete.
+- No asset in the Local machine library is named '
+- assets in the Local machine library (
+- ) - refusing to guess which one to delete. Remove the duplicate in Fusion's machine library first.
+- The Local machine library walk hit its own bound before it finished, so '
+- ' cannot be shown to name only ONE asset - a duplicate past the bound would not have been seen. Nothing was deleted.
+- The Local library asset '
+- ' does not load a machine, so what it holds cannot be confirmed. Nothing was deleted.
+- ' holds the machine '
+- ' - refusing to delete an asset that is not the machine that was confirmed.
+- Fusion declined to delete '
+- ' from the Local machine library (deleteAsset returned false) - it is still there.
+- , so the delete could not be read back and is UNCONFIRMED. Re-read with cam_get(include=['machines']).
+- deleteAsset returned true for '
+- ', but the Local library
+- location no longer resolves
+- asset walk hit its own bound before finishing
+- deleteAsset returned true but the Local machine library still lists '
+- ' - the delete did not take. Re-read with cam_get(include=['machines']).
+- deleteAsset returned true and the asset is gone, but '
+- ' still resolves to the same machine through the query cam_edit_setup assigns by - the delete did not take.
+- ' from the Local machine library failed:
+- ' still resolves to a machine whose id cannot be read - neither can the deleted machine's, so nothing here tells them apart and the delete is UNCONFIRMED. Re-read with cam_get(include=['machines']).
+
+### `cam_delete_template`
+- Provide 'name' - the template to delete, as cam_get(include=['templates'], template_location='local') lists it.
+- Provide 'confirm_name' - the template's exact name again, as a safety confirmation. Template deletion is not undoable from this server.
+- ' in the LOCAL template library - this tool deletes from the Local library only.
+- Name mismatch - refusing to delete. '
+- ' resolves to the template '
+- ', but confirm_name was '
+- '. Pass confirm_name='
+- ' if you really mean this template.
+- Could not resolve the Local template library location, so the template's asset cannot be addressed. Nothing was deleted.
+- The walk hit its own bound, so this list is incomplete.
+- No asset in the Local template library is named '
+- assets in the Local template library (
+- ) - refusing to guess which one to delete. Remove the duplicate in Fusion's template library first.
+- The Local template library walk hit its own bound before it finished, so '
+- ' cannot be shown to name only ONE asset - a duplicate past the bound would not have been seen. Nothing was deleted.
+- The Local library asset '
+- ' does not load a template, so what it holds cannot be confirmed. Nothing was deleted.
+- ' holds the template '
+- ' - refusing to delete an asset that is not the template that was confirmed.
+- Fusion declined to delete '
+- ' from the Local template library (deleteAsset returned false) - it is still there.
+- , so the delete could not be read back and is UNCONFIRMED. Re-read with cam_get(include=['templates'], template_location='local').
+- deleteAsset returned true for '
+- ', but the Local template library
+- location no longer resolves
+- asset walk hit its own bound before finishing
+- deleteAsset returned true but the Local template library still lists '
+- ' - the delete did not take. Re-read with cam_get(include=['templates'], template_location='local').
+- deleteAsset returned true and '
+- ' is gone from the Local template library's asset walk, but a template still loads from its url (
+- ) - the two reads disagree, so the delete is UNCONFIRMED.
+- Template deleted from the Local template library: its asset '
+- ' is gone from a re-walk of the library's own assets, and nothing loads from its url any more. cam_save_template writes a new one; cam_get(include=['templates'], template_location='local') lists wh...
+- ' from the Local template library failed:
+
 ### `cam_edit_folders`
 - Folders organise the operation tree. Create with action='create', move ops in with action='move'. (Patterns are created in the UI - the API won't add them.)
 - Provide 'name' for the new folder.
@@ -367,12 +440,12 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 
 ### `cam_edit_operation`
 - Provide 'operation' - the CAM operation name to edit (see cam_get(include=['operations'])).
-- Provide 'parameters' - at least one name=value to set (e.g. {'tool_feedCutting': '3000', 'maximumStepdown': '1.5'}).
+- Provide 'parameters' - at least one name=value to set (e.g. {'tool_feedCutting': '3000', 'maximumStepdown': '1.5'}) - or 'suppressed' true/false to park or restore the operation.
 - ' has no parameter(s):
 - . Read the operation's parameter names first (the tool only sets existing ones).
 - ': expression did not evaluate -
 - parameter(s); no change was applied. (An operation expression must reference existing parameters and resolve to a value - check names and units.)
-- Parameters set. changed[].value is the platform's evaluated read and can LAG a valid set (echoing the pre-set value); 'after' and the evaluation gate are the trustworthy signals. The toolpath is no...
+- (Parameters already applied:
 
 ### `cam_edit_setup`
 - Setup edited. Existing toolpaths are now OUT OF DATE - regenerate with cam_generate. A WCS bound via 'wcs' is a LIVE reference to the selected geometry or Joint Origin (bound_entities), so the WCS ...
@@ -471,18 +544,19 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Setups orientation slice. Pull deeper with include=
 - Operation rows capped at
 - . Pass 'setup' to scope to one setup, or read the per-setup operation_count in the default slice.
-- include=['parameters'] needs 'operation' - the operation whose settings to read (scope first with cam_get(setup=..., include=['operations'])).
+- include=['parameters'] needs 'operation' - the operation whose settings to read (scope first with cam_get(setup=..., include=['operations'])); or 'setup' alone for that SETUP's own parameters (stoc...
 - include=['tool'] needs 'operation' - the operation whose tool to read.
 - ' on this tool. Available:
 
 ### `cam_get_status`
 - No generation with handle '
 - . Omit 'handle' to read live document state, or pass 'target' (a setup/operation name) to read an inline generation by name.
+- 'latest' resolves to handle '
+- ', which is not registered - a generation is dropped from the registry once it completes. Active handles:
+- . Omit 'handle' to read the ACTIVE document's live state, or pass 'target' (a setup/operation name) to read an inline generation by name.
 - No operations are still generating in scope.
 - cam_get(include=['operations']) for the per-op detail.
 - Still generating in the background - check again later.
-- The generating document '
-- ' is NOT the active document - per-op tallies and warnings were skipped (they read the active document). doc_activate '
 - Generation complete (
 - The per-op tallies could not be read (
 - ), so this rests on the generation Future alone - cam_get for the job's health.
@@ -741,6 +815,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not reach the component behind '
 - Refusing to instance '
 - ' itself or sits inside it, so the component would contain an instance of itself. Pick a target outside it (omit 'into_component' for root).
+- : whether that target already sits inside '
+- ' could not be determined - the subtree could not be searched to a verdict, so the instance could make the component contain itself. Check for unresolved external references with assembly_get, then...
 - Could not access the occurrences of
 - addExistingComponent returned nothing - no instance of '
 - addExistingComponent returned an occurrence for '
@@ -976,6 +1052,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 ### `design_get`
 - (e.g. include=['tree'] for the full component tree, ['timeline'] for the feature list, ['mode'] for the capability map, ['configurations'] for configs, ['materials'] or ['appearances'] for the assi...
 - Orientation slice. Pull deeper with include=
+- contents.occurrences_walk='unreadable': NEITHER root.allOccurrences nor the component.occurrences fallback enumerated, so the occurrence count is missing because it is UNKNOWN, not because the desi...
 - No active design. Open or create a document first (see doc_new).
 - Component/occurrence not found: '
 - Could not read root occurrences:
@@ -993,6 +1070,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ' - refusing to move it.
 - : that target is its own component '
 - ' or sits inside it, so the component would contain an instance of itself. Pick a target outside it.
+- ' already sits inside that target could not be determined - its subtree could not be searched to a verdict, so a move there could make the component contain an instance of itself. Check the target ...
 - moveToComponent returned nothing - '
 - moveToComponent ran for '
 - ', but the assembly census that confirms it could not be read - the move may or may not have taken. Check with design_get(include=['tree']) before acting on this result.  **[hedge]**
@@ -1038,11 +1116,12 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 ### `design_set_name`
 - 'new_name' is required - a non-empty name to give the target.
 - No active design. Open a document first (see doc_open / doc_new).
-- ' is the ROOT component and Fusion refuses to rename it ('root component name cannot be changed') - its name IS the document name. Rename the document instead (doc_save_as), or target a body/sub-co...
 - ' but the name could not be read back, so the rename is unverified. Check the browser (design_get(include=['tree'])).
 - The rename did not take -
 - ' after setting the name to '
 - Could not reach the component behind
+- ' is the ROOT component and Fusion refuses to rename it ('root component name cannot be changed') - its name IS the document name. Rename the document instead (doc_save_as), or target a body/sub-co...
+- ' is this design's ROOT component could not be read, and the platform's refusal to rename the root aborts the enclosing transaction even when it is caught - so this rename was not attempted. Target...
 - already holds the name '
 
 ### `doc_activate`
@@ -1069,8 +1148,9 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Provide 'document_id' (lineage URN, preferred) or 'name'.
 - Provide 'project' (name) or 'project_id' for the destination.
 - Destination project not found:
+- Copy into a different 'folder'
 - ' already exists in '
-- ). Copy into a different folder, or remove the existing copy first.
+- ). Copy into a different 'folder'
 - Copy returned nothing for document '
 - No file found for document_id '
 - '. Pass the file's lineage id (URN) from data_get.
@@ -1223,15 +1303,17 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Provide 'project' (name) or 'project_id' for the destination.
 - No active document to save. Open a document first.
 - Destination project not found:
+- doc_save_as would add yet ANOTHER file of that name (a new lineage) - refused by default. To add a version to one of the files above, open that URN (doc_open) and use doc_save; to create a same-nam...
 - ' already exists in '
 - ). doc_save_as would FORK a SECOND file with the same name (a new lineage) - refused by default. To add a version to the EXISTING file, open it by that URN (doc_open) and use doc_save; to deliberat...
+- saveAs reported an error but the file DID land in the destination (verified by reading the saved document/folder back) - reporting success rather than a false negative, which would send a retry int...
 - Fusion declined to save '
 - ' to the destination. No change made.
 - A different file named '
 - ' already existed in this folder (
 - ); this saveAs created a SECOND file with the same name (a new lineage - Fusion allows this). To add a version to the EXISTING file instead, open it (doc_open by that URN) and use doc_save; or dele...
 - Could not access destination project root:
-- saveAs reported an error but the file DID land in the destination (verified by reading the saved document/folder back) - reporting success rather than a false negative, which would send a retry int...
+- ); this saveAs added another one (a new lineage - Fusion allows this). To add a version to one of them instead, open that URN (doc_open) and use doc_save. Address files by URN, not name, from here.
 - Destination folder path not found: '
 - '). Folders at project root:
 - . Pass create_path=true, or use data_get(include=['folders']) to see the structure.
@@ -1427,12 +1509,10 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - updateAllReferences failed:
 
 ### `find_geometry`
-- '. Use mm, cm, or in.
-- No active design (open or create a document first).
-- Could not resolve target '
-- '. Use an occurrence/component name, a body name (bare, or '<occurrence-or-component>:<body>' when several components hold that name), or '' for the whole design (see assembly_get / design_get(incl...
 - Narrow with kind / radius / nearest_to when a part has many similar faces. A match on a body that is not visible carries hidden:true (visible bodies' records omit it).
 A planar face's 'frame' is th...
+- '. Use mm, cm, or in.
+- No active design (open or create a document first).
 
 ### `joint_at_geometry`
 - Verify with assembly_get (is_healthy + positions).
@@ -1610,6 +1690,8 @@ A planar face's 'frame' is th...
 - component(s) to separate
 - mesh files - each top-level occurrence is one printable file.
 - Target was a MESH body, which ExportManager cannot write to a file on its own (it returns success but writes nothing). Exported its owning component instead - the file contains that component's mes...
+- ') applies to format=stl only, and this call asked for format=
+- - refusing rather than dropping it. Export as stl to bake the unit into the file, or omit 'stl_units'.
 - Provide 'file_path' - the local output path (a file, or a DIRECTORY when split_by_component=true). The format extension is appended if missing.
 - No active design to export. Open or create a document first (see doc_new).
 - top-level occurrence(s) exported to separate
@@ -1642,6 +1724,7 @@ A planar face's 'frame' is th...
 ### `mesh_get`
 - These are MESH bodies (not BRep). Inspect one with model_inspect (it reports mesh stats on a mesh target), edit with mesh_reduce / mesh_remesh, or convert with mesh_to_brep. A mesh has no BRep face...
 - No active design. Open or create a document first (see doc_new).
+- List one instance's meshes by its occurrence name/fullPathName (design_get(include=['tree']) lists the instances), or pass target='' to scan the whole design.
 - No component/occurrence named '
 - '. List the tree with design_get(include=['tree']), or pass target='' to scan the whole design.
 
@@ -1657,6 +1740,7 @@ A planar face's 'frame' is th...
 - No active design. Open or create a document first (see doc_new).
 - ' for mesh import. Use mm, cm, m, in, or ft.
 - Mesh import returned no bodies (the file may be empty or unreadable as a mesh).
+- Omit target_component to import into the ACTIVE component, and set which that is with design_activate_component (it takes the occurrence, so it can name one of them).
 - ' to import into. Omit target_component to use the active component, or list components with design_get(include=['tree']).
 - Mesh import failed (meshBodies.add raised):
 
@@ -1853,6 +1937,7 @@ A planar face's 'frame' is th...
 - No matching edges on '
 - The feature has been rolled back.
 - (The feature could not be auto-removed.)
+- or a parameter-expression string like 'WallT/2'.
 - Fusion refused a distance-and-angle chamfer of
 - deg, so nothing was chamfered.
 - Fusion refused a two-distance chamfer (
@@ -1926,6 +2011,9 @@ A planar face's 'frame' is th...
 - 'faces' sit on a body in component '
 - ', but 'profiles' belong to component '
 - ' - an emboss is built on the profile's component, so both must be the same one. Sketch the profile on the target body's component.
+- Whether the 'faces' body (component '
+- ') and the 'profiles' sketch (component '
+- ') belong to the SAME component could not be read, and an emboss across two components is refused by Fusion at createInput. Pass faces and profiles from one component - find_geometry with 'target' ...
 - EmbossFeatures.createInput returned nothing, so no emboss was attempted. Re-check that the profiles sit over the target face(s).
 - Emboss was created but failed to compute:
 - . Try a smaller depth, or move the profile fully onto the target face(s).
@@ -2004,6 +2092,7 @@ A planar face's 'frame' is th...
 - No matching edges on '
 - The feature has been rolled back.
 - (The feature could not be auto-removed.)
+- or a parameter-expression string like 'WallT/2'.
 - Fusion refused a distance-and-angle chamfer of
 - deg, so nothing was chamfered.
 - Fusion refused a two-distance chamfer (
@@ -2011,15 +2100,16 @@ A planar face's 'frame' is th...
 - Fusion refused an equal-distance chamfer of
 - , so nothing was chamfered.
 - Rule fillet created - the rounded edge set is defined by the selected FACES, not by individual edge handles. Pair with view_screenshot.
-- Provide a positive radius.
 - A rule fillet needs 'faces' - find_geometry face handles. Every edge of those faces is rounded; add 'second_faces' to round only the edges between the two sets.
+- Provide a positive radius: the expression '
 - Rule fillet reported success but rounded nothing. topology '
 - ' may exclude every edge of the selected faces ('rounds_only' takes convex edges, 'fillets_only' concave ones), or the faces meet smoothly and have no corner to round. The feature has been rolled b...
 - The rule fillet was created but its radius reads back
 - ' with design_delete_feature.
 - The rule fillet was created but its topology is not the requested '
-- 'radius' must be a number.
+- Provide a positive radius.
 - The rule fillet refused the given faces, so nothing was created. Re-run find_geometry for fresh face handles.
+- 'radius' must be a number or a parameter-expression string like 'WallT/2'.
 
 ### `model_hole`
 - Hole feature added (a real Hole, with hole/thread metadata - not an extrude-cut). For a bolt circle, pass every position in 'points' in ONE call - the pattern tools take bodies/occurrences, not hol...
@@ -2075,12 +2165,10 @@ A planar face's 'frame' is th...
 - No bounding box available for
 - (it may have no solid geometry).
 - has no min/max points.
-- No Joint Origin named '
-- '. Create one with joint_create_origin, or omit 'frame' for a world-aligned box.
 - MeasureManager unavailable.
 - has no B-Rep body to measure in a frame. Target a specific body/occurrence (design_get(include=['tree']) lists them).
 - getOrientedBoundingBox returned nothing for this target.
-- Measured in the joint-origin frame; x/y/z are the part-space extents. Feed these to param_set to drive stock size.
+- Measured in the joint-origin frame; x/y/z are the part-space extents. Feed these to param_set to drive stock size. The frame is the Joint Origin its owning COMPONENT carries - the same one for ever...
 - Oriented bounding-box measurement failed:
 - . (The X/Y axes of the frame must be perpendicular, and the target must be B-Rep geometry.)
 - Mass is driven by each body's PHYSICAL MATERIAL (density), not its appearance - if a mass looks wrong, check 'density'. Inertia_world is about the WORLD origin; principal_moments are about the cent...
@@ -2110,7 +2198,6 @@ A planar face's 'frame' is th...
 - '. Use 'distance' or 'angle'.
 - '. Valid: mm, cm, in.
 - Minimum gap between the two targets (0 = touching/overlapping). closest_point_on_a/b are the nearest points; their separation IS the distance.
-- Distance 0 with both closest points at (0,0,0): the targets touch or OVERLAP and this point pair is degenerate - it does NOT locate the contact. Use assembly_inspect_interference on the pair to get...
 - MeasureManager unavailable.
 - measureAngle returned nothing for these two targets.
 - measureAngle returned a result whose value read as
@@ -2118,6 +2205,7 @@ A planar face's 'frame' is th...
 - Angle between the two targets. Two planar faces give the angle between their planes; a face + an edge the angle between them.
 - measureMinimumDistance returned a result whose value read as
 - , not a number, so the distance is UNKNOWN - reporting it as 0 would read as touching. Re-run find_geometry for fresh handles and retry.
+- Distance 0 with both closest points at (0,0,0): the targets touch or OVERLAP and this point pair is degenerate - it does NOT locate the contact. Use assembly_inspect_interference on the pair to get...
 - Angle measurement failed:
 - . (Angle needs two entities with a defined direction - two planar faces, or a face and an edge; a whole occurrence may be rejected. Use find_geometry face/edge handles.)
 
@@ -2286,7 +2374,6 @@ A planar face's 'frame' is th...
 - (The body could not be hollowed at this thickness.)
 - Shell reported success on body '
 - . Read the body back with model_inspect, or cut a cross-section with view_section, to see what the feature did.
-- . (The thickness may be too large for the geometry, or the removed faces span more than one body - try a smaller thickness.)
 
 ### `model_split`
 - No active design. Create or open a document first (see doc_new).
@@ -2692,6 +2779,8 @@ A planar face's 'frame' is th...
 - offset needs 'distance' > 0 (in 'units'); the SIDE comes from the pick point x1,y1, so the distance is a magnitude. Got
 
 ### `sketch_get`
+- ), so a row's 'component' does not identify which one holds it, and this list does not tell those rows apart. 'placements' lists every occurrence path placing a component of one of the names just l...
+- More than one component wears the same name here (
 - No active design (open or create a document with design geometry).
 - Could not read sketches:
 
@@ -2760,21 +2849,23 @@ A planar face's 'frame' is th...
 - and design recomputed so any engraving/emboss that consumes it rebuilt
 - Provide 'text' - the string to display.
 - No active design (open a document with sketch text).
-- No sketch text found in the active design.
+- '. Use mm, cm, or in.
 - No sketch text matched index
+- 'height' must be > 0.
 - No sketch text found in a sketch named '
-- '. (Use sketch_get to list sketches; the text must live in a sketch with that exact name.)
+- . (Use sketch_get to list sketches; the text must live in a sketch with that exact name.)
+- 'height' must be a number (text height in 'units').
 - ' could not be read (a stale or deleted text proxy holds that index). Re-read the sketch with sketch_get(include_entities=true) and retry with a readable index.
 - Setting the font of sketch text in '
 - ' did not take - SketchText.fontName reads back '
+- Its string WAS set to '
+- ' before the resize was checked, so that one text carries the new string at its old size.
 - set the font of sketch text in '
 - Sketch text created (verified: sketchTexts
 - ). (x,y) are SKETCH-plane coordinates - on an on-face sketch use the 'frame' from sketch_create to keep the text on the face. Extrude/emboss the sketch to engrave it, or edit it later with sketch_s...
 - Sketch text created on '
 - ). A CLOSED path such as a circle wraps the text right around it. Extrude/emboss the sketch to engrave it, or edit the string later with sketch_set_text (without create).
 - create=true needs 'sketch_name' - the sketch to add the text to (create one first with sketch_create).
-- '. Use mm, cm, or in.
-- 'height' must be > 0.
 - ' is not available on this Fusion version.
 - . Create it first with sketch_create.
 - Sketch text did not materialize in '
@@ -2782,7 +2873,6 @@ A planar face's 'frame' is th...
 - after add(). Nothing was created.
 - ' but the new text reports '
 - ', so the font did not take. The text WAS created - remove it with sketch_delete_entity(sketch_name='
-- 'height' must be a number (text height in 'units').
 - ' text placement (it returned false), so no text was placed.
 - Could not create sketch text in '
 - 'character_spacing' must be a number - the percent change from the default spacing (0 = default, 50 = half again as wide).
@@ -3042,6 +3132,12 @@ A planar face's 'frame' is th...
 - occurrences, so only the first
 - had their visibility saved - restore will not reinstate the rest. Camera and visual style are complete.
 - Camera aimed. Call view_screenshot to capture.
+- Could not read what the viewport currently shows, so the view could not be framed on '
+- ' and the camera was NOT moved. Re-run with fit=false to re-aim only.
+- Camera aimed and framed on '
+- '. Call view_screenshot to capture.
+- ' WITHOUT zooming to it - fit=false keeps the current eye-to-target distance. Pass fit=true (the default) to frame it.
+- has a readable bounding box, so there is nothing to frame on. Re-run with fit=false to re-aim only.
 - Unknown orientation '
 - 'perspective_angle_deg' is a field-of-view angle Fusion accepts from 1 to just under 150 degrees (got
 - 'perspective_angle_deg'=
@@ -3053,8 +3149,15 @@ A planar face's 'frame' is th...
 - Set 'perspective_angle_deg'=
 - but the camera's perspectiveAngle could not be read back
 - - the field of view is unverified.
+- Set the camera extents to frame '
+- ) but the viewport reads back
+- - the framing did not take, and the view is left where it was.
 - 'perspective_angle_deg' must be a number (got '
 - needs a perspective camera, but the camera's cameraType could not be read - pass projection='perspective' in the same call to set it explicitly.
+- ' against the current view (a bounding box, the camera's axes, or its extents would not read), so the view is NOT framed on it. Re-run with fit=false to re-aim only.
+- 'focus': nothing named '
+- ' to frame - no occurrence and no sketch carries that name.
+- Occurrence lookup said:
 - Visibility changed. view_screenshot to view; view_set(restore) to undo.
 - Visibility changed. view_screenshot to view. Body bulbs are NOT captured by snapshot/restore - undo a body with the opposite hide/show.
 - PARTIAL: only the first

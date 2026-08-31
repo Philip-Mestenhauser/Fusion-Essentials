@@ -44,11 +44,11 @@ _URN_POLL_SLEEP = 0.25
 
 
 def _report_lineage_change(payload, doc, lineage_before):
-    """A save can move the document onto a NEW lineage URN - measured live when the first save
-    after a configured-design conversion forked the file (version history restarts at v1, and the
-    old URN still opens the pre-conversion file; the new URN was readable immediately). A caller
-    holding the superseded URN must learn the new one from THIS payload, so the change is reported
-    loudly, never just swapped into acted_on."""
+    """A save can move the document onto a NEW lineage URN - measured live: the first save after a
+    configured-design conversion forks the file, version history restarts at v1, the superseded URN
+    still opens the pre-conversion file, and the new URN reads immediately. A caller holding the
+    superseded URN must learn the new one from THIS payload, so the change is reported loudly,
+    never just swapped into acted_on."""
     if not (isinstance(lineage_before, str) and lineage_before.startswith("urn:")):
         return
     lineage_after = safe(lambda: doc.dataFile.id)
@@ -230,13 +230,25 @@ def copy_document_handler(document_id: str = "", name: str = "",
     want_name = (name or "").strip()
     final_name = want_name or src_name
 
+    # The remedy is in THIS tool's own input vocabulary. 'folder' always narrows the collision;
+    # 'name' only does on the document_id path, because on the by-name path 'name' IS the source
+    # lookup, so a different one copies a different file rather than renaming this copy. BOTH
+    # destination-collision refusals below end on it: the branch a caller lands in depends on how
+    # many files already carry the name, and which of this tool's inputs it can still move does not.
+    rename_remedy = (" or give the copy a different 'name'." if document_id else
+                     ". On this call 'name' selects the SOURCE file, so changing it copies a "
+                     "different document - pass 'document_id' (the source's lineage URN from "
+                     "data_get) to free 'name' for the copy.")
+
     # Duplicate guard scoped to the destination folder, against the FINAL name (what will collide).
-    existing = _file_in_folder_by_name(target, final_name)
+    existing, same_name_refusal = _file_in_folder_by_name(target, final_name)
+    if same_name_refusal:
+        return error(same_name_refusal + " Copy into a different 'folder'" + rename_remedy)
     if existing:
         return error(f"A file named '{final_name}' already exists in "
                       f"'{_folder_path_string(target) or '(project root)'}' "
-                      f"(id {safe(lambda: existing.id)}). Copy into a different folder, "
-                      "or remove the existing copy first.")
+                      f"(id {safe(lambda: existing.id)}). Copy into a different 'folder'"
+                      + rename_remedy)
 
     xrefs, xref_count = _xref_summary(src)
 
@@ -346,16 +358,55 @@ def _find_file_by_name(root_folder, name):
     return matches, seen, visited, bool(queue), unread
 
 
-def _file_in_folder_by_name(folder, name):
-    """Return an immediate child DataFile of `folder` matching name (case-insensitive)."""
+def _files_in_folder_by_name(folder, name):
+    """EVERY immediate child DataFile of `folder` carrying `name` (case-insensitive, whole name).
+
+    A folder holds several files of one name: two saveAs calls into one folder under one name
+    produce two DISTINCT lineages, and the folder reads back both files under that name. So a name
+    is not an identity here and every match is collected - the caller decides.
+    """
     want = (name or "").strip().lower()
+    out = []
     try:
         for f in folder.dataFiles.asArray():
-            if (safe(lambda: f.name) or "").strip().lower() == want:
-                return f
+            if (safe(lambda f=f: f.name) or "").strip().lower() == want:
+                out.append(f)
     except Exception:
         pass
-    return None
+    return out
+
+
+def _same_name_rows(matches):
+    """Every candidate's lineage URN, one row per file, an id that will not READ named as such - the
+    rendering every same-name disclosure lists its candidates with. One row per file, always: a
+    dropped row shows N files under fewer URNs, which reads as though two of them shared one."""
+    return "; ".join(safe(lambda f=f: f.id) or "(id unreadable)" for f in matches)
+
+
+def _same_name_refusal(folder, name, matches):
+    """The refusal for a folder already holding SEVERAL files of one name: the count, the folder,
+    and every candidate's lineage URN - the thing that IS an identity here. Each caller ENDS it with
+    the remedy its own inputs offer."""
+    rows = _same_name_rows(matches)
+    return (f"'{name}' names {len(matches)} files in "
+            f"'{_folder_path_string(folder) or '(project root)'}' - refusing to guess which. A "
+            f"folder can hold several files of one name, and the lineage URN is what tells them "
+            f"apart: {rows}.")
+
+
+def _file_in_folder_by_name(folder, name):
+    """The ONE immediate child DataFile of `folder` carrying `name`, or a REFUSAL when several do.
+
+    Returns (data_file, refusal): (file, None) for exactly one match, (None, None) when nothing
+    carries the name, and (None, sentence) when several do - never one of several, since the files
+    sharing that name are different lineages. The caller appends its own remedy to the sentence.
+    """
+    matches = _files_in_folder_by_name(folder, name)
+    if len(matches) == 1:
+        return matches[0], None
+    if matches:
+        return None, _same_name_refusal(folder, name, matches)
+    return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -571,8 +622,17 @@ def save_document_as_handler(name: str = "", project: str = "", project_id: str 
     # colliding name FORKS a new lineage - legal, but rarely what was meant, so a pre-existing
     # same-name file in the target folder is REFUSED by default (consistent with doc_copy). The fork
     # is available deliberately via allow_duplicate_name=true, which keeps the permit+warn path below.
-    existing = _file_in_folder_by_name(target, name)
+    # Collect every same-name file, then decide: the guard's question is "is this name already
+    # taken here, and by which lineages", which several files answer as truthfully as one.
+    existing_files = _files_in_folder_by_name(target, name)
+    existing = existing_files[0] if len(existing_files) == 1 else None
     existing_id = safe(lambda: existing.id) if existing else None
+    if len(existing_files) > 1 and not allow_duplicate_name:
+        return error(
+            _same_name_refusal(target, name, existing_files) + " doc_save_as would add yet ANOTHER "
+            "file of that name (a new lineage) - refused by default. To add a version to one of the "
+            "files above, open that URN (doc_open) and use doc_save; to create a same-name file "
+            "anyway, pass allow_duplicate_name=true.")
     if existing and not allow_duplicate_name:
         return error(
             f"A file named '{name}' already exists in "
@@ -585,44 +645,71 @@ def save_document_as_handler(name: str = "", project: str = "", project_id: str 
         """saveAs can RAISE InternalValidationError (or return false) while the folder AND file DID
         land. Read the GROUND TRUTH back before reporting a false negative: a same-name file now
         present in the target that was NOT there before, or - for a never-saved doc - a settled lineage
-        urn on the doc. Returns the landed file's id/urn (or True
-        when present but id-less), else None. A pre-existing urn on an already-saved doc is deliberately
-        NOT trusted (it would false-positive an allow_duplicate_name fork)."""
-        now = _file_in_folder_by_name(target, name)
-        if now is not None and existing is None:
-            return safe(lambda: now.id) or True
+        urn on the doc. A pre-existing urn on an already-saved doc is deliberately
+        NOT trusted (it would false-positive an allow_duplicate_name fork).
+
+        Returns (landed, same_name_now): landed is the landed file's id/urn, True when it landed but
+        no single id names it, else None. same_name_now is every file now carrying the name when
+        SEVERAL do - the ambiguity the payload discloses - and [] otherwise."""
+        now = _files_in_folder_by_name(target, name)
+        if now and not existing_files:
+            if len(now) == 1:
+                return safe(lambda: now[0].id) or True, []
+            # Several files carry the name now where none did before: this call landed, but WHICH
+            # lineage it wrote is not readable off the folder. The candidates travel up to be named
+            # in the payload rather than one of them being picked as this call's.
+            return True, now
         if not was_saved:
             urn = _settled_lineage_urn(doc)
             if urn:
-                return urn
-        return None
+                return urn, []
+        return None, []
 
-    def _landed_ok(file_id, how):
-        return ok({
+    def _landed_ok(file_id, how, same_name_now=()):
+        # doc.dataFile.id names this call's file ONLY for a document that was never saved. On an
+        # already-saved one it still reads the lineage that document was saved FROM - a different
+        # file, under a different name, in a different folder - which is why the urn branch of
+        # _landed_after_error is gated the same way. Unnameable publishes null, never a wrong URN.
+        resolved = (file_id if isinstance(file_id, str)
+                    else (_settled_lineage_urn(doc) if not was_saved else None))
+        payload = {
             "saved": True,
             "name": name,
             "was_previously_saved": was_saved,
             "destination_project": safe(lambda: proj.name),
             "destination_folder": (_folder_path_string(target) or "(project root)"),
-            "document_id": (file_id if isinstance(file_id, str) else _settled_lineage_urn(doc)),
+            "document_id": resolved,
             "recovered_from_error": True,
             "note": ("saveAs reported an error but the file DID land in the destination (verified by "
                      "reading the saved document/folder back) - reporting success rather than a false "
                      "negative, which would send a retry into a 'file already exists' collision. " + how),
-        })
+        }
+        if same_name_now:
+            # One entry per file, null where the id would not read - the count and the URNs are the
+            # only handles on the duplicate this recovery just measured.
+            payload["same_name_document_ids"] = [safe(lambda f=f: f.id) for f in same_name_now]
+            payload["note"] += (
+                f" {len(same_name_now)} files named '{name}' are in that folder now where none was "
+                f"before, so which lineage THIS call wrote is not readable from the folder: "
+                f"{_same_name_rows(same_name_now)}.")
+        if resolved is None:
+            payload["note"] += (" 'document_id' is null - nothing read back names this call's file "
+                                "exactly. List the folder with data_get(project, folder) and address "
+                                "the file you meant by its URN.")
+        return ok(payload)
 
     try:
         did = doc.saveAs(name, target, _agent_description(description), "")  # adsk.core: Document.saveAs(...)
     except Exception as e:
         # saveAs can raise (observed: InternalValidationError) AFTER the file landed - re-read before failing.
-        landed = _landed_after_error()
+        landed, same_name_now = _landed_after_error()
         if landed:
-            return _landed_ok(landed, f"Original error: {str(e)[:160]}")
+            return _landed_ok(landed, f"Original error: {str(e)[:160]}", same_name_now)
         return error(f"saveAs failed for '{name}': {e}")
     if not did:
-        landed = _landed_after_error()
+        landed, same_name_now = _landed_after_error()
         if landed:
-            return _landed_ok(landed, "saveAs returned false.")
+            return _landed_ok(landed, "saveAs returned false.", same_name_now)
         return error(f"Fusion declined to save '{name}' to the destination. No change made.")
 
     # Report the lineage URN this save wrote - the stable identity that ADDRESSES the file (a name
@@ -652,6 +739,21 @@ def save_document_as_handler(name: str = "", project: str = "", project_id: str 
                         "lineage - Fusion allows this). To add a version to the EXISTING file instead, "
                         "open it (doc_open by that URN) and use doc_save; or delete one with "
                         "data_delete_file. Address files by URN, not name, from here."),
+        }
+        note = (f"NAME COLLISION - see 'name_collision'. " + note)
+    elif len(existing_files) > 1:
+        # The name was ALREADY shared before this save (only reachable with allow_duplicate_name):
+        # one 'existing_document_id' cannot state several, so every pre-existing lineage is listed.
+        # One entry per pre-existing file, null where the id would not read: a dropped entry shows
+        # N files under fewer URNs, which reads as though two of them shared one.
+        prior_ids = [safe(lambda f=f: f.id) for f in existing_files]
+        result["name_collision"] = {
+            "existing_document_ids": prior_ids,
+            "warning": (f"{len(existing_files)} files named '{name}' already existed in this folder "
+                        f"({_same_name_rows(existing_files)}); this saveAs added another "
+                        "one (a new lineage - Fusion allows this). To add a version to one of them "
+                        "instead, open that URN (doc_open) and use doc_save. Address files by URN, "
+                        "not name, from here."),
         }
         note = (f"NAME COLLISION - see 'name_collision'. " + note)
     if folder_retry_note:

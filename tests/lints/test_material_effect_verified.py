@@ -35,7 +35,7 @@ _MUTATION = re.compile(r"features\.[A-Za-z_][A-Za-z0-9_]*\.add\(")
 # on purpose: a payload key like `input_body_count` echoes a request length and is not a census.
 _MATERIAL = re.compile(
     r"\b(?:volume_delta|volumes\(|signed_volume|face_count_delta|lump_count|body_count|"
-    r"census_host|native_token)\b")
+    r"census_host|native_token|native_identity)\b")
 
 _ERROR_CALL = re.compile(r"\berror\(")
 

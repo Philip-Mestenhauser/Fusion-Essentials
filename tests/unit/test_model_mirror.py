@@ -12,8 +12,9 @@ import pytest
 
 import adsk.core
 
-from conftest import (BRepBody, MakeComp, error_message, install, load_tool, make_design,
-                      payload as _payload, _make_object_collection, _NamedCollection)
+from conftest import (BRepBody, MakeComp, body_proxy, error_message, install, load_tool,
+                      make_design, make_source_document, payload as _payload,
+                      _make_object_collection, _NamedCollection)
 
 mr = load_tool("model_mirror")
 
@@ -108,7 +109,11 @@ def scene(monkeypatch):
     """Build a mirror scene: a component with `bodies`, an optional timeline, and the shared
     ObjectCollection fake carrying this scene's refusals."""
     def build(bodies=("A",), tl=None, body_owner=None, extra_components=()):
-        comp = MakeComp(name="Comp", bodies=[BRepBody(n, volume=SOURCE_VOLUME,
+        # Every component answers an entityToken and the effect census de-dupes its hosts on it
+        # (_common.same_component); a host it cannot identify makes the census unjudgeable, which is
+        # its own tested state - see test_an_unidentifiable_host_makes_the_count_unjudgeable.
+        comp = MakeComp(name="Comp", entity_token="TOKEN:Comp",
+                        bodies=[BRepBody(n, volume=SOURCE_VOLUME,
                                                       parent_component=body_owner) for n in bodies])
         comp.xYConstructionPlane = ("plane", "xy")
         comp.xZConstructionPlane = ("plane", "xz")
@@ -314,6 +319,11 @@ class TestJoin:
         assert "Could not set join" in msg
 
 
+def _source_owned_by(comp):
+    """A mirror source whose parentComponent is `comp` - the one attribute census_host reads."""
+    return types.SimpleNamespace(parentComponent=comp)
+
+
 class TestEffectCensus:
     def test_body_mirror_reports_the_census_growth(self, scene):
         sc = scene(bodies=("BankL",))
@@ -327,11 +337,33 @@ class TestEffectCensus:
         # the source body is OWNED by another component (an occurrence proxy reports its source
         # component), while the mirror lands in the component the feature is built in - a census
         # scoped to the source's component alone is blind to it
-        owner = MakeComp(name="Owner")
+        owner = MakeComp(name="Owner", entity_token="TOKEN:Owner")
         sc = scene(bodies=("A",), body_owner=owner, extra_components=(owner,))
         sc.feature = mirror_feature(bodies=[BRepBody("Mirror1", volume=SOURCE_VOLUME)])
         out = _payload(mr.handler(bodies=["A"], plane="yz"))
         assert out["bodies_added"] == 1 and out["volume_change_cm3"] == 0.0
+
+    def test_an_unidentifiable_host_makes_the_count_unjudgeable_not_doubled(self):
+        # The source's owner cannot be told apart from the build component (no token reads), so the
+        # census refuses to answer with a number: de-duplicating would drop a component the mirror
+        # can land in, and appending would count one component twice and DOUBLE the delta.
+        owner = MakeComp(name="Owner", bodies=[BRepBody("A")])      # no entityToken at all
+        comp = MakeComp(name="Comp", bodies=[BRepBody("A")])
+        assert mr._body_total(mr._census_hosts(_source_owned_by(owner), comp)) is None
+
+    def test_a_host_PROVEN_distinct_is_counted_beside_the_build_component(self):
+        owner = MakeComp(name="Owner", bodies=[BRepBody("A")], entity_token="TOKEN:Owner")
+        comp = MakeComp(name="Comp", bodies=[BRepBody("B"), BRepBody("C")],
+                        entity_token="TOKEN:Comp")
+        assert mr._body_total(mr._census_hosts(_source_owned_by(owner), comp)) == 3
+
+    def test_a_host_PROVEN_to_be_the_build_component_is_counted_once(self):
+        # the de-dupe still fires on a proven match - counting it twice would double the delta
+        comp = MakeComp(name="Comp", bodies=[BRepBody("B"), BRepBody("C")],
+                        entity_token="TOKEN:Comp")
+        twin = MakeComp(name="Comp", bodies=[BRepBody("B"), BRepBody("C")],
+                        entity_token="TOKEN:Comp")
+        assert mr._body_total(mr._census_hosts(_source_owned_by(twin), comp)) == 2
 
     def test_feature_mirror_is_verified_by_the_census(self, scene):
         ent = feature_entity("Emboss1", bodies=[BRepBody("Body1", volume=12.0)])
@@ -402,3 +434,65 @@ class TestEffectCensus:
         sc = scene(bodies=("A",))
         out = _payload(mr.handler(bodies=["A"], plane="xz"))
         assert out["plane"] == "xz" and sc.mf.last.plane == ("plane", "xz")
+
+
+# ── the volume sample keys on the PHYSICAL body, not on a wrapper token ─────
+
+# The x-ref shape, measured on a host holding two x-refs of one design: two DISTINCT bodies read one
+# byte-identical entityToken while their source documents' lineage ids differ. A body and its own
+# occurrence proxy are the other half - one physical body reading two different wrapper tokens.
+_URN_XREF = "urn:adsk.wipprod:dm.lineage:K3I2nkywRlaWPHJexysOdA"
+_URN_HOST = "urn:adsk.wipprod:dm.lineage:N_QoPrrrSJmF__f9BZV86A"
+_SHARED_TOKEN = "/vB+AAEAAwAAAAAAAAAAAAAA"
+
+
+def _body_in_document(name, volume, urn):
+    """A source body owned by a component in the document with lineage id `urn` - the chain a body's
+    source document is read through (parentComponent -> parentDesign -> parentDocument ->
+    dataFile.id). Every body built here carries the SAME document-local token."""
+    return BRepBody(name, volume=volume, entity_token=_SHARED_TOKEN,
+                    parent_component=MakeComp(name=name,
+                                              parent_design=make_source_document(urn)))
+
+
+class TestFeatureVolumeSampleKeysOnPhysicalIdentity:
+    """A feature mirror's BEFORE volume is summed over the bodies its source features act on. That
+    sample is de-duplicated by _common.native_identity: an entityToken is DOCUMENT-LOCAL, so a
+    wrapper-token key MERGES two distinct source bodies and understates the starting volume, and a
+    body's own occurrence proxy carries a DIFFERENT token, so the same key SPLITS one body and
+    counts its volume twice."""
+
+    def test_two_source_bodies_sharing_a_document_local_token_are_both_measured(self, scene):
+        a = _body_in_document("Frame", 10.0, _URN_XREF)
+        b = _body_in_document("Lid", 4.0, _URN_HOST)
+        assert a.entityToken == b.entityToken             # the tokens really collide
+        ent = feature_entity("Emboss1", bodies=[a, b])
+        sc = scene(bodies=("Body1",), tl=timeline(timeline_object("Emboss1", 0, ent)))
+        sc.spawn = 0                                     # the volume is the only signal left
+        sc.feature = mirror_feature(bodies=[BRepBody("Mirror1", volume=20.0)])
+        out = _payload(mr.handler(features=["Emboss1"], plane="yz"))
+        assert out["volume_change_cm3"] == 6.0           # 20 after - (10 + 4) before
+
+    def test_a_source_body_reached_through_its_proxy_is_measured_once(self, scene):
+        native = _body_in_document("Frame", 10.0, _URN_HOST)
+        proxy = body_proxy(native, types.SimpleNamespace(name="Frame:1"))
+        assert proxy.entityToken != native.entityToken   # the wrappers really differ
+        ent = feature_entity("Emboss1", bodies=[native, proxy])
+        sc = scene(bodies=("Body1",), tl=timeline(timeline_object("Emboss1", 0, ent)))
+        sc.spawn = 0
+        sc.feature = mirror_feature(bodies=[BRepBody("Mirror1", volume=20.0)])
+        out = _payload(mr.handler(features=["Emboss1"], plane="yz"))
+        assert out["volume_change_cm3"] == 10.0          # 20 after - 10 before, not 20 - 20
+
+    def test_two_source_bodies_with_no_readable_identity_are_both_measured(self, scene):
+        # The `or id(b)` last resort: two bodies nothing can be identified from over-count rather
+        # than merge, so neither drops silently out of the starting total.
+        a, b = BRepBody("Frame", volume=10.0), BRepBody("Lid", volume=4.0)
+        for body in (a, b):
+            del body.entityToken
+        ent = feature_entity("Emboss1", bodies=[a, b])
+        sc = scene(bodies=("Body1",), tl=timeline(timeline_object("Emboss1", 0, ent)))
+        sc.spawn = 0
+        sc.feature = mirror_feature(bodies=[BRepBody("Mirror1", volume=20.0)])
+        out = _payload(mr.handler(features=["Emboss1"], plane="yz"))
+        assert out["volume_change_cm3"] == 6.0

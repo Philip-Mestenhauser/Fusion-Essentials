@@ -127,9 +127,14 @@ def _resolve_snap_entity(design, occ_name, snap):
         return None, None, f"'{occ_name}' body has no faces."
 
     if snap == "cylinder":
+        # The enum MEMBER, never its integer: CylinderSurfaceType is 1 and 3 is SphereSurfaceType,
+        # so a hand-typed 3 here matches spheres and silently reports that a cylinder has no
+        # cylindrical face. Cones count too - a tapered pin is round and seats the same way, which
+        # is the pair joint_at_geometry already accepts.
+        want = (adsk.core.SurfaceTypes.CylinderSurfaceType, adsk.core.SurfaceTypes.ConeSurfaceType)
         cyl = None
         for f in faces:
-            if safe(lambda f=f: f.geometry.surfaceType, None) == 3:  # CylinderSurfaceType
+            if safe(lambda f=f: f.geometry.surfaceType, None) in want:
                 cyl = f
                 break
         if not cyl:
@@ -551,9 +556,9 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str 
     # occurrence returned a joint whose healthState read WARNING with "conflicts with assembly
     # relationships", moved NOTHING, and still published created:true. So the state is read back here
     # and a create that did not solve is a refusal, never a plain success. Both the joint and its
-    # timeline item are asked - the measured failure showed on both.
-    tl_obj = safe(lambda: joint.timelineObject)
-    failure = _assert.compute_failure(joint) or _assert.compute_failure(tl_obj)
+    # timeline item are asked - the measured failure showed on both - through _assert.compute_state,
+    # the ONE home for that pairing, which assembly_get's rows and workspace_orient's rollup share.
+    state, failure = _assert.compute_state(joint)
     if failure:
         state_label, detail = failure
         return error(
@@ -568,8 +573,7 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str 
     # No failure found - but that verdict rests on a state that must actually have been READ. When
     # neither the joint nor its timeline item answers healthState, 'healthy' is null (unknown), never
     # a coerced true: an unread state is not a clean bill of health.
-    healthy = (True if (safe(lambda: joint.healthState) is not None
-                        or safe(lambda: tl_obj.healthState) is not None) else None)
+    healthy = True if state == "healthy" else None
 
     payload = {
         "created": True,

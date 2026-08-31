@@ -77,9 +77,9 @@ _EDGE_FILTER_DESC = ("REQUIRED when 'edges' is omitted: all/convex/concave (with
 
 def _qualified_body_name(body):
     """The body's name qualified with the occurrence path it lives in, so two same-named bodies in
-    different components are distinguishable in the report (two chamfers on different components used
-    to read the same local 'Body1'). Reuses _inputs._body_context - the shared 'where this body
-    lives' idiom (assemblyContext.fullPathName, else the owning component name)."""
+    different components are distinguishable in the report - unqualified, two chamfers on two
+    components both report the same local 'Body1'. Reuses _inputs._body_context - the shared 'where
+    this body lives' idiom (assemblyContext.fullPathName, else the owning component name)."""
     if body is None:
         return None
     name = safe(lambda: body.name)
@@ -311,17 +311,39 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
     k = scale(units)
     if k is None:
         return error(f"Unknown units '{units}'. Use mm, cm, or in.")
-    try:
-        sz = float(size)
-    except Exception:
-        return error(f"'{size_key}' must be a number.")
-    if sz <= 0:
-        return error(f"Provide a positive {size_key}.")
+    # A fillet RADIUS may arrive as a parameter EXPRESSION string ('WallT/2') instead of a number.
+    # The chamfer's distance stays literal because _chamfer_readback compares the created feature's
+    # own distance against that number; 'chord_length' stays literal too, and its schema says so.
+    # Only a LITERAL can be judged this early, before the design that resolves an expression is in
+    # hand - so the two guards below run on a literal, and the expression is guarded on the value
+    # the units engine evaluates it to, further down.
+    as_expression = size_key == "radius" and _inputs.looks_like_expression(size)
+    sz = None
+    if not as_expression:
+        try:
+            sz = float(size)
+        except Exception:
+            return error(f"'{size_key}' must be a number"
+                         + (" or a parameter-expression string like 'WallT/2'."
+                            if size_key == "radius" else "."))
+        if sz <= 0:
+            return error(f"Provide a positive {size_key}.")
 
     design = _common.design()
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")
     comp = target_component(design)
+    # One ValueInput for both forms: a literal is scaled to internal cm, an expression crosses as a
+    # string once the design's units engine has evaluated it, so an unresolvable one is refused BY
+    # NAME. It sits here - before any edge resolution - so a bad size is reported before a bad edge
+    # scope. The evaluated cm is what puts an EXPRESSION under the same positivity guard a literal
+    # gets: without it '-1 mm' and '0 mm' reach filletFeatures.add and fail there instead.
+    val, size_cm, verr = _inputs.length_value_input(size, k, design, size_key)
+    if verr:
+        return error(verr)
+    if as_expression and size_cm is not None and size_cm <= 0:
+        return error(f"Provide a positive {size_key}: the expression '{str(size).strip()}' "
+                     f"evaluates to {round(size_cm / k, 6)} {units}.")
 
     edge_src = "filter"
     body_label = None
@@ -372,7 +394,6 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
                         f"filter '{flt}' - pass edges=[...] handles to target a specific set.")
 
     vol_before = _geom.volumes(verify_bodies)
-    val = adsk.core.ValueInput.createByReal(sz * k)
     try:
         if kind == "fillet":
             fi = comp.features.filletFeatures.createInput()
@@ -510,7 +531,8 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
         kind + "ed": True,
         "feature": safe(lambda: feature.name),
         "body": body_label,
-        size_key: round(sz, 6),
+        # An expression is echoed as itself; a literal as the rounded number it was.
+        size_key: _inputs.expression_report(size),
         "units": units,
         "edge_selection": edge_src,
         "edges_requested": edges.count,
@@ -557,12 +579,19 @@ def _rule_fillet(radius, units, faces, second_faces, topology):
     k = scale(units)
     if k is None:
         return error(f"Unknown units '{units}'. Use mm, cm, or in.")
-    try:
-        r = float(radius)
-    except Exception:
-        return error("'radius' must be a number.")
-    if r <= 0:
-        return error("Provide a positive radius.")
+    # The same two forms every fillet radius takes. Only a LITERAL can be guarded here, before the
+    # design an expression resolves against is in hand; an expression is guarded - and its applied
+    # radius compared - on the value the units engine evaluates it to, below.
+    as_expression = _inputs.looks_like_expression(radius)
+    r = None
+    if not as_expression:
+        try:
+            r = float(radius)
+        except Exception:
+            return error("'radius' must be a number or a parameter-expression string like "
+                         "'WallT/2'.")
+        if r <= 0:
+            return error("Provide a positive radius.")
     topo, terr = _TOPOLOGY.resolve(topology)
     if terr:
         return error(terr)
@@ -586,6 +615,12 @@ def _rule_fillet(radius, units, faces, second_faces, topology):
 
     verify_bodies = _geom.owning_bodies(list(first) + list(second or []))
     vol_before = _geom.volumes(verify_bodies)
+    rv, want_cm, rverr = _inputs.length_value_input(radius, k, design, "radius")
+    if rverr:
+        return error(rverr)
+    if as_expression and want_cm is not None and want_cm <= 0:
+        return error(f"Provide a positive radius: the expression '{str(radius).strip()}' evaluates "
+                     f"to {round(want_cm / k, 6)} {units}.")
     try:
         ri = comp.features.filletFeatures.createRuleFilletInput()
         # The face sets cross as plain Python lists, not an ObjectCollection.
@@ -594,7 +629,7 @@ def _rule_fillet(radius, units, faces, second_faces, topology):
         if applied is False:
             return error("The rule fillet refused the given faces, so nothing was created. Re-run "
                          "find_geometry for fresh face handles.")
-        ri.radius = adsk.core.ValueInput.createByReal(r * k)
+        ri.radius = rv
         ri.topologyType = _topology_type(topo)
         feature = comp.features.filletFeatures.addRuleFillet(ri)
     except Exception as e:
@@ -621,9 +656,16 @@ def _rule_fillet(radius, units, faces, second_faces, topology):
     got_r_cm = safe(lambda: settings.radius.value) if settings is not None else None
     got_topo = safe(lambda: settings.topologyType) if settings is not None else None
     want_topo = safe(lambda: _topology_type(topo))
-    if isinstance(got_r_cm, float) and abs(got_r_cm - r * k) > 1e-6:
+    # Both forms are compared: a literal against its own scaled number, an expression against the
+    # value the units engine evaluated it to; without that value nothing judges the applied radius.
+    # want_cm None means the evaluation itself did not answer a number - then there is nothing to
+    # compare against, and treating it as zero would roll a healthy fillet out.
+    if want_cm is not None and isinstance(got_r_cm, float) and abs(got_r_cm - want_cm) > 1e-6:
+        asked = f"{round(want_cm / k, 6)} {units}"
+        if as_expression:
+            asked += f" (what the expression '{str(radius).strip()}' evaluates to)"
         return error(f"The rule fillet was created but its radius reads back "
-                     f"{round(got_r_cm / k, 6)} {units}, not the requested {round(r, 6)}. Remove "
+                     f"{round(got_r_cm / k, 6)} {units}, not the requested {asked}. Remove "
                      f"'{safe(lambda: feature.name)}' with design_delete_feature.")
     if got_topo is not None and want_topo is not None and got_topo != want_topo:
         return error(f"The rule fillet was created but its topology is not the requested "
@@ -634,13 +676,18 @@ def _rule_fillet(radius, units, faces, second_faces, topology):
         "feature": safe(lambda: feature.name),
         "fillet_type": "rule",
         "rule": "between_faces" if second else "all_edges",
-        "radius": round(got_r_cm / k, 6) if isinstance(got_r_cm, float) else round(r, 6),
+        "radius": (round(got_r_cm / k, 6) if isinstance(got_r_cm, float)
+                   else _inputs.expression_report(radius)),
         "units": units,
         "topology": topo,
         "faces_selected": len(first) + (len(second) if second else 0),
         "note": "Rule fillet created - the rounded edge set is defined by the selected FACES, not "
                 "by individual edge handles. Pair with view_screenshot.",
     }
+    if as_expression:
+        # 'radius' is the value the FEATURE reports; without this the caller cannot tell that value
+        # came from a parameter rather than from a number they fixed.
+        payload["radius_expression"] = str(radius).strip()
     if faces_created is not None:
         payload["faces_created"] = faces_created
     if vol_readable:
@@ -655,8 +702,9 @@ _FILLET_DESC = (
     "intermediate 'positions'/'radii'); 'chord_length' (a fixed chord across the corner); 'rule' "
     "(every edge of the given 'faces', or only the edges between 'faces' and 'second_faces'). "
     "TARGET via 'edges' = find_geometry edge handles (takes precedence), OR 'body_name' (omit = "
-    "most recent) + 'edge_filter'. Lengths in 'units' (mm default). WRITES; a fillet that moves no "
-    "measurable material is returned as an error, not a success."
+    "most recent) + 'edge_filter'. Lengths in 'units' (mm default); 'radius' also takes a parameter "
+    "EXPRESSION string ('WallT/2'). WRITES; a fillet that moves no measurable material is returned "
+    "as an error, not a success."
 )
 _CHAMFER_DESC = (
 "Bevel (chamfer) edges - the machinist's default deburr/edge-break. 'distance' alone bevels "
@@ -669,8 +717,9 @@ fillet_tool = (
     Tool.create_simple(name="model_fillet", description=_FILLET_DESC)
     .add_input_property("edges", _EDGES.schema())
     .add_input_property("body_name", _BODY.schema())
-    .add_input_property("radius", {"type": "number",
-        "description": "Fillet radius in 'units' (the START radius of a variable-radius fillet)."})
+    .add_input_property("radius", {"type": ["number", "string"],
+        "description": "Fillet radius in 'units' (the START radius of a variable-radius fillet), OR "
+                       "a parameter EXPRESSION string ('WallT/2', '3 mm'; carries its own units)."})
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("edge_filter", {"type": "string", "enum": ["all", "convex", "concave"],
         "description": _EDGE_FILTER_DESC})

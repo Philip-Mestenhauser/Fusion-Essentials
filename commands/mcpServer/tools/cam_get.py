@@ -13,20 +13,24 @@ import adsk.cam
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import iter_collection, ok, error, safe, terse
-from ._cam_common import get_cam, find_operation
+from ._common import (CM_TO_UNIT, iter_collection, measured, named_with_remainder, ok, error, safe,
+                      terse)
+from ._cam_common import get_cam, find_setup, resolve_cam_node, resolve_operation
 from . import _inputs
 
 app = adsk.core.Application.get()
 
 _SLICES = ("operations", "parameters", "tool", "references", "nc_programs", "time", "tools", "library",
-           "library_types", "machines", "templates", "inspection")
+           "library_types", "machine", "machines", "templates", "inspection")
 
 # Keep operation rows readable (via _common.terse): a healthy op collapses to {name, tool, strategy, state}; an
 # abnormal op keeps the flag(s) that aren't default (is_suppressed=true, has_error=true, ...) and pops.
+# A null preset and a spindle speed inside the machine's limit are the quiet answers, so they drop
+# too - an op that is OVER the limit (true) or could not be checked (null) survives and pops.
 _OP_NOISE = {"is_generating": False, "is_suppressed": False, "is_optional": False,
              "has_warning": False, "has_error": False, "is_out_of_date": False,
-             "has_toolpath": True, "toolpath_valid": True}
+             "has_toolpath": True, "toolpath_valid": True,
+             "preset": None, "spindle_over_machine_max": False}
 
 
 # ── slice helpers - each calls a read-implementation handler in _cam_common and unwraps its payload ──
@@ -107,14 +111,45 @@ def _slice_operations(cam, setup):
             su["operations"] = rows
         if payload.get("truncated"):
             payload["note"] = (f"Operation rows capped at {_OPERATIONS_CAP}. Pass 'setup' to scope to "
-                               "one setup, or read the per-setup operation_count in the default slice.")
+                               "one setup, or read the per-setup operation_count in the default "
+                               "slice. " + (payload.get("note") or ""))
     return payload, err
 
 
+# WHAT the references slice counts, in the words of the read it actually takes. The underlying walk
+# tests each of a setup's model/fixture/stock entries with Occurrence.isReferencedComponent and does
+# not descend, so the census is the SELECTED entries - not the references reachable from them.
+# Measured on a two-setup job: each setup selects three occurrences that read isReferencedComponent
+# False, the read counted 0, and three referenced components sat one level below them (one under the
+# selected model, two under the selected fixture) - which doc_get(include=['xref_tree']) found.
+# The number is stated every time, because a 0 that does not say what it counted reads as a verdict
+# on the document.
+_REFERENCE_CENSUS = (
+    "Counted {found} referenced component(s) among the model/fixture/stock entries that the "
+    "{setups} setup(s) in scope SELECT DIRECTLY - the top-level setups[] slice names those entries "
+    "in selected_models / fixtures / stock_solids - and only an entry that is ITSELF a referenced "
+    "component is counted. A reference nested INSIDE a selected entry is not examined, so 0 here is "
+    "not 'this document has no external references': measured on a job whose setups each select "
+    "three local container occurrences, this read counted 0 while three referenced components sat "
+    "one level below them. doc_get(include=['xref_tree']) walks every depth.")
+
+
 def _slice_references(cam, setup):
-    """Each setup's external X-ref models/fixtures/stock -> source document."""
+    """Each setup's external X-ref models/fixtures/stock -> source document, plus the census sentence
+    saying which entries that count covers (see _REFERENCE_CENSUS)."""
     from . import _cam_common as _cc
-    return _unwrap(_cc.get_setup_references_handler(setup=setup))
+    payload, err = _unwrap(_cc.get_setup_references_handler(setup=setup))
+    if payload:
+        rows = payload.get("setups") or []
+        payload["counted"] = ("the model/fixture/stock entries each setup selects directly, and of "
+                              "those only the ones that are themselves referenced components")
+        note = _REFERENCE_CENSUS.format(
+            found=sum(r.get("reference_count") or 0 for r in rows), setups=len(rows))
+        if any(r.get("references_truncated") for r in rows):
+            note += (" references_truncated is set on at least one setup, so even that selected-entry "
+                     "census is incomplete - a selection list would not read, or its cap was hit.")
+        payload["note"] = note
+    return payload, err
 
 
 def _slice_nc_programs(cam):
@@ -131,10 +166,17 @@ def _slice_nc_programs(cam):
     return payload, err
 
 
-def _slice_time(cam, setup):
-    """Machining cycle-time estimate (per setup + total)."""
+def _slice_time(cam, setup, units):
+    """Machining cycle-time estimate (per setup + per operation), suppressed ops excluded."""
     from . import _cam_common as _cc
-    return _unwrap(_cc.get_machining_time_handler(setup=setup))
+    return _unwrap(_cc.get_machining_time_handler(setup=setup, units=units))
+
+
+def _slice_machine(cam, setup, units):
+    """The machine's own LIMITS per setup: spindle speed range + per-axis travels, off the machine's
+    kinematics. Distinct from 'machines' (the catalog of machines you can assign)."""
+    from . import _cam_common as _cc
+    return _unwrap(_cc.get_machine_limits_handler(setup=setup, units=units))
 
 
 def _slice_tools(cam):
@@ -194,17 +236,67 @@ def _slice_templates(cam, template_location, template_url, template_depth):
 # (we list their NAMES here); pass 'preset' to read one preset's feeds/speeds expressions (~17 rows).
 # The caller scopes to one operation first, then reads the detail they want.
 
-def _op_miss_error(operation, names):
-    """Word find_operation's (None, available). A DUPLICATED name comes back as each duplicate's
-    'Setup / op' path (leaf == the searched name) - that is ambiguity, not absence, so say so and
-    list the paths; a true miss lists the available operation names."""
+def _op_miss_error(operation, names, refusal):
+    """The refusal for an unscoped operation resolve that came back empty.
+
+    A remedy in THIS tool's own input vocabulary REPLACES the shared resolver's, but only where one
+    exists: the setups holding the duplicates, offered as the 'setup' value that scopes the read
+    (_resolve_op_in_scope resolves inside it). Sharing one operation name across setups is normal
+    shop practice, so a scope the caller can pass beats an address it has to count out.
+
+    Everything else - a plain miss, and duplicates no setup separates - returns ``refusal``,
+    resolve_cam_node's own text, whose '<name>#<n>' addresses this same input reads back. Wording a
+    second refusal here would be a re-roll that could only offer a rename."""
     want = (operation or "").strip().lower()
     paths = [n for n in names if n and n.split(" / ")[-1].strip().lower() == want]
     if paths:
-        return error(f"'{operation}' is ambiguous - {len(paths)} operations share that name: "
-                     f"{', '.join(paths)}. Rename the target so its name is unique, then retry.")
-    return error(f"No operation matching '{operation}'. Available (sample): "
-                 f"{', '.join(n for n in names[:20] if n)}.")
+        # The setup is the FIRST segment of each breadcrumb (walk_cam_tree builds it setup-first).
+        # Two segments are dropped before anything is offered, because setup= must RESOLVE:
+        #   - a path with no separator is a bare name, not a breadcrumb, so its first segment is
+        #     the operation itself;
+        #   - a setup holding SEVERAL of the duplicates refuses again when scoped to, so naming it
+        #     would print a value this tool rejects - the very defect this remedy exists to end.
+        # Only a setup appearing EXACTLY ONCE holds exactly one of them, so only it is offered.
+        heads = [p.split(" / ")[0].strip() for p in paths if " / " in p]
+        scopes = [s for s in dict.fromkeys(heads) if s and heads.count(s) == 1]
+        if scopes:
+            # Capped like every other list that crosses the wire: one name can be shared by dozens
+            # of operations, and a silently truncated list reads as the complete set.
+            return error(f"'{operation}' is ambiguous - {len(paths)} operations share that name: "
+                         f"{named_with_remainder(paths)}. Retry with the setup that holds the one "
+                         "you mean: " + ", ".join(f"setup='{s}'" for s in scopes) + ".")
+    return error(refusal)
+
+
+def _resolve_op_in_scope(cam, operation, setup):
+    """(operation, error_result_or_None) - the ONE operation resolve behind the deep per-operation
+    slices (parameters, tool), so both accept the same vocabulary and refuse the same way.
+
+    'setup' SCOPES the resolve, not only the listing: an operation name is unique only WITHIN a
+    setup, so with several setups holding the same name an unscoped read can do nothing but refuse -
+    which is why _op_miss_error offers setup= and this resolves inside it. The scoped resolve is the
+    shared resolve_cam_node over that setup's subtree alone (case-insensitive exact, a miss lists
+    that setup's operations).
+
+    UNSCOPED it is that same resolver over the whole tree, so the '<name>#<n>' address its ambiguity
+    refusal hands back is a spelling this call reads. The duplicates' breadcrumbs - what
+    _op_miss_error builds the narrower setup= remedy from - come back from the SAME call through
+    resolve_operation, off the one operation pool it resolved against: the remedy therefore cannot
+    name setups from a census the refusal was not about, and an unscoped miss walks the tree once."""
+    want_setup = (setup or "").strip()
+    if not want_setup:
+        node, rerr, names = resolve_operation(cam, operation)
+        if node is not None:
+            return node.obj, None
+        return None, _op_miss_error(operation, names, rerr)
+    s, _names, serr = find_setup(cam, want_setup)
+    if not s:
+        return None, error(serr)
+    node, rerr = resolve_cam_node(cam, operation, kinds=("operation",), setup=s,
+                                  label=f"operation in setup '{want_setup}'")
+    if rerr:
+        return None, error(rerr)
+    return node.obj, None
 
 
 def _grouped_visible_params(param_coll):
@@ -231,37 +323,114 @@ def _grouped_visible_params(param_coll):
     return {g: rows for g, rows in groups.items() if rows}
 
 
-def _slice_parameters(cam, operation):
-    """ONE operation's machining parameters, visible-only and grouped by section. Requires 'operation'."""
+# The setup's stock/model extents. These are COMPUTED parameters: they read isVisible False (so the
+# visible+enabled grouping above drops them) and isEditable False, and they are the numbers the
+# stock-size expressions in the visible rows refer to.
+#
+# A CAMParameter carries the SAME length two ways, in two DIFFERENT units, measured on a millimetre
+# document: .value.value is Fusion's internal CENTIMETRES (stockXLow -17.63) while .expression is the
+# authored text in the document's own display unit (-176.3). So the value is scaled out of cm like
+# every other length this server publishes, and the expression ships verbatim - converting it would
+# corrupt an authored string that may not even be a number ('stockXHigh - stockXLow').
+_STOCK_EXTENTS = ("stockXLow", "stockXHigh", "stockYLow", "stockYHigh", "stockZLow", "stockZHigh",
+                  "surfaceXLow", "surfaceXHigh", "surfaceYLow", "surfaceYHigh",
+                  "surfaceZLow", "surfaceZHigh")
+
+_SETUP_PARAM_NOTE = (
+    "The setup's own parameters, filtered to the visible+enabled rows and grouped like the Fusion "
+    "panel (job_stockMode is the stock mode). 'stock_extents' adds the computed low/high extents "
+    "the stock-size rows refer to - they read isVisible false, so the grouping above drops them. "
+    "Each extent carries the same length twice, in DIFFERENT units: 'value' is scaled into the "
+    "'units' this block names, while 'expression' is the parameter's authored text in the "
+    "document's own display unit (measured: value -17.63 beside expression -176.3 on the same "
+    "parameter). Subtract low from high in ONE of them, never across the two.")
+
+
+def _stock_extents(param_coll, factor, unit) -> dict:
+    """{units, <name>: {value, expression}} for the computed stock/model extents that ARE present. A
+    name the setup does not carry is simply absent - nothing is reported for a parameter that did
+    not read. 'value' is scaled out of Fusion's internal cm; 'expression' is left as authored."""
+    out = {}
+    for name in _STOCK_EXTENTS:
+        p = safe(lambda name=name: param_coll.itemByName(name))
+        if p is None:
+            continue
+        row = {"value": measured(lambda p=p: p.value.value, factor),
+               "expression": safe(lambda p=p: p.expression)}
+        if row["value"] is not None or row["expression"]:
+            out[name] = row
+    if out:
+        out["units"] = unit          # names the unit 'value' is in; 'expression' is not in it
+    return out
+
+
+def _slice_setup_parameters(cam, setup, units):
+    """ONE SETUP's own parameters (the read-back side of cam_edit_setup's writes): the visible rows
+    grouped by section, plus the computed stock extents."""
+    factor = CM_TO_UNIT.get((units or "mm").strip().lower())
+    if factor is None:
+        return None, error(f"Unknown units '{units}'. Valid: mm, cm, in.")
+    s, _names, err = find_setup(cam, setup)
+    if not s:
+        return None, error(err)
+    params = safe(lambda: s.parameters)
+    if params is None:
+        return None, error(f"Setup '{setup}' exposes no readable parameters - nothing about its "
+                           "stock or job settings can be read.")
+    groups = _grouped_visible_params(params)
+    out = {"setup": safe(lambda: s.name), "sections": groups,
+           "parameter_count": sum(len(v) for v in groups.values()),
+           "note": _SETUP_PARAM_NOTE}
+    extents = _stock_extents(params, factor, (units or "mm").strip().lower())
+    if extents:
+        out["stock_extents"] = extents
+    return out, None
+
+
+def _slice_parameters(cam, operation, setup, units="mm"):
+    """ONE operation's machining parameters, or ONE setup's own (pass 'setup' with no 'operation'),
+    visible-only and grouped by section. With BOTH named, 'setup' scopes which operation of that
+    name is read."""
     if not (operation or "").strip():
+        if (setup or "").strip():
+            return _slice_setup_parameters(cam, setup, units)
         return None, error("include=['parameters'] needs 'operation' - the operation whose settings to "
-                           "read (scope first with cam_get(setup=..., include=['operations'])).")
-    op, names = find_operation(cam, operation)
-    if not op:
-        return None, _op_miss_error(operation, names)
+                           "read (scope first with cam_get(setup=..., include=['operations'])); or "
+                           "'setup' alone for that SETUP's own parameters (stock mode + extents).")
+    op, oerr = _resolve_op_in_scope(cam, operation, setup)
+    if oerr:
+        return None, oerr
     groups = _grouped_visible_params(safe(lambda: op.parameters))
     return {"operation": safe(lambda: op.name), "strategy": safe(lambda: op.strategy),
             "sections": groups,
             "parameter_count": sum(len(v) for v in groups.values())}, None
 
 
-def _slice_tool(cam, operation, preset):
+def _slice_tool(cam, operation, preset, setup=""):
     """ONE operation's tool: spec + its preset NAMES (a tool can hold 20+); 'preset' drills one preset's
-    expressions (the feeds/speeds recipe). Requires 'operation'."""
+    expressions (the feeds/speeds recipe). Requires 'operation'; 'setup' scopes which operation of
+    that name is read, through the same resolve the parameters slice runs."""
     if not (operation or "").strip():
         return None, error("include=['tool'] needs 'operation' - the operation whose tool to read.")
-    op, names = find_operation(cam, operation)
-    if not op:
-        return None, _op_miss_error(operation, names)
+    op, oerr = _resolve_op_in_scope(cam, operation, setup)
+    if oerr:
+        return None, oerr
     t = safe(lambda: op.tool)
     if not t:
         return {"operation": safe(lambda: op.name), "tool": None}, None
     presets = list(iter_collection(safe(lambda: t.presets)))
     pnames = [safe(lambda p=p: p.name) for p in presets]
     from . import _cam_common as _cc
+    # WHICH of those presets this operation runs. Two operations can share one tool and use
+    # different presets (measured: one 3mm bullnose driving a 'Wall_Finishing' op and a
+    # 'Floor_Finishing' one), so the tool description alone cannot say what feeds an op is cutting
+    # at. Null when the operation carries no preset.
+    active = safe(lambda: op.toolPreset)
     out = {"operation": safe(lambda: op.name),
            "tool": safe(lambda: t.description),
            "holder": _cc.tool_holder(t),          # assigned holder identity (None if the tool has none)
+           "active_preset": ({"name": safe(lambda: active.name), "id": safe(lambda: active.id)}
+                             if active is not None else None),
            "preset_names": pnames, "preset_count": len(pnames)}
     want_preset = (preset or "").strip()
     if want_preset:
@@ -305,12 +474,12 @@ def handler(include=None, setup: str = "", operation: str = "", preset: str = ""
         out["operations"], e = _slice_operations(cam, setup)
         if e:
             return e
-    if "parameters" in inc:                     # deep: ONE operation's settings, grouped
-        out["parameters"], e = _slice_parameters(cam, operation)
+    if "parameters" in inc:                     # deep: ONE operation's (or setup's) settings, grouped
+        out["parameters"], e = _slice_parameters(cam, operation, setup, units)
         if e:
             return e
     if "tool" in inc:                           # deep: ONE operation's tool + presets (preset= drills)
-        out["tool"], e = _slice_tool(cam, operation, preset)
+        out["tool"], e = _slice_tool(cam, operation, preset, setup)
         if e:
             return e
     if "references" in inc:
@@ -322,7 +491,11 @@ def handler(include=None, setup: str = "", operation: str = "", preset: str = ""
         if e:
             return e
     if "time" in inc:
-        out["time"], e = _slice_time(cam, setup)
+        out["time"], e = _slice_time(cam, setup, units)
+        if e:
+            return e
+    if "machine" in inc:                        # the assigned machine's spindle/axis limits
+        out["machine"], e = _slice_machine(cam, setup, units)
         if e:
             return e
     if "tools" in inc:
@@ -377,33 +550,33 @@ def _normalize_include(include):
 
 TOOL_DESCRIPTION = (
     "Read the active document's CAM (Manufacture) state by zoom level. Default (no 'include'): "
-    "per setup, op_states (valid/out_of_date/suppressed/error/warning tally), "
-    "invalidation_reasons (why ops are stale), machine_out_of_date, and wcs (its origin/orientation "
-    "mode plus any geometry the WCS is bound to). 'include' deepens; scope "
-    "before you deepen: 'operations' (per-op state; 'setup' filters; cam_compare_operations diffs "
-    "two) -> 'parameters' or 'tool' with 'operation'=<name> for one op's machining settings "
-    "(grouped by section) or its tool + presets -> 'preset'=<name> for its feeds/speeds "
-    "expressions. Document-level slices: 'references' (X-ref source docs), 'nc_programs', 'time' "
-    "(cycle estimate), 'tools' (the tool sheet ops use), 'library' (a tool library's catalog to add "
-    "from - 'scope'/'library'/'tool_type' filter it; edits stay on cam_edit_tools), "
-    "'library_types' (the add_tools[].from_type "
-    "vocabulary), 'machines' (the machine catalog cam_edit_setup assigns), "
-    "'templates' (the toolpath template library; apply/save: cam_apply_template / "
-    "cam_save_template), 'inspection' (probing results per measure, tolerance tally + worst "
-    "point; 'measure'=<index> lists its out-of-tolerance points). Readable from any workspace; "
-    "operation validity is trustworthy only after Manufacture has been entered."
+    "per setup, op_states (the per-state tally), invalidation_reasons (why ops are stale), "
+    "machine_out_of_date and wcs (origin/orientation mode + bound geometry). 'include' deepens; "
+    "scope first: 'operations' (per-op state, folder, preset, spindle-vs-machine; 'setup' filters; "
+    "cam_compare_operations diffs two) -> 'parameters' or 'tool' with 'operation'=<name> for one "
+    "op's settings (grouped by section) or its tool + presets -> 'preset'=<name> for its "
+    "feeds/speeds expressions. 'parameters' with 'setup' alone reads that SETUP's own stock "
+    "parameters; 'machine' reads its machine's spindle and axis limits. Document-level: "
+    "'references' (X-ref sources), 'nc_programs', 'time' (cycle estimate), 'tools' (the tool "
+    "sheet), 'library' (a tool library's catalog to add from - "
+    "'scope'/'library'/'tool_type' filter it; edits stay on cam_edit_tools), 'library_types' (the "
+    "add_tools[].from_type vocabulary), 'machines' (the catalog cam_edit_setup assigns), "
+    "'templates' (the toolpath library; apply/save: cam_apply_template / cam_save_template), "
+    "'inspection' (probing results; 'measure'=<index> drills its out-of-tolerance points). "
+    "Readable from any workspace; op validity is trustworthy only after Manufacture is entered."
 )
 
 tool = (
     Tool.create_simple(name="cam_get", description=TOOL_DESCRIPTION)
     .add_input_property("include", {"type": ["array", "string"],
             "description": "Deeper slices: operations | parameters | tool | references | nc_programs | "
-                           "time | tools | library | library_types | machines | templates | inspection (list or "
-                           "comma-string). parameters/tool need 'operation'. Omit for the setups orientation slice."})
+                           "time | tools | library | library_types | machine | machines | templates | inspection "
+                           "(list or comma-string). tool needs 'operation'; parameters needs 'operation' or "
+                           "'setup'. Omit for the setups orientation slice."})
     .add_input_property("setup", {"type": "string",
-            "description": "Scope operations/references/time to this setup name (omit = all setups)."})
+            "description": "Scope operations/references/time/machine to this setup name, and the target for a setup parameter read (omit = all setups). It also picks WHICH operation a parameters/tool read means when several setups hold that operation name."})
     .add_input_property("operation", {"type": "string",
-            "description": "The operation whose parameters/tool to read (required for include=parameters/tool)."})
+            "description": "The operation whose parameters/tool to read (required for include=tool)."})
     .add_input_property("preset", {"type": "string",
             "description": "With include=['tool']: drill this tool preset's feeds/speeds expressions."})
     .add_input_property("scope", {"type": "string", "enum": ["document", "local", "cloud", "hub"],

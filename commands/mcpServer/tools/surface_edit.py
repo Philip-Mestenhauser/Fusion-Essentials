@@ -15,6 +15,7 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, scale, target_component
 from . import _common
+from . import _geom
 from . import _inputs
 from . import _assert
 
@@ -184,21 +185,16 @@ def _created_bodies(feature):
     lists the pre-existing SOURCE solid (live-verified: offsetting one face of solid Body1 reports
     bodies [Body1, Body2]), so an isSolid read over it calls a genuine open surface 'solid'. The
     faces the feature created - and the bodies that own them - are the actual product. readable=False
-    means feature.faces could not be read at all (nothing was checked)."""
+    means feature.faces could not be read at all (nothing was checked).
+
+    The owning-body walk itself is _geom.owning_bodies - the same face -> body read, the same
+    skip-on-unreadable, the same _common.native_identity de-dup - so this adds only the face COUNT
+    and the readable flag on top of it."""
     faces = safe(lambda: feature.faces)
     if faces is None:
         return [], 0, False
-    bodies, seen = [], set()
     n = int(safe(lambda: faces.count, 0) or 0)
-    for f in _common.iter_collection(faces):
-        b = safe(lambda f=f: f.body)
-        if b is None:
-            continue
-        key = safe(lambda b=b: b.entityToken) or id(b)
-        if key not in seen:
-            seen.add(key)
-            bodies.append(b)
-    return bodies, n, True
+    return _geom.owning_bodies(_common.iter_collection(faces)), n, True
 
 
 # ── surface_trim (the cancel-hazard handler) ────────────────────────────────
@@ -503,14 +499,18 @@ def thicken_handler(faces=None, thickness: float = 0.0, units: str = "mm",
 
     thick_val = adsk.core.ValueInput.createByReal(float(thickness) * k)
     op = getattr(adsk.fusion.FeatureOperations, _common.OPERATIONS[op_key])
-    # For operation='join': the solids standing BEFORE the add, by native token. A join that fused
-    # lands its created faces on one of THESE bodies; a join whose sheet touches no solid silently
-    # mints a NEW free-floating body instead (measured) - the token diff below discloses that.
+    # For operation='join': the solids standing BEFORE the add, by _common.native_identity. A join
+    # that fused lands its created faces on one of THESE bodies; a join whose sheet touches no solid
+    # silently mints a NEW free-floating body instead (measured) - the diff below discloses that.
+    # The key is the identity PAIR, not the bare token: a token is document-local, while this census
+    # is taken on the FACE's own component (census_host) and the feature is added to the ACTIVE one,
+    # so the two sides of the diff are not guaranteed to be one document - and a created body whose
+    # token collided with a censused one would drop out of `loose`, suppressing the warning.
     join_host = (_common.census_host(safe(lambda: face_ents[0].body), comp)
                  if op_key == "join" and face_ents else None)
-    before_tokens = ({t for t in (_common.native_token(b) for b in
-                                  _common.iter_collection(safe(lambda: join_host.bRepBodies)))
-                      if t} if join_host is not None else set())
+    before_keys = ({k for k in (_common.native_identity(b) for b in
+                                _common.iter_collection(safe(lambda: join_host.bRepBodies)))
+                    if k} if join_host is not None else set())
     try:
         thk_input = comp.features.thickenFeatures.createInput(coll, thick_val, bool(symmetric),
                                                               op, bool(chaining))
@@ -584,12 +584,14 @@ def thicken_handler(faces=None, thickness: float = 0.0, units: str = "mm",
         payload["unverified"] = unverified
     if tt_key:
         payload["thicken_type"] = tt_key
-    # join no-fuse disclosure: a created body whose token was NOT among the pre-add solids is a NEW
-    # free-floating body - operation='join' merged nothing (the cut path refuses on its own;
-    # measured, the join path published operation:'join' with modified:[] and no disclosure).
+    # join no-fuse disclosure: a created body whose identity was NOT among the pre-add solids is a
+    # NEW free-floating body - operation='join' merged nothing (the cut path refuses on its own;
+    # measured, the join path published operation:'join' with modified:[] and no disclosure). A body
+    # whose identity cannot be read answers None, which is never in the census either, so it lands in
+    # `loose` - a disclosed warning rather than a silently claimed fuse.
     if op_key == "join" and readable and created:
         loose = [safe(lambda b=b: b.name) for b in created
-                 if (_common.native_token(b) or "") not in before_tokens]
+                 if _common.native_identity(b) not in before_keys]
         if loose:
             payload["fused"] = False
             payload["disjoint_join"] = True

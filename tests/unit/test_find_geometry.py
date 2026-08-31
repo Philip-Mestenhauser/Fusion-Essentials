@@ -201,6 +201,58 @@ def _payload(result):
     return json.loads(result["content"][0]["text"])
 
 
+_WALK_RAISE = "2 : InternalValidationError : occ"
+
+
+class _RaisingColl:
+    """A collection whose COUNT itself raises - unreadable, not empty."""
+    @property
+    def count(self):
+        raise RuntimeError(_WALK_RAISE)
+
+    def item(self, i):
+        raise RuntimeError(_WALK_RAISE)
+
+    def __iter__(self):
+        raise RuntimeError(_WALK_RAISE)
+
+
+class _BlindRoot:
+    """The measured shape of a design holding an unresolved external reference: reading
+    root.allOccurrences RAISES, and here the component-local fallback will not enumerate either -
+    so NEITHER walk answers and the occurrence tree is unknown, not empty."""
+    name = "Root"
+
+    def __init__(self, root_bodies=()):
+        self.bRepBodies = _NamedCollection(list(root_bodies))
+        self.meshBodies = _NamedCollection([])
+        self.occurrences = _RaisingColl()
+        for b in root_bodies:
+            b.parentComponent = self
+
+    @property
+    def allOccurrences(self):
+        raise RuntimeError(_WALK_RAISE)
+
+
+class _BrokenOcc:
+    """An occurrence whose external reference does not resolve: reading its component RAISES (the
+    ONE detector), while its name still reads - the only identity a caller can be given."""
+    name = "Ghost:1"
+
+    @property
+    def component(self):
+        raise RuntimeError("3 : The occurrence's referenced component is unavailable (broken or "
+                           "missing external reference).")
+
+
+def _install_blind(root_bodies=()):
+    """An installed design whose occurrence census cannot be taken at all."""
+    design = _install([], root_bodies=root_bodies)
+    design.rootComponent = _BlindRoot(root_bodies)
+    return design
+
+
 def _cyl(token, r, centroid, axis=(1, 0, 0)):
     return FakeFace(token, _CylGeo(r, axis), centroid)
 
@@ -295,6 +347,88 @@ class TestFind:
         out = _payload(fg.handler(target="X:1"))
         flags = {m["handle"].split("|@")[0]: m.get("hidden") for m in out["matches"]}
         assert flags == {"SHOWN": None, "HIDDEN": True}
+
+
+# ── the search space is disclosed, so a HOLE in it is never published as a complete result ──────
+#
+# root.allOccurrences RAISES on a design holding an unresolved external reference (measured), and
+# swallowing that raise into an empty list turns "the assembly could not be read" into "the design
+# has no occurrences" - a root-bodies-only scan the payload would otherwise present as the whole
+# design. The census the scan ran over is published beside every result.
+
+class TestSearchSpaceDisclosure:
+    def test_a_clean_walk_publishes_the_fast_method_and_adds_no_caveat(self):
+        _install([FakeOcc("X:1", "X", [FakeBody(faces=[_plane("F", (0, 0, 0))])])])
+        out = _payload(fg.handler())
+        assert out["occurrences_walk"] == "allOccurrences"
+        assert "not a complete set" not in out["note"]
+
+    def test_an_unreadable_census_is_disclosed_not_published_as_the_whole_design(self):
+        # THE row: the scan falls back to root-level bodies, and without the marker that reads as a
+        # single-body design rather than an assembly nothing could be enumerated from.
+        _install_blind(root_bodies=[FakeBody(faces=[_plane("ROOT_FACE", (0, 0, 0))])])
+        out = _payload(fg.handler())
+        assert out["returned"] == 1                       # the root body was still scanned
+        assert out["occurrences_walk"] == "unreadable"
+        assert "not a complete set" in out["note"]
+        assert "not an empty design" in out["note"]
+
+    def test_a_MISS_carries_the_same_disclosure(self):
+        # "no such target" is a claim about the design; a census that did not enumerate cannot
+        # support it, so the refusal says which read failed rather than blaming the name.
+        _install_blind()
+        res = fg.handler(target="Bracket:1")
+        assert res["isError"] is True
+        assert "occurrences_walk='unreadable'" in res["message"]
+
+    def test_the_recursed_fallback_is_named(self):
+        # allOccurrences raised but the component.occurrences recursion answered - the rows are real
+        # and the payload says which walk produced them.
+        occ = FakeOcc("X:1", "X", [FakeBody(faces=[_plane("F", (0, 0, 0))])])
+        occ.component.occurrences = _NamedCollection([])
+        occ.childOccurrences = _NamedCollection([])
+        design = _install([occ])
+        root = design.rootComponent
+        design.rootComponent = type("R", (), {
+            "name": "Root",
+            "occurrences": _NamedCollection([occ]),
+            "bRepBodies": root.bRepBodies,
+            "meshBodies": root.meshBodies,
+            "allOccurrences": property(lambda self: (_ for _ in ()).throw(
+                RuntimeError(_WALK_RAISE))),
+        })()
+        out = _payload(fg.handler())
+        assert out["occurrences_walk"] == "recursed"
+        assert "recursed" in out["note"] and out["returned"] == 1
+
+    def test_an_unresolved_reference_is_NAMED_as_geometry_that_was_not_scanned(self):
+        # Its component raises, so it carries no geometry to scan - and saying nothing would let a
+        # short match list read as "that part has no such face".
+        good = FakeOcc("X:1", "X", [FakeBody(faces=[_plane("F", (0, 0, 0))])])
+        _install([good], all_occs=[good, _BrokenOcc()])
+        out = _payload(fg.handler())
+        assert out["returned"] == 1
+        assert "'Ghost:1'" in out["note"] and "unresolved external reference" in out["note"]
+
+    def test_a_walk_that_stopped_short_says_part_of_the_design_was_not_scanned(self):
+        # complete=False: the rows are real but they are not all of them, so the caveat is about
+        # what was NOT reached rather than about which collection answered.
+        occ = FakeOcc("X:1", "X", [FakeBody(faces=[_plane("F", (0, 0, 0))])])
+        occ.component.occurrences = _NamedCollection([])
+        occ.childOccurrences = _RaisingColl()          # the subtree under it will not enumerate
+        design = _install([occ])
+        root = design.rootComponent
+        design.rootComponent = type("R", (), {
+            "name": "Root",
+            "occurrences": _NamedCollection([occ]),
+            "bRepBodies": root.bRepBodies,
+            "meshBodies": root.meshBodies,
+            "allOccurrences": property(lambda self: (_ for _ in ()).throw(
+                RuntimeError(_WALK_RAISE))),
+        })()
+        out = _payload(fg.handler())
+        assert out["occurrences_walk"] == "recursed"
+        assert "did not run to the end" in out["note"]
 
 
 # ── NESTED sub-assembly reach (scan allOccurrences, target by fullPathName) ─────────────────────

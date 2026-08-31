@@ -76,7 +76,14 @@ def wire(monkeypatch):
     """Build a design and patch BOTH design seams (the tool's own ``_common`` and the one
     ``_inputs`` resolves the target through). Returns (design, root)."""
     def _make(bodies=(), occurrences=(), components=(), root_name="Root", meshes=()):
-        root = MakeComp(name=root_name, bodies=list(bodies), occurrences=list(occurrences))
+        # Every component carries an entityToken, and _common.same_component is measured to compare
+        # on it: the root-rename guard cannot tell a sub-component from the root without one, and it
+        # refuses rather than guess. A test that wants the unreadable state deletes the attribute.
+        root = MakeComp(name=root_name, bodies=list(bodies), occurrences=list(occurrences),
+                        entity_token="TOKEN:Root")
+        for i, sub in enumerate(components):
+            if not hasattr(sub, "entityToken"):
+                sub.entityToken = f"TOKEN:Sub{i}"
         root.meshBodies = _NamedCollection(list(meshes))
         design = MakeDesign(comp=root, all_components=[root, *components])
         occs = list(occurrences)
@@ -216,6 +223,18 @@ class TestComponentRename:
         msg = error_message(sn.handler(target="Root", new_name="MainAssembly"))
         assert "ROOT component" in msg
         assert root.name == "Root"
+
+    def test_an_unreadable_identity_refuses_instead_of_attempting_the_rename(self, wire):
+        # same_component answers None when a token will not read, and the platform's root refusal
+        # aborts the enclosing transaction even when caught - so an unproven not-root is never
+        # attempted. The component keeps its name: nothing was set.
+        comp = MakeComp(name="Component1")
+        occ = _Occurrence(comp, index=1)
+        wire(occurrences=[occ], components=[comp])
+        del comp.entityToken
+        msg = error_message(sn.handler(target="Component1:1", new_name="BasePlate"))
+        assert "could not be read" in msg and "not attempted" in msg
+        assert comp.name == "Component1"
 
 
 # ── guards and honesty ───────────────────────────────────────────────────────

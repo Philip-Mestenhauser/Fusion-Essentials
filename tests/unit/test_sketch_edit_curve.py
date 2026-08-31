@@ -83,7 +83,8 @@ class TestGuards:
         # Two components can each hold a "Plate". The refusal names them and nothing is trimmed;
         # calling it "No sketch named 'Plate'" states the opposite of what the walk read.
         refusal = "2 sketches are named 'Plate' ('Plate' in Root, 'Plate' in Frame)"
-        monkeypatch.setattr(mod._common, "find_or_recent_sketch", lambda d, n: (None, n, refusal))
+        monkeypatch.setattr(mod._common, "find_or_recent_sketch",
+                            lambda d, n, remedy=None: (None, n, refusal))
         trimmed = []
         monkeypatch.setattr(_lines(sketch).item(0), "trim", lambda p: trimmed.append(p),
                             raising=False)
@@ -233,6 +234,90 @@ class TestGuards:
         msg = error_message(mod.handler(action="offset", entity_one="line:0", x1=1, y1=1,
                                         distance=-3))
         assert "offset needs 'distance' > 0" in msg and "Got -3" in msg
+
+
+# ── the 'component' SCOPE ────────────────────────────────────────────────────
+# Fusion numbers sketches per component from 1, so two components each holding a "Plate" is the
+# norm. The design-wide refusal is right to refuse - but until this scope existed its only way
+# forward was renaming a sketch, which for a component that arrived inside a referenced document
+# means editing a DIFFERENT document. These drive the REAL walk, not a stubbed resolver.
+
+@pytest.fixture
+def shared_name(mod, monkeypatch):
+    """One name, two components, DIFFERENT contents: Alpha's 'Plate' holds two lines, Beta's holds
+    one. Equal-sized collections would hide a swapped source, and two different NAMES would resolve
+    design-wide without the filter ever running."""
+    a0, a1 = make_sketch_curve("A0", length=10.0), make_sketch_curve("A1", length=4.0)
+    b0 = make_sketch_curve("B0", length=7.0)
+    alpha_sk, beta_sk = make_sketch("Plate", lines=[a0, a1]), make_sketch("Plate", lines=[b0])
+    alpha = MakeComp(name="Alpha", sketches=[alpha_sk])
+    beta = MakeComp(name="Beta", sketches=[beta_sk])
+    install(mod, make_design(comp=alpha, all_components=[alpha, beta]))
+    monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: FakePoint(x, y, z))
+    return alpha_sk, beta_sk
+
+
+def _trim_recorder(monkeypatch, sketch, store):
+    """Record WHICH sketch's line:0 was trimmed - the discriminating read, since both sketches
+    answer to one name and only the object identity says which one the call reached."""
+    monkeypatch.setattr(_lines(sketch).item(0), "trim",
+                        lambda p, s=sketch: (store.append(s), _result())[1], raising=False)
+
+
+class TestComponentScope:
+    def test_the_unscoped_shared_name_refuses_and_names_the_scope_input(self, mod, shared_name,
+                                                                        monkeypatch):
+        alpha_sk, beta_sk = shared_name
+        touched = []
+        _trim_recorder(monkeypatch, alpha_sk, touched)
+        _trim_recorder(monkeypatch, beta_sk, touched)
+        msg = error_message(mod.handler(action="trim", sketch_name="Plate",
+                                        entity_one="line:0", x1=1, y1=1))
+        assert "2 sketches are named 'Plate'" in msg
+        assert "'component'" in msg and "Rename one" not in msg
+        assert touched == []
+
+    def test_the_scope_edits_THAT_components_curve(self, mod, shared_name, monkeypatch):
+        alpha_sk, beta_sk = shared_name
+        touched = []
+        _trim_recorder(monkeypatch, alpha_sk, touched)
+        _trim_recorder(monkeypatch, beta_sk, touched)
+        mod.handler(action="trim", sketch_name="Plate", component="Beta",
+                    entity_one="line:0", x1=1, y1=1)
+        assert touched == [beta_sk]
+
+    def test_the_sibling_component_is_reachable_by_the_same_call(self, mod, shared_name,
+                                                                 monkeypatch):
+        alpha_sk, beta_sk = shared_name
+        touched = []
+        _trim_recorder(monkeypatch, alpha_sk, touched)
+        _trim_recorder(monkeypatch, beta_sk, touched)
+        mod.handler(action="trim", sketch_name="Plate", component="Alpha",
+                    entity_one="line:0", x1=1, y1=1)
+        assert touched == [alpha_sk]
+
+    def test_an_unknown_component_is_refused(self, mod, shared_name, monkeypatch):
+        alpha_sk, _beta_sk = shared_name
+        touched = []
+        _trim_recorder(monkeypatch, alpha_sk, touched)
+        msg = error_message(mod.handler(action="trim", sketch_name="Plate", component="Gamma",
+                                        entity_one="line:0", x1=1, y1=1))
+        assert "No component named 'Gamma'" in msg and touched == []
+
+    def test_a_wrong_component_is_refused_even_when_the_name_is_UNIQUE(self, mod, monkeypatch):
+        # The scope is VALIDATED rather than dropped: otherwise the trim lands in Alpha on a call
+        # that named Beta, and nothing tells the caller.
+        a0 = make_sketch_curve("A0", length=10.0)
+        alpha_sk = make_sketch("OnlyOne", lines=[a0])
+        alpha = MakeComp(name="Alpha", sketches=[alpha_sk])
+        beta = MakeComp(name="Beta", sketches=[])
+        install(mod, make_design(comp=alpha, all_components=[alpha, beta]))
+        monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: FakePoint(x, y, z))
+        touched = []
+        _trim_recorder(monkeypatch, alpha_sk, touched)
+        msg = error_message(mod.handler(action="trim", sketch_name="OnlyOne", component="Beta",
+                                        entity_one="line:0", x1=1, y1=1))
+        assert "'Beta'" in msg and touched == []
 
 
 class TestSingleCurveEdits:
@@ -429,6 +514,13 @@ class TestDownstreamHealth:
 
 
 class TestSketchCurvesChangedPostcondition:
+    def test_the_postcondition_reads_the_same_component_scope_the_handler_edits_in(self, mod):
+        # the handler narrows its by-name resolve with 'component'; a fingerprint that did not
+        # would read a different sketch whenever that name is shared, and disclose an unconfirmed
+        # change over an edit that landed.
+        post, = mod.item.handler.__wrapped__.__assert_postconditions__
+        assert post.keys == ("sketch_name",) and post.scope_keys == ("component",)
+
     def test_an_unchanged_curve_set_is_reported_as_a_no_op(self, mod, sketch):
         kind = load_tool("_assert").SketchCurvesChanged()
         before = kind.capture({"sketch_name": "Plate"})

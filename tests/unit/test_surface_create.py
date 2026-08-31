@@ -526,6 +526,30 @@ class TestSketchNameResolution:
                                   "pass curves.")
         assert "'None'" not in res["message"]
 
+    @pytest.mark.parametrize("tool_name", ["surface_extrude_tool", "surface_revolve_tool"])
+    def test_the_component_scope_is_declared_on_the_wire(self, tool_name):
+        # both schemas are strict, so a handler parameter no property declares is refused before it
+        # reaches the handler - the scope would be unreachable and its refusal would name it anyway.
+        sd = load_tool("_sketch_detail")
+        schema = getattr(sc, tool_name).input_schema["properties"]
+        assert schema["component"] == sd.COMPONENT_SCOPE[1]
+
+    @pytest.mark.parametrize("which", ["extrude", "revolve"])
+    def test_the_component_scope_reaches_the_sketch_resolve(self, which, monkeypatch):
+        # a sketch name two components carry is Fusion's default state, so each of these two
+        # handlers needs its own 'component' to say which one it means - and must hand it to the
+        # shared resolver, whose refusals name that same input back.
+        seen = {}
+
+        def _scoped(design, name, component, input_name="component"):
+            seen.update(component=component, input_name=input_name)
+            return None, name, "refused"
+
+        monkeypatch.setattr(sc._sketch_detail, "scoped_or_recent_sketch", _scoped)
+        res = self._call(which, [FakeSketch("S")], sketch_name="S", component="Frame")
+        assert res["isError"] is True and res["message"] == "refused"
+        assert seen == {"component": "Frame", "input_name": "component"}
+
     @pytest.mark.parametrize("which", ["extrude", "revolve"])
     def test_a_whitespace_only_sketch_name_uses_the_most_recent_sketch(self, which):
         # ' ' strips to blank, which is the most-recent-sketch request - not a search for a sketch

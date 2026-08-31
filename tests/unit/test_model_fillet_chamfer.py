@@ -9,7 +9,7 @@ import math
 
 import pytest
 
-from conftest import BRepFace, load_tool
+from conftest import BRepFace, FakeUnitsManager, load_tool
 
 fl = load_tool("model_fillet_chamfer")
 
@@ -335,10 +335,21 @@ class TestGuards:
         res = fl._fillet_handler(body_name="B", radius=1, edge_filter="weird")
         assert res["isError"] is True and "edge_filter" in res["message"]
 
-    def test_nonnumeric_radius(self):
+    def test_nonnumeric_radius_is_read_as_an_expression_and_refused_by_name(self):
+        # A non-numeric radius string is a parameter EXPRESSION, so the refusal comes from the units
+        # engine that could not evaluate it - naming the input and the value, not "not a number".
         _install([FakeBody("B", [True])])
         res = fl._fillet_handler(body_name="B", radius="big")
-        assert res["isError"] is True and "must be a number" in res["message"]
+        assert res["isError"] is True
+        assert "'radius'" in res["message"] and "did not evaluate" in res["message"]
+        assert "'big'" in res["message"]
+
+    def test_a_nonnumeric_chamfer_distance_is_still_just_not_a_number(self):
+        # Only the fillet RADIUS takes the expression form; the chamfer's distance is compared as a
+        # number against the created feature, so a string there is refused outright.
+        _install([FakeBody("B", [True])])
+        res = fl._chamfer_handler(body_name="B", distance="big", edge_filter="all")
+        assert res["isError"] is True and "'distance' must be a number." in res["message"]
 
     def test_no_matching_edges_errors(self):
         # body has only convex edges; a concave filter matches nothing
@@ -1157,3 +1168,216 @@ class TestFilletGuardsBite:
         assert res["isError"] is True
         assert "try a smaller value" not in res["message"]
         assert "not necessarily the problem" in res["message"]
+
+
+def _parametric(monkeypatch, install, *args, engine=None, **kw):
+    """`install` (either installer) plus conftest's shared units engine on the design and a
+    ValueInput.createByString seam, so the two ValueInput forms are told apart by shape:
+    ('real', cm) vs ('string', expr).
+
+    The default engine resolves 'WallT/2' and nothing else, at 6.5 mm - which the engine's measured
+    unit mapping answers as 0.65 internal cm, a value no literal in these tests uses. Passing
+    valid=() gives an engine that RAISES on every call, which is how a literal is proved never to
+    reach it."""
+    import adsk.core
+    out = install(*args, **kw)
+    design = fl._inputs._common.design()
+    design.unitsManager = engine if engine is not None else FakeUnitsManager(valid=("WallT/2",),
+                                                                             value=6.5)
+    monkeypatch.setattr(adsk.core.ValueInput, "createByString",
+                        staticmethod(lambda s: ("string", s)), raising=False)
+    return out + (design,)
+
+
+def _blind_engine():
+    """A units engine that resolves NOTHING - every evaluateExpression raises."""
+    return FakeUnitsManager(valid=())
+
+
+class TestRadiusTakesAParameterExpression:
+    """A fillet radius may be a parameter EXPRESSION, so the fillet is driven by a user parameter
+    rather than frozen at a number. Only the RADIUS: the chamfer's distance is compared as a number
+    against the distance the created feature reports, and 'chord_length' is not opened here - both
+    stay numeric, and their schemas say so."""
+
+    def test_an_expression_radius_crosses_as_the_string_not_an_evaluated_number(self, monkeypatch):
+        ff, _cf, _d = _parametric(monkeypatch, _install, [FakeBody("B", [True])])
+        out = _payload(fl._fillet_handler(body_name="B", radius="WallT/2", units="mm",
+                                          edge_filter="all"))
+        _edges, val, _tangent = ff.last.edge_set
+        assert val == ("string", "WallT/2")
+        # not the evaluated 0.65 cm, and not any scaling of it: substituting the number would
+        # freeze the fillet at today's value of the parameter
+        assert val != ("real", 0.65) and val != ("real", 0.065)
+        assert out["radius"] == "WallT/2"
+
+    def test_a_literal_radius_still_crosses_as_a_scaled_number(self, monkeypatch):
+        # the engine resolves nothing, so a literal routed through it would come back refused
+        ff, _cf, _d = _parametric(monkeypatch, _install, [FakeBody("B", [True])],
+                                  engine=_blind_engine())
+        out = _payload(fl._fillet_handler(body_name="B", radius=2, units="mm", edge_filter="all"))
+        assert ff.last.edge_set[1] == ("real", pytest.approx(0.2))
+        assert out["radius"] == 2.0
+
+    def test_a_numeric_STRING_is_a_literal_not_an_expression(self, monkeypatch):
+        # '2' is a number written as a string - resolving it as an expression would tie the fillet
+        # to nothing, and against this engine it would be refused outright
+        ff, _cf, _d = _parametric(monkeypatch, _install, [FakeBody("B", [True])],
+                                  engine=_blind_engine())
+        out = _payload(fl._fillet_handler(body_name="B", radius="2", units="mm", edge_filter="all"))
+        assert ff.last.edge_set[1] == ("real", pytest.approx(0.2))
+        assert out["radius"] == 2.0
+
+    def test_an_unresolvable_expression_is_refused_before_any_feature_is_built(self, monkeypatch):
+        ff, _cf, _d = _parametric(monkeypatch, _install, [FakeBody("B", [True])])
+        res = fl._fillet_handler(body_name="B", radius="Missing/2", units="mm", edge_filter="all")
+        assert res["isError"] is True
+        assert "'radius'" in res["message"] and "Missing/2" in res["message"]
+        assert "param_get" in res["message"]
+        assert ff.last is None            # createInput was never reached
+
+    def test_the_expression_is_refused_ahead_of_the_edge_scope_guard(self, monkeypatch):
+        # the same order a literal is judged in: the size before the edge scope
+        _parametric(monkeypatch, _install, [FakeBody("B", [True])])
+        res = fl._fillet_handler(body_name="B", radius="Missing/2", units="mm")
+        assert res["isError"] is True and "did not evaluate" in res["message"]
+
+    def test_a_variable_fillets_START_radius_takes_the_expression(self, monkeypatch):
+        ff, _cf, _d = _parametric(monkeypatch, _install_edge_handles,
+                                  {"E1": _FakeEdgeEnt("Bracket")})
+        ff.result = FakeCountingFeature("Fillet1", faces=1)
+        _payload(fl._fillet_handler(fillet_type="variable", edges=["E1"], radius="WallT/2",
+                                    end_radius=5, units="mm"))
+        _edges, start, end, _pos, _rad = ff.last.variable_set
+        assert start == ("string", "WallT/2")
+        assert end == ("real", pytest.approx(0.5))     # end_radius stays a number
+
+    def test_a_chord_LENGTH_is_still_a_number_only(self, monkeypatch):
+        # the expression form is opened on 'radius' alone; chord_length's schema types it as a
+        # number, and the refusal is what keeps the two surfaces saying the same thing
+        _parametric(monkeypatch, _install_edge_handles, {"E1": _FakeEdgeEnt("Bracket")})
+        res = fl._fillet_handler(fillet_type="chord_length", edges=["E1"], chord_length="WallT/2",
+                                 units="mm")
+        assert res["isError"] is True and "'chord_length' must be a number." in res["message"]
+
+    def test_a_chamfer_distance_is_still_a_number_only(self, monkeypatch):
+        # _chamfer_readback compares the created feature's distance against this number
+        _parametric(monkeypatch, _install, [FakeBody("B", [True])])
+        res = fl._chamfer_handler(body_name="B", distance="Chamf", units="mm", edge_filter="all")
+        assert res["isError"] is True and "'distance' must be a number." in res["message"]
+
+    def test_the_positive_and_zero_guards_still_bite_on_a_literal(self, monkeypatch):
+        _parametric(monkeypatch, _install, [FakeBody("B", [True])])
+        for bad in (0, -1):
+            res = fl._fillet_handler(body_name="B", radius=bad, units="mm", edge_filter="all")
+            assert res["isError"] is True and "positive radius" in res["message"]
+
+    def test_an_expression_evaluating_NON_POSITIVE_is_refused_naming_the_value(self, monkeypatch):
+        # '-1 mm' and '0 mm' are legal expressions the engine resolves happily; only the evaluated
+        # value catches them, and without it they reach filletFeatures.add
+        for expr, value, shown in (("Neg", -1.0, "-1.0 mm"), ("Zero", 0.0, "0.0 mm")):
+            ff, _cf, _d = _parametric(monkeypatch, _install, [FakeBody("B", [True])],
+                                      engine=FakeUnitsManager(valid=(expr,), value=value))
+            res = fl._fillet_handler(body_name="B", radius=expr, units="mm", edge_filter="all")
+            assert res["isError"] is True, expr
+            assert "positive radius" in res["message"] and f"'{expr}'" in res["message"]
+            assert shown in res["message"]
+            assert ff.last is None            # refused before the input was built
+
+    def test_the_boundary_a_hair_ABOVE_zero_is_accepted(self, monkeypatch):
+        # the guard is <= 0, not < 0: the smallest positive value must still build
+        ff, _cf, _d = _parametric(monkeypatch, _install, [FakeBody("B", [True])],
+                                  engine=FakeUnitsManager(valid=("Tiny",), value=0.001))
+        _payload(fl._fillet_handler(body_name="B", radius="Tiny", units="mm", edge_filter="all"))
+        assert ff.last.edge_set[1] == ("string", "Tiny")
+
+    def test_a_units_engine_answering_a_NON_NUMBER_does_not_refuse_the_call(self, monkeypatch):
+        # an unreadable evaluation is not evidence of a bad radius - it withholds the guard rather
+        # than inventing a verdict
+        engine = FakeUnitsManager(valid=("Odd",))
+        engine.evaluateExpression = lambda expr, units=None: object()
+        ff, _cf, _d = _parametric(monkeypatch, _install, [FakeBody("B", [True])], engine=engine)
+        _payload(fl._fillet_handler(body_name="B", radius="Odd", units="mm", edge_filter="all"))
+        assert ff.last.edge_set[1] == ("string", "Odd")
+
+
+class TestRuleFilletRadiusTakesAnExpression:
+    """The rule fillet's radius is the same input, so it takes the same two forms - and the applied
+    radius is read back and compared on BOTH: a literal against its own scaled number, an
+    expression against the value the units engine evaluated it to."""
+
+    def _settings(self, cm, topology=0):
+        return type("S", (), {"radius": type("V", (), {"value": cm})(),
+                              "topologyType": topology})()
+
+    def test_the_expression_reaches_the_rule_input_as_a_string(self, monkeypatch):
+        ff, _cf, _d = _parametric(monkeypatch, _install_edge_handles, {"F1": _face()})
+        out = _payload(fl._fillet_handler(fillet_type="rule", faces=["F1"], radius="WallT/2",
+                                          units="mm"))
+        assert ff.rule_last.radius == ("string", "WallT/2")
+        assert out["radius_expression"] == "WallT/2"
+
+    def test_an_unresolvable_rule_radius_is_refused_before_the_input_is_built(self, monkeypatch):
+        ff, _cf, _d = _parametric(monkeypatch, _install_edge_handles, {"F1": _face()})
+        res = fl._fillet_handler(fillet_type="rule", faces=["F1"], radius="Missing", units="mm")
+        assert res["isError"] is True and "did not evaluate" in res["message"]
+        assert ff.rule_last is None
+
+    def test_a_settings_radius_that_disagrees_IS_an_error_for_an_expression(self, monkeypatch):
+        # the case the skipped compare let through: asked for 6.5 mm, landed at 99, reported ok
+        ff, _cf, _d = _parametric(monkeypatch, _install_edge_handles, {"F1": _face()})
+        ff.rule_settings_override = self._settings(9.9)
+        res = fl._fillet_handler(fillet_type="rule", faces=["F1"], radius="WallT/2", units="mm")
+        assert res["isError"] is True
+        assert "radius reads back 99.0 mm" in res["message"]
+        assert "6.5 mm" in res["message"] and "'WallT/2'" in res["message"]
+
+    def test_the_same_disagreement_IS_an_error_for_a_literal(self, monkeypatch):
+        ff, _cf, _d = _parametric(monkeypatch, _install_edge_handles, {"F1": _face()})
+        ff.rule_settings_override = self._settings(9.9)
+        res = fl._fillet_handler(fillet_type="rule", faces=["F1"], radius=3, units="mm")
+        assert res["isError"] is True and "radius reads back" in res["message"]
+
+    def test_a_radius_MATCHING_the_evaluated_expression_is_accepted(self, monkeypatch):
+        # the other half of the compare: the applied radius IS what the expression evaluates to
+        ff, _cf, _d = _parametric(monkeypatch, _install_edge_handles, {"F1": _face()})
+        ff.rule_settings_override = self._settings(0.65)
+        out = _payload(fl._fillet_handler(fillet_type="rule", faces=["F1"], radius="WallT/2",
+                                          units="mm"))
+        assert out["radius"] == 6.5 and out["radius_expression"] == "WallT/2"
+
+    def test_a_literal_radius_publishes_no_expression_key(self, monkeypatch):
+        _parametric(monkeypatch, _install_edge_handles, {"F1": _face()})
+        out = _payload(fl._fillet_handler(fillet_type="rule", faces=["F1"], radius=3, units="mm"))
+        assert out["radius"] == 3.0 and "radius_expression" not in out
+
+    def test_the_topology_check_still_bites_under_an_expression(self, monkeypatch):
+        # the radius here MATCHES what the expression evaluates to, so the topology mismatch is the
+        # one thing left to report
+        ff, _cf, _d = _parametric(monkeypatch, _install_edge_handles, {"F1": _face()})
+        ff.rule_settings_override = self._settings(0.65, topology=99)
+        res = fl._fillet_handler(fillet_type="rule", faces=["F1"], radius="WallT/2", units="mm")
+        assert res["isError"] is True and "topology is not the requested" in res["message"]
+
+    def test_a_rule_expression_evaluating_NON_POSITIVE_is_refused(self, monkeypatch):
+        # both sides of the <= 0 boundary a legal expression can land on
+        for expr, value, shown in (("Neg", -2.0, "-2.0 mm"), ("Zero", 0.0, "0.0 mm")):
+            ff, _cf, _d = _parametric(monkeypatch, _install_edge_handles, {"F1": _face()},
+                                      engine=FakeUnitsManager(valid=(expr,), value=value))
+            res = fl._fillet_handler(fillet_type="rule", faces=["F1"], radius=expr, units="mm")
+            assert res["isError"] is True, expr
+            assert "positive radius" in res["message"] and shown in res["message"]
+            assert ff.rule_last is None
+
+    def test_an_UNREADABLE_evaluation_withholds_the_compare(self, monkeypatch):
+        # want_cm None means nothing was measured to compare the applied radius against. Comparing
+        # against 0 instead would roll a healthy fillet out reporting "reads back 6.5 mm, not the
+        # requested 0.0" - a verdict from a read that never answered.
+        engine = FakeUnitsManager(valid=("Odd",))
+        engine.evaluateExpression = lambda expr, units=None: object()
+        ff, _cf, _d = _parametric(monkeypatch, _install_edge_handles, {"F1": _face()},
+                                  engine=engine)
+        ff.rule_settings_override = self._settings(0.65)
+        out = _payload(fl._fillet_handler(fillet_type="rule", faces=["F1"], radius="Odd",
+                                          units="mm"))
+        assert out["radius"] == 6.5 and out["radius_expression"] == "Odd"

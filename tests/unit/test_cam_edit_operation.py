@@ -56,10 +56,85 @@ class FakeParams:
 
 
 class FakeOp:
-    def __init__(self, name, params):
+    def __init__(self, name, params, suppressed=False, has_toolpath=True):
         self.name = name
         self.parameters = FakeParams(params)
         self.strategy = "adaptive"
+        self._suppressed = bool(suppressed)
+        self._has_toolpath = bool(has_toolpath)
+
+    @property
+    def isSuppressed(self):
+        return self._suppressed
+
+    @isSuppressed.setter
+    def isSuppressed(self, value):
+        self._suppressed = bool(value)
+        # Suppressing DISCARDS the toolpath: hasToolpath reads True before the set and False after
+        # (ledger row cam-suppress-discards-toolpath). What UNsuppressing does to the toolpath is
+        # not measured, so this fake leaves the flag where the suppression put it.
+        if self._suppressed:
+            self._has_toolpath = False
+
+    @property
+    def hasToolpath(self):
+        return self._has_toolpath
+
+
+class DroppedFlagOp(FakeOp):
+    """A setter the platform accepts and silently drops - the swallowed no-op the gate exists for."""
+
+    @FakeOp.isSuppressed.setter
+    def isSuppressed(self, value):
+        pass
+
+
+class RaisingSetterOp(FakeOp):
+    @FakeOp.isSuppressed.setter
+    def isSuppressed(self, value):
+        raise RuntimeError("operation is locked")
+
+
+class UnreadableAfterOp(FakeOp):
+    """isSuppressed reads until it is written, then stops answering - the UNCONFIRMED case."""
+
+    @property
+    def isSuppressed(self):
+        if self._suppressed:
+            raise RuntimeError("no longer readable")
+        return False
+
+    @isSuppressed.setter
+    def isSuppressed(self, value):
+        self._suppressed = bool(value)
+
+
+class UnreadableToolpathOp(FakeOp):
+    """isSuppressed answers; hasToolpath does not - the flag pair the note is worded from is half
+    unreadable, and neither half may be reported as a value the property held."""
+
+    @property
+    def hasToolpath(self):
+        raise RuntimeError("hasToolpath unreadable")
+
+
+class UnreadableBeforeOp(FakeOp):
+    """The PRIOR flag cannot be read; every read after the set answers normally."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self._reads = 0
+
+    @property
+    def isSuppressed(self):
+        self._reads += 1
+        if self._reads == 1:
+            raise RuntimeError("not readable yet")
+        return self._suppressed
+
+    @isSuppressed.setter
+    def isSuppressed(self, value):
+        self._suppressed = bool(value)
 
 
 class FakeOps:
@@ -101,6 +176,12 @@ def _install(monkeypatch, op_name="Adaptive1", params=None):
     op = FakeOp(op_name, params)
     cam = FakeCAM([op])
     monkeypatch.setattr(ce, "get_cam", lambda: (cam, None))
+    return op
+
+
+def _install_op(monkeypatch, op):
+    """Install ONE prepared operation (a flag-behaviour variant) behind get_cam."""
+    monkeypatch.setattr(ce, "get_cam", lambda: (FakeCAM([op]), None))
     return op
 
 
@@ -198,6 +279,130 @@ class TestEditOperation:
         c = out["changed"][0]
         assert c["after"] == "3000"          # the expression text
         assert c["value"] == 3000.0          # the evaluated value
+
+
+class TestSuppression:
+    """The WRITE side of Operation.isSuppressed: set, read back, and report what the set cost.
+
+    Every claim in the payload is a read: the flag after the set, the flag before it, and
+    hasToolpath on BOTH sides - suppressing DISCARDS the toolpath rather than hiding it, so the
+    before/after pair is what makes the cost visible at the moment of use.
+    """
+
+    def test_suppressing_reports_the_flag_and_the_discarded_toolpath(self, monkeypatch):
+        op = _install_op(monkeypatch, FakeOp("Drill1", {"tool_stepover": "2."}, has_toolpath=True))
+        out = _payload(ce.handler(operation="Drill1", suppressed=True))
+        assert op.isSuppressed is True
+        assert out["is_suppressed"] is True and out["was_suppressed"] is False
+        assert out["had_toolpath"] is True and out["has_toolpath"] is False
+        assert "DISCARDED the toolpath" in out["note"]
+        assert "only valid toolpaths post" in out["note"]
+        assert out["updated_count"] == 0 and out["changed"] == []
+
+    def test_suppressing_an_op_with_no_toolpath_claims_no_discard(self, monkeypatch):
+        # The DISCARD sentence carries the measured consequence, so it may only appear where THIS
+        # call read the transition: hasToolpath True before and False after. An op that held no
+        # toolpath to begin with lost nothing, and the note must say what it read instead.
+        op = _install_op(monkeypatch,
+                         FakeOp("Drill1", {"tool_stepover": "2."}, has_toolpath=False))
+        out = _payload(ce.handler(operation="Drill1", suppressed=True))
+        assert op.isSuppressed is True
+        assert out["had_toolpath"] is False and out["has_toolpath"] is False
+        assert "DISCARDED" not in out["note"]
+        assert "hasToolpath read False before the set and False after" in out["note"]
+
+    def test_an_unreadable_toolpath_read_reaches_the_note_as_unreadable(self, monkeypatch):
+        # null on both sides: neither the discard claim nor a fabricated False may be published.
+        _install_op(monkeypatch, UnreadableToolpathOp("Drill1", {"tool_stepover": "2."}))
+        out = _payload(ce.handler(operation="Drill1", suppressed=True))
+        assert out["had_toolpath"] is None and out["has_toolpath"] is None
+        assert "DISCARDED" not in out["note"]
+        assert "hasToolpath read unreadable before the set and unreadable after" in out["note"]
+
+    def test_unsuppressing_reports_the_toolpath_this_call_read(self, monkeypatch):
+        # The note never claims the toolpath came back: it reports the hasToolpath THIS call read.
+        op = _install_op(monkeypatch,
+                         FakeOp("Drill1", {"tool_stepover": "2."}, suppressed=True,
+                                has_toolpath=False))
+        out = _payload(ce.handler(operation="Drill1", suppressed=False))
+        assert op.isSuppressed is False
+        assert out["is_suppressed"] is False and out["was_suppressed"] is True
+        assert out["has_toolpath"] is False
+        assert "there is no toolpath to post" in out["note"]
+        assert "DISCARDED" not in out["note"]
+
+    def test_unsuppressing_an_op_that_still_reads_a_toolpath_says_so(self, monkeypatch):
+        # The other side of the unsuppress branch: the note reports the read, and the regenerate
+        # remedy belongs only to the op that has no toolpath to post.
+        _install_op(monkeypatch,
+                    FakeOp("Drill1", {"tool_stepover": "2."}, suppressed=True, has_toolpath=True))
+        out = _payload(ce.handler(operation="Drill1", suppressed=False))
+        assert out["is_suppressed"] is False and out["has_toolpath"] is True
+        assert "hasToolpath reads True." in out["note"]
+        assert "no toolpath to post" not in out["note"]
+
+    def test_a_dropped_flag_write_is_an_error_not_a_false_ok(self, monkeypatch):
+        _install_op(monkeypatch, DroppedFlagOp("Drill1", {"tool_stepover": "2."}))
+        res = ce.handler(operation="Drill1", suppressed=True)
+        assert res["isError"] is True
+        assert "did not take" in res["message"] and "Drill1" in res["message"]
+
+    def test_an_unreadable_flag_after_the_set_is_unconfirmed(self, monkeypatch):
+        _install_op(monkeypatch, UnreadableAfterOp("Drill1", {"tool_stepover": "2."}))
+        res = ce.handler(operation="Drill1", suppressed=True)
+        assert res["isError"] is True
+        assert "UNCONFIRMED" in res["message"]
+
+    def test_a_raising_setter_is_reported(self, monkeypatch):
+        _install_op(monkeypatch, RaisingSetterOp("Drill1", {"tool_stepover": "2."}))
+        res = ce.handler(operation="Drill1", suppressed=True)
+        assert res["isError"] is True
+        assert "Could not set isSuppressed" in res["message"]
+        assert "operation is locked" in res["message"]
+
+    def test_an_unreadable_PRIOR_flag_publishes_null_not_false(self, monkeypatch):
+        # was_suppressed=false would assert the operation had been active; the read did not answer.
+        _install_op(monkeypatch, UnreadableBeforeOp("Drill1", {"tool_stepover": "2."}))
+        out = _payload(ce.handler(operation="Drill1", suppressed=True))
+        assert out["is_suppressed"] is True
+        assert out["was_suppressed"] is None
+
+    def test_suppressed_alone_needs_no_parameters(self, monkeypatch):
+        _install_op(monkeypatch, FakeOp("Drill1", {"tool_stepover": "2."}))
+        out = _payload(ce.handler(operation="Drill1", suppressed=True))
+        assert out["edited"] is True and out["operation"] == "Drill1"
+
+    def test_neither_parameters_nor_suppressed_is_refused(self, monkeypatch):
+        _install(monkeypatch)
+        res = ce.handler(operation="Adaptive1")
+        assert res["isError"] is True
+        assert "parameters" in res["message"] and "suppressed" in res["message"]
+
+    def test_parameters_and_suppression_in_one_call(self, monkeypatch):
+        op = _install_op(monkeypatch, FakeOp("Drill1", {"tool_stepover": "2."}))
+        out = _payload(ce.handler(operation="Drill1", parameters={"tool_stepover": "1.5"},
+                                  suppressed=True))
+        assert op.parameters.itemByName("tool_stepover").expression == "1.5"
+        assert out["updated_count"] == 1 and out["is_suppressed"] is True
+        assert "Parameters set." in out["note"] and "isSuppressed now reads True" in out["note"]
+
+    def test_a_rolled_back_parameter_never_reaches_the_suppression(self, monkeypatch):
+        # The flag must not be flipped on an operation the call left exactly as it found it.
+        op = _install_op(monkeypatch, FakeOp("Drill1", {"tool_stepover": "2."}))
+        res = ce.handler(operation="Drill1",
+                         parameters={"tool_stepover": "NoSuchParamXyz * 2"}, suppressed=True)
+        assert res["isError"] is True and "Rolled back" in res["message"]
+        assert op.isSuppressed is False
+        assert op.hasToolpath is True
+
+    def test_a_failed_suppression_names_the_parameters_already_applied(self, monkeypatch):
+        # Partial success is stated, never swallowed: the params landed, the flag did not.
+        op = _install_op(monkeypatch, DroppedFlagOp("Drill1", {"tool_stepover": "2."}))
+        res = ce.handler(operation="Drill1", parameters={"tool_stepover": "1.5"}, suppressed=True)
+        assert res["isError"] is True
+        assert "did not take" in res["message"]
+        assert "Parameters already applied: tool_stepover" in res["message"]
+        assert op.parameters.itemByName("tool_stepover").expression == "1.5"
 
 
 class TestParseParameters:

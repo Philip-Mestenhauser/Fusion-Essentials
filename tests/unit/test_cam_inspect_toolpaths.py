@@ -5,7 +5,9 @@ resolved setup/folder/pattern/operation), the shared resolver's refusals reachin
 (a miss lists the available names, a duplicated name is refused and nothing is checked), the payload
 composition (verdict + states tally + the per-operation rows, both from the one shared classifier),
 the disagreement branches (the verdict and the per-operation reads are independent), the row cap,
-and the guards (the shared no-CAM gate, a non-boolean verdict, a raising check).
+the ACTIVE-operations default (suppressed operations are excluded and the excluded count is named;
+include_suppressed=true counts them), the empty-setup answer (a setup with no operations is a fact,
+not an exception), and the guards (the shared no-CAM gate, a non-boolean verdict, a raising check).
 """
 
 import json
@@ -211,14 +213,29 @@ class TestScopedFallback:
         assert cam.checked == [setup, op]
         assert out["passed"] is False and out["checked"] == "per-operation fallback"
 
-    def test_a_setup_with_no_operations_reports_the_raise(self, wire):
-        # Boundary: 0 children - nothing narrower exists to ask, so the raise IS the answer.
+    def test_a_setup_with_no_operations_answers_instead_of_raising(self, wire):
+        # Boundary: 0 children. Nothing narrower exists to ask - and nothing needs asking: a setup
+        # with no operations holds no toolpath that could be out of date, so the empty set IS the
+        # answer. A mid-build shop template carries such setups, and a raise is not an answer.
         setup = FakeSetup("Empty")
         cam = self._wire_raising_target(wire, setup, setup)
-        res = mod.handler(scope="Empty")
-        assert res["isError"] is True
-        assert "setup 'Empty'" in res["message"] and "3 : input is null" in res["message"]
+        out = _payload(mod.handler(scope="Empty"))
+        assert out["passed"] is True
+        assert out["checked"] == "empty scope"
+        assert out["measured"]["states"]["total"] == 0
         assert cam.checked == [setup]                   # nothing else was asked in its place
+        assert "holds no operations at all" in out["note"]
+        assert "not a check that ran" in out["note"]
+
+    def test_a_scope_whose_only_operations_are_suppressed_still_reports_the_raise(self, wire):
+        # The empty-scope answer keys on the RAW census, not the suppression filter: this setup
+        # HOLDS an operation, so a raise on it is a raise - not an empty set to answer vacuously.
+        setup = FakeSetup("Parked", ops=[FakeOperation("Off", operation_state=2, suppressed=True)])
+        cam = self._wire_raising_target(wire, setup, setup)
+        res = mod.handler(scope="Parked")
+        assert res["isError"] is True
+        assert "setup 'Parked'" in res["message"] and "3 : input is null" in res["message"]
+        assert cam.checked == [setup]
 
     def test_an_operation_target_has_nothing_narrower_and_reports_the_raise(self, wire):
         op = FakeOperation("Drill1")
@@ -278,7 +295,7 @@ class TestVerdictAndBreakdown:
                                              "error": 0, "suppressed": 0, "generating": 0,
                                              "total": 2}
         assert out["measured"]["not_valid"] == []
-        assert "the validity check passed and every operation reads valid" in out["note"]
+        assert "the validity check passed and every operation counted reads valid" in out["note"]
 
     def test_false_verdict_names_every_operation_outside_the_valid_state(self, wire):
         ops = [FakeOperation("Face1"),
@@ -287,7 +304,7 @@ class TestVerdictAndBreakdown:
                FakeOperation("Chamfer", operation_state=2, suppressed=True),
                FakeOperation("Drill", has_error=True, error="Tool is not selected.\nsecond line")]
         wire(_cam(FakeSetup("S1", ops=ops), verdict=False))
-        out = _payload(mod.handler())
+        out = _payload(mod.handler(include_suppressed=True))
         assert out["passed"] is False
         assert out["measured"]["not_valid"] == [
             {"operation": "Bore", "state": "out_of_date"},
@@ -308,8 +325,8 @@ class TestVerdictAndBreakdown:
                FakeOperation("Bore", operation_state=1),
                FakeOperation("Chamfer", operation_state=2, suppressed=True)]
         wire(_cam(FakeSetup("S1", ops=ops), verdict=False))
-        states = _payload(mod.handler())["measured"]["states"]
-        rows = _payload(mod.handler())["measured"]["not_valid"]
+        states = _payload(mod.handler(include_suppressed=True))["measured"]["states"]
+        rows = _payload(mod.handler(include_suppressed=True))["measured"]["not_valid"]
         assert len(rows) == states["total"] - states["valid"] == 2
         assert all(r["state"] in states for r in rows)
         assert sum(v for k, v in states.items() if k != "total") == states["total"]
@@ -331,7 +348,7 @@ class TestVerdictAndBreakdown:
         wire(_cam(FakeSetup("S1"), verdict=True))
         out = _payload(mod.handler())
         assert out["measured"]["states"]["total"] == 0
-        assert "no operations to check" in out["note"]
+        assert "no operations counted" in out["note"]
 
 
 # ── the verdict and the per-operation reads are independent - the note must say so ──────────────────
@@ -343,7 +360,7 @@ class TestDisagreement:
         out = _payload(mod.handler())
         assert out["passed"] is False
         assert out["measured"]["not_valid"] == []
-        assert "the validity check failed while every operation reads valid" in out["note"]
+        assert "the validity check failed while every operation counted reads valid" in out["note"]
         assert "measured.not_valid is empty" in out["note"]
         assert "validity_basis" in out["note"]
         assert "names them" not in out["note"]      # nothing is named when the list is empty
@@ -353,11 +370,12 @@ class TestDisagreement:
                                        FakeOperation("Chamfer", operation_state=2,
                                                      suppressed=True)]),
                   verdict=True))
-        out = _payload(mod.handler())
+        out = _payload(mod.handler(include_suppressed=True))
         assert out["passed"] is True
         assert out["measured"]["not_valid"] == [{"operation": "Chamfer", "state": "suppressed"}]
-        assert "every operation reads valid" not in out["note"]
-        assert "the validity check passed while 1 operation(s) read outside the valid state" in out["note"]
+        assert "every operation counted reads valid" not in out["note"]
+        assert ("the validity check passed while 1 counted operation(s) read outside the valid "
+                "state") in out["note"]
         assert "validity_basis" in out["note"]
 
     def test_a_generating_operation_is_one_bucket_in_both_the_tally_and_the_rows(self, wire):
@@ -423,6 +441,220 @@ class TestRowCap:
         assert len(out["measured"]["not_valid"]) == 1
 
 
+# ── the ACTIVE-operations default (suppressed excluded, and named) ──────────────────────────────────
+
+class TestSuppressedScoping:
+    """A suppressed operation is left out of the post, so it is left out of the count. The number
+    excluded is named on the payload, the note says what the verdict counted, and
+    include_suppressed=true counts them."""
+
+    def _template(self):
+        # a mid-build shop template: two active operations, one of them stale, beside three PARKED
+        # (suppressed) ones - the shape whose parked operations swamped the verdict's evidence.
+        return FakeSetup("Template", ops=[
+            FakeOperation("Face1"),
+            FakeOperation("Bore", operation_state=1),
+            FakeOperation("Park1", operation_state=2, suppressed=True),
+            FakeOperation("Park2", operation_state=2, suppressed=True),
+            FakeOperation("Park3", operation_state=2, suppressed=True),
+        ])
+
+    def test_the_default_counts_active_operations_and_names_what_it_excluded(self, wire):
+        wire(_cam(self._template(), verdict=False))
+        out = _payload(mod.handler())
+        assert out["measured"]["states"] == {"valid": 1, "out_of_date": 1, "no_toolpath": 0,
+                                             "error": 0, "suppressed": 0, "generating": 0,
+                                             "total": 2}
+        assert out["measured"]["not_valid"] == [{"operation": "Bore", "state": "out_of_date"}]
+        assert out["measured"]["suppressed_excluded"] == 3
+        assert out["tolerance_used"]["tally_counts"] == "active_operations"
+
+    def test_include_suppressed_restores_the_whole_census(self, wire):
+        wire(_cam(self._template(), verdict=False))
+        out = _payload(mod.handler(include_suppressed=True))
+        assert out["measured"]["states"]["suppressed"] == 3
+        assert out["measured"]["states"]["total"] == 5
+        assert out["measured"]["suppressed_excluded"] == 0      # nothing was left out to report
+        assert out["tolerance_used"]["tally_counts"] == "all_operations"
+        assert [r["operation"] for r in out["measured"]["not_valid"]] == ["Bore", "Park1", "Park2",
+                                                                         "Park3"]
+
+    def test_the_note_states_what_was_counted_and_what_was_not(self, wire):
+        wire(_cam(self._template(), verdict=False))
+        note = _payload(mod.handler())["note"]
+        assert "Counted 2 ACTIVE operation(s); 3 suppressed operation(s) were excluded" in note
+        # WHY those three are left out, measured: setting isSuppressed True flips hasToolpath True
+        # -> False, so a suppressed operation has no toolpath to post. Pinned beside the count: a
+        # description slim that drops the measured clause goes red here.
+        assert ("suppressing an operation discards its toolpath, and only valid toolpaths post"
+                in note)
+        assert "include_suppressed=true counts them" in note
+
+    def test_the_note_says_so_when_suppressed_are_counted(self, wire):
+        wire(_cam(self._template(), verdict=False))
+        note = _payload(mod.handler(include_suppressed=True))["note"]
+        assert "Counted 5 operation(s), suppressed INCLUDED" in note
+        assert "were excluded" not in note
+
+    def test_a_scope_holding_no_suppressed_operations_says_that_too(self, wire):
+        # the third branch: silence would read as "the count is everything", which is the claim
+        # this sentence exists to make explicit either way.
+        wire(_cam(FakeSetup("S1", ops=[FakeOperation("Face1")]), verdict=True))
+        out = _payload(mod.handler())
+        assert out["measured"]["suppressed_excluded"] == 0
+        assert "no suppressed operation(s) were in scope" in out["note"]
+
+    def test_the_flag_flips_the_fallback_verdict_itself(self, wire):
+        # the VERDICT, not just the tally: the per-operation fallback ANDs the operations that were
+        # counted, so a parked operation answering false cannot fail an otherwise-clean active job.
+        setup = FakeSetup("Template", ops=[FakeOperation("Face1"),
+                                           FakeOperation("Park1", operation_state=2,
+                                                         suppressed=True)])
+        cam = wire(_cam(setup))
+
+        def check(obj):
+            cam.checked.append(obj)
+            if obj is setup:
+                raise _INPUT_IS_NULL
+            return obj.name != "Park1"
+
+        cam.checkToolpath = check
+        assert _payload(mod.handler(scope="Template"))["passed"] is True
+        assert _payload(mod.handler(scope="Template", include_suppressed=True))["passed"] is False
+
+    def test_the_verdict_is_declared_wider_than_the_tally_on_cams_own_check(self, wire):
+        # MEASURED on 2705.1.4: CAM.checkToolpath answers False for a setup whose only non-valid
+        # operation is suppressed. So 'passed' is NOT the active-operation verdict the tally
+        # describes, and the payload must not let the two be read as one number.
+        wire(_cam(self._template(), verdict=False))
+        out = _payload(mod.handler())
+        assert out["tolerance_used"]["tally_counts"] == "active_operations"
+        assert out["tolerance_used"]["verdict_counts"] == "all_operations"
+        note = out["note"]
+        assert "'passed' here is CAM's own check, and that check COUNTS suppressed operations" in note
+        assert "include_suppressed does not narrow the check" in note
+
+    def test_the_fallback_verdict_is_declared_as_narrow_as_the_tally(self, wire):
+        # the ONE path where the split really does control the verdict: this tool's own AND. Here
+        # verdict_counts follows the tally and the disclosure sentence must NOT appear.
+        setup = FakeSetup("Template", ops=[FakeOperation("Face1"),
+                                           FakeOperation("Park1", operation_state=2,
+                                                         suppressed=True)])
+        cam = wire(_cam(setup))
+
+        def check(obj):
+            cam.checked.append(obj)
+            if obj is setup:
+                raise _INPUT_IS_NULL
+            return True
+
+        cam.checkToolpath = check
+        out = _payload(mod.handler(scope="Template"))
+        assert out["checked"] == "per-operation fallback"
+        assert out["tolerance_used"]["verdict_counts"] == "active_operations"
+        assert "CAM's own check" not in out["note"]
+
+    def test_no_verdict_scope_sentence_when_nothing_was_excluded(self, wire):
+        # the sentence exists to separate two DIFFERENT sets; with no suppressed operations there
+        # is no difference to disclose and it would be noise.
+        wire(_cam(FakeSetup("S1", ops=[FakeOperation("Face1")]), verdict=False))
+        out = _payload(mod.handler())
+        assert out["tolerance_used"]["verdict_counts"] == "all_operations"
+        assert "CAM's own check" not in out["note"]
+
+    def test_no_verdict_scope_sentence_when_suppressed_are_counted(self, wire):
+        wire(_cam(self._template(), verdict=False))
+        assert "CAM's own check" not in _payload(mod.handler(include_suppressed=True))["note"]
+
+    def test_a_scope_of_only_suppressed_operations_counts_zero_and_says_so(self, wire):
+        wire(_cam(FakeSetup("Parked", ops=[FakeOperation("Off", operation_state=2,
+                                                         suppressed=True)]), verdict=True))
+        out = _payload(mod.handler(scope="Parked"))
+        assert out["measured"]["states"]["total"] == 0
+        assert out["measured"]["suppressed_excluded"] == 1
+        assert "no operations counted" in out["note"]
+
+
+# ── an empty setup is a reportable fact, not an exception ───────────────────────────────────────────
+
+class TestEmptySetups:
+    """CAM.checkToolpath RAISES "3 : The operations are not CAM objects" on a setup holding zero
+    operations - measured on 2705.1.4 against a populated setup in the same call, and against the
+    same setup after one operation was added to it. ONE empty setup is enough to leave a whole
+    document with no answer while it is asked, and a mid-build shop template carries empty setups.
+    An empty setup holds no toolpath that could be out of date, so excluding it from the per-setup
+    AND skips nothing."""
+
+    def test_an_empty_setup_no_longer_blocks_the_document_answer(self, wire):
+        populated = FakeSetup("Roughing", ops=[FakeOperation("Face1")])
+        empty = FakeSetup("Blank")
+        cam = wire(_cam(populated, empty, all_raises=_NOT_CAM_OBJECTS))
+
+        def check(obj):
+            cam.checked.append(obj)
+            if obj is empty:
+                raise _INPUT_IS_NULL
+            return True
+
+        cam.checkToolpath = check
+        out = _payload(mod.handler())
+        assert out["passed"] is True
+        assert cam.checked == ["all", populated]        # the empty setup is never asked at all
+        assert out["measured"]["empty_setups_excluded"] == 1
+        assert "1 setup(s) hold no operations" in out["note"] and "Blank" in out["note"]
+
+    def test_the_populated_setups_still_decide_the_verdict(self, wire):
+        # setup_verdicts has no entry for the empty setup, so asking it would KeyError into the
+        # fallback's error - the verdict below is proof only the populated setup was consulted.
+        populated = FakeSetup("Roughing", ops=[FakeOperation("Bore", operation_state=1)])
+        wire(_cam(populated, FakeSetup("Blank"), all_raises=_NOT_CAM_OBJECTS,
+                  setup_verdicts={"Roughing": False}))
+        out = _payload(mod.handler())
+        assert out["passed"] is False
+        assert out["measured"]["states"]["out_of_date"] == 1
+        assert out["measured"]["empty_setups_excluded"] == 1
+
+    def test_every_setup_empty_counts_nothing_and_says_so(self, wire):
+        # Boundary: N empty setups, none populated. The AND over an empty set is what `all` answers.
+        cam = wire(_cam(FakeSetup("A"), FakeSetup("B"), all_raises=_NOT_CAM_OBJECTS,
+                        raises=_INPUT_IS_NULL))
+        out = _payload(mod.handler())
+        assert out["passed"] is True
+        assert cam.checked == ["all"]                   # no setup was asked
+        assert out["measured"]["states"]["total"] == 0
+        assert out["measured"]["empty_setups_excluded"] == 2
+        assert "no operations counted" in out["note"]
+
+    def test_the_named_setups_are_capped_while_the_count_stays_exact(self, wire):
+        empties = [FakeSetup(f"E{i}") for i in range(mod._EMPTY_NAMES_CAP + 2)]
+        wire(_cam(*empties, all_raises=_NOT_CAM_OBJECTS, raises=_INPUT_IS_NULL))
+        out = _payload(mod.handler())
+        assert out["measured"]["empty_setups_excluded"] == mod._EMPTY_NAMES_CAP + 2
+        assert len([s for s in empties if s.name in out["note"]]) == mod._EMPTY_NAMES_CAP
+        # the overflow is MARKED, never silently dropped - a bare colon-list past a silent cap
+        # reads as the whole set, which is the defect the count alone does not close.
+        assert "... and 2 more" in out["note"]
+
+    def test_exactly_at_the_cap_adds_no_overflow_marker(self, wire):
+        # the boundary: N == cap lists every name and must NOT claim a remainder.
+        empties = [FakeSetup(f"E{i}") for i in range(mod._EMPTY_NAMES_CAP)]
+        wire(_cam(*empties, all_raises=_NOT_CAM_OBJECTS, raises=_INPUT_IS_NULL))
+        out = _payload(mod.handler())
+        assert out["measured"]["empty_setups_excluded"] == mod._EMPTY_NAMES_CAP
+        assert len([s for s in empties if s.name in out["note"]]) == mod._EMPTY_NAMES_CAP
+        assert "more" not in out["note"]
+
+    def test_a_document_check_that_answers_excludes_nothing(self, wire):
+        # the per-setup fallback is what excludes empty setups; when checkAllToolpaths answers,
+        # nothing was excluded and neither the payload nor the note may imply otherwise.
+        wire(_cam(FakeSetup("Roughing", ops=[FakeOperation("Face1")]), FakeSetup("Blank"),
+                  verdict=True))
+        out = _payload(mod.handler())
+        assert out["checked"] == "checkAllToolpaths"
+        assert out["measured"]["empty_setups_excluded"] == 0
+        assert "hold no operations" not in out["note"]
+
+
 # ── guards ──────────────────────────────────────────────────────────────────────────────────────────
 
 class TestGuards:
@@ -461,6 +693,8 @@ class TestValidityBasis:
         wire(_cam(FakeSetup("S1", ops=[FakeOperation("Face1")])))
         out = _payload(mod.handler())
         assert out["tolerance_used"] == {"criterion": "valid_and_up_to_date",
+                                         "tally_counts": "active_operations",
+                                         "verdict_counts": "all_operations",
                                          "validity_basis": "unverified_design_workspace"}
         assert "Manufacture workspace" in out["note"]
 

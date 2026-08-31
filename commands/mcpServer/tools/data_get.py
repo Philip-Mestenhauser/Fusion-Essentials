@@ -17,6 +17,9 @@ from ._common import ok, error
 
 _SLICES = ("hubs", "folders")
 
+# Folder-tree depth a caller who names none gets (each level is a slow cloud fetch).
+_MAX_DEPTH_DEFAULT = 4
+
 
 def _unwrap(result):
     """(payload, None) on ok; (None, error_result) on error - so a cloud failure propagates verbatim."""
@@ -37,7 +40,7 @@ def _normalize_include(include):
 
 
 def handler(project: str = "", project_id: str = "", folder: str = "", recursive: bool = True,
-            include=None, max_depth: int = 4, file: str = "") -> dict:
+            include=None, max_depth: int = _MAX_DEPTH_DEFAULT, file: str = "") -> dict:
     """See TOOL_DESCRIPTION."""
     inc = _normalize_include(include)
     bad = [s for s in inc if s not in _SLICES]
@@ -167,7 +170,7 @@ tool = (
             "description": "Deeper scope: 'hubs' (all hubs) or 'folders' (a project's folder tree, with a project). "
                            "A list or comma-string. Omit for projects (no project) or files (with a project)."})
     .add_input_property("max_depth", {"type": "integer",
-            "description": "With include=['folders']: folder-tree depth cap (default 4)."})
+            "description": f"With include=['folders']: folder-tree depth cap (default {_MAX_DEPTH_DEFAULT})."})
     .add_input_property("file", {"type": "string",
             "description": "ONE file: its lineage URN (or Fusion web URL), or its name - a name needs "
                            "'project' and is refused if several files there share it."})

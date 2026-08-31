@@ -2,17 +2,23 @@
 
 Pins the ROUTER's scope dispatch: no project -> projects; project -> files; project+include=['folders']
 -> folder tree; include=['hubs'] -> hubs; and the unknown-include guard + cloud-error propagation. The
-delegated handlers (_data_read/data_ops/data_switch_hub) are stubbed via sys.modules; their own cloud logic +
-caps are covered by their tests and by live validation.
+delegated handlers (_data_read/data_ops/data_switch_hub) are swapped through conftest's
+`stub_tool_module`, which holds under either import order (see TestDeferredImportSeam); their own
+cloud logic + caps are covered by their tests and by live validation.
 """
 
 import json
+import re
+from types import SimpleNamespace
 
 import pytest
 
-from conftest import load_tool, error_message
+from conftest import load_tool, error_message, stub_tool_module
 
 dge = load_tool("data_get")
+# The real folder walk the router hands its depth to. Loaded here, before any test stubs
+# 'mcpServer.tools.data_ops' in sys.modules, so the depth test drives the walk and not a stub.
+dops = load_tool("data_ops")
 
 
 def _payload(result):
@@ -30,8 +36,7 @@ def _err(msg):
 
 @pytest.fixture
 def stub(monkeypatch):
-    import sys
-    monkeypatch.setitem(sys.modules, "mcpServer.tools._data_read",
+    stub_tool_module(monkeypatch, "_data_read",
         type("DR", (), {
             "list_projects_handler": staticmethod(lambda: _ok({"active_hub": "Main", "project_count": 2,
                                                                "projects": [{"name": "P1"}, {"name": "P2"}]})),
@@ -41,10 +46,10 @@ def stub(monkeypatch):
                                                                  "file": {"name": "notes.txt"},
                                                                  "seen": dict(kw)})),
         }))
-    monkeypatch.setitem(sys.modules, "mcpServer.tools.data_ops",
+    stub_tool_module(monkeypatch, "data_ops",
         type("DO", (), {"list_folders_handler": staticmethod(
             lambda **kw: _ok({"project": kw.get("project"), "folder_count": 4, "folders": ["f1", "f2"]}))}))
-    monkeypatch.setitem(sys.modules, "mcpServer.tools.data_switch_hub",
+    stub_tool_module(monkeypatch, "data_switch_hub",
         type("DH", (), {"handler": staticmethod(
             lambda action="list", hub="": _ok({"hub_count": 2, "hubs": [{"name": "H1", "is_active": True}]}))}))
 
@@ -71,8 +76,7 @@ class TestScopeDispatch:
     def test_truncated_folder_walk_gets_the_budget_note(self, stub, monkeypatch):
         # a budget-cut walk must TEACH the narrower next step (lower max_depth / scope with
         # 'folder'), not just flag truncated=true.
-        import sys
-        monkeypatch.setitem(sys.modules, "mcpServer.tools.data_ops",
+        stub_tool_module(monkeypatch, "data_ops",
             type("DO", (), {"list_folders_handler": staticmethod(
                 lambda **kw: _ok({"project": "P1", "folder_count": 20, "truncated": True,
                                   "folders": []}))}))
@@ -86,8 +90,7 @@ class TestScopeDispatch:
     def test_time_truncated_files_walk_gets_the_time_note(self, stub, monkeypatch):
         # A time-budget-cut walk must TEACH the same kind of next step as a size-truncated one, and
         # must name WHERE it stopped.
-        import sys
-        monkeypatch.setitem(sys.modules, "mcpServer.tools._data_read",
+        stub_tool_module(monkeypatch, "_data_read",
             type("DR", (), {
                 "list_project_files_handler": staticmethod(lambda **kw: _ok({
                     "file_count": 1, "files": ["a"],
@@ -102,8 +105,7 @@ class TestScopeDispatch:
         assert "time budget" not in out["note"]
 
     def test_time_truncated_folder_tree_gets_the_time_note(self, stub, monkeypatch):
-        import sys
-        monkeypatch.setitem(sys.modules, "mcpServer.tools.data_ops",
+        stub_tool_module(monkeypatch, "data_ops",
             type("DO", (), {
                 "list_folders_handler": staticmethod(lambda **kw: _ok({
                     "project": kw.get("project"), "folder_count": 1, "truncated": False,
@@ -118,8 +120,7 @@ class TestScopeDispatch:
         assert "time budget" not in out["note"]
 
     def test_time_truncated_projects_listing_gets_the_time_note(self, stub, monkeypatch):
-        import sys
-        monkeypatch.setitem(sys.modules, "mcpServer.tools._data_read",
+        stub_tool_module(monkeypatch, "_data_read",
             type("DR", (), {
                 "list_projects_handler": staticmethod(lambda: _ok({
                     "active_hub": "Main", "project_count": 1, "projects": [{"name": "P1"}],
@@ -139,9 +140,8 @@ class TestScopeDispatch:
         assert out["hub_count"] == 2
 
     def test_folder_path_passed_to_files(self, stub, monkeypatch):
-        import sys
         seen = {}
-        monkeypatch.setitem(sys.modules, "mcpServer.tools._data_read",
+        stub_tool_module(monkeypatch, "_data_read",
             type("DR", (), {"list_project_files_handler": staticmethod(
                 lambda **kw: (seen.update(kw) or _ok({"file_count": 0, "files": []})))}))
         out = _payload(dge.handler(project="P1", folder="Parts/Fixtures", recursive=False))
@@ -168,8 +168,7 @@ class TestFileScope:
         assert "data_download_file" in note and "data_move_file" in note
 
     def test_a_name_matched_in_a_capped_listing_gets_the_uniqueness_caveat(self, stub, monkeypatch):
-        import sys
-        monkeypatch.setitem(sys.modules, "mcpServer.tools._data_read",
+        stub_tool_module(monkeypatch, "_data_read",
             type("DR", (), {"file_facts_handler": staticmethod(
                 lambda **kw: _ok({"matched_by": "name", "name_scope_truncated": True,
                                   "file": {"name": "notes.txt"}}))}))
@@ -182,8 +181,7 @@ class TestFileScope:
     def test_a_name_matched_over_unread_folders_gets_the_unsearched_caveat(self, stub, monkeypatch):
         # A folder that never opened is a hole in the search space the cap flag does not describe:
         # the same name could sit in it, which would make this "unique" match the wrong file.
-        import sys
-        monkeypatch.setitem(sys.modules, "mcpServer.tools._data_read",
+        stub_tool_module(monkeypatch, "_data_read",
             type("DR", (), {"file_facts_handler": staticmethod(
                 lambda **kw: _ok({"matched_by": "name", "name_scope_folders_unreadable": 2,
                                   "file": {"name": "notes.txt"}}))}))
@@ -200,12 +198,62 @@ class TestFileScope:
         assert "does not apply to the 'file' scope" in error_message(res)
 
     def test_file_scope_propagates_a_resolution_error(self, stub, monkeypatch):
-        import sys
-        monkeypatch.setitem(sys.modules, "mcpServer.tools._data_read",
+        stub_tool_module(monkeypatch, "_data_read",
             type("DR", (), {"file_facts_handler": staticmethod(
                 lambda **kw: _err("'notes.txt' names 2 files in project 'P1'"))}))
         res = dge.handler(file="notes.txt", project="P1")
         assert "names 2 files" in error_message(res)
+
+
+def _folder(name, children=()):
+    """One cloud folder. Enumerating dataFolders is the round-trip the walk is budgeted on, so the
+    children are only ever reachable through it."""
+    kids = list(children)
+    return SimpleNamespace(name=name, id=f"id:{name}",
+                           dataFolders=SimpleNamespace(asArray=lambda: list(kids)))
+
+
+def _folder_chain(depth):
+    """A root holding one branch `depth` levels deep: L1 -> L2 -> ... -> L<depth>."""
+    node = None
+    for level in range(depth, 0, -1):
+        node = _folder(f"L{level}", [node] if node else [])
+    return _folder("root", [node])
+
+
+def _paths(nodes):
+    out = []
+    for n in nodes:
+        out.append(n["path"])
+        out += _paths(n.get("folders", []))
+    return out
+
+
+class TestFolderDepthDefault:
+    """The default folder depth is a CLOUD cost - each level is a round-trip - and data_get names no
+    depth of its own at the walk: it forwards the one its description promises. Nothing else here
+    calls the router without naming max_depth, so nothing else exercises that default."""
+
+    def test_the_default_depth_reaches_the_walk_and_is_the_depth_it_descends(self, stub,
+                                                                             monkeypatch):
+        seen = {}
+        stub_tool_module(monkeypatch, "data_ops",
+            type("DO", (), {"list_folders_handler": staticmethod(
+                lambda **kw: (seen.update(kw)
+                              or _ok({"project": "P1", "folder_count": 0, "folders": []})))}))
+        _payload(dge.handler(project="P1", include=["folders"]))
+        assert seen["max_depth"] == 4
+
+        promised = dge.tool.to_dict()["inputSchema"]["properties"]["max_depth"]["description"]
+        assert seen["max_depth"] == int(re.search(r"default (\d+)", promised).group(1))
+
+        # what that number DOES: a six-level chain read at the forwarded depth stops four levels
+        # down, and the last node says its children are unknown rather than implying it has none.
+        tree, count, truncated, _stalled = dops._folder_tree_bounded(_folder_chain(6),
+                                                                     seen["max_depth"])
+        assert _paths(tree) == ["L1", "L1/L2", "L1/L2/L3", "L1/L2/L3/L4"]
+        assert count == 4 and truncated is False    # the DEPTH cap stopped it, not the fetch budget
+        assert tree[0]["folders"][0]["folders"][0]["folders"][0]["children_unknown"] is True
 
 
 class TestGuards:
@@ -214,8 +262,70 @@ class TestGuards:
         assert "bogus" in error_message(res).lower() or "unknown" in error_message(res).lower()
 
     def test_cloud_error_propagates(self, monkeypatch):
-        import sys
-        monkeypatch.setitem(sys.modules, "mcpServer.tools._data_read",
+        stub_tool_module(monkeypatch, "_data_read",
             type("DR", (), {"list_projects_handler": staticmethod(lambda: _err("not signed in"))}))
         res = dge.handler()
         assert "not signed in" in error_message(res).lower()
+
+
+class TestDeferredImportSeam:
+    """`data_get`'s handlers import their delegates INSIDE the body (`from . import _data_read`), and
+    that resolves through the `mcpServer.tools` PACKAGE ATTRIBUTE whenever the attribute is bound.
+    A real import of the sibling binds it - `doc_get` imports `_data_read` at top level - so any
+    order that loads the registry ahead of this file leaves it bound. A sys.modules-only stub is
+    then never read there, and every stubbed test calls the real cloud handler instead. These pin
+    BOTH of `stub_tool_module`'s seams directly, so none of them depends on collection order."""
+
+    def _stub(self, monkeypatch):
+        return stub_tool_module(monkeypatch, "_data_read", type("DR", (), {
+            "list_projects_handler": staticmethod(
+                lambda: _ok({"active_hub": "Main", "project_count": 7, "projects": []}))}))
+
+    def test_the_stub_routes_even_when_the_package_attribute_is_already_bound(self, monkeypatch):
+        # The worst-case order, made deterministic: bind the REAL module as the package attribute
+        # first, exactly as a genuine `from . import _data_read` elsewhere leaves it, then stub.
+        import sys
+        pkg = sys.modules["mcpServer.tools"]
+        monkeypatch.setattr(pkg, "_data_read", load_tool("_data_read"), raising=False)
+        self._stub(monkeypatch)
+        assert _payload(dge.handler())["project_count"] == 7
+
+    def test_the_stub_routes_when_no_package_attribute_is_bound(self, monkeypatch):
+        # The clean order: nothing has bound the attribute, so the helper CREATES it. `from . import`
+        # routes through that attribute either way, and this pins that the create path resolves as
+        # the already-bound one does - the two orders are one behaviour, not two.
+        import sys
+        pkg = sys.modules["mcpServer.tools"]
+        monkeypatch.delattr(pkg, "_data_read", raising=False)
+        self._stub(monkeypatch)
+        assert _payload(dge.handler())["project_count"] == 7
+
+    def test_the_stub_answers_the_call_time_importlib_route_too(self, monkeypatch):
+        # The OTHER seam, and the only one sys.modules serves: a sibling reached by
+        # `importlib.import_module('.<name>', __package__)` at call time - what
+        # `sketch_core._detail_engine` and `sys_api_doc`'s module walk do - reads the module table
+        # and never the package attribute. Routing `from . import` is not enough for that shape.
+        import importlib
+        stub = self._stub(monkeypatch)
+        assert importlib.import_module("._data_read", "mcpServer.tools") is stub
+
+    def test_the_stubbed_attribute_is_removed_again_when_the_package_had_none(self, monkeypatch):
+        # The attribute patch must not LEAK a stub into the next test as the package's own module.
+        import sys
+        from _pytest.monkeypatch import MonkeyPatch
+        pkg = sys.modules["mcpServer.tools"]
+        monkeypatch.delattr(pkg, "_data_read", raising=False)
+        inner = MonkeyPatch()
+        stub_tool_module(inner, "_data_read", type("DR", (), {}))
+        assert getattr(pkg, "_data_read", None) is not None
+        inner.undo()
+        assert not hasattr(pkg, "_data_read")
+
+    def test_the_helper_refuses_before_the_tools_package_exists(self, monkeypatch):
+        # There is nothing to hang the attribute on yet, and the refusal names the call that creates
+        # the package - without it monkeypatch raises on None, which names nothing.
+        import sys
+        from _pytest.monkeypatch import MonkeyPatch
+        monkeypatch.delitem(sys.modules, "mcpServer.tools")
+        with pytest.raises(RuntimeError, match="load_tool"):
+            stub_tool_module(MonkeyPatch(), "_data_read", type("DR", (), {}))

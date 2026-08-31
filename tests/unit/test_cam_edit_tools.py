@@ -2276,7 +2276,11 @@ class TestHolderJson:
                             lambda leaf: asked.append(leaf) or (None, _AssetURL(leaf)))
         monkeypatch.setattr(ct, "_source_tool", lambda url, idx: (_Tool("CT40"), None))
         hd, err = ct._holder_json({"index": 2})
-        assert err is None and asked == [ct._HOLDERS_LIB]
+        # the leaf name is written out LITERALLY, not read back off _HOLDERS_LIB: an assertion
+        # built from the same constant the code asked with cannot fail when that constant is
+        # rewritten, and the string is matched against Fusion's own sample-library leaf names,
+        # so a typo here resolves to nothing live while the suite stays green.
+        assert err is None and asked == ["Holders (Metric)"]
         assert hd == {"description": "stock holder", "segments": []}
 
     def test_no_default_holders_library_asks_for_an_explicit_one(self, monkeypatch):

@@ -87,11 +87,19 @@ def _watched_bodies(host, participants=()):
 
     The PARTICIPANTS are unioned in: a target body can live in another component, and a census scoped
     to the host's own collection would miss its volume change entirely - reporting a successful cut as
-    'no volume changed'. De-duplicated by entityToken, never by identity: one physical body reached
-    through two collection paths hands back two wrappers, and counting it twice doubles the delta."""
+    'no volume changed'.
+
+    De-duplicated by _common.native_identity, the physical-body key. One physical body reached
+    through two collection paths hands back two wrappers whose OWN tokens differ (measured - a body
+    and its occurrence proxy), and counting it twice doubles the delta. Keyed on the wrapper token
+    instead, two DISTINCT bodies merge: a token is DOCUMENT-LOCAL (measured - two bodies reached
+    through two x-refs of one design read byte-identical tokens), so the body that drops out is never
+    watched at all and a cut that moved its material reports as 'no volume changed'. The `or id(b)`
+    last resort keys an identity-less body apart from every other one - it over-counts, never
+    merges."""
     bodies, seen = [], set()
     for b in list(_common.iter_collection(safe(lambda: host.bRepBodies))) + list(participants or []):
-        key = safe(lambda b=b: b.entityToken) or id(b)
+        key = _common.native_identity(b) or id(b)
         if key in seen:
             continue
         seen.add(key)

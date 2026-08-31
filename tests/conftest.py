@@ -22,6 +22,7 @@ workflow.
 import contextlib
 import importlib.util
 import json
+import math
 import os
 import sys
 import types
@@ -218,6 +219,35 @@ def load_tool(module_name):
         sys.modules[full_name] = module
         spec.loader.exec_module(module)
         return module
+
+
+def stub_tool_module(monkeypatch, module_name, stub):
+    """Swap ``mcpServer.tools.<module_name>`` for ``stub`` at both seams a sibling module is reached
+    through. Returns the stub.
+
+    The two seams belong to DIFFERENT import forms, and each patch serves exactly one of them:
+
+    * ``from . import <module_name>`` - the form a handler's deferred delegate import uses
+      (``data_get``) - resolves through the tools PACKAGE ATTRIBUTE. ``_handle_fromlist`` checks
+      ``hasattr(package, name)`` FIRST and skips the submodule import entirely when it holds, so
+      the ATTRIBUTE patch is what routes this form, in either order. A genuine import elsewhere
+      binds that attribute too (``doc_get`` binds ``_data_read``; ``mesh_edit`` binds
+      ``mesh_ops``), and a sys.modules-only stub is then never consulted: the handler gets the real
+      module and the stub goes silently inert while the test still passes or fails on what the real
+      module does.
+    * ``importlib.import_module(".<module_name>", __package__)`` at CALL time - what
+      ``sketch_core._detail_engine`` and ``sys_api_doc``'s module walk do - reads SYS.MODULES and
+      never the attribute, so the setitem is the only live seam for that shape.
+
+    Both patches belong to ``monkeypatch``, so they unwind after the test - including the attribute,
+    which is REMOVED again when the package did not carry it.
+    """
+    pkg = sys.modules.get("mcpServer.tools")
+    if pkg is None:
+        raise RuntimeError("stub_tool_module needs the tools package: call load_tool(...) first.")
+    monkeypatch.setitem(sys.modules, f"mcpServer.tools.{module_name}", stub)
+    monkeypatch.setattr(pkg, module_name, stub, raising=False)
+    return stub
 
 
 # Synthetic package root under which the REAL server modules are importable in tests.
@@ -753,6 +783,59 @@ class FakeVector3D:
         return (cx * cx + cy * cy + cz * cz) ** 0.5 < 1e-9
 
 
+class FakeMatrix3D:
+    """Numeric adsk.core.Matrix3D: a rotation of `deg` about Z followed by a translation `t` (cm).
+
+    Its PUBLIC surface is the pair a world lift calls on the matrix itself - ``copy()`` and
+    ``invert()``, which inverts IN PLACE and answers a bool the way Matrix3D.invert does; pass
+    ``invertible=False`` for the platform DECLINING the inversion - the False every production
+    caller gates on (model_inspect._measuring_axes, model_hole._world_lift). Measured: a SINGULAR
+    matrix does not produce that False - invert() answers True and corrupts the matrix to nan/inf
+    (ledger row matrix3d-invert-singular-answers-true-and-corrupts); rigid occurrence transforms
+    cannot be singular, so the gate is defensive. The rotation/translation state and the arithmetic
+    below it are underscored because they are this fake's own plumbing to a fake Point3D/Vector3D,
+    not members of the type it impersonates - a fake that published them would teach tool code an
+    API Fusion has no equivalent of.
+
+    That arithmetic keeps the POINT/VECTOR split the live API makes: Point3D.transformBy takes the
+    translation, Vector3D.transformBy does not. So a fake point calls ``_apply_point`` and a fake
+    DIRECTION calls ``_apply_vector``, and a lift that leaked a placement's translation into an axis
+    reads wrong here instead of passing.
+
+    A ROTATED placement is what tells a real lift apart from a backwards one - under identity the
+    two are the same matrix.
+    """
+    def __init__(self, deg=0.0, t=(0.0, 0.0, 0.0), invertible=True):
+        self._deg = float(deg)
+        self._t = tuple(float(v) for v in t)
+        self._invertible = bool(invertible)
+
+    def copy(self):
+        return type(self)(self._deg, self._t, self._invertible)
+
+    def invert(self):
+        if not self._invertible:
+            return False
+        # (R, t) -> (R^-1, -R^-1 t)
+        r = math.radians(-self._deg)
+        c, s = math.cos(r), math.sin(r)
+        tx, ty, tz = self._t
+        self._deg = -self._deg
+        self._t = (-(c * tx - s * ty), -(s * tx + c * ty), -tz)
+        return True
+
+    def _apply_vector(self, x, y, z):
+        """The rotation ONLY - what a Vector3D gets, so a direction never picks up a placement."""
+        r = math.radians(self._deg)
+        c, s = math.cos(r), math.sin(r)
+        return (c * x - s * y, s * x + c * y, z)
+
+    def _apply_point(self, x, y, z):
+        """The rotation AND the translation - what a Point3D gets."""
+        vx, vy, vz = self._apply_vector(x, y, z)
+        return (vx + self._t[0], vy + self._t[1], vz + self._t[2])
+
+
 class FakeInfiniteLine3D:
     """Numeric adsk.core.InfiniteLine3D: origin + direction, with the colinearity test the holder
     profile reduction runs (parallel directions AND the origin offset lying along the direction)."""
@@ -1074,11 +1157,18 @@ class BRepFace:
     `body` supplies the owning BRepBody itself (for a volume/token read); `body_name` is the
     lighter name-only stand-in. `normal` installs a surface evaluator whose getNormalAtPoint
     returns it - the live (bool, Vector3D) tuple. Without `normal` the face carries no evaluator,
-    which is how a face whose normal cannot be sampled reads.
+    which is how a face whose normal cannot be sampled reads. `bounding_box` is the face's own AABB
+    (BRepFace.boundingBox); without it the face reads as one whose box is unavailable.
+    `assembly_context` is the occurrence a PROXY face was read through - None (the default) is a
+    NATIVE face, whose reads are in its owning component's space.
     """
     def __init__(self, surface, area=0.0, centroid=None, edge_count=0, body_name=None,
-                 entity_token=None, body=None, point_on_face=None, normal=None):
+                 entity_token=None, body=None, point_on_face=None, normal=None,
+                 bounding_box=None, assembly_context=None):
         self.geometry = surface
+        self.assemblyContext = assembly_context
+        if bounding_box is not None:
+            self.boundingBox = bounding_box
         self.area = area
         self.centroid = centroid
         self.edges = _NamedCollection([None] * edge_count)
@@ -1124,7 +1214,8 @@ class MakeComp:
     (e.g. a fake `features`) can be attached by the caller after construction, or pass a ready-made
     component to `make_design(comp=...)` instead.
     """
-    def __init__(self, name="Root", bodies=(), occurrences=(), sketches=()):
+    def __init__(self, name="Root", bodies=(), occurrences=(), sketches=(), entity_token=None,
+                 parent_design=None):
         self.name = name
         norm = [b if hasattr(b, "name") else BRepBody(b) for b in bodies]
         self.bRepBodies = _NamedCollection(norm)
@@ -1132,14 +1223,31 @@ class MakeComp:
         self.allOccurrences = list(occurrences)
         self.sketches = _NamedCollection(list(sketches))
         self.boundingBox = None
+        # Set only when asked: a component whose token does NOT read is its own tested state, and
+        # every live component has a token but two DISTINCT ones can share it (document-local), so a
+        # test that cares about identity must choose the tokens rather than inherit a default.
+        if entity_token is not None:
+            self.entityToken = entity_token
+        # The design this component belongs to - the first hop of the chain a body's SOURCE DOCUMENT
+        # is read through (parentComponent -> parentDesign -> parentDocument -> dataFile.id). Set
+        # only when asked, so a component whose document cannot be read stays a testable state; see
+        # make_source_document.
+        if parent_design is not None:
+            self.parentDesign = parent_design
 
 
 class MakeDesign:
     """A design exposing the attributes tools/inputs read: rootComponent, activeComponent (defaults to
-    root), allOccurrences, allComponents, and findEntityByToken(token) backed by a `tokens` map."""
-    def __init__(self, comp=None, tokens=None, all_components=None):
+    root), allOccurrences, allComponents, and findEntityByToken(token) backed by a `tokens` map.
+
+    `parent_document` is the Document this design belongs to - the second hop of the source-document
+    chain (see make_source_document). Set only when asked: a design whose document cannot be read is
+    its own tested state, and that is what an unsaved or unreachable document looks like."""
+    def __init__(self, comp=None, tokens=None, all_components=None, parent_document=None):
         self.rootComponent = comp if comp is not None else MakeComp()
         self.activeComponent = self.rootComponent
+        if parent_document is not None:
+            self.parentDocument = parent_document
         self._tokens = dict(tokens or {})
         self._all_components = list(all_components) if all_components is not None else [self.rootComponent]
 
@@ -1160,6 +1268,21 @@ class MakeDesign:
         return [e] if e is not None else []
 
 
+def make_source_document(urn):
+    """The `parentDesign` a component in the document with lineage id `urn` answers.
+
+    An entity's SOURCE DOCUMENT is read through parentComponent -> parentDesign -> parentDocument ->
+    dataFile.id (``_common.native_identity``), and that id is what separates two entities in two
+    x-ref'd documents whose document-local entityTokens collide. Pass ``urn=None`` for a NEVER-SAVED
+    document: it carries no dataFile at all, so the chain stops one hop short.
+
+    Hand a DIFFERENT urn to each component standing for a different source document; hand the SAME
+    one to components of a single document. Document/DataFile have no measured shape dump, so those
+    two hops are attribute bags rather than mapped fakes."""
+    return MakeDesign(parent_document=types.SimpleNamespace(
+        dataFile=(types.SimpleNamespace(id=urn) if urn is not None else None)))
+
+
 def make_design(bodies=(), occurrences=(), tokens=None, comp=None, all_components=None,
                 sketches=()):
     """Build a standard FakeDesign. Use `comp=` to supply a tool-specific component (one carrying a
@@ -1167,6 +1290,68 @@ def make_design(bodies=(), occurrences=(), tokens=None, comp=None, all_component
     if comp is None:
         comp = MakeComp(bodies=bodies, occurrences=occurrences, sketches=sketches)
     return MakeDesign(comp=comp, tokens=tokens, all_components=all_components)
+
+
+class FakeOccurrence:
+    """One assembly occurrence: the component it places, its fullPathName, its name.
+
+    ``raises`` models the UNRESOLVED EXTERNAL REFERENCE state, and models it the way it was
+    MEASURED: the occurrence is present in the tree and EVERY read on it throws. ``component``
+    raising is the only reliable detector (isReferencedComponent / isValid / isLightBulbOn all read
+    normally on a real broken reference), and ``fullPathName`` raises too - which is why code that
+    names an occurrence in an error must fall back to the string it was handed. A fake that raises
+    only on ``component`` lets a missing fullPathName guard survive its own test.
+
+    ``name`` keeps reading in that state: it is the one identity a caller can still publish.
+
+    ``transform2`` is what the occurrence PLACES its component with (a FakeMatrix3D) and
+    ``assemblyContext`` the occurrence placing THIS one, or None where the chain ends at the root -
+    the pair a placement ladder walks. Both answer through ``raises`` like every other read here:
+    that is this fake's declared contract, not a second measurement (the measured detectors named
+    above are ``component`` and ``fullPathName``), and holding a new read to it is what stops a
+    caller reading a placement off an occurrence whose component will not load.
+
+    ONE class, so a test can point ``adsk.fusion.Occurrence`` at it and the shared occurrence
+    resolver's isinstance check passes on a handle it resolved.
+    """
+
+    def __init__(self, path="Comp:1", component=None, raises=None, transform2=None,
+                 assembly_context=None):
+        self._path = path
+        self._component = component
+        self._raises = raises
+        self._transform2 = transform2
+        self._assembly_context = assembly_context
+        self.name = path.split("+")[-1]
+
+    def _read(self, value):
+        if self._raises:
+            raise RuntimeError(self._raises)
+        return value
+
+    @property
+    def fullPathName(self):
+        return self._read(self._path)
+
+    @property
+    def component(self):
+        return self._read(self._component)
+
+    @property
+    def transform2(self):
+        return self._read(self._transform2)
+
+    @property
+    def assemblyContext(self):
+        return self._read(self._assembly_context)
+
+
+def make_occurrence(path="Comp:1", component=None, raises=None, transform2=None,
+                    assembly_context=None):
+    """An occurrence placing `component` at assembly path `path`, with the placement matrix
+    ``transform2`` and the occurrence ``assembly_context`` that places it. Pass ``raises`` to model
+    an unresolved external reference, where every read but ``name`` throws that message."""
+    return FakeOccurrence(path, component, raises, transform2, assembly_context)
 
 
 def make_sketch_curve(token="curve0", length=1.0, is_closed=None):

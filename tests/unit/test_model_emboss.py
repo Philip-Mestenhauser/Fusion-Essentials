@@ -112,8 +112,14 @@ def _wire(monkeypatch, feats, faces, design_type=None, profile_comp=None, extra_
 
     Returns the profile list the handler will receive."""
     import adsk.core
-    comp = MakeComp(name="Comp", sketches=sketches)
+    # Every component answers an entityToken and _common.same_component compares on it: the
+    # faces-vs-profile guard refuses a pair it cannot identify, so the fakes carry tokens the way
+    # live components do. A test that wants the unreadable state deletes the attribute.
+    comp = MakeComp(name="Comp", sketches=sketches, entity_token="TOKEN:Comp")
     comp.features = types.SimpleNamespace(embossFeatures=feats)
+    for i, extra in enumerate(extra_comps):
+        if not hasattr(extra, "entityToken"):
+            extra.entityToken = f"TOKEN:Extra{i}"
     design = make_design(comp=comp, all_components=[comp, *extra_comps])
     if design_type is not None:
         design.designType = design_type
@@ -127,7 +133,7 @@ def _wire(monkeypatch, feats, faces, design_type=None, profile_comp=None, extra_
             f.body.parentComponent = host
     profs = [make_profile(profile_comp if profile_comp is not None else comp)]
     if stub_profiles:
-        monkeypatch.setattr(em._PROFILES, "resolve", lambda raw: (profs, None))
+        monkeypatch.setattr(em._PROFILES, "resolve", lambda raw, component="": (profs, None))
     monkeypatch.setattr(em._FACES, "resolve", lambda raw: (faces, None))
     adsk.core.ValueInput.createByReal = staticmethod(make_value_input)
     return profs
@@ -286,6 +292,32 @@ class TestSketchText:
         assert "text:<i>" in em.emboss_tool.input_schema["properties"]["profiles"]["description"]
 
 
+class TestComponentScope:
+    """SKETCH-6: both by-name forms this input takes - {sketch, profile_index} and
+    '<sketch>/text:<i>' - address a sketch whose name is only unique inside its component. The
+    scope's refusal may only name an input the schema declares, so the two ship together."""
+
+    def test_the_kind_carries_the_scope_this_tools_schema_declares(self):
+        sd = load_tool("_sketch_detail")
+        assert em._PROFILES.scope_input == "component"
+        assert em.emboss_tool.input_schema["properties"]["component"] == sd.COMPONENT_SCOPE[1]
+
+    def test_the_scope_value_reaches_the_profile_resolve(self, monkeypatch):
+        # the input is inert unless the handler passes it: a declared property the resolve never
+        # sees is a remedy the caller can spell and the tool then ignores.
+        body = make_body(volume=12.0)
+        _wire(monkeypatch, FakeEmbossFeatures([body], volume_delta=2.0), [make_face(body)])
+        seen = {}
+
+        def _resolve(raw, component=""):
+            seen["component"] = component
+            return None, "refused"
+
+        monkeypatch.setattr(em._PROFILES, "resolve", _resolve)
+        em.handler(profiles=["p"], faces=["h"], depth=3, units="mm", component="Frame")
+        assert seen == {"component": "Frame"}
+
+
 # ── the feature is built on the profile's OWNING component (bSet avoidance) ────────────────────
 
 class TestHostComponent:
@@ -310,7 +342,7 @@ class TestHostComponent:
         feats = FakeEmbossFeatures([body], volume_delta=2.0)
         _wire(monkeypatch, feats, [make_face(body)])
         monkeypatch.setattr(em._PROFILES, "resolve",
-                            lambda raw: ([types.SimpleNamespace(parentSketch=None)], None))
+                            lambda raw, component="": ([types.SimpleNamespace(parentSketch=None)], None))
         out = payload(em.handler(profiles=["p"], faces=["h"], depth=3, units="mm"))
         assert out["embossed"] is True
         assert feats.last_input is not None
@@ -318,10 +350,10 @@ class TestHostComponent:
     def test_faces_in_another_component_than_the_profile_are_refused_by_name(self, monkeypatch):
         # The feature is built on the PROFILE's component; stamping a body that lives elsewhere
         # needs creationOccurrence, which this tool does not set - so it refuses, naming both.
-        other = MakeComp(name="SubComp")
+        other = MakeComp(name="SubComp", entity_token="TOKEN:SubComp")
         other.features = types.SimpleNamespace(embossFeatures=FakeEmbossFeatures([]))
         body = make_body(name="Plate", volume=12.0)
-        body.parentComponent = MakeComp(name="ElsewhereComp")
+        body.parentComponent = MakeComp(name="ElsewhereComp", entity_token="TOKEN:Elsewhere")
         feats = FakeEmbossFeatures([body], volume_delta=2.0)
         _wire(monkeypatch, feats, [make_face(body)], profile_comp=other, extra_comps=[other])
         msg = error_message(em.handler(profiles=["p"], faces=["h"], depth=3, units="mm"))
@@ -334,10 +366,22 @@ class TestHostComponent:
         body = make_body(volume=12.0)
         feats = FakeEmbossFeatures([body], volume_delta=2.0)
         _wire(monkeypatch, feats, [make_face(body)])
-        twin = MakeComp(name="Comp")             # same name/token, different object
+        twin = MakeComp(name="Comp", entity_token="TOKEN:Comp")   # one token, different object
         body.parentComponent = twin
         out = payload(em.handler(profiles=["p"], faces=["h"], depth=3, units="mm"))
         assert out["embossed"] is True
+
+    def test_an_unreadable_component_identity_refuses_instead_of_embossing(self, monkeypatch):
+        # same_component answers None when a token will not read. Proceeding would reach Fusion's
+        # own 'InternalValidationError : bSet' from inside createInput with nothing naming the
+        # cause, so the tool refuses first - and says the comparison failed, not that the two differ.
+        body = make_body(volume=12.0)
+        feats = FakeEmbossFeatures([body], volume_delta=2.0)
+        _wire(monkeypatch, feats, [make_face(body)])
+        body.parentComponent = MakeComp(name="Comp")              # no entityToken at all
+        msg = error_message(em.handler(profiles=["p"], faces=["h"], depth=3, units="mm"))
+        assert "could not be read" in msg
+        assert feats.last_input is None      # refused BEFORE any mutation was attempted
 
 
 # ── guards ───────────────────────────────────────────────────────────────────
@@ -363,7 +407,7 @@ class TestGuards:
         body = make_body()
         _wire(monkeypatch, FakeEmbossFeatures([body]), [make_face(body)])
         monkeypatch.setattr(em._PROFILES, "resolve",
-                            lambda raw: (None, "'profiles' needs at least one profile (handle or selector)."))
+                            lambda raw, component="": (None, "'profiles' needs at least one profile (handle or selector)."))
         msg = error_message(em.handler(profiles=[], faces=["h"], depth=1, units="mm"))
         assert "needs at least one profile" in msg
 

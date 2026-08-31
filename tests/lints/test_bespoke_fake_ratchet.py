@@ -13,6 +13,17 @@ body counts the same as a top-level one - whose name MATCHES the fake shape: sta
 OR shadows a conftest shared-fake name (a local redefinition instead of an import), OR matches a
 live adsk type name in live_api_facts.SHAPES (e.g. a bare local ``class BRepBody:``).
 
+THE BOUNDARY IS THE NAME, and it is deliberate. Counted: a fake announced as one (Fake/_Fake), a
+local redefinition of a shared conftest fake, and a class wearing an adsk type's own name. NOT
+counted: a structural stand-in under a private alias - ``_Placement`` for a Matrix3D, ``_Occ`` for
+an Occurrence. Member-shape detection does not replace the name rule: the adsk surface is wide
+enough that a small member set is a subset of MANY types at once, so such a scan's yield follows a
+hand-picked minimum-member threshold rather than anything about the classes, and a generic
+collection stand-in (count/item/itemByName) matches at every setting. A stand-in that adds a method
+the real type does not carry - a fake matrix exposing its own arithmetic - sits outside member-shape
+detection entirely. So a private-alias stand-in is caught in review, not here, and
+``test_the_scan_bites`` pins BOTH sides of that line so widening detection cannot happen silently.
+
 The baseline is PER FILE and must match measured reality exactly, moving only downward:
 
 - A file ABOVE its ``_PER_FILE_BASELINE`` entry - or a NEW file at any count, since a new test
@@ -105,7 +116,7 @@ _PER_FILE_BASELINE = {
     "test_edit_joint.py": 9,
     "test_family_gating.py": 3,
     "test_find_geometry.py": 6,
-    "test_inputs.py": 41,
+    "test_inputs.py": 39,   # -2: _install_profiles builds its design from conftest's make_design/MakeComp
     "test_joint_at_geometry.py": 7,   # +1 AsBuiltJoint: is_as_built_joint isinstance-checks adsk.fusion.AsBuiltJoint, a class conftest does not model
     "test_joint_create_edit.py": 4,
     "test_joint_create_origin.py": 14,
@@ -167,6 +178,23 @@ _PER_FILE_BASELINE = {
 # allowlist uses). _raise_offenders keeps each entry real - a ceiling at or below the file's
 # baseline entry has nothing to justify and must collapse back into it.
 _RAISED = {
+    "test_assembly_get.py": (
+        6,
+        "FakeAsBuiltJoint is defined by what it LACKS: an AsBuiltJoint carries no healthState, "
+        "errorOrWarningMessage, geometryOrOriginOne or geometryOrOriginTwo at all (measured - each "
+        "raises AttributeError), and reading that absence as 'no compute failure' is the defect "
+        "under test. conftest carries no joint, relation or TimelineObject fake to extend, and "
+        "deleting a member off the shared adsk mock does not reliably undo itself "
+        "(tests/CLAUDE.md)"),
+    "test_workspace_orient.py": (
+        18,
+        "FakeTimelineHealthOnly and FakeNoHealthAnywhere are defined by what they LACK: an "
+        "AsBuiltJoint and a RigidGroup each carry no healthState and no errorOrWarningMessage at "
+        "all (measured - AttributeError on both), so the orientation rollup reads their state off "
+        "the timelineObject, and the pair separates 'the timeline item answered' from 'neither "
+        "source answered'. conftest carries no joint, relation or TimelineObject fake to extend, "
+        "and deleting a member off the shared adsk mock does not reliably undo itself "
+        "(tests/CLAUDE.md)"),
     "test_find_geometry.py": (
         7,
         "FakeComp - the component that owns the NATIVE, component-local body an occurrence hands "
@@ -367,6 +395,28 @@ class TestBespokeFakeRatchet:
             encoding="utf-8")
         assert len(_offenders_in_file(nested, conftest_names, shape_names)) == 2, (
             "fake-shaped classes nested inside a function must trip the scan")
+        # The DOCUMENTED BOUNDARY (module docstring): detection is by NAME. A structural stand-in
+        # under a private alias stays outside this count however adsk-shaped its members are, and
+        # so does one carrying a method the real type has no equivalent of. Widening detection
+        # re-measures every file at once, so these two are what must change first.
+        aliased = tmp_path / "aliased.py"
+        aliased.write_text(
+            "class _Occ:\n"
+            "    def __init__(self, path, comp, transform2):\n"
+            "        self.fullPathName = path\n"
+            "        self.component = comp\n"
+            "        self.transform2 = transform2\n"
+            "        self.assemblyContext = None\n"
+            "class _Spin:\n"
+            "    def apply(self, v):\n"
+            "        return v\n",
+            encoding="utf-8")
+        assert not _offenders_in_file(aliased, conftest_names, shape_names), (
+            "a private-alias structural stand-in is outside this count by design")
+        renamed = tmp_path / "renamed.py"
+        renamed.write_text("class Occurrence:\n    pass\n", encoding="utf-8")
+        assert _offenders_in_file(renamed, conftest_names, shape_names), (
+            "the same stand-in under the adsk type's OWN name is inside it")
 
     def test_the_ratchet_bites(self):
         # growth in a baselined file, any count in a new file, and a stale entry all fail;

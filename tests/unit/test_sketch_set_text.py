@@ -2,7 +2,8 @@
 
 Pinned here (no live Fusion): the quote/unquote round-trip (the textParameter expression is the
 QUOTED string, with single-quote escaping), the sketch-text iterator across components + sketches
-with a name filter, the per-sketch 0-based index selection, the before/after change tally + the
+and the one-sketch leaf op a NAMED edit walks, the per-sketch 0-based index selection, the
+before/after change tally + the
 _MAX cap, the recompute gating (only in parametric mode), the create path's unit scaling and
 guards, the align-anchored multi_line box, the three layout modes with the inputs each one refuses, the definition read-back that
 says which mode actually landed, and the font applied on both paths with its read-back. The actual
@@ -13,6 +14,7 @@ import json
 import math
 import types
 
+import adsk.fusion
 import pytest
 
 from conftest import load_tool
@@ -59,17 +61,76 @@ class FakeParam:
         self.expression = expr
 
 
+class _HeightParam:
+    """A SketchText.heightParameter: .value reads internal cm and takes a write, and the glyph
+    geometry follows it (measured live). `skew` lands the written value off by that much, `lands`
+    False models a parameter that accepts the assignment while the value stays put, `readable` False
+    one whose value will not read, and `error` a setter Fusion refuses."""
+    def __init__(self, text, value, lands=True, readable=True, error=None, skew=0.0):
+        self._text = text
+        self._v = value
+        self._lands = lands
+        self._readable = readable
+        self._error = error
+        self._skew = skew
+
+    @property
+    def value(self):
+        if not self._readable:
+            raise RuntimeError("heightParameter.value is not available")
+        return self._v
+
+    @value.setter
+    def value(self, v):
+        if self._error:
+            raise RuntimeError(self._error)
+        if self._lands:
+            old, self._v = self._v, v + self._skew
+            self._text._resize(old, self._v)
+
+
 class FakeText:
     """A SketchText. `fontName` is a real property so the set-then-read-back has something to read:
     `font_error` models Fusion refusing a name (the setter raises and the font is kept), and
     `font_lands=False` models a setter that accepts the assignment while the font stays put, and
-    `font_readable=False` a text whose font will not read at all."""
-    def __init__(self, expr, font="Arial", font_error=None, font_lands=True, font_readable=True):
+    `font_readable=False` a text whose font will not read at all.
+
+    `height_cm` gives the text a heightParameter and a boundingBox; leaving it None models the
+    plain text every non-resize test uses (neither member reads). `box=False` models a text whose
+    box will not read, `box_follows=False` glyphs that stay put while the value lands, and
+    `box_delta` a box that moves by a fixed amount rather than proportionally."""
+    def __init__(self, expr, font="Arial", font_error=None, font_lands=True, font_readable=True,
+                 height_cm=None, height_lands=True, height_readable=True, height_error=None,
+                 height_skew=0.0, box=None, box_follows=True, box_delta=None):
         self.textParameter = FakeParam(expr)
         self._font = font
         self.font_error = font_error
         self.font_lands = font_lands
         self.font_readable = font_readable
+        self._box_follows = box_follows
+        self._box_delta = box_delta
+        if height_cm is not None:
+            self.heightParameter = _HeightParam(self, height_cm, height_lands, height_readable,
+                                                height_error, height_skew)
+            if box is not False:
+                self._set_box(*(box if box else (4.0 * height_cm, height_cm)))
+
+    def _set_box(self, w, h):
+        self._w, self._h = w, h
+        self.boundingBox = types.SimpleNamespace(
+            minPoint=types.SimpleNamespace(x=0.0, y=0.0),
+            maxPoint=types.SimpleNamespace(x=w, y=h))
+
+    def _resize(self, old, new):
+        """Measured live: the glyph geometry follows the height PROPORTIONALLY (halving the height
+        halves the box width). box_delta moves the box by a fixed amount instead - the band
+        boundary - and box_follows=False leaves it exactly where it was."""
+        if getattr(self, "boundingBox", None) is None:
+            return
+        if self._box_delta is not None:
+            self._set_box(self._w + self._box_delta, self._h + self._box_delta)
+        elif self._box_follows and old:
+            self._set_box(self._w * new / old, self._h * new / old)
 
     @property
     def fontName(self):
@@ -109,9 +170,14 @@ class FakeSketch:
 
 
 class FakeComp:
+    """A component. Its sketch collection answers itemByName, as a live Component's does - that is
+    what the design-wide by-name walk asks each component - and each sketch points back at it, the
+    way a live Sketch's parentComponent does."""
     def __init__(self, name, sketches):
         self.name = name
-        self.sketches = _Coll(sketches)
+        self.sketches = _NamedColl(list(sketches))
+        for sk in sketches:
+            sk.parentComponent = self
 
 
 class FakeDesign:
@@ -153,21 +219,169 @@ class TestIterSketchTexts:
                                FakeSketch("S2", [FakeText("'b'"), FakeText("'c'")])])
         c2 = FakeComp("Sub", [FakeSketch("S3", [FakeText("'d'")])])
         design = _install([c1, c2])
-        got = list(st._iter_sketch_texts(design, ""))
+        got = list(st._iter_sketch_texts(design))
         assert len(got) == 4
         # tuple shape: (component_name, sketch_name, sketch_text)
         assert got[0][0] == "Root" and got[0][1] == "S1"
 
-    def test_name_filter_limits_to_one_sketch(self):
-        c1 = FakeComp("Root", [FakeSketch("Label", [FakeText("'x'")]),
-                               FakeSketch("Other", [FakeText("'y'")])])
-        design = _install([c1])
-        got = list(st._iter_sketch_texts(design, "Label"))
-        assert len(got) == 1 and got[0][1] == "Label"
+    def test_a_scoped_walk_stops_at_that_component(self):
+        c1 = FakeComp("Root", [FakeSketch("S1", [FakeText("'a'")])])
+        c2 = FakeComp("Sub", [FakeSketch("S3", [FakeText("'d'")])])
+        design = _install([c1, c2])
+        got = list(st._iter_sketch_texts(design, c2))
+        assert [(row[0], row[1]) for row in got] == [("Sub", "S3")]
+
+    def test_texts_in_sketch_yields_one_sketchs_texts_in_index_order(self):
+        # the leaf op the NAMED path walks: one already-resolved sketch, positional
+        sk = FakeSketch("Label", [FakeText("'x'"), FakeText("'y'")])
+        FakeComp("Root", [sk])
+        got = list(st._texts_in_sketch(sk, "Root"))
+        assert [(c, n, t.textParameter.expression) for c, n, t in got] == [
+            ("Root", "Label", "'x'"), ("Root", "Label", "'y'")]
 
     def test_no_texts_yields_empty(self):
         design = _install([FakeComp("Root", [FakeSketch("Empty", [])])])
-        assert list(st._iter_sketch_texts(design, "")) == []
+        assert list(st._iter_sketch_texts(design)) == []
+
+    def test_a_sketch_whose_texts_will_not_read_yields_nothing_rather_than_raising(self):
+        # one unreadable sketch must not take the whole walk down - the other sketches still answer
+        class _Blind:
+            name = "Blind"
+
+            @property
+            def sketchTexts(self):
+                raise RuntimeError("4 : An API Object refers to a deleted Object")
+
+        blind = _Blind()
+        good = FakeSketch("Good", [FakeText("'a'")])
+        design = _install([FakeComp("Root", [blind, good])])
+        assert list(st._texts_in_sketch(blind, "Root")) == []
+        assert [row[1] for row in st._iter_sketch_texts(design)] == ["Good"]
+
+    def test_a_component_whose_sketches_raise_is_skipped_not_fatal(self):
+        class _Deaf:
+            name = "Deaf"
+
+            @property
+            def sketches(self):
+                raise RuntimeError("component not readable")
+
+        design = _install([_Deaf(), FakeComp("Root", [FakeSketch("S", [FakeText("'a'")])])])
+        assert [row[0] for row in st._iter_sketch_texts(design)] == ["Root"]
+
+
+# ── the 'component' SCOPE, on BOTH paths ────────────────────────────────────
+# Fusion numbers sketches per component from 1, so two components each holding a "Label" is the
+# norm. Both paths resolve ONE sketch by name, so both REFUSE the shared name unscoped and the
+# scope is what says which component's "Label" the call means.
+
+class TestComponentScopeOnEdits:
+    def _shared(self, monkeypatch):
+        """ONE sketch name in TWO components, each holding a DIFFERENT string, so which text an
+        edit reached is readable from the payload rather than from a name they share."""
+        alpha = FakeSketch("Label", [FakeText("'alpha-old'")])
+        beta = FakeSketch("Label", [FakeText("'beta-old'"), FakeText("'beta-second'")])
+        design = FakeDesign([FakeComp("Alpha", [alpha]), FakeComp("Beta", [beta])])
+        monkeypatch.setattr(st, "app", type("A", (), {"activeProduct": design})())
+        monkeypatch.setattr(st._common, "app", st.app)
+        monkeypatch.setattr(adsk.fusion.Design, "cast",
+                            lambda x: x if isinstance(x, FakeDesign) else None)
+        return alpha, beta
+
+    def test_an_unscoped_shared_name_refuses_and_rewrites_nothing(self, monkeypatch):
+        # A sketch name is unique only within a component, so an unscoped edit of a name TWO of them
+        # carry has no way to know which nameplate was meant. Writing the string into both and
+        # reporting the total reads as success while two components' labels changed - so it refuses,
+        # naming the owners and the input that narrows it, and neither text moves.
+        alpha, beta = self._shared(monkeypatch)
+        res = st.handler(text="New", sketch_name="Label")
+        assert res["isError"] is True
+        assert "2 sketches are named 'Label'" in res["message"]
+        assert "Alpha" in res["message"] and "Beta" in res["message"]
+        assert "'component'" in res["message"] and "Rename one" not in res["message"]
+        assert alpha.sketchTexts.item(0).textParameter.expression == "'alpha-old'"
+        assert beta.sketchTexts.item(0).textParameter.expression == "'beta-old'"
+        assert beta.sketchTexts.item(1).textParameter.expression == "'beta-second'"
+
+    def test_the_scope_edits_only_that_components_texts(self, monkeypatch):
+        alpha, beta = self._shared(monkeypatch)
+        out = _payload(st.handler(text="New", sketch_name="Label", component="Beta"))
+        assert out["changed_count"] == 2                       # Beta's two, not Alpha's one
+        assert [c["before"] for c in out["changed"]] == ["beta-old", "beta-second"]
+        # every changed row names the ONE component the scope picked
+        assert {c["component"] for c in out["changed"]} == {"Beta"}
+        assert alpha.sketchTexts.item(0).textParameter.expression == "'alpha-old'"
+
+    def test_the_sibling_component_is_reachable_by_the_same_call(self, monkeypatch):
+        alpha, beta = self._shared(monkeypatch)
+        out = _payload(st.handler(text="New", sketch_name="Label", component="Alpha"))
+        assert out["changed_count"] == 1
+        assert beta.sketchTexts.item(0).textParameter.expression == "'beta-old'"
+
+    def test_an_unknown_component_is_refused_and_nothing_is_rewritten(self, monkeypatch):
+        alpha, beta = self._shared(monkeypatch)
+        res = st.handler(text="New", sketch_name="Label", component="Gamma")
+        assert res["isError"] is True and "No component named 'Gamma'" in res["message"]
+        assert alpha.sketchTexts.item(0).textParameter.expression == "'alpha-old'"
+        assert beta.sketchTexts.item(0).textParameter.expression == "'beta-old'"
+
+    def test_the_scope_without_a_name_edits_that_components_texts_only(self, monkeypatch):
+        # 'sketch_name' omitted is "every sketch text", and the scope narrows THAT walk too - the
+        # branch a named edit does not pass through, so it needs its own coverage.
+        alpha, beta = self._shared(monkeypatch)
+        out = _payload(st.handler(text="New", component="Beta"))
+        assert out["changed_count"] == 2
+        assert [c["before"] for c in out["changed"]] == ["beta-old", "beta-second"]
+        assert alpha.sketchTexts.item(0).textParameter.expression == "'alpha-old'"
+
+    def test_an_unknown_component_without_a_name_is_refused_too(self, monkeypatch):
+        alpha, beta = self._shared(monkeypatch)
+        res = st.handler(text="New", component="Gamma")
+        assert res["isError"] is True and "No component named 'Gamma'" in res["message"]
+        assert alpha.sketchTexts.item(0).textParameter.expression == "'alpha-old'"
+        assert beta.sketchTexts.item(0).textParameter.expression == "'beta-old'"
+
+    def test_a_scope_holding_no_such_sketch_names_the_scope_and_the_owner(self, monkeypatch):
+        alpha = FakeSketch("Label", [FakeText("'alpha-old'")])
+        design = FakeDesign([FakeComp("Alpha", [alpha]),
+                             FakeComp("Beta", [FakeSketch("Other", [])])])
+        monkeypatch.setattr(st, "app", type("A", (), {"activeProduct": design})())
+        monkeypatch.setattr(st._common, "app", st.app)
+        monkeypatch.setattr(adsk.fusion.Design, "cast",
+                            lambda x: x if isinstance(x, FakeDesign) else None)
+        res = st.handler(text="New", sketch_name="Label", component="Beta")
+        assert res["isError"] is True
+        # the scope it looked in, AND where the name actually is - the caller's next call
+        assert "'Beta' holds no sketch named 'Label'" in res["message"]
+        assert "'Alpha'" in res["message"]
+        assert alpha.sketchTexts.item(0).textParameter.expression == "'alpha-old'"
+
+    def test_a_scoped_sketch_holding_no_text_still_reports_the_scope(self, monkeypatch):
+        # the other miss: the scope DOES hold that sketch, and the sketch holds no text
+        alpha = FakeSketch("Label", [FakeText("'alpha-old'")])
+        design = FakeDesign([FakeComp("Alpha", [alpha]),
+                             FakeComp("Beta", [FakeSketch("Label", [])])])
+        monkeypatch.setattr(st, "app", type("A", (), {"activeProduct": design})())
+        monkeypatch.setattr(st._common, "app", st.app)
+        monkeypatch.setattr(adsk.fusion.Design, "cast",
+                            lambda x: x if isinstance(x, FakeDesign) else None)
+        res = st.handler(text="New", sketch_name="Label", component="Beta")
+        assert res["isError"] is True and "inside component 'Beta'" in res["message"]
+        assert alpha.sketchTexts.item(0).textParameter.expression == "'alpha-old'"
+
+    def test_a_named_edit_reaches_only_that_sketch(self, monkeypatch):
+        # the name narrows WITHIN a component too: the sibling sketch's text must not move
+        label = FakeSketch("Label", [FakeText("'label-old'")])
+        other = FakeSketch("Other", [FakeText("'other-old'")])
+        design = FakeDesign([FakeComp("Alpha", [label, other])])
+        monkeypatch.setattr(st, "app", type("A", (), {"activeProduct": design})())
+        monkeypatch.setattr(st._common, "app", st.app)
+        monkeypatch.setattr(adsk.fusion.Design, "cast",
+                            lambda x: x if isinstance(x, FakeDesign) else None)
+        out = _payload(st.handler(text="New", sketch_name="Label"))
+        assert out["changed_count"] == 1
+        assert out["changed"][0]["sketch"] == "Label"
+        assert other.sketchTexts.item(0).textParameter.expression == "'other-old'"
 
 
 # ── edit handler: tally / index / recompute ─────────────────────────────────
@@ -451,10 +665,16 @@ class FakeSketchTexts:
     definition report a placement that DISAGREES with the request; `place_returns=False` makes the
     setAs* call refuse. A font is checked at ADD time: `font_raises` models Fusion rejecting the
     name there, `landed_font` a text landing with a font other than the one asked for, and
-    `blind_font` a created text whose fontName will not read."""
+    `blind_font` a created text whose fontName will not read.
+
+    `bbox` is the (x0, y0, x1, y1) cm box the landed text reports as SketchText.boundingBox. The
+    default is the measured shape of the case that motivated reporting it - an Arial h8 label
+    running 188 mm - so it is nowhere near len(text) * height and a width read off the box is
+    distinguishable from one estimated from the inputs. None models a text with no readable box."""
     def __init__(self, initial=0, materialize=True, add_returns=True, raise_on_add=None,
                  definition_type=None, blind_definition=False, place_returns=True,
-                 placement_override=None, font_raises=None, landed_font=None, blind_font=False):
+                 placement_override=None, font_raises=None, landed_font=None, blind_font=False,
+                 bbox=(0.0, 0.0, 18.8, 0.8)):
         self.last_input = None
         self._texts = [type("T", (), {"name": f"T{i}"})() for i in range(initial)]
         self.materialize = materialize
@@ -467,6 +687,7 @@ class FakeSketchTexts:
         self.font_raises = font_raises
         self.landed_font = landed_font
         self.blind_font = blind_font
+        self.bbox = bbox
         self.add_calls = 0
     @property
     def count(self):
@@ -486,6 +707,11 @@ class FakeSketchTexts:
         for prop, value in self.placement_override.items():
             setattr(definition, prop, value)
         st = types.SimpleNamespace(name="Text1", definition=definition)
+        if self.bbox is not None:
+            x0, y0, x1, y1 = self.bbox
+            st.boundingBox = types.SimpleNamespace(
+                minPoint=types.SimpleNamespace(x=x0, y=y0, z=0.0),
+                maxPoint=types.SimpleNamespace(x=x1, y=y1, z=0.0))
         font = self.landed_font if self.landed_font is not None else getattr(ipt, "fontName", None)
         if font is not None and not self.blind_font:
             st.fontName = font
@@ -522,6 +748,63 @@ def _install_create(sketch_name="Plate", texts=None, lines=0, circles=0):
     # HorizontalAlignments/VerticalAlignments members arrive pre-seeded with the measured ints
     # (live_api_facts via conftest) - the fake reads them, never assigns them.
     return design, sk
+
+
+class TestCreateComponentScope:
+    """The CREATE path's half of the scope: it resolves ONE sketch by name, so a shared name
+    refuses without one and the scope is what says which component's sketch receives the text."""
+
+    def _shared(self, monkeypatch):
+        import adsk.core
+        alpha = FakeSketchForCreate("Label")
+        beta = FakeSketchForCreate("Label")
+        design = FakeDesign([FakeComp("Alpha", [alpha]), FakeComp("Beta", [beta])])
+        monkeypatch.setattr(st, "app", type("A", (), {"activeProduct": design})())
+        monkeypatch.setattr(st._common, "app", st.app)
+        monkeypatch.setattr(adsk.fusion.Design, "cast",
+                            lambda x: x if isinstance(x, FakeDesign) else None)
+        monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: ("pt", x, y, z))
+        return alpha, beta
+
+    def test_the_unscoped_shared_name_refuses_and_names_the_scope_input(self, monkeypatch):
+        alpha, beta = self._shared(monkeypatch)
+        res = st.handler(text="LBL", create=True, sketch_name="Label", height=10)
+        assert res["isError"] is True
+        assert "2 sketches are named 'Label'" in res["message"]
+        assert "'component'" in res["message"] and "Rename one" not in res["message"]
+        assert alpha.sketchTexts.add_calls == 0 and beta.sketchTexts.add_calls == 0
+
+    def test_the_scope_creates_in_THAT_components_sketch(self, monkeypatch):
+        alpha, beta = self._shared(monkeypatch)
+        out = _payload(st.handler(text="LBL", create=True, sketch_name="Label",
+                                  component="Beta", height=10))
+        assert out["created"] is True
+        assert beta.sketchTexts.add_calls == 1 and alpha.sketchTexts.add_calls == 0
+
+    def test_the_sibling_component_is_reachable_by_the_same_call(self, monkeypatch):
+        alpha, beta = self._shared(monkeypatch)
+        _payload(st.handler(text="LBL", create=True, sketch_name="Label",
+                            component="Alpha", height=10))
+        assert alpha.sketchTexts.add_calls == 1 and beta.sketchTexts.add_calls == 0
+
+    def test_an_unknown_component_is_refused(self, monkeypatch):
+        alpha, beta = self._shared(monkeypatch)
+        res = st.handler(text="LBL", create=True, sketch_name="Label", component="Gamma",
+                         height=10)
+        assert res["isError"] is True and "No component named 'Gamma'" in res["message"]
+        assert alpha.sketchTexts.add_calls == 0 and beta.sketchTexts.add_calls == 0
+
+    def test_a_wrong_component_is_refused_even_when_the_name_is_UNIQUE(self, monkeypatch):
+        alpha = FakeSketchForCreate("OnlyOne")
+        design = FakeDesign([FakeComp("Alpha", [alpha]), FakeComp("Beta", [])])
+        monkeypatch.setattr(st, "app", type("A", (), {"activeProduct": design})())
+        monkeypatch.setattr(st._common, "app", st.app)
+        monkeypatch.setattr(adsk.fusion.Design, "cast",
+                            lambda x: x if isinstance(x, FakeDesign) else None)
+        res = st.handler(text="LBL", create=True, sketch_name="OnlyOne", component="Beta",
+                         height=10)
+        assert res["isError"] is True and "'Beta'" in res["message"]
+        assert alpha.sketchTexts.add_calls == 0
 
 
 class TestCreate:
@@ -1017,18 +1300,27 @@ class TestCreateOnlyGuard:
         res = st.handler(text="X", x=10)
         assert res["isError"] is True and "'x'" in res["message"]
 
-    def test_height_without_create_is_refused_rather_than_ignored(self):
-        # An edit writes textParameter.expression and fontName and NOTHING else, so a height passed
-        # with create=false never reaches the text. Reporting set:true/changed_count:1 over it told
-        # the caller the height had been applied when the text had not moved off its old size.
-        _install([FakeComp("Root", [FakeSketch("S", [FakeText("'a'")])])])
+    def test_height_is_no_longer_a_create_only_input(self):
+        # The edit path RESIZES now (heightParameter takes a write and the glyphs follow it), so
+        # 'height' must NOT be named by the create-only refusal - naming it would refuse the very
+        # capability the edit path grew.
+        _install([FakeComp("Root", [FakeSketch("S", [FakeText("'a'", height_cm=0.8)])])])
         res = st.handler(text="X", height=20)
+        assert res["isError"] is False, res
+        assert "height" not in st._CREATE_ONLY
+
+    def test_the_refusal_sentence_no_longer_claims_an_edit_changes_nothing_else(self):
+        # the wire contract the resize falsifies: an edit changes the string, its font AND its size
+        _install([FakeComp("Root", [FakeSketch("S", [FakeText("'a'")])])])
+        res = st.handler(text="X", x=10)
         assert res["isError"] is True
-        assert "'height'" in res["message"] and "create=true" in res["message"]
+        assert "and nothing else" not in res["message"]
+        assert "'height'" in res["message"]
 
     def test_a_zero_height_on_the_edit_path_is_still_a_supplied_value(self):
-        # boundary: 0 is falsy but supplied - _given must not read it as "not passed"
-        _install([FakeComp("Root", [FakeSketch("S", [FakeText("'a'")])])])
+        # boundary: 0 is falsy but supplied - _given must not read it as "not passed" and skip the
+        # guard, which would send a zero height at the parameter
+        _install([FakeComp("Root", [FakeSketch("S", [FakeText("'a'", height_cm=0.8)])])])
         res = st.handler(text="X", height=0)
         assert res["isError"] is True and "'height'" in res["message"]
 
@@ -1050,6 +1342,146 @@ class TestCreateOnlyGuard:
         _install([FakeComp("Root", [FakeSketch("S", [FakeText("'a'")])])])
         out = _payload(st.handler(text="X"))
         assert out["changed_count"] == 1
+
+
+# ── 'height' on the EDIT path: the resize, and the two reads that gate it ───
+# heightParameter.value takes a write on an existing text and the glyph geometry follows it
+# proportionally (measured live). Both reads matter: the value alone passes over a parameter that
+# reports the new number while nothing moved, and the box alone cannot say which number landed.
+
+class TestEditResize:
+    def _one(self, **kw):
+        sk = FakeSketch("Plate", [FakeText("'OLD'", **kw)])
+        _install([FakeComp("Root", [sk])])
+        return sk.sketchTexts.item(0)
+
+    def test_the_requested_height_is_written_to_the_parameter_in_cm(self):
+        text = self._one(height_cm=0.8)
+        out = _payload(st.handler(text="NEW", sketch_name="Plate", height=4, units="mm"))
+        assert text.heightParameter.value == 0.4          # 4 mm -> 0.4 cm
+        assert out["changed"][0]["height"] == 4.0
+        assert out["changed"][0]["height_before"] == 8.0
+
+    def test_the_box_is_re_measured_after_the_resize_not_before(self):
+        # halving the height halves the box, so 16 x 4 mm is the box AFTER the write; 32 x 8 would
+        # be the pre-resize read published as the result of the resize.
+        self._one(height_cm=0.8)
+        out = _payload(st.handler(text="NEW", sketch_name="Plate", height=4, units="mm"))
+        rec = out["changed"][0]
+        assert rec["measured_width"] == 16.0 and rec["measured_height"] == 4.0
+
+    def test_a_value_that_does_not_land_errors_naming_both_numbers(self):
+        self._one(height_cm=0.8, height_lands=False)
+        res = st.handler(text="NEW", sketch_name="Plate", height=4, units="mm")
+        assert res["isError"] is True
+        assert "did not take" in res["message"]
+        assert "8.0 mm" in res["message"] and "4.0 mm" in res["message"]
+
+    def test_a_value_that_lands_over_a_frozen_box_is_an_error(self):
+        # THE honest gate: heightParameter reports the requested number while the glyphs never
+        # moved, so the resize did not happen and reporting it would be a false ok.
+        self._one(height_cm=0.8, box_follows=False)
+        res = st.handler(text="NEW", sketch_name="Plate", height=4, units="mm")
+        assert res["isError"] is True
+        assert "did not resize" in res["message"] and "unchanged from" in res["message"]
+
+    def test_a_height_that_did_not_change_is_not_expected_to_move_the_box(self):
+        # asking for the size the text already carries is a legal no-op - a box that sat still there
+        # is the correct outcome, and erroring on it would refuse it
+        self._one(height_cm=0.8, box_follows=False)
+        out = _payload(st.handler(text="NEW", sketch_name="Plate", height=8, units="mm"))
+        assert out["changed"][0]["height"] == 8.0
+
+    def test_an_unreadable_box_makes_no_claim_either_way(self):
+        # the box proves nothing, so the value read-back alone carries the verdict rather than the
+        # resize being refused over a read that never happened
+        self._one(height_cm=0.8, box=False)
+        out = _payload(st.handler(text="NEW", sketch_name="Plate", height=4, units="mm"))
+        rec = out["changed"][0]
+        assert rec["height"] == 4.0 and "measured_width" not in rec
+
+    def test_a_height_that_will_not_read_back_refuses_rather_than_claiming_the_resize(self):
+        self._one(height_cm=0.8, height_readable=False)
+        res = st.handler(text="NEW", sketch_name="Plate", height=4, units="mm")
+        assert res["isError"] is True and "cannot be confirmed" in res["message"]
+
+    def test_a_setter_fusion_refuses_names_the_sketch_and_the_raise(self):
+        self._one(height_cm=0.8, height_error="3 : invalid height")
+        res = st.handler(text="NEW", sketch_name="Plate", height=4, units="mm")
+        assert res["isError"] is True
+        assert "Could not set the height" in res["message"]
+        assert "Plate" in res["message"] and "invalid height" in res["message"]
+
+    def test_a_failed_resize_discloses_the_string_it_already_wrote(self):
+        # the string lands BEFORE the resize is checked, so a bare "resize failed" would read as
+        # nothing having happened to that text
+        self._one(height_cm=0.8, height_lands=False)
+        res = st.handler(text="NEW", sketch_name="Plate", height=4, units="mm")
+        assert "string WAS set to 'NEW'" in res["message"]
+
+    def test_an_edit_naming_no_height_leaves_the_parameter_alone(self):
+        text = self._one(height_cm=0.8)
+        out = _payload(st.handler(text="NEW", sketch_name="Plate"))
+        assert text.heightParameter.value == 0.8
+        assert "height" not in out["changed"][0]
+
+    def test_a_non_numeric_height_is_refused_before_any_text_is_touched(self):
+        text = self._one(height_cm=0.8)
+        res = st.handler(text="NEW", sketch_name="Plate", height="tall")
+        assert res["isError"] is True and "must be a number" in res["message"]
+        assert text.textParameter.expression == "'OLD'"     # nothing written
+
+    def test_an_unknown_unit_is_refused_before_any_text_is_touched(self):
+        text = self._one(height_cm=0.8)
+        res = st.handler(text="NEW", sketch_name="Plate", height=4, units="furlongs")
+        assert res["isError"] is True and "Unknown units" in res["message"]
+        assert text.textParameter.expression == "'OLD'"
+
+    def test_the_note_names_the_height_fields_it_published(self):
+        self._one(height_cm=0.8)
+        out = _payload(st.handler(text="NEW", sketch_name="Plate", height=4, units="mm"))
+        assert "height_before" in out["note"] and "measured_width" in out["note"]
+
+    def test_the_note_does_not_name_box_keys_it_did_not_publish(self):
+        # the box would not read, so no entry carries measured_width/measured_height - a note naming
+        # them anyway sends the caller looking for fields that are not there
+        self._one(height_cm=0.8, box=False)
+        out = _payload(st.handler(text="NEW", sketch_name="Plate", height=4, units="mm"))
+        assert "height_before" in out["note"]
+        assert "measured_width" not in out["note"]
+
+    def test_the_units_input_no_longer_claims_it_is_create_only(self):
+        # the wire contract the resize falsifies: 'units' scales the EDIT height too and names the
+        # unit every reported number comes back in, so a caller trusting "(create only)" would ship
+        # a 0.25 mm text meaning inches
+        desc = st.tool.to_dict()["inputSchema"]["properties"]["units"]["description"]
+        assert "create only" not in desc
+        assert "edit" in desc.lower()
+
+    def test_a_value_difference_at_the_tolerance_passes_and_one_past_it_errors(self):
+        # The exact boundary of the 1e-6 cm band: 2e-6 - 1e-6 is EXACT in binary floating point, so
+        # the equal case really sits ON the boundary rather than rounding under it.
+        for skew, is_error in ((1e-6, False), (2e-6, True)):
+            self._one(height_cm=0.8, height_skew=skew)
+            res = st.handler(text="NEW", sketch_name="Plate", height=1e-6, units="cm")
+            assert res["isError"] is is_error, skew
+
+    def test_a_box_that_moved_by_exactly_the_band_did_not_move(self):
+        # The other comparison's boundary. A 1e-6 cm box puts the relative band at its 1 cm floor,
+        # so the band is exactly 1e-6 - and 2e-6 - 1e-6 is EXACT in binary floating point, so the
+        # equal case really sits ON it. A box moving by the band itself is read noise, not a resize,
+        # so the value-landed-but-nothing-moved refusal still fires.
+        for delta, is_error in ((1e-6, True), (2e-6, False)):
+            self._one(height_cm=0.8, box=(1e-6, 1e-6), box_delta=delta)
+            res = st.handler(text="NEW", sketch_name="Plate", height=4, units="mm")
+            assert res["isError"] is is_error, delta
+
+    def test_every_matched_text_is_resized_not_just_the_first(self):
+        sk = FakeSketch("Plate", [FakeText("'A'", height_cm=0.8), FakeText("'B'", height_cm=1.0)])
+        _install([FakeComp("Root", [sk])])
+        out = _payload(st.handler(text="NEW", sketch_name="Plate", height=4, units="mm"))
+        assert [t.heightParameter.value for t in sk.sketchTexts] == [0.4, 0.4]
+        assert [r["height_before"] for r in out["changed"]] == [8.0, 10.0]
 
 
 # ── font_name: applied on both paths, verified by reading it back ───────────
@@ -1268,3 +1700,135 @@ class TestReadBackPointer:
         _install([FakeComp("Root", [FakeSketch("S", [FakeText("'a'")])])])
         out = _payload(st.handler(text="X"))
         assert "sketch_get(sketch_name=..., include_entities=true)" in out["note"]
+
+
+class TestCreateReportsTheMeasuredWidth:
+    """Nothing tells a caller how wide a string will run before it exists, so a create that ran past
+    the face it had to fit cost a delete-text, a delete-emboss and a rebuild. The create reports the
+    landed text's own box, which is the number to check the label against."""
+
+    def test_the_width_comes_from_the_box_not_from_height_times_length(self):
+        # the default rig's box is 18.8 cm wide against a 3-character string at 5 mm: an estimate
+        # would answer 15 mm, the box answers 188
+        design, sk = _install_create()
+        out = _payload(st.handler(text="LBL", create=True, sketch_name="Plate", units="mm"))
+        assert out["measured_width"] == 188.0
+        assert out["measured_height"] == 8.0
+
+    def test_the_extents_are_scaled_into_the_callers_units(self):
+        design, sk = _install_create()
+        out = _payload(st.handler(text="LBL", create=True, sketch_name="Plate", units="cm"))
+        assert out["measured_width"] == 18.8 and out["measured_height"] == 0.8
+
+    def test_a_box_that_does_not_start_at_the_origin_measures_its_span(self):
+        # width is the SPAN, not the far corner: a text placed away from (0,0) is not wider for it
+        design, sk = _install_create(texts=FakeSketchTexts(bbox=(10.0, 5.0, 12.5, 5.8)))
+        out = _payload(st.handler(text="LBL", create=True, sketch_name="Plate", units="mm"))
+        assert out["measured_width"] == 25.0 and out["measured_height"] == 8.0
+
+    def test_the_note_says_what_was_measured_and_in_which_units(self):
+        design, sk = _install_create()
+        out = _payload(st.handler(text="LBL", create=True, sketch_name="Plate", units="mm"))
+        assert "boundingBox" in out["note"] and "in mm" in out["note"]
+
+    def test_a_text_with_no_readable_box_publishes_nothing_rather_than_a_zero(self):
+        design, sk = _install_create(texts=FakeSketchTexts(bbox=None))
+        out = _payload(st.handler(text="LBL", create=True, sketch_name="Plate"))
+        assert out["created"] is True
+        assert "measured_width" not in out and "measured_height" not in out
+        assert "boundingBox" not in out["note"]
+
+    def test_a_path_mode_create_reports_it_too(self):
+        design, sk = _install_create(lines=1)
+        out = _payload(st.handler(text="LBL", create=True, sketch_name="Plate", mode="along_path",
+                                  path="line:0", units="mm"))
+        assert out["measured_width"] == 188.0
+
+
+class TestMeasuredExtents:
+    """The read on its own: the two extents in display units, or nothing at all when any part of the
+    box will not answer - a half-read box must not publish a width."""
+
+    def _box(self, lo, hi):
+        return types.SimpleNamespace(boundingBox=types.SimpleNamespace(minPoint=lo, maxPoint=hi))
+
+    def _pt(self, x, y):
+        return types.SimpleNamespace(x=x, y=y, z=0.0)
+
+    def test_it_scales_both_spans(self):
+        text = self._box(self._pt(1.0, 2.0), self._pt(4.0, 2.5))
+        assert st._measured_extents(text, 10.0) == (30.0, 5.0)
+
+    def test_no_box_at_all_answers_nothing(self):
+        assert st._measured_extents(types.SimpleNamespace(name="T"), 10.0) == (None, None)
+
+    def test_a_missing_corner_answers_nothing(self):
+        text = types.SimpleNamespace(
+            boundingBox=types.SimpleNamespace(minPoint=self._pt(0.0, 0.0)))
+        assert st._measured_extents(text, 10.0) == (None, None)
+
+    def test_a_coordinate_that_is_not_a_number_answers_nothing(self):
+        # an adsk mock hands back a truthy child object for anything unmodeled; subtracting two of
+        # those is not a width
+        text = self._box(self._pt(0.0, 0.0), self._pt(object(), 1.0))
+        assert st._measured_extents(text, 10.0) == (None, None)
+
+    def test_a_boolean_coordinate_is_not_a_number_either(self):
+        text = self._box(self._pt(False, 0.0), self._pt(True, 1.0))
+        assert st._measured_extents(text, 10.0) == (None, None)
+
+
+@pytest.fixture
+def wired_create(monkeypatch):
+    """The create path's design - one component holding a sketch named 'Plate' - wired into the
+    tool's seams for one test; monkeypatch undoes it after."""
+    comp = type("C", (), {"name": "Root",
+                          "sketches": _NamedColl([FakeSketchForCreate("Plate")])})()
+    design = FakeDesign([comp])
+    monkeypatch.setattr(st, "app", type("A", (), {"activeProduct": design})())
+    monkeypatch.setattr(st._common, "app", st.app)
+    monkeypatch.setattr(adsk.fusion.Design, "cast",
+                        lambda x: x if isinstance(x, FakeDesign) else None)
+    return design
+
+
+@pytest.fixture
+def wired_edit(monkeypatch):
+    """The edit path's design - one component holding a sketch named 'Plate' carrying one text -
+    wired into the tool's seams for one test; monkeypatch undoes it after."""
+    design = FakeDesign([FakeComp("Root", [FakeSketch("Plate", [FakeText("'a'")])])])
+    monkeypatch.setattr(st, "app", type("A", (), {"activeProduct": design})())
+    monkeypatch.setattr(st._common, "app", st.app)
+    monkeypatch.setattr(adsk.fusion.Design, "cast",
+                        lambda x: x if isinstance(x, FakeDesign) else None)
+    return design
+
+
+class TestNamedSketchMiss:
+    def test_the_no_text_miss_reports_the_name_the_walk_searched_for(self, wired_edit):
+        # the handler strips the name before resolving it, so the stripped form is what was
+        # searched - and the message's own "that exact name" is only true of that form.
+        res = st.handler(text="X", sketch_name="  Ghost  ")
+        assert res["isError"] is True
+        assert "in a sketch named 'Ghost'" in res["message"]
+        assert "'  Ghost  '" not in res["message"]
+
+    def test_the_index_no_match_reports_the_name_the_walk_searched_for(self, wired_edit):
+        # the sketch RESOLVED here (the handler strips), so the trailing name must be the stripped
+        # one too - the raw form names a sketch nothing ever looked for.
+        res = st.handler(text="X", sketch_name="  Plate  ", index=5)
+        assert res["isError"] is True
+        assert "in sketch 'Plate'" in res["message"]
+        assert "'  Plate  '" not in res["message"]
+
+    def test_reports_the_name_the_walk_searched_for_not_the_raw_input(self, wired_create):
+        # the name is STRIPPED before the walk, so echoing the raw input quotes a name nothing
+        # ever looked for - and the caller retries against a sketch that was never missing.
+        res = st.handler(text="LBL", create=True, sketch_name="  Ghost  ")
+        assert res["isError"] is True
+        assert "No sketch named 'Ghost'" in res["message"]
+        assert "'  Ghost  '" not in res["message"]
+
+    def test_the_miss_still_lists_what_is_there(self, wired_create):
+        res = st.handler(text="LBL", create=True, sketch_name="Ghost")
+        assert "Available: Plate" in res["message"]

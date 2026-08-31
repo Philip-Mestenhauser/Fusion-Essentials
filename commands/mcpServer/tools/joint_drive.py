@@ -10,11 +10,6 @@ assembly_move). WRITES (mutates part poses); the pose is TRANSIENT until assembl
 
 import math
 
-import adsk.core
-import adsk.fusion
-
-app = adsk.core.Application.get()
-
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
@@ -22,6 +17,7 @@ from ._common import ok, error, safe, scale
 from . import _common
 from . import _geom
 from . import _inputs
+from . import _write_guard
 from ._joints import (find_joint as _find_joint, current_joint_type as _current_joint_type,
                       motion_link_partner as _motion_link_partner)
 
@@ -46,12 +42,49 @@ _MOVE_BAND_DEG = 0.01
 _driven_this_session = set()
 
 
+def _carry_driven_entries(old_key, new_key):
+    """Re-key this document's driven-joint entries when its document key changes (a save re-keys an
+    open document - see _write_guard.on_key_renamed).
+
+    Without this the crash guard fails OPEN, which is the direction that kills Fusion: entries
+    parked under old_key stop matching, so the partner of a joint driven before the save reads as
+    never driven and the both-members refusal does not fire. The key is only the document HALF of
+    each entry, so every entry carrying old_key moves and keeps its own entity token - the token is
+    document-local and says nothing about which document it came from.
+    """
+    for entry in [e for e in _driven_this_session if e[0] == old_key]:
+        _driven_this_session.discard(entry)
+        _driven_this_session.add((new_key,) + tuple(entry[1:]))
+
+
+_write_guard.on_key_renamed(_carry_driven_entries)
+
+
 def _reg_key(doc_id, joint):
     """Registry key for a driven joint: (doc identity, entityToken). The token makes delete+recreate
     clear the poison (new token) while a rename keeps it (stable token). Falls back to the joint NAME
     when no token is readable (an un-persisted joint, or a fake under test)."""
     token = safe(lambda: joint.entityToken)
     return (doc_id, token if token else (safe(lambda: joint.name) or ""))
+
+
+# What stands in for the document half of a registry key when no document reads at all. Not a
+# document either, so it matches no real one.
+_NO_DOCUMENT = "<no document>"
+
+
+def _doc_key():
+    """The document half of _reg_key - what tells one document's driven joints from another's.
+
+    _write_guard.document_key is the one home for that identity: a cloud data file's id, else a
+    per-instance token matched by document handle. A NAME cannot serve here - every never-saved
+    document answers 'Untitled' (measured on two open at once), so a name key merges two documents'
+    driven-joint sets, and a joint's entityToken is DOCUMENT-LOCAL, so two documents can carry one
+    token too. Merged, the registry reports a joint as already driven this session because a
+    DIFFERENT document's joint was, which refuses a safe drive.
+    """
+    key = _write_guard.document_key()
+    return _NO_DOCUMENT if key is None else key
 
 
 def _occ_positively_plain(occ):
@@ -233,8 +266,7 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
     # the link already moved this joint when the partner was driven, and driving both members of a
     # linked pair in an xref assembly has killed the Fusion process. A plain in-document pair falls
     # through (allowed) and gets a warning below. Keyed on the lineage URN + entity token.
-    doc_id = (safe(lambda: app.activeDocument.dataFile.id)
-              or safe(lambda: app.activeDocument.name) or "")
+    doc_id = _doc_key()
     resolved_name = safe(lambda: joint.name) or joint_name
     partner = _motion_link_partner(joint)
     # A partner name SEVERAL joints carry resolves to None here (find_joint refuses it), so the

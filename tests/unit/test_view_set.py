@@ -16,7 +16,9 @@ can assert on them.
 import json
 import types
 
-from conftest import load_tool, BRepBody, _NamedCollection
+import pytest
+
+from conftest import load_tool, make_source_document, BRepBody, MakeComp, _NamedCollection
 
 iv = load_tool("view_set")
 
@@ -50,8 +52,10 @@ class FakeOcc:
 
 
 class FakeRoot:
-    def __init__(self, occurrences, bodies=()):
+    def __init__(self, occurrences, bodies=(), bbox=None):
         self.allOccurrences = list(occurrences)
+        # the WHOLE-DESIGN box a fit frames - the denominator of the framing ratio
+        self.boundingBox = bbox if bbox is not None else FakeBBox((0, 0, 0), (100, 100, 100))
         # root-level bodies (conftest.BRepBody instances) - the body-level hide/show targets.
         self.bRepBodies = _NamedCollection(bodies)
 
@@ -102,8 +106,8 @@ class FakeNamedViews:
 
 
 class FakeDesign:
-    def __init__(self, occurrences, named_views=None, bodies=()):
-        self.rootComponent = FakeRoot(occurrences, bodies)
+    def __init__(self, occurrences, named_views=None, bodies=(), bbox=None):
+        self.rootComponent = FakeRoot(occurrences, bodies, bbox)
         self.namedViews = named_views if named_views is not None else FakeNamedViews()
 
 
@@ -112,17 +116,37 @@ class FakeCamera:
         import adsk.core
         self.eye = FakePoint(10, 10, 10)
         self.target = FakePoint(0, 0, 0)
-        self.upVector = None
+        # a real camera ALWAYS carries an up vector; framing reads it to build the screen axes
+        self.upVector = FakePoint(0, 0, 1)
         self.isFitView = False
         # a camera starts orthographic here; the projection tests are what flip it
         self.cameraType = adsk.core.CameraTypes.OrthographicCameraType
         self.perspectiveAngle = 0.0
+        # LINEAR extents (measured, not an area) - what framing scales to zoom in on a focus
+        self.viewExtents = 100.0
 
 
 class FakeViewport:
     def __init__(self):
         self.camera = FakeCamera()
         self.visualStyle = 0
+        # the aspect the framing ratio reconstructs the frame from
+        self.width, self.height = 1516, 757
+        self.frame_w, self.frame_h = 200.0, 100.0
+        # Viewport.fit() frames every VISIBLE entity. Framing on a focus runs it while the rest of
+        # the design is hidden, so the count is what says the framing pass happened at all.
+        self.fit_calls = 0
+
+    def fit(self):
+        self.fit_calls += 1
+
+    # The frame the viewport currently shows, in model units. Framing reads this instead of
+    # fitting, so the fake has to answer it: a screen point maps linearly onto a frame_w x frame_h
+    # rectangle, which makes the spans the code measures exactly (frame_w, frame_h).
+    def viewToModelSpace(self, pt):
+        import adsk.core
+        return adsk.core.Point3D.create((pt.x / self.width - 0.5) * self.frame_w, 0.0,
+                                        -(pt.y / self.height - 0.5) * self.frame_h)
 
     def refresh(self):
         pass
@@ -142,6 +166,9 @@ class _StubbornViewport:
         self._type_readable = type_readable
         self.assigned = None
         self.visualStyle = 0
+        self.fit_calls = 0
+        self.width, self.height = 1516, 757
+        self.frame_w, self.frame_h = 200.0, 100.0
 
     @property
     def camera(self):
@@ -159,6 +186,17 @@ class _StubbornViewport:
     def camera(self, value):
         self.assigned = value
 
+    def fit(self):
+        self.fit_calls += 1
+
+    # The frame the viewport currently shows, in model units. Framing reads this instead of
+    # fitting, so the fake has to answer it: a screen point maps linearly onto a frame_w x frame_h
+    # rectangle, which makes the spans the code measures exactly (frame_w, frame_h).
+    def viewToModelSpace(self, pt):
+        import adsk.core
+        return adsk.core.Point3D.create((pt.x / self.width - 0.5) * self.frame_w, 0.0,
+                                        -(pt.y / self.height - 0.5) * self.frame_h)
+
     def refresh(self):
         pass
 
@@ -169,10 +207,12 @@ class FakeDataFile:
 
 
 class FakeDoc:
+    isValid = True
+
     def __init__(self, name, data_file_id=None):
         self.name = name
-        if data_file_id is not None:
-            self.dataFile = FakeDataFile(data_file_id)
+        # Never saved -> dataFile reads None (measured); only a saved document hands back one.
+        self.dataFile = FakeDataFile(data_file_id) if data_file_id is not None else None
 
 
 class FakeApp:
@@ -182,16 +222,99 @@ class FakeApp:
         self.activeViewport = FakeViewport()
 
 
+class _DocWrapper:
+    """One read of a document handle. Models the CLOSED-document behaviour as measured: after the
+    document closes, a wrapper handed out earlier compares UNEQUAL to every live document (the
+    comparison answers False, it does NOT raise), isValid reads False, and `.name` raises
+    "An API Object refers to a deleted Object"."""
+
+    def __init__(self, opened):
+        self._opened = opened
+        # A never-saved document answers dataFile None (measured - it does not raise); only a
+        # saved one hands back a DataFile. None is the branch _doc_key's unsaved key exists for.
+        self.dataFile = (FakeDataFile(opened.data_file_id)
+                         if opened.data_file_id is not None else None)
+
+    @property
+    def isValid(self):
+        return self._opened.is_open
+
+    @property
+    def name(self):
+        if not self._opened.is_open:
+            raise RuntimeError("4 : An API Object refers to a deleted Object")
+        return self._opened.name
+
+    def __eq__(self, other):
+        if not self._opened.is_open:
+            return False
+        return isinstance(other, _DocWrapper) and other._opened is self._opened
+
+    # Not hashable, like the wrapper it stands in for: anything keying a dict/set on a document
+    # instead of comparing handles has to fail loudly here rather than silently mis-key.
+    __hash__ = None
+
+
+class _UnreadableComparisonWrapper(_DocWrapper):
+    """A wrapper whose `==` will not read - an ARBITRARY unreadable comparison, claiming nothing
+    about any particular platform state (a closed document's wrapper compares False, it does not
+    raise). It exists to drive the safe() default: a comparison that cannot be read is not a match."""
+
+    def __eq__(self, other):
+        raise RuntimeError("the comparison could not be read")
+
+    __hash__ = None
+
+
+class OpenDocument:
+    """One open document, handing back a FRESH wrapper on every read - what the real API does
+    (_write_guard._open_documents carries the live measurement: `is` reads False for the one
+    active document across two reads while `==` reads True). Two wrappers of THIS document
+    compare equal; wrappers of a different OpenDocument never do."""
+
+    def __init__(self, name, data_file_id=None, wrapper_class=_DocWrapper):
+        self.name = name
+        self.data_file_id = data_file_id
+        self.wrapper_class = wrapper_class
+        self.is_open = True
+
+    def wrapper(self):
+        return self.wrapper_class(self)
+
+    def close(self):
+        """Close the document. Wrappers already handed out (the registry holds one) stay reachable
+        as Python objects and go invalid, which is what a closed Fusion document leaves behind."""
+        self.is_open = False
+
+
+class RewrappingApp:
+    """FakeApp with the wrapper churn: every app.activeDocument read mints a new wrapper."""
+
+    def __init__(self, design, opened):
+        self.activeProduct = design
+        self.activeViewport = FakeViewport()
+        self._opened = opened
+
+    @property
+    def activeDocument(self):
+        return self._opened.wrapper()
+
+
 def _body(name, bulb=True, hidden_by_ancestor=False):
     """A conftest BRepBody: own settable bulb; isVisible = bulb AND not hidden_by_ancestor."""
     return BRepBody(name=name, light_bulb=bulb, hidden_by_ancestor=hidden_by_ancestor)
 
 
-def _install(monkeypatch, occurrences=(), named_views=None, doc_name="Doc", doc_id=None, bodies=()):
-    design = FakeDesign(list(occurrences), named_views, bodies)
+def _install(monkeypatch, occurrences=(), named_views=None, doc_name="Doc", doc_id=None, bodies=(),
+             design_bbox=None):
+    design = FakeDesign(list(occurrences), named_views, bodies, design_bbox)
     app = FakeApp(design, doc_name, doc_id=doc_id)
     monkeypatch.setattr(iv, "app", app)
     monkeypatch.setattr(iv._common, "app", app)
+    # The snapshot key is minted by _write_guard.document_key, which reads the active document
+    # through ITS OWN module-level app - patching only view_set's leaves the key read looking at the
+    # real (absent) Fusion app.
+    monkeypatch.setattr(iv._write_guard, "app", app)
     import adsk.fusion
     monkeypatch.setattr(adsk.fusion.Design, "cast", lambda x: x if isinstance(x, FakeDesign) else None)
     # adsk.core.VisualStyles.<Name> must resolve to an int for _do_style.
@@ -206,7 +329,40 @@ def _install(monkeypatch, occurrences=(), named_views=None, doc_name="Doc", doc_
     # Point3D/Vector3D create -> simple carriers (orient math touches these).
     monkeypatch.setattr(adsk.core.Point3D, "create", staticmethod(lambda x, y, z: FakePoint(x, y, z)))
     monkeypatch.setattr(adsk.core.Vector3D, "create", staticmethod(lambda x, y, z: FakePoint(x, y, z)))
+    # framing reads the frame through viewToModelSpace, which takes a Point2D
+    monkeypatch.setattr(adsk.core.Point2D, "create",
+                        staticmethod(lambda x, y: types.SimpleNamespace(x=x, y=y)))
     return design
+
+
+def _install_open_document(monkeypatch, occurrences, opened):
+    """_install, then swap in an app whose activeDocument re-wraps on every read (OpenDocument).
+    Call it again with the SAME OpenDocument to model switching back to that document."""
+    design = _install(monkeypatch, occurrences)
+    app = RewrappingApp(design, opened)
+    monkeypatch.setattr(iv, "app", app)
+    monkeypatch.setattr(iv._common, "app", app)
+    monkeypatch.setattr(iv._write_guard, "app", app)
+    return design
+
+
+def _clear_snapshot_state():
+    """BOTH halves of the module-level snapshot state: the store here and the per-instance key
+    registry in _write_guard (shared with every other consumer of document_key). The registry
+    outlives one call by design (that is what lets a document find its own snapshot on the next
+    call), so a test that asserts on keys has to start it from empty."""
+    iv._SNAPSHOTS.clear()
+    iv._write_guard._UNSAVED_DOC_KEYS.clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolated_snapshot_state():
+    """Both stores are module-level SESSION state that no test owns on entry. Cleared around every
+    test in this file, not just the snapshot ones: a fake document left in the key registry is
+    still scanned by the next test's _doc_key, in any class."""
+    _clear_snapshot_state()
+    yield
+    _clear_snapshot_state()
 
 
 def _payload(result):
@@ -528,6 +684,232 @@ class TestOrient:
         assert (cam.target.x, cam.target.y, cam.target.z) == (1, 1, 6)
         # eye shifted by the same delta -> (11, 11, 16)
         assert (cam.eye.x, cam.eye.y, cam.eye.z) == (11, 11, 16)
+
+
+class TestFocusFraming:
+    """'focus' promises the view is FRAMED ON that occurrence. Re-aiming the camera at its bbox
+    centre does not deliver that: the fit that follows an orient recomputes the camera extents over
+    EVERY visible entity, so a small part in a large design stays a speck at the centre of a
+    whole-model frame. Framing therefore hides the rest of the design, fits, and turns every bulb
+    back on - and none of those three halves may go missing."""
+
+    def test_framing_shrinks_the_extents_to_the_focus_share_of_the_frame(self, monkeypatch):
+        # Part spans 2 on both screen axes inside a 100-wide world, so the camera has to come down
+        # to 2/100 of its fitted extents, plus the margin that keeps it off the viewport border.
+        near = FakeOcc("Part", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))
+        far = FakeOcc("FarAway", bbox=FakeBBox((400, 0, 0), (402, 2, 2)))
+        _install(monkeypatch, [near, far])
+        out = _payload(iv.handler(action="orient", orientation="front", focus="Part"))
+        assert out["applied"]["frame_ratio"] == pytest.approx(0.02 * iv._FRAME_MARGIN)
+        assert iv.app.activeViewport.camera.viewExtents == pytest.approx(100.0 * 0.02 * iv._FRAME_MARGIN)
+        assert "framed on 'Part'" in out["note"]
+
+    def test_framing_touches_no_visibility_at_all(self, monkeypatch):
+        # The whole point of framing by camera extents: a camera move must not be a visibility
+        # write. Nothing goes dark, so nothing can be left dark.
+        near = FakeOcc("Part", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))
+        far = FakeOcc("FarAway", bbox=FakeBBox((400, 0, 0), (402, 2, 2)))
+        _install(monkeypatch, [near, far])
+        out = _payload(iv.handler(action="orient", orientation="front", focus="Part"))
+        assert near.isLightBulbOn is True and far.isLightBulbOn is True
+        assert far.isIsolated is False
+        assert "visibility_not_restored" not in out["applied"]
+
+    def test_the_taller_axis_wins_so_the_focus_is_never_cropped(self, monkeypatch):
+        # A focus that is a small fraction ACROSS but a large one DOWN must be framed on the down
+        # axis - taking the smaller ratio would crop it vertically.
+        tall = FakeOcc("Tall", bbox=FakeBBox((0, 0, 0), (1, 1, 50)))
+        _install(monkeypatch, [tall])
+        out = _payload(iv.handler(action="orient", orientation="front", focus="Tall"))
+        assert out["applied"]["frame_ratio"] == pytest.approx(0.5 * iv._FRAME_MARGIN)   # 50/100, not 1/100
+
+    def test_the_rest_of_the_design_does_not_affect_the_framing(self, monkeypatch):
+        """Framing measures the focus against the frame the viewport SHOWS, read from the viewport
+        itself, so the size of the rest of the design cannot enter the arithmetic. Dividing by the
+        whole-design box instead makes a wide flat scene read ~20x too loose; this pins that the
+        world is not an input."""
+        part = FakeOcc("Part", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))
+        tiny_world = FakeOcc("Speck", bbox=FakeBBox((0, 0, 0), (3, 3, 3)))
+        huge_world = FakeOcc("Strip", bbox=FakeBBox((0, 0, 0), (4000, 60, 30)))
+
+        _install(monkeypatch, [part, tiny_world], design_bbox=FakeBBox((0, 0, 0), (3, 3, 3)))
+        small = _payload(iv.handler(action="orient", orientation="front",
+                                    focus="Part"))["applied"]["frame_ratio"]
+        _install(monkeypatch, [part, huge_world],
+                 design_bbox=FakeBBox((0, 0, 0), (4000, 60, 30)))
+        large = _payload(iv.handler(action="orient", orientation="front",
+                                    focus="Part"))["applied"]["frame_ratio"]
+        assert small == pytest.approx(large)
+
+    def test_an_unreadable_viewport_size_is_refused_without_moving_the_camera(self, monkeypatch):
+        """No readable frame, no baseline to scale from. The tempting fallback - fit the whole
+        model - would answer a framing request with the exact view framing exists to avoid, and
+        report ok for it. So it refuses, and leaves the camera alone."""
+        part = FakeOcc("Part", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))
+        _install(monkeypatch, [part])
+        before = iv.app.activeViewport.camera.viewExtents
+        monkeypatch.setattr(iv.app.activeViewport, "width", 0)
+        res = iv.handler(action="orient", orientation="front", focus="Part")
+        assert res["isError"] is True and "NOT moved" in res["message"]
+        assert iv.app.activeViewport.camera.viewExtents == before
+        assert iv.app.activeViewport.fit_calls == 0
+
+    def test_framing_zooms_OUT_when_the_focus_is_bigger_than_the_current_frame(self, monkeypatch):
+        """The baseline is the frame the viewport shows right now, so moving from a tightly framed
+        part onto a bigger one legitimately zooms out. A ratio capped at 1.0 would leave the bigger
+        part cropped."""
+        big = FakeOcc("Big", bbox=FakeBBox((0, 0, 0), (400, 400, 400)))
+        _install(monkeypatch, [big])
+        out = _payload(iv.handler(action="orient", orientation="front", focus="Big"))
+        # 400 across a 200-wide frame, 400 down a 100-tall one -> the DOWN axis needs 4x
+        assert out["applied"]["frame_ratio"] == pytest.approx(4.0 * iv._FRAME_MARGIN)
+        assert iv.app.activeViewport.camera.viewExtents == pytest.approx(100.0 * 4.0 * iv._FRAME_MARGIN)
+
+    def test_a_sketch_name_frames_the_sketch(self, monkeypatch):
+        """Sketch work owns no occurrence, so an occurrence-only focus can never aim at it - and a
+        sweep that draws 49 sketches has a whole category of thing nobody can see. A sketch carries
+        a boundingBox, which is all the framing arithmetic needs."""
+        sketch = types.SimpleNamespace(name="SlotBand",
+                                       boundingBox=FakeBBox((0, 0, 0), (50, 50, 0)))
+        _install(monkeypatch, [FakeOcc("Part", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))])
+        monkeypatch.setattr(iv._common, "find_sketch", lambda d, n, remedy=None: (sketch, None))
+        # TOP, because a flat XY sketch is edge-on from the front - its height span there is 0 and
+        # the frame would be driven by width alone, which is correct but tells us nothing.
+        out = _payload(iv.handler(action="orient", orientation="top", focus="SlotBand"))
+        assert out["applied"]["focus"] == "SlotBand"
+        # 50 across a 200-wide frame, 50 down a 100-tall one -> the DOWN axis wins at 0.5
+        assert out["applied"]["frame_ratio"] == pytest.approx(0.5 * iv._FRAME_MARGIN)
+
+    def test_an_occurrence_wins_over_a_sketch_of_the_same_name(self, monkeypatch):
+        # The occurrence is tried first: a name carried by both must not silently frame the sketch.
+        part = FakeOcc("Twin", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))
+        sketch = types.SimpleNamespace(name="Twin",
+                                       boundingBox=FakeBBox((0, 0, 0), (50, 50, 0)))
+        _install(monkeypatch, [part])
+        monkeypatch.setattr(iv._common, "find_sketch", lambda d, n, remedy=None: (sketch, None))
+        out = _payload(iv.handler(action="orient", orientation="front", focus="Twin"))
+        assert out["applied"]["frame_ratio"] == pytest.approx(0.02 * iv._FRAME_MARGIN)   # the OCCURRENCE's size
+
+    def test_a_shared_sketch_name_refusal_offers_a_call_this_input_takes(self, monkeypatch):
+        # SKETCH-6: 'focus' carries no component scope, so no spelling of it separates two sketches
+        # of one name. The default remedy - rename one - is the dead end (a shared sketch name most
+        # often comes from two referenced documents), so this tool hands over its OWN way forward:
+        # the occurrence fullPathName the same input already resolves.
+        _install(monkeypatch, [FakeOcc("Part", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))])
+        seen = {}
+
+        def _find(d, n, remedy=None):
+            seen["remedy"] = remedy
+            return None, f"2 sketches are named '{n}'. {remedy}"
+
+        monkeypatch.setattr(iv._common, "find_sketch", _find)
+        res = iv.handler(action="orient", orientation="front", focus="Plate")
+        assert res["isError"] is True
+        assert seen["remedy"] == iv._FOCUS_SKETCH_REMEDY
+        assert "occurrence fullPathName" in res["message"]
+        assert "Rename" not in res["message"]
+
+    def test_a_name_that_is_neither_names_both_kinds(self, monkeypatch):
+        _install(monkeypatch, [FakeOcc("Part", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))])
+        monkeypatch.setattr(iv._common, "find_sketch", lambda d, n, remedy=None: (None, None))
+        res = iv.handler(action="orient", orientation="front", focus="Ghost")
+        assert res["isError"] is True
+        assert "occurrence" in res["message"] and "sketch" in res["message"]
+
+    def test_several_names_frame_their_union(self, monkeypatch):
+        """A tool-group belongs on screen together. Framing one member hides the rest of it, so a
+        list frames the box enclosing them all - here two 2-wide parts 40 apart, which spans 42."""
+        a = FakeOcc("GroupA", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))
+        b = FakeOcc("GroupB", bbox=FakeBBox((40, 0, 0), (42, 2, 2)))
+        _install(monkeypatch, [a, b])
+        out = _payload(iv.handler(action="orient", orientation="front",
+                                  focus=["GroupA", "GroupB"]))
+        assert out["applied"]["focus"] == "GroupA, GroupB"
+        # union spans 42 across a 200-wide frame; 2 down a 100-tall one -> width wins
+        assert out["applied"]["frame_ratio"] == pytest.approx(42 / 200 * iv._FRAME_MARGIN)
+
+    def test_a_group_focus_naming_something_absent_is_refused(self, monkeypatch):
+        # Silently framing the members that DID resolve would show a group missing a member with
+        # nothing to say it happened.
+        a = FakeOcc("GroupA", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))
+        _install(monkeypatch, [a])
+        monkeypatch.setattr(iv._common, "find_sketch", lambda d, n, remedy=None: (None, None))
+        res = iv.handler(action="orient", orientation="front", focus=["GroupA", "Ghost"])
+        assert res["isError"] is True and "Ghost" in res["message"]
+
+    def test_the_frame_margin_leaves_real_headroom(self):
+        """The ratio tests reference the margin rather than hard-coding it, so it stays tunable -
+        but a margin at or below 1.0 would draw the frame tight to the subject or inside it, which
+        is a different behaviour, not a tuning."""
+        assert iv._FRAME_MARGIN > 1.0
+
+    def test_a_focus_with_no_measurable_size_is_re_aimed_not_refused(self, monkeypatch):
+        """A point sketch spans nothing on either screen axis. There is no size to scale to, but
+        aiming at it is still exactly what was asked for - so the zoom is left alone and the payload
+        says so, rather than failing a framing the caller was right to request."""
+        point = types.SimpleNamespace(name="W3Pt", boundingBox=FakeBBox((5, 5, 0), (5, 5, 0)))
+        _install(monkeypatch, [FakeOcc("Part", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))])
+        monkeypatch.setattr(iv._common, "find_sketch", lambda d, n, remedy=None: (point, None))
+        before = iv.app.activeViewport.camera.viewExtents
+        out = _payload(iv.handler(action="orient", orientation="top", focus="W3Pt"))
+        assert out["applied"]["no_measurable_size"] is True
+        assert out["applied"]["frame_ratio"] is None
+        assert iv.app.activeViewport.camera.viewExtents == before   # zoom untouched
+
+    def test_an_unreadable_bounding_box_is_refused_not_reported_as_framed(self, monkeypatch):
+        # No box, no ratio. Returning ok here would publish "framed on X" over a whole-model view.
+        blind = FakeOcc("Blind", bbox=None)
+        _install(monkeypatch, [blind])
+        res = iv.handler(action="orient", orientation="front", focus="Blind")
+        assert res["isError"] is True
+        # the refusal NAMES what it could not read - with a group focus, "something had no box" is
+        # not enough to act on
+        assert "Blind" in res["message"] and "bounding box" in res["message"]
+
+    def test_an_extents_write_the_platform_drops_is_an_error(self, monkeypatch):
+        import adsk.core
+        near = FakeOcc("Part", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))
+        _install(monkeypatch, [near])
+        # every camera READ hands back a fresh camera, so the extents write never sticks - the
+        # framing silently did not happen, which must not be published as a framed view
+        vp = _StubbornViewport(adsk.core.CameraTypes.OrthographicCameraType)
+        monkeypatch.setattr(iv.app, "activeViewport", vp)
+        res = iv.handler(action="orient", orientation="front", focus="Part")
+        assert res["isError"] is True and "did not take" in res["message"]
+
+    def test_fit_false_re_aims_without_framing_and_says_so(self, monkeypatch):
+        near = FakeOcc("Part", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))
+        far = FakeOcc("FarAway", bbox=FakeBBox((400, 0, 0), (402, 2, 2)))
+        _install(monkeypatch, [near, far])
+        out = _payload(iv.handler(action="orient", orientation="front", focus="Part", fit=False))
+        assert iv.app.activeViewport.fit_calls == 0      # no framing pass at all
+        assert far.isLightBulbOn is True                 # so no visibility was touched either
+        assert "WITHOUT zooming" in out["note"]
+
+    def test_no_focus_leaves_visibility_alone(self, monkeypatch):
+        a = FakeOcc("A", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))
+        b = FakeOcc("B", bbox=FakeBBox((400, 0, 0), (402, 2, 2)))
+        _install(monkeypatch, [a, b])
+        out = _payload(iv.handler(action="orient", orientation="front"))
+        # a whole-model orient is the isFitView path - it must not run the isolation walk
+        assert iv.app.activeViewport.fit_calls == 0
+        assert a.isLightBulbOn is True and b.isLightBulbOn is True
+        assert "framed on" not in out["note"]
+
+    def test_a_refused_projection_read_back_never_touches_visibility(self, monkeypatch):
+        import adsk.core
+        near = FakeOcc("Part", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))
+        far = FakeOcc("FarAway", bbox=FakeBBox((400, 0, 0), (402, 2, 2)))
+        _install(monkeypatch, [near, far])
+        # a viewport that refuses the projection: the orient errors on the read-back, and framing
+        # sits AFTER that check so a failed call leaves the design exactly as it found it.
+        vp = _StubbornViewport(adsk.core.CameraTypes.OrthographicCameraType)
+        monkeypatch.setattr(iv.app, "activeViewport", vp)
+        res = iv.handler(action="orient", orientation="front", focus="Part",
+                         projection="perspective")
+        assert res["isError"] is True and "did not take" in res["message"]
+        assert vp.fit_calls == 0
+        assert near.isLightBulbOn is True and far.isLightBulbOn is True
 
 
 # ── camera projection ───────────────────────────────────────────────────────
@@ -1025,32 +1407,32 @@ class TestSnapshotRestore:
         stuck = _StubbornOcc("B", full_path="B", bulb=True, swallow=("isLightBulbOn",))
         _install(monkeypatch, [good, stuck], doc_name="StuckRestore")
         iv._SNAPSHOTS.clear()
-        _payload(iv.handler(action="snapshot"))
+        key = _payload(iv.handler(action="snapshot"))["saved_for"]
         object.__setattr__(stuck, "isLightBulbOn", False)     # hidden after the snapshot
         good.isLightBulbOn = False
         out = _payload(iv.handler(action="restore"))
         assert out["restored_occurrences"] == 1               # only the one that read back
         assert out["failed_restores"] == ["B"] and out["failed_restore_count"] == 1
         assert out["snapshot_kept"] is True
-        assert "StuckRestore" in iv._SNAPSHOTS                # retryable, not consumed
+        assert key in iv._SNAPSHOTS                           # retryable, not consumed
         assert "PARTIAL RESTORE" in out["note"]
 
     def test_a_clean_restore_still_consumes_the_snapshot(self, monkeypatch):
         a = FakeOcc("A", full_path="A", bulb=True)
         _install(monkeypatch, [a], doc_name="CleanRestore")
         iv._SNAPSHOTS.clear()
-        _payload(iv.handler(action="snapshot"))
+        key = _payload(iv.handler(action="snapshot"))["saved_for"]
         a.isLightBulbOn = False
         out = _payload(iv.handler(action="restore"))
         assert out["snapshot_kept"] is False and "failed_restores" not in out
         assert out["visual_style_restored"] is True and out["camera_restored"] is True
-        assert "CleanRestore" not in iv._SNAPSHOTS
+        assert key not in iv._SNAPSHOTS
 
     def test_a_camera_the_viewport_refuses_is_reported_and_keeps_the_snapshot(self, monkeypatch):
         a = FakeOcc("A", full_path="A", bulb=True)
         _install(monkeypatch, [a], doc_name="CamRestore")
         iv._SNAPSHOTS.clear()
-        _payload(iv.handler(action="snapshot"))
+        key = _payload(iv.handler(action="snapshot"))["saved_for"]
 
         class _RefusingViewport:
             """A viewport that hands back a camera but will not take one - the restore the
@@ -1075,14 +1457,14 @@ class TestSnapshotRestore:
         assert out["camera_restored"] is False
         assert "camera" in out["failed_restores"]
         assert "viewport busy" in out["note"]
-        assert "CamRestore" in iv._SNAPSHOTS
+        assert key in iv._SNAPSHOTS
 
     def test_a_visual_style_that_does_not_land_is_reported(self, monkeypatch):
         a = FakeOcc("A", full_path="A", bulb=True)
         _install(monkeypatch, [a], doc_name="StyleRestore")
         iv._SNAPSHOTS.clear()
         iv.app.activeViewport.visualStyle = 1
-        _payload(iv.handler(action="snapshot"))
+        key = _payload(iv.handler(action="snapshot"))["saved_for"]
 
         class _StuckStyle(FakeViewport):
             def __setattr__(self, key, value):
@@ -1096,10 +1478,10 @@ class TestSnapshotRestore:
         out = _payload(iv.handler(action="restore"))
         assert out["visual_style_restored"] is False
         assert "visualStyle" in out["failed_restores"]
-        assert "StyleRestore" in iv._SNAPSHOTS
+        assert key in iv._SNAPSHOTS
 
-    def test_same_named_documents_do_not_collide(self, monkeypatch):
-        # _SNAPSHOTS is keyed by document id, not name: two open documents that happen to share a
+    def test_saved_documents_sharing_a_name_key_on_their_data_file_id(self, monkeypatch):
+        # _SNAPSHOTS is keyed by document, not name: two open documents that happen to share a
         # name (e.g. two "Untitled") must not clobber each other's saved state. A snapshot saved
         # under one doc id must NOT be visible/restorable under another doc that shares the same
         # NAME but has a different id.
@@ -1115,6 +1497,213 @@ class TestSnapshotRestore:
         assert res["isError"] is True and "No snapshot saved" in res["message"]
         # the first document's snapshot is untouched
         assert "urn:doc-one" in iv._SNAPSHOTS
+
+    def test_two_unsaved_documents_sharing_a_name_get_different_keys(self, monkeypatch):
+        # THE branch a name key collides on: a never-saved document has NO dataFile, and several
+        # open "Untitled" documents are ordinary. Each must land under its own key.
+        one, two = OpenDocument("Untitled"), OpenDocument("Untitled")
+        _install_open_document(monkeypatch, [FakeOcc("A", full_path="A")], one)
+        first = _payload(iv.handler(action="snapshot"))["saved_for"]
+        _install_open_document(monkeypatch, [FakeOcc("B", full_path="B")], two)
+        second = _payload(iv.handler(action="snapshot"))["saved_for"]
+        assert first != second
+        assert len(iv._SNAPSHOTS) == 2                     # neither overwrote the other
+        assert set(iv._SNAPSHOTS) == {first, second}
+
+    def test_an_unsaved_documents_snapshot_is_not_restorable_into_another(self, monkeypatch):
+        # The clobber itself: doc one's camera/style/bulbs must not be restorable INTO doc two.
+        one, two = OpenDocument("Untitled"), OpenDocument("Untitled")
+        _install_open_document(monkeypatch, [FakeOcc("A", full_path="A", bulb=True)], one)
+        saved_for = _payload(iv.handler(action="snapshot"))["saved_for"]
+        # switch to the OTHER unsaved 'Untitled' and hide something there
+        b = FakeOcc("A", full_path="A", bulb=True)
+        _install_open_document(monkeypatch, [b], two)
+        b.isLightBulbOn = False
+        res = iv.handler(action="restore")
+        assert res["isError"] is True and "No snapshot saved" in res["message"]
+        assert b.isLightBulbOn is False                    # doc one's state did NOT land here
+        assert saved_for in iv._SNAPSHOTS                  # and doc one's snapshot survives
+
+    def test_one_unsaved_document_keeps_its_key_across_calls(self, monkeypatch):
+        # The other half of the same rule: the SAME document must still find its own snapshot
+        # across two calls, even though each app.activeDocument read hands back a new wrapper.
+        opened = OpenDocument("Untitled")
+        a = FakeOcc("A", full_path="A", bulb=True)
+        _install_open_document(monkeypatch, [a], opened)
+        _payload(iv.handler(action="snapshot"))
+        a.isLightBulbOn = False
+        out = _payload(iv.handler(action="restore"))
+        assert out["restored_occurrences"] == 1
+        assert a.isLightBulbOn is True
+        assert iv._SNAPSHOTS == {}                         # its own snapshot, cleanly consumed
+
+    def test_a_snapshot_survives_the_save_that_re_keys_its_document(self, monkeypatch):
+        # THE BITE: explore an unsaved document, then save it. The document key changes from the
+        # minted token to the data-file id WITHOUT the document closing, so nothing evicts and
+        # nothing else can reclaim what was parked - the restore misses honestly and the
+        # pre-explore camera/visibility state is lost for the session. The shared rename
+        # announcement carries it onto the key the document answers now.
+        opened = OpenDocument("Untitled")
+        a = FakeOcc("A", full_path="A", bulb=True)
+        _install_open_document(monkeypatch, [a], opened)
+        saved_for = _payload(iv.handler(action="snapshot"))["saved_for"]
+        assert saved_for.startswith("unsaved:")
+        a.isLightBulbOn = False                            # the exploring
+        opened.data_file_id = "urn:lineage:saved"          # doc_save_as lands mid-session
+        out = _payload(iv.handler(action="restore"))
+        assert out["restored_occurrences"] == 1
+        assert a.isLightBulbOn is True                     # the pre-explore state came back
+
+    def test_the_carried_snapshot_MOVES_onto_the_new_key(self, monkeypatch):
+        # Carried, not copied: a snapshot left behind under the superseded token is state no live
+        # document keys to again, and a restore under the new key pops only one of the two.
+        opened = OpenDocument("Untitled")
+        _install_open_document(monkeypatch, [FakeOcc("A", full_path="A")], opened)
+        old_key = _payload(iv.handler(action="snapshot"))["saved_for"]
+        opened.data_file_id = "urn:lineage:saved"
+        assert iv._doc_key() == "urn:lineage:saved"
+        assert list(iv._SNAPSHOTS) == ["urn:lineage:saved"]
+        assert old_key not in iv._SNAPSHOTS
+
+    def test_the_snapshot_is_carried_again_on_the_second_key_flip(self, monkeypatch):
+        # A save can re-key one document more than once - IF a path form answers before the lineage
+        # urn (PROBE NEEDED, KEY-2). The mechanism is tested regardless of what triggers a second
+        # flip: carrying only the FIRST one strands the snapshot one key later.
+        opened = OpenDocument("Untitled")
+        a = FakeOcc("A", full_path="A", bulb=True)
+        _install_open_document(monkeypatch, [a], opened)
+        _payload(iv.handler(action="snapshot"))
+        opened.data_file_id = "a.b.c:/Projects/Plate.f3d"
+        assert iv._doc_key() == "a.b.c:/Projects/Plate.f3d"
+        opened.data_file_id = "urn:lineage:saved"
+        a.isLightBulbOn = False
+        out = _payload(iv.handler(action="restore"))
+        assert out["restored_occurrences"] == 1 and a.isLightBulbOn is True
+
+    def test_only_the_re_keyed_documents_snapshot_moves(self, monkeypatch):
+        # The announcement is broadcast to every consumer, but it names ONE key: another open
+        # document's snapshot must stay exactly where it is, or a save in one document silently
+        # re-addresses another's saved state.
+        one, two = OpenDocument("Untitled"), OpenDocument("Untitled")
+        _install_open_document(monkeypatch, [FakeOcc("A", full_path="A")], one)
+        one_key = _payload(iv.handler(action="snapshot"))["saved_for"]
+        _install_open_document(monkeypatch, [FakeOcc("B", full_path="B")], two)
+        two_key = _payload(iv.handler(action="snapshot"))["saved_for"]
+        _install_open_document(monkeypatch, [FakeOcc("A", full_path="A")], one)
+        one.data_file_id = "urn:lineage:saved"
+        assert iv._doc_key() == "urn:lineage:saved"
+        assert set(iv._SNAPSHOTS) == {"urn:lineage:saved", two_key}
+        assert one_key not in iv._SNAPSHOTS
+
+    def test_a_rename_for_a_key_holding_no_snapshot_stores_nothing(self, monkeypatch):
+        # The listener fires for every consumer on every flip, including flips of documents this
+        # store never saw. Writing an entry for one would make a later restore find a snapshot
+        # that was never taken.
+        iv._carry_snapshot("unsaved:99", "urn:lineage:elsewhere")
+        assert iv._SNAPSHOTS == {}
+
+    def test_a_data_file_whose_id_will_not_read_falls_back_to_an_instance_key(self, monkeypatch):
+        # A dataFile that answers an EMPTY id is not an identity - keying on it would put every
+        # such document in one bucket. It takes the per-instance key instead.
+        blank_one, blank_two = OpenDocument("Shared", ""), OpenDocument("Shared", "")
+        _install_open_document(monkeypatch, [FakeOcc("A", full_path="A")], blank_one)
+        first = _payload(iv.handler(action="snapshot"))["saved_for"]
+        _install_open_document(monkeypatch, [FakeOcc("B", full_path="B")], blank_two)
+        second = _payload(iv.handler(action="snapshot"))["saved_for"]
+        assert first != second and first != "" and second != ""
+        assert len(iv._SNAPSHOTS) == 2
+
+    def test_a_comparison_that_will_not_read_is_not_a_match(self, monkeypatch):
+        # The safe() default. This wrapper's `==` raises - an ARBITRARY unreadable comparison,
+        # standing for no particular platform state (a CLOSED document's wrapper answers False,
+        # it does not raise). A comparison nobody could read is not evidence of a match, so the
+        # live document mints its own key rather than inheriting a registered one's snapshot.
+        unreadable = OpenDocument("Untitled", wrapper_class=_UnreadableComparisonWrapper)
+        _install_open_document(monkeypatch, [FakeOcc("A", full_path="A")], unreadable)
+        other_key = _payload(iv.handler(action="snapshot"))["saved_for"]
+        live = OpenDocument("Untitled")
+        _install_open_document(monkeypatch, [FakeOcc("B", full_path="B")], live)
+        res = iv.handler(action="restore")
+        assert res["isError"] is True and "No snapshot saved" in res["message"]
+        assert other_key in iv._SNAPSHOTS
+
+    def test_a_closed_document_is_pruned_and_its_snapshot_dropped(self, monkeypatch):
+        # A closed document's snapshot is unreachable - no live document keys to it again - so
+        # keeping it parks a Camera copy and a per-occurrence dict per scratch document for the
+        # session. The next unsaved-key read evicts both halves.
+        gone = OpenDocument("Untitled")
+        _install_open_document(monkeypatch, [FakeOcc("A", full_path="A")], gone)
+        dead_key = _payload(iv.handler(action="snapshot"))["saved_for"]
+        assert dead_key in iv._SNAPSHOTS and len(iv._write_guard._UNSAVED_DOC_KEYS) == 1
+        gone.close()                                       # the tab is closed
+        live = OpenDocument("Untitled")
+        _install_open_document(monkeypatch, [FakeOcc("B", full_path="B")], live)
+        live_key = _payload(iv.handler(action="snapshot"))["saved_for"]
+        assert dead_key not in iv._SNAPSHOTS               # the orphan snapshot is gone
+        assert list(iv._SNAPSHOTS) == [live_key]
+        assert [k for _d, k in iv._write_guard._UNSAVED_DOC_KEYS] == [live_key]
+
+    def test_several_closed_documents_are_all_evicted_in_one_pass(self, monkeypatch):
+        # The eviction walks the registry BACKWARDS so a deletion cannot slide the next entry past
+        # the cursor, and so the index it holds stays inside a list that is shrinking under it. A
+        # forward walk mis-handles both, and only a registry holding MORE THAN ONE dead entry can
+        # tell the two walks apart - which is the shape a --keep-open session full of scratch
+        # documents actually produces.
+        first, second, live = (OpenDocument("Untitled"), OpenDocument("Untitled"),
+                               OpenDocument("Untitled"))
+        keys = []
+        for opened, occ in ((first, "A"), (second, "B"), (live, "C")):
+            _install_open_document(monkeypatch, [FakeOcc(occ, full_path=occ)], opened)
+            keys.append(_payload(iv.handler(action="snapshot"))["saved_for"])
+        assert len(iv._write_guard._UNSAVED_DOC_KEYS) == 3 and len(iv._SNAPSHOTS) == 3
+        first.close()
+        second.close()                                     # two dead entries, adjacent, at the front
+        _install_open_document(monkeypatch, [FakeOcc("C", full_path="C")], live)
+        assert iv._doc_key() == keys[2]                    # the survivor keeps its own key
+        assert [k for _d, k in iv._write_guard._UNSAVED_DOC_KEYS] == [keys[2]]
+        assert list(iv._SNAPSHOTS) == [keys[2]]
+
+    def test_a_document_whose_validity_will_not_read_keeps_its_snapshot(self, monkeypatch):
+        # The prune only acts on a DEFINITE False. An isValid that will not read says nothing
+        # about the document, and evicting a live document's only saved state on it is the worse
+        # error - so the snapshot stays and the document still finds it.
+        class _MuteValidity(_DocWrapper):
+            @property
+            def isValid(self):
+                raise RuntimeError("isValid could not be read")
+
+        opened = OpenDocument("Untitled", wrapper_class=_MuteValidity)
+        a = FakeOcc("A", full_path="A", bulb=True)
+        _install_open_document(monkeypatch, [a], opened)
+        key = _payload(iv.handler(action="snapshot"))["saved_for"]
+        a.isLightBulbOn = False
+        assert key in iv._SNAPSHOTS
+        out = _payload(iv.handler(action="restore"))
+        assert out["restored_occurrences"] == 1 and a.isLightBulbOn is True
+
+    def test_the_refusal_names_the_document_not_the_session_token(self, monkeypatch):
+        # WIRE: 'unsaved:N' is not a name, a URN or doc_get's 'open:N' - no tool accepts it and no
+        # read reports it, so a refusal built on it hands the caller nothing to act on.
+        _install_open_document(monkeypatch, [FakeOcc("A", full_path="A")],
+                               OpenDocument("Fixture Plate"))
+        res = iv.handler(action="restore")
+        assert res["isError"] is True
+        assert "No snapshot saved for 'Fixture Plate'" in res["message"]
+        assert "unsaved:" not in res["message"]
+
+    def test_the_snapshot_payload_names_the_document_beside_its_key(self, monkeypatch):
+        # 'saved_for' is a session token for an unsaved document; alone it says nothing about
+        # WHICH document the snapshot covers.
+        _install_open_document(monkeypatch, [FakeOcc("A", full_path="A")],
+                               OpenDocument("Fixture Plate"))
+        out = _payload(iv.handler(action="snapshot"))
+        assert out["document"] == "Fixture Plate"
+        assert out["saved_for"].startswith("unsaved:")
+
+    def test_no_active_document_keys_on_a_placeholder(self, monkeypatch):
+        _install(monkeypatch, [FakeOcc("A", full_path="A")])
+        monkeypatch.setattr(iv.app, "activeDocument", None)
+        assert iv._doc_key() == "<active>"
 
 
 # ── request tracer: a per-response 'request_echo' (monotonic seq + the args the handler received) so ──
@@ -1163,6 +1752,31 @@ def _lit_root(design, token="root-tok"):
     return r
 
 
+# The x-ref shape for COMPONENTS, measured on a job assembled from several source documents: each
+# document's ROOT component reads the SAME byte-identical entityToken while the documents' lineage
+# ids differ. So a component's document is the half that tells two of them apart.
+_SHARED_ROOT_TOKEN = "/v4BAAEAAwAAAAAAAAAAAAAA"
+_URN_ONE = "urn:adsk.wipprod:dm.lineage:K3I2nkywRlaWPHJexysOdA"
+_URN_TWO = "urn:adsk.wipprod:dm.lineage:N_QoPrrrSJmF__f9BZV86A"
+
+
+def _doc_comp(name, urn, sketches=True):
+    """A component in the document with lineage id `urn`, carrying the four folder bulbs. Both of
+    these answer the SAME entityToken, which is what two documents' root components do; `sketches`
+    sets the one bulb the pair is made to DISAGREE on."""
+    c = MakeComp(name=name, entity_token=_SHARED_ROOT_TOKEN,
+                 parent_design=make_source_document(urn))
+    for attr in _FOLDER_ATTRS:
+        setattr(c, attr, True)
+    c.isSketchFolderLightBulbOn = sketches
+    return c
+
+
+def _folder_comps():
+    """The colliding pair, both fully lit - for the walk-reaches-everything case."""
+    return _doc_comp("StockDoc", _URN_ONE), _doc_comp("ViseDoc", _URN_TWO)
+
+
 class TestDisplay:
     def test_hide_all_categories_sets_each_folder_bulb(self, monkeypatch):
         design = _install(monkeypatch)
@@ -1186,6 +1800,59 @@ class TestDisplay:
         r.isSketchFolderLightBulbOn = False
         out = _payload(iv.handler(action="display", visible=False, categories=["sketches"]))
         assert out["folders_set"] == {"sketches": 0}         # nothing to write
+
+    def test_the_walk_reaches_every_component_not_just_the_root(self, monkeypatch):
+        # display() writes through _view_common's walk, so a walk that merged two components would
+        # leave the second one's folders lit while the payload counted only the components it saw.
+        design = _install(monkeypatch)
+        a, b = _folder_comps()
+        design.allComponents = [a, b]
+        out = _payload(iv.handler(action="display", visible=False))
+        # 3 per category: the root component plus both of the colliding pair
+        assert out["folders_set"] == {"sketches": 3, "construction": 3, "origins": 3, "joints": 3}
+        assert out["components_walked"] == 3
+        assert all(getattr(c, attr) is False for c in (a, b) for attr in _FOLDER_ATTRS)
+
+    def test_the_folder_snapshot_round_trip_gives_each_component_ITS_OWN_bulbs_back(
+            self, monkeypatch):
+        # snapshot -> display(hide) -> restore, across two components whose document-local tokens
+        # COLLIDE and whose starting bulbs DIFFER. Keyed on the bare token the snapshot holds one
+        # entry (the last component walked wins) and restore writes that one component's state onto
+        # both - so the component whose sketches were ON never gets them back, the write reads back
+        # as the value it just wrote, and the restore reports full success. The wrong value is the
+        # only observable, which is why it needs a differing pair to show up at all.
+        design = _install(monkeypatch)
+        lit = _doc_comp("StockDoc", _URN_ONE, sketches=True)
+        dark = _doc_comp("ViseDoc", _URN_TWO, sketches=False)
+        design.allComponents = [lit, dark]
+
+        _payload(iv.handler(action="snapshot"))
+        _payload(iv.handler(action="display", visible=False))
+        assert lit.isSketchFolderLightBulbOn is False        # the toggle really moved both
+        assert dark.isConstructionFolderLightBulbOn is False
+
+        out = _payload(iv.handler(action="restore"))
+        assert lit.isSketchFolderLightBulbOn is True         # its OWN pre-snapshot state
+        assert dark.isSketchFolderLightBulbOn is False       # and its own, which differed
+        assert all(getattr(c, a) is True for c in (lit, dark)
+                   for a in _FOLDER_ATTRS if a != "isSketchFolderLightBulbOn")
+        # a wrong restore is silent - it reads back as whatever it wrote - so the payload claiming a
+        # clean restore is exactly what a token-keyed collapse would also claim
+        assert "failed_restores" not in out and out["snapshot_kept"] is False
+
+    def test_a_component_whose_identity_does_not_read_is_left_alone(self, monkeypatch):
+        # No identity means no key: storing such a component would put it under a key every other
+        # unidentifiable component shares. It is skipped on both ends rather than restored wrong.
+        design = _install(monkeypatch)
+        anon = MakeComp(name="Anon")                          # no token, no parentDesign
+        for attr in _FOLDER_ATTRS:
+            setattr(anon, attr, True)
+        design.allComponents = [anon]
+        _payload(iv.handler(action="snapshot"))
+        _payload(iv.handler(action="display", visible=False))
+        out = _payload(iv.handler(action="restore"))
+        assert anon.isSketchFolderLightBulbOn is False        # never restored, never claimed
+        assert "failed_restores" not in out
 
     def test_a_string_false_is_parsed_never_truthy(self, monkeypatch):
         # A permissive client delivers booleans as strings; bool('false') would SHOW instead.

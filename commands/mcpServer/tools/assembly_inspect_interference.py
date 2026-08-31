@@ -23,13 +23,23 @@ RETURNS = [_outputs.ReturnsVerdict(relations=("interference_free",))]
 
 
 def _native_body_owners(occurrences):
-    """{native body entityToken -> [occurrence fullPathName, ...]} for the analysis set.
+    """{_common.native_identity(native body) -> [occurrence fullPathName, ...]} for the analysis set.
 
     LIVE-VERIFIED: analyzeInterference hands back NATIVE bodies - `assemblyContext` reads None on
     both result entities even when the input was a set of occurrences - so the interfering INSTANCE
     cannot be read off the result. Mapping each occurrence's component-native bodies back to that
     occurrence's fullPathName is how the instance gets named here. A component instanced twice maps
-    one native body to several occurrences, which is reported as the genuine ambiguity it is."""
+    one native body to several occurrences, which is reported as the genuine ambiguity it is.
+
+    Keyed on `_common.native_identity` - the (native token, source-document lineage urn) pair - and
+    NOT on the bare entityToken: a token is DOCUMENT-LOCAL (MEASURED: the 7 ROOT COMPONENTS of a CAM
+    job assembled from 7 source documents read one byte-identical token between them, and distinct
+    BODIES reached through two x-refs do the same). Keyed on the token alone, two bodies living in
+    two different x-ref'd documents write ONE owner list, and every path in it is then published as
+    an owner of the other document's body. The urn half is what separates them.
+
+    A body whose identity does not read is skipped rather than stored under a key that would collide
+    with every other unidentifiable one; `_owning_occurrence_name` names it from its component."""
     owners = {}
     for occ in occurrences:
         path = safe(lambda o=occ: o.fullPathName)
@@ -37,9 +47,9 @@ def _native_body_owners(occurrences):
         if not path or comp is None:
             continue
         for b in (safe(lambda c=comp: c.bRepBodies, None) or []):
-            tok = safe(lambda b=b: b.entityToken)
-            if tok:
-                owners.setdefault(tok, []).append(path)
+            ident = _common.native_identity(b)
+            if ident is not None:
+                owners.setdefault(ident, []).append(path)
     return owners
 
 
@@ -54,14 +64,21 @@ def _owning_occurrence_name(body, owners):
     exact, and the FULL path list when one native body serves several instances - the platform
     cannot say WHICH instance collided (see _native_body_owners), so every suspect is named
     instead of one being silently picked (the handler caps what a row publishes). Falls back to
-    the COMPONENT name (shared by every instance) only when the body maps to no occurrence."""
-    tok = safe(lambda: body.entityToken)
-    paths = owners.get(tok) if tok else None
+    the COMPONENT name (shared by every instance) only when the body maps to no occurrence.
+
+    Looked up by `_common.native_identity`, the key `_native_body_owners` stores under - the same
+    reader on both sides, so a body and the map entry built from it agree by construction.
+
+    The multi-path LABEL states what the map was built from and nothing more: these paths are the
+    occurrences whose component owns this one native body. It does NOT assert they are instances of
+    one component - nothing here reads a component identity."""
+    ident = _common.native_identity(body)
+    paths = owners.get(ident) if ident is not None else None
     if paths:
         if len(paths) == 1:
             return paths[0], None
-        return (f"{paths[0]} (or {len(paths) - 1} more instance(s) of the same component)",
-                list(paths))
+        return (f"{paths[0]} (or {len(paths) - 1} more instance(s) whose component owns this same "
+                "native body)", list(paths))
     occ = safe(lambda: body.assemblyContext)
     if occ is not None:
         nm = safe(lambda: occ.fullPathName) or safe(lambda: occ.name)
@@ -173,12 +190,12 @@ def handler(include_coincident_faces: bool = False) -> dict:
             "occurrences and their total overlap volume; fix positioning/sizing/joints. (A "
             "self-pair means two bodies of the same occurrence overlap.)")
     if candidates_by_label:
-        note += (" A side with '*_candidates' shares ONE native body across those instances - "
-                 "analyzeInterference returns native bodies, so the exact instance cannot be read "
-                 "off the result; the candidate paths are listed (capped: a *_candidates_truncated "
-                 "flag marks an incomplete list, and the side's label carries the true instance "
-                 "count). Discriminate by position (assembly_get occurrence origins) or move one "
-                 "instance and re-check.")
+        note += (" A side with '*_candidates' resolved to ONE native body, and each candidate path "
+                 "is an occurrence whose component owns that body - analyzeInterference returns "
+                 "native bodies, so the exact instance cannot be read off the result; the candidate "
+                 "paths are listed (capped: a *_candidates_truncated flag marks an incomplete list, "
+                 "and the side's label carries the true candidate count). Discriminate by position "
+                 "(assembly_get occurrence origins) or move one instance and re-check.")
     if walk.broken:
         note += (f" {len(walk.broken)} occurrence(s) with an unresolved external reference were NOT "
                  "compared - their component could not be read, so they carry no geometry for this "

@@ -107,10 +107,10 @@ def handler(view: int = None, strategy: str = "baseline", datum: str = "bottom_l
     if serr:
         return error(serr)
 
-    # A fresh AutoDimensionInput reports view=None, and an assigned View reads back as an OBJECT -
-    # a View is otherwise opaque (its own type/viewCurves accessors raise), so it serves only as a
-    # handle. The read-back is therefore a NON-NULL test: nothing measures whether the proxy that
-    # reads back compares equal to the View assigned, so equality is not what this gates on.
+    # A fresh AutoDimensionInput reports view=None, and an assigned View reads back as an OBJECT, so
+    # this gates on NON-NULL. Nothing measures whether the object AutoDimensionInput.view hands back
+    # is the View that was assigned, so it cannot gate on identity; drawing_get reads only `type` off
+    # a View.
     try:
         inp.view = target
     except Exception as ex:

@@ -12,9 +12,8 @@ from types import SimpleNamespace
 from conftest import load_tool
 
 uxref = load_tool("doc_update_xref")
-# NB: _cam_common is loaded LAZILY inside each TestLiveReadiness test (not at module top). test_cam_get
-# swaps the cam modules for a stub via monkeypatch.setitem; pre-caching the real module here
-# would change that swap's timing and leak the real handler into test_cam_get. Lazy load avoids it.
+# _cam_common is loaded inside each TestLiveReadiness test rather than at module top, so this file's
+# import does not decide which module object the cam tests find already cached.
 
 
 # ── doc_update_xref._ref_name ──────────────────────────────────────────────────
@@ -145,13 +144,16 @@ def _coll(items):
     return _C()
 
 
-def _cam_with(ops, setup_error=None, programs=()):
+def _cam_with(ops, setup_error=None, programs=(), machine=SimpleNamespace(description="Haas VF-2")):
     """Fake CAM with a single setup holding the given operations. setup_error makes the SETUP itself
     hasError; programs is a list of NC programs (each a SimpleNamespace with hasError/error/name).
     allOperations is the count/item collection shape (_coll) - the measured live protocol
-    _cam_common.walk_operations reads (live_readiness's op walk), not a plain Python list."""
+    _cam_common.walk_operations reads (live_readiness's op walk), not a plain Python list.
+    The setup carries an assigned machine by default: setup_blockers reads Setup.machine, so a
+    machine-less fake is a setup blocked by no_machine_selected, not a clean job."""
     setup = SimpleNamespace(allOperations=_coll(list(ops)), name="Setup1",
-                            hasError=setup_error is not None, error=setup_error or "")
+                            hasError=setup_error is not None, error=setup_error or "",
+                            machine=machine)
     return SimpleNamespace(setups=_coll([setup]), ncPrograms=_coll(list(programs)))
 
 
@@ -232,7 +234,10 @@ class TestLiveReadiness:
         sig, _ = ccom.live_readiness()
         assert sig["setups_errored"] == 0 and sig["programs_errored"] == 0
         assert sig["samples"]["op"] is None
-        assert "ready to post" in sig["readiness"]
+        assert sig["setups_blocked"] == []
+        # the whole sentence, not a substring: the blocked verdict CONTAINS "ready to post" inside
+        # "'ready to post' is NOT established", so a substring check passes on a blocked job too.
+        assert sig["readiness"] == "2 of 2 active ops valid - ready to post."
 
     def test_cam_unavailable_returns_error(self, monkeypatch):
         ccom = load_tool("_cam_common")

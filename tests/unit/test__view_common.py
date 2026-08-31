@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 import live_api_facts
-from conftest import load_tool
+from conftest import MakeComp, load_tool, make_source_document
 
 vc = load_tool("_view_common")
 
@@ -40,6 +40,39 @@ class TestViewDirection:
 
     def test_right_points_toward_plus_x(self):
         assert vc.view_direction("right") == (1.0, 0.0, 0.0)
+
+
+class TestIsoCornersMirrorAcrossZ:
+    """Fusion is Z-up, so an iso-BOTTOM view must put the eye BELOW the model. A positive eye z on an
+    iso-bottom-* entry aims the camera down at the TOP face - the same image its iso-top twin gives,
+    which makes the two names indistinguishable and a visual bottom-side check worthless."""
+
+    @pytest.mark.parametrize("name", ("iso-bottom-right", "iso-bottom-left"))
+    def test_iso_bottom_eye_is_below_the_model(self, name):
+        assert vc.view_direction(name)[2] < 0, name
+
+    @pytest.mark.parametrize("name", ("iso-top-right", "iso-top-left"))
+    def test_iso_top_eye_is_above_the_model(self, name):
+        assert vc.view_direction(name)[2] > 0, name
+
+    @pytest.mark.parametrize("top,bottom", [("iso-top-right", "iso-bottom-right"),
+                                            ("iso-top-left", "iso-bottom-left")])
+    def test_each_iso_bottom_mirrors_its_top_twin_across_z(self, top, bottom):
+        tx, ty, tz = vc.view_direction(top)
+        assert vc.view_direction(bottom) == (tx, ty, -tz)
+
+    @pytest.mark.parametrize("right,left", [("iso-top-right", "iso-top-left"),
+                                            ("iso-bottom-right", "iso-bottom-left")])
+    def test_the_right_and_left_corner_of_a_pair_differ_in_x_only(self, right, left):
+        # the -right/-left half of the name is the eye's x sign; agreeing on x would make the two
+        # names render the same image, the same way the z sign collapsed top onto bottom.
+        rx, ry, rz = vc.view_direction(right)
+        assert vc.view_direction(left) == (-rx, ry, rz)
+
+    def test_the_four_iso_corners_are_four_distinct_directions(self):
+        corners = {vc.view_direction(n) for n in
+                   ("iso-top-right", "iso-top-left", "iso-bottom-right", "iso-bottom-left")}
+        assert len(corners) == 4
 
 
 class TestLookDirection:
@@ -286,9 +319,51 @@ class TestCaptureOptionsPath:
         assert b64 is None and "saveAsImageFileWithOptions returned false" in err
 
 
+# The x-ref shape for COMPONENTS, measured on a CAM job assembled from 7 source documents: each
+# document's ROOT component reads the SAME byte-identical entityToken while the documents' lineage
+# ids differ. A token-only key collapses all of them onto one entry.
+_ROOT_TOKEN = "/v4BAAEAAwAAAAAAAAAAAAAA"
+_JOB_URNS = ("urn:adsk.wipprod:dm.lineage:K3I2nkywRlaWPHJexysOdA",
+             "urn:adsk.wipprod:dm.lineage:N_QoPrrrSJmF__f9BZV86A",
+             "urn:adsk.wipprod:dm.lineage:Qb7yTHkCTVSp6t9V9YQKuw")
+
+
+def _root_of_document(name, urn, token=_ROOT_TOKEN):
+    """One document's ROOT component: its own entityToken plus the parentDesign hop a component's
+    source document is read through (parentDesign -> parentDocument -> dataFile.id)."""
+    return MakeComp(name=name, entity_token=token, parent_design=make_source_document(urn))
+
+
 class TestAllDisplayComponents:
-    """The deduped component walk every folder-bulb toggle runs: allComponents holds a root proxy
-    DISTINCT from rootComponent, and the token key collapses the pair to one entry."""
+    """The deduped component walk every folder-bulb toggle runs. The key is the physical-entity
+    identity: allComponents holds a root proxy DISTINCT from rootComponent (so Python identity would
+    toggle the root twice), while an entityToken is DOCUMENT-LOCAL and shared by every document's
+    root (so a token-only key drops every root but one)."""
+
+    def test_roots_of_several_source_documents_are_all_walked(self):
+        # Keyed on the bare token these DISTINCT components collapse to one entry and the folder
+        # bulbs of the others are never written at all.
+        roots = [_root_of_document(f"Doc{i}", urn) for i, urn in enumerate(_JOB_URNS)]
+        assert len({c.entityToken for c in roots}) == 1      # the tokens really collide
+        design = SimpleNamespace(rootComponent=roots[0], allComponents=roots)
+        assert vc.all_display_components(design) == roots
+
+    def test_a_shared_token_inside_ONE_document_still_collapses(self):
+        # The other direction: the document half must not split a component from its own proxy, or
+        # the root's bulbs would be written twice on every design.
+        root = _root_of_document("Doc0", _JOB_URNS[0])
+        proxy = _root_of_document("Doc0", _JOB_URNS[0])
+        design = SimpleNamespace(rootComponent=root, allComponents=[proxy])
+        assert vc.all_display_components(design) == [root]
+
+    def test_a_component_whose_document_reads_is_kept_apart_from_one_whose_does_not(self):
+        # A source document that will not read answers None, which is a DIFFERENT urn half from a
+        # real lineage id - so the component nothing could be read from is never folded into a
+        # component that was identified.
+        placed = _root_of_document("Doc0", _JOB_URNS[0])
+        loose = SimpleNamespace(name="Loose", entityToken=_ROOT_TOKEN)   # no parentDesign at all
+        design = SimpleNamespace(rootComponent=placed, allComponents=[loose])
+        assert vc.all_display_components(design) == [placed, loose]
 
     def test_root_proxy_in_allcomponents_is_collapsed(self):
         from types import SimpleNamespace
@@ -320,3 +395,73 @@ class TestAllDisplayComponents:
             "origins": "isOriginFolderLightBulbOn",
             "joints": "isJointsFolderLightBulbOn",
         }
+
+
+class TestIsolateForFit:
+    """The frame-on-one-occurrence walk view_screenshot's fit_to and view_set's focus= both fit
+    through. Its errors are worded by the CALLER's own input kind, so neither tool reports a
+    refusal naming the other one's parameter."""
+
+    def test_no_active_design_names_the_callers_own_input(self, monkeypatch):
+        monkeypatch.setattr(vc._common, "design", lambda: None)
+        ref = SimpleNamespace(name="focus")
+        restore, target, err = vc.isolate_for_fit("Part:1", ref)
+        assert restore is None and target is None
+        assert err.startswith("focus:") and "Part:1" in err
+
+    def test_a_display_folder_that_will_not_relight_is_named(self, monkeypatch):
+        class Comp:
+            """A component whose sketch folder accepts the hide and refuses to come back on."""
+
+            def __init__(self):
+                self.name = "Blocky"
+                self.entityToken = "tok"
+                self.isSketchFolderLightBulbOn = True
+                self.isConstructionFolderLightBulbOn = False
+                self.isOriginFolderLightBulbOn = False
+                self.isJointsFolderLightBulbOn = False
+
+            def __setattr__(self, key, value):
+                if key == "isSketchFolderLightBulbOn" and value is True                         and getattr(self, "_darkened", False):
+                    return
+                if key == "isSketchFolderLightBulbOn" and value is False:
+                    object.__setattr__(self, "_darkened", True)
+                object.__setattr__(self, key, value)
+
+        comp = Comp()
+        occ = SimpleNamespace(fullPathName="Part:1", name="Part:1", isLightBulbOn=True)
+        design = SimpleNamespace(rootComponent=comp, allComponents=[comp])
+        monkeypatch.setattr(vc._common, "design", lambda: design)
+        monkeypatch.setattr(vc._common, "all_occurrences", lambda d: [occ])
+        ref = SimpleNamespace(name="fit_to", resolve=lambda raw: (occ, None))
+        restore, target, err = vc.isolate_for_fit("Part:1", ref)
+        assert err is None and target is occ
+        assert comp.isSketchFolderLightBulbOn is False    # the fit really did clear the clutter
+        # the folder stays dark, and the caller is told WHICH one - not left with a silent change
+        assert restore() == ["Blocky:isSketchFolderLightBulbOn"]
+
+
+class TestRestoreMessage:
+    def test_a_clean_restore_says_nothing(self):
+        assert vc.restore_message(lambda: [], "fit_to", "for this shot") is None
+
+    def test_no_restore_at_all_says_nothing(self):
+        assert vc.restore_message(None, "fit_to", "for this shot") is None
+
+    def test_the_message_carries_the_callers_label_and_purpose(self):
+        msg = vc.restore_message(lambda: ["A:1", "B:1"], "'focus'", "to frame the view")
+        assert msg.startswith("'focus' hid the other occurrences to frame the view")
+        assert "2 of them" in msg and "A:1" in msg and "B:1" in msg
+
+    def test_a_raising_restore_is_reported_not_swallowed(self):
+        def boom():
+            raise RuntimeError("bulb bus offline")
+
+        msg = vc.restore_message(boom, "fit_to", "for this shot")
+        assert "bulb bus offline" in msg
+
+    def test_only_the_first_five_stuck_names_are_listed(self):
+        msg = vc.restore_message(lambda: [f"O{i}:1" for i in range(9)], "fit_to", "for this shot")
+        assert "9 of them" in msg                       # the COUNT is complete...
+        assert "O4:1" in msg and "O5:1" not in msg      # ...while the listing stays bounded
+

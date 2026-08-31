@@ -290,7 +290,7 @@ def _on_path_distance(comp, design, k, path_raw, at_raw, dtype_raw, m):
         if at_raw is None or at_raw == "":
             return None, None, None, None, (f"mode='{m}' needs 'at' - the distance along 'path' from "
                                             f"its start, in 'units' (distance_type='absolute').")
-        val, verr = _inputs.length_value_input(at_raw, k, design, "at")
+        val, _at_cm, verr = _inputs.length_value_input(at_raw, k, design, "at")
         if verr:
             return None, None, None, None, verr
         member = adsk.fusion.PathDistanceTypes.PhysicalPathDistanceType
@@ -398,6 +398,22 @@ def _offset_parameter(obj):
     return safe(lambda: p.name) if p is not None else None
 
 
+def _offset_value_cm(obj):
+    """The offset an OFFSET construction plane REPORTS, in internal cm - or None when no number
+    reads, which withholds a comparison rather than judging the datum against a zero it never said.
+
+    MEASURED: a ConstructionPlaneOffsetDefinition's offset ModelParameter .value reads the requested
+    offset in SIGNED internal cm (a -12 mm request reads -1.2), so the sign is part of the answer
+    and a magnitude-only compare would pass a plane built on the wrong side of its base."""
+    defn = safe(lambda: obj.definition)
+    if defn is None:
+        return None
+    got = safe(lambda: defn.offset.value)
+    if isinstance(got, (int, float)) and not isinstance(got, bool):
+        return float(got)
+    return None
+
+
 def _geometry_readback(knd, design, obj, inv_k):
     """A cheap post-creation read of the CREATED datum's real geometry (not an echo of the input) -
     construction geometry has no healthState to poll, so this is the closest rung-3 style check: the
@@ -420,13 +436,13 @@ def _geometry_readback(knd, design, obj, inv_k):
 
 # ── per-kind builders: (mode, ...) -> (obj, extra_payload, error) ────────────────────────────────
 
-def _plane_datum(m, comp, design, k, plane_raw, plane2_raw, offset, edges_raw, angle, face_raw,
-                 points_raw, path_raw, at_raw, dtype_raw, to_object_raw):
+def _plane_datum(m, comp, design, k, units, plane_raw, plane2_raw, offset, edges_raw, angle,
+                 face_raw, points_raw, path_raw, at_raw, dtype_raw, to_object_raw):
     if m == "offset":
         base, err = _PLANE.resolve(plane_raw)
         if err:
             return None, None, err
-        val, verr = _inputs.length_value_input(offset, k, design, "offset")
+        val, offset_cm, verr = _inputs.length_value_input(offset, k, design, "offset")
         if verr:
             return None, None, verr
         cpi = comp.constructionPlanes.createInput()
@@ -434,6 +450,25 @@ def _plane_datum(m, comp, design, k, plane_raw, plane2_raw, offset, edges_raw, a
             return None, None, ("mode='offset': Fusion rejected these inputs (setByOffset returned "
                                 "false).")
         obj = comp.constructionPlanes.add(cpi)
+        # OFFSET read-back: the definition's own offset parameter is the only thing that can
+        # contradict a plane the API reported as created - the geometry read-back below publishes
+        # where the datum sits but never compares it to what was asked for. Literal and expression
+        # requests alike, since length_value_input answers a cm value for both. Withheld when either
+        # number is unreadable: judging a correct plane against a missing value would refuse it.
+        # SCOPED TO mode='offset'. The on_path forms store their placement as a 'distance' parameter
+        # with the offset as a SEPARATE one, and no measurement here backs comparing those against
+        # this request, so they are read and published (see _landed_path_report) rather than judged.
+        landed_cm = _offset_value_cm(obj)
+        if (offset_cm is not None and landed_cm is not None
+                and abs(landed_cm - offset_cm) > _common.EXTENT_MATCH_TOL_CM):
+            asked = f"{round(offset_cm / k, 6)} {units}"
+            if _inputs.looks_like_expression(offset):
+                asked += f" (what the expression '{str(offset).strip()}' evaluates to)"
+            return None, None, (f"mode='offset': Fusion reported success but the plane it created "
+                                f"reads back an offset of {round(landed_cm / k, 6)} {units}, not "
+                                f"the requested {asked}. The datum "
+                                f"'{safe(lambda: obj.name)}' was added and is still in the design - "
+                                f"remove it with design_delete_feature.")
         extra = {"offset_from": _inputs.surface_ref_label(base), "offset": _inputs.expression_report(offset)}
         dparam = _offset_parameter(obj)
         if dparam:
@@ -555,7 +590,7 @@ def _plane_datum(m, comp, design, k, plane_raw, plane2_raw, offset, edges_raw, a
                 return None, None, ("mode='on_path': 'to_object' places the plane AT that point "
                                     "(shifted by 'offset'), so it cannot be combined with 'at' or "
                                     "'distance_type' - pass one or the other.")
-            val, verr = _inputs.length_value_input(offset, k, design, "offset")
+            val, _offset_cm, verr = _inputs.length_value_input(offset, k, design, "offset")
             if verr:
                 return None, None, verr
             path, label, perr = _common.build_path(comp, path_raw)
@@ -921,8 +956,8 @@ def handler(kind: str = "point", mode: str = "", x: float = 0.0, y: float = 0.0,
         elif knd == "axis":
             obj, extra, berr = _axis_datum(m, comp, design, k, x, y, z, axis, plane, plane2, face, points)
         else:
-            obj, extra, berr = _plane_datum(m, comp, design, k, plane, plane2, offset, edges, angle,
-                                            face, points, path, at, distance_type, to_object)
+            obj, extra, berr = _plane_datum(m, comp, design, k, units, plane, plane2, offset, edges,
+                                            angle, face, points, path, at, distance_type, to_object)
         if berr:
             return error(berr)
     except Exception as e:

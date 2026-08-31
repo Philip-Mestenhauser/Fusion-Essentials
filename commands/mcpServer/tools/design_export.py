@@ -24,6 +24,7 @@ from . import _assert
 from . import _common
 from . import _export
 from . import _inputs
+from . import _sketch_detail
 
 app = adsk.core.Application.get()
 
@@ -50,10 +51,15 @@ _FORMATS = {
 _FORMAT = _inputs.Choice("format", options=list(_FORMATS), default="step",
                          description="Neutral CAD format to write (dxf = a 2D sketch/face export).")
 
-# STL-only: bake units into the file (unitType) and pick binary vs ASCII (isBinaryFormat). Omitted ->
-# the factory default is left untouched.
-_STL_UNITS = _inputs.Choice("stl_units", options=["mm", "cm", "m", "in", "ft"], required=False,
-    description="format=stl only: bake these output units into the file. Omit to keep the factory default.")
+# STL-only: bake units into the file (unitType) and pick binary vs ASCII (isBinaryFormat).
+# stl_units defaults to mm and is ALWAYS assigned - the shape mesh_export takes, for the same
+# measured reason: an STL whose unitType is left untouched takes the unit of the LAST EXPLICIT
+# assignment made anywhere in the Fusion session, across documents (measure_api
+# stl-export-unittype-is-sticky-session-state), so omitting it inherits an unrelated earlier
+# export's unit instead of any stable default. stl_binary omitted leaves the factory value alone.
+_STL_UNITS = _inputs.Choice("stl_units", options=list(_export.STL_UNIT_MEMBERS), default="mm",
+    description="format=stl only: the units baked into the file. Always assigned - an untouched "
+                "STL inherits the unit of the last STL export in this Fusion session.")
 
 # There is deliberately NO dxf_units input: the FIRST read of DXFSketchExportOptions.units kills the
 # call UNCATCHABLY - no surrounding try/except runs, no later line lands, and the whole transaction
@@ -67,33 +73,16 @@ _DXF_FACE = _inputs.GeometryHandle("dxf_face", require="planar_face", required=F
                 "into a scratch sketch, written to DXF, then the scratch sketch is removed (the "
                 "note says so if the removal failed). Pass this OR 'dxf_sketch', never both.")
 
-# mm/cm/m/in/ft -> adsk.fusion.DistanceUnits member name. STLExportOptions.unitType takes
-# DistanceUnits, NOT MeshUnits (live-verified): the two enums have mm/cm ints SWAPPED, so a
-# MeshUnits value here silently writes 10x-wrong geometry for the two most common units.
-_STL_UNIT_MEMBERS = {
-    "mm": "MillimeterDistanceUnits", "cm": "CentimeterDistanceUnits", "m": "MeterDistanceUnits",
-    "in": "InchDistanceUnits", "ft": "FootDistanceUnits",
-}
-
-
-def _stl_unit_enum(key):
-    du = safe(lambda: adsk.fusion.DistanceUnits)
-    member = _STL_UNIT_MEMBERS.get(key)
-    if du is None or not member:
-        return None
-    return safe(lambda: getattr(du, member))
-
-
 def _resolve_target(design, target):
     """Resolve 'target' -> (geometry, description, error). Empty -> root component (whole design).
 
     Order: empty -> whole design; a handle -> a specific body; then a component, an occurrence, or a
-    body by name. The occurrence and body name lookups go through the shared ambiguity-refusing
-    resolvers (_inputs._resolve_occurrence / _resolve_any_body), so a name shared by several instances
-    is REFUSED with the candidate list rather than silently exporting the first (the wrong-geometry
-    bug of a first-match itemByName). Component stays FIRST among the name lookups so a component's own
-    name is not captured by its instances' substring match. Returns (None, None, None) on a plain miss,
-    or (None, None, err) when a name was ambiguous.
+    body by name. All three name lookups go through the shared ambiguity-refusing resolvers
+    (_export.find_component / _inputs._resolve_occurrence / _resolve_any_body), so a name shared by
+    several components or instances is REFUSED rather than silently exporting the first (the
+    wrong-geometry bug of a first-match itemByName). Component stays FIRST among the name lookups so a
+    component's own name is not captured by its instances' substring match. Returns (None, None, None)
+    on a plain miss, or (None, None, err) when a name was ambiguous.
     """
     root = design.rootComponent
     name = (target or "").strip()
@@ -109,8 +98,16 @@ def _resolve_target(design, target):
             return ent, f"body (handle {name[:10]}...)", None
         return None, None, None
 
-    # Component by name (export the whole component).
-    comp = safe(lambda: _export.component_by_name(design, name))
+    # Component by name (export the whole component) - the shared resolver, which REFUSES a name
+    # several components carry rather than writing one of them to disk as if it were the one asked
+    # for. The refusal goes on the wire carrying the instance paths it found, and THIS site adds the
+    # remedy: both vocabularies it names are still open below (the occurrence step at the bottom
+    # takes a fullPathName, and a body handle resolved above this line). A plain miss falls through.
+    comp, comp_err = _export.find_component(design, name)
+    if comp_err:
+        return None, None, comp_err + (
+            " Export one instance by its occurrence name/fullPathName, or pass a body handle from "
+            "find_geometry (design_get(include=['tree']) lists the instances).")
     if comp:
         return comp, f"component '{name}'", None
 
@@ -139,10 +136,12 @@ def _resolve_target(design, target):
 
 def _option_spec(fmt, incl_bodies, incl_comps, stl_binary, stl_unit_key):
     """[(knob name, options property, value to ASSIGN, value to REPORT)] for every option THIS call
-    asked for - the one table both the set-and-read-back pass and the requested-values payload read,
-    so a knob can never be applied under one name and requested under another. stl_units resolves its
-    enum here: a build carrying no member for it yields a None assign value, which the caller records
-    as a refusal instead of assigning None."""
+    writes - the one table both the set-and-read-back pass and the requested-values payload read, so
+    a knob can never be applied under one name and requested under another. Every knob here but one
+    is present only when the call asked for it; stl_units is written on EVERY stl export, asked for
+    or not, because its omitted case inherits a unit rather than defaulting to one. stl_units
+    resolves its enum here: a build carrying no member for it yields a None assign value, which the
+    caller records as a refusal instead of assigning None."""
     spec = []
     if incl_bodies:
         spec.append(("invisible_bodies", "isIncludingInvisibleBodies", True, True))
@@ -151,8 +150,10 @@ def _option_spec(fmt, incl_bodies, incl_comps, stl_binary, stl_unit_key):
     if fmt == "stl":
         if stl_binary is not None:
             spec.append(("stl_binary", "isBinaryFormat", bool(stl_binary), bool(stl_binary)))
-        if stl_unit_key:
-            spec.append(("stl_units", "unitType", _stl_unit_enum(stl_unit_key), stl_unit_key))
+        # ALWAYS, never "only when asked for": the unit is the one knob whose omitted case is not a
+        # neutral default but an inherited one (see _STL_UNITS), so every STL this tool writes names
+        # its unit, and every STL payload carries it.
+        spec.append(("stl_units", "unitType", _export.stl_unit_enum(stl_unit_key), stl_unit_key))
     return spec
 
 
@@ -163,48 +164,69 @@ def _requested_options(fmt, incl_bodies, incl_comps, stl_binary, stl_unit_key):
             _option_spec(fmt, incl_bodies, incl_comps, stl_binary, stl_unit_key)}
 
 
+# Knobs whose READ VALUE determines the written file, each measured on its own - for these the
+# read-back answers what the caller asked whoever put the value there, so _export.applied_pair's
+# 'changed' half is dropped and no verification travels beside them. MEASURED for stl_binary
+# (isBinaryFormat) on STL: its factory value is True, an untouched export and an explicit-True one
+# are byte-identical, and explicit-False writes a distinct, larger file with an ASCII 'solid '
+# header - so 'true' colliding with the factory value costs the caller nothing.
+# A knob NOT named here publishes its verification: unitType's READ VALUE is measured not to
+# determine the file (see _export.applied_pair), and the two invisible-* flags are unmeasured -
+# they are only ever assigned True, so a False factory value would never collide at all, but
+# nothing has measured it.
+_READ_DETERMINES_FILE = frozenset({"stl_binary"})
+
+
 def _configure_export_options(fmt, opts, incl_bodies, incl_comps, stl_binary, stl_unit_key):
-    """Best-effort per-format option knobs on a freshly-created *ExportOptions object, each applied
-    and read back so the payload can report what actually took. Never fails the export over a missing
-    or wrongly-typed attribute (the file landing on disk is the deliverable this tool is graded on,
-    verified separately by verify_written/_assert.DeliverablesExist) - mirrors mesh_export.py's
-    _apply_refinement. Returns (applied, refused): applied maps each knob that LANDED to the value
-    read back off the options object, refused lists the knob names that did not.
+    """Best-effort per-format option knobs on a freshly-created *ExportOptions object, each written
+    through _export.applied_pair - the ONE knob writer, which reads the property BEFORE the set as
+    well. Never fails the export over a missing or wrongly-typed attribute (the file landing on disk
+    is the deliverable this tool is graded on, verified separately by
+    verify_written/_assert.DeliverablesExist). Returns (applied, refused, verified): applied maps
+    each knob that LANDED to the value read back off the options object, refused lists the knob
+    names that did not, and verified maps each LANDED knob to whether that read-back could have
+    failed.
 
     The VALUE that landed is recorded, not whether it stuck: a did-it-stick boolean under the knob's
-    own name reads exactly like the value it is not ('stl_binary': true on an ASCII file).
+    own name reads exactly like the value it is not ('stl_binary': true on an ASCII file). Which is
+    why the evidence travels under its OWN key - measured, a set-then-read-back cannot bite on a
+    knob whose factory value already equals the request, and every knob here has such a value
+    (unitType's is 'mm'; a boolean's is whichever of its two the factory holds). 'verified' omits
+    the knobs in _READ_DETERMINES_FILE, for which that distinction has been measured not to matter.
     """
-    applied, refused = {}, []
+    applied, refused, verified = {}, [], {}
     for name, prop, want, report in _option_spec(fmt, incl_bodies, incl_comps,
                                                  stl_binary, stl_unit_key):
         if want is None:
             refused.append(name)          # this build carries no enum member to assign
             continue
-        safe(lambda p=prop, w=want: setattr(opts, p, w))
-        if safe(lambda p=prop: getattr(opts, p)) == want:
-            applied[name] = report
-        else:
+        landed, changed = _export.applied_pair(opts, prop, want, report)
+        if landed is None:
             refused.append(name)
-    return applied, refused
+            continue
+        applied[name] = landed
+        if name not in _READ_DETERMINES_FILE:
+            verified[name] = changed
+    return applied, refused, verified
 
 
 def _export_one(em, factory_name, geom_first, geom, path, configure=None):
     """Write one geometry to one path. 'configure', if given, receives the created options object
-    BEFORE execute() and returns (applied, refused) - see _configure_export_options. It never
-    raises: a decorative-option failure never blocks the export. Returns
-    (ok_bool, error_or_None, (applied, refused))."""
+    BEFORE execute() and returns (applied, refused, verified) - see _configure_export_options. It
+    never raises: a decorative-option failure never blocks the export. Returns
+    (ok_bool, error_or_None, (applied, refused, verified))."""
     factory = getattr(em, factory_name)
-    knobs = ({}, [])
+    knobs = ({}, [], {})
     try:
         # STL/OBJ/3MF's API signature is (geometry, filename); the others are (filename, geometry).
         opts = factory(geom, path) if geom_first else factory(path, geom)
         if configure:
-            knobs = configure(opts) or ({}, [])
+            knobs = configure(opts) or ({}, [], {})
         did = em.execute(opts)
     except Exception as e:
-        return False, str(e), ({}, [])
+        return False, str(e), ({}, [], {})
     if not did:
-        return False, "export returned false - nothing was written", ({}, [])
+        return False, "export returned false - nothing was written", ({}, [], {})
     return True, None, knobs
 
 
@@ -249,7 +271,7 @@ def _write_dxf(design, sk, path, want_construction, want_points, want_projected)
 
 
 def _export_dxf(dxf_sketch, dxf_face, file_path,
-                want_construction, want_points, want_projected):
+                want_construction, want_points, want_projected, dxf_component=""):
     """format=dxf: write a whole SKETCH, or a planar FACE's outline projected into a scratch sketch
     that is removed again afterward (the design is left unchanged either way). Exactly one of
     dxf_sketch/dxf_face must be given.
@@ -281,16 +303,19 @@ def _export_dxf(dxf_sketch, dxf_face, file_path,
 
     if sketch_name:
         return _export_dxf_sketch(design, sketch_name, path,
-                                  want_construction, want_points, want_projected)
+                                  want_construction, want_points, want_projected, dxf_component)
     return _export_dxf_face(design, dxf_face, path,
                             want_construction, want_points, want_projected)
 
 
 def _export_dxf_sketch(design, sketch_name, path,
-                       want_construction, want_points, want_projected):
-    sk, ambiguous = _common.find_sketch(design, sketch_name)
-    if ambiguous:
-        return error(ambiguous)
+                       want_construction, want_points, want_projected, dxf_component=""):
+    # 'dxf_component' narrows the design-wide walk to one component's own sketches: Fusion numbers
+    # sketches per component from 1, so a name two components carry is refused, and the refusal
+    # names this input rather than a rename the caller may not be able to make.
+    sk, refusal = _sketch_detail.scoped_sketch(design, sketch_name, dxf_component, "dxf_component")
+    if refusal:
+        return error(refusal)
     if not sk:
         names = _common.all_sketch_names(design)
         return error(f"No sketch named '{sketch_name}'. Available: "
@@ -387,7 +412,7 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
             include_invisible_bodies: bool = False, include_invisible_components: bool = False,
             stl_binary=None, stl_units: str = "",
             dxf_export_construction=None, dxf_export_points=None,
-            dxf_export_projected=None) -> dict:
+            dxf_export_projected=None, dxf_component: str = "") -> dict:
     """See TOOL_DESCRIPTION."""
     fmt, ferr = _FORMAT.resolve(format)
     if ferr:
@@ -395,7 +420,8 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
 
     if fmt == "dxf":
         return _export_dxf(dxf_sketch, dxf_face, file_path,
-                           dxf_export_construction, dxf_export_points, dxf_export_projected)
+                           dxf_export_construction, dxf_export_points, dxf_export_projected,
+                           dxf_component)
 
     ext, factory_name, geom_first = _FORMATS[fmt]
 
@@ -441,6 +467,7 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
         # collected here and folded into that record below - the same per-file applied/requested
         # pair mesh_export publishes, rather than one file's read-back standing in for the rest.
         applied_by_path = {}
+        verified_by_path = {}
 
         def _write_one(occ, fpath):
             before = _export.snapshot(fpath)     # the baseline this file's landed check is proven on
@@ -453,6 +480,7 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
             if verr:
                 return None, f"{fmt.upper()} export reported success but {verr}"
             applied_by_path[fpath] = knobs[0]
+            verified_by_path[fpath] = knobs[2]
             return size, None
 
         files, errors = _export.split_by_occurrence(occs, out_dir, ext, _write_one)
@@ -470,8 +498,18 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
                 # a requested knob that did not read back - never the request echoed.
                 landed = applied_by_path.get(rec.get("file_path")) or {}
                 rec["options_applied"] = {name: landed.get(name) for name in requested}
+                # ...and whether THIS file's read-back could have failed, for the knobs that
+                # publish it. False where the options object already read the requested value:
+                # that equality proves nothing. Absent for a knob whose read determines the file.
+                backed = verified_by_path.get(rec.get("file_path")) or {}
+                landed_evidence = {name: bool(v) for name, v in backed.items()
+                                   if rec["options_applied"].get(name) is not None}
+                if landed_evidence:
+                    rec["options_verified"] = landed_evidence
         unlanded = [rec for rec in files if any(v is None for v in
                                                 rec.get("options_applied", {}).values())]
+        unverified = [rec for rec in files if any(
+            v is False for v in (rec.get("options_verified") or {}).values())]
         out = {
             "exported": True,
             "format": fmt,
@@ -503,6 +541,17 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
                             "read back the value that was set, so each such file's "
                             "'options_applied' carries null for it. 'options_requested' is what was "
                             "asked for.")
+        if unverified:
+            # TWO facts were observed per false: the file's options object reads the value under
+            # 'options_applied', and it READ IT BEFORE the assignment. What the writer then did is
+            # not readable from here, so this claims nothing about the files.
+            names = sorted({name for rec in unverified
+                            for name, v in rec["options_verified"].items() if v is False})
+            out["note"] += (f" {', '.join(names)} is set but UNVERIFIED for {len(unverified)} of "
+                            f"the {len(files)} exported file(s): those files' export options "
+                            "already read the requested value BEFORE it was set, so reading it "
+                            "back after cannot tell an assignment that took from one that was "
+                            "dropped - each such file's 'options_verified' carries false for it.")
         return ok(out)
 
     # ---- single-target export ----
@@ -548,11 +597,23 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
     "note": ("Exported to local disk. To round-trip into the cloud, upload it with "
             "data_upload_file (STEP/IGES are translated to a Fusion design on the cloud)."),
     }
-    applied_opts, refused_opts = applied_opts
+    applied_opts, refused_opts, verified_opts = applied_opts
     if applied_opts:
         # The VALUE each knob actually holds, read back off the options object - never a
         # did-it-stick flag under the knob's own name.
         out["options_applied"] = applied_opts
+        # Whether each of those values is BACKED: true only where the read-back could have failed
+        # (the options object was not already reading the requested value). 'applied' is a claim
+        # about the options object, and this is what stands behind it - a guard that cannot fail is
+        # not a verification. Absent for the knobs whose read is measured to determine the file.
+        if verified_opts:
+            out["options_verified"] = verified_opts
+        unverified_opts = sorted(n for n, backed in verified_opts.items() if not backed)
+        if unverified_opts:
+            out["note"] += (" " + ", ".join(unverified_opts) + " is set but UNVERIFIED: the export "
+                            "options already read the requested value BEFORE it was set, so "
+                            "reading it back after cannot tell an assignment that took from one "
+                            "that was dropped - 'options_verified' carries false for it.")
     if refused_opts:
         out["options_refused"] = refused_opts
         out["note"] += (" The export landed, but Fusion did not take these options: "
@@ -592,6 +653,10 @@ tool = (
     .add_input_property(_STL_UNITS.name, _STL_UNITS.schema())
     .add_input_property("dxf_sketch", {"type": "string",
             "description": "format=dxf only: the NAME of the sketch to write whole. Pass this OR 'dxf_face', never both and never neither; 'target'/'split_by_component' are ignored for dxf. The file is written in the design's default length unit."})
+    .add_input_property("dxf_component", {"type": "string",
+            "description": "The component holding 'dxf_sketch', when two components carry that name "
+                           "(Fusion numbers sketches per component from 1). A component name, or an "
+                           "occurrence fullPathName/handle from design_get(include=['tree'])."})
     .add_input_property(_DXF_FACE.name, _DXF_FACE.schema())
     .add_input_property("dxf_export_construction", {"type": "boolean",
             "description": "format=dxf only: include construction geometry (default true - Sketch.saveAsDXF writes everything unfiltered)."})

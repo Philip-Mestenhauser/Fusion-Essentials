@@ -8,12 +8,17 @@ fixture: P2-Gimbal (the S2b artifact - all hardware solid, zero overlap, support
   agent assembles the motion and saves AS A NEW document (P3-Gimbal); P2-Gimbal's cloud version
   must remain untouched. Missing fixture = ask the user - never create a project.
 budget:
-  max_tool_calls: 105
+  max_tool_calls: 150
   max_tokens: 130000
 substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
 perturbations: none (baseline)
 expected_refusals: none
 ---
+
+> NEEDS-RUN - UNMEASURED WORDING: no blind run has yet worked to a FIXED +/-30 ring range or run
+> the bisected bind-angle measurement. Both change what the executor does, so max_tool_calls 150
+> is a provisional pin over a measured 69, not a measurement. This banner stands until a blind run
+> measures this wording.
 
 # S3 - Motion: four gimbal axes, a cross-chain crank link, and an interference verdict
 
@@ -56,12 +61,24 @@ GOAL - a working three-axis gyroscope mechanism with a crank drive:
 - Joints must not teleport parts: after each joint, fresh position reads show the parts still
   seated where they were.
 
-PROVE it with a RANGE SWEEP, not a single pose. For EACH joint, DECLARE its intended travel range,
-then drive it across that range at 3-4 stations INCLUDING BOTH EXTREMES, reading fresh orientation
-after each station (report the angles you read). Drive the yaw, the two ring pivots, and the crank
-directly; drive the rotor spin ONLY through the crank link (report the crank angle and the rotor
-follow at your declared ratio at each station). After the sweep, restore every joint to the rest
-pose and read it back.
+PROVE it with a RANGE SWEEP, not a single pose.
+
+The two RING PIVOTS have a REQUIRED range, not a declared one: each must drive to +30 and to -30
+degrees. That figure is the scenario's and it is not negotiable - a gimbal whose rings cannot tilt
+30 degrees is not a working gimbal, whatever else passes. Sweep each ring pivot across +/-30 at 4
+stations INCLUDING BOTH EXTREMES.
+
+For the YAW and the CRANK, declare your own intended travel and sweep it the same way (3-4 stations,
+both extremes). Drive the yaw, the two ring pivots and the crank directly; drive the rotor spin ONLY
+through the crank link (report the crank angle and the rotor follow at your declared ratio at each
+station). Read fresh orientation after each station and report the angles you read. After the sweep,
+restore every joint to the rest pose and read it back.
+
+THEN MEASURE THE LIMIT - do not estimate it and do not stop at the requirement. For EACH ring pivot,
+find the angle at which the first overlap appears by BISECTION: drive, interference-check, halve the
+interval, repeat until the bracket is under 1 degree. Report that angle per axis as a NUMBER with
+the two bodies that meet there. Report it whether or not +/-30 passed - if the mechanism clears 30
+degrees keep going until it binds or you reach 90, and say which happened.
 
 INTERFERENCE: run an interference check at REST and AT EACH JOINT'S TWO TRAVEL EXTREMES (the
 worst-case poses the sweep reaches). Pins ride in clearance bores and the shaft in a clearance
@@ -69,7 +86,8 @@ seat, so the expected result is ZERO overlapping pairs at every pose; the design
 engagements (carrier on its pedestal, crank on its frame mount) are flush contacts, not
 overlaps. NAME any overlap you find with its volume and the two bodies. A ring swinging into the
 pedestal or the carrier at a travel extreme is a real BINDING defect: report it as a FAIL with
-the offending pose and volume - do NOT narrow the declared range to slip under it.
+the offending pose and volume. The ring range is FIXED at +/-30, so there is nothing to narrow: a
+bind inside that range is a FAIL of this scenario, never a smaller range to declare instead.
 
 Finally save AS A NEW document: P3-Gimbal into MCP Test Project / Pipeline-v1/{{RUN_FOLDER}} (create the folder path if missing; never a project).
 
@@ -83,10 +101,14 @@ POSTCONDITIONS - verify EACH with your own fresh read; report actual values WITH
   the three direction vectors and their pairwise dot products).
 - the motion link exists between the CRANK and the SPIN revolutes; driving the crank moved the
   rotor at the declared ratio (report both read angles).
-- articulation RANGE: each joint's declared travel range is stated; each drove across it at 3-4
-  stations INCLUDING both extremes (report the station angles); the coupled rotor followed the
-  crank at the declared ratio at each station; rest pose restored afterward (fresh reads show
-  original orientations within float noise).
+- articulation RANGE: BOTH ring pivots drove to +30 AND -30 degrees at 4 stations including both
+  extremes, with ZERO overlapping pairs at every station (report the station angles). Yaw and crank
+  swept their declared ranges the same way; the coupled rotor followed the crank at the declared
+  ratio at each station; rest pose restored afterward (fresh reads show original orientations
+  within float noise).
+- BIND ANGLE MEASURED: for each ring pivot, the bisected angle at which the first overlap appears,
+  reported as a NUMBER with the two bodies that meet there (or ">= 90 deg, no bind found"). This is
+  a measurement and is reported whether the +/-30 requirement passed or failed.
 - interference across travel: the REST check plus a check at EACH joint's two travel extremes all
   ran; the expected result is ZERO overlapping pairs at every pose (clearance bores/seat; flush
   support engagements are not overlaps); any overlap is NAMED with its volume and the two bodies,
@@ -126,12 +148,22 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
   cheap 3D-structure proof; counts alone never catch a collapsed axis set.
 - Coupled-ratio grading: read the two angles from the agent's fresh assembly_get reads in the
   transcript; the ratio must match its declared value, not a round number we assume.
-- WHY THE RANGE SWEEP: fixed 15-30 deg poses sit under the ~55 deg binding
-  threshold and pass a mechanism that binds - one 60 deg Inner_Pivot drive can put the ring into
-  the pedestal (0.89 cm3) and the carrier (0.28 cm3). Grading the FULL declared travel at its extremes,
-  not a single comfortable pose, is what exposes binding. The declared range is the agent's - grade
-  that it is a plausible working travel and that the extremes were actually reached and checked, not
-  quietly shrunk to clear.
+- WHY THE RING RANGE IS FIXED AT +/-30 RATHER THAN DECLARED: an agent-declared range makes the
+  grade circular - declare a range the design already clears, sweep it, pass. Measured: an executor
+  meets a bind at -15 deg, probes down to a clean +/-5 outer and +/-3 inner, DECLARES that as the
+  intended travel, sweeps it clean, and passes every postcondition. It can disclose the bind
+  honestly and name every volume, so this is not concealment - but the "do NOT narrow the declared
+  range" rule above and the grader's "is this plausible working travel" judgement are both easy to
+  fumble, and a measured run fumbled BOTH. A number the scenario owns cannot be fumbled.
+- THE BIND ANGLE IS THE GRADE, AND IT SWINGS BY 10x BETWEEN BUILDS: measured generations of this
+  design bind anywhere from ~55 deg (a 60 deg inner drive putting the ring into the pedestal,
+  0.89 cm3, and the carrier, 0.28 cm3) down to ~5 deg - and the ~5 deg build passed every gate in
+  the chain. The cause is UPSTREAM geometry, not the joints: a carrier built as a closed CUP
+  hanging 20 mm below the ring plane catches a ring edge at r78, which falls 78*sin(a) and reaches
+  that floor at 15 deg. In every measured bind the collision is against the CARRIER. A design that
+  clears +/-30 has to make its outer member OPEN - a ring or a fork, not a cup with a floor.
+- Coplanar rings AT REST are correct and are not the defect. What this scenario requires beyond
+  rest is that the assembly still MOVES once driven.
 - Interference nuance (clearance, not contact): the bores/seat carry real clearance, so pins and
   the shaft do NOT touch at rest - the correct rest result is ZERO interfering pairs, and any
   pin-in-bore contact is a missing-clearance defect. At a travel extreme the discriminating finding

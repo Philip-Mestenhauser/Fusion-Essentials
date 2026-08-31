@@ -212,8 +212,11 @@ def _host_for(design, body):
     owner = safe(lambda: body.parentComponent) or root
     # same_component, not `is`: component wrappers are never identity-stable, so `owner is root` reads
     # False even for a ROOT body, which then takes the sub-component path (a pointless
-    # allOccurrencesByComponent lookup that finds nothing).
-    if owner is None or _common.same_component(owner, root):
+    # allOccurrencesByComponent lookup that finds nothing). `is True` only: hosting on root is the
+    # claim that the body IS a root body, and hosting a sub-component body there raises "object is
+    # not in the assembly context of this component" at add() - an unproven owner takes the
+    # placement path, whose own refusal names the component it could not place.
+    if owner is None or _common.same_component(owner, root) is True:
         return root, None, None
     ctx = safe(lambda: body.assemblyContext)
     if ctx is not None:

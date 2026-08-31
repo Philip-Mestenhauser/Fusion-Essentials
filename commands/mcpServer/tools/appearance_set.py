@@ -20,13 +20,20 @@ from . import _common
 from . import _inputs
 from . import _materials
 
-# MEASURED: a Fusion appearance's transparency is its Prism material CLASS - a see-through appearance
+# Two different things are called transparency here, and only one of them is an appearance.
+#
+# MEASURED: an APPEARANCE's transparency is its Prism material CLASS - a see-through appearance
 # carries interior_model=3 plus transparent_color / transparent_distance / transparent_ior - and NOT
 # the alpha of its Color property. Both directions were measured on one body: an OPAQUE appearance
 # renders fully opaque at alpha 100, and a transparent appearance whose own alpha is 255 renders
-# see-through. Color.create stores the alpha faithfully and the render ignores it, so an opacity
-# this tool cannot deliver is REFUSED rather than echoed back in the payload as landed.
-_OPAQUE = 255
+# see-through. So the colour this tool writes is always minted fully opaque.
+#
+# The OPACITY OVERRIDE is separate and is what 'opacity' means here: Component.opacity and
+# BRepBody.opacity, 0.0 to 1.0, which the API documents as the equivalent of the browser's 'Opacity
+# Control' command. It is inherited - a body inside a half-transparent component renders
+# half-transparent while its own opacity still reads 1.0 - so the effect is read back off
+# visibleOpacity, which is the value actually being rendered.
+_COLOR_ALPHA = 255
 
 # The one appearance every color override is copied from, resolved by EXACT name in the library
 # named here. MEASURED on Fusion 2705.1.4: interior_model 0 (opaque), opaque_albedo (246, 246, 243),
@@ -232,24 +239,63 @@ def _occurrence_fanout(occ, appr_id, appr_name):
     return reached, not_reached, unverified
 
 
-def handler(target: str = "", color: str = "", opacity: int = 255, name: str = "") -> dict:
-    """Apply a solid-color appearance override to the resolved target. WRITES."""
-    rgb, cerr = _parse_color(color)
+def _opacity_note(kind, asked, seen):
+    """What the caller has to know about where the override landed and what it renders as."""
+    bits = []
+    if kind == "occurrence":
+        bits.append("An occurrence carries no opacity of its own, so this was set on its COMPONENT "
+                    "- every instance of that component renders with it.")
+    if seen is None:
+        bits.append("The rendered opacity could not be read back, so it is UNCONFIRMED.")
+    elif abs(seen - asked) > 1:
+        bits.append(f"It RENDERS at {seen}%, not {asked}% - opacity is inherited, so an ancestor "
+                    "component's own override combines with this one.")
+    return " ".join(bits)
+
+
+def _apply_opacity(entity, kind, percent):
+    """Set the OPACITY OVERRIDE on the target and read back what is actually rendered.
+
+    An occurrence carries no settable opacity of its own - the API says to set it on the Component -
+    so an occurrence target writes through its component, which every instance of that component
+    then renders with. Returns (visible_percent_or_None, error_or_None)."""
+    want = percent / 100.0
+    if kind == "face":
+        return None, ("A FACE has no opacity of its own - the override lives on the body or the "
+                      "component. Target the body (or the occurrence) instead.")
+    holder = entity
+    if kind == "occurrence":
+        holder = safe(lambda: entity.component)
+        if holder is None:
+            return None, "Could not reach the component behind this occurrence to set its opacity."
+    try:
+        holder.opacity = want
+    except Exception as e:
+        return None, f"Could not set opacity: {e}"
+    # visibleOpacity is what the renderer uses once inheritance is folded in; the object's own
+    # .opacity would read back the number just written whether or not anything changed on screen.
+    reader = entity if kind != "component" else None
+    seen = safe(lambda: reader.visibleOpacity) if reader is not None else None
+    if seen is None:
+        first = next(iter(_common.iter_collection(safe(lambda: holder.bRepBodies))), None)
+        seen = safe(lambda: first.visibleOpacity) if first is not None else None
+    return (None if seen is None else round(seen * 100)), None
+
+
+def handler(target: str = "", color: str = "", opacity=None, name: str = "") -> dict:
+    """Apply a solid-color appearance override and/or an opacity override to the target. WRITES."""
+    want_opacity = opacity is not None and str(opacity).strip() != ""
+    if want_opacity:
+        try:
+            opacity = int(opacity)
+        except (TypeError, ValueError):
+            return error("'opacity' must be a whole percent from 0 (invisible) to 100 (opaque).")
+        if not 0 <= opacity <= 100:
+            return error(f"'opacity'={opacity} is outside 0-100. It is a PERCENT - the browser's "
+                         "Opacity Control - not a 0-255 color alpha.")
+    rgb, cerr = (None, None) if not (color or "").strip() and want_opacity else _parse_color(color)
     if cerr:
         return error(cerr)
-    try:
-        opacity = int(opacity)
-    except (TypeError, ValueError):
-        return error(f"'opacity' must be an integer, and only {_OPAQUE} (opaque) is accepted.")
-    if opacity != _OPAQUE:
-        return error(
-            f"'opacity'={opacity} cannot be delivered by this tool, so it is refused rather than "
-            f"reported as applied. Only opacity={_OPAQUE} is accepted. This tool sets an "
-            "appearance's COLOR, and a Fusion appearance's transparency is its Prism material class "
-            "(interior_model plus transparent_color / transparent_distance / transparent_ior), not "
-            "the alpha of that color - measured, an OPAQUE appearance renders fully opaque at "
-            "alpha 100. For a see-through body, assign a transparent appearance such as "
-            "'Acrylic (Clear)' from the Fusion Appearance dialog.")
 
     design = _common.design()
     if not design:
@@ -273,8 +319,24 @@ def handler(target: str = "", color: str = "", opacity: int = 255, name: str = "
         if (safe(lambda: bodies.count, 0) or 0) == 0:
             return error(f"{desc} has no bodies to color.")
 
+    opacity_seen = None
+    if want_opacity:
+        opacity_seen, oerr = _apply_opacity(entity, kind, opacity)
+        if oerr:
+            return error(oerr)
+    if rgb is None:
+        return ok({
+            "applied": True,
+            "target": desc,
+            "kind": kind,
+            "opacity": opacity,
+            "opacity_rendered": opacity_seen,
+            "note": ("Opacity override applied - the browser's 'Opacity Control'. "
+                     + _opacity_note(kind, opacity, opacity_seen)),
+        })
+
     appr_name = (name or "").strip() or f"AgentColor_{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}"
-    appr, appr_reused, base_reused, aerr = _make_colored_appearance(design, rgb, opacity, appr_name)
+    appr, appr_reused, base_reused, aerr = _make_colored_appearance(design, rgb, _COLOR_ALPHA, appr_name)
     if aerr:
         return error(aerr)
 
@@ -361,6 +423,7 @@ def handler(target: str = "", color: str = "", opacity: int = 255, name: str = "
         "color_rgb": list(rgb),
         "color_hex": f"#{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}",
         "opacity": opacity,
+        "opacity_rendered": opacity_seen,
         "appearance": appr_landed_name,
         "appearance_reused": appr_reused,
         "applied_to": applied_to,
@@ -385,9 +448,10 @@ _DESC = (
 "override. 'target' = a find_geometry FACE handle (colors one face) or body, an occurrence name/"
 "fullPath, a body name, or a component name (empty = whole design). 'color' = '#RRGGBB', 'RRGGBB', or "
 "'r,g,b' (0-255). The color is written onto a copy of the Fusion Appearance Library's 'Paint - "
-"Enamel Glossy (White)', kept in the document as 'MCP Neutral Base'. Color only - transparency is "
-"an appearance's Prism material class, not its color alpha, so this tool cannot make a body "
-"see-through. Pair with view_screenshot to verify."
+"Enamel Glossy (White)', kept in the document as 'MCP Neutral Base'. 'opacity' is a PERCENT (0-100) "
+"- the browser's Opacity Control on the body/component - and may be sent with or without a color; "
+"it is read back off what actually renders, since opacity is inherited from parent components. "
+"Pair with view_screenshot to verify."
 )
 
 tool = (
@@ -396,7 +460,7 @@ tool = (
     .add_input_property("color", {"type": "string",
             "description": "Color as '#RRGGBB', 'RRGGBB', or 'r,g,b' (0-255 each)."})
     .add_input_property("opacity", {"type": "integer",
-            "description": "Only 255 (opaque) is accepted - transparency is not the color's alpha."})
+            "description": "Opacity override as a percent: 0 invisible, 100 opaque."})
     .add_input_property("name", {"type": "string",
             "description": "Optional name for the created appearance."})
     .strict_schema()

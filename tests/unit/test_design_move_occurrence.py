@@ -30,6 +30,20 @@ mo = load_tool("design_move_occurrence")
 # record carries its parent, so a path is the chain; re-parenting one recomputes every path beneath.
 
 
+class _UnreadableColl:
+    """A collection whose COUNT itself raises - the shape the cycle walk cannot enumerate at all,
+    which is not the same as an empty subtree."""
+    @property
+    def count(self):
+        raise RuntimeError("2 : InternalValidationError : occ")
+
+    def item(self, i):
+        raise RuntimeError("2 : InternalValidationError : occ")
+
+    def __iter__(self):
+        raise RuntimeError("2 : InternalValidationError : occ")
+
+
 def _comp(name):
     c = MakeComp(name=name)
     c.entityToken = "tok:" + name
@@ -334,6 +348,19 @@ class TestSelfNestingRefused:
         des = wire()
         payload(mo.handler(occurrence="A:1", into_component="B:1"))
         assert des.moved_into == "B:1"
+
+    def test_a_subtree_NEITHER_walk_can_read_is_refused_not_allowed(self, wire):
+        # component_contains answers None when the subtree did not enumerate (the measured cause is
+        # an unresolved external reference). Reading that as "no cycle" is what lets the illegal
+        # re-parent through, so the move is refused and says the question could not be answered.
+        des = wire()
+        moving = des.comps["A"]
+        del moving.allOccurrences                    # the fast walk raises...
+        moving.occurrences = _UnreadableColl()       # ...and so does the fallback
+        msg = error_message(mo.handler(occurrence="A:1", into_component="B:1"))
+        assert "could not be determined" in msg and "not be searched to a verdict" in msg
+        assert "unresolved external references" in msg          # the remedy that reaches the cause
+        assert des.moved_into is None                # the mutation was never called
 
 
 # ── guards ───────────────────────────────────────────────────────────────────

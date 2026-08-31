@@ -15,6 +15,8 @@ import os
 import sys
 import time
 
+import pytest
+
 TESTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(TESTS_DIR, "live", "evals"))
 import run_eval  # noqa: E402
@@ -35,11 +37,12 @@ def _transcript(tmp_path, mcp_calls=0, other_calls=(), final="", usage=None, nam
     return str(path)
 
 
-def _audit(tmp_path, budget_calls=None, budget_tokens=None, stderr="", **kw):
+def _audit(tmp_path, budget_calls=None, budget_tokens=None, stderr="", skill=None, **kw):
     run_dir = tmp_path / "run"
     run_dir.mkdir(exist_ok=True)
     transcript = _transcript(tmp_path, **kw)
-    report, _final = run_eval.audit(transcript, str(run_dir), budget_calls, budget_tokens, stderr)
+    report, _final = run_eval.audit(transcript, str(run_dir), budget_calls, budget_tokens, stderr,
+                                    skill)
     return report
 
 
@@ -66,12 +69,56 @@ class TestPromptAssembly:
     _SCENARIO = ("---\nid: X\n---\n\n## AGENT PROMPT (verbatim)\n\n```\n"
                  "Save into Pipeline-v1/{{RUN_FOLDER}}\n```\n\n## Grader notes\n\nnever sent\n")
 
+    _SKILL = "---\nname: p\ndescription: >-\n  when to reach for it\n---\n\n# Practice\n\nGround one part.\n"
+
+    def _skill_on_disk(self, tmp_path, monkeypatch, name="p"):
+        skills = tmp_path / "skills"
+        (skills / name).mkdir(parents=True)
+        (skills / name / "SKILL.md").write_text(self._SKILL, encoding="utf-8")
+        monkeypatch.setattr(run_eval, "SKILLS_DIR", str(skills))
+
     def test_prompt_is_the_block_plus_exactly_the_connection_lost_rule(self, tmp_path):
         path = tmp_path / "S.md"
         path.write_text(self._SCENARIO, encoding="utf-8")
-        prompt = run_eval.extract_prompt(str(path), "Eval-20260201-204000-S")
+        prompt, skill = run_eval.extract_prompt(str(path), "Eval-20260201-204000-S")
+        assert skill is None
         assert prompt == ("Save into Pipeline-v1/Eval-20260201-204000-S\n\n"
                           + run_eval.CONNECTION_LOST)
+
+    def test_a_declared_skill_is_appended_after_the_task_block(self, tmp_path, monkeypatch):
+        self._skill_on_disk(tmp_path, monkeypatch)
+        path = tmp_path / "S.md"
+        path.write_text(self._SCENARIO.replace("id: X", "id: X\nskill: p"), encoding="utf-8")
+        prompt, skill = run_eval.extract_prompt(str(path), "Eval-20260201-204000-S")
+        assert skill == "p"
+        # the task stays FIRST, the practice sits between it and the connection rule
+        assert prompt.startswith("Save into Pipeline-v1/Eval-20260201-204000-S\n\n")
+        assert prompt.index("# Practice") > prompt.index("Save into")
+        assert prompt.index("# Practice") < prompt.index(run_eval.CONNECTION_LOST)
+        assert "Ground one part." in prompt
+
+    def test_the_skill_frontmatter_never_reaches_the_executor(self, tmp_path, monkeypatch):
+        # The frontmatter tells an agent WHEN to go looking for the skill; an executor that already
+        # holds the body would only be sent hunting for a Skill tool it is denied.
+        self._skill_on_disk(tmp_path, monkeypatch)
+        path = tmp_path / "S.md"
+        path.write_text(self._SCENARIO.replace("id: X", "id: X\nskill: p"), encoding="utf-8")
+        prompt, _ = run_eval.extract_prompt(str(path), "Eval-20260201-204000-S")
+        assert "description:" not in prompt and "when to reach for it" not in prompt
+
+    def test_a_missing_skill_stops_the_run_rather_than_running_without_it(self, tmp_path,
+                                                                         monkeypatch):
+        # Silently dropping it would produce a run whose prompt.txt disagrees with its own
+        # frontmatter - the one thing a comparison across runs cannot survive.
+        self._skill_on_disk(tmp_path, monkeypatch)
+        path = tmp_path / "S.md"
+        path.write_text(self._SCENARIO.replace("id: X", "id: X\nskill: absent"), encoding="utf-8")
+        with pytest.raises(SystemExit):
+            run_eval.extract_prompt(str(path), "Eval-20260201-204000-S")
+
+    def test_the_run_records_which_skill_it_carried(self, tmp_path):
+        assert _audit(tmp_path, skill="p")["skill"] == "p"
+        assert _audit(tmp_path)["skill"] is None
 
 
 class TestBudgetScoring:

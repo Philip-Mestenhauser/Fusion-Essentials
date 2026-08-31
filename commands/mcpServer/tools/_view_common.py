@@ -22,7 +22,12 @@ MAP_BLURB = ("camera-orientation table for the standard named views - view_direc
              "apply_named_view/capture_png_b64 (the orient + refresh-then-grab capture mechanics) + "
              "DISPLAY_FOLDERS/all_display_components (the category -> Component folder-bulb map and "
              "the deduped component walk that view_set(display) and view_screenshot's fit_to shot "
-             "both toggle non-body clutter through)")
+             "both toggle non-body clutter through) + keep_visible/isolate_for_fit/restore_message "
+             "(the ONE frame-on-one-occurrence isolate: hide every occurrence that is not the "
+             "target, its ancestors or its descendants AND every display folder, so a viewport fit "
+             "frames the target instead of the whole scene, then put every bulb back and NAME the "
+             "ones that would not come back - view_screenshot's fit_to and view_set(orient, focus=) "
+             "frame through the same walk)")
 
 
 # Display category -> the Component FOLDER bulb that controls it (one switch per component; the
@@ -37,22 +42,130 @@ DISPLAY_FOLDERS = {
 
 
 def all_display_components(design):
-    """Every component ONCE (root + allComponents, deduped by entityToken - allComponents holds a
-    root proxy distinct from rootComponent) - the walk a design-wide folder-bulb toggle runs."""
+    """Every component ONCE (root + allComponents) - the walk a design-wide folder-bulb toggle runs.
+
+    De-duplicated by _common.native_identity, the (token, source-document urn) pair, because the two
+    simpler keys are each wrong in one direction. Python identity SPLITS: allComponents holds a root
+    proxy distinct from rootComponent, so the root would be toggled twice. The bare entityToken
+    MERGES: a token is DOCUMENT-LOCAL and every document's ROOT component carries the same one -
+    MEASURED on a CAM job assembled from 7 source documents, where 7 distinct root components read
+    one byte-identical token. Keyed on that token those 7 collapse to 1 entry, and the folder bulbs
+    of the other 6 are never written at all.
+
+    The `or id(c)` last resort keys an identity-less component apart from every other one: it
+    over-counts, never merges."""
     root = _common.safe(lambda: design.rootComponent)
     comps = ([root] if root is not None else []) + list(
         _common.safe(lambda: design.allComponents, []) or [])
     out, seen = [], set()
     for c in comps:
-        key = _common.safe(lambda c=c: c.entityToken) or id(c)
+        key = _common.native_identity(c) or id(c)
         if key in seen:
             continue
         seen.add(key)
         out.append(c)
     return out
 
+
+def keep_visible(o_path, target_path):
+    """Keep an occurrence visible during a frame-on-one isolate if it IS the target, an ANCESTOR of it,
+    or a DESCENDANT of it. Hiding an ancestor hides the nested target (BLANK view); hiding a descendant
+    drops part of the target's own subtree. Nesting is by fullPathName ('Frame:1+Pedestal:1', '+' per
+    level). Comparison is by PATH, never Python `is` - the API mints a fresh occurrence proxy on each
+    access, so `o is target` is never true across two walks and would hide the target itself."""
+    if not o_path or not target_path:
+        return False
+    return (o_path == target_path
+            or target_path.startswith(o_path + "+")     # o is an ancestor of the target
+            or o_path.startswith(target_path + "+"))     # o is a descendant of the target
+
+
+def isolate_for_fit(name, ref):
+    """Temporarily hide every occurrence that is NOT the named one, its ancestors, or its descendants,
+    so a viewport fit frames just the named one. 'ref' is the caller's own OccurrenceRef (its name
+    words the errors). Returns (restore_callable, target_occurrence, error) - error is set (and the
+    other two None) when the occurrence didn't resolve (including an ambiguous name, which names the
+    candidates); the target feeds the bodies-only camera fit.
+
+    The restore callable returns the NAMES of the occurrences whose bulb it could not put back
+    (empty when everything was restored): framing mutates visibility, so a restore that silently
+    failed would leave the document changed by a call that only meant to move the camera.
+    """
+    design = _common.design()
+    root = _common.safe(lambda: design.rootComponent) if design else None
+    if not root:
+        return None, None, f"{ref.name}: no active design to resolve '{name}' against."
+    # Resolve via the caller's OccurrenceRef kind (fullPathName-preferring, ambiguity-refusing) so an
+    # ambiguous name doesn't silently frame the wrong instance.
+    target, err = ref.resolve(name)
+    if target is None:
+        return None, None, err
+    target_path = _common.safe(lambda: target.fullPathName)
+    # The shared census, not a bare root.allOccurrences: that property RAISES on a design holding an
+    # unresolved external reference, and an empty walk would hide NOTHING while the view is published
+    # as framed on the target.
+    occs = _common.all_occurrences(design)
+    prev = []
+    for o in occs:
+        if keep_visible(_common.safe(lambda o=o: o.fullPathName), target_path):
+            continue
+        was = _common.safe(lambda o=o: o.isLightBulbOn)
+        if was:
+            prev.append(o)
+            _common.safe(lambda o=o: setattr(o, "isLightBulbOn", False))
+
+    # ALSO hide non-body geometry design-wide for the fit: Viewport.fit() frames every VISIBLE entity,
+    # and construction geometry owned by the fitted component (measured: a datum plane) blows the
+    # frame to the whole scene while the occurrence isolation holds. The per-component display
+    # FOLDER bulbs (DISPLAY_FOLDERS) switch sketches/construction/origins/joints off in one write
+    # each without touching any entity's own bulb.
+    folder_prev = []                       # (component, attr) - only bulbs we moved
+    for comp in all_display_components(design):
+        for attr in DISPLAY_FOLDERS.values():
+            if _common.read_flag(lambda comp=comp, attr=attr: getattr(comp, attr)):
+                folder_prev.append((comp, attr))
+                _common.safe(lambda comp=comp, attr=attr: setattr(comp, attr, False))
+
+    def restore():
+        stuck = []
+        for o in prev:
+            _common.safe(lambda o=o: setattr(o, "isLightBulbOn", True))
+            if _common.safe(lambda o=o: o.isLightBulbOn) is not True:
+                stuck.append(_common.safe(lambda o=o: o.fullPathName)
+                             or _common.safe(lambda o=o: o.name) or "?")
+        for comp, attr in folder_prev:
+            _common.safe(lambda comp=comp, attr=attr: setattr(comp, attr, True))
+            if _common.read_flag(lambda comp=comp, attr=attr: getattr(comp, attr)) is not True:
+                stuck.append(f"{_common.safe(lambda comp=comp: comp.name) or '?'}:{attr}")
+        return stuck
+    return restore, target, None
+
+
+def restore_message(restore, label, purpose):
+    """Run an isolate_for_fit restore and return the sentence naming what it could NOT put back, or
+    None. A restore that did not take leaves the document changed by a call that only framed the
+    camera, and the caller is the only one who can undo it - so EVERY exit that reaches the isolate
+    runs this, not just the successful one. Returns None when there was nothing to restore or
+    everything came back."""
+    if not restore:
+        return None
+    try:
+        stuck = restore() or []
+    except Exception as e:
+        stuck = [f"the restore raised: {e}"]
+    if not stuck:
+        return None
+    return (f"{label} hid the other occurrences {purpose} and could NOT turn "
+            f"{len(stuck)} of them back on: {', '.join(str(s) for s in stuck[:5])}. "
+            "The document is left with those hidden - view_set(action='show', target=...) "
+            "restores them.")
+
 # eye - target direction per named view. Not pre-normalized (the iso corners are (+-1,+-1,+-1));
-# view_direction()/look_direction() normalize on read.
+# view_direction()/look_direction() normalize on read. An iso-bottom-* entry's z is NEGATIVE - the
+# camera sits UNDER the model and mirrors its iso-top-* twin across z. Fusion is Z-up, so a positive
+# z there aims the camera down at the TOP face: measured on 2705.1.4 against a plate carrying a
+# through-pocket on its underside, an eye-target of (1,1,1) rendered the top face and (1,-1,-1)
+# rendered the pocket.
 VIEW_DIRECTIONS = {
     "front": (0, -1, 0),
     "back": (0, 1, 0),
@@ -62,8 +175,8 @@ VIEW_DIRECTIONS = {
     "left": (-1, 0, 0),
     "iso-top-right": (1, -1, 1),
     "iso-top-left": (-1, -1, 1),
-    "iso-bottom-right": (1, 1, 1),
-    "iso-bottom-left": (-1, 1, 1),
+    "iso-bottom-right": (1, -1, -1),
+    "iso-bottom-left": (-1, -1, -1),
 }
 
 # Up vector per named view - the SAME for view_direction and look_direction (only the primary

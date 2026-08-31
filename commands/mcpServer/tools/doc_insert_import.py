@@ -18,6 +18,7 @@ from ..mcp_primitives.registry import register
 from ._common import error, ok, safe
 from . import _common
 from . import _inputs
+from . import _sketch_detail
 from . import _assert
 
 app = adsk.core.Application.get()
@@ -218,8 +219,12 @@ def _import_dxf(mgr, design, path, into_component, plane):
     })
 
 
-def _import_svg(mgr, design, path, sketch):
-    target, requested, ambiguous = _common.find_or_recent_sketch(design, sketch)
+def _import_svg(mgr, design, path, sketch, sketch_component=""):
+    # The scope is 'sketch_component', NOT 'into_component': into_component names the component a
+    # DXF's new sketches or a solid's occurrence LAND in, while an SVG lands in a sketch that
+    # already exists. Two different components, so the two inputs stay two inputs.
+    target, requested, ambiguous = _sketch_detail.scoped_or_recent_sketch(
+        design, sketch, sketch_component, "sketch_component")
     if ambiguous:
         return error(ambiguous)
     if target is None:
@@ -300,7 +305,7 @@ def _import_to_new_document(mgr, fmt, path):
 
 
 def handler(file_path: str = "", format: str = "", into_component: str = "", sketch: str = "",
-            plane: str = "xy", new_document: bool = False) -> dict:
+            plane: str = "xy", new_document: bool = False, sketch_component: str = "") -> dict:
     """See TOOL_DESCRIPTION."""
     path = (file_path or "").strip()
     if not path:
@@ -330,7 +335,7 @@ def handler(file_path: str = "", format: str = "", into_component: str = "", ske
         return error("No active design to import into. Open or create a document first (see "
                      "doc_new), or pass new_document=true.")
     if fmt == "svg":
-        return _import_svg(mgr, design, path, sketch)
+        return _import_svg(mgr, design, path, sketch, sketch_component)
     if fmt == "dxf":
         return _import_dxf(mgr, design, path, into_component, plane)
     return _import_solid(mgr, design, path, fmt, into_component)
@@ -354,6 +359,7 @@ tool = (
     .add_input_property(*_INTO_COMPONENT.as_property())
     .add_input_property("sketch", {"type": "string",
             "description": "SVG only: sketch to import into (default: the most recent sketch)."})
+    .add_input_property(*_sketch_detail.component_scope("sketch_component", narrows="sketch"))
     .add_input_property(*_PLANE.as_property())
     .add_input_property("new_document", {"type": "boolean",
             "description": "Import to a new unsaved document instead of the open design (solid formats only)."})

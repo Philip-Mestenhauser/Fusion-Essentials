@@ -44,6 +44,11 @@ MAP_BLURB = ("build_joint_geometry (keypoint factory per entity kind) + apply_mo
              "joint_drive's second-member refusal gates on it) + "
              "all_joint_origins (the ONE JointOrigin walk) / find_joint_origins_by_name / "
              "jo_assembly_proxy (the JO leaf ops resolve-one/collect-names/read-axes sit on) + "
+             "component_world_matrix (the ONE matrix-to-world ladder: the root frame as identity, "
+             "the occurrence a proxy was reached through - or one of its assembly ancestors - and "
+             "a singly-placed component's own occurrence, answering None where several placements "
+             "would each give a different frame, so a caller refuses or makes no judgement instead "
+             "of picking an instance; every axis lift and world-frame read resolves through it) + "
              "motion_param_names/OFFSET_PARAM_NOTE (the joint's own offset/angle dNN read + the one "
              "offset-is-frame-Z wire sentence every joint payload appends) + "
              "pending_position/pending_move_guard/PENDING_MOVE_REFUSAL (the ONE moved-but-uncaptured "
@@ -185,36 +190,83 @@ def _fmt_point(xyz):
     return "(%.4f, %.4f, %.4f)" % xyz
 
 
-def _world_placement(entity):
-    """The Matrix3D taking `entity`'s surface geometry from its component frame into WORLD, or None
-    when that cannot be established.
+def _occurrence_chain(occ):
+    """`occ` and each of its assembly ancestors, innermost first - the path a proxy is reached
+    through. A top-level occurrence's assemblyContext reads None (measured), which ends the walk;
+    the depth cap is a cycle guard, not a real assembly limit."""
+    out = []
+    while occ is not None and len(out) < 64:
+        out.append(occ)
+        occ = safe(lambda o=occ: o.assemblyContext)
+    return out
 
-    A face reached through an assembly proxy carries its occurrence in assemblyContext, and that
-    occurrence's transform2 IS the component-to-world matrix (transform is the LOCAL one and composes
-    no parent). A NATIVE face carries no context: its geometry is already world only when it belongs
-    to the ROOT component. A native face in a placed sub-component has a world placement this cannot
-    resolve without picking among that component's occurrences, so it answers None - and the caller
-    then makes NO judgement rather than a wrong one."""
-    occ = safe(lambda: entity.assemblyContext)
-    if occ is not None:
-        return safe(lambda: occ.transform2)
-    comp = safe(lambda: entity.body.parentComponent)
-    root = safe(lambda: _common.design().rootComponent)
-    if comp is not None and root is not None and _common.same_component(comp, root):
-        return safe(lambda: adsk.core.Matrix3D.create())      # the root frame IS world
+
+def component_world_matrix(design, comp, context_occ=None):
+    """The Matrix3D taking `comp`'s OWN coordinate frame into WORLD, or None when no single
+    placement answers for it. The ONE matrix-to-world ladder in this module.
+
+    The resolution ladder is ``jo_assembly_proxy``'s, answering with a matrix instead of a proxy:
+    the ROOT component's frame IS world (identity); a component placed ONCE is carried by that
+    occurrence's transform2; a component placed SEVERAL times has no one world frame.
+
+    transform2 is the ONLY matrix read. ``transform`` is the LOCAL one and composes no parent, so on
+    a nested occurrence it names a different frame - falling back to it would answer with a matrix
+    this function's own contract calls unknowable, under a caller that reads None as "make no
+    judgement". An unreadable transform2 is therefore None, like any other unresolved placement.
+
+    `context_occ` is the occurrence the caller reached the geometry through: when `comp` is placed by
+    it or by one of its assembly ancestors, THAT instance's transform is the answer, so a
+    multi-placed component still resolves for the instance actually being measured. With no context
+    and several placements this returns None - the caller then refuses, or makes no judgement,
+    rather than picking an instance whose rotation may differ from the one in hand."""
+    root = safe(lambda: design.rootComponent)
+    if comp is None or root is None:
+        return None
+    # `is True` on both: an identity comparison that did not read cannot mint a frame. The identity
+    # matrix is the claim "this component's frame IS world" and an occurrence's transform2 is the
+    # claim "THIS instance carries it" - an unproven match falls through to the placement ladder and,
+    # failing that, to the None this function's callers read as "make no judgement".
+    if _common.same_component(comp, root) is True:
+        return safe(lambda: adsk.core.Matrix3D.create())
+    for o in _occurrence_chain(context_occ):
+        if _common.same_component(safe(lambda o=o: o.component), comp) is True:
+            return safe(lambda o=o: o.transform2)
+    occs = list(safe(lambda: root.allOccurrencesByComponent(comp)) or [])
+    if len(occs) == 1:
+        return safe(lambda: occs[0].transform2)
     return None
+
+
+def _world_placement(entity):
+    """The Matrix3D taking `entity`'s owning component's frame into WORLD, or None when no single
+    placement answers for it - the module's one matrix-to-world ladder,
+    ``component_world_matrix``, over the entity's owner and the occurrence it was reached through.
+
+    An entity reached through an assembly proxy names its instance in assemblyContext; a NATIVE one
+    carries no context, and its owning component's own placement answers. None means the caller
+    makes NO judgement rather than a wrong one."""
+    return component_world_matrix(_common.design(),
+                                  safe(lambda: entity.body.parentComponent),
+                                  safe(lambda: entity.assemblyContext))
 
 
 def _world_torus_centre(entity):
     """The torus face's own centre in WORLD coordinates, or None when it cannot be established.
 
-    Surface geometry is component-LOCAL, so the centre must be lifted through the entity's placement
-    before it can be compared against a keypoint that is measured world-framed."""
-    m = _world_placement(entity)
-    local = safe(lambda: entity.geometry.origin)
-    if m is None or local is None:
+    Which frame ``geometry.origin`` answers in follows assemblyContext, MEASURED on a torus centred
+    at component-local (0, 0, -1) in a component turned 30 deg about Z and placed 8 cm out: the
+    NATIVE face reads (0, 0, -1) and needs the lift through its owning component's one placement,
+    while the face reached through the assembly PROXY reads (8, 0, -1) - already world, and lifting
+    it a second time lands (14.9282, 4.0, -1.0), a point on no part of the model."""
+    origin = safe(lambda: entity.geometry.origin)
+    if origin is None:
         return None
-    moved = safe(lambda: local.copy())
+    if safe(lambda: entity.assemblyContext) is not None:
+        return _xyz(origin)
+    m = _world_placement(entity)
+    if m is None:
+        return None
+    moved = safe(lambda: origin.copy())
     if moved is None or not safe(lambda: moved.transformBy(m)):
         return None
     return _xyz(moved)
@@ -230,7 +282,7 @@ def _torus_keypoint_error(g, entity):
         placed one. Nothing raises, so the returned origin is the only signal there is.
     The component origin is right only when the torus happens to be centred on it.
 
-    So the discriminating comparison is the keypoint against the torus's own centre lifted into the
+    So the discriminating comparison is the keypoint against the torus's own centre read in the
     SAME world frame. A world-origin signature alone would catch only root-component bodies and pass
     a placed one's plausible-but-wrong point silently; comparing against the raw component-LOCAL
     centre would false-refuse every placed assembly. Either side unestablished -> no judgement."""
@@ -573,7 +625,10 @@ def jo_assembly_proxy(design, jo, comp):
     (obj, error): an owning component instanced MORE THAN ONCE is ambiguous which instance carries the
     frame, so it refuses and names the '<occurrence>:<JO name>' form that picks one."""
     root = safe(lambda: design.rootComponent)
-    if _common.same_component(comp, root):
+    # `is True`: only a PROVEN root JO is handed back native (the form Fusion refuses anywhere else).
+    # An unproven owner takes the placement walk below, which ends on the same native when nothing
+    # places the component - so the unknown costs one lookup and claims nothing.
+    if _common.same_component(comp, root) is True:
         return jo, None
     occs = list(safe(lambda: root.allOccurrencesByComponent(comp)) or []) if root else []
     if len(occs) == 1:
@@ -603,7 +658,10 @@ def jo_reference_names(design, jo, comp):
     assembly_get JO slice (its qualified_name field) and the JointOriginRef ambiguity candidate list."""
     nm = safe(lambda: jo.name) or "?"
     root = safe(lambda: design.rootComponent)
-    if _common.same_component(comp, root):
+    # `is True`: an owner proven to be the root is reachable by the bare name. An unproven one takes
+    # the occurrence walk, which prints the qualified spellings that exist and falls back to the bare
+    # name when none do - so no reference string is offered on an identity that did not read.
+    if _common.same_component(comp, root) is True:
         return [nm]
     occs = list(safe(lambda: root.allOccurrencesByComponent(comp)) or []) if root else []
     out = [f"{safe(lambda o=o: o.fullPathName)}:{nm}" for o in occs if safe(lambda o=o: o.fullPathName)]

@@ -7,7 +7,7 @@ right ExportManager.create*Options call is used per format. No live Fusion - fak
 """
 
 import json
-from conftest import load_tool
+from conftest import _NamedCollection, load_tool
 
 dx = load_tool("design_export")
 
@@ -141,11 +141,16 @@ class FakeDesign:
         return [e] if e is not None else []
 
 
-def _install(monkeypatch, bodies=None, comp_name="Root", occurrences=()):
+def _install(monkeypatch, bodies=None, comp_name="Root", occurrences=(), components=None):
     bodies = bodies if bodies is not None else [FakeBody("Body1")]
     comp = FakeComp(comp_name, bodies, occurrences)
     em = FakeExportManager()
     design = FakeDesign(comp, em)
+    if components is not None:
+        # only when a test needs the design-wide component walk: without it the design answers no
+        # allComponents at all and _common.all_components falls back to [root], as most tests want.
+        # allComponents is a COUNTED collection (count + item(i)) - conftest's shared one.
+        design.allComponents = _NamedCollection([FakeComp(n, []) for n in components])
     app = type("A", (), {"activeProduct": design})()
     monkeypatch.setattr(dx, "app", app)
     monkeypatch.setattr(dx._common, "app", app)
@@ -281,6 +286,27 @@ class TestTargetResolution:
         assert "Sub-A:1+Bolt:1" in res["message"] and "Sub-B:1+Bolt:1" in res["message"]
         assert em.executed is None                        # nothing was exported
 
+    def test_component_name_resolves_when_one_component_carries_it(self, tmp_path, monkeypatch):
+        _, em, _ = _install(monkeypatch, components=["Bracket", "Frame"])
+        out = _payload(dx.handler(format="step", target="Frame", file_path=str(tmp_path / "p.step")))
+        assert em.calls[-1]["geom"].name == "Frame"
+        assert "Frame" in out["target"]
+
+    def test_duplicate_component_name_refused_not_exported(self, tmp_path, monkeypatch):
+        # two components named 'Bracket': neither is the one asked for, so the export must refuse
+        # rather than write one of them to disk under the requested name
+        _, em, _ = _install(monkeypatch, components=["Bracket", "Bracket"])
+        res = dx.handler(format="step", target="Bracket", file_path=str(tmp_path / "p.step"))
+        assert res["isError"] is True
+        # the COMPONENT step is what refuses, before the body vocabulary gets a turn: its refusal is
+        # unlabelled, where the body resolver's copy of it arrives prefixed "'target': "
+        assert res["message"].startswith("2 components match 'Bracket'")
+        # and it offers the two vocabularies THIS tool still resolves, not a rename of the model
+        assert "occurrence name/fullPathName" in res["message"]
+        assert "find_geometry" in res["message"]
+        assert "rename" not in res["message"].lower()
+        assert em.executed is None                        # nothing was exported
+
     def test_an_EXACT_shared_name_refusal_keeps_its_candidate_list(self, tmp_path, monkeypatch):
         # the shared-EXACT-name refusal carries no "ambiguous" wording - only the OCCURRENCE_MISS
         # stem tells a plain miss from a refusal - so its candidate list must reach the caller
@@ -332,6 +358,99 @@ class TestOptionsApplied:
         assert out.get("options_applied", {}).get("stl_binary") is None
         assert "stl_binary" in out["options_refused"]
         assert "did not take these options" in out["note"]
+
+    def _drops_every_write(self, em, **factory_values):
+        """Options whose FACTORY values are 'factory_values' and which DROP every write to them -
+        the shape a set-then-read-back cannot bite on. Measured, it is not hypothetical: a fresh
+        STLExportOptions reads unitType 0 and MillimeterDistanceUnits IS 0, so an 'mm' request
+        reads back off an object nothing was ever assigned to."""
+        class _Deaf(FakeOptions):
+            def __init__(self, kind, path, geom=None):
+                super().__init__(kind, path, geom)
+                for k, v in factory_values.items():
+                    object.__setattr__(self, k, v)
+
+            def __setattr__(self, k, v):
+                if k in factory_values:
+                    return
+                object.__setattr__(self, k, v)
+        em.options_class = _Deaf
+        return _Deaf
+
+    def test_a_unit_the_options_already_read_is_published_unverified(self, tmp_path, monkeypatch):
+        # THE COLLISION. Every write is dropped, yet the options object reads 'mm' because that is
+        # its factory value - so the read-back equals the request and would report a clean
+        # 'applied'. The file is written in INCHES. 'options_applied' may not stand alone here.
+        _, em, _ = _install(monkeypatch)
+        self._drops_every_write(
+            em, unitType=dx.adsk.fusion.DistanceUnits.MillimeterDistanceUnits)
+        out = _payload(dx.handler(format="stl", file_path=str(tmp_path / "p.stl"), stl_units="mm"))
+        assert out["options_applied"]["stl_units"] == "mm"
+        assert out["options_verified"]["stl_units"] is False
+        assert "UNVERIFIED" in out["note"]
+        assert "options_refused" not in out          # it DID read back - a different disclosure
+
+    def test_an_unmeasured_boolean_the_options_already_read_is_published_unverified(self, tmp_path,
+                                                                                    monkeypatch):
+        # A boolean has only two possible requests, so whichever one the factory holds is
+        # unverifiable - about half of them. invisible_bodies is the case with NO measurement
+        # tying its read to the written file, so it discloses like any unmeasured knob.
+        _, em, _ = _install(monkeypatch)
+        self._drops_every_write(em, isIncludingInvisibleBodies=True)
+        out = _payload(dx.handler(format="stl", file_path=str(tmp_path / "p.stl"),
+                                  include_invisible_bodies=True))
+        assert out["options_applied"]["invisible_bodies"] is True
+        assert out["options_verified"]["invisible_bodies"] is False
+        assert "invisible_bodies is set but UNVERIFIED" in out["note"]
+
+    def test_stl_binary_publishes_no_verification_because_its_read_determines_the_file(
+            self, tmp_path, monkeypatch):
+        # MEASURED: isBinaryFormat's factory value is True, and its read value DETERMINES the file -
+        # untouched and explicit-True are byte-identical, explicit-False writes a distinct ASCII
+        # 'solid ' file. So reading back the request answers what the caller asked whoever set it,
+        # and a permanent 'verified: false' on the COMMON request would be noise, not honesty.
+        # Driven at the collision: the write is dropped and the factory value is the request.
+        _, em, _ = _install(monkeypatch)
+        self._drops_every_write(em, isBinaryFormat=True)
+        out = _payload(dx.handler(format="stl", file_path=str(tmp_path / "p.stl"),
+                                  stl_binary=True))
+        assert out["options_applied"]["stl_binary"] is True
+        assert "stl_binary" not in out.get("options_verified", {})   # no evidence key for THIS knob
+        assert "UNVERIFIED" not in out["note"]
+
+    def test_a_dropped_stl_binary_write_is_still_refused_where_the_read_back_can_see_it(
+            self, tmp_path, monkeypatch):
+        # Dropping the flag must not drop the GUARD: asked for the value the factory does NOT hold,
+        # a dropped write still reads back wrong and is refused, never reported as applied.
+        _, em, _ = _install(monkeypatch)
+        self._drops_every_write(em, isBinaryFormat=True)
+        out = _payload(dx.handler(format="stl", file_path=str(tmp_path / "p.stl"),
+                                  stl_binary=False))
+        assert out.get("options_applied", {}).get("stl_binary") is None
+        assert "stl_binary" in out["options_refused"]
+
+    def test_a_knob_the_options_did_not_already_read_is_published_verified(self, tmp_path,
+                                                                          monkeypatch):
+        # The control, and the one that keeps this honest in the other direction: the property held
+        # a DIFFERENT value before the set, the write landed, so the read-back could have failed
+        # and did not. A real verification, published as one, with no caveat on the wire.
+        _, em, _ = _install(monkeypatch)
+        out = _payload(dx.handler(format="stl", file_path=str(tmp_path / "p.stl"), stl_units="in"))
+        assert out["options_applied"]["stl_units"] == "in"
+        assert out["options_verified"]["stl_units"] is True
+        assert "UNVERIFIED" not in out["note"]
+
+    def test_a_dropped_write_is_still_refused_where_the_read_back_can_see_it(self, tmp_path,
+                                                                            monkeypatch):
+        # The pre-read must not weaken the existing guard: a dropped write to a property holding
+        # some OTHER value is still a refusal, not an unverified pass.
+        _, em, _ = _install(monkeypatch)
+        self._drops_every_write(
+            em, unitType=dx.adsk.fusion.DistanceUnits.MillimeterDistanceUnits)
+        out = _payload(dx.handler(format="stl", file_path=str(tmp_path / "p.stl"), stl_units="in"))
+        assert out.get("options_applied", {}).get("stl_units") is None
+        assert "stl_units" in out["options_refused"]
+        assert "options_verified" not in out         # nothing landed, so nothing to back
 
     def test_default_call_sets_no_extra_options(self, tmp_path, monkeypatch):
         # the common case (no opt-in flags) must keep the plain export payload shape - no
@@ -389,10 +508,37 @@ class TestOptionsApplied:
         # under this key would read as the value it is not
         assert out["options_applied"]["stl_units"] == "in"
 
-    def test_stl_units_omitted_leaves_factory_default_untouched(self, tmp_path, monkeypatch):
+    def test_stl_units_omitted_still_assigns_mm_rather_than_inheriting_a_unit(self, tmp_path,
+                                                                              monkeypatch):
+        # The omitted case is NOT a neutral default: an STL whose unitType is never assigned takes
+        # the unit of the last explicit assignment anywhere in the Fusion session, so leaving the
+        # property alone writes an unrelated earlier export's unit. Asserted on the ENUM MEMBER the
+        # options object received, not on the payload - this is the write, not the report of it.
         _, em, _ = _install(monkeypatch)
         dx.handler(format="stl", file_path=str(tmp_path / "p.stl"))
-        assert not hasattr(em.calls[-1], "unitType")
+        assert em.calls[-1].unitType is dx.adsk.fusion.DistanceUnits.MillimeterDistanceUnits
+
+    def test_the_omitted_unit_is_the_one_the_schema_advertises(self, tmp_path, monkeypatch):
+        # The advertised default and the unit actually assigned are ONE value: a handler default
+        # drifting from the Choice's would advertise one unit while writing another, and every test
+        # here naming its own literal would pass straight over it. The sibling mesh_export pins the
+        # same pair, so the two tools cannot drift apart on one measured fact.
+        advertised = dx._STL_UNITS.default
+        assert f"Default {advertised}." in dx._STL_UNITS.schema()["description"]
+        _, em, _ = _install(monkeypatch)
+        dx.handler(format="stl", file_path=str(tmp_path / "p.stl"))
+        assert em.calls[-1].unitType is getattr(
+            dx.adsk.fusion.DistanceUnits, dx._export.STL_UNIT_MEMBERS[advertised])
+
+    def test_an_omitted_unit_is_reported_in_the_payload_it_was_written_with(self, tmp_path,
+                                                                            monkeypatch):
+        # Writing the right unit is half of it: a caller re-importing the file needs the payload to
+        # NAME the unit, and the omitted case is exactly where nothing was asked for to echo back.
+        # options_applied is the value read back off the options object that wrote the file, so the
+        # unit is recoverable from the receipt without the caller having asked for it.
+        _, em, _ = _install(monkeypatch)
+        out = _payload(dx.handler(format="stl", file_path=str(tmp_path / "p.stl")))
+        assert out["options_applied"]["stl_units"] == "mm"
 
     def test_stl_units_bad_value_errors(self, tmp_path, monkeypatch):
         _install(monkeypatch)
@@ -472,7 +618,8 @@ class TestDxfExport:
     def test_sketch_happy_path(self, tmp_path, monkeypatch):
         _, em, _ = _install(monkeypatch)
         sk = FakeSketch(lines=2)
-        monkeypatch.setattr(dx._common, "find_sketch", lambda design, name: (sk, None))
+        monkeypatch.setattr(dx._common, "find_sketch",
+                            lambda design, name, remedy=None: (sk, None))
         out = _payload(dx.handler(format="dxf", dxf_sketch="Profile1",
                                    file_path=str(tmp_path / "p")))
         assert out["exported"] is True
@@ -487,7 +634,8 @@ class TestDxfExport:
         # export must reproduce that by defaulting all three content flags to True.
         _, em, _ = _install(monkeypatch)
         sk = FakeSketch(lines=2)
-        monkeypatch.setattr(dx._common, "find_sketch", lambda design, name: (sk, None))
+        monkeypatch.setattr(dx._common, "find_sketch",
+                            lambda design, name, remedy=None: (sk, None))
         _payload(dx.handler(format="dxf", dxf_sketch="Profile1", file_path=str(tmp_path / "p.dxf")))
         opts = em.calls[-1]
         assert opts.isConstructionExported is True
@@ -497,7 +645,8 @@ class TestDxfExport:
     def test_sketch_export_flags_can_be_narrowed(self, tmp_path, monkeypatch):
         _, em, _ = _install(monkeypatch)
         sk = FakeSketch(lines=2)
-        monkeypatch.setattr(dx._common, "find_sketch", lambda design, name: (sk, None))
+        monkeypatch.setattr(dx._common, "find_sketch",
+                            lambda design, name, remedy=None: (sk, None))
         _payload(dx.handler(format="dxf", dxf_sketch="Profile1", file_path=str(tmp_path / "p.dxf"),
                             dxf_export_construction=False, dxf_export_points=False))
         opts = em.calls[-1]
@@ -511,7 +660,8 @@ class TestDxfExport:
         # handler leaves it alone entirely. There is deliberately no dxf_units input.
         _, em, _ = _install(monkeypatch)
         sk = FakeSketch(lines=1)
-        monkeypatch.setattr(dx._common, "find_sketch", lambda design, name: (sk, None))
+        monkeypatch.setattr(dx._common, "find_sketch",
+                            lambda design, name, remedy=None: (sk, None))
         out = _payload(dx.handler(format="dxf", dxf_sketch="Profile1",
                                   file_path=str(tmp_path / "p.dxf")))
         assert out["exported"] is True
@@ -531,13 +681,15 @@ class TestDxfExport:
     def test_empty_sketch_errors(self, tmp_path, monkeypatch):
         _install(monkeypatch)
         sk = FakeSketch(lines=0, arcs=0, circles=0, points=0)
-        monkeypatch.setattr(dx._common, "find_sketch", lambda design, name: (sk, None))
+        monkeypatch.setattr(dx._common, "find_sketch",
+                            lambda design, name, remedy=None: (sk, None))
         res = dx.handler(format="dxf", dxf_sketch="Empty", file_path=str(tmp_path / "p.dxf"))
         assert res["isError"] is True and "empty" in res["message"].lower()
 
     def test_sketch_not_found_errors(self, tmp_path, monkeypatch):
         _install(monkeypatch)
-        monkeypatch.setattr(dx._common, "find_sketch", lambda design, name: (None, None))
+        monkeypatch.setattr(dx._common, "find_sketch",
+                            lambda design, name, remedy=None: (None, None))
         monkeypatch.setattr(dx._common, "all_sketch_names", lambda design: ["Sketch1"])
         res = dx.handler(format="dxf", dxf_sketch="Nope", file_path=str(tmp_path / "p.dxf"))
         assert res["isError"] is True and "Nope" in res["message"]
@@ -548,16 +700,113 @@ class TestDxfExport:
         # named 'Profile1'" - that sentence states the opposite of what the walk read.
         _install(monkeypatch)
         refusal = "2 sketches are named 'Profile1' ('Profile1' in Root, 'Profile1' in Frame)"
-        monkeypatch.setattr(dx._common, "find_sketch", lambda design, name: (None, refusal))
+        monkeypatch.setattr(dx._common, "find_sketch",
+                            lambda design, name, remedy=None: (None, refusal))
         res = dx.handler(format="dxf", dxf_sketch="Profile1", file_path=str(tmp_path / "p.dxf"))
         assert res["isError"] is True
         assert res["message"] == refusal
         assert "No sketch named" not in res["message"]
 
+    def _two_components(self, monkeypatch, alpha_sketches, beta_sketches):
+        """Two named components, each with its OWN sketches collection, and the design-wide walk
+        LEFT UNSTUBBED - the scope filter is the thing under test, so a fake standing in for the
+        resolver would prove nothing. Both components hold a sketch of the SAME name; with two
+        different names the filter never runs and unscoped code would pass."""
+        design, em, comp = _install(monkeypatch)
+        alpha = FakeComp("Alpha", [])
+        alpha.sketches = _NamedCollection(list(alpha_sketches))
+        beta = FakeComp("Beta", [])
+        beta.sketches = _NamedCollection(list(beta_sketches))
+        design.allComponents = _NamedCollection([alpha, beta])
+        design.rootComponent = alpha
+        design.activeComponent = alpha
+        return design, em, alpha, beta
+
+    def test_the_unscoped_shared_name_refuses_and_names_the_scope_input(self, tmp_path,
+                                                                        monkeypatch):
+        a_sk, b_sk = FakeSketch("Profile1", lines=2), FakeSketch("Profile1", circles=1)
+        _d, em, _a, _b = self._two_components(monkeypatch, [a_sk], [b_sk])
+        res = dx.handler(format="dxf", dxf_sketch="Profile1", file_path=str(tmp_path / "p.dxf"))
+        assert res["isError"] is True
+        assert "2 sketches are named 'Profile1'" in res["message"]
+        assert "'dxf_component'" in res["message"] and "Rename one" not in res["message"]
+        assert em.calls == []                        # nothing was written
+
+    def test_the_scope_writes_THAT_components_sketch(self, tmp_path, monkeypatch):
+        a_sk, b_sk = FakeSketch("Profile1", lines=2), FakeSketch("Profile1", circles=1)
+        _d, em, _a, _b = self._two_components(monkeypatch, [a_sk], [b_sk])
+        out = _payload(dx.handler(format="dxf", dxf_sketch="Profile1", dxf_component="Beta",
+                                  file_path=str(tmp_path / "p.dxf")))
+        assert out["exported"] is True
+        assert em.calls[-1]["geom"] is b_sk
+
+    def test_the_sibling_component_is_reachable_by_the_same_call(self, tmp_path, monkeypatch):
+        a_sk, b_sk = FakeSketch("Profile1", lines=2), FakeSketch("Profile1", circles=1)
+        _d, em, _a, _b = self._two_components(monkeypatch, [a_sk], [b_sk])
+        _payload(dx.handler(format="dxf", dxf_sketch="Profile1", dxf_component="Alpha",
+                            file_path=str(tmp_path / "p.dxf")))
+        assert em.calls[-1]["geom"] is a_sk
+
+    def test_an_unknown_component_is_refused_before_the_write(self, tmp_path, monkeypatch):
+        a_sk, b_sk = FakeSketch("Profile1", lines=2), FakeSketch("Profile1", circles=1)
+        _d, em, _a, _b = self._two_components(monkeypatch, [a_sk], [b_sk])
+        res = dx.handler(format="dxf", dxf_sketch="Profile1", dxf_component="Gamma",
+                         file_path=str(tmp_path / "p.dxf"))
+        assert res["isError"] is True and "No component named 'Gamma'" in res["message"]
+        assert em.calls == []
+
+    def test_a_wrong_component_is_refused_even_when_the_name_is_UNIQUE(self, tmp_path,
+                                                                       monkeypatch):
+        # The scope is VALIDATED: a dropped one writes Alpha's sketch to a file the caller asked
+        # for from Beta, and the DXF on disk is the wrong outline with no error to say so.
+        a_sk = FakeSketch("OnlyOne", lines=2)
+        _d, em, _a, _b = self._two_components(monkeypatch, [a_sk], [])
+        res = dx.handler(format="dxf", dxf_sketch="OnlyOne", dxf_component="Beta",
+                         file_path=str(tmp_path / "p.dxf"))
+        assert res["isError"] is True and "'Beta'" in res["message"]
+        assert em.calls == []
+
+    def test_the_scoped_MISS_names_dxf_component_never_the_bare_component(self, tmp_path,
+                                                                          monkeypatch):
+        # This tool declares a STRICT schema and carries NO 'component' input, so a refusal naming
+        # 'component' hands the caller a retry its own schema rejects.
+        a_sk = FakeSketch("Profile1", lines=2)
+        _d, em, _a, _b = self._two_components(monkeypatch, [a_sk], [FakeSketch("Other", lines=1)])
+        res = dx.handler(format="dxf", dxf_sketch="Profile1", dxf_component="Beta",
+                         file_path=str(tmp_path / "p.dxf"))
+        assert res["isError"] is True
+        assert "holds no sketch named 'Profile1'" in res["message"]
+        assert "'dxf_component'" in res["message"]
+        assert "'component'" not in res["message"]
+        assert em.calls == []
+
+    def test_an_AMBIGUOUS_dxf_component_names_dxf_component(self, tmp_path, monkeypatch):
+        from conftest import make_occurrence
+        design, em, comp = _install(monkeypatch)
+        root = FakeComp("Root", [])
+        root.sketches = _NamedCollection([])
+        a = FakeComp("Frame", [])
+        a.sketches = _NamedCollection([FakeSketch("Profile1", lines=2)])
+        b = FakeComp("Frame", [])
+        b.sketches = _NamedCollection([FakeSketch("Profile1", circles=1)])
+        root.allOccurrences = [make_occurrence("P2-Gimbal:1+Frame:1", a),
+                               make_occurrence("P3-Gimbal:1+Frame:1", b)]
+        design.rootComponent = root
+        design.activeComponent = root
+        design.allComponents = _NamedCollection([root, a, b])
+        res = dx.handler(format="dxf", dxf_sketch="Profile1", dxf_component="Frame",
+                         file_path=str(tmp_path / "p.dxf"))
+        assert res["isError"] is True
+        assert "2 components match 'Frame'" in res["message"]
+        assert "'dxf_component' also takes an occurrence fullPathName" in res["message"]
+        assert "'component'" not in res["message"]
+        assert em.calls == []
+
     def test_execute_false_is_reported_as_failure(self, tmp_path, monkeypatch):
         _, em, _ = _install(monkeypatch)
         sk = FakeSketch(lines=1)
-        monkeypatch.setattr(dx._common, "find_sketch", lambda design, name: (sk, None))
+        monkeypatch.setattr(dx._common, "find_sketch",
+                            lambda design, name, remedy=None: (sk, None))
         em.execute = lambda opts: False
         res = dx.handler(format="dxf", dxf_sketch="Profile1", file_path=str(tmp_path / "p.dxf"))
         assert res["isError"] is True
@@ -592,7 +841,8 @@ class TestDxfExport:
     def test_extension_auto_appended(self, tmp_path, monkeypatch):
         _install(monkeypatch)
         sk = FakeSketch(lines=1)
-        monkeypatch.setattr(dx._common, "find_sketch", lambda design, name: (sk, None))
+        monkeypatch.setattr(dx._common, "find_sketch",
+                            lambda design, name, remedy=None: (sk, None))
         out = _payload(dx.handler(format="dxf", dxf_sketch="Profile1",
                                    file_path=str(tmp_path / "noext")))
         assert out["file_path"].lower().endswith(".dxf")
@@ -605,7 +855,7 @@ class TestDxfWriterGuards:
     def _sketch_export(self, tmp_path, monkeypatch, sketch=None):
         design, em, _ = _install(monkeypatch)
         monkeypatch.setattr(dx._common, "find_sketch",
-                            lambda d, name: (sketch or FakeSketch(lines=1), None))
+                            lambda d, name, remedy=None: (sketch or FakeSketch(lines=1), None))
         return design, em
 
     def test_a_design_with_no_export_manager_is_named(self, tmp_path, monkeypatch):
@@ -687,11 +937,46 @@ class TestSplitByComponent:
         out = _payload(dx.handler(format="stl", file_path=str(tmp_path), split_by_component=True,
                                   stl_binary=True))
         assert out["file_count"] == 2
-        assert out["options_requested"] == {"stl_binary": True}
-        assert [f["options_applied"] for f in out["files"]] == [{"stl_binary": True},
-                                                                {"stl_binary": True}]
+        # stl_units rides on every STL export, asked for or not - its omitted case inherits a unit
+        # from the session rather than defaulting to one, so each file names the unit it was written in
+        assert out["options_requested"] == {"stl_binary": True, "stl_units": "mm"}
+        assert [f["options_applied"] for f in out["files"]] == [
+            {"stl_binary": True, "stl_units": "mm"}, {"stl_binary": True, "stl_units": "mm"}]
+        # stl_binary's read is MEASURED to determine the file, so IT carries no evidence key
+        assert all("stl_binary" not in (f.get("options_verified") or {}) for f in out["files"])
         # the first-file-representative key and its consistency flag are gone with the shape
         assert "options_applied" not in out and "options_applied_consistent" not in out
+
+    def test_split_publishes_the_unverified_knob_per_file_and_counts_it(self, tmp_path,
+                                                                        monkeypatch):
+        # The evidence is per file for the same reason the value is: each file got its own options
+        # object. Every one of them already read the request and dropped the write, so every file
+        # carries false and the note counts the files rather than claiming the knob for them.
+        occs = [FakeOcc("Body:1"), FakeOcc("Cab:1")]
+        _, em, _ = _install(monkeypatch, occurrences=occs)
+
+        class _Deaf(FakeOptions):
+            def __init__(self, kind, path, geom=None):
+                super().__init__(kind, path, geom)
+                object.__setattr__(self, "isIncludingInvisibleBodies", True)
+
+            def __setattr__(self, k, v):
+                if k == "isIncludingInvisibleBodies":
+                    return
+                object.__setattr__(self, k, v)
+
+        em.options_class = _Deaf
+        out = _payload(dx.handler(format="stl", file_path=str(tmp_path), split_by_component=True,
+                                  include_invisible_bodies=True))
+        assert [f["options_applied"] for f in out["files"]] == [
+            {"invisible_bodies": True, "stl_units": "mm"},
+            {"invisible_bodies": True, "stl_units": "mm"}]
+        assert [f["options_verified"] for f in out["files"]] == [
+            {"invisible_bodies": False, "stl_units": True},
+            {"invisible_bodies": False, "stl_units": True}]
+        assert ("invisible_bodies is set but UNVERIFIED for 2 of the 2 exported file(s)"
+                in out["note"])
+        assert "did NOT land" not in out["note"]
 
     def test_a_knob_that_did_not_read_back_is_null_on_that_files_record(self, tmp_path, monkeypatch):
         # An option Fusion ignored must show as null on the FILE it did not land on - an export
@@ -711,9 +996,9 @@ class TestSplitByComponent:
         em.options_class = Stubborn
         out = _payload(dx.handler(format="stl", file_path=str(tmp_path), split_by_component=True,
                                   stl_binary=False))
-        assert out["options_requested"] == {"stl_binary": False}
-        assert [f["options_applied"] for f in out["files"]] == [{"stl_binary": None},
-                                                                {"stl_binary": None}]
+        assert out["options_requested"] == {"stl_binary": False, "stl_units": "mm"}
+        assert [f["options_applied"] for f in out["files"]] == [
+            {"stl_binary": None, "stl_units": "mm"}, {"stl_binary": None, "stl_units": "mm"}]
         assert "stl_binary did NOT land for 2 of the 2 exported file(s)" in out["note"]
         assert "options_refused" not in out
 
@@ -743,18 +1028,29 @@ class TestSplitByComponent:
         monkeypatch.setattr(em, "_opt", _opt)
         out = _payload(dx.handler(format="stl", file_path=str(tmp_path),
                                   split_by_component=True, stl_binary=True))
-        assert [f["options_applied"] for f in out["files"]] == [{"stl_binary": True},
-                                                                {"stl_binary": None}]
+        assert [f["options_applied"] for f in out["files"]] == [
+            {"stl_binary": True, "stl_units": "mm"}, {"stl_binary": None, "stl_units": "mm"}]
         assert "stl_binary did NOT land for 1 of the 2 exported file(s)" in out["note"]
 
     def test_no_option_requested_publishes_neither_key(self, tmp_path, monkeypatch):
-        # Nothing was asked for, so there is nothing to state - an empty applied/requested pair on
-        # every file record would be noise a caller has to read past.
+        # Nothing was asked for and this format forces nothing, so there is nothing to state - an
+        # empty applied/requested pair on every file record would be noise a caller reads past.
+        # Driven on a format with no always-written knob; stl has one (the unit) by design.
         _install(monkeypatch, occurrences=[FakeOcc("Body:1")])
-        out = _payload(dx.handler(format="stl", file_path=str(tmp_path), split_by_component=True))
+        out = _payload(dx.handler(format="step", file_path=str(tmp_path), split_by_component=True))
         assert "options_requested" not in out
         assert "options_applied" not in out["files"][0]
         assert "did NOT land" not in out["note"]
+
+    def test_a_split_stl_names_its_unit_on_every_file_with_nothing_asked_for(self, tmp_path,
+                                                                             monkeypatch):
+        # The counterpart, and the one that matters for a print job: split writes one options object
+        # PER FILE, so a unit written on the first file only would leave the rest inheriting the
+        # session's unit. Every file record must name it, not just the first.
+        _install(monkeypatch, occurrences=[FakeOcc("Body:1"), FakeOcc("Cab:1")])
+        out = _payload(dx.handler(format="stl", file_path=str(tmp_path), split_by_component=True))
+        assert out["options_requested"] == {"stl_units": "mm"}
+        assert [f["options_applied"]["stl_units"] for f in out["files"]] == ["mm", "mm"]
 
     def test_filenames_sanitized_and_extensioned(self, tmp_path, monkeypatch):
         _, _, _ = _install(monkeypatch, occurrences=[FakeOcc("Loader Arm:1")])
@@ -862,7 +1158,7 @@ class TestExportOne:
         em = FakeExportManager()
         out = str(tmp_path / "out.stl")
         okk, err, applied = dx._export_one(em, "createSTLExportOptions", True, "GEOM", out)
-        assert okk is True and err is None and applied == ({}, [])
+        assert okk is True and err is None and applied == ({}, [], {})
         # STL records (geom, path); the call captured the geometry, not the path, as geom
         assert em.calls[-1]["geom"] == "GEOM" and em.calls[-1]["path"] == out
 
@@ -877,7 +1173,7 @@ class TestExportOne:
         em.execute = lambda opts: False
         okk, err, applied = dx._export_one(em, "createSTEPExportOptions", False, "G",
                                            str(tmp_path / "out"))
-        assert okk is False and "nothing was written" in err and applied == ({}, [])
+        assert okk is False and "nothing was written" in err and applied == ({}, [], {})
 
     def test_exception_captured_as_error_string(self, tmp_path):
         em = FakeExportManager()

@@ -13,7 +13,8 @@ import json
 
 import pytest
 
-from conftest import load_tool, FakePoint, BRepEdge, Circle3D, Line3D
+from conftest import (load_tool, FakePoint, BRepEdge, Circle3D, Line3D, FakeMatrix3D, MakeComp,
+                      make_occurrence)
 
 mh = load_tool("model_hole")
 
@@ -32,9 +33,12 @@ class FakeHoleInput:
     # entities cannot carry the placement, and a False that is not read lets add() run anyway.
     # refuse_extent is the same for setAllExtent - a declined extent never lands, so the input goes
     # into add() without one.
-    def __init__(self, kind, args, refuse_placement=False, refuse_extent=False):
+    # refusals maps a setter NAME to the answer it gives instead of True, so a test can distinguish
+    # an outright False (a refusal the handler must report) from a None (no answer read at all).
+    def __init__(self, kind, args, refuse_placement=False, refuse_extent=False, refusals=None):
         self.refuse_placement = refuse_placement
         self.refuse_extent = refuse_extent
+        self.refusals = dict(refusals or {})
         self.kind = kind            # 'simple' | 'counterbore' | 'countersink'
         self.args = args            # the ValueInput strings passed to the builder
         self.placed = None          # ('point', pt) / ('points', [pts]) / ('center', edge) /
@@ -46,10 +50,20 @@ class FakeHoleInput:
         self.isDefaultDirection = True
         self.holeTapType = 0
         self.tipAngle = None
+    def _answer(self, setter):
+        """The setter's bool. A False means it DECLINED, so the caller skips its side effect; any
+        other answer (True, or a None that read as nothing) means the setting landed."""
+        return self.refusals.get(setter, True)
     def setPositionBySketchPoint(self, sp):
-        self.placed = ("point", sp); return True
+        answer = self._answer("setPositionBySketchPoint")
+        if answer is False:
+            return False
+        self.placed = ("point", sp); return answer
     def setPositionBySketchPoints(self, coll):
-        self.placed = ("points", list(coll.items)); return True
+        answer = self._answer("setPositionBySketchPoints")
+        if answer is False:
+            return False
+        self.placed = ("points", list(coll.items)); return answer
     def setPositionAtCenter(self, planar_entity, center_edge):
         assert planar_entity == "FACE"
         assert isinstance(center_edge, BRepEdge)
@@ -69,15 +83,24 @@ class FakeHoleInput:
             return False
         self.placed = ("plane_offsets", args); return True
     def setDistanceExtent(self, v):
-        self.extent = ("distance", v); return True
+        answer = self._answer("setDistanceExtent")
+        if answer is False:
+            return False
+        self.extent = ("distance", v); return answer
     def setAllExtent(self, direction):
         if self.refuse_extent:
             return False
         self.extent = ("all", direction); return True
     def setToTappedHole(self, ti):
-        self.tap = ti; self.holeTapType = 2; return True
+        answer = self._answer("setToTappedHole")
+        if answer is False:
+            return False
+        self.tap = ti; self.holeTapType = 2; return answer
     def setToClearanceHole(self, chi):
-        self.clearance = chi; return True
+        answer = self._answer("setToClearanceHole")
+        if answer is False:
+            return False
+        self.clearance = chi; return answer
 
 
 class _Param:
@@ -165,6 +188,7 @@ class FakeHoleFeatures:
         self.miss_indices = ()       # placement-point indices that MISS the body (cut nothing)
         self.refuse_placement = False   # the setPosition* setters answer False
         self.refuse_extent = False      # setAllExtent answers False (the through-all extent declined)
+        self.refusals = {}              # setter name -> the answer it gives instead of True
         # True echoes the input; a bool models a flag that read back different; None models one
         # that could not be read at all
         self.modeled_readback = True
@@ -175,11 +199,14 @@ class FakeHoleFeatures:
     def __len__(self):
         return len(self.added)
     def createSimpleInput(self, dia):
-        return FakeHoleInput("simple", {"dia": dia}, self.refuse_placement, self.refuse_extent)
+        return FakeHoleInput("simple", {"dia": dia}, self.refuse_placement, self.refuse_extent,
+                             self.refusals)
     def createCounterboreInput(self, dia, cbd, cbdepth):
-        return FakeHoleInput("counterbore", {"dia": dia, "cb_dia": cbd, "cb_depth": cbdepth})
+        return FakeHoleInput("counterbore", {"dia": dia, "cb_dia": cbd, "cb_depth": cbdepth},
+                             refusals=self.refusals)
     def createCountersinkInput(self, dia, csd, csa):
-        return FakeHoleInput("countersink", {"dia": dia, "cs_dia": csd, "cs_angle": csa})
+        return FakeHoleInput("countersink", {"dia": dia, "cs_dia": csd, "cs_angle": csa},
+                             refusals=self.refusals)
     def add(self, inp):
         if inp.placed is None or inp.extent is None:
             raise RuntimeError("InternalValidationError : logicalSelection")
@@ -292,12 +319,41 @@ class _Features:
         self.threadFeatures = FakeThreadFeatures()
 
 
+class _LiftPoint(FakePoint):
+    """A Point3D that transforms IN PLACE, the way the lift carries a world point into a
+    component's own frame before the sketch's converter sees it. A POINT, so the placement's
+    translation applies (_apply_point), unlike a direction."""
+
+    def transformBy(self, m):
+        self.x, self.y, self.z = m._apply_point(self.x, self.y, self.z)
+        return True
+
+
+def _bracket(name="Bracket"):
+    """A component the placement ladder can identify - same_component compares entityToken, so the
+    token is chosen rather than inherited."""
+    return MakeComp(name=name, entity_token=f"tok:{name}")
+
+
+def _placing(comp, transform2, path="Bracket:1"):
+    """The occurrence PLACING `comp` with `transform2` - the transform2/assemblyContext pair the
+    placement ladder walks, off conftest's shared occurrence."""
+    return make_occurrence(path, comp, transform2=transform2)
+
+
 class _Root:
     def __init__(self):
         # the root OWNS the sketches created in it, which is what makes their model space world
         self.sketches = _Sketches(owner=self)
         self.features = _Features()
         self.name = "Root"
+        self.entityToken = "tok:Root"
+        # component entityToken -> the occurrences placing it: the census the placement ladder
+        # walks when no context occurrence names one instance.
+        self.placements = {}
+
+    def allOccurrencesByComponent(self, comp):
+        return list(self.placements.get(getattr(comp, "entityToken", None), []))
 
 
 class _ObjColl:
@@ -435,6 +491,85 @@ class TestSimple:
         assert out["points"] == 3
 
 
+# ── the input setters that answer "did it take" ──────────────────────────────
+#
+# Every one of these is declared bool by the bindings. A False that is not read lets the handler run
+# straight on to add() and report a hole built with a setting the platform declined.
+
+class TestRefusedInputSetters:
+    def test_refused_single_point_placement_is_an_honest_error(self):
+        d = _install()
+        hf = d.rootComponent.features.holeFeatures
+        hf.refusals = {"setPositionBySketchPoint": False}
+        res = mh.handler(hole_type="simple", diameter="8 mm", face="h", points=[[2, 3, 0]],
+                         extent="through")
+        assert res["isError"] is True
+        assert "setPositionBySketchPoint returned false" in res["message"]
+        assert hf.added == []
+        assert d.rootComponent.sketches._byname["HolePts0"].deleted is True
+
+    def test_refused_multi_point_placement_names_the_plural_setter(self):
+        # the two placement setters are different API calls; the error must name the one that ran
+        d = _install()
+        hf = d.rootComponent.features.holeFeatures
+        hf.refusals = {"setPositionBySketchPoints": False}
+        res = mh.handler(hole_type="simple", diameter="5 mm", face="h",
+                         points=[[2, 2, 0], [5, 2, 0]], extent="through")
+        assert res["isError"] is True
+        assert "setPositionBySketchPoints returned false" in res["message"]
+        assert hf.added == []
+
+    def test_refused_blind_depth_is_an_honest_error(self):
+        d = _install()
+        hf = d.rootComponent.features.holeFeatures
+        hf.refusals = {"setDistanceExtent": False}
+        res = mh.handler(hole_type="simple", diameter="8 mm", face="h", points=[[2, 3, 0]],
+                         extent="blind", depth="10 mm")
+        assert res["isError"] is True
+        assert "setDistanceExtent returned false" in res["message"]
+        assert "10 mm" in res["message"]             # the refused value is named
+        assert hf.added == []
+        assert d.rootComponent.sketches._byname["HolePts0"].deleted is True
+
+    def test_an_extent_answer_that_read_as_nothing_is_not_a_refusal(self):
+        # the exact boundary of `is False`. The bindings declare setDistanceExtent -> bool, and
+        # gen_api_surface subtracts any name that returns non-bool ANYWHERE, so a live call answers
+        # True or False and nothing else; the call is direct rather than wrapped in safe(), so a
+        # platform failure raises instead of answering None. A non-bool is therefore unreachable in
+        # production and is pinned here only as the boundary - against the real bindings `is False`
+        # and `not` cannot differ.
+        d = _install()
+        hf = d.rootComponent.features.holeFeatures
+        hf.refusals = {"setDistanceExtent": None}
+        out = _payload(mh.handler(hole_type="simple", diameter="8 mm", face="h",
+                                  points=[[2, 3, 0]], extent="blind", depth="10 mm"))
+        assert out["holes"] == 1
+        assert hf.added[0]._inp.extent == ("distance", ("V", "10 mm"))
+
+    def test_refused_tap_is_an_honest_error(self):
+        # a swallowed False here drills an UNTAPPED hole while the payload reports the designation
+        d = _install()
+        hf = d.rootComponent.features.holeFeatures
+        hf.refusals = {"setToTappedHole": False}
+        res = mh.handler(hole_type="simple", diameter="5 mm", face="h", points=[[5, 3, 0]],
+                         extent="blind", depth="12 mm", tap="M5x0.8")
+        assert res["isError"] is True
+        assert "setToTappedHole returned false" in res["message"]
+        assert "M5x0.8" in res["message"]
+        assert hf.added == []
+
+    def test_refused_clearance_spec_is_an_honest_error(self):
+        d = _install()
+        hf = d.rootComponent.features.holeFeatures
+        hf.refusals = {"setToClearanceHole": False}
+        res = mh.handler(hole_type="simple", face="h", points=[[2, 3, 0]], extent="through",
+                         fastener="M6 Socket Head Cap Screw", fit="normal")
+        assert res["isError"] is True
+        assert "setToClearanceHole returned false" in res["message"]
+        assert "M6 Socket Head Cap Screw" in res["message"]
+        assert hf.added == []
+
+
 # ── per-point verification: a point that misses the body cuts NOTHING while add() 'succeeds' ─────
 #
 # Live-verified: with 2 of 3 points off the target body, holes.add returned the feature with only a
@@ -534,17 +669,22 @@ def _identity(x, y, z):
     return (x, y, z)
 
 
-def _framed(monkeypatch, to_sketch, owner=_ROOT):
+def _framed(monkeypatch, to_sketch, owner=_ROOT, placements=None):
     """_install plus a placement sketch whose modelToSketchSpace applies `to_sketch`.
 
     `owner` defaults to the design root - the space that IS world; pass another object to model a
-    sketch that landed in a sub-component, and None one whose owner cannot be read."""
+    sketch that landed in a sub-component, and None one whose owner cannot be read. `placements`
+    maps such a component to the occurrences that place it, which is what the world lift resolves
+    its frame through. adsk.core.Matrix3D stays UNPATCHED: a root-owned sketch must short-circuit
+    before any matrix is built, so a lift that reached for one would fail loudly here."""
     import adsk.core
     d = _install()
     monkeypatch.setattr(adsk.core.Point3D, "create",
-                        staticmethod(lambda x, y, z: FakePoint(x, y, z)))
+                        staticmethod(lambda x, y, z: _LiftPoint(x, y, z)))
     d.rootComponent.sketches.to_sketch = to_sketch
     d.rootComponent.sketches.owner = d.rootComponent if owner is _ROOT else owner
+    for comp, occs in (placements or {}).items():
+        d.rootComponent.placements[comp.entityToken] = list(occs)
     return d
 
 
@@ -657,15 +797,18 @@ class TestPointsSpaceWorldOnAnOffsetComponent:
         _drill(points=[[40, 20, 0]])
         assert _placed(d) == [(4.0, 2.0, 0.0)]
 
-    def test_a_sketch_outside_the_root_refuses_the_world_space(self, monkeypatch):
-        # modelToSketchSpace maps from the sketch OWNER's model space, so anywhere but the root a
-        # 'world' point is really that component's local one - refuse rather than convert wrongly.
-        sub = type("Comp", (), {"name": "Bracket"})()
-        d = _framed(monkeypatch, lambda x, y, z: (x - 2, y, z - 1), owner=sub)
+    def test_a_sketch_outside_the_root_with_no_single_placement_is_refused(self, monkeypatch):
+        # modelToSketchSpace maps from the sketch OWNER's model space. Outside the root the point is
+        # carried into that component's frame first - but only when ONE placement answers for it.
+        # Two placements put the component in two different frames, so a world point names neither.
+        sub = _bracket()
+        d = _framed(monkeypatch, lambda x, y, z: (x - 2, y, z - 1), owner=sub,
+                    placements={sub: [_placing(sub, FakeMatrix3D(0.0), "Bracket:1"),
+                                      _placing(sub, FakeMatrix3D(90.0), "Bracket:2")]})
         res = _drill(points=[[40, 20, 10]], points_space="world")
         assert res["isError"] is True
-        assert "Bracket" in res["message"] and "ROOT" in res["message"]
-        assert "points_space='sketch'" in res["message"]
+        assert "Bracket" in res["message"] and "no single placement" in res["message"]
+        assert "sketch_add_geometry" in res["message"]      # a remedy the caller can perform
         assert d.rootComponent.features.holeFeatures.added == []
         sketch = next(iter(d.rootComponent.sketches._byname.values()))
         assert sketch.deleted is True
@@ -674,7 +817,81 @@ class TestPointsSpaceWorldOnAnOffsetComponent:
         # an unproven space is refused; an unreadable owner is not a yes
         d = _framed(monkeypatch, _identity, owner=None)
         res = _drill(points=[[10, 0, 0]], points_space="world")
-        assert res["isError"] is True and "ROOT" in res["message"]
+        assert res["isError"] is True and "no single placement" in res["message"]
+        assert d.rootComponent.features.holeFeatures.added == []
+
+
+class TestWorldPointsIntoANestedComponent:
+    """The world path from INSIDE the component that owns the body - the case that had no route at
+    all: from the root the hole finds no target body, and the owning component refused the world
+    frame outright. The placement sketch lands in that component, so a world point is carried
+    through the occurrence's own placement before the sketch's converter reads it.
+
+    The rig's occurrence is ROTATED 90 deg about Z and offset (2, 0, 1) cm, and `to_sketch` is the
+    IDENTITY, so the lift is the only thing that moves the point: world (4, 2, 1) cm answers
+    (2, -2, 0) local. Straight through it would be (4, 2, 1) - a centimetre off the plane; lifted
+    the wrong way round, (0, 4, 2)."""
+
+    def _nested(self, monkeypatch, occs=None, sub=None):
+        sub = sub or _bracket()
+        occs = occs if occs is not None else [_placing(sub, FakeMatrix3D(90.0, (2.0, 0.0, 1.0)))]
+        return _framed(monkeypatch, _identity, owner=sub, placements={sub: occs}), sub
+
+    def _at(self, d):
+        """Where the points landed, rounded past the trig's last bit."""
+        return [tuple(round(c, 9) for c in p) for p in _placed(d)]
+
+    def test_a_world_point_is_lifted_through_the_rotated_placement(self, monkeypatch):
+        d, _sub = self._nested(monkeypatch)
+        out = _payload(_drill(points=[[40, 20, 10]], points_space="world"))
+        assert self._at(d) == [(2.0, -2.0, 0.0)]
+        assert out["points_space"] == "world" and out["holes"] == 1
+
+    def test_the_lift_is_disclosed_by_the_component_it_went_through(self, monkeypatch):
+        d, _sub = self._nested(monkeypatch)
+        out = _payload(_drill(points=[[40, 20, 10]], points_space="world"))
+        assert out["world_lift_component"] == "Bracket"
+        assert "'Bracket'" in out["note"]
+
+    def test_a_root_owned_sketch_reports_no_lift(self, monkeypatch):
+        # the root's model space IS world, so nothing is carried and nothing is claimed
+        _framed(monkeypatch, _identity)
+        out = _payload(_drill(points=[[10, 0, 0]], points_space="world"))
+        assert "world_lift_component" not in out
+
+    def test_the_off_plane_guard_MEASURES_the_lifted_distance(self, monkeypatch):
+        # World z=30 mm sits 2 cm off the plane once the placement's own z (1 cm) is taken out, and
+        # 3 cm off if it never is. Both trip the guard, so only the DISTANCE in the message tells
+        # the two apart - the substring "off the plane" alone cannot.
+        d, _sub = self._nested(monkeypatch)
+        res = _drill(points=[[40, 20, 30]], points_space="world")
+        assert res["isError"] is True and "off the plane" in res["message"]
+        assert "20 'mm'" in res["message"]           # lifted
+        assert "30 'mm'" not in res["message"]       # unlifted
+        assert d.rootComponent.features.holeFeatures.added == []
+
+    def test_sketch_space_points_are_untouched_inside_the_same_component(self, monkeypatch):
+        d, _sub = self._nested(monkeypatch)
+        _drill(points=[[40, 20, 0]])
+        assert _placed(d) == [(4.0, 2.0, 0.0)]
+
+    def test_the_face_context_picks_WHICH_instance_of_several(self, monkeypatch):
+        # Two placements alone refuse, but a face reached THROUGH one of them names the instance in
+        # hand, and that instance's frame - not the first occurrence's - carries the point.
+        sub = _bracket()
+        first = _placing(sub, FakeMatrix3D(0.0, (0.0, 0.0, 0.0)), "Bracket:1")
+        second = _placing(sub, FakeMatrix3D(90.0, (2.0, 0.0, 1.0)), "Bracket:2")
+        d, _sub = self._nested(monkeypatch, occs=[first, second], sub=sub)
+        face = type("F", (), {"assemblyContext": second})()
+        mh._resolve_face = lambda _d, _h: (face, None)
+        _payload(_drill(points=[[40, 20, 10]], points_space="world"))
+        assert self._at(d) == [(2.0, -2.0, 0.0)]        # second's frame, not first's identity
+
+    def test_a_placement_that_will_not_invert_is_refused(self, monkeypatch):
+        sub = _bracket()
+        d, _sub = self._nested(monkeypatch, occs=[_placing(sub, FakeMatrix3D(90.0, invertible=False))], sub=sub)
+        res = _drill(points=[[40, 20, 10]], points_space="world")
+        assert res["isError"] is True and "did not invert" in res["message"]
         assert d.rootComponent.features.holeFeatures.added == []
 
 
@@ -701,22 +918,156 @@ class TestSketchSpacePoint:
         assert mh._sketch_space_point(_Sketch("S"), 1.0, 2.0, 3.0) == (None, None, None)
 
 
-class TestSketchSpaceIsWorld:
-    """Only a ROOT-owned sketch converts from world - and an unreadable owner is not a yes."""
+class TestWorldLift:
+    """The lift on its own: the matrix carrying a WORLD point into the space the placement sketch
+    converts from, or the refusal when no single placement answers for that component."""
 
     def _design(self, root):
         return type("D", (), {"rootComponent": root})()
 
-    def test_a_root_owned_sketch_is_world(self):
+    def _lifted(self, m, x, y, z):
+        p = _LiftPoint(x, y, z)
+        p.transformBy(m)
+        return (round(p.x, 9), round(p.y, 9), round(p.z, 9))
+
+    def test_a_root_owned_sketch_needs_no_lift_at_all(self):
         root = _Root()
-        assert mh._sketch_space_is_world(_Sketch("S", parent=root), self._design(root)) is True
+        assert mh._world_lift(self._design(root), _Sketch("S", parent=root), None) == (None, "")
 
-    def test_a_sub_component_sketch_is_not(self):
-        sub = type("Comp", (), {"name": "Bracket"})()
-        assert mh._sketch_space_is_world(_Sketch("S", parent=sub), self._design(_Root())) is False
+    def test_a_single_placement_answers_with_its_INVERSE(self):
+        root, sub = _Root(), _bracket()
+        root.placements[sub.entityToken] = [_placing(sub, FakeMatrix3D(90.0, (2.0, 0.0, 1.0)))]
+        m, err = mh._world_lift(self._design(root), _Sketch("S", parent=sub), None)
+        assert err == ""
+        assert self._lifted(m, 4.0, 2.0, 1.0) == (2.0, -2.0, 0.0)
 
-    def test_an_unreadable_owner_is_not(self):
-        assert mh._sketch_space_is_world(_Sketch("S", parent=None), self._design(_Root())) is False
+    def test_the_occurrences_own_transform_is_not_inverted_in_place(self):
+        # the placement ladder hands back the occurrence's OWN transform2; inverting that rather
+        # than a copy would turn a real part's placement inside out
+        root, sub = _Root(), _bracket()
+        placement = FakeMatrix3D(90.0, (2.0, 0.0, 1.0))
+        root.placements[sub.entityToken] = [_placing(sub, placement)]
+        mh._world_lift(self._design(root), _Sketch("S", parent=sub), None)
+        assert (placement._deg, placement._t) == (90.0, (2.0, 0.0, 1.0))
+
+    def test_several_placements_refuse_naming_the_component_and_a_remedy(self):
+        root, sub = _Root(), _bracket()
+        root.placements[sub.entityToken] = [_placing(sub, FakeMatrix3D(0.0)),
+                                            _placing(sub, FakeMatrix3D(90.0))]
+        m, err = mh._world_lift(self._design(root), _Sketch("S", parent=sub), None)
+        assert m is None
+        assert "'Bracket'" in err and "no single placement" in err
+        # both remedies, and both are things the caller can actually do: name the instance on the
+        # way in, or cut the hole as a profile
+        assert "find_geometry" in err and "'target'" in err
+        assert "sketch_create" in err and "model_extrude(operation='cut')" in err
+
+    def test_a_placement_whose_reads_throw_is_not_a_placement(self):
+        # ONE occurrence places the component, but it is an unresolved external reference: every
+        # read on it throws, transform2 with the rest. The ladder gets no frame, so the lift refuses
+        # instead of drilling at a guessed one.
+        root, sub = _Root(), _bracket()
+        root.placements[sub.entityToken] = [
+            make_occurrence("Bracket:1", sub, raises="reference is not resolved",
+                            transform2=FakeMatrix3D(90.0))]
+        m, err = mh._world_lift(self._design(root), _Sketch("S", parent=sub), None)
+        assert m is None and "no single placement" in err
+
+    def test_no_placement_at_all_refuses(self):
+        root, sub = _Root(), _bracket()
+        m, err = mh._world_lift(self._design(root), _Sketch("S", parent=sub), None)
+        assert m is None and "no single placement" in err
+
+    def test_an_unreadable_owner_refuses(self):
+        m, err = mh._world_lift(self._design(_Root()), _Sketch("S", parent=None), None)
+        assert m is None and "no single placement" in err
+
+    def test_a_matrix_that_refuses_to_invert_refuses(self):
+        root, sub = _Root(), _bracket()
+        root.placements[sub.entityToken] = [_placing(sub, FakeMatrix3D(90.0, invertible=False))]
+        m, err = mh._world_lift(self._design(root), _Sketch("S", parent=sub), None)
+        assert m is None and "did not invert" in err
+
+
+class TestSketchSpacePointTakesTheLift:
+    """The conversion applies the lift BEFORE the sketch's own converter, and answers nothing at all
+    when the lift will not apply."""
+
+    @pytest.fixture(autouse=True)
+    def _liftable_points(self, monkeypatch):
+        import adsk.core
+        monkeypatch.setattr(adsk.core.Point3D, "create",
+                            staticmethod(lambda x, y, z: _LiftPoint(x, y, z)))
+
+    def test_the_lift_runs_BEFORE_the_sketchs_converter(self):
+        # the converter subtracts 1 from x, the lift adds 10 - the order shows in the answer
+        s = _Sketch("S", to_sketch=lambda x, y, z: (x - 1, y, z))
+        assert mh._sketch_space_point(s, 4.0, 0.0, 0.0,
+                                      FakeMatrix3D(0.0, (10.0, 0.0, 0.0))) == (13.0, 0.0, 0.0)
+
+    def test_no_lift_leaves_the_point_where_it_was(self):
+        s = _Sketch("S", to_sketch=_identity)
+        assert mh._sketch_space_point(s, 4.0, 2.0, 0.0, None) == (4.0, 2.0, 0.0)
+
+    def test_a_transform_that_refuses_voids_the_conversion(self):
+        class _Refusing:
+            def _apply_point(self, x, y, z):
+                raise RuntimeError("transformBy refused")
+        s = _Sketch("S", to_sketch=_identity)
+        assert mh._sketch_space_point(s, 1.0, 2.0, 3.0, _Refusing()) == (None, None, None)
+
+
+class TestForeignFaceIsNamedOnAShortfall:
+    """A hole built in one component against a 'face' owned by another cuts nothing, and Fusion says
+    only 'No target body!'. The refusal names both components - each read, neither inferred - and
+    the call that makes the face's own component the build target."""
+
+    def _face_in(self, comp_name):
+        body = type("B", (), {"parentComponent": _bracket(comp_name)})()
+        return type("F", (), {"body": body, "assemblyContext": None})()
+
+    def _shortfall(self, monkeypatch, face=None):
+        d = _install_verified(monkeypatch)
+        if face is not None:
+            mh._resolve_face = lambda _d, _h: (face, None)
+        d.rootComponent.features.holeFeatures.miss_indices = (0,)
+        return mh.handler(hole_type="simple", diameter="4 mm", face="h",
+                          points=[[10, 10, 0]], extent="through")
+
+    def test_the_shortfall_names_the_faces_component_and_the_activation(self, monkeypatch):
+        res = self._shortfall(monkeypatch, self._face_in("Bracket"))
+        assert res["isError"] is True
+        assert "'Bracket'" in res["message"] and "'Root'" in res["message"]
+        assert "design_activate_component" in res["message"]
+
+    def test_a_face_in_the_SAME_component_adds_no_clause(self, monkeypatch):
+        res = self._shortfall(monkeypatch, self._face_in("Root"))
+        assert res["isError"] is True and "design_activate_component" not in res["message"]
+
+    def test_an_unreadable_face_owner_adds_no_clause(self, monkeypatch):
+        # nothing was read, so nothing is claimed about where the face lives
+        res = self._shortfall(monkeypatch)
+        assert res["isError"] is True and "design_activate_component" not in res["message"]
+
+    def test_an_owner_that_cannot_be_TOLD_APART_adds_no_clause(self, monkeypatch):
+        # The owner READS but same_component answers None (no entityToken on it). The clause STATES
+        # that the two components differ, so emitting it here would publish a component sentence
+        # from a comparison that was never made - and send the caller to activate a component the
+        # hole may already have been built in.
+        body = type("B", (), {"parentComponent": MakeComp(name="Bracket")})()   # no entityToken
+        face = type("F", (), {"body": body, "assemblyContext": None})()
+        res = self._shortfall(monkeypatch, face)
+        assert res["isError"] is True
+        assert "design_activate_component" not in res["message"]
+        assert "'Bracket'" not in res["message"]
+
+    def test_the_clause_is_the_ONLY_thing_the_verdict_gates(self, monkeypatch):
+        # the positive branch, pinned beside the two silent ones: a PROVEN difference names both
+        # components as read, so a verdict flipped to silence is caught here rather than passing as
+        # "no clause was due".
+        res = self._shortfall(monkeypatch, self._face_in("Bracket"))
+        assert "belongs to component 'Bracket'" in res["message"]
+        assert "built in 'Root'" in res["message"]
 
 
 

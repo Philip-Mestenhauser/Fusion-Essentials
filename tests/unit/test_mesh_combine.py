@@ -21,7 +21,7 @@ Pinned (the DoD):
 import json
 import types
 
-from conftest import body_proxy, go_stale, load_tool
+from conftest import body_proxy, go_stale, load_tool, make_source_document
 
 mc = load_tool("mesh_combine")
 
@@ -507,6 +507,83 @@ class TestSameBodyGuard:
         proxy = body_proxy(target, types.SimpleNamespace(name="Jaw:1", fullPathName="Jaw:1"))
         _install(des, handle_map={"P": proxy, "T": target})
         res = mc.handler(target="P", tools=["T"])
+        assert res["isError"] is True and "same as the target" in res["message"]
+        assert feats.create_args is None
+
+
+class TestXrefMeshesAreNotTheSameBody:
+    """Two DISTINCT meshes, one in each of two x-ref'd documents, answering ONE entityToken.
+
+    An entityToken is DOCUMENT-LOCAL (measured on a host holding two x-refs of one design: the two
+    'Frame' bodies read byte-identical tokens), so a same-body guard keyed on the token alone refuses
+    a legitimate combine of two different meshes - and from the host document the caller can do
+    nothing about either token."""
+
+    _URN_A = "urn:adsk.wipprod:dm.lineage:K3I2nkywRlaWPHJexysOdA"
+    _URN_B = "urn:adsk.wipprod:dm.lineage:N_QoPrrrSJmF__f9BZV86A"
+    _SHARED_TOKEN = "/vB+AAEAAwAAAAAAAAAAAAAA"
+
+    def _component_in_document(self, name, urn, feats):
+        comp = FakeComp(name, features=_Features(mesh_combine=feats,
+                                                 base_features=_BaseFeatures(made=_BaseFeature())))
+        # the chain a body's source document is read through
+        comp.parentDesign = make_source_document(urn)
+        return comp
+
+    def _two_xrefs(self):
+        _wire_adsk()
+        feats = _MeshCombineFeatures([MeshBody("Result")])
+        comp_a = self._component_in_document("P2a-Gimbal", self._URN_A, feats)
+        comp_b = self._component_in_document("P3-Gimbal", self._URN_B, feats)
+        target = MeshBody("Frame", token=self._SHARED_TOKEN, parent=comp_a)
+        tool = MeshBody("Frame", token=self._SHARED_TOKEN, parent=comp_b)
+        _install(FakeDesign(comp_a, design_type=0), handle_map={"T": target, "X": tool})
+        return feats, target, tool
+
+    def test_the_x_ref_fixture_really_models_the_collision(self):
+        # Without the token collision the guard was never going to fire; without two documents there
+        # is nothing to tell the two meshes apart by.
+        _feats, target, tool = self._two_xrefs()
+        assert target is not tool and target.entityToken == tool.entityToken
+        assert (target.parentComponent.parentDesign.parentDocument.dataFile.id
+                != tool.parentComponent.parentDesign.parentDocument.dataFile.id)
+
+    def test_a_combine_of_the_two_is_NOT_refused_as_a_self_combine(self):
+        feats, _target, _tool = self._two_xrefs()
+        res = mc.handler(target="T", tools=["X"], operation="join")
+        assert "same as the target" not in (res.get("message") or "")
+        assert feats.create_args is not None          # the combine actually ran
+
+    def test_a_genuine_self_combine_INSIDE_one_document_is_still_refused(self):
+        # The other direction: the document half must not weaken the guard where it is right - two
+        # references reading one token AND one source document are one mesh.
+        feats, target, _tool = self._two_xrefs()
+        twin = MeshBody("Frame", token=target.entityToken, parent=target.parentComponent)
+        _install(FakeDesign(target.parentComponent, design_type=0),
+                 handle_map={"T": target, "T2": twin})
+        res = mc.handler(target="T", tools=["T2"])
+        assert res["isError"] is True and "same as the target" in res["message"]
+        assert feats.create_args is None
+
+    def test_two_meshes_with_NO_readable_identity_are_not_taken_for_one_body(self):
+        # An unreadable identity is None, and two Nones are not a match. Without the truthiness gate
+        # on both keys these two DISTINCT meshes compare equal and get the same false self-combine
+        # refusal - reached through the unreadable path instead of the x-ref one.
+        des, feats, target, tool_a, _tool_b = _build()
+        del target.entityToken
+        del tool_a.entityToken
+        res = mc.handler(target="T", tools=["A"], operation="join")
+        assert "same as the target" not in (res.get("message") or "")
+        assert feats.create_args is not None
+
+    def test_a_native_and_its_PROXY_inside_a_saved_document_are_still_refused(self):
+        feats, target, _tool = self._two_xrefs()
+        proxy = body_proxy(target, types.SimpleNamespace(name="P2a-Gimbal:1",
+                                                         fullPathName="P2a-Gimbal:1"))
+        assert proxy.entityToken != target.entityToken
+        _install(FakeDesign(target.parentComponent, design_type=0),
+                 handle_map={"T": target, "P": proxy})
+        res = mc.handler(target="T", tools=["P"])
         assert res["isError"] is True and "same as the target" in res["message"]
         assert feats.create_args is None
 

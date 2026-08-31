@@ -97,7 +97,10 @@ def sketch_design(monkeypatch):
 
     design, root, active = _two_component_design(build)
     install(sk, design)
-    monkeypatch.setattr(sk, "sketch_world_frame", lambda s: None)
+    # The frame is not what this file pins, so it is stubbed out - taking whatever the handler
+    # hands it (the sketch, the design being read), so the stub cannot pass by swallowing a
+    # signature mismatch.
+    monkeypatch.setattr(sk, "sketch_world_frame", lambda *a, **k: None)
     return design, root, active
 
 

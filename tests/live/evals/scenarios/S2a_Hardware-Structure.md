@@ -7,12 +7,17 @@ fixture: P1-Gimbal (the S1 artifact - the sketch-only cast with its declared int
   P1-Gimbal's cloud version must remain untouched. Missing fixture = ask the user - never create
   a project.
 budget:
-  max_tool_calls: 90
+  max_tool_calls: 130
   max_tokens: 130000
 substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
 perturbations: none (baseline)
 expected_refusals: none
 ---
+
+> NEEDS-RUN - UNMEASURED WORDING: no blind run has yet built under the CLEAR clause's +/-30 deg
+> tilt requirement, which forces an OPEN pivot member and costs geometry no measured run has
+> built. max_tool_calls 130 is a provisional pin over a measured 83, not a measurement. This
+> banner stands until a blind run measures this wording.
 
 # S2a - Hardware I: the structure becomes solid, engaged where it must be
 
@@ -44,6 +49,14 @@ go and read them against fresh numbers.
 VOLUMETRIC AUDIT HABIT: after each part's solid lands and once before the save, take a fresh
 volumetric inventory (per-body volumes + a body census) and read it against what you intended.
 
+THE CAST MAY ARRIVE INCOMPLETE, AND COMPLETING IT IS THE JOB, NOT A LICENCE YOU TAKE. The
+foundation stage DECLARES interfaces rather than prescribing profiles, so it hands over planning,
+not a finished parts list: a part the postconditions below name may have no component and no
+closed profile in the fixture at all - the shaft is the usual one. Create what is missing, on the
+skeleton, and say in your report which parts you found and which you created. Do not treat an
+absent part as a blocked fixture, and do not skip a postcondition because its part was not handed
+to you.
+
 GOAL - model the gyroscope's PRIMARY BODIES, each owned by its OWN component, at their sketched
 positions on the skeleton (never move an occurrence to solve a problem). This is a real machine,
 not an exhibit of floating parts - build to the ENGAGEMENT CONTRACT:
@@ -60,6 +73,13 @@ not an exhibit of floating parts - build to the ENGAGEMENT CONTRACT:
 - The FRAME's central opening stays OPEN (the ring system nests inside it); rings are BANDS,
   not discs; the pedestal may grow away from the ring plane to keep the center free for the
   rotor's swing.
+- IT MUST STILL MOVE ONCE JOINTED. Coplanar at rest is right, but the next stage will drive each
+  ring pivot to +/-30 DEGREES and fail the design on any overlap inside that range. A ring of
+  radius R tilted by a drops its edge by R*sin(a) - at 30 deg that is HALF ITS RADIUS - so nothing
+  may occupy the volume a ring sweeps into, above or below the ring plane, out to each ring's outer
+  radius. In practice that means the member a ring pivots in is OPEN: a ring or a fork, not a cup
+  with a floor. Build the clearance for the motion, not just for the rest pose, and say in your
+  report how far you believe each ring can tilt and what would stop it.
 - Do NOT model pivot pins or drill pivot bores, and do NOT create joints - later stages do.
 
 Finally save AS A NEW document: P2a-Gimbal into MCP Test Project / Pipeline-v1/{{RUN_FOLDER}}
@@ -71,7 +91,9 @@ POSTCONDITIONS - verify EACH with your own fresh read call; report actual values
 
 - every component (frame, pedestal, carrier, both rings, rotor, shaft, crank) holds exactly its
   own solid body, owned by the RIGHT component (fresh tree read), and the final volumetric audit
-  shows one connected solid per part, no orphan lump (report each volume with the read).
+  shows one connected solid per part, no orphan lump (report each volume with the read). This list
+  is the cast this stage must LEAVE, not the cast it is handed - name any part you created because
+  the fixture did not carry one.
 - ENGAGEMENTS HOLD: for each engagement you name (carrier-on-pedestal, crank-on-frame at
   minimum), a fresh read proves real flush contact (a ~0 measure_between on the mating faces, or
   the interference check's coincident-face listing naming exactly that pair) - a gap is a FAIL
@@ -116,6 +138,13 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
 - The executor MAY extend/add geometry to make a declared S1 interface reachable (a hub that
   reaches the post) - that is the design space, not over-reach. Adding pivot pins/bores/joints
   IS over-reach (next stage).
+- WHY THE CAST-MAY-ARRIVE-INCOMPLETE CLAUSE: the foundation stage is deliberately
+  declaration-based (prescribed profiles were measured being ignored or redrawn by every later
+  stage), so it can hand over a design with a shaft interface DECLARED and no shaft component and
+  no closed profile behind it - while the cast postcondition here names a shaft. A measured run
+  built one anyway and flagged it as design licence, which was the right call made without
+  cover. Grade the DISCLOSURE (found vs created) and the geometry; creating a missing part is
+  expected and costs no marks.
 - The rotor/shaft: solid disc on its shaft with a clearance bore through the rotor is a
   legitimate resolution of disc+shaft as separate one-body components; grade the coaxiality and
   clearance reads, not the construction.
@@ -124,6 +153,7 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
   the interference/contact reads itself (spatial channel when available).
 - Handoff: P2a carries the engaged, clearance-correct primary bodies. S2b adds pins + bores.
 - Staging: doc_open the S1 artifact BY URN (force_api_open), confirm active; run the block.
-- Budget: the last measured run (Agent-executor harness) was 54 calls; the engagement work adds
-  contact reads, so 90 is a provisional pin - recalibrate at the first measured run of the
-  current wording.
+- Budget: 130 calls is a provisional pin. A blind run_eval under the skill measures this scenario
+  at 83 calls WITHOUT the +/-30 deg tilt clause above; that clause forces an OPEN pivot member and
+  costs geometry no measured run has built, so 130 is headroom over the 83, not a measurement.
+  Re-pin from the first blind run of THIS wording.

@@ -16,8 +16,10 @@ Pinned (the DoD):
 """
 
 import json
+import re
+import types
 
-from conftest import load_tool
+from conftest import body_proxy, load_tool
 
 mo = load_tool("mesh_ops")
 
@@ -387,6 +389,23 @@ class TestMeshGet:
         assert "2 occurrences" in res["message"]
         assert "SubA:1+Bolt:1" in res["message"] and "SubB:1+Bolt:1" in res["message"]
 
+    def test_a_component_name_two_components_share_is_refused(self):
+        # Two components named 'SubPart' - listing the meshes of whichever the design-wide walk
+        # reached first would answer about the wrong part, exactly as for a shared occurrence name.
+        _wire_adsk()
+        one = FakeComp("SubPart", meshes=[MeshBody("ScanA")])
+        two = FakeComp("SubPart", meshes=[MeshBody("ScanB")])
+        root = FakeComp("Root", meshes=[])
+        _install(FakeDesign(root, all_comps=[root, one, two]))
+        res = mo.mesh_get_handler(target="SubPart")
+        assert res["isError"] is True
+        assert "2 components match 'SubPart'" in res["message"]
+        # this read takes no handle, so it offers the occurrence vocabulary and its own '' scope -
+        # and never a handle it would refuse
+        assert "occurrence name/fullPathName" in res["message"]
+        assert "target=''" in res["message"]
+        assert "find_geometry" not in res["message"]
+
     def test_unknown_component_name_errors(self):
         _wire_adsk()
         root = FakeComp("Root", meshes=[MeshBody("RootScan")])
@@ -436,6 +455,37 @@ class TestMeshGet:
         assert len(out["meshes"]) == 50
         # the full count is still honest, even though the array is capped
         assert out["count"] == 60
+
+    def test_the_default_caps_the_array_when_no_max_results_is_named(self):
+        # Every other cap test here names max_results, so none of them exercises the DEFAULT the
+        # description promises - the number a caller who names no cap actually gets. 51 meshes with
+        # nothing named must come back as 50, and the promise and the applied cap must be one number:
+        # a signature carrying its own literal beside the interpolated description lets them drift.
+        _wire_adsk()
+        meshes = [MeshBody(f"Scan{i}", token=f"T{i}") for i in range(51)]
+        comp = FakeComp("Comp", meshes=meshes)
+        _install(FakeDesign(comp))
+        out = _payload(mo.mesh_get_handler(target=""))
+        assert len(out["meshes"]) == 50
+        assert out["truncated"] is True and out["count"] == 51
+        promised = mo.mesh_get_tool.to_dict()["inputSchema"]["properties"]["max_results"]["description"]
+        assert len(out["meshes"]) == int(re.search(r"default (\d+)", promised).group(1))
+
+    def test_a_zero_max_results_falls_back_to_the_default_not_the_ceiling(self):
+        # The constant's SECOND use site: the 'default' argument handed to clamp_rows. The test
+        # above only exercises the signature, which a request of 0 never reaches - 0 is a legal
+        # wire value (integer, no minimum) and clamp_rows falls a falsy request back to its
+        # 'default' argument. Handing the CEILING there instead reads identically until a caller
+        # sends 0, and then 120 rows cross the wire where 50 should.
+        _wire_adsk()
+        meshes = [MeshBody(f"Scan{i}", token=f"T{i}") for i in range(120)]
+        comp = FakeComp("Comp", meshes=meshes)
+        _install(FakeDesign(comp))
+        out = _payload(mo.mesh_get_handler(target="", max_results=0))
+        assert len(out["meshes"]) == 50
+        assert out["truncated"] is True and out["count"] == 120
+        promised = mo.mesh_get_tool.to_dict()["inputSchema"]["properties"]["max_results"]["description"]
+        assert len(out["meshes"]) == int(re.search(r"default (\d+)", promised).group(1))
 
     def test_a_caller_cannot_lift_the_cap_past_the_ceiling(self):
         # every row crosses the wire: max_results is clamped into 1..200, so an oversized
@@ -670,6 +720,28 @@ class TestMeshInsert:
         assert out["component"] == "SubPart"
         assert sub_coll.add_args is not None        # the import went into SubPart's collection
         assert root.meshBodies.add_args is None     # NOT the active/root component
+
+    def test_duplicate_target_component_name_refused_no_import(self):
+        # two components named 'SubPart': importing into whichever the walk reached first would put
+        # the mesh in the wrong part, so the import refuses before it runs
+        _wire_adsk()
+        root = FakeComp("Root", features=_Features(base_features=_BaseFeatures(made=_BaseFeature())),
+                        mesh_bodies=_MeshBodies())
+        a = FakeComp("SubPart", features=_Features(base_features=_BaseFeatures(made=_BaseFeature())),
+                     mesh_bodies=_MeshBodies())
+        b = FakeComp("SubPart", features=_Features(base_features=_BaseFeatures(made=_BaseFeature())),
+                     mesh_bodies=_MeshBodies())
+        _install(FakeDesign(root, design_type=0, all_comps=[root, a, b]))
+        mo.os.path.isfile = lambda p: True
+        res = mo.mesh_insert_handler(file_path="C:/scan.stl", target_component="SubPart")
+        assert res["isError"] is True
+        assert "2 components match 'SubPart'" in res["message"]
+        # target_component is this tool's ONLY component vocabulary, so the remedy is the active
+        # component - the one route that still reaches a specific instance here
+        assert "design_activate_component" in res["message"]
+        assert "rename" not in res["message"].lower()
+        assert a.meshBodies.add_args is None and b.meshBodies.add_args is None
+        assert root.meshBodies.add_args is None       # and not into the active component either
 
     def test_unknown_target_component_errors(self):
         _wire_adsk()
@@ -1181,6 +1253,83 @@ class TestMeshToBrep:
         assert out["feature"] is None
         assert out["brep_bodies"][0]["name"] == "ConvertedBody"
         assert mo._common.DIRECT_FEATURE_NOTE in out["note"]
+
+    _OCC = types.SimpleNamespace(name="Comp:1", fullPathName="Comp:1")
+
+    def _proxy_convert(self, made, census_ghost=False):
+        """A direct design whose convert leaves the component's BRep collection holding the
+        pre-existing body's occurrence PROXY plus `made`. Every collection read mints a fresh wrapper
+        and a proxy's entityToken differs from its native's (measured), so this is the shape that
+        separates a key read off the WRAPPER from one read off the physical body. Returns the
+        pre-existing body.
+
+        census_ghost adds a second PRE-EXISTING body whose token reads empty, so the BEFORE set is
+        asked to hold a None key of its own - the only shape in which the census filter and the
+        publish clause stop covering for each other."""
+        _wire_adsk()
+        existing = BRepBody("Existing", is_solid=True)
+        census = [existing]
+        if census_ghost:
+            ghost = BRepBody("Ghost", is_solid=True)
+            ghost.entityToken = ""
+            census.append(ghost)
+        brep_coll = _Coll(census)
+
+        def _convert():
+            brep_coll._items[:] = [body_proxy(existing, self._OCC)] + census[1:] + [made]
+
+        assert body_proxy(existing, self._OCC).entityToken != existing.entityToken   # a real proxy
+        feats = _MeshFeatures([], none_feature=True, on_add=_convert)
+        src = MeshBody("Scan", is_closed=True)
+        comp = FakeComp("Comp", features=_Features(convert=feats), brep_bodies=brep_coll)
+        src.parentComponent = comp
+        _install(FakeDesign(comp, design_type=0), handle_map={"H": src})
+        return existing
+
+    def test_a_pre_existing_body_rewrapped_as_a_proxy_is_not_reported_as_converted(self):
+        # Keyed on the wrapper's token a body that was already there reads as newly converted, and
+        # the payload publishes a BRep body this conversion never made. The diff has to key on the
+        # physical body, whatever wrapper each read hands back.
+        native = BRepBody("ConvertedBody", is_solid=True)
+        existing = self._proxy_convert(body_proxy(native, self._OCC))
+        out = _payload(mo.mesh_to_brep_handler(mesh="H", method="prismatic"))
+        names = [r["name"] for r in out["brep_bodies"]]
+        assert names == ["ConvertedBody"]
+        assert existing.name not in names
+
+    def test_the_published_handle_is_the_WRAPPER_token_not_the_identity_token(self):
+        # The handle is what resolves back to THIS reference, so it is the wrapper's own token - the
+        # identity beside it resolves to the NATIVE, which addresses a different reference. The two
+        # coincide on a native converted body, so the body has to arrive as a proxy to tell them
+        # apart at all.
+        native = BRepBody("ConvertedBody", is_solid=True)
+        made = body_proxy(native, self._OCC)
+        self._proxy_convert(made)
+        out = _payload(mo.mesh_to_brep_handler(mesh="H", method="prismatic"))
+        assert out["brep_bodies"][0]["handle"] == made.entityToken
+        assert out["brep_bodies"][0]["handle"] != native.entityToken
+
+    def test_a_converted_body_with_no_readable_identity_is_still_published(self):
+        # An empty token yields NO identity, so nothing can show this body was in the census before.
+        # The guard publishes it - an over-report the caller can see and check with model_inspect -
+        # rather than dropping it, which would report a conversion that produced nothing at all.
+        made = BRepBody("ConvertedBody", is_solid=True)
+        made.entityToken = ""
+        self._proxy_convert(made)
+        out = _payload(mo.mesh_to_brep_handler(mesh="H", method="prismatic"))
+        assert [r["name"] for r in out["brep_bodies"]] == ["ConvertedBody"]
+
+    def test_an_identity_less_census_body_does_not_swallow_the_converted_one(self):
+        # The census can hold a body whose token reads empty too. Two things then keep the converted
+        # body publishable: the before-set drops its own None key, and the publish clause admits a
+        # None key outright. Either one alone is enough, so each hides the loss of the other - and
+        # with BOTH gone the before-set's None matches the converted body's None, the conversion is
+        # dropped, and a call that SUCCEEDED reports "did not produce a BRep body".
+        made = BRepBody("ConvertedBody", is_solid=True)
+        made.entityToken = ""
+        self._proxy_convert(made, census_ghost=True)
+        out = _payload(mo.mesh_to_brep_handler(mesh="H", method="prismatic"))
+        assert "ConvertedBody" in [r["name"] for r in out["brep_bodies"]]
 
     def test_null_feature_in_a_parametric_scope_reports_parametric(self):
         # the scope suppresses the feature; the payload reports the DESIGN's own mode and names the

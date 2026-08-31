@@ -14,9 +14,10 @@ it runs only when something it reads or writes has CHANGED since a check last pa
 content FINGERPRINT over both halves at once: every INPUT the generators read (the whole
 commands/mcpServer tree plus the scripts under tests/) and every OUTPUT they write. A run whose
 fingerprint matches one a passing check already saw cannot be looking at a stale artifact - staleness
-means a byte differs somewhere in that set. Everything else misses and pays the full check: a first
-run, an edited tool, a regenerated doc, a HAND-EDITED generated doc (which is why the outputs are in
-the fingerprint, not just the inputs), and a Fusion update that moves the bindings.
+means a byte differs somewhere in that set. Everything else misses and pays the full check: no
+cached fingerprint yet, an edited tool, a regenerated doc, a HAND-EDITED generated doc (which is why
+the outputs are in the fingerprint, not just the inputs), and a Fusion update that moves the
+bindings.
 
 The failure surface is unchanged - only the subprocess can report a verdict, and it reports the same
 one with the same regen command. Adding a generator that reads something OUTSIDE those two sets means

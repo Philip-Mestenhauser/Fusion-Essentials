@@ -98,9 +98,11 @@ class _OriginRecorder(_Recorder):
 
 
 class FakeBRepFace:
-    """`origin` is the surface geometry's centre in its COMPONENT frame. `context` is the occurrence
-    an assembly proxy carries (None = a native face); `component` is the owning body's component,
-    which decides whether a native face's frame is already world."""
+    """`origin` is the surface geometry's centre AS THAT FACE REPORTS IT - which frame that is
+    follows `context`, live-measured on a torus centred at component-local (0, 0, -1) in a component
+    turned 30 deg and placed 8 cm out: the NATIVE face reads (0, 0, -1), the assembly PROXY reads
+    (8, 0, -1). `context` is the occurrence an assembly proxy carries (None = a native face);
+    `component` is the owning body's component, which supplies a native face's placement."""
     def __init__(self, surface_type, origin=None, context=None, component=None):
         members = {"surfaceType": surface_type}
         if origin is not None:
@@ -112,25 +114,52 @@ class FakeBRepFace:
             self.body = SimpleNamespace(parentComponent=component)
 
 
-_ROOT = SimpleNamespace(name="Root")
+def _comp(name, token):
+    """One component as a FRESH wrapper. Live, two references to one component are DISTINCT objects
+    sharing one entityToken, so a fixture handing the same object to both sides of a same-component
+    test cannot tell an identity compare from the token compare the placement ladder makes."""
+    return SimpleNamespace(name=name, entityToken=token)
 
 
-def _placed(matrix):
-    """An assembly proxy's occurrence: transform2 is the composed component-to-world matrix."""
-    return SimpleNamespace(transform2=matrix, transform=_Matrix())
+def _root_component():
+    """A fresh root component per test: the by-component occurrence lookup a test overrides to
+    place a sub-component is state, and a module-level singleton would carry it into the next one."""
+    return SimpleNamespace(name="Root", entityToken="ROOT", allOccurrencesByComponent=lambda c: [])
+
+
+def _placed(matrix, component=None):
+    """An occurrence: transform2 is the composed component-to-world matrix, and `component` is what
+    it places - the ladder matches an entity's owning component against that, not against the first
+    occurrence it meets."""
+    return SimpleNamespace(transform2=matrix, transform=_Matrix(), component=component,
+                           assemblyContext=None)
+
+
+def _proxy_face(surface_type, world_origin, matrix, token="CHILD"):
+    """A face reached through an assembly PROXY: assemblyContext names the occurrence, and
+    `world_origin` is the centre the proxy's own surface geometry reports - already WORLD. `matrix`
+    is the placement that occurrence still carries, so a test can assert it was NOT applied a second
+    time on top of a reading that already has it."""
+    return FakeBRepFace(surface_type, origin=world_origin,
+                        context=_placed(matrix, component=_comp("Child", token)),
+                        component=_comp("Child", token))
 
 
 @pytest.fixture
 def world_frames(monkeypatch):
     """Wire the two seams the world-lift reads: the active design's root component (a native ROOT
-    face needs no transform) and the identity matrix factory."""
+    face needs no transform) and the identity matrix factory. same_component stays the REAL one -
+    component wrappers are never identity-stable live, so an `a is b` stand-in here would let an
+    identity compare pass for the token compare the ladder actually makes."""
     import adsk.core
     globs = jg._joint_geometry_for.__globals__
-    stub = SimpleNamespace(
-        design=lambda: SimpleNamespace(rootComponent=_ROOT),
-        same_component=lambda a, b: a is b)
+    root_comp = _root_component()
+    design = SimpleNamespace(rootComponent=root_comp)
+    stub = SimpleNamespace(design=lambda: design,
+                           same_component=globs["_common"].same_component)
     monkeypatch.setitem(globs, "_common", stub)
     monkeypatch.setattr(adsk.core.Matrix3D, "create", staticmethod(_Matrix), raising=False)
+    return root_comp
 
 
 class FakeBRepEdge:
@@ -237,14 +266,15 @@ class TestJointGeometryRules:
     # The measured torus rule, three rigs: a PARAMETRIC torus returns its true centre world-framed,
     # while a torus inside a BASE FEATURE returns its owning COMPONENT'S ORIGIN world-framed,
     # whatever the torus centre is. Nothing raises either way, so the returned origin is the only
-    # signal - and the only comparison that separates them is against the torus's own centre lifted
-    # into the SAME world frame.
+    # signal - and the only comparison that separates them is against the torus's own centre read
+    # in the SAME world frame.
 
     def test_root_base_feature_torus_is_refused(self, monkeypatch, world_frames):
         # Rig 1: root component, torus centred (25, 0, 2), keypoint comes back (0,0,0) = the root
         # origin. A native ROOT face needs no lift - its frame IS world.
         _install(monkeypatch, _OriginRecorder((0.0, 0.0, 0.0)))
-        face = FakeBRepFace(_ST.TorusSurfaceType, origin=(25.0, 0.0, 2.0), component=_ROOT)
+        face = FakeBRepFace(_ST.TorusSurfaceType, origin=(25.0, 0.0, 2.0),
+                            component=_comp("Root", "ROOT"))
         g, label, err = jg._joint_geometry_for(face)
         assert g is None and label == "torus_face@center"
         assert "(0.0000, 0.0000, 0.0000) cm in WORLD space" in err
@@ -254,67 +284,112 @@ class TestJointGeometryRules:
     def test_placed_base_feature_torus_offset_from_its_component_origin_is_refused(
             self, monkeypatch, world_frames):
         # Rig 3 - the one a world-origin signature MISSES: the child sits at world (50,6,0) rotated
-        # 90deg, the torus is centred (2,0,0) locally = (50,8,0) in world, and the keypoint comes
-        # back as the CHILD ORIGIN (50,6,0) - a plausible nonzero point that is still wrong.
+        # 90deg, the proxy reports the torus centre at world (50,8,0), and the keypoint comes back
+        # as the CHILD ORIGIN (50,6,0) - a plausible nonzero point that is still wrong.
         _install(monkeypatch, _OriginRecorder((50.0, 6.0, 0.0)))
-        child = _placed(_Matrix(rotate=_rot90z, translate=(50.0, 6.0, 0.0)))
-        face = FakeBRepFace(_ST.TorusSurfaceType, origin=(2.0, 0.0, 0.0), context=child)
+        face = _proxy_face(_ST.TorusSurfaceType, (50.0, 8.0, 0.0),
+                           _Matrix(rotate=_rot90z, translate=(50.0, 6.0, 0.0)))
         g, _label, err = jg._joint_geometry_for(face)
         assert g is None
         assert "(50.0000, 6.0000, 0.0000) cm in WORLD space" in err       # the keypoint
-        # the centre is published WORLD-framed - never the component-local (2, 0, 0)
-        assert "(50.0000, 8.0000, 0.0000) cm in WORLD space" in err
-        assert "(2.0000, 0.0000, 0.0000)" not in err
+        assert "(50.0000, 8.0000, 0.0000) cm in WORLD space" in err       # the proxy's own centre
+        # the occurrence's placement is NOT applied to a reading that already carries it - that
+        # second lift would put the centre at (42, 56, 0), a point on no part of the model.
+        assert "(42.0000, 56.0000, 0.0000)" not in err
 
     def test_placed_base_feature_torus_centred_on_its_component_origin_is_accepted(
             self, monkeypatch, world_frames):
         # Rig 2: the same base-feature bug, but the torus happens to be centred at the child's own
         # origin, so the keypoint is accidentally RIGHT. There is nothing wrong to report.
         _install(monkeypatch, _OriginRecorder((50.0, 6.0, 0.0)))
-        child = _placed(_Matrix(rotate=_rot90z, translate=(50.0, 6.0, 0.0)))
-        face = FakeBRepFace(_ST.TorusSurfaceType, origin=(0.0, 0.0, 0.0), context=child)
+        face = _proxy_face(_ST.TorusSurfaceType, (50.0, 6.0, 0.0),
+                           _Matrix(rotate=_rot90z, translate=(50.0, 6.0, 0.0)))
         g, _label, err = jg._joint_geometry_for(face)
         assert err is None and g is not None
 
     def test_parametric_torus_under_a_placed_parent_is_accepted(self, monkeypatch, world_frames):
-        # The correct case the naive comparison would destroy: geometry.origin is component-LOCAL
-        # (2, 0, 1) while the keypoint is world (50, 8, 1). Comparing the raw local centre would
-        # false-refuse every placed assembly.
+        # The valid parametric case: the proxy reports the centre at world (50, 8, 1) and the
+        # keypoint agrees, so nothing is wrong. Lifting the proxy's reading through its occurrence
+        # again refuses this torus and tells its owner to rebuild parametrically something that
+        # already is.
         _install(monkeypatch, _OriginRecorder((50.0, 8.0, 1.0)))
-        child = _placed(_Matrix(rotate=_rot90z, translate=(50.0, 6.0, 0.0)))
-        face = FakeBRepFace(_ST.TorusSurfaceType, origin=(2.0, 0.0, 1.0), context=child)
+        face = _proxy_face(_ST.TorusSurfaceType, (50.0, 8.0, 1.0),
+                           _Matrix(rotate=_rot90z, translate=(50.0, 6.0, 0.0)))
         g, _label, err = jg._joint_geometry_for(face)
         assert err is None and g is not None
 
     def test_parametric_root_torus_is_accepted(self, monkeypatch, world_frames):
         _install(monkeypatch, _OriginRecorder((27.0, 0.0, 1.0)))
-        face = FakeBRepFace(_ST.TorusSurfaceType, origin=(27.0, 0.0, 1.0), component=_ROOT)
+        face = FakeBRepFace(_ST.TorusSurfaceType, origin=(27.0, 0.0, 1.0),
+                            component=_comp("Root", "ROOT"))
         g, _label, err = jg._joint_geometry_for(face)
         assert err is None and g is not None
 
-    def test_a_native_face_in_a_placed_component_makes_no_judgement(self, monkeypatch,
-                                                                    world_frames):
-        # No assemblyContext and not the root component: the world placement cannot be established
-        # without picking among that component's occurrences. No judgement beats a wrong one - a
-        # refusal here would block a perfectly good joint.
-        _install(monkeypatch, _OriginRecorder((0.0, 0.0, 0.0)))
-        sub = SimpleNamespace(name="Child")
-        face = FakeBRepFace(_ST.TorusSurfaceType, origin=(25.0, 0.0, 2.0), component=sub)
-        g, _label, err = jg._joint_geometry_for(face)
+    # A NATIVE face in a placed sub-component: LIVE-MEASURED, its surface geometry.origin is
+    # component-LOCAL (a torus built at local (30, 10, 5) mm read (3, 1, 0.5) cm) while the keypoint
+    # comes back WORLD from a native face too ((-1, -5, 0.5) cm for that component placed at
+    # (0, -80, 0) mm and turned 90 deg). So the comparison is available exactly when ONE placement
+    # answers for the component, and undecidable otherwise.
+
+    def _native_in_child(self, monkeypatch, world_frames, keypoint, local_origin, placements=1):
+        _install(monkeypatch, _OriginRecorder(keypoint))
+        # Distinct placements with DIFFERENT transforms, so "several" is a real ambiguity and not
+        # one occurrence listed twice.
+        occs = [_placed(_Matrix(rotate=_rot90z, translate=(50.0 + 20.0 * i, 6.0, 0.0)),
+                        component=_comp("Child", "CHILD")) for i in range(placements)]
+        world_frames.allOccurrencesByComponent = lambda c, o=occs: o
+        face = FakeBRepFace(_ST.TorusSurfaceType, origin=local_origin,
+                            component=_comp("Child", "CHILD"))
+        return jg._joint_geometry_for(face)
+
+    def test_a_native_face_in_a_SINGLY_placed_component_is_judged_against_that_placement(
+            self, monkeypatch, world_frames):
+        # local (2,0,0) turned 90 deg and moved to (50,6,0) is world (50,8,0) - the keypoint agrees,
+        # so a valid parametric torus must NOT be refused now the placement is resolvable.
+        g, _label, err = self._native_in_child(monkeypatch, world_frames, (50.0, 8.0, 0.0),
+                                               (2.0, 0.0, 0.0))
+        assert err is None and g is not None
+
+    def test_a_native_base_feature_torus_in_a_placed_component_is_refused(self, monkeypatch,
+                                                                          world_frames):
+        # the same rig with the base-feature keypoint - the CHILD's own origin (50,6,0), plausible
+        # and still wrong. Only the resolved placement separates it from the case above.
+        g, _label, err = self._native_in_child(monkeypatch, world_frames, (50.0, 6.0, 0.0),
+                                               (2.0, 0.0, 0.0))
+        assert g is None
+        assert "(50.0000, 6.0000, 0.0000) cm in WORLD space" in err       # the keypoint
+        assert "(50.0000, 8.0000, 0.0000) cm in WORLD space" in err       # the lifted centre
+
+    def test_a_native_face_in_a_TWICE_placed_component_makes_no_judgement(self, monkeypatch,
+                                                                          world_frames):
+        # two placements, two world frames, and nothing in hand says which instance the face is
+        # being asked about. No judgement beats a wrong one - a refusal would block a good joint.
+        g, _label, err = self._native_in_child(monkeypatch, world_frames, (0.0, 0.0, 0.0),
+                                               (25.0, 0.0, 2.0), placements=2)
+        assert err is None and g is not None
+
+    def test_a_native_face_in_an_UNPLACED_component_makes_no_judgement(self, monkeypatch,
+                                                                       world_frames):
+        # the other side of the "exactly one placement" boundary: a component the assembly does not
+        # place has no world frame at all, so there is still nothing to compare against.
+        g, _label, err = self._native_in_child(monkeypatch, world_frames, (0.0, 0.0, 0.0),
+                                               (25.0, 0.0, 2.0), placements=0)
         assert err is None and g is not None
 
     def test_sphere_keypoint_is_not_cross_checked(self, monkeypatch, world_frames):
         # Measured: the sphere face is correct in BOTH the parametric and the base-feature case, so
         # it carries no cross-check - adding one would refuse valid sphere joints.
         _install(monkeypatch, _OriginRecorder((0.0, 0.0, 0.0)))
-        face = FakeBRepFace(_ST.SphereSurfaceType, origin=(9.0, 9.0, 9.0), component=_ROOT)
+        face = FakeBRepFace(_ST.SphereSurfaceType, origin=(9.0, 9.0, 9.0),
+                            component=_comp("Root", "ROOT"))
         g, label, err = jg._joint_geometry_for(face)
         assert err is None and g is not None and label == "sphere_face@center"
 
     def test_unreadable_torus_centre_makes_no_judgement(self, monkeypatch, world_frames):
         # Nothing to compare against is not evidence of a bad keypoint - the geometry is returned.
         _install(monkeypatch, _OriginRecorder((0.0, 0.0, 0.0)))
-        face = FakeBRepFace(_ST.TorusSurfaceType, component=_ROOT)   # geometry carries no origin
+        face = FakeBRepFace(_ST.TorusSurfaceType,        # geometry carries no origin
+                            component=_comp("Root", "ROOT"))
         g, _label, err = jg._joint_geometry_for(face)
         assert err is None and g is not None
 
@@ -681,11 +756,12 @@ class TestHandler:
 
 
 class TestHealthVerdict:
-    """The created joint's own state decides the payload's authoritative flag. Only the ERROR and
-    WARNING states are a failed compute; SUPPRESSED / ROLLED BACK are states published by NAME with
-    no failure claim, and a state this read cannot classify (Unknown, or a healthState that will not
-    answer) leaves 'healthy' null instead of asserting either verdict. The enum members come from
-    adsk.fusion.FeatureHealthStates, never a hand-typed int."""
+    """The created joint's state - read off the joint AND its timeline item, joint first - decides
+    the payload's authoritative flag. Only the ERROR and WARNING states are a failed compute;
+    SUPPRESSED / ROLLED BACK are states published by NAME with no failure claim; a state that
+    answers but carries no name here is still not a failure, so 'healthy' is true with a null
+    state name. 'healthy' is null only where NEITHER source answered a state at all. The enum
+    members come from adsk.fusion.FeatureHealthStates, never a hand-typed int."""
 
     _FHS = adsk.fusion.FeatureHealthStates
 
@@ -728,11 +804,53 @@ class TestHealthVerdict:
         assert "health_warning" not in out
         assert "'rolled_back'" in out["note"] and "FAILED TO COMPUTE" not in out["note"]
 
-    def test_an_unknown_state_leaves_the_verdict_null(self, monkeypatch):
+    def test_a_state_with_no_name_here_is_still_not_a_failed_compute(self, monkeypatch):
+        # A state that ANSWERED and is not ERROR/WARNING is not a failure - the same classification
+        # joint_create and assembly_get publish, so two create tools cannot disagree on one design.
+        # No name in this tool's table matches it, so the state name is null while 'healthy' reports
+        # what was read.
         out = self._out(monkeypatch, joint_health=self._FHS.UnknownFeatureHealthState)
-        assert out["healthy"] is None and out["health_state"] is None
-        assert "UNVERIFIED" in out["health_warning"]
-        assert "FAILED TO COMPUTE" not in out["health_warning"]
+        assert out["healthy"] is True and out["health_state"] is None
+        assert "health_warning" not in out
+        assert "no name for" in out["note"] and "FAILED TO COMPUTE" not in out["note"]
+
+    def test_a_timeline_items_failure_decides_past_a_healthy_joint(self, monkeypatch):
+        # The Joint object and its TimelineObject each carry healthState and they can disagree: a
+        # joint reading HEALTHY whose timeline item reports a WARNING is a failed compute, and
+        # reading the joint alone publishes healthy=true for it.
+        joints = self._cyl_pair(monkeypatch)
+        item = SimpleNamespace(healthState=self._FHS.WarningFeatureHealthState,
+                               errorOrWarningMessage="Conflicts with assembly relationships.")
+        joints.add = lambda ji: SimpleNamespace(
+            name="Joint1", healthState=self._FHS.HealthyFeatureHealthState,
+            errorOrWarningMessage="", timelineObject=item,
+            occurrenceOne=SimpleNamespace(name="Rod:1"),
+            occurrenceTwo=SimpleNamespace(name="Crank:1"))
+        out = _payload(jg.handler(handle_one="a", handle_two="b", motion="revolute"))
+        assert out["healthy"] is False and out["health_state"] == "warning"
+        assert "Conflicts with assembly relationships." in out["health_warning"]
+
+    def test_a_joint_answering_no_state_is_read_off_its_timeline_item(self, monkeypatch):
+        # The joint itself answers nothing; its timeline item answers HEALTHY. Reading the joint
+        # alone would publish 'healthy' null for a state that was in fact read.
+        joints = self._cyl_pair(monkeypatch)
+        item = SimpleNamespace(healthState=self._FHS.HealthyFeatureHealthState,
+                               errorOrWarningMessage="")
+
+        class _Blind:
+            name = "Joint1"
+            timelineObject = item
+            occurrenceOne = SimpleNamespace(name="Rod:1")
+            occurrenceTwo = SimpleNamespace(name="Crank:1")
+
+            @property
+            def healthState(self):
+                raise RuntimeError("health unreadable")
+
+        joints.add = lambda ji: _Blind()
+        out = _payload(jg.handler(handle_one="a", handle_two="b", motion="revolute"))
+        assert out["healthy"] is True and out["health_state"] == "healthy"
+        assert "health_warning" not in out
 
     def test_a_state_that_will_not_read_leaves_the_verdict_null(self, monkeypatch):
         # An unreadable state is not a clean compute either - reading it as healthy publishes
@@ -751,6 +869,35 @@ class TestHealthVerdict:
         joints.add = lambda ji: _Blind()
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="revolute"))
         assert out["healthy"] is None and out["health_state"] is None
+        # The warning names BOTH sources that stayed silent - the condition this branch fires on. A
+        # warning that blames the state's NAME describes the healthy=true/health_state=null case
+        # instead, which reaches a different branch entirely.
+        assert "Neither this joint nor its timeline item" in out["health_warning"]
+        assert "UNVERIFIED" in out["health_warning"]
+
+    def test_an_unread_state_stays_null_even_when_no_enum_member_reads(self, monkeypatch):
+        # A build carrying the FeatureHealthStates family but NONE of its members: every member read
+        # answers None - and so does the joint's own unreadable healthState. A bare
+        # `hs == <member>` walk would match None against None and publish 'healthy' for a joint
+        # whose state nothing read. The verdict is gated on the state having been READ instead.
+        # The empty family is SET here, never delattr'd off the shared adsk mock: a deleted Mock
+        # member does not reliably come back and leaks into unrelated tests.
+        joints = self._cyl_pair(monkeypatch)
+
+        class _Blind:
+            name = "Joint1"
+            occurrenceOne = type("O", (), {"name": "Rod:1"})()
+            occurrenceTwo = type("O", (), {"name": "Crank:1"})()
+
+            @property
+            def healthState(self):
+                raise RuntimeError("health unreadable")
+
+        joints.add = lambda ji: _Blind()
+        monkeypatch.setattr(jg.adsk.fusion, "FeatureHealthStates", type("FHS", (), {})())
+        out = _payload(jg.handler(handle_one="a", handle_two="b", motion="revolute"))
+        assert out["healthy"] is None and out["health_state"] is None
+        assert "Neither this joint nor its timeline item" in out["health_warning"]
         assert "UNVERIFIED" in out["health_warning"]
 
     def test_the_wire_advertises_the_null_verdict(self, monkeypatch):

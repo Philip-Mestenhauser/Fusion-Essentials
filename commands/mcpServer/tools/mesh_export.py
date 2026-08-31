@@ -55,6 +55,18 @@ _EXPORT_FORMAT = _inputs.Choice("format", options=list(_FORMATS), default="3mf",
                                 description="Mesh file format to write.")
 _EXPORT_REFINE = _inputs.Choice("refinement", options=list(_REFINEMENTS), default="medium",
                                 description="Mesh refinement (density) where the format supports it.")
+# The UNIT an STL is written in (STLExportOptions.unitType), from the shared _export map. The default
+# is mm - the unit mesh_insert defaults to, so an export and a re-import that both name nothing agree.
+# The property and the FILE answer differently, which is why the omitted case still ASSIGNS mm rather
+# than leaving the property alone: the factory unitType READS as MillimeterDistanceUnits (measure_api
+# enum-distance-units-collides-with-factory), yet an export that leaves it untouched writes the unit
+# of the LAST EXPLICIT unitType assignment in the session, across documents (measure_api
+# stl-export-unittype-is-sticky-session-state) - so leaving the property alone inherits whatever
+# unit an unrelated earlier export set. The read cannot confirm the unit, and the pre-read is what
+# keeps it honest.
+_EXPORT_UNITS = _inputs.Choice("stl_units", options=list(_export.STL_UNIT_MEMBERS), default="mm",
+                               description="format=stl only: the units baked into the file - hand "
+                                           "the same value to mesh_insert to re-import it at size.")
 
 # save_as_mesh's source is a BRep body to tessellate (solid OR surface).
 _SAVE_BODY = _inputs.BodyRef("body", kind="any", required=True,
@@ -102,8 +114,16 @@ def _resolve_export_target(design, target):
                           f"be export-written on its own)"), True, None
         return body, f"body '{safe(lambda: body.name) or name}'", False, None
 
-    # Component by name (export the whole component).
-    comp = safe(lambda: _export.component_by_name(design, name))
+    # Component by name (export the whole component) - the shared resolver, which REFUSES a name
+    # several components carry rather than writing one of them to disk as if it were the one asked
+    # for. The refusal goes on the wire carrying the instance paths it found, and THIS site adds the
+    # remedy: the occurrence step below takes a fullPathName, and the target kind above this line
+    # takes a handle. A plain miss falls through to that occurrence vocabulary.
+    comp, comp_err = _export.find_component(design, name)
+    if comp_err:
+        return None, None, False, comp_err + (
+            " Export one instance by its occurrence name/fullPathName, or pass a body handle from "
+            "find_geometry (design_get(include=['tree']) lists the instances).")
     if comp:
         return comp, f"component '{name}'", False, None
 
@@ -121,18 +141,68 @@ def _resolve_export_target(design, target):
 
 
 def _apply_refinement(opts, refine_key):
-    """Set MeshRefinementSettings on an export-options object and READ IT BACK. Returns the key when
-    the read-back equals the value assigned - the only evidence the setting took - else None. The
-    read-back is the whole test: it covers a build whose options object carries no meshRefinement and
-    one that carries it but does not keep the assignment, without telling the two apart. Never fails
-    the export over a refinement that did not stick; the caller reports what landed."""
+    """Set MeshRefinementSettings on an export-options object and read it back through the shared
+    rule - see _export.applied_pair, which carries the per-knob measurement. Returns the key when
+    the options object reads the requested density afterwards, else None.
+
+    The post-read is the WHOLE answer here: measured on STL and OBJ, the value meshRefinement reads
+    determines the file that gets written, so whether this assignment is what put it there does not
+    change what the caller gets - the pair's 'changed' half is dropped."""
     mrs = safe(lambda: adsk.fusion.MeshRefinementSettings)
     member = _REFINEMENTS.get(refine_key)
     val = safe(lambda: getattr(mrs, member)) if (mrs is not None and member) else None
     if val is None:
-        return None
-    safe(lambda: setattr(opts, "meshRefinement", val))
-    return refine_key if safe(lambda: opts.meshRefinement) == val else None
+        return None                      # this build carries no MeshRefinementSettings member
+    return _export.applied_pair(opts, "meshRefinement", val, refine_key)[0]
+
+
+def _apply_stl_units(opts, unit_key):
+    """Set STLExportOptions.unitType and read it back through the shared rule - see
+    _export.applied_pair. Returns (applied_key_or_None, verified).
+
+    The unit the read-back cannot bite on is 'mm', the commonest request, and it is not a
+    distinction without a file behind it: measured, an export that leaves unitType untouched writes
+    the unit of the last explicit assignment made anywhere in the session, not the one asked for
+    (measure_api stl-export-unittype-is-sticky-session-state), so wherever that inherited unit is
+    not already mm a dropped assignment and a landed one write different files. The pair's 'changed'
+    half IS the unit's verification, and travels on the wire."""
+    val = _export.stl_unit_enum(unit_key)
+    if val is None:
+        return _export.NOT_APPLIED       # this build carries no DistanceUnits member for the key
+    return _export.applied_pair(opts, "unitType", val, unit_key)
+
+
+def _units_not_landed(unit_key, subject):
+    """The ONE sentence both export paths append when _apply_stl_units' read-back did not equal the
+    value assigned. ONE fact was observed: the read-back disagreed. WHY, and which unit the writer
+    then used, are not readable from here, so the sentence names neither - it says the file's unit is
+    unconfirmed, which is exactly what makes it un-round-trippable."""
+    return (f"stl_units '{unit_key}' did NOT land for {subject}: the export options did not read "
+            "back the value that was set, so 'options_applied' carries null for it and the unit the "
+            "file was written in is unconfirmed. 'options_requested' is what was asked for.")
+
+
+def _units_unverified(unit_key, subject):
+    """The ONE sentence both export paths append when the unit read back but the read-back could not
+    have failed - the options object ALREADY read the requested value before it was set. TWO facts
+    were observed: the object reads this unit, and it read it before the assignment too. What the
+    writer then did is not readable from here, so the sentence claims nothing about the file and
+    names the unit only as the one that was ASKED FOR."""
+    return (f"stl_units '{unit_key}' is set but UNVERIFIED for {subject}: the export options "
+            f"already read '{unit_key}' BEFORE it was set, so reading it back after cannot tell an "
+            "assignment that took from one that was dropped - 'options_verified' carries false for "
+            f"it. Re-import with mesh_insert units='{unit_key}', the unit that was asked for.")
+
+
+def _wrote_in_units(unit_key):
+    """The ONE sentence both export paths append when the unit DID read back: the observation (the
+    options object holds this unit) plus the value mesh_insert needs to bring the file back at size.
+    An export that names no unit inherits the unit of an unrelated earlier export in the same Fusion
+    session, which no read exposes (measure_api stl-export-unittype-is-sticky-session-state), while
+    mesh_insert's default is mm - so a file whose unit is not published cannot be round-tripped by
+    anyone."""
+    return (f"The export options read back units '{unit_key}' - re-import this file with "
+            f"mesh_insert units='{unit_key}'.")
 
 
 def _refinement_not_landed(ref, subject):
@@ -146,33 +216,39 @@ def _refinement_not_landed(ref, subject):
             "unconfirmed. 'refinement_requested' is what was asked for.")
 
 
-def _write_mesh_file(em, factory_name, fmt, geom, path, ref):
-    """Create options, apply refinement, execute, and VERIFY a non-empty file THIS call wrote landed
-    (execute() can return True while writing nothing, and a stale file from an earlier export can sit
-    at the same path). Returns (size_or_None, applied_refinement, error_str)."""
+def _write_mesh_file(em, factory_name, fmt, geom, path, ref, unit_key):
+    """Create options, apply refinement (and the STL unit), execute, and VERIFY a non-empty file THIS
+    call wrote landed (execute() can return True while writing nothing, and a stale file from an
+    earlier export can sit at the same path). Returns (size_or_None, applied_refinement, units_pair,
+    error_str), units_pair being the unit's (applied_key_or_None, verified)."""
     factory = safe(lambda: getattr(em, factory_name))
     if factory is None:
-        return None, None, f"this build's ExportManager has no {factory_name}"
+        return None, None, _export.NOT_APPLIED, f"this build's ExportManager has no {factory_name}"
     before = _export.snapshot(path)      # the baseline that makes the landed check THIS call's proof
     try:
         opts = factory(geom, path)
     except Exception as e:
-        return None, None, f"could not create {fmt.upper()} options: {e}"
+        return None, None, _export.NOT_APPLIED, f"could not create {fmt.upper()} options: {e}"
     applied = _apply_refinement(opts, ref)
+    # STL is the only path this tool bakes a unit into: it is the one measured here, and C3MF's
+    # options object carries no unitType at all (tests/api_surface.py). OBJ's does - whether writing
+    # it changes the file is unmeasured, so this refuses the pairing rather than guessing (see below).
+    units = _apply_stl_units(opts, unit_key) if fmt == "stl" else _export.NOT_APPLIED
     try:
         did = em.execute(opts)
     except Exception as e:
-        return None, applied, f"{fmt.upper()} export failed: {e}"
+        return None, applied, units, f"{fmt.upper()} export failed: {e}"
     if not did:
-        return None, applied, f"{fmt.upper()} export returned false"
+        return None, applied, units, f"{fmt.upper()} export returned false"
     size, verr = _export.verify_written(path, before)
     if verr:
-        return None, applied, f"{fmt.upper()} {verr}"
-    return size, applied, None
+        return None, applied, units, f"{fmt.upper()} {verr}"
+    return size, applied, units, None
 
 
 def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
-                   refinement: str = "medium", split_by_component: bool = False) -> dict:
+                   refinement: str = "medium", stl_units: str = "",
+                   split_by_component: bool = False) -> dict:
     """Export 'target' (body/mesh/component/occurrence, or whole design) to 'file_path' as a mesh.
 
     split_by_component=true exports EACH top-level occurrence to its own mesh file (one per part - what
@@ -184,6 +260,16 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
     ref, rerr = _EXPORT_REFINE.resolve(refinement)
     if rerr:
         return error(rerr)
+    unit_key, uerr = _EXPORT_UNITS.resolve(stl_units)
+    if uerr:
+        return error(uerr)
+    # A unit asked for on a format this tool writes no unit into is REFUSED naming both, rather than
+    # dropped: the caller who asked for it would otherwise get a file whose unit nothing states.
+    # An empty request is the omitted case and takes the Choice's default (STL's factory value).
+    if (stl_units or "").strip() and fmt != "stl":
+        return error(f"'stl_units' ('{unit_key}') applies to format=stl only, and this call asked "
+                     f"for format={fmt} - refusing rather than dropping it. Export as stl to bake "
+                     f"the unit into the file, or omit 'stl_units'.")
     ext, factory_name = _FORMATS[fmt]
 
     path = (file_path or "").strip().strip('"')
@@ -220,10 +306,13 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
         # collected here and folded into each record below - the same applied/requested pair the
         # single-target path publishes, rather than dropped.
         applied_by_path = {}
+        units_by_path = {}
 
         def _write_one(occ, fpath):
-            size, applied, eerr = _write_mesh_file(em, factory_name, fmt, occ, fpath, ref)
+            size, applied, units, eerr = _write_mesh_file(em, factory_name, fmt, occ, fpath, ref,
+                                                          unit_key)
             applied_by_path[fpath] = applied
+            units_by_path[fpath] = units
             return size, eerr
 
         files, errors = _export.split_by_occurrence(occs, out_dir, ext, _write_one)
@@ -236,8 +325,21 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
                          + _export.failure_detail(errors))
         for rec in files:
             # what LANDED for THIS file; null when the set did not take (never the request echoed).
+            # Per FILE because each file got its own options object - and so, for the unit, is
+            # whether that file's read-back could have failed.
             rec["refinement"] = applied_by_path.get(rec.get("file_path"))
+            if fmt == "stl":
+                u_applied, u_verified = units_by_path.get(rec.get("file_path"), _export.NOT_APPLIED)
+                rec["options_applied"] = {"stl_units": u_applied}
+                rec["options_verified"] = {"stl_units": u_verified}
         unlanded = [rec for rec in files if rec["refinement"] is None]
+        unlanded_units = [rec for rec in files
+                          if (rec.get("options_applied") or {}).get("stl_units") is None
+                          and fmt == "stl"]
+        unverified_units = [rec for rec in files
+                            if fmt == "stl"
+                            and (rec.get("options_applied") or {}).get("stl_units") is not None
+                            and not (rec.get("options_verified") or {}).get("stl_units")]
         note = (f"Exported {len(files)} component(s) to separate {fmt.upper()} mesh files - each "
                 "top-level occurrence is one printable file.")
         out = {
@@ -249,6 +351,8 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
             "file_count": len(files),
             "files": files,
         }
+        if fmt == "stl":
+            out["options_requested"] = {"stl_units": unit_key}
         if errors:
             # PARTIAL success: some occurrences produced no file. Disclosed as its own flag plus the
             # per-occurrence reasons, so a caller reading file_count alone cannot miss the shortfall.
@@ -260,6 +364,14 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
         if unlanded:
             note += " " + _refinement_not_landed(
                 ref, f"{len(unlanded)} of the {len(files)} exported file(s)")
+        if unlanded_units:
+            note += " " + _units_not_landed(
+                unit_key, f"{len(unlanded_units)} of the {len(files)} exported file(s)")
+        if unverified_units:
+            note += " " + _units_unverified(
+                unit_key, f"{len(unverified_units)} of the {len(files)} exported file(s)")
+        elif fmt == "stl" and not unlanded_units:
+            note += " " + _wrote_in_units(unit_key)
         out["note"] = note
         return ok(out)
 
@@ -300,6 +412,10 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
     except Exception as e:
         return error(f"Could not create {fmt.upper()} export options: {e}")
     applied_refinement = _apply_refinement(opts, ref)
+    # The unit also answers whether its read-back could have FAILED (see _applied_pair). STL only,
+    # as above.
+    applied_units, units_verified = (_apply_stl_units(opts, unit_key) if fmt == "stl"
+                                     else _export.NOT_APPLIED)
     try:
         did = em.execute(opts)
     except Exception as e:
@@ -333,11 +449,21 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
         # The request is NOT the effect: 'refinement' is null and only the request is echoed, under
         # its own key. The sentence is the shared one the split path also appends.
         note = _refinement_not_landed(ref, "this file") + " " + note
+    if fmt == "stl":
+        # The unit goes on the wire either way - the value that read back, the disclosure that the
+        # read-back disagreed, or the disclosure that it could not have disagreed. Measured: the
+        # same file re-imported at the wrong unit comes back 25.4x off in every coordinate.
+        if applied_units is None:
+            note = _units_not_landed(unit_key, "this file") + " " + note
+        elif units_verified:
+            note = _wrote_in_units(applied_units) + " " + note
+        else:
+            note = _units_unverified(applied_units, "this file") + " " + note
     if redirected_from_mesh:
         note = ("Target was a MESH body, which ExportManager cannot write to a file on its own (it "
             "returns success but writes nothing). Exported its owning component instead - the "
             "file contains that component's mesh bodies. " + note)
-    return ok({
+    payload = {
         "exported": True,
         "format": fmt,
         "target": desc,
@@ -348,7 +474,17 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
         "file_exists": True,
         "size_bytes": size,
         "note": note,
-    })
+    }
+    if fmt == "stl":
+        # The value the options object READ BACK, null when it did not - never the request, which
+        # travels under its own key. Same key names design_export publishes its STL knobs under.
+        payload["options_applied"] = {"stl_units": applied_units}
+        payload["options_requested"] = {"stl_units": unit_key}
+        # Whether that applied value is BACKED: true only when the read-back could have failed (the
+        # options object did not already read the requested unit). False is the honest answer for a
+        # unit the check cannot bite on - a guard that cannot fail is not a verification.
+        payload["options_verified"] = {"stl_units": units_verified}
+    return ok(payload)
 
 
 # ── save_as_mesh: tessellate a BRep body -> persistent MeshBody (inverse of mesh_to_brep) ────────
@@ -526,7 +662,7 @@ def save_as_mesh_handler(body: str = "", quality: str = "normal", name: str = ""
 
 # ── tool registration ────────────────────────────────────────────────────────────────────────
 
-_EXPORT_SPEC = [_EXPORT_FORMAT, _EXPORT_REFINE, _EXPORT_TARGET]
+_EXPORT_SPEC = [_EXPORT_FORMAT, _EXPORT_REFINE, _EXPORT_UNITS, _EXPORT_TARGET]
 mesh_export_tool = (
     _inputs.apply_to_tool(
         Tool.create_simple(
@@ -537,7 +673,9 @@ mesh_export_tool = (
                 "BRep formats). 'target' is a body HANDLE from find_geometry (precise; works for BRep "
                 "AND mesh bodies) OR a body/mesh/component/occurrence NAME, or omit it to export the "
                 "whole design. 'format' is obj/3mf/stl (default 3mf); 'refinement' (high|medium|low) "
-                "sets mesh density where the format supports it. split_by_component=true exports EACH "
+                "sets mesh density where the format supports it. format=stl bakes 'stl_units' into "
+                "the file and reports the unit that landed - hand that unit to mesh_insert to get "
+                "the file back at size. split_by_component=true exports EACH "
                 "top-level occurrence to its own file (one per part - what 3D printing wants); "
                 "'target' is ignored in that mode. WRITES a file to disk (does NOT modify the "
                 "design).")),

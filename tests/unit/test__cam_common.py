@@ -18,8 +18,10 @@ across setups).
 """
 
 import json
+import math
 from types import SimpleNamespace
 
+import adsk.cam
 import pytest
 
 from conftest import load_tool, make_cam, wcs_params
@@ -425,6 +427,97 @@ class TestInvalidationReasons:
 # shares) rather than a live op, so each test builds the raw op then reads it through op_state_facts
 # first - exercising the two functions exactly as every real caller composes them.
 
+class _RaisingFlagOp:
+    """An operation whose toolpath flags RAISE - the read that must answer None, not False."""
+
+    def __init__(self, name="Op", raising=("hasToolpath", "isToolpathValid")):
+        self.name = name
+        self.hasError = False
+        self.hasWarning = False
+        self.isSuppressed = False
+        self.isGenerating = False
+        self.operationState = adsk.cam.OperationStates.IsValidOperationState
+        self._raising = set(raising)
+        self._values = {"hasToolpath": True, "isToolpathValid": True}
+
+    def _read(self, name):
+        if name in self._raising:
+            raise RuntimeError(f"{name} cannot be read on this operation")
+        return self._values[name]
+
+    @property
+    def hasToolpath(self):
+        return self._read("hasToolpath")
+
+    @property
+    def isToolpathValid(self):
+        return self._read("isToolpathValid")
+
+
+class TestOpStateFactsToolpathFlags:
+    """The toolpath pair is what tells an EMPTY op from one that never generated, so an unreadable
+    flag has to answer None - safe(read, False) would publish a state nothing observed."""
+
+    def test_a_raising_toolpath_flag_reads_none_not_false(self):
+        facts = cc.op_state_facts(_RaisingFlagOp())
+        assert facts["has_toolpath"] is None and facts["is_toolpath_valid"] is None
+
+    def test_one_raising_flag_leaves_the_other_readable(self):
+        facts = cc.op_state_facts(_RaisingFlagOp(raising=("hasToolpath",)))
+        assert facts["has_toolpath"] is None and facts["is_toolpath_valid"] is True
+
+    def test_readable_flags_read_as_themselves(self):
+        facts = cc.op_state_facts(_RaisingFlagOp(raising=()))
+        assert facts["has_toolpath"] is True and facts["is_toolpath_valid"] is True
+
+
+class TestIsEmptyToolpath:
+    """The EMPTY class is a THREE-flag conjunction: not suppressed / not errored / state IsValid
+    (op_primary_state), isToolpathValid True, hasToolpath False. Every other combination - including
+    an unreadable flag - is not empty, because 'this op cut nothing' is a claim about what was read."""
+
+    def _facts(self, **over):
+        base = {"name": "Op", "has_error": False, "has_warning": False, "is_suppressed": False,
+                "is_generating": False,
+                "operation_state": adsk.cam.OperationStates.IsValidOperationState,
+                "generating_progress": None, "has_toolpath": False, "is_toolpath_valid": True}
+        base.update(over)
+        return base
+
+    def test_generated_with_no_toolpath_is_empty(self):
+        assert cc.is_empty_toolpath(self._facts()) is True
+
+    def test_an_unreadable_has_toolpath_is_not_empty(self):
+        # None means the flag did not answer; publishing EMPTY off it invents the state
+        assert cc.is_empty_toolpath(self._facts(has_toolpath=None)) is False
+
+    def test_an_unreadable_toolpath_valid_is_not_empty(self):
+        assert cc.is_empty_toolpath(self._facts(is_toolpath_valid=None)) is False
+
+    def test_a_never_generated_op_is_not_empty(self):
+        # isToolpathValid False + hasToolpath False = nothing has been computed yet, not "cuts
+        # nothing" - the discriminator that separates the empty class from the ungenerated one
+        assert cc.is_empty_toolpath(self._facts(is_toolpath_valid=False)) is False
+
+    def test_an_op_holding_a_toolpath_is_not_empty(self):
+        assert cc.is_empty_toolpath(self._facts(has_toolpath=True)) is False
+
+    def test_a_suppressed_op_is_not_empty(self):
+        assert cc.is_empty_toolpath(self._facts(
+            is_suppressed=True,
+            operation_state=adsk.cam.OperationStates.SuppressedOperationState)) is False
+
+    def test_an_errored_op_is_not_empty(self):
+        assert cc.is_empty_toolpath(self._facts(has_error=True)) is False
+
+    def test_a_generating_op_is_not_empty(self):
+        assert cc.is_empty_toolpath(self._facts(is_generating=True)) is False
+
+    def test_an_out_of_date_op_is_not_empty(self):
+        assert cc.is_empty_toolpath(self._facts(
+            operation_state=adsk.cam.OperationStates.IsInvalidOperationState)) is False
+
+
 class TestOpPrimaryState:
     def _facts(self, **kw):
         base = dict(isSuppressed=False, hasError=False, isGenerating=False, operationState=0)
@@ -477,7 +570,9 @@ class TestOperationsSummaryErrorGate:
     def test_all_valid_no_errors_is_ready(self, monkeypatch):
         monkeypatch.setattr(cc, "validity_basis", lambda: "manufacture_verified")
         summary = cc._operations_summary([self._rec("Face1"), self._rec("Adaptive1")])
-        assert "ready to post" in summary["readiness"]
+        # the whole sentence, not a substring: every demoted verdict CONTAINS "ready to post"
+        # inside "'ready to post' is NOT established", so a substring check asserts nothing.
+        assert summary["readiness"] == "2 of 2 active ops have valid toolpaths - ready to post."
         assert summary["exceptions"] == []
 
 
@@ -500,31 +595,87 @@ class TestHms:
 # ── machining-time estimate: pin the exact constants passed to getMachiningTime ──────────────────
 
 class _MTResult:
-    def __init__(self, seconds):
+    def __init__(self, seconds, feed_distance=0.0, rapid_distance=0.0, tool_changes=0):
         self.machiningTime = seconds
         self.totalFeedTime = 0.0
         self.totalRapidTime = 0.0
-        self.toolChangeCount = 0
+        self.toolChangeCount = tool_changes
+        self.feedDistance = feed_distance      # CM, per MachiningTime
+        self.rapidDistance = rapid_distance
+
+
+class _MTOp:
+    def __init__(self, name="Op", valid=True, suppressed=False, has_toolpath=True):
+        self.name = name
+        self.isToolpathValid = valid
+        self.isSuppressed = suppressed
+        self.hasToolpath = has_toolpath
+        self.hasError = False
+        self.hasWarning = False
+        self.isGenerating = False
+        self.operationState = (adsk.cam.OperationStates.SuppressedOperationState if suppressed
+                               else adsk.cam.OperationStates.IsValidOperationState)
 
 
 class _MTSetup:
-    def __init__(self, name, has_valid_toolpath=True):
+    def __init__(self, name, has_valid_toolpath=True, ops=None):
         self.name = name
-        self.allOperations = [SimpleNamespace(isToolpathValid=has_valid_toolpath)]
+        rows = ops if ops is not None else [_MTOp(name + " op", valid=has_valid_toolpath)]
+        self.allOperations = _Coll(rows)
 
 
 class _MTCam:
-    def __init__(self, setups):
+    def __init__(self, setups, seconds=120.0, per_op=60.0):
         self.setups = _Coll(list(setups))
         self.calls = []
+        self._seconds = seconds
+        self._per_op = per_op
 
     def getMachiningTime(self, obj, feed_scale, rapid_feed, tool_change):
         self.calls.append((obj, feed_scale, rapid_feed, tool_change))
-        return _MTResult(120.0)
+        if isinstance(obj, _MTOp):                    # a per-OPERATION call
+            return _MTResult(self._per_op, feed_distance=100.0, rapid_distance=25.0)
+        return _MTResult(self._seconds, feed_distance=1000.0, rapid_distance=250.0,
+                         tool_changes=17)
+
+    @property
+    def aggregate_calls(self):
+        """Only the whole-collection calls - the per-operation ones are a different question."""
+        return [c for c in self.calls if not isinstance(c[0], _MTOp)]
+
+
+class _RecordingCollection:
+    """An adsk.core.ObjectCollection stand-in: add() answers whether the item went in, which is
+    what the handler counts to know the collection really holds what it is about to time."""
+
+    def __init__(self, accept=True):
+        self.items = []
+        self._accept = accept
+
+    def add(self, item):
+        if not self._accept:
+            return False
+        self.items.append(item)
+        return True
+
+
+@pytest.fixture
+def object_collection(monkeypatch):
+    """Hand the handler REAL collections (a Mock would accept everything silently); returns the
+    list of collections it created, newest last."""
+    import adsk.core
+    made = []
+
+    def _create():
+        made.append(_RecordingCollection())
+        return made[-1]
+    monkeypatch.setattr(adsk.core.ObjectCollection, "create", _create)
+    return made
 
 
 class TestMachiningTimeConstants:
-    def test_feed_scale_is_100_percent_not_a_0_to_1_fraction(self, install, operation_cast_passthrough):
+    def test_feed_scale_is_100_percent_not_a_0_to_1_fraction(self, install, object_collection,
+                                                             operation_cast_passthrough):
         # getMachiningTime's feedScale is a PERCENT (100 = full programmed feed); passing 1.0 would
         # mean 1% feed and inflate the estimate roughly 100x.
         cam = _MTCam([_MTSetup("S1")])
@@ -532,7 +683,8 @@ class TestMachiningTimeConstants:
         _payload(cc.get_machining_time_handler())
         assert cam.calls[0][1] == 100.0
 
-    def test_rapid_feed_is_10_58_centimeters_per_second(self, install, operation_cast_passthrough):
+    def test_rapid_feed_is_10_58_centimeters_per_second(self, install, object_collection,
+                                                        operation_cast_passthrough):
         # getMachiningTime's rapidFeed is centimeters per SECOND, not cm/min - passing a cm/min
         # value (e.g. 1000) would understate rapids by roughly 60x.
         cam = _MTCam([_MTSetup("S1")])
@@ -540,13 +692,17 @@ class TestMachiningTimeConstants:
         _payload(cc.get_machining_time_handler())
         assert cam.calls[0][2] == 10.58
 
-    def test_tool_change_time_is_1_5_seconds(self, install, operation_cast_passthrough):
+    def test_tool_change_time_is_1_5_seconds(self, install, object_collection,
+                                             operation_cast_passthrough):
         cam = _MTCam([_MTSetup("S1")])
         install(cam)
         _payload(cc.get_machining_time_handler())
         assert cam.calls[0][3] == 1.5
 
-    def test_total_seconds_sums_across_setups(self, install, operation_cast_passthrough):
+    def test_total_seconds_sums_the_setup_aggregates_not_the_per_op_rows(
+            self, install, object_collection, operation_cast_passthrough):
+        # the total is the sum of the per-SETUP aggregates; the per-op figures (60.0 each here) are
+        # a different, deliberately non-summing number and must never reach the total.
         cam = _MTCam([_MTSetup("S1"), _MTSetup("S2")])
         install(cam)
         out = _payload(cc.get_machining_time_handler())
@@ -555,7 +711,8 @@ class TestMachiningTimeConstants:
         assert out["setups"][0]["machining_time_hms"] == "0:02:00"
 
     def test_setup_without_a_valid_toolpath_reports_an_error_not_a_crash(self, install,
-                                                                          operation_cast_passthrough):
+                                                                        object_collection,
+                                                                        operation_cast_passthrough):
         cam = _MTCam([_MTSetup("S1", has_valid_toolpath=False)])
         install(cam)
         out = _payload(cc.get_machining_time_handler())
@@ -738,6 +895,98 @@ class TestWalkCamTree:
         assert [o.name for o in cc.operations_under(folder)] == ["Drill1", "Bore1"]
         assert [o.name for o in cc.operations_under(s2)] == ["Face2"]
 
+    def test_operation_nodes_under_keeps_the_full_breadcrumb_from_the_nodes_own_path(self):
+        # THE POINT of the node form: a scoped walk started at "" prints ' / Drill1', which names
+        # neither the setup nor the folder - and that breadcrumb is the only thing separating two
+        # operations of one name. Walked from the node's own path, every row is addressable.
+        cam, s1, _s2, _folder, _pattern = _tree_cam()
+        node = {n.name: n for n in cc.walk_cam_tree(cam)}["Setup1"]
+        assert [n.path for n in cc.operation_nodes_under(node)] == [
+            "Setup1 / Face1", "Setup1 / Holes / Drill1", "Setup1 / Holes / Pat1 / Bore1"]
+
+    def test_operation_nodes_under_a_FOLDER_starts_at_that_folders_path(self):
+        cam, *_ = _tree_cam()
+        folder_node = {n.path: n for n in cc.walk_cam_tree(cam)}["Setup1 / Holes"]
+        rows = cc.operation_nodes_under(folder_node)
+        assert [n.path for n in rows] == ["Setup1 / Holes / Drill1",
+                                          "Setup1 / Holes / Pat1 / Bore1"]
+        assert all(n.setup == "Setup1" for n in rows)   # the node's own setup, not a re-resolve
+
+    def test_operation_nodes_under_an_empty_container_is_empty(self):
+        cam, *_ = _tree_cam()
+        empty = cc.tree_nodes(FakeSetup("Bare"))[0]
+        assert cc.operation_nodes_under(empty) == []
+
+
+class _UnreadableNameFolder(FakeCAMFolder):
+    """A CAM folder whose .name RAISES - the read the walk cannot answer, which safe() reports as
+    None. The setter is inert so the container protocol still builds."""
+
+    @property
+    def name(self):
+        raise RuntimeError("folder name unreadable")
+
+    @name.setter
+    def name(self, value):
+        pass
+
+
+class TestBreadcrumbSegments:
+    """Every segment of a walked path is a name that READ, or a marker saying that level did not.
+
+    The walk joins each level into an f-string, so a name that did not answer joins as the literal
+    'None' - a segment nothing tells apart from a container really NAMED that, which makes an
+    address to a container nobody identified look complete. The decision is made on the READ, never
+    on the joined text, so both halves of that pair are driven here."""
+
+    def test_a_folder_whose_name_raises_is_disclosed_not_joined_as_None(self):
+        blind = _UnreadableNameFolder("ignored", ops=[FakeOperation("Drill1")])
+        cam = make_cam(FakeSetup("S1", folders=[blind]))
+        paths = [n.path for n in cc.walk_cam_tree(cam)]
+        assert f"S1 / {cc._UNREAD_SEGMENT} / Drill1" in paths
+        assert not any("None" in p for p in paths)
+
+    def test_a_folder_LITERALLY_named_None_keeps_its_own_segment(self):
+        # THE GUARD: the repair keys on the READ answering None, never on a string match over the
+        # joined path. A folder really named 'None' is a container that answered, so its address is
+        # its own name and no marker appears anywhere in the tree.
+        cam = make_cam(FakeSetup("S1", folders=[FakeCAMFolder("None",
+                                                              ops=[FakeOperation("Drill1")])]))
+        paths = [n.path for n in cc.walk_cam_tree(cam)]
+        assert "S1 / None" in paths and "S1 / None / Drill1" in paths
+        assert not any(cc._UNREAD_SEGMENT in p for p in paths)
+
+    def test_an_operations_own_unreadable_name_is_disclosed_too(self):
+        # the leaf level joins through the same helper - a row named after nothing is not a row
+        # named 'None'.
+        op = FakeOperation("placeholder")
+        op.name = None
+        cam = make_cam(FakeSetup("S1", ops=[op]))
+        assert [n.path for n in cc.walk_cam_tree(cam)] == ["S1", f"S1 / {cc._UNREAD_SEGMENT}"]
+
+    def test_a_setup_whose_name_does_not_read_leaves_a_marked_root_not_a_blank_one(self):
+        # A blank root segment prints ' / Drill1', which reads as an operation sitting in no
+        # container at all rather than one whose container did not answer.
+        s = FakeSetup("placeholder", ops=[FakeOperation("Drill1")])
+        s.name = None
+        cam = make_cam(s)
+        assert [n.path for n in cc.walk_cam_tree(cam)] == [
+            cc._UNREAD_SEGMENT, f"{cc._UNREAD_SEGMENT} / Drill1"]
+
+    def test_a_name_that_reads_empty_is_not_marked(self):
+        # '' is a read that ANSWERED. Only a name that did not read is disclosed, so the marker
+        # never stands in for a value Fusion actually handed back.
+        cam = make_cam(FakeSetup("S1", folders=[FakeCAMFolder("", ops=[FakeOperation("Drill1")])]))
+        assert "S1 /  / Drill1" in [n.path for n in cc.walk_cam_tree(cam)]
+
+    def test_the_raw_name_read_is_untouched_by_the_disclosure(self):
+        # _op_breadcrumb-style consumers decide per LEVEL off node.name, so the marker must live in
+        # the PATH only - a name field carrying it would make the level look readable.
+        blind = _UnreadableNameFolder("ignored", ops=[FakeOperation("Drill1")])
+        cam = make_cam(FakeSetup("S1", folders=[blind]))
+        folder_node = [n for n in cc.walk_cam_tree(cam) if n.kind == "folder"][0]
+        assert folder_node.name is None
+
 
 class TestResolveCamNode:
     def test_unique_hit_returns_node(self):
@@ -773,10 +1022,344 @@ class TestResolveCamNode:
         node, err = cc.resolve_cam_node(None, "Face2", setup=s1, label="operation")
         assert node is None and "Face2" in err
 
+    def test_a_setup_scope_OVERRIDES_a_handed_in_pool(self):
+        # `nodes` is the unscoped caller's own walk; `setup` is a narrower question. A scoped call
+        # that reused the wider pool would resolve a node from ANOTHER setup - the scope silently
+        # doing nothing - so setup= must win over any pool handed alongside it.
+        cam, s1, s2, *_ = _tree_cam()
+        wide = cc.walk_cam_tree(cam)
+        assert any(n.name == "Face2" for n in wide)        # the foreign node IS in the pool
+        node, err = cc.resolve_cam_node(cam, "Face2", setup=s1, label="operation", nodes=wide)
+        assert node is None and "No operation named 'Face2'" in err
+        # and the setup's OWN operation still resolves through the same call shape
+        node, err = cc.resolve_cam_node(cam, "Face1", setup=s1, label="operation", nodes=wide)
+        assert err is None and node.obj.name == "Face1"
+
     def test_setup_kind_matches_setups_only(self):
         cam, *_ = _tree_cam()
         node, err = cc.resolve_cam_node(cam, "setup2", kinds=("setup",), label="setup")
         assert err is None and node.kind == "setup" and node.name == "Setup2"
+
+
+# The four kinds cam_delete passes. A resolve whose kinds include `setup` alongside another kind is
+# how a SETUP lands in a candidate list beside a namesake; two setups cannot share a name (Fusion
+# dedupes), so that collision is always setup-vs-other.
+_ANY_KIND = ("setup", "operation", "folder", "pattern")
+
+
+class TestDuplicateNameAddress:
+    """One SETUP and one OPERATION sharing a name - the buildable collision a setup's path cannot
+    discriminate, since _setup_node makes a setup's path its own bare name. Reached through the
+    mixed-kind resolve the delete/post/setup-sheet/inspect tools all run: the setup candidate is
+    told apart by its OPERATION COUNT, the operation by its 'Setup / op' path."""
+
+    def _dup(self):
+        """A setup 'Dup' holding two operations, and an operation 'Dup' in a differently-named
+        setup - measured: names collide across parents, never between two setups."""
+        setup = FakeSetup("Dup", ops=[FakeOperation("Face1"), FakeOperation("Face2")])
+        other = FakeSetup("S2", ops=[FakeOperation("Dup")])
+        return make_cam(setup, other), setup, other.operations.item(0)
+
+    def test_candidates_carry_an_address_and_the_fact_that_tells_them_apart(self):
+        cam, _setup, _op = self._dup()
+        node, err = cc.resolve_cam_node(cam, "Dup", kinds=_ANY_KIND, label="CAM item")
+        assert node is None
+        assert "Dup#1 (2 operations)" in err        # the SETUP - its path is its own bare name
+        assert "Dup#2 (at S2 / Dup)" in err         # the operation - its breadcrumb discriminates
+
+    def test_the_refusal_asks_for_no_rename(self):
+        cam, *_ = self._dup()
+        _node, err = cc.resolve_cam_node(cam, "Dup", kinds=_ANY_KIND, label="CAM item")
+        assert "ename" not in err          # "Rename"/"rename" - the address is performable instead
+
+    def test_each_offered_address_resolves_that_item(self):
+        # the discriminating assertion: identity, not just "an error-free answer". A scope-blind
+        # resolver returns the FIRST hit for both addresses and reports no error.
+        cam, setup, op = self._dup()
+        one, err_one = cc.resolve_cam_node(cam, "Dup#1", kinds=_ANY_KIND)
+        two, err_two = cc.resolve_cam_node(cam, "Dup#2", kinds=_ANY_KIND)
+        assert err_one is None and one.obj is setup and one.kind == "setup"
+        assert err_two is None and two.obj is op and two.kind == "operation"
+
+    def test_an_ordinal_past_the_end_names_the_range_it_stops_at(self):
+        cam, *_ = self._dup()
+        node, err = cc.resolve_cam_node(cam, "Dup#3", kinds=_ANY_KIND)
+        assert node is None
+        assert "numbered 1 to 2" in err and "Dup#1 (2 operations)" in err
+
+    def test_an_ordinal_of_zero_is_not_an_address(self):
+        # the boundary below the 1-based range: '#0' addresses nothing, so it must not answer the
+        # first item.
+        cam, *_ = self._dup()
+        node, err = cc.resolve_cam_node(cam, "Dup#0", kinds=_ANY_KIND)
+        assert node is None and "numbered 1 to 2" in err
+
+    def test_the_last_address_in_range_resolves_rather_than_overrunning(self):
+        # the upper boundary of `1 <= ordinal <= len(same)`: '#2' of two is the last VALID address.
+        cam, _setup, op = self._dup()
+        node, err = cc.resolve_cam_node(cam, "Dup#2", kinds=_ANY_KIND)
+        assert err is None and node.obj is op
+
+    def test_a_name_that_itself_carries_a_hash_wins_over_the_address(self):
+        # a literal name resolves by its own spelling; '#n' is read only where none does. Only ONE
+        # item is named 'Dup' here, so 'Dup#2' addresses nothing and the two readings cannot clash.
+        # Two setups named 'Dup' and 'Dup#2' are DIFFERENT names, so this document is buildable.
+        literal = FakeSetup("Dup#2", ops=[FakeOperation("Face1")])
+        cam = make_cam(FakeSetup("Dup"), literal)
+        node, err = cc.resolve_cam_node(cam, "Dup#2", kinds=("setup",), label="setup")
+        assert err is None and node.obj is literal
+
+    def test_a_literal_name_that_also_reads_as_an_address_is_refused(self):
+        # 'Dup#2' names one setup outright AND addresses the second of the two items named 'Dup'
+        # (an operation under S1, then the setup) - the refusal for 'Dup' itself prints that very
+        # address, so the tool would be inducing a wrong pick. Both readings are named; neither is
+        # taken. The addressed reading here is the SETUP, so its operation count is what names it.
+        cam = make_cam(FakeSetup("S1", ops=[FakeOperation("Dup")]),
+                       FakeSetup("Dup", ops=[FakeOperation("B"), FakeOperation("C")]),
+                       FakeSetup("Dup#2", ops=[FakeOperation("Face1")]))
+        node, err = cc.resolve_cam_node(cam, "Dup#2", kinds=_ANY_KIND, label="CAM item")
+        assert node is None
+        assert "reads two ways" in err and "CARRYING that name" in err
+        assert "of the 2 named 'Dup'" in err
+        assert "Dup#2 (2 operations)" in err        # the OTHER reading, named as it is addressed
+
+    def test_the_address_still_resolves_when_only_one_reading_exists(self):
+        # the guard above must not swallow the ordinary case: with no literal 'Dup#2' in the pool,
+        # the address resolves as before.
+        cam, _setup, op = self._dup()
+        node, err = cc.resolve_cam_node(cam, "Dup#2", kinds=_ANY_KIND)
+        assert err is None and node.obj is op
+
+    def test_a_name_carrying_a_hash_is_addressed_on_its_LAST_separator(self):
+        # a setup and an operation both named 'Op#3': the address for the second is 'Op#3#2'.
+        # Splitting on the FIRST separator reads the base as 'Op' and the ordinal as '3#2', which
+        # is no number at all, so the address would resolve nothing.
+        setup = FakeSetup("Op#3", ops=[FakeOperation("A")])
+        other = FakeSetup("S2", ops=[FakeOperation("Op#3")])
+        cam = make_cam(setup, other)
+        node, err = cc.resolve_cam_node(cam, "Op#3#2", kinds=_ANY_KIND)
+        assert err is None and node.obj is other.operations.item(0)
+        first_node, first_err = cc.resolve_cam_node(cam, "Op#3#1", kinds=_ANY_KIND)
+        assert first_err is None and first_node.obj is setup
+
+    def test_duplicate_operations_are_addressed_and_keep_their_paths(self):
+        cam = make_cam(FakeSetup("Setup1", ops=[FakeOperation("Drill1")]),
+                       FakeSetup("Setup2", ops=[FakeOperation("Drill1")]))
+        node, err = cc.resolve_cam_node(cam, "Drill1")
+        assert node is None
+        assert "Drill1#1 (at Setup1 / Drill1)" in err
+        assert "Drill1#2 (at Setup2 / Drill1)" in err
+        picked, perr = cc.resolve_cam_node(cam, "Drill1#2")
+        assert perr is None and picked.path == "Setup2 / Drill1"
+
+
+class TestTwoReadingsRemedy:
+    """A name reading BOTH as a literal and as an ordinal address over a same-named set.
+
+    The fake carries its two 'Dup' operations in DIFFERENT setups, plus a third operation literally
+    named 'Dup#2'. Two siblings under ONE setup are reported not to hold one name - Fusion storing
+    the second as 'Face11' - but that has no ledger row, so the split across setups is the
+    arrangement nothing contradicts rather than the only one a document can hold. PROBE NEEDED
+    (CAM-34).
+
+    The refusal names both readings and takes neither; what it can also offer is a sibling ADDRESS
+    free to be renamed, since the ordinal reading dies once fewer than `ordinal` nodes carry the
+    base name."""
+
+    def _cam(self):
+        return make_cam(FakeSetup("S1", ops=[FakeOperation("Dup"), FakeOperation("Dup#2")]),
+                        FakeSetup("S2", ops=[FakeOperation("Dup")]))
+
+    def test_both_readings_are_named_and_neither_is_taken(self):
+        node, err = cc.resolve_cam_node(self._cam(), "Dup#2")
+        assert node is None
+        assert "reads two ways" in err and "CARRYING that name" in err
+        assert "of the 2 named 'Dup'" in err
+
+    def test_the_refusal_offers_the_free_sibling_address(self):
+        # the ON boundary of the gate: ONE rename dissolves the reading (ordinal == the count named
+        # 'Dup'), so the address list is cashable whichever entry the caller picks.
+        _node, err = cc.resolve_cam_node(self._cam(), "Dup#2")
+        assert "Rename any ONE of the items named 'Dup'" in err
+        assert "addressed here as Dup#1," in err
+        assert "fewer than 2 carry 'Dup'" in err
+
+    def _three(self):
+        # THREE operations named 'Dup', one per setup, plus the literal 'Dup#2': the shape where
+        # 'Dup#2' addresses the MIDDLE item and two renames are needed to dissolve the reading.
+        return make_cam(FakeSetup("S1", ops=[FakeOperation("Dup"), FakeOperation("Dup#2")]),
+                        FakeSetup("S2", ops=[FakeOperation("Dup")]),
+                        FakeSetup("S3", ops=[FakeOperation("Dup")]))
+
+    def test_two_renames_are_offered_in_DESCENDING_order(self):
+        # Each rename leaves the same-named set one item shorter, so a highest-first list keeps
+        # every address still to come inside the set that remains - the order the sentence has to
+        # state for the list to be worth printing at all.
+        node, err = cc.resolve_cam_node(self._three(), "Dup#2")
+        assert node is None
+        # ordinal AND total, on the one fixture where they differ: with ordinal == total (the
+        # need == 1 shape next door) a sentence printing either number reads the same, so only this
+        # fixture pins that the refusal names the item it was actually asked for.
+        ordinal, total = 2, 3
+        assert f"item {ordinal} of the {total} named 'Dup'" in err
+        assert "Rename 2 of the items named 'Dup' - Dup#3, Dup#1 - in the order given" in err
+        assert "fewer than 2 carry 'Dup'" in err
+        assert "keeps every address still to come inside the set that remains" in err
+        # The promise stops at what the set's SIZE settles. Which item a given address reaches after
+        # a rename rests on the walk returning the survivors in the same relative order, which is
+        # not established here - so the sentence must not offer that.
+        assert "the same items" not in err
+
+    def test_performing_the_two_renames_in_the_order_given_dissolves_the_collision(self):
+        # the round trip the multi-rename sentence claims, executed one address at a time: each
+        # address still lands inside the same-named set when its turn comes, and after the last one
+        # the input reads exactly one way. Taken in the printed order this passes; taken
+        # lowest-first the second address names nothing (the leg below).
+        #
+        # WHICH of the namesakes an address reaches is deliberately not asserted - the sentence does
+        # not promise it, and any `need` of them dissolve the reading equally.
+        cam = self._three()
+        _node, err = cc.resolve_cam_node(cam, "Dup#2")
+        offered = err.split("named 'Dup' - ")[1].split(" - in the order given")[0].split(", ")
+        assert offered == ["Dup#3", "Dup#1"]
+        for addr in offered:
+            target, terr = cc.resolve_cam_node(cam, addr)
+            assert terr is None, f"'{addr}' stopped resolving part-way through the remedy: {terr}"
+            assert target.name == "Dup"          # it reached one of the items the remedy names
+            target.obj.name = f"Roughing ({addr})"
+        node, err2 = cc.resolve_cam_node(cam, "Dup#2")
+        assert err2 is None and node.path == "S1 / Dup#2"
+
+    def test_no_remedy_is_offered_when_too_few_sibling_addresses_are_free(self):
+        # need is 2 and only 'Dup#1' addresses a sibling ('Dup#2' and 'Dup#3' are carried literally,
+        # so each reaches the node wearing that spelling). A list that cannot dissolve the reading
+        # is not offered.
+        cam = make_cam(FakeSetup("S1", ops=[FakeOperation("Dup"), FakeOperation("Dup#2"),
+                                            FakeOperation("Dup#3")]),
+                       FakeSetup("S2", ops=[FakeOperation("Dup")]),
+                       FakeSetup("S3", ops=[FakeOperation("Dup")]))
+        node, err = cc.resolve_cam_node(cam, "Dup#2")
+        assert node is None and "reads two ways" in err
+        assert "ename" not in err              # "Rename"/"rename" - none is performable here
+
+    def test_the_renumbering_the_descending_order_exists_for_is_real(self):
+        # what makes an ASCENDING list un-cashable, executed: rename the lowest address first and
+        # the highest one no longer names anything.
+        cam = self._three()
+        third, err = cc.resolve_cam_node(cam, "Dup#3")
+        assert err is None and third.path == "S3 / Dup"
+        first, _e = cc.resolve_cam_node(cam, "Dup#1")
+        first.obj.name = "Roughing"
+        gone, err2 = cc.resolve_cam_node(cam, "Dup#3")
+        assert gone is None and "numbered 1 to 2" in err2
+
+    def test_the_address_a_node_CARRIES_is_never_offered_as_a_handle(self):
+        # 'Dup#2' counts to a sibling AND is one operation's own name, so passing it back reaches
+        # that operation rather than the sibling - it is no handle on a sibling and stays unlisted.
+        _node, err = cc.resolve_cam_node(self._cam(), "Dup#2")
+        offered = err.split("addressed here as ")[1].split(", so fewer")[0]
+        assert offered == "Dup#1"            # the WHOLE offered list, not just its first entry
+
+    def test_performing_the_remedy_makes_the_address_resolve(self):
+        # the round trip the remedy sentence claims: rename the sibling it addressed, and the
+        # literal reading is the only one left.
+        cam = self._cam()
+        sibling, err = cc.resolve_cam_node(cam, "Dup#1")
+        assert err is None and sibling.path == "S1 / Dup"
+        sibling.obj.name = "Roughing"
+        node, err2 = cc.resolve_cam_node(cam, "Dup#2")
+        assert err2 is None and node.path == "S1 / Dup#2"
+
+    def test_no_remedy_is_offered_when_no_sibling_address_is_free(self):
+        # 'Dup#1' and 'Dup#2' are both carried literally, so neither addresses a sibling: the
+        # refusal stays remedy-less rather than printing an address that reaches the wrong node.
+        cam = make_cam(FakeSetup("S1", ops=[FakeOperation("Dup"), FakeOperation("Dup#1")]),
+                       FakeSetup("S2", ops=[FakeOperation("Dup"), FakeOperation("Dup#2")]))
+        node, err = cc.resolve_cam_node(cam, "Dup#2")
+        assert node is None and "reads two ways" in err
+        assert "ename" not in err                  # "Rename"/"rename" - none is performable here
+
+    def test_two_nodes_CARRYING_the_name_get_the_ordinary_ambiguity_refusal(self):
+        # four same-named nodes across two spellings: two operations literally named 'Dup#2' AND two
+        # named 'Dup'. The literal name is itself AMBIGUOUS, so the refusal that helps is the
+        # standard one - it hands back 'Dup#2#1' / 'Dup#2#2', addresses this same input resolves -
+        # not the two-readings text, which describes a single carrier and offers no such address.
+        cam = make_cam(FakeSetup("S1", ops=[FakeOperation("Dup"), FakeOperation("Dup#2")]),
+                       FakeSetup("S2", ops=[FakeOperation("Dup"), FakeOperation("Dup#2")]))
+        node, err = cc.resolve_cam_node(cam, "Dup#2")
+        assert node is None
+        assert "2 CAM items share that name" in err and "reads two ways" not in err
+        assert "Dup#2#1 (at S1 / Dup#2)" in err and "Dup#2#2 (at S2 / Dup#2)" in err
+        first, e1 = cc.resolve_cam_node(cam, "Dup#2#1")
+        second, e2 = cc.resolve_cam_node(cam, "Dup#2#2")
+        assert e1 is None and first.path == "S1 / Dup#2"
+        assert e2 is None and second.path == "S2 / Dup#2"
+
+
+class TestAvailableListIsCappedByName:
+    """A not-found lists what IS there, and that list crosses the wire - so it is capped by NAME
+    COUNT with the remainder counted. A character cap ends the list mid-name, printing a spelling
+    the caller cannot pass back."""
+
+    def _cam(self, count):
+        return make_cam(FakeSetup("S1", ops=[FakeOperation(f"Operation-{i:02d}-LongEnoughToTruncate")
+                                             for i in range(count)]))
+
+    def test_every_listed_name_is_whole_and_the_rest_are_counted(self):
+        node, err = cc.resolve_cam_node(self._cam(20), "Ghost", label="operation")
+        assert node is None
+        listed = err.split("Available: ")[1].rstrip(".").split(", ")
+        assert listed[:8] == [f"Operation-{i:02d}-LongEnoughToTruncate" for i in range(8)]
+        assert listed[8:] == ["... (+12 more not listed)"]
+
+    def test_a_short_list_is_printed_whole_with_no_remainder_clause(self):
+        _node, err = cc.resolve_cam_node(self._cam(3), "Ghost", label="operation")
+        assert "more not listed" not in err
+        assert "Operation-02-LongEnoughToTruncate." in err
+
+    def test_a_pool_with_no_named_item_says_none(self):
+        _node, err = cc.resolve_cam_node(make_cam(FakeSetup("S1")), "Ghost", label="operation")
+        assert "Available: (none)." in err
+
+
+class TestResolveOperationOnePool:
+    """The unscoped operation resolve and the available list a caller words its OWN remedy from come
+    off ONE operation pool, in ONE walk. Two independently-filtered pools agree only by convention."""
+
+    def _cam(self):
+        # a FOLDER rides in the tree: the pool is walk_cam_tree filtered to operations, so a pool
+        # filtered any other way lists the container too and the equalities below separate them.
+        return make_cam(FakeSetup("S1", ops=[FakeOperation("Drill1")],
+                                  folders=[FakeCAMFolder("Holes", ops=[FakeOperation("Face1")])]),
+                        FakeSetup("S2", ops=[FakeOperation("Drill1")]))
+
+    def test_a_duplicate_lists_exactly_what_find_operation_lists(self):
+        cam = self._cam()
+        node, err, avail = cc.resolve_operation(cam, "Drill1")
+        assert node is None and "ambiguous" in err
+        assert avail == ["S1 / Drill1", "S2 / Drill1"] == cc.find_operation(cam, "Drill1")[1]
+
+    def test_a_miss_lists_exactly_what_find_operation_lists(self):
+        cam = self._cam()
+        node, err, avail = cc.resolve_operation(cam, "Ghost")
+        assert node is None and "No operation named 'Ghost'" in err
+        assert avail == ["Drill1", "Face1", "Drill1"] == cc.find_operation(cam, "Ghost")[1]
+
+    def test_a_unique_name_resolves_and_still_lists_every_operation(self):
+        cam = self._cam()
+        node, err, avail = cc.resolve_operation(cam, "face1")     # case-insensitive exact
+        assert err is None and node.path == "S1 / Holes / Face1"
+        assert avail == ["Drill1", "Face1", "Drill1"]
+
+    def test_the_resolve_and_its_list_share_ONE_walk(self, monkeypatch):
+        # the efficiency half, and the structural one: a second walk is exactly what would let the
+        # refusal and the remedy describe different censuses of the same tree.
+        real = cc.walk_cam_tree
+        walks = []
+        monkeypatch.setattr(cc, "walk_cam_tree",
+                            lambda c: (walks.append(c), real(c))[1])
+        cc.resolve_operation(self._cam(), "Drill1")
+        assert len(walks) == 1
 
 
 # â”€â”€ inspection results: the recorded probing measurements (cam_get(include=['inspection'])) â”€â”€â”€â”€â”€â”€â”€
@@ -1211,11 +1794,16 @@ class TestWarningOverlayTally:
         assert t["out_of_date"] == 1 and t["warnings"] == 1
 
 
+# A setup carrying an assigned machine - setup_blockers reads Setup.machine through machine_label,
+# so a fake with no machine is a setup blocked by no_machine_selected, not a clean one.
+def _machined_setup(ops, name="Setup1", machine=SimpleNamespace(description="Haas VF-2")):
+    return SimpleNamespace(allOperations=_Coll(list(ops)), name=name, hasError=False, error="",
+                           machine=machine)
+
+
 class TestLiveReadinessEdges:
     def _cam(self, ops):
-        setup = SimpleNamespace(allOperations=_Coll(list(ops)), name="Setup1",
-                                hasError=False, error="")
-        return SimpleNamespace(setups=_Coll([setup]), ncPrograms=_Coll([]))
+        return SimpleNamespace(setups=_Coll([_machined_setup(ops)]), ncPrograms=_Coll([]))
 
     def test_a_document_with_no_active_ops_gives_no_verdict(self, monkeypatch,
                                                             operation_cast_passthrough):
@@ -1248,10 +1836,9 @@ class TestReadinessWarningVerdict:
     but 'ready to post' on its own hides an op that reads valid and cut nothing, so a warned job
     reports the count and names the first warning."""
 
-    def _sig(self, monkeypatch, ops):
-        cam = SimpleNamespace(setups=_Coll([SimpleNamespace(
-            allOperations=_Coll(list(ops)), name="Setup1", hasError=False, error="")]),
-            ncPrograms=_Coll([]))
+    def _sig(self, monkeypatch, ops, machine=SimpleNamespace(description="Haas VF-2")):
+        cam = SimpleNamespace(setups=_Coll([_machined_setup(ops, machine=machine)]),
+                              ncPrograms=_Coll([]))
         monkeypatch.setattr(cc, "get_cam", lambda: (cam, None))
         sig, err = cc.live_readiness()
         assert err is None
@@ -1390,6 +1977,247 @@ class TestSharedReadyVerdict:
     def test_an_unnamed_sample_points_at_the_read_rather_than_quoting_a_blank_name(self):
         out = cc.ready_verdict("1 of 1 active ops valid", 1, {"name": None, "warning": "w"})
         assert "cam_get(include=['operations'])" in out and "''" not in out
+
+
+# --- setup_blockers / the blocked-setup verdict: ONE input set for 'is this job postable' ---
+#
+# A setup's blocked_by and the readiness verdict were computed from different inputs, so a poll read
+# "ready to post" on a setup cam_get flagged blocked_by ["no_machine_selected"]. The fixture that
+# discriminates is a setup with NOTHING wrong at op level - every op valid, no warnings, no errors -
+# and no machine: a verdict reading only the op tally says "ready to post" on it.
+
+def _machine(description="Haas VF-2"):
+    return SimpleNamespace(description=description)
+
+
+class TestSetupBlockers:
+    """setup_blockers - the ONE read of a setup's own post prerequisites."""
+
+    def test_a_setup_with_no_machine_is_blocked_by_that(self):
+        assert cc.setup_blockers(SimpleNamespace(machine=None)) == ["no_machine_selected"]
+
+    def test_a_setup_whose_machine_property_raises_is_blocked_not_cleared(self):
+        class _Raises:
+            @property
+            def machine(self):
+                raise RuntimeError("machine cannot be read")
+        # an unreadable machine is not a read machine - it may never clear the block by default
+        assert cc.setup_blockers(_Raises()) == ["no_machine_selected"]
+
+    def test_an_assigned_machine_clears_the_block(self):
+        assert cc.setup_blockers(SimpleNamespace(machine=_machine())) == []
+
+    def test_a_machine_with_no_readable_label_still_counts_as_assigned(self):
+        # machine_label falls back to '(unnamed machine)' for a Machine carrying no description or
+        # vendor/model - the machine IS assigned, so nothing here may report it as unselected.
+        m = SimpleNamespace(description=None, vendor=None, model=None)
+        assert cc.machine_label(m) == "(unnamed machine)"
+        assert cc.setup_blockers(SimpleNamespace(machine=m)) == []
+
+    def test_blocked_setup_records_names_only_the_blocked_ones(self):
+        rows = cc.blocked_setup_records([
+            SimpleNamespace(name="Top", machine=_machine()),
+            SimpleNamespace(name="Bottom", machine=None),
+            SimpleNamespace(name="Side", machine=None)])
+        assert rows == [{"name": "Bottom", "blocked_by": ["no_machine_selected"]},
+                        {"name": "Side", "blocked_by": ["no_machine_selected"]}]
+
+    def test_no_blocked_setups_is_an_empty_list_not_a_null(self):
+        assert cc.blocked_setup_records([SimpleNamespace(name="Top", machine=_machine())]) == []
+
+
+class TestBlockedReadyVerdict:
+    """ready_verdict consults the blockers: op state alone cannot earn 'ready to post'."""
+
+    def _blocked(self, *names):
+        return [{"name": n, "blocked_by": ["no_machine_selected"]} for n in names]
+
+    def test_a_fully_valid_warning_free_scope_is_still_not_ready_while_a_setup_is_blocked(self):
+        out = cc.ready_verdict("3 of 3 active ops valid", 0, None, self._blocked("Setup1"))
+        assert "- ready to post." not in out                 # the plain verdict is withheld
+        assert "'ready to post' is NOT established" in out   # and the withholding is stated
+        assert "blocked_by" in out and "no_machine_selected" in out and "'Setup1'" in out
+
+    def test_the_remedy_is_named_in_the_tools_own_vocabulary(self):
+        out = cc.ready_verdict("3 of 3 active ops valid", 0, None, self._blocked("Setup1"))
+        assert "cam_edit_setup assigns a machine." in out
+
+    def test_an_unknown_blocker_code_names_no_remedy_it_cannot_back(self):
+        out = cc.ready_verdict("1 of 1 active ops valid", 0, None,
+                               [{"name": "S1", "blocked_by": ["some_future_code"]}])
+        assert "some_future_code" in out and "cam_edit_setup" not in out
+
+    def test_no_remedy_is_offered_for_a_blocker_the_sentence_did_not_print(self):
+        # the sentence names the FIRST blocked setup and counts the rest, so a remedy gathered
+        # across every row would name a fix for a code the caller never saw. Row 2's code is the
+        # only one with a remedy on file, and row 2 is not printed - so no remedy rides.
+        out = cc.ready_verdict("1 of 1 active ops valid", 0, None,
+                               [{"name": "S1", "blocked_by": ["some_future_code"]},
+                                {"name": "S2", "blocked_by": ["no_machine_selected"]}])
+        assert "some_future_code" in out and "and 1 more" in out
+        assert "cam_edit_setup" not in out          # the unprinted row's remedy stays unprinted
+        assert "S2" not in out
+
+    def test_one_blocked_setup_is_named_without_a_remainder_clause(self):
+        # boundary: len(blocked) == 1 -> no "and N more" tail at all
+        out = cc.ready_verdict("1 of 1 active ops valid", 0, None, self._blocked("Setup1"))
+        assert "more" not in out
+
+    def test_two_blocked_setups_name_the_first_and_count_the_rest(self):
+        out = cc.ready_verdict("1 of 1 active ops valid", 0, None, self._blocked("Setup1", "Setup2"))
+        assert "2 setup(s) carry blocked_by" in out
+        assert "'Setup1'" in out and "and 1 more" in out
+        assert "Setup2" not in out                           # the sentence stays one line
+
+    def test_an_empty_blocked_list_is_the_plain_verdict_not_a_demotion(self):
+        # boundary on the other side of the same branch: [] must behave exactly like None
+        assert cc.ready_verdict("2 of 2 active ops valid", 0, None, []) == \
+            cc.ready_verdict("2 of 2 active ops valid", 0, None) == \
+            "2 of 2 active ops valid - ready to post."
+
+    def test_a_blocked_setup_whose_name_did_not_read_is_described_not_quoted_blank(self):
+        out = cc.ready_verdict("1 of 1 active ops valid", 0, None,
+                               [{"name": None, "blocked_by": ["no_machine_selected"]}])
+        assert "''" not in out and "did not read" in out
+
+    def test_the_warning_count_still_rides_a_blocked_verdict(self):
+        # a blocked job may also carry warnings; the blocker outranks, but the warnings are not lost
+        out = cc.ready_verdict("2 of 2 active ops valid", 1, {"name": "C1", "warning": "w"},
+                               self._blocked("Setup1"))
+        assert "'ready to post' is NOT established" in out
+        assert "1 active op(s) also carry warnings" in out
+
+    def test_a_blocked_verdict_with_no_warnings_says_nothing_about_warnings(self):
+        out = cc.ready_verdict("2 of 2 active ops valid", 0, None, self._blocked("Setup1"))
+        assert "warning" not in out
+
+
+class TestLiveReadinessConsumesSetupBlockers:
+    """live_readiness and cam_get's setups projection answer 'is this postable' off ONE input set."""
+
+    def _cam(self, setups):
+        return SimpleNamespace(setups=_Coll(setups), ncPrograms=_Coll([]))
+
+    def _sig(self, monkeypatch, setups):
+        monkeypatch.setattr(cc, "get_cam", lambda: (self._cam(setups), None))
+        sig, err = cc.live_readiness()
+        assert err is None
+        return sig
+
+    def test_a_clean_but_machine_less_document_never_reads_ready_to_post(
+            self, monkeypatch, operation_cast_passthrough):
+        # THE BITE: two valid ops, no warnings, no errors - a verdict built from the op tally alone
+        # reads "2 of 2 active ops valid - ready to post." on this exact document.
+        sig = self._sig(monkeypatch, [_machined_setup([_tally_op("Face1"), _tally_op("Face2")],
+                                                      machine=None)])
+        assert sig["valid"] == 2 and sig["errored"] == 0 and sig["warnings"] == 0
+        assert "- ready to post." not in sig["readiness"]
+        assert sig["setups_blocked"] == [{"name": "Setup1",
+                                          "blocked_by": ["no_machine_selected"]}]
+
+    def test_the_same_document_with_a_machine_reads_plainly_ready(
+            self, monkeypatch, operation_cast_passthrough):
+        sig = self._sig(monkeypatch, [_machined_setup([_tally_op("Face1"), _tally_op("Face2")])])
+        assert sig["setups_blocked"] == []
+        assert sig["readiness"] == "2 of 2 active ops valid - ready to post."
+
+    def test_only_the_blocked_setup_of_several_is_named(self, monkeypatch,
+                                                        operation_cast_passthrough):
+        sig = self._sig(monkeypatch, [_machined_setup([_tally_op("Face1")], name="Top"),
+                                      _machined_setup([_tally_op("Face2")], name="Bottom",
+                                                      machine=None)])
+        assert sig["setups_blocked"] == [{"name": "Bottom",
+                                          "blocked_by": ["no_machine_selected"]}]
+        assert "'Bottom'" in sig["readiness"] and "Top" not in sig["readiness"]
+
+    def test_an_errored_job_keeps_the_BLOCKER_verdict_and_still_publishes_the_blockers(
+            self, monkeypatch, operation_cast_passthrough):
+        # an op error outranks the wording, but the machine-readable list is still there to branch on
+        sig = self._sig(monkeypatch, [_machined_setup([_tally_op("Drill1", error=True)],
+                                                      machine=None)])
+        assert sig["readiness"].startswith("BLOCKER:")
+        assert sig["setups_blocked"] == [{"name": "Setup1",
+                                          "blocked_by": ["no_machine_selected"]}]
+
+    def test_the_setups_slice_and_the_verdict_report_the_SAME_blocked_by(
+            self, monkeypatch, operation_cast_passthrough):
+        # the one-input-set proof: the codes cam_get publishes per setup are the codes the verdict
+        # was built from - the two surfaces cannot report different answers about one setup.
+        setups = [_machined_setup([_tally_op("Face1")], machine=None)]
+        monkeypatch.setattr(cc, "get_cam", lambda: (self._cam(setups), None))
+        sig, _err = cc.live_readiness()
+        slice_rec = _payload(cc.get_cam_setups_handler())["setups"][0]
+        assert slice_rec["blocked_by"] == ["no_machine_selected"]
+        assert [r["blocked_by"] for r in sig["setups_blocked"]] == [slice_rec["blocked_by"]]
+
+
+class TestOperationsSummaryConsumesSetupBlockers:
+    """cam_get's own operations summary is the third surface on the shared verdict."""
+
+    @pytest.fixture(autouse=True)
+    def _manufacture(self, monkeypatch):
+        monkeypatch.setattr(cc, "validity_basis", lambda: "manufacture_verified")
+
+    def _rec(self, name):
+        return {"name": name, "state": "valid", "toolpath_valid": True, "is_suppressed": False,
+                "has_error": False, "has_warning": False, "blocked_by": []}
+
+    def test_a_blocked_setup_demotes_the_operations_summary_verdict(self):
+        summary = cc._operations_summary(
+            [self._rec("Face1")], [{"name": "S1", "blocked_by": ["no_machine_selected"]}])
+        assert "- ready to post." not in summary["readiness"]
+        assert "no_machine_selected" in summary["readiness"]
+        assert summary["exceptions"] == []          # a SETUP blocker is not an op exception
+
+    def test_no_blockers_keeps_the_plain_summary_verdict(self):
+        summary = cc._operations_summary([self._rec("Face1")], [])
+        assert summary["readiness"] == "1 of 1 active ops have valid toolpaths - ready to post."
+
+    def _postable_op(self, name):
+        """An op row the summary counts as good to post - tool selected, toolpath valid, no fault -
+        so ONLY a setup-level blocker can demote a verdict built over it."""
+        return SimpleNamespace(name=name, tool=SimpleNamespace(description="6mm flat"),
+                               strategy="adaptive", operationState=0, hasToolpath=True,
+                               isToolpathValid=True, isGenerating=False, isSuppressed=False,
+                               isOptional=False, hasWarning=False, hasError=False, messageLog="")
+
+    def test_the_operations_handler_feeds_each_setups_own_blockers(self, install,
+                                                                    operation_cast_passthrough):
+        # end to end through cam_get's slice: the machine-less setup is demoted, the machined one
+        # beside it is not - so the blockers are read PER setup, not once for the document.
+        blocked = FakeSetup("Bottom", ops=[self._postable_op("Face2")])
+        blocked.machine = None
+        machined = FakeSetup("Top", ops=[self._postable_op("Face1")])
+        machined.machine = _machine()
+        install(FakeCAM([machined, blocked]))
+        out = _payload(cc.get_cam_operations_handler())
+        by_name = {s["setup"]: s["summary"]["readiness"] for s in out["setups"]}
+        assert by_name["Top"] == "1 of 1 active ops have valid toolpaths - ready to post."
+        assert "- ready to post." not in by_name["Bottom"]
+        assert "no_machine_selected" in by_name["Bottom"]
+
+
+class TestOwningSetup:
+    """owning_setup - the parent-chain walk a scoped verdict reads its setup blockers through."""
+
+    def test_a_setup_node_is_its_own_owner(self, install):
+        setup = FakeSetup("S1")
+        install(FakeCAM([setup]))
+        node = cc.walk_cam_tree(cc.get_cam()[0])[0]
+        assert node.kind == "setup" and cc.owning_setup(node) is setup
+
+    def test_an_op_nested_two_folders_deep_still_resolves_to_the_setup(self, install):
+        inner = FakeCAMFolder("Inner", ops=[FakeOperation("Face1")])
+        setup = FakeSetup("S1", folders=[FakeCAMFolder("Outer", folders=[inner])])
+        install(FakeCAM([setup]))
+        op_node = next(n for n in cc.walk_cam_tree(cc.get_cam()[0]) if n.name == "Face1")
+        assert cc.owning_setup(op_node) is setup
+
+    def test_a_parentless_non_setup_node_owns_no_setup(self):
+        # nothing is invented for a node the walk did not build - the caller reads "no blockers",
+        # never some other setup's.
+        orphan = cc.CamNode(object(), "operation", "Face1", None, "Face1", None)
+        assert cc.owning_setup(orphan) is None
 
 
 # --- _attach_setup_invalidation: the per-setup op_states rollup + WHY the setup is stale ---
@@ -1618,6 +2446,249 @@ class TestOperationSummaryDisclosure:
         assert out["setups"][0]["setup"] == "S2" and len(out["setups"][0]["operations"]) == 2
 
 
+# --- the operation row's WHERE and WHAT-IT-ASKS-FOR: folder path, preset, spindle vs machine ---
+
+def _row_op(name, rpm=None, preset=None, suppressed=False):
+    return SimpleNamespace(
+        name=name, tool=SimpleNamespace(description="flat 10mm"), strategy="adaptive",
+        operationState=(adsk.cam.OperationStates.SuppressedOperationState if suppressed
+                        else adsk.cam.OperationStates.IsValidOperationState),
+        hasWarning=False, hasError=False, hasToolpath=True, isToolpathValid=True,
+        isGenerating=False, isSuppressed=suppressed, isOptional=False,
+        toolPreset=(SimpleNamespace(name=preset) if preset else None),
+        parameters=_SpindleParams(rpm))
+
+
+class TestOperationRowContext:
+    def _rows(self, install, setup, machine=None):
+        setup.machine = machine
+        install(FakeCAM([setup]))
+        out = _payload(cc.get_cam_operations_handler())
+        return out["setups"][0]
+
+    def test_a_folder_nested_op_carries_its_breadcrumb_and_folder_name(
+            self, install, operation_cast_passthrough):
+        folder = FakeCAMFolder("Metric Threads Unsuppress as Needed",
+                               ops=[_row_op("Thread1", suppressed=True)])
+        setup = FakeSetup("Op1", ops=[_row_op("Rough")], folders=[folder])
+        rows = {r["name"]: r for r in self._rows(install, setup)["operations"]}
+        assert rows["Thread1"]["path"] == "Op1 / Metric Threads Unsuppress as Needed / Thread1"
+        assert rows["Thread1"]["folder"] == "Metric Threads Unsuppress as Needed"
+        assert rows["Thread1"]["is_suppressed"] is True     # the intent sits beside the flag
+
+    def test_an_op_directly_under_the_setup_has_no_folder(self, install,
+                                                          operation_cast_passthrough):
+        setup = FakeSetup("Op1", ops=[_row_op("Rough")])
+        row = self._rows(install, setup)["operations"][0]
+        assert row["path"] == "Op1 / Rough" and "folder" not in row
+
+    def test_an_op_inside_a_pattern_names_the_pattern(self, install, operation_cast_passthrough):
+        # a CAMPattern is a container the walk yields exactly like a folder (kind is structural,
+        # from the collection that produced it), and its name is where the op sits.
+        pattern = FakeCAMFolder("Bolt Circle Pattern", ops=[_row_op("Drill")])
+        setup = FakeSetup("Op1", patterns=[pattern])
+        row = self._rows(install, setup)["operations"][0]
+        assert row["path"] == "Op1 / Bolt Circle Pattern / Drill"
+        assert row["folder"] == "Bolt Circle Pattern"
+
+    def test_a_nested_folder_names_the_innermost_one(self, install, operation_cast_passthrough):
+        inner = FakeCAMFolder("Bonus", ops=[_row_op("Extra")])
+        outer = FakeCAMFolder("Finishing", folders=[inner])
+        setup = FakeSetup("Op1", folders=[outer])
+        row = self._rows(install, setup)["operations"][0]
+        assert row["path"] == "Op1 / Finishing / Bonus / Extra" and row["folder"] == "Bonus"
+
+    def test_the_preset_the_op_uses_is_published(self, install, operation_cast_passthrough):
+        setup = FakeSetup("Op1", ops=[_row_op("Wall", preset="Wall_Finishing"),
+                                      _row_op("Floor", preset="Floor_Finishing")])
+        rows = {r["name"]: r for r in self._rows(install, setup)["operations"]}
+        # one tool, two presets - the distinction the tool description cannot carry
+        assert rows["Wall"]["tool"] == rows["Floor"]["tool"] == "flat 10mm"
+        assert rows["Wall"]["preset"] == "Wall_Finishing"
+        assert rows["Floor"]["preset"] == "Floor_Finishing"
+
+    def test_an_op_without_a_preset_reads_null(self, install, operation_cast_passthrough):
+        setup = FakeSetup("Op1", ops=[_row_op("Rough")])
+        assert self._rows(install, setup)["operations"][0]["preset"] is None
+
+    def test_an_op_over_the_machine_maximum_carries_both_numbers(self, install,
+                                                                 operation_cast_passthrough):
+        setup = FakeSetup("Op1", ops=[_row_op("Rough", rpm=24999.0)])
+        rec = self._rows(install, setup, machine=_haas())
+        row = rec["operations"][0]
+        assert rec["machine_spindle_max_rpm"] == 12000.0
+        assert row["spindle_over_machine_max"] is True
+        assert row["spindle_rpm"] == 24999.0 and row["machine_max_rpm"] == 12000.0
+
+    def test_an_op_at_the_machine_maximum_is_not_over(self, install, operation_cast_passthrough):
+        setup = FakeSetup("Op1", ops=[_row_op("Rough", rpm=12000.0)])
+        row = self._rows(install, setup, machine=_haas())["operations"][0]
+        assert row["spindle_over_machine_max"] is False
+        assert "spindle_check" not in row              # checked and fine, not unknown
+
+    def test_a_setup_without_a_machine_marks_the_check_unavailable(self, install,
+                                                                   operation_cast_passthrough):
+        setup = FakeSetup("Op1", ops=[_row_op("Rough", rpm=24999.0)])
+        rec = self._rows(install, setup)
+        row = rec["operations"][0]
+        assert row["spindle_over_machine_max"] is None          # never a coerced false
+        assert row["spindle_check"] == "machine_max_unavailable"
+        assert "machine_spindle_max_rpm" not in rec
+
+    def test_an_unreadable_op_speed_marks_its_own_side(self, install, operation_cast_passthrough):
+        setup = FakeSetup("Op1", ops=[_row_op("Rough")])        # no tool_spindleSpeed parameter
+        row = self._rows(install, setup, machine=_haas())["operations"][0]
+        assert row["spindle_over_machine_max"] is None
+        assert row["spindle_check"] == "op_spindle_speed_unreadable"
+        assert row["machine_max_rpm"] == 12000.0                # the readable half still rides
+
+    def test_a_row_built_without_a_walk_node_carries_no_path(self):
+        # _folder_of reads the walk's parent node; with no node there is nothing to name
+        assert cc._folder_of(None) is None
+
+
+class TestSpindleScopedToActiveOps:
+    """A SUPPRESSED op is excluded from posting, so what it asks of the spindle never reaches the
+    machine. Its row carries no comparison at all - and the marker says that is why, which is a
+    different fact from 'at or under the maximum' and from 'a number would not read'."""
+
+    def _rows(self, install, setup, machine=None):
+        setup.machine = machine
+        install(FakeCAM([setup]))
+        return _payload(cc.get_cam_operations_handler())["setups"][0]
+
+    def test_a_suppressed_row_is_not_compared_even_when_both_numbers_read(
+            self, install, operation_cast_passthrough):
+        # both halves are readable and the op asks for twice the maximum: the comparison is
+        # WITHHELD, not answered - a suppressed op posts nothing, so it is no warning to act on.
+        setup = FakeSetup("Op1", ops=[_row_op("Parked", rpm=24999.0, suppressed=True)])
+        row = self._rows(install, setup, machine=_haas())["operations"][0]
+        assert row["is_suppressed"] is True
+        assert "spindle_over_machine_max" not in row
+        assert row["spindle_check"] == "suppressed_not_compared"
+        assert "spindle_rpm" not in row and "machine_max_rpm" not in row
+
+    def test_an_active_row_beside_it_is_still_compared(self, install, operation_cast_passthrough):
+        # the scoping is per row, not per setup: the parked op's withheld comparison must not take
+        # the active op's with it.
+        setup = FakeSetup("Op1", ops=[_row_op("Parked", rpm=24999.0, suppressed=True),
+                                      _row_op("Cut", rpm=24999.0)])
+        rows = {r["name"]: r for r in self._rows(install, setup, machine=_haas())["operations"]}
+        assert "spindle_over_machine_max" not in rows["Parked"]
+        assert rows["Cut"]["spindle_over_machine_max"] is True
+        assert rows["Cut"]["spindle_rpm"] == 24999.0
+
+    def test_the_summary_counts_only_the_active_rows_over_the_maximum(
+            self, install, operation_cast_passthrough):
+        setup = FakeSetup("Op1", ops=[_row_op("Parked", rpm=24999.0, suppressed=True),
+                                      _row_op("Cut", rpm=24999.0),
+                                      _row_op("Also", rpm=13000.0),
+                                      _row_op("Fine", rpm=8000.0)])
+        rec = self._rows(install, setup, machine=_haas())
+        assert rec["summary"]["spindle_over_machine_max_count"] == 2      # NOT 3 - Parked is parked
+        assert rec["summary"]["active_count"] == 3
+
+    def test_an_op_AT_the_maximum_is_not_counted(self, install, operation_cast_passthrough):
+        # the boundary the flag is built on, carried through the aggregate: at the maximum is not
+        # over it, so a job whose only fast op sits exactly on the limit publishes no count at all.
+        setup = FakeSetup("Op1", ops=[_row_op("Cut", rpm=12000.0)])
+        rec = self._rows(install, setup, machine=_haas())
+        assert rec["operations"][0]["spindle_over_machine_max"] is False
+        assert "spindle_over_machine_max_count" not in rec["summary"]
+
+    def test_an_uncomparable_row_is_not_counted_as_over(self, install,
+                                                        operation_cast_passthrough):
+        # null is "the comparison could not be made" - counting it would state a number the reads
+        # do not support.
+        setup = FakeSetup("Op1", ops=[_row_op("Cut", rpm=24999.0)])       # no machine on the setup
+        rec = self._rows(install, setup)
+        assert rec["operations"][0]["spindle_over_machine_max"] is None
+        assert "spindle_over_machine_max_count" not in rec["summary"]
+
+    def test_the_note_states_the_scoping_it_applies(self, install, operation_cast_passthrough):
+        # the rule is invisible to a caller unless the payload says it: an absent flag otherwise
+        # reads as a comparison that came out fine.
+        setup = FakeSetup("Op1", ops=[_row_op("Parked", rpm=24999.0, suppressed=True)])
+        install(FakeCAM([setup]))
+        note = _payload(cc.get_cam_operations_handler())["note"]
+        assert "suppressed_not_compared" in note and "spindle_over_machine_max_count" in note
+
+    def test_a_setup_name_containing_a_separator_does_not_invent_a_folder(
+            self, install, operation_cast_passthrough):
+        # the breadcrumb is a JOINED string: splitting 'Op1 / Rev2 / Rough' on ' / ' would name
+        # 'Rev2' as the folder of an op that sits directly under the setup.
+        setup = FakeSetup("Op1 / Rev2", ops=[_row_op("Rough")])
+        row = self._rows(install, setup)["operations"][0]
+        assert row["path"] == "Op1 / Rev2 / Rough"
+        assert "folder" not in row
+
+    def test_a_folder_name_containing_a_separator_is_reported_whole(
+            self, install, operation_cast_passthrough):
+        folder = FakeCAMFolder("Holes / Move and unsuppress", ops=[_row_op("Drill")])
+        setup = FakeSetup("Op1", folders=[folder])
+        row = self._rows(install, setup)["operations"][0]
+        assert row["folder"] == "Holes / Move and unsuppress"
+
+    def test_the_folder_comes_from_the_container_not_the_string(self):
+        # the structural read: a node whose parent is a FOLDER names it; a node whose parent is the
+        # SETUP names nothing, whatever the two names look like.
+        setup_node = cc.CamNode(object(), "setup", "S / 1", "S / 1", "S / 1", None)
+        folder_node = cc.CamNode(object(), "folder", "F", "S / 1", "S / 1 / F", setup_node)
+        under_setup = cc.CamNode(object(), "operation", "Op", "S / 1", "S / 1 / Op", setup_node)
+        under_folder = cc.CamNode(object(), "operation", "Op", "S / 1", "S / 1 / F / Op",
+                                  folder_node)
+        assert cc._folder_of(under_setup) is None
+        assert cc._folder_of(under_folder) == "F"
+
+    def test_a_container_that_slips_through_the_walk_is_skipped(self, install, monkeypatch):
+        monkeypatch.setattr(adsk.cam.Operation, "cast",
+                            lambda x: None if getattr(x, "name", "") == "Folderish" else x)
+        setup = FakeSetup("Op1", ops=[SimpleNamespace(name="Folderish"), _row_op("Rough")])
+        rec = self._rows(install, setup)
+        assert [r["name"] for r in rec["operations"]] == ["Rough"]
+
+    def test_the_rows_walk_is_seeded_the_way_tree_nodes_seeds_it(self, install, monkeypatch,
+                                                                 operation_cast_passthrough):
+        # _operations_in drives _walk_children itself (it owns the output list so a partial walk
+        # keeps its rows), so it has to hand the walk the SAME seed tree_nodes does - the setup
+        # node. Omitting it leaves a top-level op with no parent at all, which reads as "the
+        # container is unknown" rather than "this op sits directly under the setup".
+        seen = {}
+        real = cc._walk_children
+
+        def _record(parent, setup_name, path, out, parent_node=None):
+            seen["parent_node"] = parent_node
+            return real(parent, setup_name, path, out, parent_node)
+        monkeypatch.setattr(cc, "_walk_children", _record)
+        setup = FakeSetup("Op1", ops=[_row_op("Rough")])
+        self._rows(install, setup)
+        assert seen["parent_node"] is not None
+        assert seen["parent_node"].kind == "setup" and seen["parent_node"].name == "Op1"
+
+    def test_a_walk_that_raises_keeps_the_rows_it_reached(self, install, monkeypatch,
+                                                          operation_cast_passthrough):
+        # _walk_children appends as it goes, so a raise mid-walk leaves the nodes already collected
+        real = cc._walk_children
+
+        def _dies(parent, setup_name, path, out, parent_node=None):
+            real(parent, setup_name, path, out, parent_node)
+            raise RuntimeError("the CAM tree stopped answering")
+        monkeypatch.setattr(cc, "_walk_children", _dies)
+        setup = FakeSetup("Op1", ops=[_row_op("Rough")])
+        rec = self._rows(install, setup)
+        assert [r["name"] for r in rec["operations"]] == ["Rough"]
+        assert rec["operations_truncated"] is True
+
+    def test_a_row_read_that_raises_flags_the_list_incomplete(self, install, monkeypatch,
+                                                              operation_cast_passthrough):
+        def _boom(*_a, **_k):
+            raise RuntimeError("operation read failed")
+        monkeypatch.setattr(cc, "_operation_summary", _boom)
+        setup = FakeSetup("Op1", ops=[_row_op("Rough")])
+        rec = self._rows(install, setup)
+        assert rec["operations"] == [] and rec["operations_truncated"] is True
+
+
 # --- get_setup_references_handler / _references_in: X-ref occurrences -> their source docs ---
 
 def _xref_occ(name, source_id="urn:a", version=3, ood=False, source_name="Fixture.f3d",
@@ -1701,6 +2772,32 @@ class TestToolList:
         out = _payload(cc.get_tool_list_handler())
         assert out["tools"][0]["operations"] == ["S1 / Face1", "S1 / Adaptive1", "S2 / Face1"]
         assert out["tools"][0]["setups"] == ["S1", "S2"]
+
+    def test_an_unread_operation_name_is_disclosed_not_joined_as_None(
+            self, install, operation_cast_passthrough):
+        # This list is the same join every breadcrumb takes, so it takes the same disclosure. An
+        # unread name would otherwise read as a setup holding an operation NAMED 'None'.
+        flat = SimpleNamespace(description="flat 10mm")
+        install(FakeCAM([_OpSetup("S1", [SimpleNamespace(name=None, tool=flat),
+                                         SimpleNamespace(name="Face1", tool=flat)])]))
+        out = _payload(cc.get_tool_list_handler())
+        rows = out["tools"][0]["operations"]
+        assert rows == [f"S1 / {cc._UNREAD_SEGMENT}", "S1 / Face1"]
+        # the row is a STRING either way: a bare null here would still count in operation_count
+        # while addressing nothing a caller can read.
+        assert all(isinstance(r, str) for r in rows)
+        assert out["tools"][0]["operation_count"] == 2
+
+    def test_an_unread_SETUP_name_still_qualifies_the_row(self, install,
+                                                          operation_cast_passthrough):
+        # Dropping the setup half leaves a bare 'Face1', which reads as a document with one setup.
+        # The marker says which half did not read instead. 'setups' takes no marker - it is a list
+        # of real setup names, and a name nothing read is not one.
+        flat = SimpleNamespace(description="flat 10mm")
+        install(FakeCAM([_OpSetup(None, [SimpleNamespace(name="Face1", tool=flat)])]))
+        out = _payload(cc.get_tool_list_handler())
+        assert out["tools"][0]["operations"] == [f"{cc._UNREAD_SEGMENT} / Face1"]
+        assert out["tools"][0]["setups"] == []
 
     def test_the_most_used_tool_comes_first(self, install, operation_cast_passthrough):
         install(self._cam())
@@ -1786,16 +2883,162 @@ class TestNcPrograms:
         assert "programs unavailable" in res["message"]
 
 
+class TestNcProgramPostedOperations:
+    """What a program POSTS is filteredOperations, not the single-entry 'operations' list - and an
+    operation whose toolpath is empty is in it, so it would post with nothing to cut."""
+
+    def _program(self, posted, **kw):
+        return SimpleNamespace(name="Main", machine=None, postConfiguration=None,
+                               operations=[object()], postParameters=None,
+                               filteredOperations=posted, **kw)
+
+    def test_the_posted_list_is_counted_beside_the_operations_property(self, install,
+                                                                       operation_cast_passthrough):
+        posted = [_row_op("Cut"), _row_op("Rough")]
+        install(SimpleNamespace(ncPrograms=_Coll([self._program(posted)])))
+        entry = _payload(cc.get_nc_programs_handler())["nc_programs"][0]
+        assert entry["operation_count"] == 1          # NCProgram.operations - the setup
+        assert entry["posted_operations"] == 2        # what actually posts
+        assert entry["empty_toolpath_count"] == 0
+        assert "empty_toolpaths" not in entry
+
+    def test_an_empty_toolpath_operation_is_named_as_one_that_would_post(
+            self, install, operation_cast_passthrough):
+        empty = _row_op("Rest Wall Finishing 1")
+        empty.hasToolpath = False
+        install(SimpleNamespace(ncPrograms=_Coll([self._program([_row_op("Cut"), empty])])))
+        entry = _payload(cc.get_nc_programs_handler())["nc_programs"][0]
+        assert entry["empty_toolpath_count"] == 1
+        assert entry["empty_toolpaths"] == ["Rest Wall Finishing 1"]
+
+    def test_the_named_empties_are_capped_while_the_count_is_not(self, install, monkeypatch,
+                                                                 operation_cast_passthrough):
+        monkeypatch.setattr(cc, "_NC_EMPTY_NAME_CAP", 2)
+        empties = []
+        for i in range(5):
+            op = _row_op(f"Empty{i}")
+            op.hasToolpath = False
+            empties.append(op)
+        install(SimpleNamespace(ncPrograms=_Coll([self._program(empties)])))
+        entry = _payload(cc.get_nc_programs_handler())["nc_programs"][0]
+        assert entry["empty_toolpath_count"] == 5 and len(entry["empty_toolpaths"]) == 2
+
+    def test_a_non_operation_entry_is_skipped(self, install, monkeypatch):
+        monkeypatch.setattr(adsk.cam.Operation, "cast",
+                            lambda x: x if getattr(x, "name", "") != "folder" else None)
+        install(SimpleNamespace(ncPrograms=_Coll([
+            self._program([SimpleNamespace(name="folder"), _row_op("Cut")])])))
+        entry = _payload(cc.get_nc_programs_handler())["nc_programs"][0]
+        assert entry["posted_operations"] == 2 and entry["empty_toolpath_count"] == 0
+
+    def test_an_unreadable_posted_list_claims_nothing(self, install):
+        # no filteredOperations at all: the keys are absent rather than reported as zero
+        install(SimpleNamespace(ncPrograms=_Coll([SimpleNamespace(
+            name="Main", machine=None, postConfiguration=None, operations=[],
+            postParameters=None)])))
+        entry = _payload(cc.get_nc_programs_handler())["nc_programs"][0]
+        assert "posted_operations" not in entry and "empty_toolpath_count" not in entry
+
+    def test_the_note_tells_the_two_lists_apart(self, install):
+        install(SimpleNamespace(ncPrograms=_Coll([])))
+        note = _payload(cc.get_nc_programs_handler())["note"]
+        assert "filteredOperations" in note and "empty_toolpath_count" in note
+
+    def _empty(self, name):
+        op = _row_op(name)
+        op.hasToolpath = False
+        return op
+
+    def test_a_name_two_posted_operations_share_is_told_apart_by_its_position(
+            self, install, operation_cast_passthrough):
+        # A program's posted list can draw operations from several setups and an operation name is
+        # unique only within one, so a bare name printed twice addresses two operations and
+        # separates neither. The position is the fact this read holds.
+        install(SimpleNamespace(ncPrograms=_Coll([self._program(
+            [self._empty("Rough"), _row_op("Cut"), self._empty("Rough")])])))
+        entry = _payload(cc.get_nc_programs_handler())["nc_programs"][0]
+        assert entry["empty_toolpaths"] == ["Rough (posted operation 1)",
+                                            "Rough (posted operation 3)"]
+        assert entry["empty_toolpath_count"] == 2
+
+    def test_a_name_only_one_posted_operation_carries_stays_the_bare_name(
+            self, install, operation_cast_passthrough):
+        # The spelling a caller passes to cam_get/cam_generate crosses unchanged where it already
+        # identifies one row - a position there separates nothing that was not already separate.
+        install(SimpleNamespace(ncPrograms=_Coll([self._program(
+            [self._empty("Bore"), self._empty("Face")])])))
+        entry = _payload(cc.get_nc_programs_handler())["nc_programs"][0]
+        assert entry["empty_toolpaths"] == ["Bore", "Face"]
+
+    def test_the_position_counts_over_the_posted_list_not_the_empty_rows(
+            self, install, operation_cast_passthrough):
+        # The discriminator has to address the POSTED list, which is what a reader is looking at;
+        # numbering the empty rows instead would print '2' for the fourth posted operation.
+        install(SimpleNamespace(ncPrograms=_Coll([self._program(
+            [self._empty("Rough"), _row_op("Cut"), _row_op("Drill"),
+             self._empty("Rough")])])))
+        entry = _payload(cc.get_nc_programs_handler())["nc_programs"][0]
+        assert entry["empty_toolpaths"] == ["Rough (posted operation 1)",
+                                            "Rough (posted operation 4)"]
+
+    def test_a_skipped_non_operation_entry_still_holds_its_position(
+            self, install, monkeypatch):
+        # Operation.cast returning None skips the row without consuming a position: the number is
+        # the index into filteredOperations, which is the list a reader counts along.
+        monkeypatch.setattr(adsk.cam.Operation, "cast",
+                            lambda x: x if getattr(x, "name", "") != "folder" else None)
+        install(SimpleNamespace(ncPrograms=_Coll([self._program(
+            [self._empty("Rough"), SimpleNamespace(name="folder"),
+             self._empty("Rough")])])))
+        entry = _payload(cc.get_nc_programs_handler())["nc_programs"][0]
+        assert entry["empty_toolpaths"] == ["Rough (posted operation 1)",
+                                            "Rough (posted operation 3)"]
+
+    def test_the_substitution_is_judged_over_every_empty_row_not_the_capped_head(
+            self, install, monkeypatch, operation_cast_passthrough):
+        # The cap is applied AFTER the substitution, or the visible list would print an address
+        # that reaches two operations while looking unique.
+        monkeypatch.setattr(cc, "_NC_EMPTY_NAME_CAP", 2)
+        install(SimpleNamespace(ncPrograms=_Coll([self._program(
+            [self._empty("Dup"), self._empty("Solo"), self._empty("Dup")])])))
+        entry = _payload(cc.get_nc_programs_handler())["nc_programs"][0]
+        assert entry["empty_toolpaths"] == ["Dup (posted operation 1)", "Solo"]
+        assert entry["empty_toolpath_count"] == 3
+
+    def test_an_empty_operation_whose_name_does_not_read_keeps_it(
+            self, install, operation_cast_passthrough):
+        # An empty discriminator is not a label: told_apart keeps the row's own name, so a nameless
+        # operation never renders as a bare position with nothing in front of it.
+        nameless = self._empty(None)
+        install(SimpleNamespace(ncPrograms=_Coll([self._program([nameless])])))
+        entry = _payload(cc.get_nc_programs_handler())["nc_programs"][0]
+        assert entry["empty_toolpaths"] == [None]
+
+    def test_the_note_describes_the_shape_the_rows_actually_take(
+            self, install, operation_cast_passthrough):
+        # The note and the label have to agree on ONE shape: the row KEEPS the operation's name and
+        # carries the position BESIDE it. A note saying the position replaces the name sends a
+        # reader hunting for a name that is still sitting there.
+        install(SimpleNamespace(ncPrograms=_Coll([self._program(
+            [self._empty("Rough"), self._empty("Rough")])])))
+        out = _payload(cc.get_nc_programs_handler())
+        rows = out["nc_programs"][0]["empty_toolpaths"]
+        assert all(r.startswith("Rough (") for r in rows)     # the name is KEPT, not replaced
+        assert "with its POSITION in the posted list beside it" in out["note"]
+
+
 # --- get_machining_time_handler: the setup scope + the getMachiningTime precondition ---
 
 class TestMachiningTimeScope:
-    def test_a_named_setup_scopes_the_estimate(self, install, operation_cast_passthrough):
+    def test_a_named_setup_scopes_the_estimate(self, install, object_collection,
+                                               operation_cast_passthrough):
         cam = _MTCam([_MTSetup("S1"), _MTSetup("S2")])
         install(cam)
         out = _payload(cc.get_machining_time_handler(setup="s2"))    # case-insensitive exact
         assert out["setup_count"] == 1 and out["setups"][0]["setup"] == "S2"
         assert out["total_machining_time_seconds"] == 120.0
-        assert len(cam.calls) == 1                                   # S1 was never timed
+        assert len(cam.aggregate_calls) == 1                          # S1 was never timed
+        assert [op.name for op in object_collection[0].items] == ["S2 op"]
 
     def test_a_duplicated_setup_name_is_refused(self, install, operation_cast_passthrough):
         install(_MTCam([_MTSetup("Dup"), _MTSetup("Dup")]))
@@ -1816,7 +3059,7 @@ class TestMachiningTimeScope:
         out = _payload(cc.get_machining_time_handler())
         assert "error" in out["setups"][0] and cam.calls == []
 
-    def test_a_raising_estimate_becomes_that_setups_error(self, install,
+    def test_a_raising_estimate_becomes_that_setups_error(self, install, object_collection,
                                                           operation_cast_passthrough, monkeypatch):
         cam = _MTCam([_MTSetup("S1")])
         install(cam)
@@ -1827,6 +3070,234 @@ class TestMachiningTimeScope:
         out = _payload(cc.get_machining_time_handler())
         assert out["setups"][0]["error"] == "post engine unavailable"
         assert out["total_machining_time_seconds"] == 0.0
+
+    def test_unknown_units_are_refused_by_name(self, install):
+        install(_MTCam([_MTSetup("S1")]))
+        res = cc.get_machining_time_handler(units="furlongs")
+        assert res["isError"] is True and "furlongs" in res["message"]
+
+
+# --- CAM-13: the SUPPRESSED operations are what breaks getMachiningTime, so they never go in ---
+
+class TestMachiningTimeExcludesSuppressed:
+    """Measured: the call fails ('Machining time could not be calculated') whenever a suppressed op
+    is in the target, while the same valid ops - with or without EMPTY-toolpath ops beside them -
+    return a time. So the timed target is a collection of the non-suppressed ops, and what was left
+    out is published rather than silently dropped."""
+
+    def _cam(self, install, ops):
+        cam = _MTCam([_MTSetup("S1", ops=ops)])
+        install(cam)
+        return cam
+
+    def test_suppressed_ops_are_kept_out_of_the_timed_collection(self, install, object_collection,
+                                                                 operation_cast_passthrough):
+        cam = self._cam(install, [_MTOp("Cut", valid=True),
+                                  _MTOp("Parked", valid=False, suppressed=True),
+                                  _MTOp("AlsoParked", valid=False, suppressed=True)])
+        out = _payload(cc.get_machining_time_handler())
+        assert [op.name for op in object_collection[0].items] == ["Cut"]
+        assert out["setups"][0]["excluded_suppressed"] == 2
+        assert out["setups"][0]["timed_operations"] == 1
+        # the SETUP object itself is never the target - that is the shape that fails live
+        assert not any(isinstance(c[0], _MTSetup) for c in cam.calls)
+
+    def test_empty_toolpath_ops_stay_in_the_collection(self, install, object_collection,
+                                                       operation_cast_passthrough):
+        # an op with a valid toolpath flag but nothing to cut is harmless to the call (measured),
+        # so excluding it would understate the job for no reason.
+        self._cam(install, [_MTOp("Cut", valid=True), _MTOp("Empty", valid=True)])
+        out = _payload(cc.get_machining_time_handler())
+        assert [op.name for op in object_collection[0].items] == ["Cut", "Empty"]
+        assert out["setups"][0]["excluded_suppressed"] == 0
+
+    def test_a_setup_of_only_suppressed_ops_reports_the_precondition(self, install,
+                                                                     object_collection,
+                                                                     operation_cast_passthrough):
+        cam = self._cam(install, [_MTOp("Parked", valid=True, suppressed=True)])
+        out = _payload(cc.get_machining_time_handler())
+        assert "error" in out["setups"][0]
+        assert out["setups"][0]["excluded_suppressed"] == 1
+        assert cam.calls == []            # nothing timed - the one valid toolpath was suppressed
+
+    def test_a_collection_that_refuses_an_item_is_an_error_not_a_short_estimate(
+            self, install, monkeypatch, operation_cast_passthrough):
+        import adsk.core
+        monkeypatch.setattr(adsk.core.ObjectCollection, "create",
+                            lambda: _RecordingCollection(accept=False))
+        cam = self._cam(install, [_MTOp("Cut", valid=True)])
+        out = _payload(cc.get_machining_time_handler())
+        assert "0 of 1" in out["setups"][0]["error"]
+        assert cam.calls == []
+
+    def test_an_empty_toolpath_op_is_named_not_timed(self, install, object_collection,
+                                                     operation_cast_passthrough):
+        # measured: a per-op call on an op with no toolpath raises "Machining time could not be
+        # calculated", while the same op inside the setup's collection is harmless. Reporting the
+        # state beats reporting a platform error the flags already predict.
+        cam = self._cam(install, [_MTOp("Cut", valid=True),
+                                  _MTOp("Empty", valid=True, has_toolpath=False)])
+        out = _payload(cc.get_machining_time_handler())
+        rows = {r["operation"]: r for r in out["setups"][0]["operations"]}
+        assert rows["Empty"] == {"operation": "Empty", "empty_toolpath": True}
+        assert "machining_time_seconds" not in rows["Empty"]
+        assert rows["Cut"]["machining_time_seconds"] == 60.0
+        # the doomed call is never made: only the op holding a toolpath was timed per-op
+        assert [c[0].name for c in cam.calls if isinstance(c[0], _MTOp)] == ["Cut"]
+        # ...and the empty op still rides in the setup's collection, which times fine
+        assert [op.name for op in object_collection[0].items] == ["Cut", "Empty"]
+
+    def test_the_empty_rows_count_against_the_cap(self, install, object_collection,
+                                                  operation_cast_passthrough, monkeypatch):
+        monkeypatch.setattr(cc, "_TIME_OP_CAP", 2)
+        self._cam(install, [_MTOp(f"Empty{i}", valid=True, has_toolpath=False) for i in range(4)])
+        out = _payload(cc.get_machining_time_handler())
+        assert len(out["setups"][0]["operations"]) == 2
+        assert out["setups"][0]["operations_truncated"] is True
+
+    def test_per_operation_rows_carry_time_and_cut_distance(self, install, object_collection,
+                                                            operation_cast_passthrough):
+        self._cam(install, [_MTOp("Cut", valid=True), _MTOp("Stale", valid=False)])
+        out = _payload(cc.get_machining_time_handler())
+        rows = out["setups"][0]["operations"]
+        # only the op carrying a valid toolpath is timed; feedDistance is CM -> mm
+        assert [r["operation"] for r in rows] == ["Cut"]
+        assert rows[0]["machining_time_seconds"] == 60.0
+        assert rows[0]["feed_distance"] == 1000.0 and rows[0]["rapid_distance"] == 250.0
+
+    def test_distances_scale_to_the_requested_unit(self, install, object_collection,
+                                                   operation_cast_passthrough):
+        self._cam(install, [_MTOp("Cut", valid=True)])
+        out = _payload(cc.get_machining_time_handler(units="cm"))
+        assert out["units"] == "cm"
+        assert out["setups"][0]["feed_distance"] == 1000.0        # 1000 cm stays 1000 cm
+        assert out["setups"][0]["operations"][0]["feed_distance"] == 100.0
+
+    def test_the_note_states_the_measured_non_summing_caveat(self, install, object_collection,
+                                                             operation_cast_passthrough):
+        self._cam(install, [_MTOp("Cut", valid=True)])
+        out = _payload(cc.get_machining_time_handler())
+        assert "do NOT sum" in out["note"] and "SUPPRESSED" in out["note"]
+
+    # --- CAM-18: BOTH totals ship, and the note says what each covers ---
+
+    def test_both_totals_are_published_so_the_gap_is_visible_on_this_job(
+            self, install, object_collection, operation_cast_passthrough):
+        # The aggregate is ONE getMachiningTime call over the collection; the sum is the per-op
+        # calls added up. They disagree (measured live, and the fake reproduces the shape), so the
+        # payload publishes both instead of leaving a caller to add the rows and guess which number
+        # is the job.
+        self._cam(install, [_MTOp("Cut", valid=True)])
+        rec = _payload(cc.get_machining_time_handler())["setups"][0]
+        assert rec["machining_time_seconds"] == 120.0
+        assert rec["operations_time_sum_seconds"] == 60.0
+        assert rec["operations_time_summed"] == 1
+        assert rec["operations_time_sum_seconds"] != rec["machining_time_seconds"]
+
+    def test_the_sum_adds_every_timed_row(self, install, object_collection,
+                                          operation_cast_passthrough):
+        self._cam(install, [_MTOp("Cut", valid=True), _MTOp("Cut2", valid=True),
+                            _MTOp("Cut3", valid=True)])
+        rec = _payload(cc.get_machining_time_handler())["setups"][0]
+        assert rec["operations_time_sum_seconds"] == 180.0
+        assert rec["operations_time_summed"] == 3
+
+    def test_an_empty_toolpath_row_contributes_nothing_and_is_not_counted(
+            self, install, object_collection, operation_cast_passthrough):
+        # an empty-toolpath row carries no time at all, so it may not silently enter the sum as a
+        # zero the count then claims was measured.
+        self._cam(install, [_MTOp("Cut", valid=True),
+                            _MTOp("Empty", valid=True, has_toolpath=False)])
+        rec = _payload(cc.get_machining_time_handler())["setups"][0]
+        assert len(rec["operations"]) == 2
+        assert rec["operations_time_sum_seconds"] == 60.0
+        assert rec["operations_time_summed"] == 1
+
+    def test_a_row_whose_own_call_errored_is_left_out_of_the_sum(
+            self, install, object_collection, operation_cast_passthrough, monkeypatch):
+        cam = self._cam(install, [_MTOp("Cut", valid=True)])
+        real = cam.getMachiningTime
+
+        def _boom(obj, *a):
+            if isinstance(obj, _MTOp):
+                raise RuntimeError("per-op estimate unavailable")
+            return real(obj, *a)
+        monkeypatch.setattr(cam, "getMachiningTime", _boom)
+        rec = _payload(cc.get_machining_time_handler())["setups"][0]
+        assert rec["operations_time_sum_seconds"] == 0.0
+        assert rec["operations_time_summed"] == 0
+
+    def test_a_truncated_row_pass_leaves_the_sum_covering_only_the_rows_present(
+            self, install, object_collection, operation_cast_passthrough, monkeypatch):
+        monkeypatch.setattr(cc, "_TIME_OP_CAP", 2)
+        self._cam(install, [_MTOp(f"Op{i}", valid=True) for i in range(5)])
+        rec = _payload(cc.get_machining_time_handler())["setups"][0]
+        assert rec["operations_truncated"] is True
+        assert rec["operations_time_summed"] == 2 and rec["operations_time_sum_seconds"] == 120.0
+
+    def test_the_note_names_both_totals_and_what_each_one_covers(self, install, object_collection,
+                                                                 operation_cast_passthrough):
+        self._cam(install, [_MTOp("Cut", valid=True)])
+        note = _payload(cc.get_machining_time_handler())["note"]
+        assert "operations_time_sum_seconds" in note and "operations_time_summed" in note
+        assert "not as a decomposition of the setup total" in note
+        assert "operations_truncated" in note
+
+    def test_per_op_rows_are_capped(self, install, object_collection, operation_cast_passthrough,
+                                    monkeypatch):
+        monkeypatch.setattr(cc, "_TIME_OP_CAP", 3)
+        self._cam(install, [_MTOp(f"Op{i}", valid=True) for i in range(5)])
+        out = _payload(cc.get_machining_time_handler())
+        assert len(out["setups"][0]["operations"]) == 3
+        assert out["setups"][0]["operations_truncated"] is True
+
+    def test_a_full_set_of_rows_is_not_flagged_truncated(self, install, object_collection,
+                                                         operation_cast_passthrough, monkeypatch):
+        monkeypatch.setattr(cc, "_TIME_OP_CAP", 3)
+        self._cam(install, [_MTOp(f"Op{i}", valid=True) for i in range(3)])
+        out = _payload(cc.get_machining_time_handler())
+        assert len(out["setups"][0]["operations"]) == 3
+        assert "operations_truncated" not in out["setups"][0]
+
+    def test_a_per_op_estimate_that_raises_becomes_that_rows_error(self, install,
+                                                                   object_collection,
+                                                                   operation_cast_passthrough,
+                                                                   monkeypatch):
+        # one op's estimate failing must not cost the setup total, which already came back
+        cam = self._cam(install, [_MTOp("Cut", valid=True)])
+        real = cam.getMachiningTime
+
+        def _boom(obj, *a):
+            if isinstance(obj, _MTOp):
+                raise RuntimeError("per-op estimate unavailable")
+            return real(obj, *a)
+        monkeypatch.setattr(cam, "getMachiningTime", _boom)
+        out = _payload(cc.get_machining_time_handler())
+        rec = out["setups"][0]
+        assert rec["machining_time_seconds"] == 120.0
+        assert rec["operations"][0] == {"operation": "Cut", "error": "per-op estimate unavailable"}
+
+    def test_a_non_operation_node_never_reaches_the_collection(self, install, object_collection,
+                                                               monkeypatch):
+        # a setup that exposes .operations is walked WITHOUT a cast (the container branch), so a
+        # node that is not an Operation reaches _timeable_ops itself - and must be dropped there,
+        # never added to a collection getMachiningTime is about to be handed.
+        monkeypatch.setattr(adsk.cam.Operation, "cast",
+                            lambda x: None if getattr(x, "name", "") == "Folderish" else x)
+        cam = _MTCam([FakeSetup("S1", ops=[SimpleNamespace(name="Folderish"),
+                                           _MTOp("Cut", valid=True)])])
+        install(cam)
+        _payload(cc.get_machining_time_handler())
+        assert [op.name for op in object_collection[0].items] == ["Cut"]
+
+    def test_an_uncreatable_collection_is_an_error_not_a_setup_object_fallback(
+            self, install, monkeypatch, operation_cast_passthrough):
+        import adsk.core
+        monkeypatch.setattr(adsk.core.ObjectCollection, "create", lambda: None)
+        cam = self._cam(install, [_MTOp("Cut", valid=True)])
+        out = _payload(cc.get_machining_time_handler())
+        assert "Could not build the operation collection" in out["setups"][0]["error"]
+        assert cam.calls == []          # never falls back to timing the Setup object
 
 
 # --- the async-generation registry: the handle cam_get_status reads, and what keeps a launch alive ---
@@ -1839,6 +3310,7 @@ class TestRegisterFuture:
         monkeypatch.setattr(cc, "_GENERATIONS", {})
         monkeypatch.setattr(cc, "_HANDLE_SEQ", [0])
         monkeypatch.setattr(cc, "_active_identity", lambda: ("Part.f3d", "urn:adsk:1"))
+        monkeypatch.setattr(cc, "document_key", lambda: "urn:adsk:1")
         return cc._GENERATIONS
 
     def test_each_launch_mints_its_own_handle(self, registry):
@@ -1862,8 +3334,55 @@ class TestRegisterFuture:
                                             "operation", False, "  Face1  ")
         entry = registry[handle]
         assert entry["doc_name"] == "Part.f3d" and entry["doc_urn"] == "urn:adsk:1"
+        assert entry["doc_key"] == "urn:adsk:1"       # what the status read COMPARES on
         assert entry["target_name"] == "Face1"       # stripped: the status read matches on it
         assert entry["scope"] == "operation" and entry["skip_valid"] is False
+
+    def test_a_never_saved_launch_document_is_still_bound_by_its_key(self, monkeypatch, registry):
+        # THE POINT of stamping the key: a never-saved document has no urn, so a urn-only record
+        # cannot identify a launch from one, and its status read has only the Future to settle on.
+        # The per-instance key identifies it, and doc_name/doc_urn stay as they read (the payload
+        # NAMES the generating document from them).
+        monkeypatch.setattr(cc, "_active_identity", lambda: ("Untitled", None))
+        monkeypatch.setattr(cc, "document_key", lambda: "unsaved:7")
+        handle, _total = cc.register_future(SimpleNamespace(numberOfOperations=1), "whole document",
+                                            "document", True)
+        entry = registry[handle]
+        assert entry["doc_key"] == "unsaved:7"
+        assert entry["doc_urn"] is None and entry["doc_name"] == "Untitled"
+
+    def test_the_entry_keeps_the_launch_DOCUMENT_beside_its_key(self, monkeypatch, registry):
+        # The key is DERIVED from what reads on the document - document_key prefers a data-file id -
+        # so it changes under a launch that is still the same open document the moment one becomes
+        # readable. The document itself is what the status read compares when that happens.
+        doc = SimpleNamespace(name="Untitled")
+        monkeypatch.setattr(cc, "app", SimpleNamespace(activeDocument=doc))
+        handle, _total = cc.register_future(SimpleNamespace(numberOfOperations=1), "whole document",
+                                            "document", True)
+        assert registry[handle]["doc"] is doc
+
+    def test_a_launch_whose_active_document_will_not_read_records_no_handle(self, monkeypatch,
+                                                                            registry):
+        # None, never a raise out of the launch: the entry then compares on its key alone, which is
+        # what it did before there was a handle to keep.
+        class _NoActiveDocument:
+            @property
+            def activeDocument(self):
+                raise RuntimeError("no active document")
+
+        monkeypatch.setattr(cc, "app", _NoActiveDocument())
+        handle, _total = cc.register_future(SimpleNamespace(numberOfOperations=1), "whole document",
+                                            "document", True)
+        assert registry[handle]["doc"] is None
+
+    def test_a_launch_with_no_readable_document_records_no_key(self, monkeypatch, registry):
+        # document_key answers None when nothing reads. Recorded as None, so the status read
+        # answers "cannot be compared" instead of comparing two absent identities into a match.
+        monkeypatch.setattr(cc, "_active_identity", lambda: (None, None))
+        monkeypatch.setattr(cc, "document_key", lambda: None)
+        handle, _total = cc.register_future(SimpleNamespace(numberOfOperations=1), "whole document",
+                                            "document", True)
+        assert registry[handle]["doc_key"] is None
 
     def test_an_unreadable_operation_count_is_null_not_zero(self, registry):
         # 0 would read as "nothing to generate" and settle the handle complete immediately.
@@ -1871,6 +3390,68 @@ class TestRegisterFuture:
         assert total is None and registry[handle]["total"] is None
         assert registry[handle]["skip_valid"] is True     # coerced to a real bool
         assert registry[handle]["target_name"] == ""      # a whole-document launch names no target
+
+    def test_a_key_flip_re_stamps_the_launch_it_belongs_to(self, monkeypatch, registry):
+        # A launch document that is SAVED mid-generation answers a new key without closing. The
+        # stored key is what the status read compares first, so an entry still holding the
+        # superseded one reports a mismatch on every later poll and leans on the handle fallback for
+        # the rest of the generation instead of only for the call that detected the flip.
+        monkeypatch.setattr(cc, "document_key", lambda: "unsaved:7")
+        handle, _total = cc.register_future(SimpleNamespace(numberOfOperations=1), "whole document",
+                                            "document", True)
+        cc._carry_generation_keys("unsaved:7", "urn:lineage:saved")
+        assert registry[handle]["doc_key"] == "urn:lineage:saved"
+
+    def test_a_flip_of_a_different_documents_key_leaves_the_launch_alone(self, monkeypatch, registry):
+        # The announcement is broadcast to every consumer and names ONE key: re-stamping a launch
+        # whose key did not change would bind it to a document it was never launched from.
+        monkeypatch.setattr(cc, "document_key", lambda: "unsaved:7")
+        handle, _total = cc.register_future(SimpleNamespace(numberOfOperations=1), "whole document",
+                                            "document", True)
+        cc._carry_generation_keys("unsaved:99", "urn:lineage:elsewhere")
+        assert registry[handle]["doc_key"] == "unsaved:7"
+
+    def test_the_re_stamp_is_WIRED_to_the_shared_announcement(self, monkeypatch, registry):
+        # The listener existing is not the same as it being registered: without the on_key_renamed
+        # call at import, the two tests above still pass and no real key flip ever reaches this
+        # registry. Driven through the shared key read itself.
+        wg = load_tool("_write_guard")
+
+        class _Handle:
+            def __init__(self, doc):
+                self._doc = doc
+                self.dataFile = SimpleNamespace(id=doc.urn) if doc.urn else None
+                self.isValid = True
+
+            def __eq__(self, other):
+                return isinstance(other, _Handle) and other._doc is self._doc
+            __hash__ = None
+
+        class _Doc:
+            urn = None
+
+        class _App:
+            def __init__(self, doc):
+                self._doc = doc
+
+            @property
+            def activeDocument(self):
+                return _Handle(self._doc)
+
+        doc = _Doc()
+        monkeypatch.setattr(wg, "app", _App(doc))
+        monkeypatch.setattr(wg, "_UNSAVED_DOC_SEQ", 0)
+        wg._UNSAVED_DOC_KEYS.clear()
+        try:
+            monkeypatch.setattr(cc, "document_key", wg.document_key)
+            handle, _total = cc.register_future(SimpleNamespace(numberOfOperations=1),
+                                                "whole document", "document", True)
+            assert registry[handle]["doc_key"] == "unsaved:1"
+            doc.urn = "urn:lineage:saved"                  # the launch document is saved
+            assert wg.document_key() == "urn:lineage:saved"
+            assert registry[handle]["doc_key"] == "urn:lineage:saved"
+        finally:
+            wg._UNSAVED_DOC_KEYS.clear()
 
 
 # --- the machine library: the label vocabulary, the query, and the catalog ---
@@ -2044,6 +3625,23 @@ def _dying_after(items):
     return _gen()
 
 
+class _DyingCollection:
+    """A count/item collection that promises one more item than item() will hand over - the
+    mid-walk failure in the protocol iter_collection actually reads."""
+
+    def __init__(self, items):
+        self._items = list(items)
+
+    @property
+    def count(self):
+        return len(self._items) + 1
+
+    def item(self, i):
+        if i >= len(self._items):
+            raise RuntimeError("collection died mid-walk")
+        return self._items[i]
+
+
 class TestPartialReadsAreFlaggedIncomplete:
     # _model_names / _references_in take the GETTER, so a property that raises before yielding any
     # collection at all is a THIRD kind of incompleteness beside the cap and the dying walk.
@@ -2058,8 +3656,10 @@ class TestPartialReadsAreFlaggedIncomplete:
         assert names == ["A"] and truncated is False
 
     def test_operations_from_a_dying_walk_read_truncated(self):
+        # the ops walk reads count/item (iter_collection's protocol), so the dying collection here
+        # promises one more item than it can hand over - the rows already read must survive.
         ops = [FakeOperation("Op1"), FakeOperation("Op2")]
-        setup = SimpleNamespace(allOperations=_dying_after(ops))
+        setup = SimpleNamespace(allOperations=_DyingCollection(ops))
         summaries, truncated = cc._operations_in(setup)
         assert [s["name"] for s in summaries] == ["Op1", "Op2"]
         assert truncated is True
@@ -2222,3 +3822,337 @@ class TestLibraryAssets:
         lib = _library({"root": ([], [_url("A"), _url("B")])})
         assets, truncated = cc.library_assets(lib, root, max_assets=3)
         assert [a.leafName for a in assets] == ["A", "B"] and truncated is False
+
+
+# ── addressing ONE asset by name: asset_leaf / asset_key / asset_leaf_keys / assets_named ────────
+#
+# The matcher every library DELETE resolves its target on (cam_delete_machine, cam_delete_template).
+# A stored asset's leafName carries the file extension the object's own name does not, so the stem
+# has to answer too - and both comparisons stay EXACT, because a substring match here deletes the
+# neighbour whose name merely starts the same.
+
+class TestAssetLeafKeys:
+    """The names ONE asset answers to. Pinned directly because one of them is not observable
+    through either delete handler: an EMPTY key can only match a wanted name that is empty, and no
+    name a handler can reach is - so the guard that keeps '' out of the set is asserted here or
+    nowhere."""
+
+    def test_an_extension_less_leaf_answers_to_itself_alone(self):
+        assert cc.asset_leaf_keys(_url("root/SweepMach")) == {"sweepmach"}
+
+    def test_a_stored_leaf_answers_to_both_its_name_and_its_stem(self):
+        assert cc.asset_leaf_keys(_url("root/SweepMach.mch")) == {"sweepmach.mch", "sweepmach"}
+
+    def test_a_dotted_name_keeps_everything_before_the_LAST_dot(self):
+        # 'Mill v1.2' stored as 'Mill v1.2.mch': a FIRST-dot split reads the stem as 'Mill v1' and
+        # the asset becomes unreachable by its own name.
+        assert cc.asset_leaf_keys(_url("root/Mill v1.2.mch")) == {"mill v1.2.mch", "mill v1.2"}
+
+    def test_a_leafName_that_does_not_read_contributes_no_stem(self):
+        # safe() answers None, asset_leaf answers '' - and '' must not become a stem key that any
+        # empty wanted-name would match.
+        bad = SimpleNamespace(toString=lambda: "root/x")
+        assert cc.asset_leaf(bad) == ""
+        assert cc.asset_leaf_keys(bad) == {""}
+
+
+class TestAssetsNamed:
+    def test_an_asset_is_reached_by_the_STEM_of_its_stored_leaf(self):
+        hits = cc.assets_named([_url("root/GyroTmpl.f3dhsm-template")], {"gyrotmpl"})
+        assert [a.leafName for a in hits] == ["GyroTmpl.f3dhsm-template"]
+
+    def test_an_asset_stored_without_an_extension_is_reached_by_its_whole_leaf(self):
+        hits = cc.assets_named([_url("root/GyroTmpl")], {"gyrotmpl"})
+        assert [a.leafName for a in hits] == ["GyroTmpl"]
+
+    def test_a_neighbour_whose_name_merely_STARTS_the_same_is_not_a_hit(self):
+        assets = [_url("root/GyroTmpl Mk2.f3dhsm-template"), _url("root/GyroTmplExtra")]
+        assert cc.assets_named(assets, {"gyrotmpl"}) == []
+
+    def test_the_match_is_case_insensitive_on_both_sides(self):
+        hits = cc.assets_named([_url("root/GyroTmpl.mch")], {"gyrotmpl"})
+        assert len(hits) == 1
+
+    def test_two_urls_for_ONE_asset_read_as_one_candidate(self):
+        # de-dup is by url STRING: the same address arriving twice must not read as a duplicate the
+        # delete then refuses to guess between.
+        same = [_url("root/A.mch"), _url("root/A.mch")]
+        assert len(cc.assets_named(same, {"a"})) == 1
+
+    def test_two_assets_of_one_name_in_DIFFERENT_folders_stay_two_candidates(self):
+        both = [_url("root/A.mch"), _url("root/Mills/A.mch")]
+        assert len(cc.assets_named(both, {"a"})) == 2
+
+    def test_any_of_the_wanted_names_matches(self):
+        # the delete searches by the name it was asked for AND the name the object resolved to
+        hits = cc.assets_named([_url("root/VF-2.mch")], {"shop mill #3", "vf-2"})
+        assert [a.leafName for a in hits] == ["VF-2.mch"]
+
+    def test_asset_key_falls_back_to_the_object_when_the_url_does_not_stringify(self):
+        # two urls for one asset must not read as two candidates just because toString raised
+        class _Mute:
+            leafName = "A.mch"
+
+            def toString(self):
+                raise RuntimeError("url is not addressable")
+        mute = _Mute()
+        assert cc.asset_key(mute) is mute
+
+
+# ── the machine's own limits: spindle speed + axis travels off its kinematics tree ───────────────
+#
+# The route under test is the SUPPORTED one: Machine.elements -> the kinematics element by its
+# staticTypeId -> parts (a tree). Machine.kinematics reaches the same tree and is flagged "not
+# officially supported", so a test below proves it is never read.
+
+
+class _MachSpindle:
+    def __init__(self, max_speed=12000.0, min_speed=0.0):
+        self.maxSpeed = max_speed
+        self.minSpeed = min_speed
+
+
+class _MachStation:
+    def __init__(self, diameter=0.0, length=0.0):
+        self.maxToolDiameter = diameter
+        self.maxToolLength = length
+
+
+class _MachAxis:
+    """A MachineAxis. The axis TYPE decides the unit its range carries (cm for linear, radians for
+    rotary), so it is read from the same enum production compares against, never hand-typed."""
+
+    _KINDS = {"linear": "LinearMachineAxisType", "rotary": "RotaryMachineAxisType"}
+
+    def __init__(self, name, kind="linear", lo=0.0, hi=0.0, infinite=False, has_limits=True):
+        self.name = name
+        self.axisType = (getattr(adsk.cam.MachineAxisTypes, self._KINDS[kind])
+                         if kind in self._KINDS else object())
+        self.hasLimits = has_limits
+        self.physicalRange = SimpleNamespace(min=lo, max=hi, isInfinite=infinite)
+
+
+class _MachPart:
+    def __init__(self, axis=None, spindle=None, station=None, children=()):
+        self.axis = axis
+        self.spindle = spindle
+        self.toolStation = station
+        self.children = _Coll(list(children))
+
+
+class _MachElements:
+    """MachineElements: the type-filtered accessors a caller reaches the kinematics element by."""
+
+    def __init__(self, parts, has_kinematics=True, default_answers=True):
+        self._parts = _Coll(list(parts))
+        self._has = has_kinematics
+        self._default_answers = default_answers
+        self.asked = []
+
+    def _element(self):
+        return SimpleNamespace(parts=self._parts)
+
+    def defaultItemByType(self, type_id):
+        self.asked.append(type_id)
+        return self._element() if (self._has and self._default_answers) else None
+
+    def itemsByType(self, type_id):
+        self.asked.append(type_id)
+        return [self._element()] if self._has else []
+
+
+class _Machine:
+    def __init__(self, elements, description="Haas with A-axis"):
+        self.elements = elements
+        self.description = description
+        self.unsupported_reads = 0
+
+    @property
+    def kinematics(self):
+        # the route the bindings flag "not officially supported" - reading it is the defect
+        self.unsupported_reads += 1
+        return None
+
+
+def _haas():
+    """The measured Haas A-axis shape: a Z axis carrying the spindle head, then Y, X and an
+    unbounded A axis nested under each other."""
+    head = _MachPart(spindle=_MachSpindle(12000.0), station=_MachStation())
+    a_axis = _MachPart(axis=_MachAxis("A", kind="rotary", lo=-math.inf, hi=math.inf, infinite=True,
+                                      has_limits=False))
+    x_axis = _MachPart(axis=_MachAxis("X", lo=-76.2, hi=0.0), children=[a_axis])
+    y_axis = _MachPart(axis=_MachAxis("Y", lo=-40.6, hi=0.0), children=[x_axis])
+    z_axis = _MachPart(axis=_MachAxis("Z", lo=-50.8, hi=0.0), children=[head])
+    return _Machine(_MachElements([_MachPart(), z_axis, y_axis]))
+
+
+class _MachineSetup:
+    def __init__(self, name, machine=None):
+        self.name = name
+        self.machine = machine
+
+
+class TestMachineLimits:
+    def test_spindle_max_and_axis_travels_read_in_mm(self, install):
+        install(FakeCAM([_MachineSetup("Op1", _haas())]))
+        out = _payload(cc.get_machine_limits_handler())
+        rec = out["setups"][0]
+        assert rec["machine"] == "Haas with A-axis"
+        assert rec["kinematics_readable"] is True
+        assert rec["spindle"]["max_rpm"] == 12000.0
+        travels = {a["name"]: a.get("travel") for a in rec["axes"]}
+        assert travels["X"] == 762.0 and travels["Y"] == 406.0 and travels["Z"] == 508.0
+        assert out["units"] == "mm"
+
+    def test_travels_scale_with_the_units_input(self, install):
+        install(FakeCAM([_MachineSetup("Op1", _haas())]))
+        out = _payload(cc.get_machine_limits_handler(units="in"))
+        travels = {a["name"]: a.get("travel") for a in out["setups"][0]["axes"]}
+        assert travels["X"] == 30.0                       # 76.2 cm = 30 in
+        assert out["units"] == "in"
+
+    def test_an_infinite_rotary_axis_publishes_no_travel_number(self, install):
+        # -inf/+inf is not a travel, and it is not valid JSON for a strict client either.
+        install(FakeCAM([_MachineSetup("Op1", _haas())]))
+        out = _payload(cc.get_machine_limits_handler())
+        a_axis = [a for a in out["setups"][0]["axes"] if a["name"] == "A"][0]
+        assert a_axis["is_infinite"] is True and a_axis["has_limits"] is False
+        assert "travel" not in a_axis and "travel_deg" not in a_axis
+
+    def test_a_bounded_rotary_axis_reads_in_degrees(self, install):
+        rotary = _MachPart(axis=_MachAxis("B", kind="rotary", lo=0.0, hi=math.pi))
+        install(FakeCAM([_MachineSetup("Op1", _Machine(_MachElements([rotary])))]))
+        out = _payload(cc.get_machine_limits_handler())
+        axis = out["setups"][0]["axes"][0]
+        assert axis["kind"] == "rotary" and axis["travel_deg"] == 180.0
+        assert "travel" not in axis                        # radians are never reported as a length
+
+    def test_an_undecodable_axis_type_publishes_the_raw_range_unconverted(self, install):
+        odd = _MachPart(axis=_MachAxis("W", kind="?", lo=-5.0, hi=5.0))
+        install(FakeCAM([_MachineSetup("Op1", _Machine(_MachElements([odd])))]))
+        axis = _payload(cc.get_machine_limits_handler())["setups"][0]["axes"][0]
+        assert axis["kind"] is None and axis["range_raw"] == [-5.0, 5.0]
+        assert "travel" not in axis and "travel_deg" not in axis
+
+    def test_zero_tool_station_limits_are_not_published_as_limits(self, install):
+        # measured: maxToolDiameter/maxToolLength read 0.0 on a machine whose spindle read 12000 -
+        # publishing 0 would read as "no tool wider than nothing fits".
+        install(FakeCAM([_MachineSetup("Op1", _haas())]))
+        assert "tool_stations" not in _payload(cc.get_machine_limits_handler())["setups"][0]
+
+    def test_a_real_tool_station_limit_is_published(self, install):
+        part = _MachPart(station=_MachStation(diameter=5.0, length=10.0))
+        install(FakeCAM([_MachineSetup("Op1", _Machine(_MachElements([part])))]))
+        station = _payload(cc.get_machine_limits_handler())["setups"][0]["tool_stations"][0]
+        assert station == {"max_tool_diameter": 50.0, "max_tool_length": 100.0, "units": "mm"}
+
+    def test_the_unsupported_kinematics_shortcut_is_never_read(self, install):
+        machine = _haas()
+        install(FakeCAM([_MachineSetup("Op1", machine)]))
+        _payload(cc.get_machine_limits_handler())
+        assert machine.unsupported_reads == 0
+        assert machine.elements.asked[0] == adsk.cam.KinematicsMachineElement.staticTypeId()
+
+    def test_the_filtered_list_answers_when_there_is_no_default_element(self, install):
+        machine = _Machine(_MachElements([_MachPart(spindle=_MachSpindle(8000.0))],
+                                         default_answers=False))
+        install(FakeCAM([_MachineSetup("Op1", machine)]))
+        rec = _payload(cc.get_machine_limits_handler())["setups"][0]
+        assert rec["spindle"]["max_rpm"] == 8000.0
+
+    def test_a_machine_without_kinematics_says_so(self, install):
+        machine = _Machine(_MachElements([], has_kinematics=False))
+        install(FakeCAM([_MachineSetup("Op1", machine)]))
+        rec = _payload(cc.get_machine_limits_handler())["setups"][0]
+        assert rec["kinematics_readable"] is False and rec["axes"] == []
+
+    def test_a_setup_with_no_machine_is_blocked_not_silent(self, install):
+        install(FakeCAM([_MachineSetup("Op1", None)]))
+        rec = _payload(cc.get_machine_limits_handler())["setups"][0]
+        assert rec["machine"] is None and rec["blocked_by"] == ["no_machine_selected"]
+
+    def test_the_setup_filter_scopes_the_read(self, install):
+        install(FakeCAM([_MachineSetup("Op1", _haas()), _MachineSetup("Op2", None)]))
+        out = _payload(cc.get_machine_limits_handler(setup="op2"))
+        assert out["setup_count"] == 1 and out["setups"][0]["setup"] == "Op2"
+
+    def test_a_duplicated_setup_name_is_refused(self, install):
+        install(FakeCAM([_MachineSetup("Dup"), _MachineSetup("Dup")]))
+        res = cc.get_machine_limits_handler(setup="Dup")
+        assert res["isError"] is True and "ambiguous" in res["message"].lower()
+
+    def test_unknown_units_are_refused_by_name(self, install):
+        install(FakeCAM([_MachineSetup("Op1", _haas())]))
+        res = cc.get_machine_limits_handler(units="cubits")
+        assert res["isError"] is True and "cubits" in res["message"]
+
+    def test_the_note_keeps_the_machine_dimension_trap_out_of_the_travels(self, install):
+        install(FakeCAM([_MachineSetup("Op1", _haas())]))
+        assert "machine_dimension_x/y/z" in _payload(cc.get_machine_limits_handler())["note"]
+
+    def test_the_fastest_spindle_is_the_one_the_comparison_uses(self):
+        machine = _Machine(_MachElements([_MachPart(spindle=_MachSpindle(6000.0)),
+                                          _MachPart(spindle=_MachSpindle(24000.0))]))
+        assert cc.machine_spindle_max(machine) == 24000.0
+        limits = cc.machine_limits(machine, 10.0, "mm")
+        assert limits["spindle"]["max_rpm"] == 24000.0 and limits["spindle_count"] == 2
+
+    def test_a_zero_maxspeed_is_not_a_limit(self):
+        # 0 rpm bounds nothing; reported as a limit it would make every operation over-max.
+        machine = _Machine(_MachElements([_MachPart(spindle=_MachSpindle(0.0))]))
+        assert cc.machine_spindle_max(machine) is None
+        assert cc.machine_limits(machine, 10.0, "mm")["spindle"]["max_rpm"] is None
+
+    def test_no_machine_has_no_maximum(self):
+        assert cc.machine_spindle_max(None) is None
+
+    def test_the_parts_walk_is_depth_bounded(self):
+        deep = _MachPart()
+        deep.children = _Coll([deep])                       # a self-referencing tree
+        machine = _Machine(_MachElements([deep]))
+        assert len(cc.kinematics_parts(machine)) == cc._MACHINE_PART_DEPTH + 1
+
+
+# ── the per-operation "does it ask for more than the machine allows" comparison ──────────────────
+
+class _SpindleParams:
+    def __init__(self, rpm):
+        self._rpm = rpm
+
+    def itemByName(self, name):
+        if name != "tool_spindleSpeed" or self._rpm is None:
+            return None
+        return SimpleNamespace(value=SimpleNamespace(value=self._rpm))
+
+
+class _SpindleOp:
+    def __init__(self, rpm=None, name="Op"):
+        self.name = name
+        self.parameters = _SpindleParams(rpm)
+
+
+class TestSpindleCheck:
+    def test_over_the_maximum_is_true_with_both_numbers(self):
+        over, requested, marker = cc.spindle_check(_SpindleOp(24999.0), 12000.0)
+        assert over is True and requested == 24999.0 and marker is None
+
+    def test_exactly_at_the_maximum_is_not_over(self):
+        over, requested, marker = cc.spindle_check(_SpindleOp(12000.0), 12000.0)
+        assert over is False and requested == 12000.0 and marker is None
+
+    def test_one_rpm_over_the_maximum_is_over(self):
+        assert cc.spindle_check(_SpindleOp(12000.1), 12000.0)[0] is True
+
+    def test_under_the_maximum_is_false(self):
+        assert cc.spindle_check(_SpindleOp(8000.0), 12000.0)[0] is False
+
+    def test_an_unreadable_machine_maximum_is_null_with_a_marker(self):
+        over, requested, marker = cc.spindle_check(_SpindleOp(24999.0), None)
+        assert over is None and requested is None and marker == "machine_max_unavailable"
+
+    def test_an_unreadable_op_speed_is_null_with_its_own_marker(self):
+        over, requested, marker = cc.spindle_check(_SpindleOp(None), 12000.0)
+        assert over is None and marker == "op_spindle_speed_unreadable"
+
+    def test_an_op_without_parameters_reads_no_speed(self):
+        assert cc.op_spindle_speed(SimpleNamespace(name="Op")) is None

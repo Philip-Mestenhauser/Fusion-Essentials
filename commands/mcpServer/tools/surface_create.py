@@ -17,6 +17,7 @@ from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, scale, target_component
 from . import _common
 from . import _inputs
+from . import _sketch_detail
 from . import _assert
 
 app = adsk.core.Application.get()
@@ -89,17 +90,15 @@ def _body_names_and_solid(feature):
 
 
 def _landed_depth(feature, want_cm, k):
-    """(depth in display units, error) read off the CREATED ExtrudeFeature.
-
-    MEASURED: extentOne is a DistanceExtentDefinition, and a symmetric extrude's is a
-    SymmetricExtentDefinition; both carry .distance as a ModelParameter reading CM with the
-    requested SIGN kept (-15 mm read back -1.5). So the depth published is the feature's own, never
-    the echoed input, and a depth disagreeing with the request is an error rather than a false ok.
+    """(depth in display units, error) over the shared extent read-back (_common.landed_extent_cm,
+    which carries the measured contract and the match band). The depth published is the feature's
+    own, never the echoed input, and a depth disagreeing with the request is an error rather than a
+    false ok. What is local here is the display-unit projection and this surface's own sentence.
     A depth that cannot be read comes back None, which the caller names in `unverified`."""
-    got = safe(lambda: feature.extentOne.distance.value)
-    if not isinstance(got, float):
+    got = _common.landed_extent_cm(feature)
+    if got is None:
         return None, ""
-    if abs(got - want_cm) > 1e-6:
+    if abs(got - want_cm) > _common.EXTENT_MATCH_TOL_CM:
         return None, (f"The surface was extruded but its depth reads back {round(got / k, 6)}, not "
                       f"the requested {round(want_cm / k, 6)}.")
     return round(got / k, 6), ""
@@ -108,7 +107,8 @@ def _landed_depth(feature, want_cm, k):
 # ── surface_extrude ─────────────────────────────────────────────────────────
 
 def extrude_handler(sketch_name: str = "", curves=None, distance: float = 0.0,
-                    units: str = "mm", symmetric: bool = False, operation: str = "new") -> dict:
+                    units: str = "mm", symmetric: bool = False, operation: str = "new",
+                    component: str = "") -> dict:
     """Extrude an OPEN profile into a sheet (surface) body - isSolid == False."""
     k = scale(units)
     if k is None:
@@ -139,7 +139,8 @@ def extrude_handler(sketch_name: str = "", curves=None, distance: float = 0.0,
         profile, perr = _open_profile_from_curves(host, ents)
         source = "curves"
     else:
-        sketch, requested, ambiguous = _common.find_or_recent_sketch(design, sketch_name)
+        sketch, requested, ambiguous = _sketch_detail.scoped_or_recent_sketch(
+            design, sketch_name, component)
         if ambiguous:
             return error(ambiguous)
         if not sketch:
@@ -213,7 +214,8 @@ def extrude_handler(sketch_name: str = "", curves=None, distance: float = 0.0,
 # ── surface_revolve ─────────────────────────────────────────────────────────
 
 def revolve_handler(sketch_name: str = "", curves=None, axis: str = "z",
-                    angle_deg: float = 360.0, symmetric: bool = False, operation: str = "new") -> dict:
+                    angle_deg: float = 360.0, symmetric: bool = False, operation: str = "new",
+                    component: str = "") -> dict:
     """Revolve an OPEN profile about an axis into a sheet (surface) body - isSolid == False."""
     try:
         ang = float(angle_deg)
@@ -249,7 +251,8 @@ def revolve_handler(sketch_name: str = "", curves=None, axis: str = "z",
         profile, perr = _open_profile_from_curves(host, ents)
         source = "curves"
     else:
-        sketch, requested, ambiguous = _common.find_or_recent_sketch(design, sketch_name)
+        sketch, requested, ambiguous = _sketch_detail.scoped_or_recent_sketch(
+            design, sketch_name, component)
         if ambiguous:
             return error(ambiguous)
         if not sketch:
@@ -532,6 +535,7 @@ surface_extrude_tool = (
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("symmetric", {"type": "boolean", "description": "Extrude both sides (default false)."})
     .add_input_property(*_inputs.boolean_op(options=("new", "join"), default="new").as_property())
+    .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
     .strict_schema()
 )
 surface_extrude_item = Item.create_tool_item(tool=surface_extrude_tool, write="write", handler=extrude_handler,
@@ -555,6 +559,7 @@ surface_revolve_tool = (
     .add_input_property("angle_deg", {"type": "number", "description": "Sweep angle in degrees (360 = full, default)."})
     .add_input_property("symmetric", {"type": "boolean", "description": "Split the angle both ways (default false)."})
     .add_input_property(*_inputs.boolean_op(options=("new", "join"), default="new").as_property())
+    .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
     .strict_schema()
 )
 surface_revolve_item = Item.create_tool_item(tool=surface_revolve_tool, write="write", handler=revolve_handler,

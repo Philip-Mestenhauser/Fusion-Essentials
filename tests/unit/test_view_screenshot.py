@@ -253,6 +253,14 @@ class TestFitToRestoreDisclosure:
         monkeypatch.setattr(gs, "_isolate_for_fit",
                             lambda name: (lambda: list(stuck), object(), None))
 
+    def test_an_unresolved_fit_to_is_an_error_before_anything_is_hidden(self, rig):
+        # the shared isolate hands back its own refusal (a miss, or an ambiguous name naming the
+        # candidates); the shot must not proceed on a frame nobody chose
+        rig.setattr(gs, "_isolate_for_fit",
+                    lambda name: (None, None, "fit_to: 'Ghost' matched no occurrence."))
+        result = gs.handler(fit_to="Ghost")
+        assert result["isError"] is True and "Ghost" in result["message"]
+
     def test_a_clean_restore_leaves_the_image_alone(self, rig):
         self._stub_isolate(rig, [])
         result = gs.handler(fit_to="Bracket:1")
@@ -552,3 +560,38 @@ class TestKeepVisible:
     def test_missing_path_is_hidden(self):
         assert gs._keep_visible(None, "Frame:1") is False
         assert gs._keep_visible("Frame:1", None) is False
+
+
+class TestHandlerInputGuards:
+    """The two guards ahead of any camera move: an unknown view name, and pixel dimensions that
+    are not numbers at all (which must fall back to the documented default, not raise)."""
+
+    @pytest.fixture
+    def rig(self, monkeypatch):
+        vp = SimpleNamespace(camera=SimpleNamespace(viewExtents=1.0), fit=lambda: None)
+        monkeypatch.setattr(gs, "app", SimpleNamespace(activeViewport=vp))
+        monkeypatch.setattr(gs._common, "design", lambda: None)
+        monkeypatch.setattr(gs._view_common, "apply_named_view", lambda v, name: None)
+        return monkeypatch
+
+    def test_unknown_view_is_refused_and_lists_the_valid_ones(self, rig):
+        result = gs.handler(view="sideways")
+        assert result["isError"] is True
+        assert "sideways" in result["message"] and "iso-top-right" in result["message"]
+
+    def test_unusable_dimensions_fall_back_to_the_default_size(self, rig):
+        seen = {}
+
+        def capture(vp, width, height, **kw):
+            seen["size"] = (width, height)
+            return "B64DATA", None
+
+        rig.setattr(gs._view_common, "capture_png_b64", capture)
+        result = gs.handler(width="wide", height=None)
+        assert result["isError"] is False
+        assert seen["size"] == (800, 600)
+
+    def test_no_active_viewport_is_an_error(self, monkeypatch):
+        monkeypatch.setattr(gs, "app", SimpleNamespace(activeViewport=None))
+        result = gs.handler()
+        assert result["isError"] is True and "viewport" in result["message"]

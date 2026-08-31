@@ -14,11 +14,17 @@ tools. MAIN-THREAD read tools get the lighter wrap_read: no guard, but every res
 'active_document' - the document the read actually came from. Main-thread tools only - the identity
 read touches adsk, which a pure-Python off-thread handler must never do, so an off-main-thread read
 (sys_find_tool) carries no stamp.
+
+document_key asks the same identity question for a STORE that outlives one MCP call (a view
+snapshot, a driven-joint registry, a live generation), where a never-saved document still needs a
+key of its own.
 """
 
 import json
 
 import adsk.core
+
+from . import _common
 
 app = adsk.core.Application.get()
 
@@ -30,7 +36,21 @@ MAP_BLURB = ("_active_identity - the ONE active-document identity read ((name, u
              "ONE document: an assembly loads its references as real Documents, so a tab and its own "
              "dependency instance repeat the same name AND lineage URN - identical ids resolve, "
              "distinct or unreadable ids are a true ambiguity; the write guard and "
-             "doc_lifecycle's open-document resolver share it)")
+             "doc_lifecycle's open-document resolver share it) + document_key / prune_closed_documents "
+             "/ on_key_evicted (the ONE key a store that outlives one MCP call - a view snapshot, a "
+             "driven-joint registry, a live generation - remembers a document by: the lineage urn for "
+             "a saved document, and for one with no readable data-file id a token minted per DOCUMENT "
+             "INSTANCE and matched on later calls by handle EQUALITY, since a Document wrapper is not "
+             "identity-stable, and never by NAME, which several open documents answer 'Untitled' to; "
+             "None when no document reads at all, so each caller words its own placeholder. A closed "
+             "document's entry is evicted on the isValid False it reads, and every consumer holding "
+             "state under that key hears it through on_key_evicted - the registry is shared, so "
+             "whichever consumer's read triggers the prune must drop what all of them parked there. "
+             "A held document whose key CHANGES - a save replaces its minted token with the data-file "
+             "id, which itself may answer a path form before the lineage urn - keeps its registry "
+             "entry and announces the change through on_key_renamed(old, new), so every consumer "
+             "carries its parked state across instead of stranding it under a key nothing answers "
+             "again)")
 
 
 def _active_identity():
@@ -54,6 +74,136 @@ def _active_identity():
     except Exception:
         pass
     return name, urn
+
+
+# The documents this session has MINTED a key for, as (document, key) pairs - every entry created
+# because that document carried no readable data-file id when it was first seen. An entry OUTLIVES
+# that state: when the document later answers an id, the entry keeps its place and its key is
+# rewritten to that id (document_key below), which is what makes the change announceable instead of
+# silent. A scanned LIST rather than a dict because the match is `==`, not identity or hash: a
+# Document wrapper is not identity-stable - the same open document reads as a new wrapper on each
+# app.activeDocument access, so `is` reads False across two MCP calls while `==` reads True
+# (_open_documents below matches the active document off that same measurement). Cleared on reload.
+#
+# DO NOT "simplify" this to rootComponent.entityToken. A Document carries no entityToken of its
+# own (live API introspection: adsk.core.Document exposes no such member, and FusionDocument's
+# document-level reads are dataFile / isValid / name), so the component's token is the only one
+# reachable - and it does not identify the document. Live-measured on two distinct never-saved
+# documents: that token READS (it does not raise) and is BYTE-IDENTICAL across both - each
+# answered the same 24 characters, '/v4BAAEAAwAAAAAAAAAAAAAA'. It collides in exactly the place
+# doc.name collides, and it collides SILENTLY, because the read succeeds.
+_UNSAVED_DOC_KEYS = []
+_UNSAVED_DOC_SEQ = 0
+
+# Consumers holding per-document state under these keys register here. A LIST of listeners rather
+# than a per-call callback because the registry is SHARED: whichever consumer's read happens to
+# trigger the prune must drop what EVERY consumer parked under that key, and a per-call callback
+# drops only the caller's own - leaving the others' state stranded under a key no live document
+# ever matches again.
+_KEY_EVICTION_LISTENERS = []
+
+# The same shape for the other thing that happens to a key: it CHANGES while its document stays
+# open. A LIST for the same reason - one consumer's read triggers the flip and every consumer's
+# parked state has to move with it, not just the caller's.
+_KEY_RENAME_LISTENERS = []
+
+
+def on_key_evicted(callback):
+    """Register callback(key) for every key the prune drops - the key a CLOSED document held, which
+    is the key it last answered, not necessarily the token minted for it.
+    Call it at module import; a consumer holding state under that key drops it there."""
+    _KEY_EVICTION_LISTENERS.append(callback)
+
+
+def on_key_renamed(callback):
+    """Register callback(old_key, new_key) for every key a HELD document re-keys onto.
+
+    Call it at module import; a consumer holding state under old_key MOVES it to new_key. Fired
+    only while the document stays open, so both keys name the same document and the move is a
+    re-address, never a merge of two documents' state. A consumer that keys per document (a view
+    snapshot) moves one entry; one that keys per (document, thing) (a driven-joint registry) moves
+    every entry whose document half matches.
+    """
+    _KEY_RENAME_LISTENERS.append(callback)
+
+
+def prune_closed_documents():
+    """Drop key-registry entries whose document is gone, telling every listener which key went.
+
+    A closed document's leftover wrapper reads isValid False (measured; .name on that same wrapper
+    raises "An API Object refers to a deleted Object"). Leaving it parks a Document wrapper per
+    scratch document for the life of the add-in session, plus whatever each consumer stored under
+    that key, and the listeners are told the key's document is GONE - a minted token no live
+    document matches again, and for an entry that has since re-keyed onto a data-file id, state
+    about a viewport and an occurrence set that closed with it. Only a definite False
+    evicts: an isValid that will not read proves nothing about the document, and a LIVE document
+    losing its key is the worse error of the two - it would be minted a second one and its own
+    saved state split in half.
+    """
+    # Walked BACKWARDS: deleting at i slides the next entry into i, and range() is sized before the
+    # list starts shrinking - so a forward walk skips an entry and then indexes past the end.
+    for i in range(len(_UNSAVED_DOC_KEYS) - 1, -1, -1):
+        known, key = _UNSAVED_DOC_KEYS[i]
+        if _common.read_flag(lambda known=known: known.isValid) is False:
+            del _UNSAVED_DOC_KEYS[i]
+            for listener in _KEY_EVICTION_LISTENERS:
+                listener(key)
+
+
+def document_key():
+    """The key the ACTIVE document is remembered by across MCP calls - None when none reads at all.
+
+    A document with a cloud data file keys on that file's id. One with no readable id (never saved)
+    keys on a per-instance token minted on first sight of it and matched on later calls by document
+    handle EQUALITY - never by NAME, because several open documents named "Untitled" are ordinary
+    and a name key hands one document's stored state to another. A CLOSED document cannot hand its
+    key to a live one: its leftover wrapper compares UNEQUAL to every live document (measured - the
+    comparison answers False, it does not raise), and the entry is evicted on the isValid False it
+    does read. safe() covers a comparison that will not read at all, which is not a match either.
+
+    A document that was minted a token and LATER answers an id changes key without closing, and the
+    change is ANNOUNCED (on_key_renamed) rather than left for each consumer to discover, because
+    every store keyed on it parks state that no live document would key to again. The registry is
+    scanned before the id is preferred, so the announcement is possible at all: a document that
+    already holds a key is found by the handle scan before the id can be preferred.
+
+    None is not a key: no document read, so there is nothing to mint for and each caller words its
+    own placeholder.
+    """
+    global _UNSAVED_DOC_SEQ
+    # Pruned FIRST, before any branch can return. The read that finds a document CLOSED is usually
+    # taken while a DIFFERENT document is active, so a prune placed after a branch that returns
+    # early never runs in the very situation it exists for, and a closed scratch document's entry
+    # (plus whatever each consumer parked under its key) outlives the add-in session.
+    prune_closed_documents()
+    doc = _common.safe(lambda: app.activeDocument)
+    if doc is None:
+        return None
+    df = _common.safe(lambda: doc.dataFile)
+    did = _common.safe(lambda: df.id) if df is not None else None
+    for i, (known, held) in enumerate(_UNSAVED_DOC_KEYS):
+        if not bool(_common.safe(lambda known=known: known == doc, False)):
+            continue
+        # A held document that reads NO id keeps the key it holds: the id is what CHANGES a key,
+        # and an id that stopped reading is not evidence the document went back to having none -
+        # dropping to a fresh mint here would strand the state under the key it already answers.
+        if not did or did == held:
+            return held
+        # The id does not arrive settled: through a save it may answer a path-form string before
+        # the lineage urn resolves, so ONE document can re-key more than once. The entry is kept
+        # (rewritten, not removed) so the SECOND flip is caught the same way as the first, and the
+        # freshly read handle replaces the stored one - the two are equal, this one is live.
+        # PROBE NEEDED (KEY-2): the transient path-form id is stated as mechanism, not a ledger fact.
+        _UNSAVED_DOC_KEYS[i] = (doc, did)
+        for listener in _KEY_RENAME_LISTENERS:
+            listener(held, did)
+        return did
+    if did:
+        return did          # first sight of a document that already answers an id - nothing to mint
+    _UNSAVED_DOC_SEQ += 1
+    key = "unsaved:%d" % _UNSAVED_DOC_SEQ
+    _UNSAVED_DOC_KEYS.append((doc, key))
+    return key
 
 
 def _refusal(expect, name, urn):

@@ -190,14 +190,17 @@ def _resolve_base_feature(design, comp, name):
         candidates.append(comp)
     root = safe(lambda: design.rootComponent)
     # same_component, not `is`: component wrappers are never identity-stable, so `root is not comp`
-    # reads True even when comp IS the root and root would be searched twice.
-    if root is not None and not _common.same_component(root, comp):
+    # reads True even when comp IS the root and root would be searched twice. Both de-dupes below
+    # drop a candidate only on a PROVEN match: this list is a SEARCH order, so an unproven pair
+    # searches one component twice (a repeated itemByName read) where dropping it would skip the
+    # component holding the base feature and report it missing.
+    if root is not None and _common.same_component(root, comp) is not True:
         candidates.append(root)
     for c in _common.all_components(design):
         # same_component, not `in`: `in` compares with ==, which on a component wrapper falls back
         # to identity - and component wrappers are measured never identity-stable, so the dedupe
         # would never fire and the same component would be searched twice.
-        if c is not None and not any(_common.same_component(c, k) for k in candidates):
+        if c is not None and not any(_common.same_component(c, k) is True for k in candidates):
             candidates.append(c)
     for c in candidates:
         bf = safe(lambda c=c: c.features.baseFeatures.itemByName(nm))

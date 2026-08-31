@@ -105,15 +105,17 @@ def handler(target: str = "", tools=None, operation: str = "join",
     if aerr:
         return error(aerr)
 
-    # same-body guard: the target must NOT also be a tool body. Compared by _common.native_token,
+    # same-body guard: the target must NOT also be a tool body. Compared by _common.native_identity,
     # never by Python identity - the API mints a FRESH wrapper per access, so `is` reads False even
     # when both references name the same physical body and the guard would never fire. The NATIVE
-    # token, because two wrappers of one body (a native and an occurrence proxy) carry DIFFERENT
-    # tokens of their own.
-    tgt_token = _common.native_token(tgt)
+    # half of that key, because two wrappers of one body (a native and an occurrence proxy) carry
+    # DIFFERENT tokens of their own; the SOURCE-DOCUMENT half, because a token is document-local -
+    # two bodies reached through two x-refs answer one token (measured), and keyed on that alone this
+    # guard REFUSES a legitimate combine of two distinct meshes.
+    tgt_key = _common.native_identity(tgt)
     for b in tool_bodies:
-        b_token = _common.native_token(b)
-        if b is tgt or (tgt_token and b_token and b_token == tgt_token):
+        b_key = _common.native_identity(b)
+        if b is tgt or (tgt_key and b_key and b_key == tgt_key):
             return error("A tool body is the same as the target - pick distinct mesh bodies "
     "(the target is combined INTO, the tools are combined FROM).")
 
@@ -122,6 +124,11 @@ def handler(target: str = "", tools=None, operation: str = "join",
     # tools list published nulls for the very bodies that were combined.
     tool_names = [safe(lambda b=b: b.name) for b in tool_bodies]
     tgt_name = safe(lambda: tgt.name)
+    # The handle the payload publishes when the feature hands back no result bodies and the combine
+    # landed in the TARGET in place. It is the NATIVE's token: for a proxy target that is a different
+    # string from the one the caller passed, and from the result-body handles below, which are each
+    # wrapper's OWN token.
+    tgt_token = _common.native_token(tgt)
 
     # Meshes that do not touch make every operation here a lie waiting to happen: a JOIN lands one
     # body still holding both shells, and a CUT/INTERSECT reports success while consuming the tool

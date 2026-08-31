@@ -44,22 +44,29 @@ _DIRECTION = _inputs.AxisRef("direction", entity_only=True,
     description="Only for ruled_type=direction.")
 
 
-def _body_key(body):
-    """A body's identity ACROSS a mutation: its entityToken, else its name (unique inside one
-    component's browser). Never id() - a body hands back a fresh proxy on every read, so identity
-    cannot carry a before/after comparison."""
-    return safe(lambda: body.entityToken) or safe(lambda: body.name)
-
-
 def _added_bodies(bodies, before_keys):
-    """The members of `bodies` that were NOT in the component before the mutation.
+    """The members of `bodies` that were NOT in the component before the mutation, keyed by
+    ``_common.native_identity`` and falling back to the body's NAME.
 
     MEASURED: RuledSurfaceFeature.bodies also holds the body the edges came from - a tangent surface
     off a solid box read back [the solid box, the new sheet] - so the feature's own result set is not
     the result. Published raw it would report the parent as created and let the parent's isSolid
-    decide the sheet verdict. A body whose key cannot be read counts as pre-existing, which
-    under-reports rather than inventing a creation."""
-    return [b for b in bodies if _body_key(b) not in before_keys]
+    decide the sheet verdict.
+
+    The two sides of this diff come from two DIFFERENT collections - the component's own body census
+    before, the feature's result set after - and each mints its own wrapper for the same body. That
+    is why the key is the identity rather than the wrapper's entityToken: a proxy's token differs
+    from its native's (measured), so a parent reached natively in one collection and as a proxy in
+    the other would read as newly created.
+
+    The NAME fallback holds that same pair together where no token reads - a proxy delegates its name
+    to its native - and it cannot merge two different bodies here, because both collections are read
+    off ONE component and a body name is unique inside one component's browser. It is deliberately
+    the bare name: pairing it with the wrapper's SCOPE (its occurrence path for a proxy, its
+    component for a native) is what would split the native/proxy pair again. A body answering neither
+    half keys as None, which matches any other unreadable body already in the census."""
+    return [b for b in bodies
+            if (_common.native_identity(b) or safe(lambda b=b: b.name)) not in before_keys]
 
 
 def _resolve_direction(raw, host):
@@ -187,7 +194,8 @@ def ruled_handler(edges=None, ruled_type="tangent", distance=None, units="mm",
     # feature's own result set holds the parent body too (see _added_bodies), and a Features.*.add()
     # that returns nothing - measured in DIRECT designs for six feature classes, this one not among
     # them - leaves the model itself as the only evidence. A count cannot say WHICH body is new.
-    before_keys = {_body_key(b) for b in _common.iter_collection(safe(lambda: host.bRepBodies))}
+    before_keys = {(_common.native_identity(b) or safe(lambda b=b: b.name))
+                   for b in _common.iter_collection(safe(lambda: host.bRepBodies))}
     try:
         # MEASURED arity: the 4-argument form builds tangent/normal; DirectionRuledSurfaceType takes
         # the direction entity as a REQUIRED 5th argument.

@@ -8,11 +8,12 @@ occurrence<->joint cross-index.
 
 import json
 import math
+import re
 from types import SimpleNamespace
 
 import pytest
 
-from conftest import load_tool
+from conftest import load_tool, FakeMatrix3D
 
 ap = load_tool("assembly_get")
 
@@ -141,13 +142,21 @@ class _UnreadableMotion(_Motion):
 
 
 class _JointFrame:
-    """A joint's geometryOrOriginOne/Two: the joint frame in WORLD coordinates - origin (cm) plus
-    primaryAxisVector (the frame Z), secondaryAxisVector (X) and thirdAxisVector (Y)."""
+    """A joint's geometryOrOriginOne/Two as a JointGeometry: origin (cm) plus primaryAxisVector (the
+    frame Z), secondaryAxisVector (X) and thirdAxisVector (Y).
+
+    The two halves sit in DIFFERENT frames, measured on a joint anchored to a face of a component
+    turned 30 deg about Z and placed 8 cm out: the ORIGIN reads WORLD (the face centre at
+    component-local (0.5, 0.5, 1) read its lifted world point), while the AXES read
+    component-LOCAL - the geometry on a face whose local normal is (1,0,0) published exactly that
+    while the face's world normal was (0.866, 0.5, 0). The axis vectors are the copy()/transformBy()
+    kind an axis lift takes; a JointGeometry carries no parentComponent and no assemblyContext
+    (measured), so the placement has to come from the joint's own occurrence on that side."""
     def __init__(self, origin=(0.0, 0.0, 0.0), z=(0, 0, 1), x=(1, 0, 0), y=(0, 1, 0)):
         self.origin = _Vec(*origin)
-        self.primaryAxisVector = _Vec(*z)
-        self.secondaryAxisVector = _Vec(*x)
-        self.thirdAxisVector = _Vec(*y)
+        self.primaryAxisVector = _JOPt(*z)
+        self.secondaryAxisVector = _JOPt(*x)
+        self.thirdAxisVector = _JOPt(*y)
 
 
 class _OpaqueFrame:
@@ -163,13 +172,21 @@ class _OpaqueFrame:
     thirdAxisVector = property(_unreadable)
 
 
+def _joint_occ(occ):
+    """A joint's occurrenceOne/Two. A plain NAME is an occurrence a row only has to name; an
+    occurrence OBJECT (see _FrameOcc) is one whose placement a frame's axes are lifted through."""
+    if not occ or not isinstance(occ, str):
+        return occ or None
+    return type("O", (), {"name": occ})()
+
+
 class FakeJoint:
     def __init__(self, name, motion_type, occ1, occ2, health_state=0, message="",
                  motion_values=None, motion_cls=_Motion, frame_one=None, frame_two=None):
         self.name = name
         self.jointMotion = motion_cls(motion_type, **(motion_values or {}))
-        self.occurrenceOne = type("O", (), {"name": occ1})() if occ1 else None
-        self.occurrenceTwo = type("O", (), {"name": occ2})() if occ2 else None
+        self.occurrenceOne = _joint_occ(occ1)
+        self.occurrenceTwo = _joint_occ(occ2)
         self.healthState = health_state          # 0 = healthy, non-zero = error/warning
         self.errorOrWarningMessage = message
         # Both geometry references exist and read null on an inferred joint - that null is what the
@@ -183,6 +200,46 @@ class FakeTimelineObj:
         self.name = name
         self.healthState = health_state
         self.errorOrWarningMessage = message
+
+
+class _StatelessTimelineObj:
+    """A timeline item that exists and names itself but answers NO compute state - the residual
+    case where nothing a row can ask has a verdict to give."""
+    def __init__(self, name):
+        self.name = name
+
+
+class _AsBuiltGeometry(_JointFrame):
+    """The single JointGeometry an as-built joint holds. `context` is what its own entity answers in
+    assemblyContext - measured 'BlkB:1' on a joint whose occurrenceOne was 'BlkA:1', so the geometry
+    NAMES the instance its component-local axes belong to and the joint's first occurrence is not
+    that statement. `owner` stands in for the entity's body.parentComponent, the read that answers
+    when the entity carries no context at all."""
+    def __init__(self, origin=(0.0, 0.0, 0.0), z=(0, 0, 1), x=(1, 0, 0), y=(0, 1, 0),
+                 context=None, owner=None, entity=True):
+        super().__init__(origin=origin, z=z, x=x, y=y)
+        self.entityOne = None
+        if entity:
+            self.entityOne = SimpleNamespace(assemblyContext=context)
+            if owner is not None:
+                self.entityOne.body = SimpleNamespace(parentComponent=owner)
+
+
+class FakeAsBuiltJoint:
+    """An AsBuiltJoint. It carries a single `geometry` and NO healthState, errorOrWarningMessage,
+    geometryOrOriginOne or geometryOrOriginTwo AT ALL - measured, every one of those raises
+    AttributeError, while `Joint` carries all four and no `geometry`. The class is built without
+    those attributes rather than by deleting them from a shared mock, so the absence cannot leak
+    into another test."""
+    def __init__(self, name, motion_type, occ1, occ2, geometry=None, timeline=None,
+                 motion_values=None):
+        self.name = name
+        self.jointMotion = _Motion(motion_type, **(motion_values or {}))
+        self.occurrenceOne = _joint_occ(occ1)
+        self.occurrenceTwo = _joint_occ(occ2)
+        self.geometry = geometry
+        if timeline is not None:
+            self.timelineObject = timeline
 
 
 class _Coll:
@@ -201,6 +258,10 @@ class _NamedBody:
 
 class FakeRoot:
     def __init__(self, occs, joints, root_bodies=(), asbuilt=(), all_occs=None):
+        # Its own token: the placement ladder asks "is this the root component" by entityToken, and
+        # a root with none would answer that on a name collision instead.
+        self.entityToken = "ROOT"
+        self.name = "Root"
         self.occurrences = _Coll(occs)
         # allOccurrences is a plain list on the ROOT component and is the only walk that reaches
         # NESTED occurrences (root.occurrences is top-level only).
@@ -545,6 +606,108 @@ class TestHealth:
             assert err.count("z") == (240 if cut else length), length
 
 
+# ── "could not read it" is not "read it, it is fine" ────────────────────────────────────────────
+#
+# The shared classifier answers None for BOTH a state deliberately not flagged (Healthy, Suppressed,
+# a collapsed group's rollup) and an entity carrying no healthState at all - measured, AsBuiltJoint
+# raises AttributeError on healthState AND errorOrWarningMessage while its TimelineObject answers
+# both. Reading that second None as "no failure" publishes healthy:true from an attribute that was
+# never there. Each row reports the state its timeline item answers, and WITHHOLDS the flag where
+# nothing answers - without turning a withheld flag into a false alarm.
+
+class TestHealthWithheldWhenUnread:
+    def _unread(self, kin_design, **kw):
+        return kin_design(asbuilt=[FakeAsBuiltJoint(
+            "Spin", 1, "A:1", "B:1", timeline=_StatelessTimelineObj("Spin"), **kw)])
+
+    def test_an_absent_health_state_publishes_NO_healthy_flag(self, kin_design):
+        self._unread(kin_design)
+        row = _payload(ap.handler())["joints"][0]
+        assert "healthy" not in row and row["health_unknown"] is True
+
+    def test_a_state_the_tool_chooses_not_to_flag_still_publishes_healthy(self, kin_design):
+        # The discriminator: healthState 3 (suppressed) is a state that IS read and deliberately
+        # counted healthy. The distinction drawn is absent-vs-read, not unflagged-vs-failed, so this
+        # row must keep its healthy:true - a fixture where both cases answer alike proves nothing.
+        kin_design(joints=[FakeJoint("Parked", 1, "A:1", "B:1", health_state=3)])
+        row = _payload(ap.handler())["joints"][0]
+        assert row["healthy"] is True and "health_unknown" not in row
+
+    def test_the_timeline_item_answers_where_the_joint_carries_no_state(self, kin_design):
+        # An as-built joint's TimelineObject DOES carry healthState (measured), so the row reports a
+        # state that was read rather than withholding the flag.
+        kin_design(asbuilt=[FakeAsBuiltJoint("Spin", 1, "A:1", "B:1",
+                                             timeline=FakeTimelineObj("Spin", 0))])
+        row = _payload(ap.handler())["joints"][0]
+        assert row["healthy"] is True and "health_unknown" not in row
+
+    def test_a_failed_as_built_joint_is_read_off_that_timeline_item(self, kin_design):
+        kin_design(asbuilt=[FakeAsBuiltJoint(
+            "Spin", 1, "A:1", "B:1",
+            timeline=FakeTimelineObj("Spin", 1, message="Can't resolve positions."))])
+        out = _payload(ap.handler())
+        assert out["broken_joints"] == ["Spin"] and out["is_healthy"] is False
+        assert out["joints"][0]["healthy"] is False
+        assert "Can't resolve positions" in out["joints"][0]["error"]
+
+    def test_a_withheld_flag_is_NOT_counted_broken(self, kin_design):
+        # The opposite false alarm: reading the missing key as unhealthy would drop is_healthy on
+        # every design holding a joint whose state nothing answered.
+        self._unread(kin_design)
+        out = _payload(ap.handler())
+        assert out["broken_joints"] == [] and out["is_healthy"] is True
+
+    def test_the_note_names_the_joints_that_publish_no_verdict(self, kin_design):
+        self._unread(kin_design)
+        note = _payload(ap.handler())["note"]
+        assert "1 joint(s) publish NO healthy flag (Spin)" in note
+        assert "is_healthy makes no claim about them" in note
+
+    def test_no_such_note_when_every_row_carries_a_verdict(self, kin_design):
+        kin_design(joints=[FakeJoint("Pin", 1, "A:1", "B:1")])
+        assert "publish NO healthy flag" not in _payload(ap.handler())["note"]
+
+    def test_a_timeline_item_that_answers_no_state_is_not_a_problem(self, kin_design):
+        # The timeline walk consumes the same tri-state: reading "nothing answered" as a failure
+        # would publish a compute failure nobody measured.
+        kin_design(timeline=[_StatelessTimelineObj("Group1")])
+        out = _payload(ap.handler())
+        assert out["timeline_problems"] == [] and out["is_healthy"] is True
+
+
+class TestRelationHealthWithheldWhenUnread:
+    """The relations rows consume the same tri-state. MotionLink and AssemblyConstraint DO carry
+    healthState (measured), so a row here withholds its flag only when the read itself answers
+    nothing - and a withheld flag must not reach broken_relations."""
+
+    def _stateless(self, obj):
+        del obj.healthState
+        del obj.errorOrWarningMessage
+        return obj
+
+    def test_a_motion_link_that_answers_no_state_withholds_its_flag(self, relations_design):
+        relations_design(links=[self._stateless(_RelLink("ML1"))])
+        out = _payload(ap.handler(include=["relations"]))
+        row = out["relations"]["motion_links"][0]
+        assert "healthy" not in row and row["health_unknown"] is True
+        assert out["broken_relations"] == [] and out["is_healthy"] is True
+
+    def test_a_constraint_that_answers_no_state_withholds_its_flag(self, relations_design):
+        relations_design(constraints=[self._stateless(_RelConstraint("AC1"))])
+        out = _payload(ap.handler(include=["relations"]))
+        row = out["relations"]["constraints"][0]
+        assert "healthy" not in row and row["health_unknown"] is True
+        assert out["broken_relations"] == [] and out["is_healthy"] is True
+
+    def test_a_readable_relation_still_publishes_its_verdict(self, relations_design):
+        relations_design(links=[_RelLink("Good")],
+                         constraints=[_RelConstraint("Bad", health=2, message="over-constrained")])
+        out = _payload(ap.handler(include=["relations"]))
+        assert out["relations"]["motion_links"][0]["healthy"] is True
+        assert out["relations"]["constraints"][0]["healthy"] is False
+        assert [r["name"] for r in out["broken_relations"]] == ["Bad"]
+
+
 # ── BOUNDED READS: occurrences/joints arrays cap + report truncated (CLAUDE.md "Bound it") ──────
 
 class TestCaps:
@@ -599,14 +762,52 @@ class TestCaps:
 # frame axes, the joints that CONSUME it, and a handle. A sub-component JO is reported per occurrence.
 
 class _JOPt:
+    """A Vector3D: the coordinate reads plus the copy()/transformBy(matrix) pair an axis lift makes.
+    transformBy reports True, as the API's own does, and takes the matrix's DIRECTION transform, so
+    a placement's translation can never reach an axis through it."""
     def __init__(self, x, y, z):
         self.x, self.y, self.z = x, y, z
 
+    def copy(self):
+        return _JOPt(self.x, self.y, self.z)
+
+    def transformBy(self, m):
+        self.x, self.y, self.z = m._apply_vector(self.x, self.y, self.z)
+        return True
+
+
+class _StuckAxis(_JOPt):
+    """ONE axis vector whose lift refuses. _world_axes reads each axis separately - getattr,
+    copy, transformBy, axis_vec - so a single axis can come back None while its siblings resolve,
+    independently of whether the placement matrix did. copy() must stay this type or the refusal
+    does not survive the copy the lift takes first."""
+    def copy(self):
+        return _StuckAxis(self.x, self.y, self.z)
+
+    def transformBy(self, m):
+        return False
+
+
+def _zrot(deg, tx=5.0):
+    """An occurrence's transform2: a rotation of `deg` about Z plus a translation that must never
+    reach a DIRECTION. Live-measured on a component turned 30 deg and moved 5 cm in X - the frame's
+    lifted X read (0.866, 0.5, 0), not the 5 cm offset - so the translation is CARRIED here and the
+    shared matrix drops it on a direction; a rig that left it at zero would let a
+    translation-leaking lift pass."""
+    return FakeMatrix3D(deg, (tx, 0.0, 0.0))
+
 
 class _SliceJO:
-    def __init__(self, name, pos=(0.0, 0.0, 0.0), offsets=(0.0, 0.0, 0.0), token=None):
+    """`pos` is the base anchor point the reference reports. `instance_pos` maps an occurrence's
+    fullPathName to the point its PROXY reports: measured on a component placed at (5,0,0) and again
+    turned 90 deg at (0,10,0), the proxy answers its OWN instance's world point ((6,1,2) and
+    (-1,11,2)) while the context-stripped native answers the FIRST placement's for both."""
+    def __init__(self, name, pos=(0.0, 0.0, 0.0), offsets=(0.0, 0.0, 0.0), token=None, comp=None,
+                 instance_pos=None):
         self.name = name
-        self.geometry = SimpleNamespace(origin=_JOPt(*pos))   # the BASE anchor point (cm)
+        self.geometry = SimpleNamespace(origin=_JOPt(*pos))   # the BASE anchor point (cm, WORLD)
+        # The three axis vectors, in the OWNING COMPONENT's frame - measured: a JO on a component
+        # turned 30 deg about Z still reads (1,0,0) here, natively and through a proxy alike.
         self.primaryAxisVector = _JOPt(0.0, 0.0, 1.0)     # Z
         self.secondaryAxisVector = _JOPt(1.0, 0.0, 0.0)   # X
         self.thirdAxisVector = _JOPt(0.0, 1.0, 0.0)       # Y
@@ -615,25 +816,51 @@ class _SliceJO:
         self.offsetY = SimpleNamespace(value=offsets[1])
         self.offsetZ = SimpleNamespace(value=offsets[2])
         self.entityToken = token
+        self.parentComponent = comp
+        self.assemblyContext = None
         self._pos, self._offsets = pos, offsets
+        self._instance_pos = dict(instance_pos or {})
 
     def createForAssemblyContext(self, occ):
-        p = _SliceJO(self.name, pos=self._pos, offsets=self._offsets, token=self.entityToken)
+        pos = self._instance_pos.get(getattr(occ, "fullPathName", None), self._pos)
+        p = _SliceJO(self.name, pos=pos, offsets=self._offsets, token=self.entityToken,
+                     comp=self.parentComponent, instance_pos=self._instance_pos)
+        # The proxy reports the SAME axis triple as its native (measured), so each vector is copied
+        # as its own type - a per-axis read that refuses must refuse through the proxy too, which is
+        # the object every sub-component row is actually built from.
+        for attr in ("primaryAxisVector", "secondaryAxisVector", "thirdAxisVector"):
+            v = getattr(self, attr)
+            setattr(p, attr, type(v)(v.x, v.y, v.z))
         p.context = occ
+        p.assemblyContext = occ      # measured: a proxy answers the occurrence it was made for
         return p
 
 
 class _SliceComp:
-    def __init__(self, name, jos=()):
+    def __init__(self, name, jos=(), token=None):
         self.name = name
         self.jointOrigins = _Coll(list(jos))
+        # Its OWN token, so a same-component test cannot pass on a name collision or on identity.
+        self.entityToken = token or f"COMP:{name}"
 
 
 class _SliceOcc:
-    def __init__(self, full, comp):
+    def __init__(self, full, comp, transform2=None):
         self.fullPathName = full
         self.name = full
         self.component = comp
+        self.transform2 = transform2
+        self.assemblyContext = None
+
+
+class _FrameOcc(_SliceOcc):
+    """The occurrence one side of a joint is anchored to - the only thing that answers for a
+    JointGeometry's frame, since the geometry carries neither parentComponent nor assemblyContext.
+    Its component gets its OWN entityToken, so the placement ladder's same-component test cannot
+    pass on identity, and transform2 defaults to an unturned frame for a test whose subject is not
+    the lift."""
+    def __init__(self, name, comp="A", transform2=None):
+        super().__init__(name, _SliceComp(comp), transform2=transform2 or _zrot(0.0, 0.0))
 
 
 class _SliceJoint:
@@ -646,8 +873,9 @@ class _SliceJoint:
 
 
 class _SliceRoot:
-    def __init__(self, name="Root", jos=(), joints=(), occ_by_comp=None):
+    def __init__(self, name="Root", jos=(), joints=(), occ_by_comp=None, token="ROOT"):
         self.name = name
+        self.entityToken = token
         self.jointOrigins = _Coll(list(jos))
         self.joints = _Coll(list(joints))
         self.asBuiltJoints = _Coll([])
@@ -680,6 +908,14 @@ def _install_slice(design):
 
 
 class TestJointOriginsSlice:
+    @pytest.fixture(autouse=True)
+    def _root_frame_is_world(self, monkeypatch):
+        # component_world_matrix answers the ROOT leg with adsk.core.Matrix3D.create(); the shared
+        # mock hands back a Mock no axis lift can read, so the root frame gets a real identity here.
+        import adsk.core
+        monkeypatch.setattr(adsk.core.Matrix3D, "create", staticmethod(lambda: _zrot(0.0, 0.0)),
+                            raising=False)
+
     def test_default_omits_slice_and_advertises_it(self):
         _install_slice(_SliceDesign(_SliceRoot(jos=[_SliceJO("Stock_Center", token="T")])))
         out = _payload(ap.handler())                       # no include
@@ -761,6 +997,127 @@ class TestJointOriginsSlice:
         jo = _SliceJO("Center", token="C")
         refs = [ref for ref, _ctx in ap._jo_instances(_SliceDesign(root), jo, other)]
         assert refs == ["Center"]
+
+    # The row's world heading has to hold for the AXES too. A JointOrigin reports them in its owning
+    # COMPONENT's frame, so on a rotated component the unlifted pair contradicts the world_position
+    # beside it AND the occurrence row in the same payload - and it corrupts the position, which
+    # projects the offsets ALONG those axes. Every fixture below rotates the component: an identity
+    # placement cannot tell a lifted axis from an unlifted one.
+
+    def _rotated_tower(self, deg=30.0, tx=5.0, offsets=(0.0, 0.0, 0.0), pos=(5.0, 0.0, 0.0),
+                       blind_axis=None):
+        """A 'Tower' component placed ONCE, turned `deg` about Z and `tx` cm out in X, carrying one
+        JO whose part-space axes are the identity triple. `blind_axis` names ONE axis attribute whose
+        lift refuses, so the row is built from a MIXED triple - one None beside two readable."""
+        sub = _SliceComp("Tower")
+        native = _SliceJO("Center", pos=pos, offsets=offsets, token="C", comp=sub)
+        if blind_axis:
+            v = getattr(native, blind_axis)
+            setattr(native, blind_axis, _StuckAxis(v.x, v.y, v.z))
+        sub.jointOrigins = _Coll([native])
+        occ = _SliceOcc("Tower:1", sub, transform2=_zrot(deg, tx))
+        root = _SliceRoot(occ_by_comp={"Tower": [occ]})
+        _install_slice(_SliceDesign(root, subs=[sub]))
+        return root, sub, occ
+
+    def test_a_rotated_components_jo_axes_are_published_in_WORLD(self):
+        # The JO reports x_axis [1,0,0] in part space while the occurrence row for the same
+        # component reads [0.866, 0.5, 0]; one payload carries one frame, so the row publishes the
+        # latter.
+        self._rotated_tower()
+        r = _payload(ap.handler(include=["joint_origins"], units="mm"))["joint_origins"][0]
+        assert r["frame"]["x_axis"] == [0.866, 0.5, 0.0]
+        assert r["frame"]["y_axis"] == [-0.5, 0.866, 0.0]
+        assert r["frame"]["z_axis"] == [0.0, 0.0, 1.0]      # the rotation axis is unmoved
+
+    def test_the_world_position_projects_the_offsets_along_the_WORLD_axes(self):
+        # MEASURED live: geometry.origin reads WORLD (5,0,0) cm for a component 50 mm out in X, so a
+        # 20 mm offsetX projected on the component-LOCAL (1,0,0) published [70, 0, 0] mm for a frame
+        # that actually sits at [67.321, 10.0, 0]. The position and the axes stand or fall together.
+        self._rotated_tower(offsets=(2.0, 0.0, 0.0))
+        r = _payload(ap.handler(include=["joint_origins"], units="mm"))["joint_origins"][0]
+        assert r["world_position"] == [67.32, 10.0, 0.0]
+
+    def test_each_instances_row_lifts_through_ITS_OWN_placement(self):
+        # one component placed twice with different rotations: the rows are per INSTANCE, so each
+        # must carry the frame of the occurrence its qualified_name names, not one shared answer.
+        sub = _SliceComp("Tower")
+        native = _SliceJO("Center", token="C", comp=sub)
+        sub.jointOrigins = _Coll([native])
+        occs = [_SliceOcc("Tower:1", sub, transform2=_zrot(30.0, 0.0)),
+                _SliceOcc("Tower:2", sub, transform2=_zrot(90.0, 0.0))]
+        _install_slice(_SliceDesign(_SliceRoot(occ_by_comp={"Tower": occs}), subs=[sub]))
+        rows = {r["qualified_name"]: r for r in
+                _payload(ap.handler(include=["joint_origins"]))["joint_origins"]}
+        assert rows["Tower:1:Center"]["frame"]["x_axis"] == [0.866, 0.5, 0.0]
+        assert rows["Tower:2:Center"]["frame"]["x_axis"] == [0.0, 1.0, 0.0]
+
+    def _unplaced_jo(self, offsets=(0.0, 0.0, 0.0), pos=(5.0, 0.0, 0.0)):
+        """A JO on a component the assembly does not place - reachable because all_joint_origins
+        walks design.allComponents, which lists a component no occurrence references."""
+        sub = _SliceComp("Orphan")
+        sub.jointOrigins = _Coll([_SliceJO("Center", pos=pos, offsets=offsets, token="C", comp=sub)])
+        _install_slice(_SliceDesign(_SliceRoot(occ_by_comp={}), subs=[sub]))
+        return _payload(ap.handler(include=["joint_origins"], units="mm"))["joint_origins"][0]
+
+    def test_a_jo_with_no_placement_to_lift_through_publishes_no_frame(self):
+        # a component the assembly does not place has no world frame. Publishing the part-space
+        # triple under the world key is the same defect this closes, so the key is dropped instead.
+        r = self._unplaced_jo()
+        assert r["name"] == "Center" and "frame" not in r
+
+    def test_an_unplaceable_jo_publishes_NO_world_position_for_a_nonzero_offset(self):
+        # The offsets run ALONG the frame axes, so dropping only the 'frame' key leaves the position
+        # computed on a substituted world basis - the identical mixed-frame sum, now with nothing in
+        # the row to show it: 5 cm base + 2 cm offsetX on (1,0,0) reads [70, 0, 0] mm for a frame
+        # whose real direction was never established. Both keys go, or neither is honest.
+        r = self._unplaced_jo(offsets=(2.0, 0.0, 0.0))
+        assert "frame" not in r and "world_position" not in r
+
+    def test_an_unplaceable_jo_with_no_offsets_still_reports_its_base_anchor(self):
+        # the guard is about the PROJECTION: with every offset zero there is no direction to need,
+        # and geometry.origin is a read rather than a computation, so it still travels.
+        assert self._unplaced_jo()["world_position"] == [50.0, 0.0, 0.0]
+
+    def test_each_offset_is_gated_by_ITS_OWN_axis(self):
+        """The guard pairs offsetX/Y/Z with the frame's X/Y/Z. A MIXED triple - exactly one axis
+        missing - is the only fixture that can hold that pairing: with all three present nothing
+        gates, and with all three absent every pairing gates alike.
+
+        The axis order is remapped once on the way here - _jo_row destructures (Z, X, Y) and passes
+        (x, y, z) - so a swapped pair reads plausibly at both sites. Mis-paired, offsetX would be
+        gated by the readable Y and sail through, X would fall to the zero vector, and its 20 mm
+        contribution would VANISH from a published world_position with nothing in the row saying so.
+        """
+        # (a) the offset is on the MISSING axis: no direction for it to run along, so no position.
+        self._rotated_tower(offsets=(2.0, 0.0, 0.0), blind_axis="secondaryAxisVector")
+        r = _payload(ap.handler(include=["joint_origins"], units="mm"))["joint_origins"][0]
+        assert "world_position" not in r
+        assert r["frame"]["x_axis"] is None                  # exactly one axis went missing
+        assert r["frame"]["y_axis"] == [-0.5, 0.866, 0.0]
+
+        # (b) the same missing axis, but the offset is on a PRESENT one: the position still travels
+        # AND carries that offset - base [50,0,0] plus 20 mm along the lifted Y (-0.5, 0.866, 0).
+        self._rotated_tower(offsets=(0.0, 2.0, 0.0), blind_axis="secondaryAxisVector")
+        r = _payload(ap.handler(include=["joint_origins"], units="mm"))["joint_origins"][0]
+        assert r["world_position"] == [40.0, 17.32, 0.0]
+
+    def test_an_unplaceable_jo_is_judged_per_AXIS_not_on_any_offset_at_all(self):
+        # the boundary is "a nonzero offset whose axis is missing", not "any nonzero offset": a
+        # placed component resolves all three axes, so its offsets project and the row stands.
+        self._rotated_tower(offsets=(0.0, 0.0, 2.0))
+        r = _payload(ap.handler(include=["joint_origins"], units="mm"))["joint_origins"][0]
+        assert r["world_position"] == [50.0, 0.0, 20.0]     # offsetZ along the unmoved world Z
+
+    def test_a_ROOT_jo_is_published_unlifted(self):
+        # the root component's frame IS world, so its JO's axes are already the answer - lifting
+        # them through anything but identity would be this defect pointing the other way.
+        jo = _SliceJO("Stock_Center", token="T")
+        root = _SliceRoot(jos=[jo])
+        jo.parentComponent = _SliceComp("Root", token="ROOT")     # a second wrapper of the root
+        _install_slice(_SliceDesign(root))
+        r = _payload(ap.handler(include=["joint_origins"]))["joint_origins"][0]
+        assert r["frame"]["x_axis"] == [1.0, 0.0, 0.0]
 
     def test_joint_origins_cap_and_truncated(self):
         jos = [_SliceJO(f"JO{i}", token=f"T{i}") for i in range(5)]
@@ -1182,8 +1539,9 @@ def kin_design(monkeypatch):
     """A design of occurrences + joints wired into assembly_get through a fixture, so the patches
     undo themselves. all_occs is what root.allOccurrences reports - the NESTED walk - while occs is
     the top-level root.occurrences."""
-    def _build(occs=(), joints=(), all_occs=None, asbuilt=()):
-        design = FakeDesign(list(occs), list(joints), asbuilt=asbuilt, all_occs=all_occs)
+    def _build(occs=(), joints=(), all_occs=None, asbuilt=(), timeline=None):
+        design = FakeDesign(list(occs), list(joints), timeline=timeline, asbuilt=asbuilt,
+                            all_occs=all_occs)
         fake_app = type("A", (), {"activeProduct": design})()
         monkeypatch.setattr(ap, "app", fake_app)
         monkeypatch.setattr(ap._common, "app", fake_app)
@@ -1247,32 +1605,66 @@ class TestJointValueNow:
 
 # ── frame: the joint's own frame in WORLD coordinates ────────────────────────────────────────────
 #
-# geometryOrOriginOne/Two expose the frame world-framed: .origin plus primaryAxisVector (the frame
-# Z), secondaryAxisVector (X) and thirdAxisVector (Y). The frame Z is the axis a joint OFFSET drives
-# along, which is the fact a caller otherwise pays a probe cycle to discover.
+# geometryOrOriginOne/Two carry .origin plus primaryAxisVector (the frame Z), secondaryAxisVector (X)
+# and thirdAxisVector (Y). The frame Z is the axis a joint OFFSET drives along, which is the fact a
+# caller otherwise pays a probe cycle to discover. The two halves sit in different frames - the
+# origin is measured WORLD, the axes component-LOCAL - so only the axes are lifted, through the
+# occurrence THAT SIDE of the joint is anchored to.
 
 class TestJointFrame:
-    def test_frame_reports_the_world_origin_and_axes_of_the_first_geometry(self, kin_design):
-        f1 = _JointFrame(origin=(6.3027, 0.0, 1.6), z=(1, 0, 0), x=(0, 0, -1), y=(0, 1, 0))
-        kin_design(joints=[FakeJoint("Grip", 0, "A:1", "B:1", frame_one=f1)])
+    def test_frame_reports_the_world_origin_and_the_LIFTED_axes_of_the_first_geometry(
+            self, kin_design):
+        # The component is turned 30 deg about Z, which is what separates the two possible answers:
+        # its local X (1,0,0) stands at (0.866, 0.5, 0) in world.
+        f1 = _JointFrame(origin=(6.3027, 0.0, 1.6), z=(0, 0, 1), x=(1, 0, 0), y=(0, 1, 0))
+        kin_design(joints=[FakeJoint("Grip", 0, _FrameOcc("A:1", transform2=_zrot(30.0)), "B:1",
+                                     frame_one=f1)])
         frame = _payload(ap.handler(units="mm"))["joints"][0]["frame"]
-        assert frame["origin"] == [63.027, 0.0, 16.0]     # 6.3027 cm -> 63.027 mm
-        assert frame["z_axis"] == [1.0, 0.0, 0.0]         # primaryAxisVector
-        assert frame["x_axis"] == [0.0, 0.0, -1.0]        # secondaryAxisVector
-        assert frame["y_axis"] == [0.0, 1.0, 0.0]         # thirdAxisVector
+        assert frame["origin"] == [63.027, 0.0, 16.0]     # 6.3027 cm -> 63.027 mm, already world
+        assert frame["x_axis"] == [0.866, 0.5, 0.0]       # secondaryAxisVector, lifted
+        assert frame["y_axis"] == [-0.5, 0.866, 0.0]      # thirdAxisVector, lifted
+        assert frame["z_axis"] == [0.0, 0.0, 1.0]         # the rotation axis is unmoved
+
+    def test_the_origin_is_NOT_lifted_with_the_axes(self, kin_design):
+        # The origin already carries the placement; running it through the same matrix as the axes
+        # would turn a real point into one on no part of the model - (10, 0, 0) cm would read
+        # (8.66, 5.0, 0). The pairing is per-half, not per-frame.
+        f1 = _JointFrame(origin=(10.0, 0.0, 0.0), z=(0, 0, 1), x=(1, 0, 0), y=(0, 1, 0))
+        kin_design(joints=[FakeJoint("Grip", 1, _FrameOcc("A:1", transform2=_zrot(30.0)), "B:1",
+                                     frame_one=f1)])
+        frame = _payload(ap.handler(units="cm"))["joints"][0]["frame"]
+        assert frame["origin"] == [10.0, 0.0, 0.0]
+        assert frame["x_axis"] == [0.866, 0.5, 0.0]       # the axes DID move, so the matrix applied
 
     def test_frame_falls_back_to_the_second_geometry_when_the_first_is_null(self, kin_design):
         # an inferred joint reads null on geometryOrOriginOne; the frame is still readable off Two.
         f2 = _JointFrame(origin=(0.0, 4.0, 0.0), z=(0, 1, 0), x=(1, 0, 0), y=(0, 0, -1))
-        kin_design(joints=[FakeJoint("Inferred", 1, "A:1", "B:1", frame_one=None, frame_two=f2)])
+        kin_design(joints=[FakeJoint("Inferred", 1, "A:1",
+                                     _FrameOcc("B:1", comp="B"), frame_one=None, frame_two=f2)])
         frame = _payload(ap.handler(units="mm"))["joints"][0]["frame"]
         assert frame["origin"] == [0.0, 40.0, 0.0]
         assert frame["z_axis"] == [0.0, 1.0, 0.0]
 
+    def test_each_half_is_lifted_through_ITS_OWN_occurrence(self, kin_design):
+        # Measured on one joint: side one's axes read Probe-local and side two's read Anchor-local,
+        # and the two describe the SAME world direction only once each is lifted through its own
+        # occurrence. Here both components are turned, by DIFFERENT angles, and the fallback half is
+        # the one that answers - so pairing the geometry with occurrenceOne would publish
+        # (0.866, 0.5, 0) instead of the 60-deg answer below.
+        f2 = _JointFrame(origin=(0.0, 0.0, 0.0), z=(0, 0, 1), x=(1, 0, 0), y=(0, 1, 0))
+        kin_design(joints=[FakeJoint("Pin", 1,
+                                     _FrameOcc("A:1", comp="A", transform2=_zrot(30.0)),
+                                     _FrameOcc("B:1", comp="B", transform2=_zrot(60.0)),
+                                     frame_one=None, frame_two=f2)])
+        frame = _payload(ap.handler(units="mm"))["joints"][0]["frame"]
+        assert frame["x_axis"] == [0.5, 0.866, 0.0]       # 60 deg - occurrenceTwo's placement
+        assert frame["y_axis"] == [-0.866, 0.5, 0.0]
+
     def test_the_first_geometry_wins_when_both_are_present(self, kin_design):
         one = _JointFrame(origin=(1.0, 0.0, 0.0), z=(1, 0, 0))
         two = _JointFrame(origin=(0.0, 9.0, 0.0), z=(0, 0, 1))
-        kin_design(joints=[FakeJoint("Pin", 1, "A:1", "B:1", frame_one=one, frame_two=two)])
+        kin_design(joints=[FakeJoint("Pin", 1, _FrameOcc("A:1"), _FrameOcc("B:1", comp="B"),
+                                     frame_one=one, frame_two=two)])
         frame = _payload(ap.handler(units="mm"))["joints"][0]["frame"]
         assert frame["origin"] == [10.0, 0.0, 0.0] and frame["z_axis"] == [1.0, 0.0, 0.0]
 
@@ -1282,36 +1674,213 @@ class TestJointFrame:
 
     def test_no_frame_key_when_the_geometry_answers_nothing(self, kin_design):
         # a frame of four nulls claims a frame that was never read.
-        kin_design(joints=[FakeJoint("Opaque", 1, "A:1", "B:1", frame_one=_OpaqueFrame(),
-                                     frame_two=_OpaqueFrame())])
+        kin_design(joints=[FakeJoint("Opaque", 1, _FrameOcc("A:1"), _FrameOcc("B:1", comp="B"),
+                                     frame_one=_OpaqueFrame(), frame_two=_OpaqueFrame())])
         assert "frame" not in _payload(ap.handler())["joints"][0]
 
     def test_a_geometry_that_answers_nothing_does_not_shadow_the_second(self, kin_design):
         good = _JointFrame(origin=(0.0, 0.0, 5.0), z=(0, 0, 1))
-        kin_design(joints=[FakeJoint("Pin", 1, "A:1", "B:1", frame_one=_OpaqueFrame(),
-                                     frame_two=good)])
+        kin_design(joints=[FakeJoint("Pin", 1, _FrameOcc("A:1"), _FrameOcc("B:1", comp="B"),
+                                     frame_one=_OpaqueFrame(), frame_two=good)])
         frame = _payload(ap.handler(units="mm"))["joints"][0]["frame"]
         assert frame["origin"] == [0.0, 0.0, 50.0] and frame["z_axis"] == [0.0, 0.0, 1.0]
 
     def test_frame_origin_follows_the_units_but_the_axes_do_not(self, kin_design):
         # a direction is dimensionless - scaling it by the unit factor would corrupt it.
         f1 = _JointFrame(origin=(2.54, 0.0, 0.0), z=(0, 0, 1))
-        kin_design(joints=[FakeJoint("Grip", 1, "A:1", "B:1", frame_one=f1)])
+        kin_design(joints=[FakeJoint("Grip", 1, _FrameOcc("A:1", transform2=_zrot(30.0)), "B:1",
+                                     frame_one=f1)])
         frame = _payload(ap.handler(units="in"))["joints"][0]["frame"]
         assert frame["origin"] == [1.0, 0.0, 0.0]         # 2.54 cm -> 1 inch
-        assert frame["z_axis"] == [0.0, 0.0, 1.0]
+        assert frame["z_axis"] == [0.0, 0.0, 1.0]         # dimensionless, and on the rotation axis
+        assert frame["x_axis"] == [0.866, 0.5, 0.0]       # lifted, and still a unit vector
+
+    def test_a_root_anchored_geometry_publishes_its_axes_unchanged(self, monkeypatch, kin_design):
+        # A joint half anchored to root-owned geometry names no occurrence; the root component's
+        # frame IS world, so there is nothing to apply.
+        import adsk.core
+        monkeypatch.setattr(adsk.core.Matrix3D, "create", staticmethod(lambda: _zrot(0.0, 0.0)),
+                            raising=False)
+        f1 = _JointFrame(origin=(1.0, 2.0, 3.0), z=(0, 0, 1), x=(1, 0, 0), y=(0, 1, 0))
+        kin_design(joints=[FakeJoint("Grip", 1, None, "B:1", frame_one=f1)])
+        frame = _payload(ap.handler(units="cm"))["joints"][0]["frame"]
+        assert frame["origin"] == [1.0, 2.0, 3.0]
+        assert frame["x_axis"] == [1.0, 0.0, 0.0] and frame["y_axis"] == [0.0, 1.0, 0.0]
+
+    def test_axes_are_dropped_when_no_placement_answers_for_that_half(self, kin_design):
+        # The occurrence reads but its component does not, so no matrix answers. Publishing the
+        # part-space axes anyway is the defect - the row keeps the origin it did read and states no
+        # axes at all.
+        occ = _SliceOcc("A:1", None, transform2=_zrot(30.0))
+        f1 = _JointFrame(origin=(1.0, 2.0, 3.0), z=(0, 0, 1), x=(1, 0, 0), y=(0, 1, 0))
+        kin_design(joints=[FakeJoint("Grip", 1, occ, "B:1", frame_one=f1)])
+        frame = _payload(ap.handler(units="cm"))["joints"][0]["frame"]
+        assert frame["origin"] == [1.0, 2.0, 3.0]
+        assert frame["x_axis"] is None and frame["y_axis"] is None and frame["z_axis"] is None
+
+    def _jo_joint(self, monkeypatch, kin_design, jo, occs=(), occ_one="A:1"):
+        """A joint whose geometryOrOriginOne IS a JointOrigin, with the root frame answering as
+        world (component_world_matrix takes the root leg through adsk.core.Matrix3D.create, and the
+        shared mock's Mock is unreadable to an axis lift). `occ_one` is the occurrence the joint
+        names on that half - a bare name where the half's instance is not the subject."""
+        import adsk.core, adsk.fusion
+        monkeypatch.setattr(adsk.fusion, "JointOrigin", _SliceJO, raising=False)
+        monkeypatch.setattr(adsk.core.Matrix3D, "create", staticmethod(lambda: _zrot(0.0, 0.0)),
+                            raising=False)
+        design = kin_design(joints=[FakeJoint("Grip", 0, occ_one, "B:1", frame_one=jo)])
+        if jo.parentComponent is None:
+            jo.parentComponent = design.rootComponent
+        design.rootComponent.allOccurrencesByComponent = lambda c, o=list(occs): o
+        return _payload(ap.handler(units="mm"))["joints"][0]["frame"]
+
+    # A joint's STORED JointOrigin reference reads assemblyContext None even when the joint was
+    # built from a createForAssemblyContext proxy, and that context-stripped native answers the
+    # FIRST placement's world point. The occurrence the joint names is the only thing that puts the
+    # instance back, so the JO half resolves through it exactly as the JointGeometry half does.
+
+    def _twice_placed_pin(self):
+        """'Pin' placed at (5,0,0) and again turned 90 deg at (0,10,0), carrying one JO. The
+        occurrences' component is a SEPARATE wrapper sharing the token, so the placement ladder's
+        same-component test runs on the token and cannot pass on identity."""
+        owner = _SliceComp("Pin")
+        jo = _SliceJO("PinCenter", pos=(6.0, 1.0, 2.0), token="C", comp=owner,
+                      instance_pos={"Pin:2": (-1.0, 11.0, 2.0)})
+        owner.jointOrigins = _Coll([jo])
+        occs = [_SliceOcc("Pin:1", _SliceComp("Pin"), transform2=_zrot(0.0, 0.0)),
+                _SliceOcc("Pin:2", _SliceComp("Pin"), transform2=_zrot(90.0, 0.0))]
+        return jo, occs
+
+    def test_a_joint_origin_half_reports_the_INSTANCE_THE_JOINT_NAMES(self, monkeypatch,
+                                                                       kin_design):
+        # The joint is on Pin:2, so its frame is Pin:2's: origin (-1, 11, 2) cm and the JO's part
+        # space X (1,0,0) standing at (0,1,0). Reading the stored reference as it comes states
+        # Pin:1's (6, 1, 2) instead - a point 12.2 cm from the joint - beside three null axes,
+        # because two placements answer the owning component and neither is picked.
+        jo, occs = self._twice_placed_pin()
+        frame = self._jo_joint(monkeypatch, kin_design, jo, occs=occs, occ_one=occs[1])
+        assert frame["origin"] == [-10.0, 110.0, 20.0]      # cm -> mm
+        assert frame["x_axis"] == [0.0, 1.0, 0.0]
+        assert frame["y_axis"] == [-1.0, 0.0, 0.0]
+
+    def test_a_joint_origin_half_with_no_instance_publishes_NEITHER_origin_nor_axes(
+            self, monkeypatch, kin_design):
+        # The same twice-placed JO on a half that names no occurrence: nothing says which instance,
+        # and a JO's position is an instance read. Publishing it beside null axes would state one
+        # instance's point under a frame the row declines to describe, so both go together.
+        jo, occs = self._twice_placed_pin()
+        import adsk.core, adsk.fusion
+        monkeypatch.setattr(adsk.fusion, "JointOrigin", _SliceJO, raising=False)
+        monkeypatch.setattr(adsk.core.Matrix3D, "create", staticmethod(lambda: _zrot(0.0, 0.0)),
+                            raising=False)
+        design = kin_design(joints=[FakeJoint("Grip", 0, None, None, frame_one=jo)])
+        design.rootComponent.allOccurrencesByComponent = lambda c, o=list(occs): o
+        assert "frame" not in _payload(ap.handler(units="mm"))["joints"][0]
+
+    def test_a_joint_origin_half_whose_proxy_REFUSES_falls_through_to_the_other_half(
+            self, monkeypatch, kin_design):
+        # createForAssemblyContext answering nothing leaves the instance unestablished, so that half
+        # states nothing at all and the second half - a readable JointGeometry - answers instead.
+        jo, occs = self._twice_placed_pin()
+        jo.createForAssemblyContext = lambda occ: None
+        import adsk.core, adsk.fusion
+        monkeypatch.setattr(adsk.fusion, "JointOrigin", _SliceJO, raising=False)
+        monkeypatch.setattr(adsk.core.Matrix3D, "create", staticmethod(lambda: _zrot(0.0, 0.0)),
+                            raising=False)
+        good = _JointFrame(origin=(0.0, 0.0, 5.0), z=(0, 0, 1), x=(1, 0, 0), y=(0, 1, 0))
+        design = kin_design(joints=[FakeJoint("Grip", 1, occs[1], _FrameOcc("Slab:1", comp="Slab"),
+                                              frame_one=jo, frame_two=good)])
+        design.rootComponent.allOccurrencesByComponent = lambda c, o=list(occs): o
+        frame = _payload(ap.handler(units="mm"))["joints"][0]["frame"]
+        assert frame["origin"] == [0.0, 0.0, 50.0] and frame["x_axis"] == [1.0, 0.0, 0.0]
 
     def test_a_joint_origin_reference_reports_its_offset_world_position(self, monkeypatch,
                                                                         kin_design):
         # a JointOrigin exposes the three axis vectors but no origin of its own: its position is the
         # base anchor PLUS offsetX/Y/Z along the frame axes. A plain .origin read reports null here.
-        import adsk.fusion
-        monkeypatch.setattr(adsk.fusion, "JointOrigin", _SliceJO, raising=False)
         jo = _SliceJO("Stock_Center", pos=(0.0, 0.0, 0.0), offsets=(0.0, 0.0, 4.5), token="T")
-        kin_design(joints=[FakeJoint("Grip", 0, "A:1", "B:1", frame_one=jo)])
-        frame = _payload(ap.handler(units="mm"))["joints"][0]["frame"]
+        frame = self._jo_joint(monkeypatch, kin_design, jo)
         assert frame["origin"] == [0.0, 0.0, 45.0]      # base (0,0,0) + offsetZ 4.5 cm along +Z
         assert frame["z_axis"] == [0.0, 0.0, 1.0]
+
+    def test_a_joint_origin_on_a_ROTATED_component_reports_WORLD_axes(self, monkeypatch,
+                                                                      kin_design):
+        # The same JointOrigin reaches the joint_origins slice, which publishes its axes in world;
+        # reading them raw here would describe one frame two ways inside a single payload. The
+        # component's 30-deg turn is what separates the two answers.
+        sub = _SliceComp("Tower")
+        jo = _SliceJO("Center", pos=(5.0, 0.0, 0.0), offsets=(2.0, 0.0, 0.0), token="C", comp=sub)
+        occ = _SliceOcc("Tower:1", sub, transform2=_zrot(30.0, 5.0))
+        frame = self._jo_joint(monkeypatch, kin_design, jo, occs=[occ])
+        assert frame["x_axis"] == [0.866, 0.5, 0.0]
+        assert frame["y_axis"] == [-0.5, 0.866, 0.0]
+        assert frame["origin"] == [67.32, 10.0, 0.0]   # the offset runs along the WORLD frame X
+
+    def _as_built(self, kin_design, geometry, occ_one=None, occ_two="BlkB:1"):
+        """One as-built joint, timeline-healthy, wired into a design. occ_one defaults to an
+        UNTURNED instance, so a lift that ran through it publishes the unlifted axes and a lift
+        through the geometry's own instance does not."""
+        joint = FakeAsBuiltJoint("Spin", 1, occ_one or _FrameOcc("BlkA:1"), occ_two,
+                                 geometry=geometry, timeline=FakeTimelineObj("Spin", 0))
+        return kin_design(asbuilt=[joint])
+
+    def test_an_as_built_joint_publishes_the_frame_of_its_single_geometry(self, kin_design):
+        # An AsBuiltJoint carries `geometry` and NEITHER geometryOrOriginOne nor Two, so the
+        # two-halves walk published no frame key at all for one.
+        occ_b = _SliceOcc("BlkB:1", _SliceComp("BlkB"), transform2=_zrot(90.0, 0.0))
+        self._as_built(kin_design, _AsBuiltGeometry(origin=(4.0, 2.0, 1.0), z=(1, 0, 0),
+                                                    x=(0, 0, 1), y=(0, -1, 0), context=occ_b),
+                       occ_two=occ_b)
+        frame = _payload(ap.handler(units="cm"))["joints"][0]["frame"]
+        assert frame["origin"] == [4.0, 2.0, 1.0]      # the stored reference is already world
+        assert frame["z_axis"] == [0.0, 1.0, 0.0]      # local (1,0,0) through BlkB:1's 90 deg
+        assert frame["x_axis"] == [0.0, 0.0, 1.0]
+        assert frame["y_axis"] == [1.0, 0.0, 0.0]
+
+    def test_the_axes_are_lifted_through_the_GEOMETRYS_instance_not_occurrenceOne(self, kin_design):
+        # MEASURED: on a joint between BlkA:1 (identity) and BlkB:1 (turned 90 deg about Z), the
+        # geometry's entityOne named BlkB:1 and lifting through it published (0,1,0) - the face's
+        # own world normal, and the vector jointMotion.rotationAxisVector reports. occurrenceOne is
+        # BlkA:1, whose identity placement publishes the unlifted (1,0,0), 90 deg wrong.
+        occ_b = _SliceOcc("BlkB:1", _SliceComp("BlkB"), transform2=_zrot(90.0, 0.0))
+        occ_a = _SliceOcc("BlkA:1", _SliceComp("BlkA"), transform2=_zrot(0.0, 0.0))
+        self._as_built(kin_design, _AsBuiltGeometry(z=(1, 0, 0), context=occ_b),
+                       occ_one=occ_a, occ_two=occ_b)
+        assert _payload(ap.handler())["joints"][0]["frame"]["z_axis"] == [0.0, 1.0, 0.0]
+
+    def test_an_uncontexted_entity_resolves_through_its_owners_SINGLE_placement(self, kin_design):
+        # The entity names no instance, so the owning component's own placement answers - the same
+        # ladder every other axis lift resolves through.
+        owner = _SliceComp("BlkB")
+        design = self._as_built(kin_design,
+                                _AsBuiltGeometry(z=(1, 0, 0), context=None, owner=owner))
+        design.rootComponent.allOccurrencesByComponent = (
+            lambda c, o=[_SliceOcc("BlkB:1", owner, transform2=_zrot(90.0, 0.0))]: o)
+        assert _payload(ap.handler())["joints"][0]["frame"]["z_axis"] == [0.0, 1.0, 0.0]
+
+    def test_axes_are_dropped_when_the_owning_component_is_placed_TWICE(self, kin_design):
+        # Two placements each put the geometry's frame somewhere different and nothing names one,
+        # so the row keeps the origin it read and states NO axes rather than an arbitrary instance's.
+        owner = _SliceComp("BlkB")
+        design = self._as_built(kin_design, _AsBuiltGeometry(origin=(4.0, 2.0, 1.0), z=(1, 0, 0),
+                                                             context=None, owner=owner))
+        design.rootComponent.allOccurrencesByComponent = (
+            lambda c, o=[_SliceOcc("BlkB:1", owner, transform2=_zrot(0.0, 0.0)),
+                         _SliceOcc("BlkB:2", owner, transform2=_zrot(90.0, 0.0))]: o)
+        frame = _payload(ap.handler(units="cm"))["joints"][0]["frame"]
+        assert frame["origin"] == [4.0, 2.0, 1.0]
+        assert frame["z_axis"] is None and frame["x_axis"] is None and frame["y_axis"] is None
+
+    def test_no_frame_key_when_the_as_built_joint_carries_no_geometry(self, kin_design):
+        self._as_built(kin_design, None)
+        assert "frame" not in _payload(ap.handler())["joints"][0]
+
+    def test_a_regular_joint_still_reads_its_two_halves(self, kin_design):
+        # The as-built branch is taken on the presence of `geometry`, which a Joint does not carry -
+        # a branch that swallowed regular joints would drop every frame in the payload.
+        kin_design(joints=[FakeJoint("Pin", 1, _FrameOcc("A:1", transform2=_zrot(30.0)), "B:1",
+                                     frame_one=_JointFrame(origin=(1.0, 0.0, 0.0)))])
+        frame = _payload(ap.handler(units="cm"))["joints"][0]["frame"]
+        assert frame["origin"] == [1.0, 0.0, 0.0] and frame["x_axis"] == [0.866, 0.5, 0.0]
 
     def test_the_note_teaches_that_the_frame_z_is_the_offset_axis(self, kin_design):
         kin_design(joints=[FakeJoint("Grip", 1, "A:1", "B:1", frame_one=_JointFrame())])
@@ -1493,3 +2062,107 @@ class TestJointLimitsRead:
         _install([], [j])
         rec = _payload(ap.handler())["joints"][0]
         assert "rotation_limits_deg" not in rec and "slide_limits_mm" not in rec
+
+
+# ── the DEFAULT cap of every bounded array, driven through the payload ───────────────────────────
+#
+# Each max_* input's description states a default, and the handler applies one when the caller names
+# none. Nothing forces those to be the same number: a description reading its constant while the
+# signature carries a bare literal of its own leaves the two free to diverge, and every existing cap
+# test passes the cap EXPLICITLY, so none of them exercises the default at all. These call the
+# handler with no cap and assert the list length that comes back - the number the agent actually
+# gets - against the number the wire promises.
+
+@pytest.fixture
+def jo_design(monkeypatch):
+    """A JointOrigin-carrying design wired into assembly_get through a fixture, so every patch undoes
+    itself - adsk.fusion.JointOrigin included, which is the class is_joint_origin casts against and
+    is shared with every other test in the session."""
+    def _build(design):
+        import adsk.fusion
+        monkeypatch.setattr(adsk.fusion, "JointOrigin", _SliceJO, raising=False)
+        fake_app = type("A", (), {"activeProduct": design})()
+        monkeypatch.setattr(ap, "app", fake_app)
+        monkeypatch.setattr(ap._common, "app", fake_app)
+        monkeypatch.setattr(adsk.fusion.Design, "cast",
+                            lambda x: x if isinstance(x, _SliceDesign) else None)
+        return design
+    return _build
+
+
+def _promised_default(input_name):
+    """The default one max_* input's WIRE description states, as an int."""
+    text = ap.tool.to_dict()["inputSchema"]["properties"][input_name]["description"]
+    match = re.search(r"default (\d+)", text)
+    assert match, f"{input_name} states no default: {text!r}"
+    return int(match.group(1))
+
+
+class TestDefaultCapsReachThePayload:
+    def test_occurrences_default_caps_the_array_at_50(self, kin_design):
+        kin_design(occs=[FakeOcc(f"O{i}:1", f"C{i}") for i in range(51)])
+        out = _payload(ap.handler())
+        assert len(out["occurrences"]) == 50
+        assert out["occurrence_count"] == 51 and out["occurrences_truncated"] is True
+
+    def test_joints_default_caps_the_array_at_100(self, kin_design):
+        kin_design(joints=[FakeJoint(f"J{i}", 1, "A:1", "B:1") for i in range(101)])
+        out = _payload(ap.handler())
+        assert len(out["joints"]) == 100
+        assert out["joint_count"] == 101 and out["joints_truncated"] is True
+
+    def test_all_occurrences_default_caps_the_list_at_100(self, kin_design):
+        kin_design(occs=[], all_occs=[FakeOcc(f"P{i}:1", "P", full_path=f"T:1+P{i}:1")
+                                      for i in range(101)])
+        out = _payload(ap.handler(include=["all_occurrences"]))
+        assert len(out["all_occurrences"]) == 100
+        assert out["all_occurrence_count"] == 101 and out["all_occurrences_truncated"] is True
+
+    def test_joint_origins_default_caps_the_list_at_50(self, jo_design):
+        jos = [_SliceJO(f"JO{i}", token=f"T{i}") for i in range(51)]
+        jo_design(_SliceDesign(_SliceRoot(jos=jos)))
+        out = _payload(ap.handler(include=["joint_origins"]))
+        assert len(out["joint_origins"]) == 50
+        assert out["joint_origin_count"] == 51 and out["joint_origins_truncated"] is True
+
+    def test_relations_default_caps_each_list_at_50(self, relations_design):
+        relations_design(rigid=[_RelRigid(f"RG{i}") for i in range(51)])
+        out = _payload(ap.handler(include=["relations"]))
+        assert len(out["relations"]["rigid_groups"]) == 50
+        assert out["relation_counts"]["rigid_groups"] == 51
+        assert out["relations_truncated"] is True
+
+    def test_contacts_default_caps_the_list_at_50(self, contacts_design):
+        contacts_design(sets=[_ContactSetRow(f"CS{i}") for i in range(51)])
+        out = _payload(ap.handler(include=["contacts"]))
+        assert len(out["contacts"]) == 50
+        assert out["contact_count"] == 51 and out["contacts_truncated"] is True
+
+    def test_every_cap_the_wire_promises_is_the_cap_the_payload_applies(
+            self, kin_design, jo_design, relations_design, contacts_design):
+        """The two legs read the same number. Each max_* input's description PROMISES a default and
+        the handler APPLIES one; a signature carrying its own literal lets the promise and the
+        applied cap drift apart while every explicit-cap test above stays green."""
+        over = 200                                   # more rows than any default admits
+
+        kin_design(occs=[FakeOcc(f"O{i}:1", f"C{i}") for i in range(over)],
+                   joints=[FakeJoint(f"J{i}", 1, "A:1", "B:1") for i in range(over)],
+                   all_occs=[FakeOcc(f"P{i}:1", "P", full_path=f"T:1+P{i}:1")
+                             for i in range(over)])
+        out = _payload(ap.handler(include=["all_occurrences"]))
+        assert len(out["occurrences"]) == _promised_default("max_occurrences")
+        assert len(out["joints"]) == _promised_default("max_joints")
+        assert len(out["all_occurrences"]) == _promised_default("max_all_occurrences")
+
+        jo_design(_SliceDesign(_SliceRoot(jos=[_SliceJO(f"JO{i}", token=f"T{i}")
+                                              for i in range(over)])))
+        out = _payload(ap.handler(include=["joint_origins"]))
+        assert len(out["joint_origins"]) == _promised_default("max_joint_origins")
+
+        relations_design(rigid=[_RelRigid(f"RG{i}") for i in range(over)])
+        out = _payload(ap.handler(include=["relations"]))
+        assert len(out["relations"]["rigid_groups"]) == _promised_default("max_relations")
+
+        contacts_design(sets=[_ContactSetRow(f"CS{i}") for i in range(over)])
+        out = _payload(ap.handler(include=["contacts"]))
+        assert len(out["contacts"]) == _promised_default("max_contacts")

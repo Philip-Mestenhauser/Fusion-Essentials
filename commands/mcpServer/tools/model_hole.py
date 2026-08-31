@@ -21,6 +21,7 @@ from . import _common
 from . import _geom
 from . import _inputs
 from . import _assert
+from . import _joints
 from . import _threads
 
 app = adsk.core.Application.get()
@@ -198,20 +199,78 @@ def _require_linear_edge(edge_ent, label):
             "Pass a linear edge handle from find_geometry(kind='line_edge').")
 
 
-def _sketch_space_is_world(sketch, design):
-    """True only when the sketch's model space IS world - that is, it belongs to the design ROOT.
-
-    modelToSketchSpace maps from the SKETCH'S PARENT COMPONENT's model space, so in any other
-    component a 'world' point would silently be read as that component's local coordinates.
-    Unreadable reads answer False: an unproven space is refused, never assumed. Component identity
-    goes through same_component - component wrappers are measured never identity-stable."""
-    return _common.same_component(safe(lambda: sketch.parentComponent),
-                                  safe(lambda: design.rootComponent))
+# The route out when a world point names no single frame: it is performable start to finish, and
+# each step names a tool that exists (sketch_create publishes the new sketch's own frame, so the
+# circle can be placed in the coordinates the cut actually reads).
+_PROFILE_CUT_REMEDY = (
+    "Cut it as a profile instead: sketch_create on the same face reports where that sketch's origin "
+    "sits and where its +X/+Y point, place a circle at those coordinates with "
+    "sketch_add_geometry(kind='circle'), then model_extrude(operation='cut').")
 
 
-def _sketch_space_point(sketch, x, y, z):
+def _world_lift(design, sketch, context_occ):
+    """(matrix, error) for carrying a WORLD point into the model space `modelToSketchSpace` reads
+    from - the SKETCH'S OWN parent component's frame.
+
+    A None matrix with no error means no lift is needed: the sketch belongs to the design ROOT,
+    whose model space IS world, and applying anything there double-compensates (measured - the
+    root-owned sketch on an occurrence proxy face already reports world coordinates).
+
+    Anywhere else the lift is the INVERSE of that component's placement: component_world_matrix is
+    the one ladder that answers component -> world, and the point travels the other way. That ladder
+    answers None when no SINGLE placement does (several instances, or a transform2 that will not
+    read), and a world point then names no one frame to convert from, so the call is refused rather
+    than drilled at a guessed instance. `context_occ` is the occurrence the caller reached 'face'
+    through, which resolves a multiply-placed component for the instance actually in hand."""
+    owner = safe(lambda: sketch.parentComponent)
+    # `is True`: "no lift needed" is the claim that this sketch's model space IS world. An unproven
+    # owner goes down the ladder, which answers a real matrix or None - and None is already refused
+    # below, naming the component and the way to narrow to one instance.
+    if _common.same_component(owner, safe(lambda: design.rootComponent)) is True:
+        return None, ""
+    to_world = _joints.component_world_matrix(design, owner, context_occ)
+    name = safe(lambda: owner.name)
+    whose = f" ('{name}')" if name else ""
+    if to_world is None:
+        # The instance remedy first: a 'face' reached THROUGH an occurrence is what this function
+        # resolves the frame from, and find_geometry's 'target' is where a caller narrows to one.
+        return None, (f"The placement sketch landed in a component{whose} that no single placement "
+                      "answers for, so a points_space='world' point names no one frame to convert "
+                      "from. Take 'face' from find_geometry with 'target' narrowed to the ONE "
+                      "occurrence you mean - a face reached through an occurrence names that "
+                      "placement. " + _PROFILE_CUT_REMEDY)
+    inverse = safe(lambda: to_world.copy())
+    if inverse is None or not safe(lambda: inverse.invert()):
+        return None, (f"The placement of the component{whose} the placement sketch landed in did "
+                      "not invert, so a points_space='world' point could not be carried into its "
+                      "frame. " + _PROFILE_CUT_REMEDY)
+    return inverse, ""
+
+
+def _foreign_face_clause(comp, face_ent):
+    """The clause naming a 'face' whose OWN component is not the one the hole was built in, or ''.
+
+    Both sides are READ (the face's body's parent, and the component the feature was added to); the
+    clause states that they differ and names the call that makes the face's component the build
+    target. It claims nothing about why the drill found no body."""
+    owner = safe(lambda: face_ent.body.parentComponent)
+    # `is not False`: the clause STATES that the two components differ, so it is emitted only on a
+    # proven difference - an identity that did not read is evidence of nothing and says nothing.
+    if owner is None or _common.same_component(owner, comp) is not False:
+        return ""
+    face_name = safe(lambda: owner.name)
+    built_in = safe(lambda: comp.name)
+    if not face_name or not built_in:
+        return ""
+    return (f" The drilled 'face' belongs to component '{face_name}', while this hole was built in "
+            f"'{built_in}'. Activate '{face_name}' with design_activate_component and retry, or "
+            + _PROFILE_CUT_REMEDY)
+
+
+def _sketch_space_point(sketch, x, y, z, to_model=None):
     """A WORLD point (cm) in the sketch's own space: (u, v, off_plane) in cm, or (None, None, None)
-    when the conversion cannot be made.
+    when the conversion cannot be made. `to_model` is _world_lift's matrix, applied first when the
+    sketch's model space is not world; None means the point is already in that space.
 
     modelToSketchSpace is the API's own converter and the only thing that can be right here,
     because the space a placement sketch reads follows the sketch's OWNER, not the face: a sketch
@@ -226,6 +285,8 @@ def _sketch_space_point(sketch, x, y, z):
     being silently flattened onto it. Reads are STRICT: an unreadable coordinate voids the whole
     conversion rather than drilling at a guessed one."""
     p = safe(lambda: adsk.core.Point3D.create(x, y, z))
+    if p is not None and to_model is not None and not safe(lambda: p.transformBy(to_model)):
+        return None, None, None
     q = safe(lambda: sketch.modelToSketchSpace(p)) if p is not None else None
     c = ((safe(lambda: q.x), safe(lambda: q.y), safe(lambda: q.z))
          if q is not None else (None, None, None))
@@ -464,6 +525,7 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
     sketch = None
     sketch_pts = []
     scaled_pts = []            # the raw scaled (cm) coords, for best-effort naming of failed points
+    world_lift = None          # the component whose placement carried the world points, if any
 
     def _abandon(msg):
         """Error exit AFTER the placement sketch exists: roll the sketch back first, so a refused
@@ -479,15 +541,16 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
             return error(f"Could not create a placement sketch on the face: {e}")
         if not sketch:
             return error("Could not create a placement sketch on the face (sketches.add returned nothing).")
-        if points_space == "world" and not _sketch_space_is_world(sketch, design):
-            # The sketch's OWNER decides the space it converts from, so outside the root a 'world'
-            # point would be read as that component's local coordinates. Refuse the ambiguous space.
-            owner = safe(lambda: sketch.parentComponent.name)
-            return _abandon(f"The placement sketch did not land in the ROOT component"
-                            + (f" (it is in '{owner}')" if owner else "") + ", so a "
-                            "points_space='world' point would be read in that component's own "
-                            "coordinates instead of world. Activate the root component "
-                            "(design_activate_component), or pass points_space='sketch'.")
+        # The sketch's OWNER decides the space modelToSketchSpace converts from, so outside the root
+        # a 'world' point is carried into that component's frame first - the leg that lets a hole in
+        # a NESTED component be placed by world coordinates at all.
+        to_model = None
+        if points_space == "world":
+            to_model, lerr = _world_lift(design, sketch, safe(lambda: face_ent.assemblyContext))
+            if lerr:
+                return _abandon(lerr)
+            if to_model is not None:
+                world_lift = safe(lambda: sketch.parentComponent.name)
         for xyz in pts:
             try:
                 sx, sy, sz = (float(xyz[0]) * factor, float(xyz[1]) * factor,
@@ -498,11 +561,10 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
             if points_space == "world":
                 # sketchPoints.add takes SKETCH coordinates, and the sketch's own converter is the
                 # only thing that knows the mapping - see _sketch_space_point.
-                u, v, off = _sketch_space_point(sketch, sx, sy, sz)
+                u, v, off = _sketch_space_point(sketch, sx, sy, sz, to_model)
                 if u is None:
-                    return _abandon(f"Point {xyz!r} could not be converted into the placement "
-                                    "sketch's space (modelToSketchSpace). Retry with "
-                                    "points_space='sketch'.")
+                    return _abandon(f"Point {xyz!r} could not be carried into the placement "
+                                    "sketch's space. Retry with points_space='sketch'.")
                 if abs(off) > _OFF_PLANE_TOL_CM:
                     return _abandon(f"Point {xyz!r} lies {round(off / factor, 4):g} '{units}' off "
                                     "the plane of 'face', and a points_space='world' point must lie "
@@ -518,12 +580,17 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
             sketch_pts.append(sp)
             scaled_pts.append((sx, sy, sz))
         if len(sketch_pts) == 1:
-            hin.setPositionBySketchPoint(sketch_pts[0])
+            setter = "setPositionBySketchPoint"
+            placed = hin.setPositionBySketchPoint(sketch_pts[0])
         else:
             coll = _object_collection()
             for sp in sketch_pts:
                 coll.add(sp)
-            hin.setPositionBySketchPoints(coll)
+            setter = "setPositionBySketchPoints"
+            placed = hin.setPositionBySketchPoints(coll)
+        if placed is False:
+            return _abandon(f"Fusion refused the sketch-point placement ({setter} returned false), "
+                            "so nothing was drilled.")
         n_expected = len(sketch_pts)
     elif placement == "center":
         try:
@@ -568,7 +635,9 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
 
     # Extent (THROUGH must be Positive - verified live).
     if extent == "blind":
-        hin.setDistanceExtent(_value(depth))
+        if hin.setDistanceExtent(_value(depth)) is False:
+            return _abandon(f"Fusion refused the blind-hole depth '{depth}' (setDistanceExtent "
+                            "returned false), so nothing was drilled.")
     else:
         # The HOLE setAllExtent is NOT the retired extrude sibling: it is measured honest on this
         # build (an 8 mm through hole in a 15 mm plate removed exactly the bore volume), so a false
@@ -586,7 +655,9 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
 
     # Tap (after placement/extent; size comes from the designation).
     if thread_info is not None:
-        hin.setToTappedHole(thread_info)
+        if hin.setToTappedHole(thread_info) is False:
+            return _abandon(f"Fusion refused to tap the hole to '{tap}' (setToTappedHole returned "
+                            "false), so nothing was drilled.")
         try:
             # isModeled only takes effect after setToTappedHole.
             hin.isModeled = bool(modeled)
@@ -597,7 +668,9 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
     # Clearance fastener TAG: records the fastener spec on the feature (the diameter was already set from
     # the table into the base input). setToClearanceHole does NOT resize the geometry on this version.
     if clearance_info is not None:
-        hin.setToClearanceHole(clearance_info)
+        if hin.setToClearanceHole(clearance_info) is False:
+            return _abandon(f"Fusion refused the clearance-hole spec for '{fastener}' "
+                            "(setToClearanceHole returned false), so nothing was drilled.")
 
     try:
         feature = holes.add(hin)         # MUTATION - raises (and aborts) if anything is inconsistent
@@ -641,7 +714,8 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
         return error(
             f"{n_missing} of {n_pts} hole point(s) cut NOTHING - the feature created {len(axes)} "
             f"hole(s).{named} {where_msg} {tail}"
-            + (f" Fusion reported: {warn}" if warn else ""))
+            + (f" Fusion reported: {warn}" if warn else "")
+            + _foreign_face_clause(comp, face_ent))
 
     result = {
         "holes": min(len(axes), n_pts) if verified else n_pts,
@@ -656,6 +730,12 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
                 "For a bolt circle, pass every position in 'points' in ONE call - the pattern tools "
                 "take bodies/occurrences, not hole features.",
     }
+    if world_lift:
+        # Disclose the extra step the points took: nothing else in the payload shows that they were
+        # carried through a placement rather than handed straight to the sketch's converter.
+        result["world_lift_component"] = world_lift
+        result["note"] += (" The world points were carried into the frame of component "
+                           f"'{world_lift}' through its placement before the sketch converted them.")
     if tap:
         # A tapped hole also creates a ThreadFeature, and the helix flag lives THERE: the
         # HoleFeature has no isModeled and its tappedHoleInfo (a ThreadInfo) has none either.

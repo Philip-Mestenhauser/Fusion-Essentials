@@ -19,6 +19,16 @@ from conftest import load_tool
 jd = load_tool("joint_drive")
 
 
+@pytest.fixture(autouse=True)
+def _isolated_document_keys():
+    """_write_guard's per-instance key registry is SESSION state shared with every other consumer
+    of document_key, and it outlives one call by design. Cleared around every test in this file so
+    the minted tokens are deterministic and no fake document is left for another file to scan."""
+    jd._write_guard._UNSAVED_DOC_KEYS.clear()
+    yield
+    jd._write_guard._UNSAVED_DOC_KEYS.clear()
+
+
 # ── fakes (class NAMES matter: _current_joint_type keys off type(jm).__name__) ──────────────────────
 
 class FakeLimits:
@@ -359,10 +369,78 @@ class _FakeDoc:
             self.dataFile = _FakeDataFile(urn)
         # no urn -> no dataFile attribute at all: reading it raises, like an unsaved doc
 
+    def save_as(self, urn):
+        """The document is SAVED without closing: the same open document (the same handle, so the
+        key registry still matches it) now answers a data-file id where it answered none."""
+        self.dataFile = _FakeDataFile(urn)
+
 
 class _FakeApp:
     def __init__(self, doc_name="DocA", urn=None):
         self.activeDocument = _FakeDoc(doc_name, urn)
+
+
+class TestDocumentKeyIdentity:
+    """What THIS consumer does with the shared document key (_write_guard.document_key).
+
+    The key itself - the lineage urn for a saved document, a per-instance token matched by document
+    HANDLE for an unsaved one (measured live, two open never-saved documents both answer
+    'Untitled', so a name is not a stand-in), and the backward prune walk - is pinned once in
+    test_write_guard.py. Pinned here is joint_drive's own branch on it: the stand-in it words when
+    no document reads at all, and the consequence for the driven-joint registry, whose entityToken
+    half is DOCUMENT-LOCAL and repeats across documents - so a key that merged two documents would
+    refuse a safe drive in one because a DIFFERENT document's joint was driven.
+    """
+
+    def test_no_readable_document_is_not_a_document_key(self, monkeypatch):
+        # document_key answers None here - nothing read, so nothing to mint for. This consumer's
+        # stand-in is a string that is not a document either, so it matches no real one.
+        monkeypatch.setattr(jd._write_guard, "app", types.SimpleNamespace())   # activeDocument raises
+        key = jd._doc_key()
+        assert key == "<no document>"
+        assert not key.startswith("unsaved:")               # and it mints nothing
+        assert jd._write_guard._UNSAVED_DOC_KEYS == []
+
+    def test_several_closed_documents_are_all_evicted_in_one_pass(self, monkeypatch):
+        # The SHARED eviction, reached through this consumer. It walks the registry BACKWARDS so a
+        # deletion cannot slide the next entry past the cursor, and so the index it holds stays
+        # inside a list that is shrinking under it. Only a registry holding MORE THAN ONE dead entry
+        # tells the two walks apart: a forward walk skips the entry that slid into the freed slot
+        # and then indexes past the end, raising IndexError out of _doc_key() and so out of
+        # handler(). A --keep-open session full of scratch documents produces exactly this shape.
+        app = _FakeApp("Untitled")
+        docs = [app.activeDocument, _FakeDoc("Untitled"), _FakeDoc("Untitled")]
+        monkeypatch.setattr(jd._write_guard, "app", app)
+        keys = []
+        for d in docs:
+            d.isValid = True
+            app.activeDocument = d
+            keys.append(jd._doc_key())
+        assert len(jd._write_guard._UNSAVED_DOC_KEYS) == 3 and len(set(keys)) == 3
+        docs[0].isValid = False
+        docs[1].isValid = False                    # two dead entries, adjacent, at the front
+        app.activeDocument = docs[2]
+        assert jd._doc_key() == keys[2]       # the survivor keeps its own key
+        assert [k for _d, k in jd._write_guard._UNSAVED_DOC_KEYS] == [keys[2]]
+
+    def test_a_drive_in_one_unsaved_document_does_not_refuse_the_partner_in_another(self, monkeypatch):
+        # The end-to-end consequence, holding the JOINTS constant and varying only the document:
+        # driving JawL in one never-saved document must not refuse JawR in a different one.
+        jaw_l = FakeJoint("Slider_JawL", SliderJointMotion())
+        jaw_r = FakeJoint("Slider_JawR", SliderJointMotion())
+        link_pair(jaw_l, jaw_r)
+        design = _Design([jaw_l, jaw_r])
+        monkeypatch.setattr(jd._common, "design", lambda: design)
+        monkeypatch.setattr(jd, "_driven_this_session", set())
+        app = _FakeApp("Untitled")
+        monkeypatch.setattr(jd._write_guard, "app", app)
+        assert _payload(jd.handler(joint_name="Slider_JawL", distance=16))["driven"] is True
+        app.activeDocument = _FakeDoc("Untitled")          # a DIFFERENT unsaved document
+        out = jd.handler(joint_name="Slider_JawR", distance=-16)
+        assert out["isError"] is False, out
+        # and the guard is not disarmed generally: back in the FIRST document it still refuses.
+        app.activeDocument = jd._write_guard._UNSAVED_DOC_KEYS[0][0]
+        assert jd.handler(joint_name="Slider_JawR", distance=-16)["isError"] is True
 
 
 class TestSecondMemberRefusal:
@@ -375,7 +453,7 @@ class TestSecondMemberRefusal:
         link_pair(jaw_l, jaw_r)
         design = _Design([jaw_l, jaw_r])
         monkeypatch.setattr(jd._common, "design", lambda: design)
-        monkeypatch.setattr(jd, "app", _FakeApp("DocA"))
+        monkeypatch.setattr(jd._write_guard, "app", _FakeApp("DocA"))
         monkeypatch.setattr(jd, "_driven_this_session", set())
         return jaw_l, jaw_r, design
 
@@ -414,7 +492,7 @@ class TestSecondMemberRefusal:
         a, b = FakeJoint("A", SliderJointMotion()), FakeJoint("B", SliderJointMotion())
         design = _Design([a, b])                          # no motion link
         monkeypatch.setattr(jd._common, "design", lambda: design)
-        monkeypatch.setattr(jd, "app", _FakeApp("DocA"))
+        monkeypatch.setattr(jd._write_guard, "app", _FakeApp("DocA"))
         monkeypatch.setattr(jd, "_driven_this_session", set())
         assert _payload(jd.handler(joint_name="A", distance=5))["driven"] is True
         assert _payload(jd.handler(joint_name="B", distance=5))["driven"] is True
@@ -430,7 +508,7 @@ class TestSecondMemberRefusal:
         sub = _Root([jaw_l, jaw_r])
         design.allComponents = [sub]
         monkeypatch.setattr(jd._common, "design", lambda: design)
-        monkeypatch.setattr(jd, "app", _FakeApp("DocA"))
+        monkeypatch.setattr(jd._write_guard, "app", _FakeApp("DocA"))
         monkeypatch.setattr(jd, "_driven_this_session", set())
         assert _payload(jd.handler(joint_name="Slider_JawL", distance=16))["driven"] is True
         res = jd.handler(joint_name="Slider_JawR", distance=-16)
@@ -439,30 +517,74 @@ class TestSecondMemberRefusal:
     def test_registry_is_per_document_identity(self, monkeypatch, linked_pair):
         # A same-named pair in ANOTHER document (distinct lineage URN, same display name) is not
         # poisoned by the first document's drive - identity is the URN, not the name.
-        monkeypatch.setattr(jd, "app", _FakeApp("Doc", urn="urn:lineage:a"))
+        monkeypatch.setattr(jd._write_guard, "app", _FakeApp("Doc", urn="urn:lineage:a"))
         jd.handler(joint_name="Slider_JawL", distance=16)
-        monkeypatch.setattr(jd, "app", _FakeApp("Doc", urn="urn:lineage:b"))
+        monkeypatch.setattr(jd._write_guard, "app", _FakeApp("Doc", urn="urn:lineage:b"))
         assert _payload(jd.handler(joint_name="Slider_JawR", distance=-16))["driven"] is True
 
     def test_rename_does_not_disarm_guard(self, monkeypatch, linked_pair):
         # The first drive registers under the lineage URN; a document RENAME (name changes,
         # dataFile.id stable) must still refuse the second-member drive.
         jaw_l, jaw_r, _ = linked_pair
-        monkeypatch.setattr(jd, "app", _FakeApp("Original", urn="urn:lineage:1"))
+        monkeypatch.setattr(jd._write_guard, "app", _FakeApp("Original", urn="urn:lineage:1"))
         assert _payload(jd.handler(joint_name="Slider_JawL", distance=16))["driven"] is True
-        monkeypatch.setattr(jd, "app", _FakeApp("Renamed", urn="urn:lineage:1"))
+        monkeypatch.setattr(jd._write_guard, "app", _FakeApp("Renamed", urn="urn:lineage:1"))
         res = jd.handler(joint_name="Slider_JawR", distance=-16)
         assert res["isError"] is True and "Slider_JawL" in res["message"]
         assert jaw_r.jointMotion.slideValue == 0.0       # refused BEFORE mutating
 
-    def test_unsaved_doc_falls_back_to_name_key(self, linked_pair):
-        # An unsaved document has no dataFile - the name is the registry key and the guard
-        # still functions.
+    def test_unsaved_doc_keys_on_a_per_instance_token_and_the_guard_still_functions(self, linked_pair):
+        # An unsaved document has no dataFile, so the registry keys on a per-instance token minted
+        # for that document - NOT its name. Within the one document the guard is unchanged: the
+        # second member is still refused.
         jaw_l, jaw_r, _ = linked_pair                     # fixture's DocA carries no dataFile
         assert _payload(jd.handler(joint_name="Slider_JawL", distance=16))["driven"] is True
-        assert ("DocA", "Slider_JawL") in jd._driven_this_session
+        keys = [k for k, _ in jd._driven_this_session]
+        assert keys and all(k.startswith("unsaved:") for k in keys), keys
+        assert "DocA" not in keys                         # the name is not the identity
         res = jd.handler(joint_name="Slider_JawR", distance=-16)
         assert res["isError"] is True and "Slider_JawL" in res["message"]
+
+    def test_guard_survives_the_save_that_re_keys_the_document(self, monkeypatch, linked_pair):
+        # THE BITE, and it fails toward the crash: a never-saved document holding referenced
+        # components is driven, then SAVED. The document key changes from the minted token to the
+        # data-file id without the document closing, so the entry parked under the token stops
+        # matching and the partner reads as never driven - the both-members refusal, which exists
+        # because driving both members of a motion-linked pair in an xref context has killed the
+        # Fusion process, does not fire. The rename announcement carries the entry across.
+        jaw_l, jaw_r, _ = linked_pair
+        app = _FakeApp("Untitled")                          # no dataFile - never saved
+        monkeypatch.setattr(jd._write_guard, "app", app)
+        assert _payload(jd.handler(joint_name="Slider_JawL", distance=16))["driven"] is True
+        app.activeDocument.save_as("urn:lineage:saved")     # doc_save_as, same open document
+        res = jd.handler(joint_name="Slider_JawR", distance=-16)
+        assert res["isError"] is True and "Slider_JawL" in res["message"]
+        assert jaw_r.jointMotion.slideValue == 0.0          # refused BEFORE mutating
+
+    def test_the_carried_entry_keeps_its_own_joint_token(self, monkeypatch, linked_pair):
+        # Only the DOCUMENT half of the key moves. The entity-token half is what makes a
+        # delete+recreate of the driven joint clear the block and a rename keep it; carrying an
+        # entry that lost it would arm the guard for every joint in the document.
+        jaw_l, jaw_r, _ = linked_pair
+        jaw_l.entityToken = "tok:jawL"
+        app = _FakeApp("Untitled")
+        monkeypatch.setattr(jd._write_guard, "app", app)
+        jd.handler(joint_name="Slider_JawL", distance=16)
+        app.activeDocument.save_as("urn:lineage:saved")
+        jd._doc_key()                                       # the read that detects the flip
+        assert jd._driven_this_session == {("urn:lineage:saved", "tok:jawL")}
+
+    def test_a_save_in_one_document_does_not_re_key_anothers_entries(self, monkeypatch, linked_pair):
+        # The announcement is broadcast but names ONE key: an entry registered against a different
+        # document must keep its own key, or saving document A silently moves document B's
+        # driven-joint entries onto A's new id and refuses a safe drive there.
+        jd._driven_this_session.add(("unsaved:other", "tok:elsewhere"))
+        app = _FakeApp("Untitled")
+        monkeypatch.setattr(jd._write_guard, "app", app)
+        jd.handler(joint_name="Slider_JawL", distance=16)
+        app.activeDocument.save_as("urn:lineage:saved")
+        jd._doc_key()
+        assert ("unsaved:other", "tok:elsewhere") in jd._driven_this_session
 
     def test_partial_drive_still_arms_the_guard(self, monkeypatch):
         # A cylindrical drive that lands its rotation and then fails on the slide HAS moved the
@@ -484,7 +606,7 @@ class TestSecondMemberRefusal:
         link_pair(a, b)
         design = _Design([a, b])
         monkeypatch.setattr(jd._common, "design", lambda: design)
-        monkeypatch.setattr(jd, "app", _FakeApp("DocA"))
+        monkeypatch.setattr(jd._write_guard, "app", _FakeApp("DocA"))
         monkeypatch.setattr(jd, "_driven_this_session", set())
         res = jd.handler(joint_name="Cyl_A", angle_deg=30, distance=10, units="mm")
         assert res["isError"] is True and "PARTIALLY" in res["message"]
@@ -502,7 +624,7 @@ class TestXrefScopingAndTokens:
     def _install(self, monkeypatch, jaws, urn=None):
         design = _Design(jaws)
         monkeypatch.setattr(jd._common, "design", lambda: design)
-        monkeypatch.setattr(jd, "app", _FakeApp("DocA", urn=urn))
+        monkeypatch.setattr(jd._write_guard, "app", _FakeApp("DocA", urn=urn))
         monkeypatch.setattr(jd, "_driven_this_session", set())
         return design
 

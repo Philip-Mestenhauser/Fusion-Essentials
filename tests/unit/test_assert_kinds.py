@@ -456,6 +456,86 @@ class TestSketchCurvesChanged:
         assert "curve_count_after" not in out
 
 
+class TestSketchCurvesChangedScope:
+    """The fingerprint reads the sketch the HANDLER acted on. A handler that scoped its by-name
+    resolve to a component and a fingerprint that did not would describe two different sketches
+    whenever that name is shared - and a name two components share is Fusion's default, since it
+    numbers sketches per component from 1."""
+
+    def _spy(self, monkeypatch):
+        """Record the (name, scope) pair the fingerprint resolves with, and answer 'no sketch' so
+        the gate discloses rather than gating on a fake sketch."""
+        seen = []
+        import mcpServer.tools._sketch_detail as sd
+        import mcpServer.tools._common as common
+        monkeypatch.setattr(common, "design", lambda: object())
+
+        def _scoped(d, n, c, input_name="component"):
+            seen.append((n, c))
+            return None, None, None
+
+        monkeypatch.setattr(sd, "scoped_or_recent_sketch", _scoped)
+        return seen
+
+    def test_the_handlers_scope_reaches_the_fingerprint(self, monkeypatch):
+        p = kernel.SketchCurvesChanged(scope_keys=("component",))
+        seen = self._spy(monkeypatch)
+
+        def handler(sketch_name="", component=""):
+            return _ok({"moved": True})
+
+        kernel.wrap(handler, [p])(sketch_name="Plate", component="Beta")
+        assert seen == [("Plate", "Beta"), ("Plate", "Beta")]     # capture and verify both scoped
+
+    def test_two_references_do_not_borrow_each_others_scope(self, monkeypatch):
+        # the copy shape: 'target_sketch' is narrowed by 'target_component', 'sketch_name' by
+        # 'component'. Pairing them by anything but position reads the source's component.
+        p = kernel.SketchCurvesChanged(keys=("target_sketch", "sketch_name"),
+                                       scope_keys=("target_component", "component"))
+        seen = self._spy(monkeypatch)
+
+        def handler(sketch_name="", target_sketch="", component="", target_component=""):
+            return _ok({"copied": True})
+
+        kernel.wrap(handler, [p])(sketch_name="Plate", component="Alpha",
+                                  target_sketch="Plate", target_component="Beta")
+        assert seen == [("Plate", "Beta"), ("Plate", "Beta")]
+
+    def test_falling_through_to_the_second_name_takes_the_SECOND_scope(self, monkeypatch):
+        # a copy with no 'target_sketch' writes into the SOURCE sketch, so the fingerprint falls
+        # through to 'sketch_name' - and must then read 'component', not the target scope that
+        # narrows a reference this call never made.
+        p = kernel.SketchCurvesChanged(keys=("target_sketch", "sketch_name"),
+                                       scope_keys=("target_component", "component"))
+        seen = self._spy(monkeypatch)
+
+        def handler(sketch_name="", target_sketch="", component="", target_component=""):
+            return _ok({"copied": True})
+
+        kernel.wrap(handler, [p])(sketch_name="Plate", component="Alpha", target_component="Beta")
+        assert seen == [("Plate", "Alpha"), ("Plate", "Alpha")]
+
+    def test_a_blank_name_still_carries_its_scope(self, monkeypatch):
+        # an empty name means "the most recent sketch", and the scope decides WHOSE.
+        p = kernel.SketchCurvesChanged(scope_keys=("component",))
+        seen = self._spy(monkeypatch)
+
+        def handler(sketch_name="", component=""):
+            return _ok({"moved": True})
+
+        kernel.wrap(handler, [p])(component="Beta")
+        assert seen == [("", "Beta"), ("", "Beta")]
+
+    def test_a_scope_key_the_handler_does_not_take_is_refused_at_wiring(self):
+        p = kernel.SketchCurvesChanged(scope_keys=("nope",))
+
+        def handler(sketch_name=""):
+            return _ok({})
+
+        with pytest.raises(ValueError, match="nope"):
+            kernel.wrap(handler, [p])
+
+
 # ── ChildGeometryMoved: a joint's reposition must reach the NESTED body geometry ────────────────
 #
 # The fake occurrence tree is built from types.SimpleNamespace (no bespoke Fake* classes): a handler
@@ -522,6 +602,95 @@ class TestComputeFailureReaders:
 
         assert kernel.compute_failure(_Blind()) is None
         assert kernel.compute_failure(None) is None
+
+    def test_health_state_read_separates_the_two_Nones_the_classifier_returns(self):
+        # compute_failure answers None for a state it does not flag AND for one that never read.
+        # This is the half that tells them apart, so a caller can publish 'healthy' for the first
+        # and withhold the flag for the second.
+        class _Blind:
+            @property
+            def healthState(self):
+                raise RuntimeError("healthState unreadable")
+
+        class _Absent:
+            """The measured AsBuiltJoint shape: no healthState attribute at all."""
+
+        assert kernel.health_state_read(_FakeTimelineItem("F", 0, "")) is True
+        assert kernel.health_state_read(_FakeTimelineItem("F", 2, "bad")) is True
+        assert kernel.health_state_read(_Blind()) is False
+        assert kernel.health_state_read(_Absent()) is False
+        assert kernel.health_state_read(None) is False
+
+
+class TestComputeState:
+    """The ONE entity-plus-timelineObject dispatch every published health verdict runs -
+    assembly_get's rows, workspace_orient's rollup and joint_create's read-back. It answers the
+    three-valued state AND the failure pair the verdict was taken from, so a caller republishing the
+    message states the failure this read found rather than one of its own."""
+
+    def _paired(self, own_health=None, tl_health=None, own_msg="", tl_msg=""):
+        """An entity carrying a healthState only where `own_health` is given (the measured
+        AsBuiltJoint shape has none at all) and a timelineObject only where `tl_health` is."""
+        ent = types.SimpleNamespace(name="E")
+        if own_health is not None:
+            ent.healthState = own_health
+            ent.errorOrWarningMessage = own_msg
+        if tl_health is not None:
+            ent.timelineObject = _FakeTimelineItem("E", tl_health, tl_msg)
+        return ent
+
+    def test_a_failed_entity_answers_broken_and_hands_back_the_failure(self):
+        state, failure = kernel.compute_state(self._paired(own_health=2, own_msg="over-constrained"))
+        assert state == "broken"
+        assert failure == ("error", "over-constrained")
+
+    def test_a_failure_only_the_timeline_item_carries_is_still_broken(self):
+        # the measured AsBuiltJoint/RigidGroup shape: no healthState on the object at all, the
+        # timeline item beside it answering. A read of the entity alone calls this healthy.
+        state, failure = kernel.compute_state(self._paired(tl_health=1, tl_msg="conflict"))
+        assert state == "broken"
+        assert failure == ("warning", "conflict")
+
+    def test_the_entity_is_read_first_when_both_sources_fail(self):
+        # both carry a failure with DIFFERENT text, so the order is what the assertion reads.
+        _state, failure = kernel.compute_state(
+            self._paired(own_health=2, own_msg="from the entity",
+                         tl_health=2, tl_msg="from the timeline item"))
+        assert failure == ("error", "from the entity")
+
+    def test_a_healthy_timeline_item_does_not_mask_a_failed_entity(self):
+        state, failure = kernel.compute_state(
+            self._paired(own_health=1, own_msg="iffy", tl_health=0))
+        assert state == "broken" and failure == ("warning", "iffy")
+
+    # The failing pair is WARNING (1) and ERROR (2); the two states either side of it read and are
+    # deliberately not flagged, so both boundaries are pinned rather than the middle alone.
+    def test_healthy_is_the_boundary_below_the_failing_pair(self):
+        assert kernel.compute_state(self._paired(own_health=0)) == ("healthy", None)
+
+    def test_suppressed_is_the_boundary_above_the_failing_pair(self):
+        # 3 = SUPPRESSED: a state that READ and is parked on purpose - healthy, never withheld.
+        assert kernel.compute_state(self._paired(own_health=3)) == ("healthy", None)
+
+    def test_a_state_only_the_timeline_item_answers_reads_healthy(self):
+        assert kernel.compute_state(self._paired(tl_health=0)) == ("healthy", None)
+
+    def test_neither_source_answering_is_unknown_not_healthy(self):
+        # An unread state is not a clean bill of health: the caller withholds its flag on this.
+        assert kernel.compute_state(self._paired()) == ("unknown", None)
+        assert kernel.compute_state(None) == ("unknown", None)
+
+    def test_a_raising_health_state_is_unknown_on_both_sources(self):
+        class _Blind:
+            @property
+            def healthState(self):
+                raise RuntimeError("healthState unreadable")
+
+            @property
+            def timelineObject(self):
+                raise RuntimeError("timelineObject unreadable")
+
+        assert kernel.compute_state(_Blind()) == ("unknown", None)
 
 
 class TestChildGeometryMoved:

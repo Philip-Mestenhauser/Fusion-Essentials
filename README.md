@@ -23,18 +23,14 @@ install the add-in. If you are familiar with git, you can clone the repo into yo
 
 ## The MCP server
 
-[Model Context Protocol](https://modelcontextprotocol.io) is the standard way an AI assistant talks
-to software outside itself. Fusion-Essentials can run a small MCP server on your machine, and any
-MCP client (Claude, or another) can connect to it and work in whatever document you have open:
-reading a design, sketching, modelling, assembling, measuring, taking screenshots, setting up CAM.
+Everything about the server - setup, connecting a client, the full tool list, permissions, and
+why it is built the way it is - lives in the [MCP Server README](commands/mcpServer/README.md).
+It is **off by default**.
 
 The tools are workflow-agnostic. Each does a single job and assumes nothing about how your shop
 works, so a repeatable procedure is something you assemble in your client out of whichever calls it
-needs.
-Anything that changes the model reads the design back afterwards, ensuring LLM tools can act more like an incrimental designer, than a script shotgun.
-
-The server is **off by default**. Setup, connecting a client, the full tool list, permissions, and
-why it is built the way it is: [MCP Server README](commands/mcpServer/README.md).
+needs. Anything that changes the model reads the design back afterwards, so an LLM works like an
+incremental designer rather than a script shotgun.
 
 ## Contributing
 

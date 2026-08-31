@@ -88,10 +88,21 @@ def handler(component: str = "", into_component: str = "", x: float = 0.0, y: fl
     # A component cannot hold an instance of itself (nor of anything it already sits inside).
     # Measured: the platform refuses this itself - addExistingComponent raises '3 : add operation
     # failed' and the tree is unchanged. This guard is the earlier, named error, not a crash shield.
-    if component_contains(comp, host):
+    cycle = component_contains(comp, host)
+    if cycle is True:
         return error(f"Refusing to instance '{comp_name}' into {host_label}: that target is "
                      f"'{comp_name}' itself or sits inside it, so the component would contain an "
                      "instance of itself. Pick a target outside it (omit 'into_component' for root).")
+    if cycle is None:
+        # False is the claim "this instance is legal"; the walk answers None for several distinct
+        # reads - an unenumerable collection, a census holding an unresolved reference, or one
+        # occurrence whose component identity would not read. The wire says only what is common to
+        # all of them: no verdict was reached.
+        return error(f"Refusing to instance '{comp_name}' into {host_label}: whether that target "
+                     f"already sits inside '{comp_name}' could not be determined - the subtree could "
+                     "not be searched to a verdict, so the instance could make the component contain "
+                     "itself. Check for unresolved external references with assembly_get, then "
+                     "retry.")
 
     matrix = adsk.core.Matrix3D.create()
     if rotate_deg:

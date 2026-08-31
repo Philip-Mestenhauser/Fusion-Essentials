@@ -7,9 +7,19 @@ overlap volume per occurrence-pair, the clear=true path, and the <2-occurrence s
 
 import json
 
-from conftest import load_tool
+from conftest import load_tool, make_source_document
 
 ai = load_tool("assembly_inspect_interference")
+
+# The x-ref identity shape, MEASURED: an entityToken is DOCUMENT-LOCAL, so two DISTINCT bodies living
+# in two different source documents read byte-identical tokens (measured on a CAM job assembled from 7
+# source documents - all 7 root components answered one token, and their 7 lineage urns all differed).
+# The token below is deliberately opaque and shared verbatim by both bodies: a mnemonic token derived
+# from a body's own name would make a bare-token key and an identity key agree, and a fixture where the
+# two schemes agree cannot tell them apart.
+_COLLIDING_TOKEN = "/vB+AAEAAwAAAAAAAAAAAAAA"
+_URN_HOST = "urn:adsk.wipprod:dm.lineage:K3I2nkywRlaWPHJexysOdA"
+_URN_XREF = "urn:adsk.wipprod:dm.lineage:N_QoPrrrSJmF__f9BZV86A"
 
 
 def _payload(result):
@@ -38,12 +48,22 @@ class FakeComp:
 
 class FakeBody:
     # LIVE shape: analyzeInterference returns NATIVE bodies - assemblyContext reads None on both
-    # result entities - so the interfering INSTANCE is recovered by mapping entityToken back to the
-    # occurrences that were put into the analysis set.
-    def __init__(self, name, comp_name=None, occ_name=None, token=None):
+    # result entities - so the interfering INSTANCE is recovered by mapping the body's
+    # _common.native_identity back to the occurrences that were put into the analysis set.
+    #
+    # `urn` puts the body in a named SOURCE DOCUMENT, through the chain native_identity reads its
+    # second half over (parentComponent -> parentDesign -> parentDocument -> dataFile.id, built by the
+    # shared conftest.make_source_document). Omitted, the chain stops short and the urn half reads
+    # None - which is what an unsaved single-document design looks like, and what every fixture here
+    # that is not about the x-ref collision wants.
+    def __init__(self, name, comp_name=None, occ_name=None, token=None, urn=None):
         self.name = name
         self.entityToken = token or f"TOK::{name}"
         self.parentComponent = FakeComp(comp_name) if comp_name else None
+        if urn is not None:
+            if self.parentComponent is None:
+                self.parentComponent = FakeComp("")
+            self.parentComponent.parentDesign = make_source_document(urn)
         self.assemblyContext = FakeOcc(occ_name) if occ_name else None
 
 
@@ -168,9 +188,10 @@ class TestOwningOccurrence:
     def test_names_the_INSTANCE_via_the_analysis_set(self):
         # The point of the report: which INSTANCE interferes. analyzeInterference returns a native
         # body, so the path comes from the occurrence map, not off the body. An exact instance
-        # carries no candidate list.
+        # carries no candidate list. The map is keyed the way _native_body_owners keys it - on
+        # _common.native_identity, the same reader both sides use.
         b = FakeBody("Body1", comp_name="Wheel")
-        owners = {b.entityToken: ["Rig:1+Wheel:2"]}
+        owners = {ai._common.native_identity(b): ["Rig:1+Wheel:2"]}
         assert ai._owning_occurrence_name(b, owners) == ("Rig:1+Wheel:2", None)
 
     def test_names_every_candidate_when_one_native_body_serves_several_instances(self):
@@ -178,7 +199,7 @@ class TestOwningOccurrence:
         # says so AND the full candidate path list rides along, so the caller can discriminate
         # instead of guessing from "or N more".
         b = FakeBody("Body1", comp_name="Wheel")
-        owners = {b.entityToken: ["Rig:1+Wheel:1", "Rig:1+Wheel:2"]}
+        owners = {ai._common.native_identity(b): ["Rig:1+Wheel:1", "Rig:1+Wheel:2"]}
         label, cands = ai._owning_occurrence_name(b, owners)
         assert "Rig:1+Wheel:1" in label and "1 more instance" in label
         assert cands == ["Rig:1+Wheel:1", "Rig:1+Wheel:2"]
@@ -188,14 +209,87 @@ class TestOwningOccurrence:
         # more" is the true total either way.
         b = FakeBody("Body1", comp_name="Wheel")
         paths = [f"Wheel:{i}" for i in range(1, 5)]
-        label, cands = ai._owning_occurrence_name(b, {b.entityToken: paths})
+        label, cands = ai._owning_occurrence_name(b, {ai._common.native_identity(b): paths})
         assert cands == paths                          # full, uncapped
         assert "3 more instance" in label              # the true total
+
+    def test_the_multi_owner_label_claims_only_what_the_map_was_built_from(self):
+        # The map is built by walking each occurrence's component bodies, so what a multi-path entry
+        # records is: these occurrences' components own this one native body. Nothing in this module
+        # reads a component IDENTITY, so the label must not assert the paths are instances of one
+        # component.
+        b = FakeBody("Body1", comp_name="Wheel")
+        label, _ = ai._owning_occurrence_name(
+            b, {ai._common.native_identity(b): ["Rig:1+Wheel:1", "Rig:1+Wheel:2"]})
+        assert "whose component owns this same native body" in label
 
     def test_falls_back_to_component_then_body_name_when_unmapped(self):
         # A root-level body belongs to no occurrence: the component name is all there is.
         assert ai._owning_occurrence_name(FakeBody("B", comp_name="Crank"), {}) == ("Crank", None)
         assert ai._owning_occurrence_name(FakeBody("LooseBody"), {}) == ("LooseBody", None)
+
+    def test_a_body_with_no_readable_token_has_no_identity_and_falls_back(self):
+        # native_identity answers None with no token, and None must not become a lookup key - every
+        # unidentifiable body would then share one owner list. The component-name fallback covers it.
+        b = FakeBody("B", comp_name="Crank")
+        b.entityToken = ""
+        assert ai._common.native_identity(b) is None
+        assert ai._owning_occurrence_name(b, {None: ["Wrong:1"]}) == ("Crank", None)
+
+    def test_the_owner_map_SKIPS_a_body_with_no_identity(self):
+        # The WRITE side of the same guard: storing an identity-less body under None would give
+        # every unidentifiable body in the design ONE shared owner list - a merge, not an unknown -
+        # and _owning_occurrence_name's None lookup would then read it back.
+        good = FakeBody("Good", comp_name="Wheel")
+        blank = FakeBody("Bad", comp_name="Wheel")
+        blank.entityToken = ""
+        owners = ai._native_body_owners([FakeOcc("Wheel:1", bodies=[good, blank])])
+        assert list(owners) == [ai._common.native_identity(good)]
+        assert None not in owners
+
+
+class TestTheTwoDocumentTokenCollision:
+    """An entityToken is DOCUMENT-LOCAL: two DISTINCT native bodies in two x-ref'd documents read
+    byte-identical tokens (measured). Keyed on the bare token their owner lists MERGE, and every path
+    in the merged list is then published as an owner of the other document's body. These fixtures put
+    two such bodies in front of the tool; a fixture whose tokens differ cannot tell a bare-token key
+    from an identity key and would prove nothing."""
+
+    def _two_documents(self):
+        """(host body, x-ref body): different documents, ONE shared token, two different lineage urns."""
+        return (FakeBody("Frame", comp_name="Frame", token=_COLLIDING_TOKEN, urn=_URN_HOST),
+                FakeBody("Frame", comp_name="Lid", token=_COLLIDING_TOKEN, urn=_URN_XREF))
+
+    def test_the_fixture_really_models_the_collision(self):
+        # Both halves have to be real or every test below proves nothing: with no token collision the
+        # defect the identity key exists for never fires, and with no urn difference the identity key
+        # would answer the same value the bare token does.
+        host, xref = self._two_documents()
+        host_id, xref_id = ai._common.native_identity(host), ai._common.native_identity(xref)
+        assert host is not xref
+        assert host.entityToken == xref.entityToken == _COLLIDING_TOKEN     # the collision is real
+        assert host_id[1] == _URN_HOST and xref_id[1] == _URN_XREF          # and so is the separation
+        assert host_id != xref_id
+
+    def test_the_owner_map_keeps_two_documents_bodies_apart(self):
+        host, xref = self._two_documents()
+        owners = ai._native_body_owners([FakeOcc("Frame:1", bodies=[host]),
+                                         FakeOcc("Lid:1", bodies=[xref])])
+        assert len(owners) == 2                                    # merged on the bare token: 1
+        assert owners[ai._common.native_identity(host)] == ["Frame:1"]
+        assert owners[ai._common.native_identity(xref)] == ["Lid:1"]
+
+    def test_a_pair_across_two_documents_names_the_two_instances_exactly(self, monkeypatch):
+        # The end-to-end shape a merge wrecks: both bodies would look up ONE owner list, so both
+        # sides of the row would carry the same two-path label - collapsing a genuine pair into a
+        # self-pair and naming each document's instance as a suspect for the other's body.
+        host, xref = self._two_documents()
+        _install(monkeypatch, [FakeOcc("Frame:1", bodies=[host]), FakeOcc("Lid:1", bodies=[xref])],
+                 [FakeResult(host, xref, 3.0)])
+        row = _payload(ai.handler())["measured"]["interferences"][0]
+        assert {row["occurrence_one"], row["occurrence_two"]} == {"Frame:1", "Lid:1"}
+        assert "occurrence_one_candidates" not in row              # each side is EXACT
+        assert "occurrence_two_candidates" not in row
 
 
 class TestInterferenceHandler:
@@ -295,6 +389,17 @@ class TestInterferenceHandler:
         assert ambiguous == [["Wheel:1", "Wheel:2"]]        # the ambiguous side lists both suspects
         assert "Fork:1" in sides and sides["Fork:1"] is None   # the exact side carries no list
         assert "candidates" in out["note"] and "native bodies" in out["note"]
+
+    def test_the_candidates_note_claims_only_the_shared_native_body(self, monkeypatch):
+        # The note states what the owner map records - one native body, and the occurrences whose
+        # component owns it. It does NOT say the instances belong to one component: nothing in this
+        # module reads a component identity to back that.
+        shared = FakeBody("Body1")
+        lone = FakeBody("Body1", token="TOK::fork-native")
+        _install(monkeypatch, [FakeOcc("Wheel:1", bodies=[shared]), FakeOcc("Wheel:2", bodies=[shared]),
+                               FakeOcc("Fork:1", bodies=[lone])], [FakeResult(shared, lone, 2.5)])
+        note = _payload(ai.handler())["note"]
+        assert "each candidate path is an occurrence whose component owns that body" in note
 
     def test_both_sides_ambiguous_each_lists_its_own_candidates(self, monkeypatch):
         # a rail instanced twice collides with a rod instanced twice - BOTH sides of the pair
