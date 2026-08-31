@@ -17,17 +17,16 @@ import adsk.core
 
 from . import _common
 
-MAP_BLURB = ("camera-orientation table for the standard named views - view_direction/"
-             "look_direction/up_vector plus the true-orthographic-face set + "
-             "apply_named_view/capture_png_b64 (the orient + refresh-then-grab capture mechanics) + "
-             "DISPLAY_FOLDERS/all_display_components (the category -> Component folder-bulb map and "
-             "the deduped component walk that view_set(display) and view_screenshot's fit_to shot "
-             "both toggle non-body clutter through) + keep_visible/isolate_for_fit/restore_message "
-             "(the ONE frame-on-one-occurrence isolate: hide every occurrence that is not the "
-             "target, its ancestors or its descendants AND every display folder, so a viewport fit "
-             "frames the target instead of the whole scene, then put every bulb back and NAME the "
-             "ones that would not come back - view_screenshot's fit_to and view_set(orient, focus=) "
-             "frame through the same walk)")
+MAP_BLURB = (
+    "view_direction/look_direction/up_vector + the true-orthographic-face set - the "
+    "camera-orientation table for the standard named views; apply_named_view/capture_png_b64 - "
+    "the orient + refresh-then-grab capture mechanics; DISPLAY_FOLDERS/all_display_components - "
+    "the category -> Component folder-bulb map and the deduped component walk, for any toggle of "
+    "non-body clutter (view_set(display) and view_screenshot's fit_to both run it); "
+    "keep_visible/isolate_for_fit/restore_message - the ONE frame-on-one-occurrence isolate and "
+    "its restore-with-disclosure, for a viewport fit that must frame the target rather than the "
+    "whole scene (view_screenshot's fit_to and view_set(orient, focus=) frame through the same "
+    "walk)")
 
 
 # Display category -> the Component FOLDER bulb that controls it (one switch per component; the

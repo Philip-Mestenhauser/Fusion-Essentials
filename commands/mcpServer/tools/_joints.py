@@ -33,31 +33,29 @@ def is_as_built_joint(x):
     except TypeError:
         return False
 
-# One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
-MAP_BLURB = ("build_joint_geometry (keypoint factory per entity kind) + apply_motion (motion-type "
-             "dispatch, frame-relative or a custom direction entity) + all_joints (the full joint walk "
-             "- joints AND asBuiltJoints, root and every sub-component - that the health rollups count "
-             "broken joints over) + find_joints_by_name / find_joint (the list form over those same "
-             "scopes, and the resolve-one over it - a name SEVERAL joints carry is REFUSED naming "
-             "each hit's owning component, since a joint name is only component-locally unique) + "
-             "motion_link_partner (a joint's own MotionLink membership -> linked-partner name; "
-             "joint_drive's second-member refusal gates on it) + "
-             "all_joint_origins (the ONE JointOrigin walk) / find_joint_origins_by_name / "
-             "jo_assembly_proxy (the JO leaf ops resolve-one/collect-names/read-axes sit on) + "
-             "component_world_matrix (the ONE matrix-to-world ladder: the root frame as identity, "
-             "the occurrence a proxy was reached through - or one of its assembly ancestors - and "
-             "a singly-placed component's own occurrence, answering None where several placements "
-             "would each give a different frame, so a caller refuses or makes no judgement instead "
-             "of picking an instance; every axis lift and world-frame read resolves through it) + "
-             "motion_param_names/OFFSET_PARAM_NOTE (the joint's own offset/angle dNN read + the one "
-             "offset-is-frame-Z wire sentence every joint payload appends) + "
-             "pending_position/pending_move_guard/PENDING_MOVE_REFUSAL (the ONE moved-but-uncaptured "
-             "position read - Design.snapshots.hasPendingSnapshot as True/False/None - and the "
-             "refusal every joint CREATE returns while it is set, since the create's recompute "
-             "silently reverts the uncaptured pose and freezes the reverted one) + "
-             "planar_outward_normal/normals_oppose/FLIP_HINT (the flush face-to-face detection - "
-             "two planar faces whose outward normals OPPOSE force a 180-deg rotation of the free "
-             "part, so every joint create that can seat two faces publishes the same flip_hint)")
+# The "what to reuse from here" catalog line for the generated CLAUDE.md helper map (see
+# tests/gen_manifest.py): each symbol with the one clause that says WHEN to reach for it. The
+# mechanism behind a clause lives at the symbol itself, in its test, or in VERIFIED_API_FACTS.md.
+MAP_BLURB = (
+    "build_joint_geometry - the keypoint factory per entity kind; apply_motion - the motion-type "
+    "dispatch, frame-relative or a custom direction entity; all_joints - the full joint walk "
+    "(joints AND asBuiltJoints, root and every sub-component) the health rollups count broken "
+    "joints over; find_joints_by_name / find_joint - the list form over those same scopes and the "
+    "resolve-one over it, which REFUSES a name SEVERAL joints carry, since a joint name is only "
+    "component-locally unique; motion_link_partner - a joint's own MotionLink membership -> "
+    "linked-partner name, which joint_drive's second-member refusal gates on; all_joint_origins - "
+    "the ONE JointOrigin walk the collect-names / read-axes / resolve-one leaf ops sit on, with "
+    "find_joint_origins_by_name the resolve-one over it and jo_assembly_proxy the same JO in "
+    "ASSEMBLY CONTEXT, which a native sub-component JO must become before a joint accepts it; "
+    "component_world_matrix - the ONE matrix-to-world "
+    "ladder every axis lift and world-frame read resolves through, answering None where several "
+    "placements would each give a different frame; motion_param_names/OFFSET_PARAM_NOTE - the "
+    "joint's own offset/angle dNN read and the one offset-is-frame-Z wire sentence every joint "
+    "payload appends; pending_position/pending_move_guard/PENDING_MOVE_REFUSAL - the ONE "
+    "moved-but-uncaptured position read and the refusal every joint CREATE returns while it is "
+    "set, since the create's recompute silently reverts the uncaptured pose; planar_outward_normal/"
+    "normals_oppose/FLIP_HINT - the flush face-to-face detection (two planar faces whose outward "
+    "normals OPPOSE) and the hint every joint create that can seat two faces publishes")
 
 
 def planar_outward_normal(entity):
@@ -92,9 +90,9 @@ FLIP_HINT = ("The two planar faces' outward normals OPPOSE (the flush face-to-fa
 def motion_param_names(joint):
     """The joint's OWN ModelParameter names: {'offset': dNN, 'angle': dNN}, absent ones omitted.
     Joint.offset moves the anchor along the joint frame's TERTIARY (Z) axis (the API's own docstring;
-    live-verified) - it is the ONLY parametric position drive a joint has. A slider's slide VALUE has
-    no ModelParameter at all, even after joint_drive poses it (live-verified), so a slider whose
-    TRAVEL must be parametric is driven by the geometry its anchor sits on, not by a joint param."""
+    live-verified) and is the ONLY parametric position drive a joint has; a slider's slide VALUE has
+    no ModelParameter at all, even after joint_drive poses it (live-verified). OFFSET_PARAM_NOTE
+    carries both to the caller."""
     out = {}
     for key in ("offset", "angle"):
         nm = safe(lambda k=key: getattr(joint, k).name)
@@ -530,10 +528,8 @@ def find_joints_by_name(design, name):
 
 
 def find_joint(design, name):
-    """Resolve ONE Joint or AsBuiltJoint by name over all_joints' scopes (the root component and
-    every sub-component, joints AND asBuiltJoints - both are separate collections, and a joint
-    internal to a sub-component lives there, so a root-only lookup would miss it). Returns
-    (joint, error_or_None).
+    """Resolve ONE Joint or AsBuiltJoint by name over all_joints - the walk that reaches joints AND
+    asBuiltJoints on the root component and every sub-component. Returns (joint, error_or_None).
 
     A name carried by SEVERAL joints is REFUSED, naming each hit's owning component: the name space
     is component-local, so picking one of them targets an arbitrary assembly's joint. A name no
@@ -584,9 +580,9 @@ def all_joint_origins(design):
     share: collect-names (joint_create's available-JO list), read-axes (model_inspect's oriented bbox
     frame), and resolve-one-by-name (find_joint_origins_by_name, under the JointOriginRef kind). Joints
     know 'which joints exist' one way; this answers 'which joint origins exist' the same way everywhere.
-    De-duplicated by entityToken: design.allComponents includes the root as a proxy DISTINCT from
-    design.rootComponent, so a root JO is reached twice - counting it once each would double-list it (the
-    token is stable across the two root proxies, verified live for all_joints; id() falls back for fakes)."""
+    De-duplicated by entityToken for the reason all_joints records, which here would double-list a root
+    JO (the token is stable across the two root proxies, verified live for all_joints; id() falls back
+    for fakes)."""
     out, seen = [], set()
     scopes = [safe(lambda: design.rootComponent)] + list(safe(lambda: design.allComponents, []) or [])
     for c in scopes:

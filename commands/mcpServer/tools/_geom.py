@@ -20,45 +20,32 @@ import adsk.fusion
 from ._common import counted, safe
 from . import _common
 
-# One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
-MAP_BLURB = ("unit_vector/unit_vector_between - the normalize / point-to-point-direction math "
-             "find_geometry and sys_get_selection both need; evaluator_normal_at - the "
-             "evaluator.getNormalAtPoint sample find_geometry uses for every face's normal; "
-             "body_aabb - the bodies-only (solid+surface+mesh) AABB of an occurrence/component/"
-             "body that model_inspect and assembly_get size reads share; occ_world_frame/axis_vec - "
-             "the ONE occurrence world-placement record (origin + the x/y/z basis axes of its "
-             "rotation + the bodies-only bbox centre/size, lengths scaled to display units) every "
-             "occurrence row is built from, and the 4dp basis-axis read under it; owning_bodies/volumes/"
-             "volume_delta - the owning-body set and the before/after volume diff every "
-             "material-changing feature verifies its cut with; signed_volume - ONE body's signed "
-             "volume or None, the single-read counterpart for a feature judged on the SIGN (a "
-             "reversed mesh reports a negative volume) or on a ratio rather than a delta; "
-             "face_counts/face_count_delta - the "
-             "same before/after pair over FACE counts, the signal a topology-changing feature "
-             "(delete-face, split-face) verifies with where volume does not move; lump_count - ONE "
-             "BRep body's DISCONNECTED-piece count (None for a mesh body, which carries no .lumps), "
-             "the read a JOIN is verified with: fusing bodies that touch yields fewer lumps than the "
-             "inputs held between them; aabb_gap - the largest axis gap in cm between two bodies' "
-             "AABBs, the sound not-touching proof for a body kind with no lump count: a positive gap "
-             "PROVES the two cannot touch and is a LOWER BOUND on the real clearance, never the "
-             "clearance itself, and it answers None unless both references live in ONE coordinate "
-             "space (a proxy's box is root-space, its native's component-local); "
-             "parallel_plane_facts - the ONE bounded-gap measure for two PARALLEL PLANAR faces, a "
-             "pair whose plane-to-plane separation alone under-states the gap: it gates on "
-             "reproducing the measurement API's own number from the two planes, bounds the offset "
-             "ACROSS the planes with the faces' AABBs - only where those boxes are in ONE space "
-             "(two proxies, or two natives of one component; a MIXED pair is refused) - and hands "
-             "back the proven distance, which never falls below the number it was given, the three "
-             "disclosure flags (bounded / plane_separation_only / lateral_offset_untested, the "
-             "last telling boxes that proved nothing apart from boxes never compared at all) and "
-             "the ONE sentence both measure tools publish it with; subtree_facts - the ONE "
-             "nested-child disclosure both measure tools publish: an occurrence is measured on its "
-             "OWN bodies and NOT on what is nested inside it, so a gap read off a parent is "
-             "silently optimistic about the assembly under it - this names the target's direct "
-             "children (fullPathName, which round-trips as a target), MEASURES each one against "
-             "the other target, and flags the list's limits (capped at SUBTREE_NAMES_MAX, children "
-             "of children never measured, and the unresolved children childOccurrences drops); it "
-             "answers None where neither target holds children, so the caveat stays quiet")
+# The "what to reuse from here" catalog line for the generated CLAUDE.md helper map (see
+# tests/gen_manifest.py): each symbol with the one clause that says WHEN to reach for it. The
+# mechanism behind a clause lives at the symbol itself, in its test, or in VERIFIED_API_FACTS.md.
+MAP_BLURB = (
+    "unit_vector/unit_vector_between - the normalize / point-to-point-direction math find_geometry "
+    "and sys_get_selection both need; evaluator_normal_at - the evaluator.getNormalAtPoint sample "
+    "find_geometry takes for every face's normal; body_aabb - the bodies-only (solid+surface+mesh) "
+    "AABB of an occurrence/component/body, for a size read that must not count sketch and "
+    "construction datums; occ_world_frame/axis_vec - the ONE occurrence world-placement record "
+    "every occurrence row is built from (origin, the rotation's basis axes, the bodies-only bbox "
+    "centre/size), and the 4dp basis-axis read under it; owning_bodies/volumes/volume_delta - the "
+    "owning-body set and the before/after volume diff a material-changing feature verifies its cut "
+    "with; signed_volume - ONE body's signed volume, for a feature judged on the SIGN (a reversed "
+    "mesh reports a negative volume) or on a ratio rather than a delta; face_counts/"
+    "face_count_delta - the same before/after pair over FACE counts, for a topology-changing "
+    "feature (delete-face, split-face) that moves no volume; lump_count - ONE BRep body's "
+    "DISCONNECTED-piece count, the read a JOIN is verified with, since fusing bodies that touch "
+    "yields fewer lumps than the inputs held between them; aabb_gap - the largest axis gap between "
+    "two bodies' AABBs, the sound not-touching proof for a body kind with no lump count: a LOWER "
+    "BOUND on the clearance rather than the clearance, and None unless both references live in ONE "
+    "coordinate space; parallel_plane_facts - the ONE bounded-gap measure for two PARALLEL PLANAR "
+    "faces, a pair whose plane-to-plane separation alone under-states the gap, handing back the "
+    "proven distance, the three disclosure flags and the ONE sentence both measure tools publish "
+    "it with; subtree_facts - the ONE nested-child disclosure both measure tools publish, since an "
+    "occurrence is measured on its OWN bodies and NOT on what is nested inside it, which makes a "
+    "gap read off a parent silently optimistic about the assembly under it")
 
 # The body entity-types for boundingBox2: solid + surface + mesh, so the box spans real geometry and
 # NOT the sketch/construction datums that the plain .boundingBox counts. The construction contribution

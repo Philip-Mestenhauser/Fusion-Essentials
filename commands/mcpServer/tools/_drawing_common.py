@@ -6,33 +6,30 @@ import adsk.drawing
 from . import _common
 from ._common import safe
 
+# The "what to reuse from here" catalog line for the generated CLAUDE.md helper map (see
+# tests/gen_manifest.py): each symbol with the one clause that says WHEN to reach for it. The
+# mechanism behind a clause lives at the symbol itself, in its test, or in VERIFIED_API_FACTS.md.
 MAP_BLURB = (
-    "active_drawing (the ONE active-document -> Drawing read every drawing tool gates on - "
-    "None when the active document is not a drawing), active_drawing_document (the same cast "
-    "stopped one level earlier, at the DrawingDocument the reference/refresh surface hangs off), "
-    "SHEET_SIZE_MAP (the ONE sheet-size key -> (required standard, SheetSizes member) table both "
-    "the creation-time and the set_size path resolve through), DIMENSION_STRATEGIES (the ONE "
-    "auto-dimension strategy key -> DimensionStrategyTypes member table - all eight members the "
-    "family carries), sheet_units (the ONE "
-    "documentSettings.units decode -> the drawing's DIMENSION display unit 'mm' / 'in' / None, "
-    "never a guessed default - it does NOT describe Sheet.width/height), SHEET_EXTENT_UNIT (the "
-    "ONE honest label for Sheet.width/height: 'mm' on EVERY drawing, a constant fact, not a read), "
-    "enum_value (the ONE adsk.drawing enum member read BY NAME -> its value, None on a build "
-    "carrying neither the family nor the member), standard_label (the ONE documentSettings.standard "
-    "decode -> 'iso' / 'asme' / None), DOCUMENT_UNIT + coordinate_unit (the ONE standard -> length "
-    "unit table a drawing's own numbers are authored in - 'mm' under ISO, 'in' under ASME - and the "
-    "read that decodes it for one drawing, None when the standard is unreadable: the unit sheet "
-    "GEOMETRY lands in and the unit a custom sheet size is written in, neither of which "
-    "sheet_units describes), "
-    "NO_PORTRAIT (the ONE measured (standard, sheet size) table Fusion refuses portrait on), "
-    "resolve_sheet (the ONE sheet-by-name resolver: case-insensitive EXACT - sheet names are "
-    "measured case-insensitively unique, a duplicate add RAISES and a duplicate rename "
-    "silently no-ops - a miss returns the available names), "
-    "size_label / orientation_label / ORIENTATION_MEMBERS (the SheetSizes / "
-    "SheetOrientationTypes value -> wire-key decoders), sheet_listing (the ONE 1-based "
-    "export-index sheet walk drawing_export's sheet_range is addressed by - positional, so an "
-    "unreadable sheet never slides later indices), sheet_facts (the ONE per-sheet readable-state "
-    "record; it never reads Sheet.tidyUp, a property whose READ tidies the sheet)"
+    "active_drawing - the ONE active-document -> Drawing read every drawing tool gates on; "
+    "active_drawing_document - the same cast stopped one level earlier, for the reference/refresh "
+    "surface that hangs off the DrawingDocument; SHEET_SIZE_MAP - the ONE sheet-size key -> "
+    "(required standard, SheetSizes member) table both the creation-time and the set_size path "
+    "resolve through; DIMENSION_STRATEGIES - the ONE auto-dimension strategy key -> "
+    "DimensionStrategyTypes member table, so the creation-time generator and the per-view call "
+    "offer one set; sheet_units - the drawing's DIMENSION display unit ('mm' / 'in' / None, never "
+    "a guessed default), which does NOT describe Sheet.width/height; SHEET_EXTENT_UNIT - the "
+    "honest label for those two, a constant fact rather than a read; enum_value - the ONE "
+    "adsk.drawing enum member read BY NAME, for a member a Fusion build may not carry; "
+    "standard_label - the ONE documentSettings.standard decode -> 'iso' / 'asme' / None; "
+    "DOCUMENT_UNIT + coordinate_unit - the standard -> length unit table sheet GEOMETRY and a "
+    "custom sheet size are authored in, and the read that decodes it for one drawing; NO_PORTRAIT "
+    "- the MEASURED (standard, sheet size) pairs Fusion refuses portrait on, to pre-guard rather "
+    "than take the raise; resolve_sheet - the ONE sheet-by-name resolver (case-insensitive EXACT, "
+    "listing the available names on a miss), where ''/None means the ACTIVE sheet; size_label / "
+    "orientation_label / ORIENTATION_MEMBERS - the SheetSizes / SheetOrientationTypes value -> "
+    "wire-key decoders; sheet_listing - the ONE 1-based export-index sheet walk drawing_export's "
+    "sheet_range is addressed by; sheet_facts - the ONE per-sheet readable-state record, which "
+    "never reads Sheet.tidyUp (a property whose READ tidies the sheet)"
 )
 
 # Sheet.width/height are MILLIMETRES on every drawing, ISO and ASME alike: an ASME B sheet (17 x 11
@@ -121,9 +118,8 @@ def standard_label(dwg):
     """'iso' or 'asme' from the drawing's own documentSettings.standard; None when unreadable.
 
     DrawingStandardTypes carries exactly these two members, and the standard is fixed at creation
-    (documentSettings.standard has no setter). Fusion refuses a sheet size belonging to the other
-    standard, and refuses portrait on the standard's largest sheet, so this read is what those two
-    guards turn on.
+    (documentSettings.standard has no setter). SHEET_SIZE_MAP and NO_PORTRAIT are the two guards
+    this read turns on.
     """
     value = safe(lambda: dwg.documentSettings.standard)
     if value is None:
@@ -186,20 +182,19 @@ def sheet_listing(dwg):
     """The drawing's sheets in order as [{export_index, name}]. export_index is 1-BASED - the
     numbering drawing_export's sheet_range takes - and the sheet-changing writes and drawing_get
     hand back the SAME list, so the caller's index is never a guess."""
-    # A sheet's INDEX is its address (export_index is exactly what drawing_export's sheet_range
-    # takes), so this stays a positional walk: iter_collection drops an unreadable sheet, which
-    # would slide every later export_index down one and export the WRONG sheets.
+    # A sheet's INDEX is its address, so this stays a positional walk: iter_collection drops an
+    # unreadable sheet, which would slide every later export_index down one and export the WRONG
+    # sheets.
     sheets = safe(lambda: dwg.sheets)
     return [{"export_index": i + 1, "name": safe(lambda i=i: sheets.item(i).name)}
             for i in range(safe(lambda: sheets.count, 0) or 0)]
 
 
 def sheet_facts(sheet):
-    """One sheet's readable state. width/height are read-only, derive from size + orientation, and
-    are MILLIMETRES on every drawing - width_height_unit carries that constant fact beside them, so
-    the numbers are never read against sheet_units (the drawing's DIMENSION display unit, which on
-    an inch drawing reads 'in' while these two still read mm). Sheet.tidyUp is deliberately NOT read
-    here: it is a property whose READ tidies the sheet."""
+    """One sheet's readable state. width/height are read-only and derive from size + orientation;
+    width_height_unit publishes SHEET_EXTENT_UNIT beside them, whose banner holds the measurement,
+    so the two are never read against sheet_units. Sheet.tidyUp is deliberately NOT read here: it
+    is a property whose READ tidies the sheet."""
     size = safe(lambda: sheet.sheetSize)
     orientation = safe(lambda: sheet.orientation)
     return {

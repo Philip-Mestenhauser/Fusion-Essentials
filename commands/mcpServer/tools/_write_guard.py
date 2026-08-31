@@ -28,29 +28,25 @@ from . import _common
 
 app = adsk.core.Application.get()
 
-# One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
-MAP_BLURB = ("_active_identity - the ONE active-document identity read ((name, urn), either may be "
-             "None), the same read the write guard stamps 'acted_on' from; _cam_common's generation "
-             "registry and cam_get_status use it to bind a launch to its document + "
-             "one_open_document (the ONE test for whether several open-document matches are really "
-             "ONE document: an assembly loads its references as real Documents, so a tab and its own "
-             "dependency instance repeat the same name AND lineage URN - identical ids resolve, "
-             "distinct or unreadable ids are a true ambiguity; the write guard and "
-             "doc_lifecycle's open-document resolver share it) + document_key / prune_closed_documents "
-             "/ on_key_evicted (the ONE key a store that outlives one MCP call - a view snapshot, a "
-             "driven-joint registry, a live generation - remembers a document by: the lineage urn for "
-             "a saved document, and for one with no readable data-file id a token minted per DOCUMENT "
-             "INSTANCE and matched on later calls by handle EQUALITY, since a Document wrapper is not "
-             "identity-stable, and never by NAME, which several open documents answer 'Untitled' to; "
-             "None when no document reads at all, so each caller words its own placeholder. A closed "
-             "document's entry is evicted on the isValid False it reads, and every consumer holding "
-             "state under that key hears it through on_key_evicted - the registry is shared, so "
-             "whichever consumer's read triggers the prune must drop what all of them parked there. "
-             "A held document whose key CHANGES - a save replaces its minted token with the data-file "
-             "id, which itself may answer a path form before the lineage urn - keeps its registry "
-             "entry and announces the change through on_key_renamed(old, new), so every consumer "
-             "carries its parked state across instead of stranding it under a key nothing answers "
-             "again)")
+# The "what to reuse from here" catalog line for the generated CLAUDE.md helper map (see
+# tests/gen_manifest.py): each symbol with the one clause that says WHEN to reach for it. The
+# mechanism behind a clause lives at the symbol itself, in its test, or in VERIFIED_API_FACTS.md.
+MAP_BLURB = (
+    "_active_identity - the ONE active-document identity read ((name, urn), either may be None), "
+    "the same read the write guard stamps 'acted_on' from; _cam_common's generation registry and "
+    "cam_get_status use it to bind a launch to its document; one_open_document - the ONE test for "
+    "whether several open-document matches are really ONE document, since an assembly loads its "
+    "references as real Documents and a tab plus its own dependency instance repeat one name AND "
+    "lineage URN (the write guard and doc_lifecycle's open-document resolver share it); "
+    "document_key - the ONE key a store that outlives one MCP call (a view snapshot, a driven-"
+    "joint registry, a live generation) remembers a document by: the data-file id where one "
+    "reads, else a token minted per document INSTANCE and matched by handle EQUALITY - never "
+    "by NAME, which several open documents answer 'Untitled' to; None when no document "
+    "reads at all, so each caller words its own placeholder; prune_closed_documents / "
+    "on_key_evicted / on_key_renamed - the eviction pass and the two hooks a store registers at "
+    "import, since the registry is SHARED: a closed document's key is dropped and a held "
+    "document's CHANGED key is announced, so a consumer moves or discards what it parked there "
+    "instead of stranding it")
 
 
 def _active_identity():
