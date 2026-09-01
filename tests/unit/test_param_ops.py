@@ -764,3 +764,33 @@ class TestAddFavorite:
         out = _payload(params.add_handler(name="P", expression="5 mm", favorite=True))
         assert out["favorite"] is True
         assert up.itemByName("P").isFavorite is True
+
+    def test_a_stuck_favorite_is_published_as_the_parameter_reads_it(self, monkeypatch):
+        # The add payload is a READ of the parameter that landed, never an echo of the request: the
+        # isFavorite assignment here is accepted and changes nothing, so both the flag and the
+        # parameter row report the state the parameter actually carries. Echoing the request would
+        # report favorite:true over a parameter nothing was set on.
+        class StuckFavoriteParam(FakeParam):
+            @property
+            def isFavorite(self):
+                return False
+
+            @isFavorite.setter
+            def isFavorite(self, value):
+                pass                                  # silently ignores the assignment
+
+        class StuckFavoriteParams(FakeUserParams):
+            def add(self, name, _value_input, _unit, _comment):
+                p = StuckFavoriteParam(name, owner=self)
+                self._items.append(p)
+                return p
+
+        up = StuckFavoriteParams([])
+        design = FakeParamsDesign(up, FakeTimeline([FakeTimelineItem("A", 0)]))
+        _stub_design(monkeypatch, design)
+        out = _payload(params.add_handler(name="NewP", expression="3 mm", favorite=True))
+        assert out["added"] is True
+        assert out["favorite"] is False                # as it READS, not as it was asked for
+        assert out["parameter"]["favorite"] is False   # the same read, in the parameter row
+        assert out["parameter"]["name"] == "NewP"
+        assert up.itemByName("NewP").isFavorite is False

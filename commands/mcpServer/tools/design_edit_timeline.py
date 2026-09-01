@@ -7,7 +7,7 @@ Timeline.movetoNextStep carries a lowercase 't' - that is the member name the AP
 """
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from . import _common
 from . import _inputs
@@ -602,8 +602,12 @@ tool = (
             "description": "Text to store (set_attribute)."})
     .strict_schema()
 )
-item = Item.create_tool_item(tool=tool, write="destructive", handler=handler,
-                             run_on_main_thread=True)
+item = Item.create_tool_item(
+    tool=tool, write="destructive", handler=handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_design_edit_timeline.py::TestVerificationPathsBite"
+                      "::test_rollto_that_left_the_item_in_the_wrong_state_is_an_error"))
 
 
 def register_tool():

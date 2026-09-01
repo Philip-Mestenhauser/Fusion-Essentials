@@ -11,7 +11,7 @@ the tree walk. All measured.
 """
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import component_contains, error, occurrence_paths, ok, safe
 from . import _common
@@ -193,7 +193,12 @@ tool = (
     .add_input_property(*_INTO_COMPONENT.as_property())
     .strict_schema()
 )
-item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(
+    tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_design_move_occurrence.py::TestHonesty"
+                      "::test_an_unchanged_tree_is_an_error_not_a_false_ok"))
 
 
 def register_tool():

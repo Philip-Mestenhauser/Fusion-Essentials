@@ -14,7 +14,7 @@ import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe, target_component
 from . import _common
@@ -540,7 +540,11 @@ _set_mode_tool = (
     .strict_schema()
 )
 set_mode_item = Item.create_tool_item(
-    tool=_set_mode_tool, write="destructive", handler=set_mode_handler, run_on_main_thread=True)
+    tool=_set_mode_tool, write="destructive", handler=set_mode_handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="effect",
+        evidence_test="tests/unit/test_design_mode.py::TestSetMode"
+                      "::test_history_discarded_rides_on_the_read_back_not_the_request"))
 
 _base_feature_tool = (
     Tool.create_simple(
@@ -580,7 +584,12 @@ _activate_component_tool = (
     .strict_schema()
 )
 activate_component_item = Item.create_tool_item(
-    tool=_activate_component_tool, write="write", handler=activate_component_handler, run_on_main_thread=True)
+    tool=_activate_component_tool, write="write", handler=activate_component_handler,
+    run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_design_mode.py::TestActivateComponent"
+                      "::test_activation_that_does_not_take_bites"))
 
 
 def register_tool():

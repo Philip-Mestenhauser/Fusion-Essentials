@@ -13,7 +13,7 @@ import math
 import adsk.core
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import component_contains, error, occurrence_paths, ok, safe, scale
 from . import _common
@@ -230,7 +230,12 @@ tool = (
             description="World axis for the orientation rotation.").as_property())
     .strict_schema()
 )
-item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(
+    tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_design_add_instance.py::TestHonesty"
+                      "::test_an_occurrence_returned_with_an_unchanged_tree_is_an_error"))
 
 
 def register_tool():

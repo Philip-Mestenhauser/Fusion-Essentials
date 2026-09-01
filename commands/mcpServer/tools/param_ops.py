@@ -444,7 +444,12 @@ _add_tool = (
             "items": {"type": "object"}})
     .strict_schema()
 )
-add_item = Item.create_tool_item(tool=_add_tool, write="write", handler=add_handler, run_on_main_thread=True)
+add_item = Item.create_tool_item(
+    tool=_add_tool, write="write", handler=add_handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="effect",
+        evidence_test="tests/unit/test_param_ops.py::TestAddFavorite"
+                      "::test_a_stuck_favorite_is_published_as_the_parameter_reads_it"))
 
 _delete_tool = (
     Tool.create_with_string_input(
@@ -457,7 +462,12 @@ _delete_tool = (
         input_param_description="User parameter to delete.",
     ).strict_schema()
 )
-delete_item = Item.create_tool_item(tool=_delete_tool, write="destructive", handler=delete_handler, run_on_main_thread=True)
+delete_item = Item.create_tool_item(
+    tool=_delete_tool, write="destructive", handler=delete_handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_param_ops.py::TestDeleteHandlerExtra"
+                      "::test_delete_me_false_reported"))
 
 _favorite_tool = (
     Tool.create_with_string_input(

@@ -11,7 +11,7 @@ import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import ok, error
 from . import _common
@@ -70,7 +70,12 @@ _recompute_tool = Tool.create_simple(
         "rebuild against current values (e.g. after changing text an emboss consumes). "
         "Reports timeline health afterwards."),
 ).strict_schema()
-recompute_item = Item.create_tool_item(tool=_recompute_tool, write="write", handler=recompute_handler, run_on_main_thread=True)
+recompute_item = Item.create_tool_item(
+    tool=_recompute_tool, write="write", handler=recompute_handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="effect",
+        evidence_test="tests/unit/test_design_ops.py::TestRecomputeHandler"
+                      "::test_errors_surfaced_by_the_recompute_are_named"))
 
 
 def register_tool():

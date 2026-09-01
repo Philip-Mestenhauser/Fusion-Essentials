@@ -9,7 +9,7 @@ Fusion auto-dedupes a name a sibling already holds - assigning a taken name land
 """
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, iter_collection, ok, safe
 from . import _common
@@ -175,7 +175,12 @@ tool = (
             "description": "The new name. Deduped by Fusion if a sibling already holds it."})
     .strict_schema()
 )
-item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(
+    tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_design_set_name.py::TestGuards"
+                      "::test_a_silently_refused_set_is_an_error_not_a_false_ok"))
 
 
 def register_tool():
