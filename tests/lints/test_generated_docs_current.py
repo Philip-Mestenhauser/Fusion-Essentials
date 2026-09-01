@@ -1,10 +1,11 @@
 """Lint: the generated docs (TOOL_MANIFEST/TOOL_POINTER_MAP/PERMISSION_POSTURE + the CLAUDE.md map) match the live tree.
 
-Four scripts derive documentation from the registry/source instead of being hand-maintained:
+Five scripts derive documentation from the registry/source instead of being hand-maintained:
 ``gen_manifest.py`` (TOOL_MANIFEST.md + the CLAUDE.md map from the registry), ``gen_wiring.py``
 (tests/generated/TOOL_POINTER_MAP.md from the tool source), ``gen_posture.py`` (PERMISSION_POSTURE.md
 from the registry's write-status truth), ``gen_api_surface.py`` (tests/api_surface.py from the
-installed Fusion bindings). ``gen_all.py`` fronts all four in one process and its ``--check`` exits
+installed Fusion bindings), ``gen_guidance.py`` (.claude/skills/parametric-cad-design/SKILL.md from
+the canonical guidance JSON). ``gen_all.py`` fronts all five in one process and its ``--check`` exits
 non-zero if any output would differ from what is committed. Since agents run pytest constantly but
 rarely remember to re-run a generator, this test shells that ``--check`` so a stale doc shows up as a
 normal test failure instead of silently rotting.
@@ -47,6 +48,7 @@ _OUTPUT_FILES = (
     os.path.join(TESTS_DIR, "api_surface.py"),
     os.path.join(REPO_ROOT, "CLAUDE.md"),
     os.path.join(REPO_ROOT, "commands", "mcpServer", "tools", "CLAUDE.md"),
+    os.path.join(REPO_ROOT, ".claude", "skills", "parametric-cad-design", "SKILL.md"),
 )
 
 
@@ -82,7 +84,9 @@ def _fingerprinted_paths():
     for root, _dirs, names in os.walk(_INPUT_TREE):
         if "__pycache__" in root:
             continue
-        paths.update(os.path.join(root, n) for n in names if n.endswith(".py"))
+        # .json admits the guidance data gen_guidance reads - an input, so a JSON-only edit misses
+        # the cache and pays the full check instead of riding a stale fingerprint.
+        paths.update(os.path.join(root, n) for n in names if n.endswith((".py", ".json")))
     for root, _dirs, names in os.walk(_OUTPUT_TREE):
         paths.update(os.path.join(root, n) for n in names)
     return tuple(sorted(p for p in paths if os.path.isfile(p)))
@@ -182,7 +186,8 @@ class TestTheFingerprintCoversEveryArtifact:
                          "tests/generated/PERMISSION_POSTURE.md",
                          "tests/api_surface.py",
                          "CLAUDE.md",
-                         "commands/mcpServer/tools/CLAUDE.md"):
+                         "commands/mcpServer/tools/CLAUDE.md",
+                         ".claude/skills/parametric-cad-design/SKILL.md"):
             path = os.path.join(REPO_ROOT, *artifact.split("/"))
             assert os.path.isfile(path), f"{artifact} is not where this lint looks for it"
             assert path in watched, f"{artifact} is generated but not fingerprinted"
@@ -190,7 +195,7 @@ class TestTheFingerprintCoversEveryArtifact:
     def test_every_generator_script_is_fingerprinted(self):
         watched = set(_fingerprinted_paths())
         for script in ("gen_all.py", "gen_manifest.py", "gen_wiring.py", "gen_posture.py",
-                       "gen_api_surface.py", "conftest.py"):
+                       "gen_api_surface.py", "gen_guidance.py", "conftest.py"):
             path = os.path.join(TESTS_DIR, script)
             assert path in watched, f"tests/{script} decides the output and must be fingerprinted"
 

@@ -5,8 +5,8 @@
 
 Each generator pays a full mocked-registry load when run as its own process; importing them here
 means that load happens once, so the staleness check stays fast. Same contracts as running them
-individually: writes tests/generated/* (and the CLAUDE.md spliced maps), or with --check exits 1
-naming what is stale.
+individually: writes tests/generated/* (plus the CLAUDE.md spliced maps and the guidance-generated
+Claude skill), or with --check exits 1 naming what is stale.
 
     py -3 tests/gen_all.py           # regenerate everything
     py -3 tests/gen_all.py --check   # exit 1 if any generated artifact is stale
@@ -20,7 +20,7 @@ TESTS = os.path.dirname(os.path.abspath(__file__))
 if TESTS not in sys.path:
     sys.path.insert(0, TESTS)
 
-_GENERATORS = ("gen_manifest", "gen_wiring", "gen_posture", "gen_api_surface")
+_GENERATORS = ("gen_manifest", "gen_wiring", "gen_posture", "gen_guidance", "gen_api_surface")
 
 
 def exit_code(value):

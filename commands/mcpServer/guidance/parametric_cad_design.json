@@ -1,0 +1,370 @@
+{
+  "guidance_id": "parametric-cad-design",
+  "name": "parametric-cad-design",
+  "title": "Designing in Fusion",
+  "description": "Use when designing or modelling in Fusion through the fusion-essentials tools - building a part or an assembly, not running a fixed procedure. Task-agnostic practice: what to settle before the first feature, how intent is carried in parameters and sketches, how an assembly's degrees of freedom are structured, and the reads that prove what you built is what you meant. Each rule states when it applies, what to do, where it does not apply, and what to read back. Guidance to apply while the design is still moving, not a checklist to recite.",
+  "summary": "Aimed at the gap automated checks miss.",
+  "scenarios": [
+    "configurable_template",
+    "fixed_mechanism",
+    "floating_mechanism",
+    "imported_audit",
+    "parametric_family",
+    "simple_part"
+  ],
+  "sections": [
+    {
+      "id": "kernel",
+      "title": "Kernel - every design",
+      "rules": [
+        {
+          "id": "declare-acceptance-and-interfaces",
+          "section": "kernel",
+          "scenarios": [
+            "configurable_template",
+            "fixed_mechanism",
+            "floating_mechanism",
+            "imported_audit",
+            "parametric_family",
+            "simple_part"
+          ],
+          "when": "you take on a brief",
+          "do": "state what the design must satisfy, and each interface as a checkable expectation - seating faces, aligned axes, clearance",
+          "except": "a throwaway probe",
+          "prove": [
+            {"tool": "workspace_orient", "observe": "the active document and its units"}
+          ]
+        },
+        {
+          "id": "encode-intended-changeability",
+          "section": "kernel",
+          "scenarios": [
+            "configurable_template",
+            "fixed_mechanism",
+            "floating_mechanism",
+            "imported_audit",
+            "parametric_family",
+            "simple_part"
+          ],
+          "when": "a value carries a decision",
+          "do": "hold it in a named, commented parameter and derive the rest; a buried literal freezes while geometry moves",
+          "except": "a measured value, in one parameter saying so; audits only read",
+          "prove": [
+            {"tool": "param_get", "observe": "each driving parameter's expression and comment"}
+          ]
+        },
+        {
+          "id": "build-and-observe-in-milestones",
+          "section": "kernel",
+          "scenarios": [
+            "configurable_template",
+            "fixed_mechanism",
+            "floating_mechanism",
+            "imported_audit",
+            "parametric_family",
+            "simple_part"
+          ],
+          "when": "a milestone lands",
+          "do": "read it back against intent, not at the end; a half-turn seating error shows in a bounding box",
+          "except": "a write whose result reports the effect",
+          "prove": [
+            {"tool": "model_inspect", "observe": "the bounding box of what was built"}
+          ]
+        },
+        {
+          "id": "prove-structure-before-detail",
+          "section": "kernel",
+          "scenarios": [
+            "configurable_template",
+            "fixed_mechanism",
+            "floating_mechanism",
+            "imported_audit",
+            "parametric_family",
+            "simple_part"
+          ],
+          "when": "detail is next",
+          "do": "prove the structure first - detail on a part sitting on the wrong plane is drawn twice",
+          "except": "detail that is itself the requirement",
+          "prove": [
+            {"tool": "model_measure_relation", "observe": "perpendicular, coaxial or concentric where claimed"}
+          ]
+        },
+        {
+          "id": "compare-the-artifact-with-acceptance",
+          "section": "kernel",
+          "scenarios": [
+            "configurable_template",
+            "fixed_mechanism",
+            "floating_mechanism",
+            "imported_audit",
+            "parametric_family",
+            "simple_part"
+          ],
+          "when": "the design looks finished",
+          "do": "compare it against the acceptance you wrote, and report each item you could not meet",
+          "except": "acceptance the brief left open",
+          "prove": [
+            {"tool": "view_screenshot", "observe": "whether it reads as the object it should be"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "plan",
+      "title": "Plan",
+      "rules": [
+        {
+          "id": "name-parts-for-what-they-are",
+          "section": "plan",
+          "scenarios": [
+            "configurable_template",
+            "fixed_mechanism",
+            "floating_mechanism",
+            "parametric_family",
+            "simple_part"
+          ],
+          "when": "a part enters the tree",
+          "do": "a made part takes a functional name, a bought part its supplier number",
+          "except": "imported names",
+          "prove": [
+            {"tool": "design_get", "observe": "the component names in the tree"}
+          ]
+        },
+        {
+          "id": "variants-are-configurations",
+          "section": "plan",
+          "scenarios": [
+            "configurable_template",
+            "parametric_family"
+          ],
+          "when": "the brief names several variants",
+          "do": "author them as configurations of one document; check the active row before calling a failed compute a defect",
+          "except": "a single variant",
+          "prove": [
+            {"tool": "design_get", "observe": "the configuration table and the active row"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sketch",
+      "title": "Sketch",
+      "rules": [
+        {
+          "id": "couple-what-moves-together",
+          "section": "sketch",
+          "scenarios": [
+            "configurable_template",
+            "fixed_mechanism",
+            "floating_mechanism",
+            "parametric_family",
+            "simple_part"
+          ],
+          "when": "two profiles must move together",
+          "do": "draw them in one sketch so an edit carries; give independent features their own sketch; pick a profile by measured area, not index",
+          "except": "geometry projected from a body",
+          "prove": [
+            {"tool": "sketch_get", "observe": "each profile's area, centroid and handle"}
+          ]
+        },
+        {
+          "id": "constraints-carry-relationship",
+          "section": "sketch",
+          "scenarios": [
+            "configurable_template",
+            "fixed_mechanism",
+            "floating_mechanism",
+            "parametric_family",
+            "simple_part"
+          ],
+          "when": "a sketch must survive a size change",
+          "do": "carry symmetry, coincidence, midpoint and tangency as constraints; dimensions set only size",
+          "except": "a reference sketch you will not resize",
+          "prove": [
+            {"tool": "sketch_get", "observe": "is_fully_constrained and the constraint list"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "model",
+      "title": "Model",
+      "rules": [
+        {
+          "id": "pattern-only-identical-intent",
+          "section": "model",
+          "scenarios": [
+            "configurable_template",
+            "fixed_mechanism",
+            "floating_mechanism",
+            "parametric_family",
+            "simple_part"
+          ],
+          "when": "the same feature repeats",
+          "do": "build one and pattern it; copies answering different requirements are modelled apart",
+          "except": "copies that merely share a shape",
+          "prove": [
+            {"tool": "design_get", "observe": "the pattern feature in the timeline"}
+          ]
+        },
+        {
+          "id": "let-the-process-shape-the-part",
+          "section": "model",
+          "scenarios": [
+            "configurable_template",
+            "fixed_mechanism",
+            "floating_mechanism",
+            "parametric_family",
+            "simple_part"
+          ],
+          "when": "the part will be manufactured",
+          "do": "take terminations, draft and minimum internal radius from that process; treat edge treatment as design",
+          "except": "an unsettled process, which is stated rather than assumed",
+          "prove": [
+            {"tool": "find_geometry", "observe": "the resulting faces, their normals and radii"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "assemble",
+      "title": "Assemble",
+      "rules": [
+        {
+          "id": "connected-reference-path",
+          "section": "assemble",
+          "scenarios": [
+            "fixed_mechanism"
+          ],
+          "when": "an assembly has a fixed moving mechanism",
+          "do": "establish one intentional reference path; do not ground parts to hide missing joints",
+          "except": "floating or multiple independent mechanisms",
+          "prove": [
+            {"tool": "assembly_get", "observe": "grounding and joint connectivity"},
+            {"tool": "joint_drive", "observe": "home and representative extreme positions"},
+            {"tool": "assembly_inspect_interference", "observe": "overlaps at each pose"}
+          ]
+        },
+        {
+          "id": "exercise-the-mechanism",
+          "section": "assemble",
+          "scenarios": [
+            "fixed_mechanism",
+            "floating_mechanism"
+          ],
+          "when": "the mechanism has a driven joint",
+          "do": "drive it to home and a representative extreme; keep moving joints few, the rest rigid",
+          "except": "a joint with no travel of interest",
+          "example": "a nut overlapping a plain shaft is a thread modelled as a cylinder",
+          "prove": [
+            {"tool": "joint_drive", "observe": "the value at each pose"},
+            {"tool": "assembly_inspect_interference", "observe": "overlaps at each pose, intended fit or defect"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "validate",
+      "title": "Validate",
+      "rules": [
+        {
+          "id": "close-the-declared-interfaces",
+          "section": "validate",
+          "scenarios": [
+            "configurable_template",
+            "fixed_mechanism",
+            "floating_mechanism",
+            "imported_audit",
+            "parametric_family",
+            "simple_part"
+          ],
+          "when": "the declared interfaces are built",
+          "do": "measure each and report the number - contact where parts engage, clearance where they move",
+          "except": "an interface the brief left open",
+          "prove": [
+            {"tool": "model_measure_between", "observe": "the distance or angle at each interface"}
+          ]
+        },
+        {
+          "id": "grade-structure-not-counts",
+          "section": "validate",
+          "scenarios": [
+            "configurable_template",
+            "fixed_mechanism",
+            "floating_mechanism",
+            "imported_audit",
+            "parametric_family",
+            "simple_part"
+          ],
+          "when": "counts and volumes look right",
+          "do": "read plane normals, axis directions and containment - a flat stack passes every count while nothing nests",
+          "except": "a genuinely planar design",
+          "prove": [
+            {"tool": "find_geometry", "observe": "face normals and linear-edge directions"}
+          ]
+        },
+        {
+          "id": "measurements-test-the-brief",
+          "section": "validate",
+          "scenarios": [
+            "configurable_template",
+            "fixed_mechanism",
+            "floating_mechanism",
+            "imported_audit",
+            "parametric_family",
+            "simple_part"
+          ],
+          "when": "a measurement disagrees with the brief",
+          "do": "report the disagreement - a measurement is evidence about the artifact; intent comes from the brief",
+          "except": "a brief quoting a measured fact about existing hardware",
+          "prove": [
+            {"tool": "model_measure_between", "observe": "the measured value beside the brief's"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "finish",
+      "title": "Finish",
+      "rules": [
+        {
+          "id": "verify-the-write",
+          "section": "finish",
+          "kind": "safety_invariant",
+          "scenarios": [
+            "configurable_template",
+            "fixed_mechanism",
+            "floating_mechanism",
+            "imported_audit",
+            "parametric_family",
+            "simple_part"
+          ],
+          "when": "a write reports success",
+          "do": "confirm the effect through a read other than the tool's claim; read a refusal's reason before retrying",
+          "except": "a deferred write, confirmed through the poller it names",
+          "prove": [
+            {"tool": "design_get", "observe": "the timeline entry the write claims"}
+          ]
+        },
+        {
+          "id": "leave-the-artifact-openable",
+          "section": "finish",
+          "scenarios": [
+            "configurable_template",
+            "fixed_mechanism",
+            "floating_mechanism",
+            "imported_audit",
+            "parametric_family",
+            "simple_part"
+          ],
+          "when": "the work is handed on",
+          "do": "leave the saved state valid, look at the result, and say what you could not do",
+          "except": "a scratch document",
+          "prove": [
+            {"tool": "doc_get", "observe": "the document's save state"}
+          ]
+        }
+      ]
+    }
+  ]
+}
