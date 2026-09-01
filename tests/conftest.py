@@ -502,11 +502,40 @@ def _restore_shared_adsk_mocks():
                 setattr(_mod, attr, val)
 
 
+# ── provenance declarations on the shared fakes ────────────────────────────
+
+def fusion_fake(live_type=None, facts=(), factory_for=None, scenario_double=None):
+    """Declare what a shared fake stands for and which measured rows back it.
+
+    METADATA ONLY: this records ``__fusion_fake__`` and hands the object back untouched, so no
+    fake's behaviour depends on being declared.
+
+    ``live_type`` is the adsk type the fake impersonates, named by its SHAPES key - the same key
+    test_fake_shapes_exist.py sweeps the fake's public members against - and ``facts`` are the
+    measure_api row ids that measured what the fake encodes. A def that CONSTRUCTS a declared fake
+    names it with ``factory_for``, so no builder of declared fakes sits outside the inventory.
+    ``scenario_double`` classifies a double that impersonates no live type at all, its string being
+    the reason.
+
+    test_api_fact_provenance.py resolves every id against measure_api.ROWS, so a row renamed or
+    dropped from the registry turns each fake citing it red. Nothing reads the prose around a
+    declaration.
+    """
+    declaration = {"live_type": live_type, "facts": tuple(facts), "factory_for": factory_for,
+                   "scenario_double": scenario_double}
+
+    def declare(obj):
+        obj.__fusion_fake__ = declaration
+        return obj
+    return declare
+
+
 # ── small Fusion-shaped fakes a tool's logic branches on ───────────────────
 #
 # These mimic the *interface* a tool reads, not the whole API. Names match the
 # Fusion type names because tools branch on ``type(entity).__name__``.
 
+@fusion_fake(live_type="Point3D", facts=("shape-dump-design-world", "point3d-vectorto"))
 class FakePoint:
     def __init__(self, x=0.0, y=0.0, z=0.0):
         self.x, self.y, self.z = x, y, z
@@ -537,12 +566,14 @@ class FakePoint:
         return True
 
 
+@fusion_fake(live_type="BoundingBox3D", facts=("shape-dump-design-world",))
 class FakeBoundingBox3D:
     def __init__(self, min_pt, max_pt):
         self.minPoint = min_pt
         self.maxPoint = max_pt
 
 
+@fusion_fake(live_type="BRepBody", facts=("shape-dump-design-world",))
 class BRepBody:
     """Matches type(entity).__name__ == 'BRepBody' in the tool's logic. volume/is_solid/entity_token
     are optional (all real BRepBody attributes per live_api_facts.SHAPES) for a before/after
@@ -574,6 +605,7 @@ class BRepBody:
         return bool(self.isLightBulbOn) and not self._hidden_by_ancestor
 
 
+@fusion_fake(live_type="TriangleMesh", facts=("shape-dump-mesh-world",))
 class _FakeTriangleMesh:
     """MeshBody.displayMesh - the triangle/vertex census a mesh feature is judged on. Held as ONE
     object per body so a feature fake can mutate the counts in place the way a real repair does."""
@@ -582,6 +614,7 @@ class _FakeTriangleMesh:
         self.nodeCount = nodes
 
 
+@fusion_fake(live_type="PolygonMesh", facts=("shape-dump-mesh-world",))
 class _FakePolygonMesh:
     """MeshBody.mesh - the flat x,y,z node coordinates a smooth moves and the flat normal
     components a reverse negates."""
@@ -590,6 +623,8 @@ class _FakePolygonMesh:
         self.normalVectorsAsDouble = list(normals)
 
 
+@fusion_fake(live_type="MeshBody",
+             facts=("shape-dump-mesh-world", "meshbody-volume-open-returns-zero"))
 class MeshBody:
     """Matches type(entity).__name__ == 'MeshBody' - the shared mesh fake every mesh-feature tool
     test builds on (repair, shell, smooth, separate, reverse_normal).
@@ -674,6 +709,9 @@ class MeshBody:
         return 0.0
 
 
+@fusion_fake(scenario_double="a harness affordance, not a stand-in for any live type: it publishes "
+                             "no member of its own and delegates every read to the fake it wraps, "
+                             "so it has no member surface to sweep and nothing to measure")
 class _EntityProxy:
     """See ``entity_proxy``. Deliberately holds no state of its own - reads and writes both go to the
     one underlying entity, so only object IDENTITY differs."""
@@ -691,25 +729,24 @@ class _EntityProxy:
         delattr(object.__getattribute__(self, "_obj"), name)
 
 
+@fusion_fake(factory_for="_EntityProxy")
 def entity_proxy(obj):
-    """A DISTINCT Python object standing for the same entity - what Fusion hands back on every read.
+    """A DISTINCT Python object standing for the same entity - one per reference a test hands out.
 
-    LIVE-MEASURED, and it is not confined to bodies:
-      * three faces of one box, and three edges of one open surface body, each gave N distinct python
-        ids and ONE entityToken (``f0.body is f1.body`` False);
-      * two reads of ``design.rootComponent`` return DIFFERENT objects, as do rootComponent vs
-        ``body.parentComponent`` vs ``edge.body.parentComponent`` - all four sharing one entityToken.
+    The CONTRACT this fake declares, which no measurement row carries: a python object identity
+    never answers an is-it-the-same question, for bodies, faces, edges and components alike. Holding
+    code to that is what keeps an identity-keyed comparison distinguishable from a token-keyed one -
+    reusing the SAME object for two references makes the two indistinguishable, which is exactly how
+    that class of defect survives a green suite.
 
-    So identity NEVER carries an is-it-the-same test, for bodies or components alike. Every read
-    delegates to `obj`, so a mutation a fake applies is visible through each proxy. Hand one out per
-    reference whenever a test covers code that compares or dedupes entities: reusing the SAME object
-    makes an identity-keyed comparison indistinguishable from a token-keyed one, which is exactly how
-    that class of defect survives a green suite. A harness affordance, deliberately NOT a method on
-    the fakes - they expose only attributes the live types have.
+    Every read delegates to `obj`, so a mutation a fake applies is visible through each proxy. A
+    harness affordance, deliberately NOT a method on the fakes - they expose only attributes the
+    live types have.
     """
     return _EntityProxy(obj)
 
 
+@fusion_fake(live_type="BRepBody", facts=("shape-dump-design-world",))
 class _OccurrenceProxy(_EntityProxy):
     """See ``body_proxy``. Every read but the three that make a proxy a proxy goes to the native."""
 
@@ -742,11 +779,13 @@ class _OccurrenceProxy(_EntityProxy):
         return object.__getattribute__(self, "_occurrence")
 
 
+@fusion_fake(factory_for="_OccurrenceProxy")
 def body_proxy(native, occurrence=None, entity_token=None):
     """The occurrence PROXY of `native` - what an occurrence's bRepBodies hands back for a body its
-    component owns natively.
+    component owns natively. The members it publishes are BRepBody's own; the proxy CONTRACT below
+    is this fake's, and no measurement row carries it.
 
-    LIVE-MEASURED, and the reason a token cannot be the de-dup key on its own: a proxy's entityToken
+    That contract is the reason a token cannot be the de-dup key on its own: a proxy's entityToken
     DIFFERS from its native's (each is stable across re-fetches of that wrapper), while
     ``proxy.nativeObject`` IS the native and a native's own ``nativeObject`` reads None. One physical
     body therefore answers two tokens, and a walk that reaches it both natively and through an
@@ -757,6 +796,8 @@ def body_proxy(native, occurrence=None, entity_token=None):
     return _OccurrenceProxy(native, occurrence, entity_token)
 
 
+@fusion_fake(live_type="BRepBodies", facts=("shape-dump-design-world", "brepbodies-protocol",
+                                           "item-oor-brepbodies", "item-oor-sketches"))
 class _NamedCollection:
     """Counted collection (Fusion's count/item(i)) with itemByName lookup (None on a miss),
     iterable - the measured live protocol (see live_api_facts; NamedViews' raise-on-miss is the
@@ -786,6 +827,7 @@ class _NamedCollection:
         return iter(self._items)
 
 
+@fusion_fake(factory_for="FakeBoundingBox3D", facts=("units-cm",))
 def make_bbox(minp, maxp):
     """A FakeBoundingBox3D from (min xyz, max xyz) tuples in cm (Fusion's internal unit). The plain
     function, so a module-level fake that HOLDS a bounding box can build one without a fixture."""
@@ -804,6 +846,7 @@ def bbox():
 # and type(curve).__name__ ("Line3D", "Circle3D", ...), so the geometry fakes
 # below are NAMED to match those runtime type names exactly.
 
+@fusion_fake(live_type="Vector3D", facts=("shape-dump-design-world", "vector3d-normalize-zero"))
 class FakeVector3D:
     """Vector matching Fusion's real Vector3D interface: plain .x/.y/.z plus .length/.copy()/
     .normalize().
@@ -851,6 +894,9 @@ class FakeVector3D:
         return True
 
 
+@fusion_fake(live_type="Matrix3D",
+             facts=("shape-dump-design-world",
+                    "matrix3d-invert-singular-answers-true-and-corrupts"))
 class FakeMatrix3D:
     """Numeric adsk.core.Matrix3D: a rotation of `deg` about Z followed by a translation `t` (cm).
 
@@ -858,12 +904,11 @@ class FakeMatrix3D:
     ``invert()``, which inverts IN PLACE and answers a bool the way Matrix3D.invert does; pass
     ``invertible=False`` for the platform DECLINING the inversion - the False every production
     caller gates on (model_inspect._measuring_axes, model_hole._world_lift). Measured: a SINGULAR
-    matrix does not produce that False - invert() answers True and corrupts the matrix to nan/inf
-    (ledger row matrix3d-invert-singular-answers-true-and-corrupts); rigid occurrence transforms
-    cannot be singular, so the gate is defensive. The rotation/translation state and the arithmetic
-    below it are underscored because they are this fake's own plumbing to a fake Point3D/Vector3D,
-    not members of the type it impersonates - a fake that published them would teach tool code an
-    API Fusion has no equivalent of.
+    matrix does not produce that False - invert() answers True and corrupts the matrix to nan/inf;
+    rigid occurrence transforms cannot be singular, so the gate is defensive. The
+    rotation/translation state and the arithmetic below it are underscored because they are this
+    fake's own plumbing to a fake Point3D/Vector3D, not members of the type it impersonates - a
+    fake that published them would teach tool code an API Fusion has no equivalent of.
 
     That arithmetic keeps the POINT/VECTOR split the live API makes: Point3D.transformBy takes the
     translation, Vector3D.transformBy does not. So a fake point calls ``_apply_point`` and a fake
@@ -922,6 +967,7 @@ class FakeInfiniteLine3D:
         return off.length < 1e-9 or off.isParallelTo(self.direction)
 
 
+@fusion_fake(live_type="Plane", facts=("shape-dump-design-world", "enum-surface-types"))
 class Plane:
     """surfaceType is intrinsic (a Plane fake IS always PlaneSurfaceType) - set automatically so
     callers reading face.geometry.surfaceType don't each hand-wire the same measured constant.
@@ -946,6 +992,7 @@ class Plane:
                          line.origin.z + t * line.direction.z)
 
 
+@fusion_fake(live_type="Cylinder", facts=("shape-dump-design-world", "enum-surface-types"))
 class Cylinder:
     """surfaceType is intrinsic - see Plane."""
     def __init__(self, axis, origin=None):
@@ -954,6 +1001,7 @@ class Cylinder:
         self.surfaceType = _api_facts.ENUMS["core.SurfaceTypes"]["CylinderSurfaceType"]
 
 
+@fusion_fake(live_type="Cone", facts=("shape-dump-design-world", "enum-surface-types"))
 class Cone:
     """A conical surface - mirrors Cylinder's .axis (both expose it per the live _inputs.py
     face-axis code). surfaceType is intrinsic - see Plane."""
@@ -967,16 +1015,18 @@ class Sphere:
     pass
 
 
+@fusion_fake(live_type="Torus", facts=("shape-dump-torus", "enum-surface-types"))
 class Torus:
     """A toroidal surface - surfaceType is intrinsic, see Plane. `origin` is the torus CENTRE, the
-    point the torus keypoint gate lifts into world and compares a JointGeometry against: MEASURED
-    (shape-dump-torus) - a torus created centred at (2, 3, -1) reads that point back, and the
-    surface's own origin reads unchanged after a transform of a COPY of it."""
+    point the torus keypoint gate lifts into world and compares a JointGeometry against: a torus
+    created centred at (2, 3, -1) reads that point back, and the surface's own origin reads
+    unchanged after a transform of a COPY of it."""
     def __init__(self, origin=None):
         self.origin = origin
         self.surfaceType = _api_facts.ENUMS["core.SurfaceTypes"]["TorusSurfaceType"]
 
 
+@fusion_fake(live_type="Line3D", facts=("shape-dump-design-world", "enum-curve3d-types"))
 class Line3D:
     """curveType is intrinsic - see Plane."""
     def __init__(self, start=None, end=None):
@@ -991,6 +1041,7 @@ class Line3D:
         return FakeInfiniteLine3D(self.startPoint, d)
 
 
+@fusion_fake(live_type="Circle3D", facts=("shape-dump-design-world", "enum-curve3d-types"))
 class Circle3D:
     """curveType is intrinsic - see Plane."""
     def __init__(self, normal, center=None, radius=None):
@@ -1008,6 +1059,7 @@ class Circle3D:
 # CONTAINERS are DROPPED - so a container is only reachable through the explicit
 # .operations/.folders/.patterns walk, exactly like live Fusion.
 
+@fusion_fake(live_type="Operation", facts=("shape-dump-cam-world",))
 class FakeOperation:
     """A CAM Operation leaf. Every attribute is real per live_api_facts.SHAPES['Operation'].
 
@@ -1040,6 +1092,7 @@ class FakeOperation:
         return self._operation_state
 
 
+@fusion_fake(live_type="CAMFolder", facts=("shape-dump-cam-world", "cam-alloperations-shape"))
 class FakeCAMFolder:
     """A CAM folder/pattern container: .operations/.folders/.patterns hold the DIRECT children
     (Fusion's count/item protocol); allOperations applies the measured flatten (see the section
@@ -1063,6 +1116,7 @@ class FakeCAMFolder:
         return _NamedCollection(flat)
 
 
+@fusion_fake(live_type="Setup", facts=("shape-dump-cam-world", "cam-alloperations-shape"))
 class FakeSetup(FakeCAMFolder):
     """A CAM Setup: the same container protocol + measured allOperations flatten as FakeCAMFolder,
     plus Setup.parameters - the collection the WCS binding is written to and read back from
@@ -1098,6 +1152,7 @@ class _SetupParam:
         self.value = types.SimpleNamespace(value=value)
 
 
+@fusion_fake(factory_for="_NamedCollection")
 def wcs_params(origin_mode=None, orientation_mode=None, origin=None, z_axis=None):
     """A Setup.parameters collection holding the WCS parameters. A mode is its string; `origin` /
     `z_axis` are lists of (object_type, name) entity specs - None omits that parameter entirely,
@@ -1120,6 +1175,7 @@ def wcs_params(origin_mode=None, orientation_mode=None, origin=None, z_axis=None
     return _NamedCollection(params)
 
 
+@fusion_fake(factory_for="_NamedCollection")
 def make_cam(*setups):
     """A minimal CAM product carrying `setups` (count/item protocol) - pair with
     `monkeypatch.setattr(mod, "get_cam", lambda: (cam, None))`."""
@@ -1173,9 +1229,11 @@ class _InspMeasure:
         self.inspectionPathResults = None if paths is None else _NamedCollection(list(paths))
 
 
+@fusion_fake(factory_for="_NamedCollection")
 def make_inspection_cam(measures):
-    """A CAM product whose inspectionResults is a collection of `measures`. measures=None models the
-    MEASURED empty state: the property reads None on a document that has never been probed."""
+    """A CAM product whose inspectionResults is a collection of `measures`. measures=None models one
+    of the two zero-measure answers the read path handles - the property answering None rather than
+    a count-0 collection - and no measurement row carries it."""
     return types.SimpleNamespace(
         inspectionResults=None if measures is None else _NamedCollection(list(measures)))
 
@@ -1241,6 +1299,7 @@ class _Vertex:
         self.geometry = point
 
 
+@fusion_fake(live_type="BRepFace", facts=("shape-dump-design-world",))
 class BRepFace:
     """Matches type(entity).__name__ == 'BRepFace'. `geometry` is the surface.
 
@@ -1281,6 +1340,7 @@ class _SimpleNamed:
         self.name = name
 
 
+@fusion_fake(live_type="BRepEdge", facts=("shape-dump-design-world",))
 class BRepEdge:
     """Matches type(entity).__name__ == 'BRepEdge'. `geometry` is the curve. `point_on_edge`/
     `entity_token` are None by default (see BRepFace) - set them for a test that mints/asserts on a
@@ -1303,6 +1363,7 @@ class BRepEdge:
 # the wrong (or stale) design, so the test passes while testing the wrong thing. install() patches
 # BOTH seams to the same design, making "patch both seams" structural instead of a remembered rule.
 
+@fusion_fake(live_type="Component", facts=("shape-dump-design-world",))
 class MakeComp:
     """A component with the standard Fusion collection protocol (count/item/itemByName).
 
@@ -1332,6 +1393,10 @@ class MakeComp:
             self.parentDesign = parent_design
 
 
+@fusion_fake(live_type="Design",
+             facts=("shape-dump-design-world", "allcomponents-design-only",
+                    "find-entity-token-shape", "find-entity-token-miss",
+                    "find-entity-token-multi"))
 class MakeDesign:
     """A design exposing the attributes tools/inputs read: rootComponent, activeComponent (defaults to
     root), allOccurrences, allComponents, and findEntityByToken(token) backed by a `tokens` map.
@@ -1364,6 +1429,7 @@ class MakeDesign:
         return [e] if e is not None else []
 
 
+@fusion_fake(factory_for="MakeDesign")
 def make_source_document(urn):
     """The `parentDesign` a component in the document with lineage id `urn` answers.
 
@@ -1379,6 +1445,7 @@ def make_source_document(urn):
         dataFile=(types.SimpleNamespace(id=urn) if urn is not None else None)))
 
 
+@fusion_fake(factory_for="MakeDesign")
 def make_design(bodies=(), occurrences=(), tokens=None, comp=None, all_components=None,
                 sketches=()):
     """Build a standard FakeDesign. Use `comp=` to supply a tool-specific component (one carrying a
@@ -1388,24 +1455,24 @@ def make_design(bodies=(), occurrences=(), tokens=None, comp=None, all_component
     return MakeDesign(comp=comp, tokens=tokens, all_components=all_components)
 
 
+@fusion_fake(live_type="Occurrence", facts=("shape-dump-design-world",))
 class FakeOccurrence:
     """One assembly occurrence: the component it places, its fullPathName, its name.
 
-    ``raises`` models the UNRESOLVED EXTERNAL REFERENCE state, and models it the way it was
-    MEASURED: the occurrence is present in the tree and EVERY read on it throws. ``component``
-    raising is the only reliable detector (isReferencedComponent / isValid / isLightBulbOn all read
-    normally on a real broken reference), and ``fullPathName`` raises too - which is why code that
-    names an occurrence in an error must fall back to the string it was handed. A fake that raises
-    only on ``component`` lets a missing fullPathName guard survive its own test.
+    ``raises`` models the UNRESOLVED EXTERNAL REFERENCE state as this fake's declared WORST CASE,
+    which no measurement row carries: the occurrence is present in the tree and EVERY read on it
+    throws. ``component`` is the read the resolvers detect that state on, and ``fullPathName``
+    throws with it - which is why code that names an occurrence in an error must fall back to the
+    string it was handed. A fake that raises only on ``component`` lets a missing fullPathName guard
+    survive its own test.
 
     ``name`` keeps reading in that state: it is the one identity a caller can still publish.
 
     ``transform2`` is what the occurrence PLACES its component with (a FakeMatrix3D) and
     ``assemblyContext`` the occurrence placing THIS one, or None where the chain ends at the root -
-    the pair a placement ladder walks. Both answer through ``raises`` like every other read here:
-    that is this fake's declared contract, not a second measurement (the measured detectors named
-    above are ``component`` and ``fullPathName``), and holding a new read to it is what stops a
-    caller reading a placement off an occurrence whose component will not load.
+    the pair a placement ladder walks. Both answer through ``raises`` like every other read here,
+    and holding a new read to that contract is what stops a caller reading a placement off an
+    occurrence whose component will not load.
 
     ONE class, so a test can point ``adsk.fusion.Occurrence`` at it and the shared occurrence
     resolver's isinstance check passes on a handle it resolved.
@@ -1442,6 +1509,7 @@ class FakeOccurrence:
         return self._read(self._assembly_context)
 
 
+@fusion_fake(factory_for="FakeOccurrence")
 def make_occurrence(path="Comp:1", component=None, raises=None, transform2=None,
                     assembly_context=None):
     """An occurrence placing `component` at assembly path `path`, with the placement matrix
@@ -1460,6 +1528,7 @@ def make_sketch_curve(token="curve0", length=1.0, is_closed=None):
     return curve
 
 
+@fusion_fake(factory_for="_NamedCollection")
 def make_sketch(name="Sketch1", lines=(), arcs=(), circles=(), ellipses=(), splines=(), points=()):
     """A Sketch fake: sketchCurves (flat, plus the per-kind sub-collections a '<type>:<index>' ref
     indexes), sketchPoints and name. Members come from make_sketch_curve; a collection-level factory
@@ -1547,6 +1616,8 @@ def install(mod, design, *, cast_design=True, object_collection=True):
     return design
 
 
+@fusion_fake(live_type="ObjectCollection",
+             facts=("shape-dump-design-world", "objectcollection-protocol"))
 class _FakeObjectCollection:
     """ObjectCollection: add() ANSWERS whether the collection took the object (live returns a bool),
     so a tool that reads that answer sees a real one. `refuse` holds the objects it rejects - the
@@ -1569,6 +1640,7 @@ class _FakeObjectCollection:
         return self._items[i]
 
 
+@fusion_fake(factory_for="_FakeObjectCollection")
 def _make_object_collection(refuse=()):
     return _FakeObjectCollection(refuse)
 
