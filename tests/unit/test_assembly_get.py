@@ -908,8 +908,11 @@ class _SliceDesign:
 
     @property
     def allComponents(self):
-        # counted AND iterable, like the live collection (measure_api allcomponents-design-only) -
-        # _common.all_components reads .count/.item while _joints.all_joints iterates.
+        # counted AND iterable alike (measure_api allcomponents-design-only), the two ways the joint
+        # walks read it: _common.all_components takes .count/.item, _joints.all_joint_origins
+        # iterates. The root is IN it - the contract _common.all_components holds - so all_joints
+        # asks this collection alone, while all_joint_origins still prepends design.rootComponent and
+        # leans on its entityToken de-dup to collapse the doubled root read.
         return _NamedCollection([self.rootComponent] + self._subs)
 
 
@@ -1437,6 +1440,18 @@ class TestContactsSlice:
         # whole membership, so nothing was truncated away - a flag counting only the named ones
         # would report this row as a preview.
         assert row["members_truncated"] is False
+
+    def test_a_fully_readable_membership_omits_the_unreadable_count(self, contacts_design):
+        # the key's ABSENCE is what says every member was named. A published 0 would make
+        # "members_unreadable" in row true for every readable set, and the same key also carries
+        # True for a membership that could not be read at all - so a zero there reads as
+        # "unreadable, some amount". No members and two named members are both the 0 side of that
+        # boundary; one unnamed member is the 1 side.
+        for members in ([], [_MemberOcc("Frame:1"), _MemberOcc("Panel:1")]):
+            contacts_design(sets=[_ContactSetRow("Readable", members=members)])
+            row = _payload(ap.handler(include=["contacts"]))["contacts"][0]
+            assert "members_unreadable" not in row
+            assert row["member_count"] == len(members)
 
     def test_members_are_previewed_but_the_count_is_honest(self, contacts_design):
         contacts_design(sets=[_ContactSetRow("Big", members=[_MemberOcc(f"P{i}:1") for i in range(30)])])

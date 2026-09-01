@@ -1029,6 +1029,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Exported to local disk. To round-trip into the cloud, upload it with data_upload_file (STEP/IGES are translated to a Fusion design on the cloud).
 - ') applies to format=stl only, and this call asked for format=
 - - refusing rather than dropping it. Export as stl to bake the unit into the file, or omit 'stl_units'.
+- ) applies to format=stl only, and this call asked for format=
+- - refusing rather than dropping it. Export as stl to choose binary or ASCII, or omit 'stl_binary'.
 - Provide 'file_path' - the local output path (a file, or a DIRECTORY when split_by_component=true). The format extension is appended if missing.
 - No active design to export. Open or create a document first (see doc_new).
 - component(s) to separate
@@ -1125,10 +1127,12 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 ### `doc_activate`
 - Switch ACCEPTED but not yet active - activation is async and hasn't propagated. Call doc_get to confirm it took before acting on the new document.
 - Provide 'name' - the open document to activate (a display name, or a lineage URN / web URL to be unambiguous).
-- ' matches more than one OPEN document - refusing to guess which to activate. Pass the lineage URN / web URL, or the 'open:N' index from doc_get (the only handle for an UNSAVED same-name doc with no...
+- Activate failed for '
 - No open document matched '
 - . (A shared name needs a lineage URN or the 'open:N' index from doc_get.)
-- Activate failed for '
+- ' matches more than one OPEN document - refusing to guess which to
+- . Candidates, each with the document id it answered:
+- . Retry with the address a candidate carries: a document id standing ALONE reaches that one and no other. A row carrying an 'open:N' index as well is one no URN reaches - it answered no id, or anot...
 
 ### `doc_close`
 - No document was closed.
@@ -1136,10 +1140,12 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - discarding unsaved changes
 - No documents are open.
 - . No document was closed.
-- ' matches more than one OPEN document - refusing to guess which to close. Pass the lineage URN / web URL, or the 'open:N' index from doc_get (the only handle for an UNSAVED same-name doc with no UR...
+- No active document to close.
 - No open document matched '
 - . (A shared name needs a lineage URN or the 'open:N' index from doc_get.)
-- No active document to close.
+- ' matches more than one OPEN document - refusing to guess which to
+- . Candidates, each with the document id it answered:
+- . Retry with the address a candidate carries: a document id standing ALONE reaches that one and no other. A row carrying an 'open:N' index as well is one no URN reaches - it answered no id, or anot...
 
 ### `doc_copy`
 - The copy preserves external references: each referenced component still points at its ORIGINAL source file - the references are not re-copied. This tool does not offer a Document.saveAs-based copy ...
@@ -1608,11 +1614,11 @@ A planar face's 'frame' is th...
 - ', which was already driven this session, and the pair is in an XREF/referenced context where driving BOTH members has killed the Fusion process.
 - . Fusion IGNORES an out-of-range drive (the value stays where it was), so nothing would move. Command a value inside the limits (a command exactly AT a bound lands on it), or widen them with joint_...
 - Refused: the command lies beyond the enabled joint limits of '
-- ' DID NOT TAKE - value_now reads
 - Could not drive joint '
-- DID NOT TAKE. The mechanism has moved (and any motion-linked partner with it) - read the pose back with assembly_get.
-- . PARTIALLY applied first (
-- ) - the joint (and any motion-linked partner) has moved; read the pose back with assembly_get.
+- . Read the pose back with assembly_get.
+- did NOT land the commanded value -
+- . The assignments made before the failure (
+- ) were accepted; no value was read back here, so where the mechanism stands now is not known from this receipt. Read the pose back with assembly_get.
 
 ### `joint_edit`
 - Joint edited + recomputed, but the timeline still has errored feature(s) (

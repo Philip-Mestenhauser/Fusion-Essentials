@@ -925,6 +925,53 @@ def _gaps(monkeypatch, table):
     return calls
 
 
+class _NameOnly:
+    """An occurrence whose external reference is UNRESOLVED: fullPathName RAISES and name still
+    answers (measured, see _common.broken_reference)."""
+
+    name = "Ghost:1"
+
+    @property
+    def fullPathName(self):
+        raise RuntimeError("reference is not resolved")
+
+
+class TestAddress:
+    """The ONE way an occurrence is named on the wire - the shared helper model_measure_between's
+    echo and the nested-child rows both address an entity through."""
+
+    def test_the_full_path_wins_over_the_leaf_name(self):
+        # THE reason this prefers fullPathName: `name` is the LEAF only, and two sub-assemblies can
+        # each hold a 'Pedestal:1' - naming the leaf addresses a different entity than the one read.
+        occ = types.SimpleNamespace(name="Pedestal:1", fullPathName="Frame:1+Pedestal:1")
+        assert geom.address(occ) == "Frame:1+Pedestal:1"
+
+    def test_an_unresolved_reference_is_named_by_the_name_it_still_answers(self):
+        # The row survives the raise rather than vanishing: the caller is being told what a number
+        # does not cover, which is true whether or not the path reads.
+        assert geom.address(_NameOnly()) == "Ghost:1"
+
+    def test_an_empty_full_path_falls_through_to_the_name(self):
+        # THE boundary: an entity answering '' is not one that answered an address. Accepting the
+        # empty string publishes a row naming nothing while a real name sits unread beside it.
+        occ = types.SimpleNamespace(name="Pedestal:1", fullPathName="")
+        assert geom.address(occ) == "Pedestal:1"
+
+    def test_an_entity_answering_neither_says_it_is_unreadable(self):
+        assert geom.address(_NoAddress()) == "(unreadable name)"
+
+    def test_a_caller_holding_a_real_address_names_it_with_that_instead(self):
+        # A face or edge carries neither property, and the find_geometry handle the caller passed
+        # IS a real address for it - '(unreadable name)' would throw away the one it holds.
+        assert geom.address(_NoAddress(), fallback="face:h7") == "face:h7"
+
+    def test_the_fallback_is_reached_only_when_both_reads_fail(self):
+        # the other side of that: a caller-supplied fallback must not outrank an entity that names.
+        occ = types.SimpleNamespace(name="Pedestal:1", fullPathName="Frame:1+Pedestal:1")
+        assert geom.address(occ, fallback="face:h7") == "Frame:1+Pedestal:1"
+        assert geom.address(_NameOnly(), fallback="face:h7") == "Ghost:1"
+
+
 class TestSubtreeFacts:
     """MEASURED: measureMinimumDistance against an occurrence measures that occurrence's OWN bodies
     and NOT what is nested inside it - a parent whose own body sits 90 mm from the other target,

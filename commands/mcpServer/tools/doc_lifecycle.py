@@ -804,19 +804,103 @@ def _lineage_key(urn):
     return urn.split("?")[0].strip() if isinstance(urn, str) else ""
 
 
+def _unique_lineages(ids):
+    """Per open-document id, whether a URN reaches THAT document and no other in this list.
+
+    False for an id that did not read - it answers to no lineage at all - and false for an id whose
+    lineage another candidate answers to as well: the same file open at two VERSIONS, where either
+    id retried lands back on the pair, since the '?version=N' suffix is dropped before matching.
+    Only a lineage held by exactly one candidate singles that candidate out."""
+    keys = [_lineage_key(i) for i in ids]
+    return [bool(k) and keys.count(k) == 1 for k in keys]
+
+
+def _document_row(name, document_id, open_index, unique_urn=True):
+    """One open document as a disclosure row: its display name, the document id it answered, and -
+    where that id does NOT reach it alone - the 'open:N' index that does (doc_get publishes the same
+    index).
+
+    The id is what the row states, suffix and all: an id carrying '?version=N' is what THAT candidate
+    answered, and calling it a lineage URN would name a value the row does not hold. A document whose
+    id did not read says so and is addressed by its index instead - two unsaved 'Untitled' otherwise
+    render as byte-identical rows advising an 'open:N' neither of them states. Every candidate gets a
+    row, always: a dropped row shows N documents under fewer URNs, which reads as though two of them
+    shared one."""
+    address = document_id or "no lineage URN"
+    if not (document_id and unique_urn):
+        address += " - open:%d" % open_index
+    return "%s (%s)" % (name or "(unnamed)", address)
+
+
+# The row a slot that answered NO DOCUMENT gets. documents.item(i) did not read, so the slot holds
+# its place in the open:N address space (every later document keeps its index) but has no document
+# behind it - and _find_open_document refuses the very 'open:N' that names it. So the row states the
+# hole and offers no address at all: this listing is the set the caller retries against, and an
+# index refused on arrival is not something to retry with. The row is still PUBLISHED rather than
+# dropped, so the listing counts what the session holds.
+_UNREADABLE_SLOT_ROW = "(unreadable slot) (no handle - the document did not read)"
+
+
+def _document_rows(hits):
+    """_document_row per (open_index, document, name, document_id) candidate, each carrying the
+    address that REACHES it: its document id where no other candidate answers to that lineage, else
+    the open index, which addresses one document whatever its id says. A candidate whose DOCUMENT
+    did not read gets _UNREADABLE_SLOT_ROW instead - a hole in the address space is named, never
+    offered as a handle.
+
+    Which address a row states is decided over the WHOLE list handed in, so a listing is built in
+    one call rather than a row at a time: a row written without its neighbours cannot know that a
+    second candidate answers to its lineage, and would offer an id that resolves back to the pair."""
+    unique = _unique_lineages([did for _i, _d, _nm, did in hits])
+    return [_document_row(nm, did, i, u) if d is not None else _UNREADABLE_SLOT_ROW
+            for (i, d, nm, did), u in zip(hits, unique)]
+
+
+def _open_candidates(open_docs):
+    """Every open (document, name) pair as the (open_index, document, name, document_id) candidate
+    _document_rows is built from, its id read once here.
+
+    A LISTING is over every open document, not only the ones a query matched: the caller is being
+    handed the set to retry against, and a document left out of it is one the retry cannot name. A
+    slot whose document did not read is carried too - its document is None, which is what marks it
+    as a hole rather than a candidate to address - since a missing row would show the session
+    holding one document fewer than it does."""
+    return [(i, d, nm, safe(lambda d=d: d.dataFile.id)) for i, (d, nm) in enumerate(open_docs)]
+
+
+def _tried_lineage(raw):
+    """What a by-URN resolve actually SEARCHED FOR, as ' (lineage <key>)', for a miss to name.
+
+    A '?version=N' suffix is dropped before matching and a web URL is decoded to the urn inside it,
+    so the value the caller typed is not always the value that was compared - a miss that echoed
+    only the input would leave the caller guessing which of the two missed. Empty when the value
+    carries no urn at all (a display name), and empty when it already IS that key, since the
+    refusal's own echo states it."""
+    keys = sorted({_lineage_key(c) for c in _urn_candidates(raw) if c.startswith("urn:")})
+    keys = [k for k in keys if k and k != (raw or "").strip()]
+    return " (lineage %s)" % ", ".join(keys) if keys else ""
+
+
 def _find_open_document(name):
-    """Return the open Document identified by `name`, and a sample of the open names.
+    """Return the open Document identified by `name`, and the open-document listing for a refusal.
 
     `name` may be a lineage URN or a Fusion web URL (the UNAMBIGUOUS identity - Fusion allows several
     open docs to share a display name, e.g. two 'Untitled' or two files both named 'P1-Gimbal'); it is
     matched against each open doc's dataFile.id first, by LINEAGE EQUALITY. Failing that, it is matched
     as a display name by case-insensitive EXACT match. A value that matches MORE THAN ONE open doc is
     REFUSED (returns None + an ambiguous flag) rather than silently acting on the wrong one - except
-    where the repeat is ONE document listed twice (_write_guard.one_open_document), which resolves. A
-    shared display name is disambiguated by the URN, a lineage open at two VERSIONS only by 'open:N'.
+    where the repeat is ONE document listed twice (_write_guard.one_open_document), which resolves on
+    BOTH match paths, since an assembly's dependency instance repeats the tab's name as well as its
+    URN. A shared display name is disambiguated by the URN, a lineage open at two VERSIONS only by
+    'open:N'.
 
-    `names` is the open display names, for the caller's message; on a URN refusal each candidate is
-    annotated with its document id, since the names there are twins and the id is what differs.
+    `names` is what the caller LISTS: every refusal hands back a _document_row per candidate, since
+    a listing is what the retry is built out of and the row carries the address that reaches that
+    candidate - its document id, or the open index where no URN reaches it alone. That holds on
+    every miss path, NAME and 'open:N' as much as URN: the refusal advises a URN or an 'open:N', so
+    a listing of display names would name neither, and two documents sharing a name would render as
+    that name printed twice. A resolve that ANSWERS hands back the display names, which no caller
+    reads.
     Operates on app.documents (all loaded docs - a superset of the user's visible tabs).
 
     Returns (document_or_None, names, ambiguous_bool)."""
@@ -844,42 +928,86 @@ def _find_open_document(name):
         try:
             idx = int(raw.split(":", 1)[1].strip())
         except ValueError:
-            return None, names, False
-        if 0 <= idx < len(open_docs):
-            return open_docs[idx][0], names, False
-        return None, names, False
+            idx = None
+        hit = open_docs[idx][0] if idx is not None and 0 <= idx < len(open_docs) else None
+        if hit is not None:
+            return hit, names, False
+        # All THREE ways an 'open:N' reaches nothing - an index that is not a number, one outside
+        # the open range, and one naming a slot whose document did not read - refuse with the same
+        # listing the name and URN misses return: a row per candidate carrying the address that
+        # reaches it. Bare display names here hand two unsaved 'Untitled' back as one name printed
+        # twice, which states neither of the indexes that do address them.
+        return None, _document_rows(_open_candidates(open_docs)), False
 
     # 1) URN / web-URL identity: resolve the raw value to candidate URNs, then match an open doc's
     # dataFile.id by LINEAGE EQUALITY.
     wanted = {_lineage_key(c) for c in _urn_candidates(raw) if c.startswith("urn:")} if raw else set()
     wanted.discard("")
     if wanted:
-        hits = []
-        for d, nm in open_docs:
-            did = safe(lambda d=d: d.dataFile.id)
-            if _lineage_key(did) in wanted:
-                hits.append((d, nm, did))
-        if len(hits) > 1 and not _write_guard.one_open_document([i for _d, _nm, i in hits]):
+        candidates = _open_candidates(open_docs)
+        hits = [c for c in candidates if _lineage_key(c[3]) in wanted]
+        if len(hits) > 1 and not _write_guard.one_open_document([did for _i, _d, _nm, did in hits]):
             # Distinct ids under one lineage - two VERSIONS of the file open at once. No URN can
-            # settle it (every candidate answers to that lineage), so the ids are named here and the
-            # caller's refusal points at open:N.
-            return None, [f"{nm or '(unnamed)'} ({i})" for _d, nm, i in hits], True
+            # settle it (every candidate answers to that lineage), so each row carries the open
+            # index that does, and the caller's refusal points at the index in the row.
+            return None, _document_rows(hits), True
         if hits:
             # Repeated ids are ONE document listed twice - an assembly's own dependency instance
             # beside its visible tab (_write_guard.one_open_document holds that measured fact). Both
             # handles address the same document, so the first is returned without disclosure.
-            return hits[0][0], names, False
-        # A URN was supplied but no OPEN doc carries it - not a name; report a clean miss (not ambiguous).
-        return None, names, False
+            return hits[0][1], names, False
+        # A URN was supplied but no OPEN doc carries it - not a name; report a clean miss (not
+        # ambiguous), listing every open document WITH the address that reaches it: the caller
+        # addressed this call by URN, and a URN is what the retry has to be addressed by too -
+        # except where two open documents answer to one lineage, whose rows carry the index instead.
+        return None, _document_rows(candidates), False
 
-    # 2) Display-name EXACT match. Refuse if more than one open doc shares the name (pass a URN instead).
+    # 2) Display-name EXACT match. Refuse if more than one DISTINCT open doc shares the name.
     want = raw.lower()
-    matches = [d for d, nm in open_docs if nm.lower() == want]
+    matches = [(i, d, nm, safe(lambda d=d: d.dataFile.id))
+               for i, (d, nm) in enumerate(open_docs) if nm.lower() == want]
     if len(matches) == 1:
-        return matches[0], names, False
+        return matches[0][1], names, False
     if len(matches) > 1:
-        return None, names, True     # ambiguous name-twin - caller tells the user to pass a URN
-    return None, names, False
+        if _write_guard.one_open_document([did for _i, _d, _nm, did in matches]):
+            # ONE document reached by its display NAME rather than its URN: an assembly loads its
+            # references as real Documents, so the visible tab and the dependency instance repeat
+            # the name AND the lineage URN. Both handles address that document, so the first
+            # resolves - only genuinely DISTINCT candidates refuse.
+            return matches[0][1], names, False
+        # A name-twin: the display names cannot tell these apart, so the rows carry the URNs.
+        return None, _document_rows(matches), True
+    # A NAME matched nothing. The refusal that follows advises a lineage URN or an 'open:N', so the
+    # listing states them: display names alone name neither, and a session holding two documents
+    # under one name renders that name twice - one row for each, telling the caller nothing the
+    # count did not.
+    return None, _document_rows(_open_candidates(open_docs)), False
+
+
+def _resolve_open_document(name, verb):
+    """The ONE by-name/by-URN open-document resolve doc_activate and doc_close share, refusals
+    already worded: (document, None) when exactly one document answers, else (None, refusal).
+
+    Both refusals list each candidate with the address that REACHES it, since a refusal that named
+    only the shared display name would ask for the value that just failed - and one that told every
+    caller to retry with a URN would ask for a value that cannot work where two candidates answer to
+    one lineage, or where a candidate answered no id at all. `verb` is the acting word, so one
+    wording serves both tools."""
+    d, listing, ambiguous = _find_open_document(name)
+    if d is not None:
+        return d, None
+    rows = "; ".join(r for r in listing if r)
+    if ambiguous:
+        return None, error(
+            f"'{name}' matches more than one OPEN document - refusing to guess which to {verb}. "
+            f"Candidates, each with the document id it answered: {rows}. Retry with the address a "
+            "candidate carries: a document id standing ALONE reaches that one and no other. A row "
+            "carrying an 'open:N' index as well is one no URN reaches - it answered no id, or "
+            "another candidate answers to the same lineage (one file open at two VERSIONS) - so "
+            "that index, which doc_get publishes too, is its only handle.")
+    return None, error(
+        f"No open document matched '{name}'{_tried_lineage(name)}. Open: {rows or '(none)'}. "
+        "(A shared name needs a lineage URN or the 'open:N' index from doc_get.)")
 
 
 def save_document_handler(description: str = "") -> dict:
@@ -931,16 +1059,9 @@ def close_document_handler(name: str = "", save_changes: bool = False,
     if close_all:
         targets = list(iter_collection(docs))
     elif name.strip():
-        d, names, ambiguous = _find_open_document(name)
-        if ambiguous:
-            return error(f"'{name}' matches more than one OPEN document - refusing to guess which to "
-                         "close. Pass the lineage URN / web URL, or the 'open:N' index from doc_get "
-                         "(the only handle for an UNSAVED same-name doc with no URN, and for one "
-                         "lineage open at two VERSIONS, where every candidate answers to the same "
-                         f"URN). Open: {', '.join(n for n in names if n)}.")
-        if not d:
-            return error(f"No open document matched '{name}'. Open: {', '.join(n for n in names if n)}. "
-                         "(A shared name needs a lineage URN or the 'open:N' index from doc_get.)")
+        d, refusal = _resolve_open_document(name, "close")
+        if refusal is not None:
+            return refusal
         targets = [d]
     else:
         active = safe(lambda: app.activeDocument)
@@ -1021,16 +1142,9 @@ def activate_document_handler(name: str = "") -> dict:
     if not name.strip():
         return error("Provide 'name' - the open document to activate (a display name, or a lineage "
                      "URN / web URL to be unambiguous).")
-    d, names, ambiguous = _find_open_document(name)
-    if ambiguous:
-        return error(f"'{name}' matches more than one OPEN document - refusing to guess which to "
-                     "activate. Pass the lineage URN / web URL, or the 'open:N' index from doc_get "
-                     "(the only handle for an UNSAVED same-name doc with no URN, and for one "
-                     "lineage open at two VERSIONS, where every candidate answers to the same "
-                     f"URN). Open: {', '.join(n for n in names if n)}.")
-    if not d:
-        return error(f"No open document matched '{name}'. Open: {', '.join(n for n in names if n)}. "
-                     "(A shared name needs a lineage URN or the 'open:N' index from doc_get.)")
+    d, refusal = _resolve_open_document(name, "activate")
+    if refusal is not None:
+        return refusal
     try:
         did = d.activate()
     except Exception as e:

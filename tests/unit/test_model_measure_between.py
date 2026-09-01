@@ -433,6 +433,60 @@ class TestNestedTargetDisclosure:
         assert "targets_with_children" not in out and "NESTED" not in out["note"]
 
 
+class TestTargetEcho:
+    """The payload's 'a'/'b' name what was MEASURED, and a nested occurrence's `name` is the LEAF
+    only: a target given as 'Frame:1+Pedestal:1' answers 'Pedestal:1' to name. Echoing the leaf
+    names a different address than the one measured - and not a unique one, since two
+    sub-assemblies can each hold a 'Pedestal:1'. The fullPathName is the address this tool's own
+    target input resolves, and the address the nested-children rows already use."""
+
+    def _pair(self, monkeypatch, a, kind_a, b, kind_b):
+        monkeypatch.setattr(mb._A, "resolve", lambda raw: ((a, kind_a), None))
+        monkeypatch.setattr(mb._B, "resolve", lambda raw: ((b, kind_b), None))
+
+    def _nested(self, path):
+        """A nested occurrence as Fusion answers one: fullPathName is the assembly path, name the
+        leaf. No children, so the subtree disclosure stays out of this payload."""
+        return types.SimpleNamespace(name=path.split("+")[-1], fullPathName=path,
+                                     childOccurrences=_NamedCollection([]),
+                                     component=types.SimpleNamespace(
+                                         occurrences=_NamedCollection([])))
+
+    def test_a_nested_occurrence_echoes_its_full_path_not_its_leaf(self, monkeypatch):
+        self._pair(monkeypatch, self._nested("Frame:1+Pedestal:1"), "occurrence",
+                   self._nested("Carrier:1"), "occurrence")
+        _install_mgr(monkeypatch, _Res(0.6, _Pt(0, 0, 0), _Pt(0.6, 0, 0)))
+        out = _payload(mb.handler(a="Frame:1+Pedestal:1", b="Carrier:1"))
+        assert out["a"] == "occurrence 'Frame:1+Pedestal:1'"
+        assert out["b"] == "occurrence 'Carrier:1'"
+
+    def test_the_angle_payload_echoes_the_full_path_too(self, monkeypatch):
+        # the same echo is built twice, once per mode - a fix applied to one leg only leaves the
+        # other naming the leaf.
+        self._pair(monkeypatch, self._nested("Frame:1+Pedestal:1"), "face",
+                   self._nested("Carrier:1"), "face")
+        _install_mgr(monkeypatch, _Res(math.pi / 2))
+        out = _payload(mb.handler(a="Frame:1+Pedestal:1", b="Carrier:1", mode="angle"))
+        assert out["a"] == "face 'Frame:1+Pedestal:1'"
+        assert out["b"] == "face 'Carrier:1'"
+
+    def test_a_target_with_no_path_still_echoes_its_name(self, monkeypatch):
+        # a body carries a name and no fullPathName - the fallback must not drop to the raw input
+        # and hide which body the handle resolved to.
+        self._pair(monkeypatch, types.SimpleNamespace(name="Band"), "body",
+                   types.SimpleNamespace(name="Plate"), "body")
+        _install_mgr(monkeypatch, _Res(0.6, _Pt(0, 0, 0), _Pt(0.6, 0, 0)))
+        out = _payload(mb.handler(a="h1", b="h2"))
+        assert out["a"] == "body 'Band'" and out["b"] == "body 'Plate'"
+
+    def test_a_target_answering_neither_echoes_the_value_the_caller_passed(self, monkeypatch):
+        # a face has neither property, so the find_geometry handle IS its address here.
+        self._pair(monkeypatch, object(), "face", object(), "face")
+        _install_mgr(monkeypatch, _Res(0.6, _Pt(0, 0, 0), _Pt(0.6, 0, 0)))
+        out = _payload(mb.handler(a="h7", b="h8"))
+        assert out["a"] == "face 'h7'" and out["b"] == "face 'h8'"
+
+
 class TestAngle:
     def test_angle_returns_degrees(self, monkeypatch):
         _resolve_both("face")

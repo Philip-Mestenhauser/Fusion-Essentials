@@ -8,8 +8,10 @@ adsk.cam is mocked. What we PIN is the handler's own logic:
   - each kind takes its geometry from ONE input (handles / bodies / sketches) and refuses the others;
   - the per-kind knobs (chain is_open/reverted, loop_type/side_type, the pocket-recognition filter),
     each confirmed by a read-back, and REFUSED on a kind whose selection class lacks the property;
-  - sketch names are resolved design-wide (via _inputs.SketchRefList) and a name several sketches
-    share is refused;
+  - sketch AND body names are resolved design-wide (via _inputs.SketchRefList / BodyRefList), a name
+    several of them share is refused naming the ONE 'component' scope, and that scope narrows every
+    name in whichever list the selection kind reads;
+  - the payload NAMES what the by-name references resolved to, so a wrong pick is visible in it;
   - the post-apply read-back: outputGeometry paths/segments + value entities, and a selection whose
     hasError is set turning the call into an error carrying Fusion's own reason;
   - diameter filtering of cylinder faces (mm), and the empty-after-filter guard;
@@ -26,10 +28,12 @@ own promise.
 """
 
 import json
+import types
 
 import pytest
 
-from conftest import load_tool, make_cam, install, make_sketch, MakeComp, MakeDesign
+from conftest import (load_tool, make_cam, install, make_sketch, MakeComp, MakeDesign, BRepBody,
+                      body_proxy, _NamedCollection)
 from conftest import FakeSetup as SharedSetup, FakeOperation as SharedOp
 
 cg = load_tool("cam_select_geometry")
@@ -295,8 +299,10 @@ def _install(monkeypatch, cam, entities):
 
 
 def _install_bodies(monkeypatch, cam, bodies):
+    # The stub takes the kind's own (raw, component) signature: the handler passes the scope
+    # through, so a one-argument stand-in would hide the wiring instead of standing in for it.
     monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
-    cg._inputs.BodyRefList.resolve = lambda self, raw: (list(bodies), None)
+    cg._inputs.BodyRefList.resolve = lambda self, raw, component="": (list(bodies), None)
     return cam
 
 
@@ -489,6 +495,110 @@ class TestBodySelections:
         assert _selection_of(op).kind == "pocket_recognition"
 
 
+def _shared_body_design(name="Body1"):
+    """A design where TWO components hold a body of one name - Fusion names every component's first
+    body 'Body1', so a machining reference by that name is shared by construction. The sub-component
+    is placed once, so the design-wide walk offers the root's native body and the sub's proxy.
+    Returns (design, the root's body, the sub's placed proxy)."""
+    import adsk.fusion
+    adsk.fusion.BRepBody = BRepBody
+    sub_body = BRepBody(name, entity_token="TOK-SUB")
+    sub = MakeComp("Bracket", bodies=[sub_body], entity_token="TOKEN:Bracket")
+    sub_body.parentComponent = sub
+    occ = types.SimpleNamespace(name="Bracket:1", fullPathName="Bracket:1", component=sub)
+    proxy = body_proxy(sub_body, occ)
+    occ.bRepBodies = _NamedCollection([proxy])
+    root_body = BRepBody(name, entity_token="TOK-ROOT")
+    root = MakeComp("Carrier", bodies=[root_body], occurrences=[occ], entity_token="TOKEN:Carrier")
+    root_body.parentComponent = root
+    return MakeDesign(comp=root, all_components=[root, sub]), root_body, proxy
+
+
+class TestBodySelectionComponentScope:
+    """The 'bodies' input reads NAMES design-wide, and Fusion auto-names every component's first
+    body 'Body1' - the same shared-name trap the sketch input closed, one input over. The ONE
+    'component' scope narrows whichever by-name reference the selection kind reads."""
+
+    def _run(self, monkeypatch, **kw):
+        op = _curve_op()
+        cam = _CAM([_Setup([op])])
+        monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
+        res = cg.handler(operation="2D Contour1", selection="silhouette", generate=False, **kw)
+        return op, res
+
+    def test_a_shared_body_name_is_refused_naming_the_component_scope(self, monkeypatch):
+        # A first-match resolve here machines a body in the wrong component and reports the same
+        # count either way, so the name is refused - and the way out has to include this tool's own
+        # input, not just the qualified spellings.
+        install(cg, _shared_body_design()[0])
+        op, res = self._run(monkeypatch, bodies=["Body1"])
+        assert res["isError"] is True
+        assert "names 2 bodies" in res["message"]
+        assert "'Carrier:Body1'" in res["message"] and "'Bracket:1:Body1'" in res["message"]
+        assert "'component'" in res["message"]
+        assert op.parameters.itemByName("contours").value.applied == 0   # nothing was applied
+
+    def test_the_component_scope_picks_that_components_body(self, monkeypatch):
+        # The remedy the refusal names has to WORK, and it must land on the scoped component's own
+        # body rather than on whichever the design-wide walk reached first.
+        design, _root_body, proxy = _shared_body_design()
+        install(cg, design)
+        op, res = self._run(monkeypatch, bodies=["Body1"], component="Bracket")
+        assert res["isError"] is False
+        sel = _selection_of(op)
+        assert sel.inputGeometry == [proxy] and sel.isSetupModelSelected is False
+
+    def test_the_scope_reaches_pocket_recognition_as_well(self, monkeypatch):
+        # Both body kinds read the same input through the same kind, so a scope that only narrowed
+        # silhouette would leave the identical trap open one strategy over.
+        design, _root_body, proxy = _shared_body_design()
+        install(cg, design)
+        op = _curve_op(name="Adaptive1")
+        cam = _CAM([_Setup([op])])
+        monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
+        res = cg.handler(operation="Adaptive1", selection="pocket_recognition", bodies=["Body1"],
+                         component="Bracket", generate=False)
+        assert res["isError"] is False
+        assert _selection_of(op).inputGeometry == [proxy]
+
+    def test_a_scope_the_design_does_not_hold_is_refused(self, monkeypatch):
+        # An input a caller can get wrong without being told is a trap - and this scope is refused
+        # even though a qualified name would have identified the body on its own.
+        install(cg, _shared_body_design()[0])
+        op, res = self._run(monkeypatch, bodies=["Carrier:Body1"], component="Ghost")
+        assert res["isError"] is True and "No component named 'Ghost'" in res["message"]
+        assert op.parameters.itemByName("contours").value.applied == 0
+
+    def test_a_scope_with_NO_bodies_is_refused_rather_than_machining_the_setup_models(self, monkeypatch):
+        # Omitting 'bodies' is the setup-models form (isSetupModelSelected), which no component
+        # scope narrows - so a caller who asked to narrow to one component and would have got the
+        # whole setup's models is told, not answered with a success that names no scope at all.
+        install(cg, _shared_body_design()[0])
+        op, res = self._run(monkeypatch, component="Bracket")
+        assert res["isError"] is True
+        assert "'component'" in res["message"] and "'bodies'" in res["message"]
+        assert "No component named" not in res["message"]   # the scope exists; it applies to nothing
+        pv = op.parameters.itemByName("contours").value
+        assert pv.applied == 0 and pv.getCurveSelections().count == 0
+
+    def test_a_scope_the_design_does_not_hold_with_NO_bodies_is_refused_too(self, monkeypatch):
+        # An unresolvable scope beside an empty list is refused on the scope, not dropped: the
+        # empty form selects the setup's own models, which no component narrows, so a dropped
+        # scope would answer ok naming neither the unknown component nor what it selected.
+        install(cg, _shared_body_design()[0])
+        op, res = self._run(monkeypatch, component="Ghost")
+        assert res["isError"] is True and "'component'" in res["message"]
+        assert op.parameters.itemByName("contours").value.applied == 0
+
+    def test_the_setup_models_form_still_resolves_with_no_scope(self, monkeypatch):
+        # Only the scope BESIDE it is refused: omitting both is the form the tool description
+        # advertises, and it still selects the setup's own models.
+        install(cg, _shared_body_design()[0])
+        op, res = self._run(monkeypatch)
+        assert res["isError"] is False
+        assert _selection_of(op).isSetupModelSelected is True
+
+
 class TestPocketFilter:
     def _run(self, monkeypatch, flt, units="mm"):
         op = _curve_op(name="Adaptive1")
@@ -631,7 +741,85 @@ class TestSketchSelection:
         assert "'Sketch1' in Carrier" in res["message"]
         assert "'Sketch1' in Bracket" in res["message"]
         assert "'sketches'[0]" in res["message"]   # and still names the input slot it came from
+        # the way through is this tool's OWN input, not a rename in whichever document owns the
+        # other sketch - the scope input the schema declares beside 'sketches'
+        assert "'component'" in res["message"]
+        assert "rename" not in res["message"].lower()
         assert op.parameters.itemByName("contours").value.applied == 0   # nothing was applied
+
+    def test_the_component_scope_picks_that_components_sketch(self, monkeypatch):
+        # The remedy the refusal above names has to WORK: with both components holding a 'Sketch1',
+        # the scope decides which one is machined - and it is the scoped component's own object,
+        # not whichever the design-wide walk reached first.
+        mine = make_sketch("Sketch1")
+        theirs = make_sketch("Sketch1")
+        root = MakeComp("Carrier", sketches=[theirs])
+        sub = MakeComp("Bracket", sketches=[mine])
+        install(cg, _sketch_design(root, sub))
+        op = _curve_op()
+        cam = _CAM([_Setup([op])])
+        monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
+        out = _payload(cg.handler(operation="2D Contour1", selection="sketch", sketches=["Sketch1"],
+                                  component="Bracket", generate=False))
+        assert _selection_of(op).inputGeometry == [mine]
+        assert out["selections"] == 1
+
+    def test_the_scope_narrows_EVERY_name_in_the_list(self, monkeypatch):
+        # A list resolves one name at a time, so a scope applied to the first element only would
+        # machine one component's outline beside another's and report two selections either way.
+        a_mine, b_mine = make_sketch("Inner"), make_sketch("Outer")
+        root = MakeComp("Carrier", sketches=[make_sketch("Inner"), make_sketch("Outer")])
+        sub = MakeComp("Bracket", sketches=[a_mine, b_mine])
+        install(cg, _sketch_design(root, sub))
+        op = _curve_op()
+        cam = _CAM([_Setup([op])])
+        monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
+        _payload(cg.handler(operation="2D Contour1", selection="sketch",
+                            sketches=["Inner", "Outer"], component="Bracket", generate=False))
+        assert _selection_of(op).inputGeometry == [a_mine, b_mine]
+
+    def test_a_scope_the_design_does_not_hold_is_refused(self, monkeypatch):
+        # An input a caller can get wrong without being told is a trap: the name here IS unique, so
+        # dropping the unusable scope would resolve and machine geometry the caller never scoped.
+        install(cg, _sketch_design(MakeComp("Carrier", sketches=[make_sketch("Outline")])))
+        op = _curve_op()
+        cam = _CAM([_Setup([op])])
+        monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
+        res = cg.handler(operation="2D Contour1", selection="sketch", sketches=["Outline"],
+                         component="Ghost", generate=False)
+        assert res["isError"] is True
+        assert "No component named 'Ghost'" in res["message"] and "Carrier" in res["message"]
+        assert op.parameters.itemByName("contours").value.applied == 0
+
+    def test_a_name_the_scoped_component_does_not_hold_names_where_it_lives(self, monkeypatch):
+        # The scope decides which component answers, so a name it does not hold is a miss even
+        # though the design carries exactly one sketch of that name - and the refusal names the
+        # component that DOES hold it rather than offering a design-wide list the scope excluded.
+        root = MakeComp("Carrier", sketches=[make_sketch("Outline")])
+        sub = MakeComp("Bracket", sketches=[make_sketch("Inner")])
+        install(cg, _sketch_design(root, sub))
+        op = _curve_op()
+        cam = _CAM([_Setup([op])])
+        monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
+        res = cg.handler(operation="2D Contour1", selection="sketch", sketches=["Outline"],
+                         component="Bracket", generate=False)
+        assert res["isError"] is True
+        assert "Outline" in res["message"] and "Carrier" in res["message"]
+        assert op.parameters.itemByName("contours").value.applied == 0
+
+    def test_the_scope_is_refused_on_a_kind_that_reads_no_NAME(self, monkeypatch):
+        # 'component' narrows whichever by-NAME list the selection kind reads (sketches or bodies),
+        # so on a handle-driven kind it applies to nothing - dropping it would leave the caller
+        # believing it scoped the cut. The refusal names every kind the scope DOES reach.
+        op = _curve_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        res = cg.handler(operation="2D Contour1", selection="chain", handles=["e"],
+                         component="Bracket", generate=False)
+        assert res["isError"] is True
+        assert "'component'" in res["message"] and "'chain'" in res["message"]
+        for kind in ("sketch", "silhouette", "pocket_recognition"):
+            assert kind in res["message"]
 
     def test_unknown_sketch_lists_the_available_names(self, monkeypatch):
         install(cg, _sketch_design(MakeComp("Root", sketches=[make_sketch("Outline")])))
@@ -649,6 +837,89 @@ class TestSketchSelection:
         monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
         res = cg.handler(operation="2D Contour1", selection="sketch", generate=False)
         assert res["isError"] is True and "sketches" in res["message"]
+
+
+# ── WHICH sketch / body the by-name reference resolved to ────────────────────
+
+class TestSelectedIdentityIsPublished:
+    """A count says a selection landed; it cannot say WHICH sketch or body it landed on. Both
+    inputs address by NAME, so a wrong pick reads exactly like a right one unless the payload names
+    what the reference resolved to."""
+
+    def _sketch_run(self, monkeypatch, comps, names):
+        install(cg, _sketch_design(*comps))
+        op = _curve_op()
+        cam = _CAM([_Setup([op])])
+        monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
+        return _payload(cg.handler(operation="2D Contour1", selection="sketch", sketches=names,
+                                   generate=False))
+
+    def _named_sketches(self, *names):
+        """A root component holding a sketch per name, each answering its owning component."""
+        sketches = [make_sketch(n) for n in names]
+        root = MakeComp("Carrier", sketches=sketches)
+        for sk in sketches:
+            sk.parentComponent = root
+        return root, sketches
+
+    def test_a_selected_sketch_is_named_with_its_owning_component(self, monkeypatch):
+        root, _ = self._named_sketches("Pocket Outline")
+        out = self._sketch_run(monkeypatch, [root], ["Pocket Outline"])
+        assert out["selected"] == "'Pocket Outline' in Carrier"
+
+    def test_the_selected_sketches_are_named_one_per_entry(self, monkeypatch):
+        root, _ = self._named_sketches("Inner", "Outer")
+        out = self._sketch_run(monkeypatch, [root], ["Inner", "Outer"])
+        assert out["selected"] == "'Inner' in Carrier, 'Outer' in Carrier"
+
+    def test_a_selected_body_is_named_in_the_spelling_that_addresses_it_back(self, monkeypatch):
+        # The qualified '<occurrence-or-component>:<body>' form is what the ambiguity refusal lists
+        # and what this input resolves, so the payload's label is a string the caller can re-send.
+        design, _root_body, _proxy = _shared_body_design()
+        install(cg, design)
+        op = _curve_op()
+        cam = _CAM([_Setup([op])])
+        monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
+        out = _payload(cg.handler(operation="2D Contour1", selection="silhouette",
+                                  bodies=["Body1"], component="Bracket", generate=False))
+        assert out["selected"] == "'Bracket:1:Body1'"
+
+    def test_the_setup_models_form_names_no_bodies(self, monkeypatch):
+        # Nothing was selected by name there - 'setup_models_selected' is the whole answer, and an
+        # empty label list would read as a selection that resolved to nothing.
+        op = _curve_op()
+        cam = _CAM([_Setup([op])])
+        _install_bodies(monkeypatch, cam, [])
+        out = _payload(cg.handler(operation="2D Contour1", selection="silhouette", generate=False))
+        assert out["setup_models_selected"] is True and "selected" not in out
+
+    def test_a_handle_driven_selection_names_nothing(self, monkeypatch):
+        # A handle addresses one entity and the resolver refuses a token that names more than one,
+        # so there is no by-name pick to disclose - and a face carries no name to publish.
+        op = _curve_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge(), _Edge()])
+        out = _payload(cg.handler(operation="2D Contour1", selection="chain", handles=["a", "b"],
+                                  generate=False))
+        assert out["selections"] == 1 and "selected" not in out
+
+    def test_more_sketches_than_the_cap_counts_the_ones_it_did_not_name(self, monkeypatch):
+        # The label list grows with the selection, so it is bounded by the shared renderer - and a
+        # silently cut list reads as the complete set of what was machined.
+        cap = cg._inputs._common._MAX_NAMED_CANDIDATES
+        root, sketches = self._named_sketches(*[f"S{i:02d}" for i in range(cap + 1)])
+        out = self._sketch_run(monkeypatch, [root], [s.name for s in sketches])
+        assert out["selected"].count(" in Carrier") == cap
+        assert f"'S{cap:02d}'" not in out["selected"]
+        assert "(+1 more not listed)" in out["selected"]
+
+    def test_every_sketch_AT_the_cap_is_named_and_nothing_is_counted(self, monkeypatch):
+        cap = cg._inputs._common._MAX_NAMED_CANDIDATES
+        root, sketches = self._named_sketches(*[f"S{i:02d}" for i in range(cap)])
+        out = self._sketch_run(monkeypatch, [root], [s.name for s in sketches])
+        assert out["selected"].count(" in Carrier") == cap
+        assert f"'S{cap - 1:02d}' in Carrier" in out["selected"]
+        assert "not listed" not in out["selected"]
 
 
 # ── per-kind knobs ───────────────────────────────────────────────────────────

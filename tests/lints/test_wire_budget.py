@@ -71,7 +71,7 @@ _TOOL_WEIGHTS = {
     "cam_post": 3384,
     "cam_reorder": 1268,
     "cam_save_template": 1716,
-    "cam_select_geometry": 4628,   # + the sketch and pocket_recognition selection kinds, per-kind input routing with refusals, loop/side/pocket-filter knobs read back, and the outputGeometry rung-3 read
+    "cam_select_geometry": 5007,   # +379: the 'component' scope - see sketch_add_3d_line - narrowing BOTH by-name geometry lists, 'sketches' and 'bodies' (Fusion numbers sketches per component from 1 and names every component's first body 'Body1', so both name spaces are shared by default); the schema is strict, so the input and each kind's scope ship together, and the shared-name refusal names this input as the remedy instead of a rename in another document. + the sketch and pocket_recognition selection kinds, per-kind input routing with refusals, loop/side/pocket-filter knobs read back, and the outputGeometry rung-3 read
     "cam_set_nc_comment": 1411,
     "cam_show_toolpath": 1758,   # + the setup-activation disclosure: show/isolate/show_folder activate the operation's own setup (Manufacture renders only the active setup's models) - state a later CAM call consumes, so the caller must be told the tool changes it
     "data_create_folder": 1314,

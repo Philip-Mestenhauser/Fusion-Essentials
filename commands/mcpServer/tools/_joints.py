@@ -45,7 +45,9 @@ MAP_BLURB = (
     "(joints AND asBuiltJoints, root and every sub-component) the health rollups count broken "
     "joints over; find_joints_by_name / find_joint - the list form over those same scopes and the "
     "resolve-one over it, which REFUSES a name SEVERAL joints carry, since a joint name is only "
-    "component-locally unique; motion_link_record - a joint's own MotionLink membership as ONE "
+    "component-locally unique; DRIVES_ANGLE/DRIVES_SLIDE - which joint kinds TURN and which SLIDE, "
+    "the ONE pairing every rotation/slide member is selected through (the driven value, its limits, "
+    "its heading); motion_link_record - a joint's own MotionLink membership as ONE "
     "TRI-STATE record (partner, link, suppressed, broken, the two coupled values, reversed), which "
     "joint_drive's coupling claim and its second-member refusal gate on, with "
     "motion_link_partner its NAME projection; link_ratio_values/dof_motion_kind - the ONE "
@@ -456,6 +458,17 @@ def current_joint_type(joint):
     return _MOTION_CLASS_TO_TYPE.get(type(jm).__name__, "") if jm else ""
 
 
+# Joint KIND (current_joint_type's vocabulary) -> the drivable degree of freedom it carries, the ONE
+# pairing every consumer of a rotate-or-slide member selects through: a revolute and a cylindrical
+# TURN, a slider and a cylindrical SLIDE. So a kind in DRIVES_ANGLE is the one whose rotationValue /
+# rotationLimits / rotationAxisVector are read, and one in DRIVES_SLIDE the one whose slideValue /
+# slideLimits / slideDirectionVector are. The kinds in NEITHER set - rigid, ball, planar, pin_slot -
+# are not addressed here, and a consumer reading a rotate-or-slide member off one of them states its
+# own basis for that read.
+DRIVES_ANGLE = frozenset(("revolute", "cylindrical"))
+DRIVES_SLIDE = frozenset(("slider", "cylindrical"))
+
+
 # JointMotion subclass -> the single JointMotionTypes DOF a MotionLink.setMotionData couples. This is
 # the DEGREE OF FREEDOM enum (RevoluteJointRotateMotionType, ...), a DIFFERENT enum from JointTypes:
 # jointMotion.jointType returns a JointTypes value (RevoluteJointType == 1), which setMotionData
@@ -603,31 +616,38 @@ def link_ratio_mismatch(value_two, read_one, read_two):
 
 
 def all_joints(design):
-    """Every Joint AND AsBuiltJoint in the design, as a flat list of the joint objects: the root
-    component plus every sub-component (both are SEPARATE collections, and a joint internal to a
-    sub-component lives on that component - a root-only walk under-reports, so a broken sub-component or
-    as-built joint would be invisible to a health rollup). The ONE joint walk: find_joint resolves a
-    name over it, and the assembly_get / workspace_orient health rollups count broken joints over it,
-    so 'which joints exist' is answered the same way everywhere. Joints are de-duplicated by
-    entityToken: design.allComponents includes the root as a proxy DISTINCT from
-    design.rootComponent, so the root's joints are reached twice - counting them once each would
-    over-report joint_count and repeat a broken joint in the health rollup."""
+    """Every Joint AND AsBuiltJoint in the design, as a flat list of the joint objects: every
+    component once, over both of the SEPARATE collections a component carries them in. A joint
+    internal to a sub-component lives on THAT component, so a root-only walk under-reports and a
+    broken sub-component or as-built joint would be invisible to a health rollup. The ONE joint
+    walk: find_joint resolves a name over it, and the assembly_get / workspace_orient health rollups
+    count broken joints over it, so 'which joints exist' is answered the same way everywhere.
+
+    The component walk is ``_common.all_components`` and nothing else - the ONE design-wide component
+    walk, which holds the contract for how ``design.allComponents`` reaches the root and for what it
+    answers when that collection does not read. That collection already carries the root, so
+    prepending ``design.rootComponent`` to it reads every root joint twice: the root arrives a second
+    time as a distinct wrapper. Both identity keys below are shared by two readings of ONE joint, so
+    such a pair collapses; a doubled joint answering NEITHER a token NOR a name falls to id(), which
+    two wrappers never share, and that one escapes the de-dup - it is returned twice, over-reporting
+    joint_count and repeating itself in the health rollup.
+
+    The entityToken de-dup is a SECOND line, over the joint objects themselves: two readings that
+    answer ONE token collapse to one row."""
     out, seen = [], set()
-    scopes = [safe(lambda: design.rootComponent)] + list(safe(lambda: design.allComponents, []) or [])
-    for c in scopes:
-        if c is None:
-            continue
+    # No None guard on the component: all_components drops the rows its own collection read as None,
+    # so every component reaching here is one that read.
+    for c in _common.all_components(design):
         for coll_name in ("joints", "asBuiltJoints"):
             jc = safe(lambda c=c, cn=coll_name: getattr(c, cn))
             for i in range(safe(lambda: jc.count, 0) or 0 if jc else 0):
                 j = safe(lambda i=i: jc.item(i))
                 if j is None:
                     continue
-                # entityToken is stable across the two root proxies. A SUPPRESSED joint's token can
-                # read None (it degrades toward a bare feature), and an id() fallback then splits
-                # the two root proxies into two records (measured: joint_count 2 for ONE suppressed
-                # joint) - so the fallback key is (name, objectType, owning component), which the
-                # two proxies of one joint share; id() remains only for a joint with no readable name.
+                # A key has to be one a SECOND reading of the same joint can share, and id() never
+                # is. A SUPPRESSED joint's token can read None (it degrades toward a bare feature),
+                # so the fallback key is (name, objectType, owning component), which two readings of
+                # one joint still share; id() remains only for a joint with no readable name.
                 token = safe(lambda j=j: j.entityToken)
                 if token is not None:
                     key = ("tok", token)
@@ -794,13 +814,17 @@ def motion_link_partner(joint):
 def all_joint_origins(design):
     """Every JointOrigin in the design as a flat list of (jo, owning_component): the root component plus
     every sub-component (a JO internal to a sub-component lives on that component, so a root-only walk
-    under-reports). The ONE JointOrigin walk - the same shape as all_joints - that the three JO leaf ops
-    share: collect-names (joint_create's available-JO list), read-axes (model_inspect's oriented bbox
-    frame), and resolve-one-by-name (find_joint_origins_by_name, under the JointOriginRef kind). Joints
-    know 'which joints exist' one way; this answers 'which joint origins exist' the same way everywhere.
-    De-duplicated by entityToken for the reason all_joints records, which here would double-list a root
-    JO (the token is stable across the two root proxies, verified live for all_joints; id() falls back
-    for fakes)."""
+    under-reports). The ONE JointOrigin walk that the three JO leaf ops share: collect-names
+    (joint_create's available-JO list), read-axes (model_inspect's oriented bbox frame), and
+    resolve-one-by-name (find_joint_origins_by_name, under the JointOriginRef kind). Joints know
+    'which joints exist' one way; this answers 'which joint origins exist' the same way everywhere.
+
+    This scope list PREPENDS design.rootComponent to a collection that already carries the root, so
+    the root is walked TWICE and every root JO is read through two distinct wrappers. The entityToken
+    de-dup below is what collapses that pair back into one row, and it is the only thing that does:
+    the id() fallback under it collapses the pair only where both scopes hand back ONE object, so a
+    JO whose token does not read is returned twice. all_joints asks ``_common.all_components`` alone
+    and carries no such doubling - this walk still does."""
     out, seen = [], set()
     scopes = [safe(lambda: design.rootComponent)] + list(safe(lambda: design.allComponents, []) or [])
     for c in scopes:

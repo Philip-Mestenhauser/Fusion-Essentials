@@ -25,6 +25,7 @@ same-name-in-two-folders refusal, two miss paths) and directly for its hard fold
 """
 
 import json
+import re
 import time
 
 import pytest
@@ -1573,7 +1574,44 @@ class TestOpenIndexAddressing:
         d, names, ambiguous = _doc_lifecycle._find_open_document("open:2")
         assert d is third and ambiguous is False
         assert names == ["Untitled", "", "Untitled"]
-        assert _doc_lifecycle._find_open_document("open:1") == (None, names, False)
+        missed, listing, miss_ambiguous = _doc_lifecycle._find_open_document("open:1")
+        assert missed is None and miss_ambiguous is False   # a clean miss, not a propagated raise
+        # ...and the listing that refusal carries never offers open:1 back: that is the address
+        # this very call refused.
+        assert "open:1" not in "; ".join(listing)
+
+
+class TestWhichCandidatesAUrnReaches:
+    """Which candidate a document id ADDRESSES decides how its row is written: a lineage exactly one
+    candidate answers to is that candidate's handle, and every other candidate needs its open index,
+    because a refusal that offered a URN reaching two documents would ask for a value that returns
+    that same refusal."""
+
+    def test_two_distinct_lineages_each_reach_one_candidate(self):
+        assert _doc_lifecycle._unique_lineages(
+            ["urn:adsk.wipprod:dm.lineage:AB", "urn:adsk.wipprod:dm.lineage:CD"]) == [True, True]
+
+    def test_a_lone_candidate_is_reached_by_its_own_lineage(self):
+        assert _doc_lifecycle._unique_lineages(["urn:adsk.wipprod:dm.lineage:AB"]) == [True]
+
+    def test_two_versions_of_one_lineage_reach_neither(self):
+        # THE boundary: ONE candidate under a lineage is reached by it, TWO are reached by neither -
+        # a '?version=N' suffix is dropped before matching, so both ids answer to lineage AB.
+        assert _doc_lifecycle._unique_lineages(
+            ["urn:adsk.wipprod:dm.lineage:AB",
+             "urn:adsk.wipprod:dm.lineage:AB?version=2"]) == [False, False]
+
+    def test_an_id_that_did_not_read_reaches_nothing(self):
+        # an unreadable id is no address at all, and a second one beside it is a different document
+        # rather than the same one - neither is singled out by 'no id'.
+        assert _doc_lifecycle._unique_lineages([None]) == [False]
+        assert _doc_lifecycle._unique_lineages([None, None]) == [False, False]
+
+    def test_a_shared_lineage_costs_only_the_candidates_that_share_it(self):
+        # the mixed session: the pair under one lineage needs indexes, the outsider keeps its URN.
+        assert _doc_lifecycle._unique_lineages(
+            ["urn:adsk.wipprod:dm.lineage:AB", "urn:adsk.wipprod:dm.lineage:AB?version=2",
+             "urn:adsk.wipprod:dm.lineage:CD"]) == [False, False, True]
 
 
 class TestUrnIdentityIsExact:
@@ -1648,8 +1686,10 @@ class TestUrnIdentityIsExact:
         d, names, ambiguous = _doc_lifecycle._find_open_document(
             "urn:adsk.wipprod:dm.lineage:AB")
         assert d is None and ambiguous is True             # never `v_latest`
-        assert names == ["P1 (urn:adsk.wipprod:dm.lineage:AB)",
-                         "P1 (urn:adsk.wipprod:dm.lineage:AB?version=2)"]
+        # each row states the id that candidate answered - suffix and all - and the open index,
+        # since neither id reaches one document: both answer to lineage AB.
+        assert names == ["P1 (urn:adsk.wipprod:dm.lineage:AB - open:0)",
+                         "P1 (urn:adsk.wipprod:dm.lineage:AB?version=2 - open:1)"]
 
     def test_close_refuses_two_versions_and_points_at_open_n(self, monkeypatch):
         a = _CloseableDoc("P1", urn="urn:adsk.wipprod:dm.lineage:AB")
@@ -1660,6 +1700,29 @@ class TestUrnIdentityIsExact:
         assert "?version=2" in res["message"]              # both ids named
         assert "open:N" in res["message"]                  # the handle that CAN settle it
         assert a.close_called_with is None and b.close_called_with is None
+
+    def test_the_version_twin_refusal_never_asks_for_a_urn_retry(self, monkeypatch):
+        # THE wording boundary: every candidate here answers to lineage AB, so a retry with either
+        # listed id returns this same refusal. The message must hand back the open index each
+        # candidate carries and must NOT carry the URN-retry imperative the name-twin path gives.
+        a = _CloseableDoc("P1", urn="urn:adsk.wipprod:dm.lineage:AB")
+        b = _CloseableDoc("P1", urn="urn:adsk.wipprod:dm.lineage:AB?version=2")
+        self._open(monkeypatch, [a, b])
+        msg = _doc_lifecycle.close_document_handler(
+            name="urn:adsk.wipprod:dm.lineage:AB")["message"]
+        assert "Retry with one of those URNs" not in msg
+        assert "open:0" in msg and "open:1" in msg          # the handle each candidate carries
+        assert a.close_called_with is None and b.close_called_with is None
+
+    def test_a_name_twin_is_addressed_by_the_urn_it_carries_and_no_index(self, monkeypatch):
+        # the other side of that boundary: two DISTINCT lineages, so each id reaches one document
+        # and the rows offer the URN alone - an open index beside it would say no URN settles this.
+        self._open(monkeypatch, [_NamedDoc("P1", urn="urn:adsk.wipprod:dm.lineage:AB"),
+                                 _NamedDoc("P1", urn="urn:adsk.wipprod:dm.lineage:CD")])
+        msg = _doc_lifecycle.activate_document_handler(name="P1")["message"]
+        assert "P1 (urn:adsk.wipprod:dm.lineage:AB)" in msg
+        assert "P1 (urn:adsk.wipprod:dm.lineage:CD)" in msg
+        assert "open:0" not in msg and "open:1" not in msg
 
     def test_an_unreadable_id_beside_a_readable_one_is_not_one_document(self, monkeypatch):
         # a hit whose id did not read cannot be shown to be the same document as its neighbour.
@@ -1696,6 +1759,322 @@ class TestUrnIdentityIsExact:
             name="urn:adsk.wipprod:dm.lineage:ABC"))
         assert out["closed"] == ["P2"]
         assert a.close_called_with is None
+
+
+class TestAmbiguityNamesEveryLineageUrn:
+    """A refusal that lists only the shared display NAME asks the caller to retry with the value that
+    just failed. Every candidate is listed with the lineage URN that tells it apart, so the retry is
+    exact - and a repeat that is ONE document listed twice is not an ambiguity to refuse at all."""
+
+    def _open(self, monkeypatch, docs):
+        class _App:
+            documents = _CloseableDocs(docs)
+            activeDocument = docs[0] if docs else None
+        monkeypatch.setattr(_doc_lifecycle, "app", _App())
+
+    def test_activate_refusal_names_each_candidates_urn(self, monkeypatch):
+        self._open(monkeypatch, [_NamedDoc("P1-Gimbal", urn="urn:adsk.wipprod:dm.lineage:AAA"),
+                                 _NamedDoc("P1-Gimbal", urn="urn:adsk.wipprod:dm.lineage:BBB")])
+        res = _doc_lifecycle.activate_document_handler(name="P1-Gimbal")
+        assert res["isError"] is True
+        assert "P1-Gimbal (urn:adsk.wipprod:dm.lineage:AAA)" in res["message"]
+        assert "P1-Gimbal (urn:adsk.wipprod:dm.lineage:BBB)" in res["message"]
+        assert "which to activate" in res["message"]        # the acting word is this tool's
+
+    def test_close_refusal_names_each_candidates_urn_and_closes_nothing(self, monkeypatch):
+        a = _CloseableDoc("P1-Gimbal", urn="urn:adsk.wipprod:dm.lineage:AAA")
+        b = _CloseableDoc("P1-Gimbal", urn="urn:adsk.wipprod:dm.lineage:BBB")
+        self._open(monkeypatch, [a, b])
+        res = _doc_lifecycle.close_document_handler(name="P1-Gimbal")
+        assert res["isError"] is True
+        assert "P1-Gimbal (urn:adsk.wipprod:dm.lineage:AAA)" in res["message"]
+        assert "P1-Gimbal (urn:adsk.wipprod:dm.lineage:BBB)" in res["message"]
+        assert "which to close" in res["message"]           # the acting word is this tool's
+        assert a.close_called_with is None and b.close_called_with is None
+
+    def test_a_candidate_that_answered_no_urn_says_so_beside_one_that_did(self, monkeypatch):
+        # A row is published per candidate whether or not its id read: dropping the URN-less one
+        # would show two documents under one address, and dropping its row would show one document.
+        # Each is addressed by what reaches it - the URN one, the open index the other.
+        self._open(monkeypatch, [_NamedDoc("P1", urn="urn:adsk.wipprod:dm.lineage:AAA"),
+                                 _NamedDoc("P1")])
+        msg = _doc_lifecycle.activate_document_handler(name="P1")["message"]
+        assert "P1 (urn:adsk.wipprod:dm.lineage:AAA)" in msg
+        assert "P1 (no lineage URN - open:1)" in msg
+
+    def test_two_unsaved_twins_are_listed_at_the_distinct_indexes_that_address_them(
+            self, monkeypatch):
+        # Two unsaved 'Untitled' answer no URN, so a refusal advising 'open:N' has to SAY which N
+        # each one is: rows reading identically leave the caller with nothing to retry with.
+        self._open(monkeypatch, [_NamedDoc("Untitled"), _NamedDoc("Untitled")])
+        msg = _doc_lifecycle.activate_document_handler(name="Untitled")["message"]
+        assert "Untitled (no lineage URN - open:0)" in msg
+        assert "Untitled (no lineage URN - open:1)" in msg
+
+    def test_two_versions_sharing_a_name_are_addressed_by_index_on_the_NAME_path_too(
+            self, monkeypatch):
+        # The same file open at two versions, reached by its display NAME: the ids differ, so this
+        # refuses - and telling the caller to retry with either id would return this refusal again,
+        # since both answer to lineage AB. Each row carries the index that does address one.
+        self._open(monkeypatch, [_NamedDoc("P1", urn="urn:adsk.wipprod:dm.lineage:AB"),
+                                 _NamedDoc("P1", urn="urn:adsk.wipprod:dm.lineage:AB?version=2")])
+        msg = _doc_lifecycle.activate_document_handler(name="P1")["message"]
+        assert "P1 (urn:adsk.wipprod:dm.lineage:AB - open:0)" in msg
+        assert "P1 (urn:adsk.wipprod:dm.lineage:AB?version=2 - open:1)" in msg
+
+    def test_a_tab_and_its_dependency_instance_resolve_by_NAME_too(self, monkeypatch):
+        # MEASURED, and held by _write_guard.one_open_document: an assembly loads its references as
+        # real Documents, so the visible tab and the dependency instance repeat the name AND the
+        # lineage URN. Refusing that would refuse an ordinary assembly by its own display name -
+        # both handles address one document, so the first resolves.
+        tab = _CloseableDoc("P1", urn="urn:adsk.wipprod:dm.lineage:AB")
+        dependency = _CloseableDoc("P1", urn="urn:adsk.wipprod:dm.lineage:AB")
+        self._open(monkeypatch, [tab, dependency])
+        out = _payload(_doc_lifecycle.close_document_handler(name="P1"))
+        assert out["closed"] == ["P1"]
+        assert tab.close_called_with is False and dependency.close_called_with is None
+
+    def test_two_DISTINCT_documents_sharing_a_name_still_refuse(self, monkeypatch):
+        # The boundary the collapse must not cross: one name, two LINEAGES. Equal ids collapse;
+        # anything else is a genuine ambiguity and a close here would destroy the wrong document.
+        a = _CloseableDoc("P1", urn="urn:adsk.wipprod:dm.lineage:AB")
+        b = _CloseableDoc("P1", urn="urn:adsk.wipprod:dm.lineage:CD")
+        self._open(monkeypatch, [a, b])
+        res = _doc_lifecycle.close_document_handler(name="P1")
+        assert res["isError"] is True
+        assert a.close_called_with is None and b.close_called_with is None
+
+    def test_a_name_matching_one_document_still_resolves(self, monkeypatch):
+        # the other side of the collapse: a unique name is not touched by any of it.
+        a = _CloseableDoc("P1", urn="urn:adsk.wipprod:dm.lineage:AB")
+        b = _CloseableDoc("P2", urn="urn:adsk.wipprod:dm.lineage:CD")
+        self._open(monkeypatch, [a, b])
+        out = _payload(_doc_lifecycle.close_document_handler(name="P2"))
+        assert out["closed"] == ["P2"] and a.close_called_with is None
+
+
+class TestAUrnMissNamesWhatItTried:
+    """A URN that matches no open document is a clean miss - and the caller addressed the call by
+    URN, so the miss answers in URNs: what was searched for, and what each open document answers."""
+
+    def _open(self, monkeypatch, docs):
+        class _App:
+            documents = _CloseableDocs(docs)
+            activeDocument = docs[0] if docs else None
+        monkeypatch.setattr(_doc_lifecycle, "app", _App())
+
+    def test_the_miss_lists_every_open_document_by_urn(self, monkeypatch):
+        self._open(monkeypatch, [_NamedDoc("P1-Gimbal", urn="urn:adsk.wipprod:dm.lineage:AAA"),
+                                 _NamedDoc("Untitled")])
+        res = _doc_lifecycle.activate_document_handler(
+            name="urn:adsk.wipprod:dm.lineage:ZZZ")
+        assert res["isError"] is True
+        msg = res["message"]
+        assert "urn:adsk.wipprod:dm.lineage:ZZZ" in msg                  # what it tried
+        assert "P1-Gimbal (urn:adsk.wipprod:dm.lineage:AAA)" in msg      # what is open, by URN
+        assert "Untitled (no lineage URN - open:1)" in msg               # ...and by index where none
+
+    def test_a_lineage_open_at_two_versions_is_listed_at_the_indexes_that_reach_it(self, monkeypatch):
+        # The miss listing is the set the caller retries against, so every row states an address
+        # that reaches ONE document. Two versions of lineage AB both answer to that lineage, so
+        # offering either id alone hands back a value that resolves to the pair - the rows carry the
+        # open index instead. The third document is the boundary: its own id singles it out, so it
+        # keeps the URN alone and an index beside it would say no URN reaches it.
+        self._open(monkeypatch, [_NamedDoc("P1", urn="urn:adsk.wipprod:dm.lineage:AB"),
+                                 _NamedDoc("P1", urn="urn:adsk.wipprod:dm.lineage:AB?version=2"),
+                                 _NamedDoc("P2", urn="urn:adsk.wipprod:dm.lineage:CD")])
+        msg = _doc_lifecycle.activate_document_handler(
+            name="urn:adsk.wipprod:dm.lineage:ZZZ")["message"]
+        assert "P1 (urn:adsk.wipprod:dm.lineage:AB - open:0)" in msg
+        assert "P1 (urn:adsk.wipprod:dm.lineage:AB?version=2 - open:1)" in msg
+        assert "P2 (urn:adsk.wipprod:dm.lineage:CD)" in msg
+        assert "open:2" not in msg
+
+    def test_a_version_suffixed_miss_names_the_lineage_it_compared(self, monkeypatch):
+        # The value COMPARED is the lineage key, not the string typed - the '?version=N' suffix is
+        # dropped first. A miss echoing only the input leaves the caller unable to tell which of the
+        # two missed.
+        self._open(monkeypatch, [_NamedDoc("P1", urn="urn:adsk.wipprod:dm.lineage:AAA")])
+        msg = _doc_lifecycle.activate_document_handler(
+            name="urn:adsk.wipprod:dm.lineage:ZZZ?version=4")["message"]
+        assert "?version=4" in msg                                       # the value typed
+        assert "(lineage urn:adsk.wipprod:dm.lineage:ZZZ)" in msg         # the value compared
+
+    def test_a_bare_urn_miss_adds_no_lineage_clause(self, monkeypatch):
+        # the boundary: when the typed value IS the lineage key, the echo already states it and a
+        # second copy of the same string is noise.
+        self._open(monkeypatch, [_NamedDoc("P1", urn="urn:adsk.wipprod:dm.lineage:AAA")])
+        msg = _doc_lifecycle.activate_document_handler(
+            name="urn:adsk.wipprod:dm.lineage:ZZZ")["message"]
+        assert "(lineage " not in msg
+
+    def test_a_display_name_miss_invents_no_lineage_clause(self, monkeypatch):
+        self._open(monkeypatch, [_NamedDoc("P1", urn="urn:adsk.wipprod:dm.lineage:AAA")])
+        msg = _doc_lifecycle.activate_document_handler(name="Ghost")["message"]
+        assert "(lineage " not in msg.split("Open:")[0]
+
+    def test_a_web_url_miss_names_the_urn_decoded_out_of_it(self, monkeypatch):
+        # a URL carries the lineage base64url-encoded, so the string typed shares no characters with
+        # the value compared - this is the miss that most needs to say what it searched for.
+        import base64
+        urn = "urn:adsk.wipprod:dm.lineage:ZZZ"
+        seg = base64.b64encode(urn.encode()).decode().rstrip("=").replace("+", "-").replace("/", "_")
+        url = (f"https://x.autodesk360.com/g/projects/123/data/FOLDERSEG_LONG_ENOUGH/{seg}"
+               "?show=overview")
+        self._open(monkeypatch, [_NamedDoc("P1", urn="urn:adsk.wipprod:dm.lineage:AAA")])
+        msg = _doc_lifecycle.activate_document_handler(name=url)["message"]
+        assert f"(lineage {urn})" in msg
+
+
+class TestTheMissListingCarriesOnlyRealRows:
+    """The miss refusal's 'Open:' listing is the set the caller retries against, so it states an
+    empty session as such and never publishes a separator standing in for a row."""
+
+    def _open(self, monkeypatch, docs):
+        class _App:
+            documents = _CloseableDocs(docs)
+            activeDocument = docs[0] if docs else None
+        monkeypatch.setattr(_doc_lifecycle, "app", _App())
+
+    def test_a_session_with_nothing_open_says_none_rather_than_trailing_off(self, monkeypatch):
+        # An empty listing renders as 'Open: .' - a sentence stating no fact, where the fact is
+        # that there is nothing open to retry against at all.
+        self._open(monkeypatch, [])
+        msg = _doc_lifecycle.activate_document_handler(name="Ghost")["message"]
+        assert "Open: (none)." in msg
+
+    def test_a_document_whose_name_will_not_read_is_listed_at_its_open_index(self, monkeypatch):
+        # A document whose name raises still holds its open index, and open:N is exactly what
+        # addresses it - so it is listed as an unnamed row carrying that index, never as a bare
+        # separator with no document on either side of it.
+        self._open(monkeypatch, [_NamedDoc("P1"), _NamedDoc("Ghost", name_raises=True)])
+        msg = _doc_lifecycle.activate_document_handler(name="Nope")["message"]
+        assert "Open: P1 (no lineage URN - open:0); (unnamed) (no lineage URN - open:1)." in msg
+        assert "; ;" not in msg and "Open: ;" not in msg
+        # the row above offers open:1 because open:1 REACHES that document - the row is an offer,
+        # and this is the reading the burned-slot test below is the other side of.
+        assert _doc_lifecycle._find_open_document("open:1")[0] is not None
+
+    def test_a_slot_that_answered_no_document_is_named_and_carries_no_address(self, monkeypatch):
+        # One step earlier than the row above: documents.item(1) itself raises, so the slot holds
+        # its place in the address space but answers NO document - and 'open:1', the address its
+        # position would name, is refused by the very resolve this listing is the retry set for.
+        # So the hole is named and carries no address, and every 'open:N' the listing does print
+        # reaches a document - on the NAME miss and the URN miss alike.
+        first, third = _NamedDoc("Untitled"), _NamedDoc("Untitled")
+        class _App:
+            documents = _CloseableDocs([first, _NamedDoc("dead"), third], item_raises_at=1)
+            activeDocument = first
+        monkeypatch.setattr(_doc_lifecycle, "app", _App())
+        for asked in ("Nope", "urn:adsk.wipprod:dm.lineage:ZZZ"):
+            msg = _doc_lifecycle.activate_document_handler(name=asked)["message"]
+            assert "(unreadable slot) (no handle - the document did not read)" in msg
+            offered = re.findall(r"open:(\d+)", msg)
+            assert offered == ["0", "2"]              # the two slots that DO answer a document
+            for n in offered:
+                assert _doc_lifecycle._find_open_document("open:" + n)[0] is not None
+
+
+class TestANameMissListsTheAddressThatReachesEachDocument:
+    """A display-name miss ends on 'a shared name needs a lineage URN or the open:N index' - so the
+    listing beside it has to STATE them. Bare display names render two documents sharing a name as
+    one name printed twice, which names neither address the sentence asks for and leaves the caller
+    a second call away from any retry."""
+
+    def _open(self, monkeypatch, docs):
+        class _App:
+            documents = _CloseableDocs(docs)
+            activeDocument = docs[0] if docs else None
+        monkeypatch.setattr(_doc_lifecycle, "app", _App())
+
+    def test_name_twins_are_listed_at_the_urns_that_tell_them_apart(self, monkeypatch):
+        # THE case: two documents answer to 'P1-Gimbal', so a listing of display names prints that
+        # name twice and the caller cannot build the URN retry the sentence asks for.
+        self._open(monkeypatch, [_NamedDoc("P1-Gimbal", urn="urn:adsk.wipprod:dm.lineage:AAA"),
+                                 _NamedDoc("P1-Gimbal", urn="urn:adsk.wipprod:dm.lineage:BBB")])
+        msg = _doc_lifecycle.activate_document_handler(name="Ghost")["message"]
+        assert "P1-Gimbal (urn:adsk.wipprod:dm.lineage:AAA)" in msg
+        assert "P1-Gimbal (urn:adsk.wipprod:dm.lineage:BBB)" in msg
+        assert "open:0" not in msg and "open:1" not in msg   # each id reaches one; no index needed
+
+    def test_unsaved_twins_are_listed_at_the_open_indexes_that_address_them(self, monkeypatch):
+        # The other half of the sentence: two unsaved 'Untitled' answer no URN at all, so the only
+        # retry left is the index - and rows reading identically state neither one.
+        self._open(monkeypatch, [_NamedDoc("Untitled"), _NamedDoc("Untitled")])
+        msg = _doc_lifecycle.close_document_handler(name="Ghost")["message"]
+        assert "Untitled (no lineage URN - open:0)" in msg
+        assert "Untitled (no lineage URN - open:1)" in msg
+
+    def test_a_lineage_open_at_two_versions_carries_its_index_on_the_name_miss_too(self, monkeypatch):
+        # The boundary between the two halves: both ids READ, so a bare id-per-row listing looks
+        # complete - but both answer to lineage AB, so neither retry reaches one document.
+        self._open(monkeypatch, [_NamedDoc("P1", urn="urn:adsk.wipprod:dm.lineage:AB"),
+                                 _NamedDoc("P1", urn="urn:adsk.wipprod:dm.lineage:AB?version=2")])
+        msg = _doc_lifecycle.activate_document_handler(name="Ghost")["message"]
+        assert "P1 (urn:adsk.wipprod:dm.lineage:AB - open:0)" in msg
+        assert "P1 (urn:adsk.wipprod:dm.lineage:AB?version=2 - open:1)" in msg
+
+    def test_a_single_open_document_is_listed_by_the_urn_that_reaches_it(self, monkeypatch):
+        # The quiet case, and the one that must not gain noise: one document, one id that singles
+        # it out, no index.
+        self._open(monkeypatch, [_NamedDoc("P1", urn="urn:adsk.wipprod:dm.lineage:AAA")])
+        msg = _doc_lifecycle.activate_document_handler(name="Ghost")["message"]
+        assert "Open: P1 (urn:adsk.wipprod:dm.lineage:AAA)." in msg
+
+
+class TestAnOpenIndexMissListsTheAddressesThatDoReach:
+    """An 'open:N' reaching no document refuses like every other miss, so it lists what the name and
+    URN misses list: one row per candidate carrying the address that reaches it. Bare display names
+    hand two unsaved 'Untitled' back as one name printed twice - which names neither of the indexes
+    that address them, and the index is the only handle either of them has."""
+
+    def _open(self, monkeypatch, docs):
+        class _App:
+            documents = _CloseableDocs(docs)
+            activeDocument = docs[0] if docs else None
+        monkeypatch.setattr(_doc_lifecycle, "app", _App())
+
+    def test_an_index_past_the_end_lists_the_indexes_that_do_address(self, monkeypatch):
+        # THE case: two unsaved twins answer no URN, so the listing has to state open:0 and open:1
+        # or the caller is left with 'Untitled; Untitled' and no retry.
+        self._open(monkeypatch, [_NamedDoc("Untitled"), _NamedDoc("Untitled")])
+        msg = _doc_lifecycle.activate_document_handler(name="open:9")["message"]
+        assert "Untitled (no lineage URN - open:0)" in msg
+        assert "Untitled (no lineage URN - open:1)" in msg
+
+    def test_the_last_index_resolves_and_the_next_one_refuses(self, monkeypatch):
+        # THE boundary of the in-range test, both sides: with two documents open, open:1 is the
+        # last index that addresses one and open:2 is one past the end - and a negative index
+        # addresses nothing, rather than indexing backwards off the end of the list.
+        a, b = _NamedDoc("Untitled"), _NamedDoc("Untitled")
+        self._open(monkeypatch, [a, b])
+        assert _doc_lifecycle._find_open_document("open:1")[0] is b
+        d, listing, ambiguous = _doc_lifecycle._find_open_document("open:2")
+        assert d is None and ambiguous is False
+        assert listing == ["Untitled (no lineage URN - open:0)",
+                           "Untitled (no lineage URN - open:1)"]
+        assert _doc_lifecycle._find_open_document("open:-1")[0] is None
+
+    def test_an_index_that_is_not_a_number_lists_the_same_rows(self, monkeypatch):
+        # the second refusal path: 'open:abc' parses to no index at all, and that caller needs the
+        # same set to retry against as the out-of-range one.
+        self._open(monkeypatch, [_NamedDoc("Untitled"), _NamedDoc("Untitled")])
+        msg = _doc_lifecycle.close_document_handler(name="open:abc")["message"]
+        assert "Untitled (no lineage URN - open:0)" in msg
+        assert "Untitled (no lineage URN - open:1)" in msg
+
+    def test_an_index_naming_a_slot_that_answered_no_document_lists_them_too(self, monkeypatch):
+        # the third: the index is IN range and the slot behind it answers no document. The rows for
+        # the two that do answer carry their indexes; the hole is named and carries no address.
+        first, third = _NamedDoc("Untitled"), _NamedDoc("Untitled")
+        class _App:
+            documents = _CloseableDocs([first, _NamedDoc("dead"), third], item_raises_at=1)
+            activeDocument = first
+        monkeypatch.setattr(_doc_lifecycle, "app", _App())
+        msg = _doc_lifecycle.activate_document_handler(name="open:1")["message"]
+        assert "Untitled (no lineage URN - open:0)" in msg
+        assert "Untitled (no lineage URN - open:2)" in msg
+        assert "(unreadable slot) (no handle - the document did not read)" in msg
 
 
 class TestCloseAllSkipsDeadProxies:

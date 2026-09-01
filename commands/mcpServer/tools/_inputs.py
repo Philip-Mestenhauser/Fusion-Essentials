@@ -294,16 +294,26 @@ def _entity_context_label(ent):
     return f"{kind} in '{where}'" if where else kind
 
 
+# How many candidates a token's ambiguity refusal NAMES before it counts the rest. Narrower than the
+# shared cap because this list is one clause of a sentence a consuming kind then wraps in its own,
+# and every candidate reads as the same entity type in a different place.
+_TOKEN_CANDIDATES_LISTED = 4
+
+
 def _ambiguous_token_refusal(hits, locator, locator_reason=None):
     """The reason text for a token that resolved to SEVERAL entities and could not be narrowed to one
     - it names the COUNT (the fact a caller acts on) and each candidate, and says why the locator did
-    not settle it. Bounded to a few candidates: this rides in an error string."""
-    cands = "; ".join(_entity_context_label(e) for e in hits[:4])
-    more = f" (+{len(hits) - 4} more)" if len(hits) > 4 else ""
+    not settle it.
+
+    The candidate list is rendered by ``_common.named_with_remainder``, the ONE capped-wire-list
+    renderer, so a candidate past the cap is COUNTED beside the ones named: this rides in an error
+    string, and a self-rendered cut reads as the complete set of what the token answered."""
+    cands = _common.named_with_remainder([_entity_context_label(e) for e in hits],
+                                         cap=_TOKEN_CANDIDATES_LISTED)
     why = (locator_reason if locator_reason else
            ("this handle's position locator matched none of them" if locator else
             "this bare token carries no position locator to tell them apart"))
-    return (f"the token resolved to {len(hits)} entities - {cands}{more} - and {why}. A split face "
+    return (f"the token resolved to {len(hits)} entities - {cands} - and {why}. A split face "
             "resolves this way, so acting on any of them would be a guess")
 
 
@@ -710,8 +720,11 @@ def _body_key(b):
     The (name, scope) fallback cannot re-open that split for a native/proxy pair: both wrappers' keys
     come from the SAME read (``native_identity`` resolves the proxy to its native before reading
     either half), a component-owned BRepBody's token is measured non-empty even in an unsaved
-    document, and a MeshBody never appears as a proxy in this walk at all (reading meshBodies off an
-    occurrence raises). An empty-STRING token answers None from ``native_identity`` and so falls
+    document, and a MeshBody never appears as a proxy in this walk at all - the walk reaches an
+    occurrence's ``meshBodies`` only through ``_common.iter_collection``, whose ``count`` and
+    ``item(i)`` both raise AttributeError on the MeshBodyVector an Occurrence hands back (measured
+    2705.1.4, where ``len()`` answers and Python ITERATION yields assembly-context proxies). An
+    empty-STRING token answers None from ``native_identity`` and so falls
     through the ``or`` to the fallback - same reasoning, and if some future wrapper kind ever hit it,
     the degraded direction is a spurious REFUSAL naming both spellings, never a silently wrong body.
 
@@ -729,9 +742,11 @@ def _bodies_named_in(comp, name):
     spelled (and is the ONLY lookup a collection without count/item has), while the iteration pass
     over both collections is what adds a case variant and is the only mesh lookup at all
     (``meshBodies`` has no itemByName). The two therefore overlap, and ``_body_key`` collapses the
-    overlap. Reading ``meshBodies`` off an OCCURRENCE raises, so every collection read is guarded:
-    that scope contributes BReps only, and ``_collect_bodies_by_name`` reaches meshes through the
-    components."""
+    overlap. An OCCURRENCE scope answers no mesh here: ``iter_collection`` walks ``count`` and
+    ``item(i)``, and both raise AttributeError on the MeshBodyVector an Occurrence hands back
+    (measured 2705.1.4 - ``len()`` answers there and Python iteration yields assembly-context
+    proxies). Every collection read is guarded, so that scope contributes BReps only and
+    ``_collect_bodies_by_name`` reaches meshes through the components."""
     out, seen = [], set()
 
     def add(b):
@@ -833,9 +848,11 @@ def _collect_bodies_by_name(des, comp, name):
     for o in _common.all_occurrences(des):
         for b in _bodies_named_in(o, name):
             add(b)
-    # Reading meshBodies off an Occurrence proxy RAISES (measured; dir(occ) lists the member but the
-    # read raises AttributeError, while occ.bRepBodies reads fine), so the occurrence pass above
-    # contributes BReps only and can never find a mesh. _common.all_meshes is the ONE design-wide
+    # MEASURED 2705.1.4: occ.meshBodies hands back a MeshBodyVector on which len() answers and
+    # Python ITERATION yields assembly-context proxies, while .count and .item(i) BOTH raise
+    # AttributeError - and those two are exactly the idioms _common.iter_collection walks with. So
+    # the occurrence pass above contributes BReps only and can never find a mesh (occ.bRepBodies
+    # reads fine through the same walk). _common.all_meshes is the ONE design-wide
     # mesh traversal - every component's meshBodies, reached through the components - and the same
     # one mesh_delete's survivor check builds on, so mesh name resolution covers every component.
     # Grouping by _body_key (native entityToken, else (name, scope)) keeps a mesh already added
@@ -902,7 +919,7 @@ def _qualified_body(label, des, spec):
     if len(hits) == 1:
         return hits[0][0], None
     if len(hits) > 1:
-        cands = ", ".join(f"'{q}'" for q in _qualified_body_names(hits)[:8])
+        cands = _common.named_with_remainder([f"'{q}'" for q in _qualified_body_names(hits)])
         return None, (f"'{label}': '{spec}' is ambiguous - it still names {len(hits)} bodies "
                       f"({cands}). Pass one of those, or a find_geometry 'handle'.")
     scope, scope_err = _named_scope(des, head)
@@ -931,12 +948,12 @@ def _qualified_body(label, des, spec):
     if len(named) == 1:
         return named[0], None
     if len(named) > 1:
-        cands = ", ".join(f"'{qualified_body_name(b)}'" for b in named[:8])
+        cands = _common.named_with_remainder([f"'{qualified_body_name(b)}'" for b in named])
         return None, (f"'{label}': '{spec}' is ambiguous - it names {len(named)} bodies ({cands}).")
     if tail.isdigit():
         return None, None            # 'Frame:1' - an instance SUFFIX, not a body name
-    held = ", ".join(f"'{_common.safe(lambda b=b: b.name) or '?'}'"
-                     for b in _component_bodies(scope)[:8])
+    held = _common.named_with_remainder([f"'{_common.safe(lambda b=b: b.name) or '?'}'"
+                                         for b in _component_bodies(scope)])
     return None, (f"'{label}': '{head}' holds no body named '{tail}'"
                   + (f" - it holds {held}." if held else " - it holds no bodies."))
 
@@ -1033,7 +1050,96 @@ def _component_bodies(scope):
     return out
 
 
-def _resolve_any_body(name, raw, source=None):
+# ── the component SCOPE a body NAME is narrowed by ──────────────────────────────────────────────
+#
+# Fusion names every component's first body 'Body1', so a design-wide body name is shared BY
+# CONSTRUCTION. A consuming tool that declares a component-scope input hands its value here.
+
+def _body_scope_remedy(input_name):
+    """The second way out a consumer carrying a component-scope input can offer on a shared body
+    NAME, or '' for one that carries none.
+
+    Worded as what the input DOES rather than as a promise that it resolves: a component name
+    answers EVERY placement of that component, so it separates namesakes in different components and
+    leaves two instances of one component ambiguous - which the scoped refusal then says in its own
+    words. Empty without an input name, because a refusal may only name an input the consuming
+    tool's schema actually takes."""
+    if not input_name:
+        return ""
+    return (f" Or pass the owning component as '{input_name}', which narrows this reference to that "
+            "one component's bodies.")
+
+
+def _body_scope(des, raw, input_name):
+    """(scope, error) for the value a consuming tool's component-scope input was given.
+
+    The vocabulary is ``_sketch_detail.scope_component``'s - a component name, an occurrence
+    fullPathName, or an occurrence handle - so ONE component input narrows a body reference by
+    exactly what it narrows a sketch reference by, and a tool scoping both cannot end up accepting
+    two different spellings.
+
+    ``scope`` is (host, keys, spelled): the component-or-occurrence to ask DIRECTLY, the reference
+    keys a body inside it answers to (``_body_scope_keys``' vocabulary), and the caller's own
+    spelling, which the refusals quote back. An OCCURRENCE-spelled scope keys on that ONE placement;
+    a COMPONENT-spelled one keys on the component name, which every placement of it answers to."""
+    from . import _sketch_detail       # _sketch_detail imports this module, so the import is local
+    comp, occ, err = _sketch_detail.scope_component(des, raw, input_name)
+    if err:
+        return None, err
+    host = occ if occ is not None else comp
+    reads = ((_common.safe(lambda: occ.fullPathName), _common.safe(lambda: occ.name))
+             if occ is not None else (_common.safe(lambda: comp.name),))
+    keys = {k.strip().lower() for k in reads if isinstance(k, str) and k.strip()}
+    if not keys:
+        return None, (f"'{input_name}': '{raw}' resolved, but nothing that names what it resolved to "
+                      "could be read, so a body reference cannot be narrowed to it. Pass a "
+                      "find_geometry 'handle' instead.")
+    return (host, keys, (raw or "").strip()), None
+
+
+def _scoped_body(label, des, s, scope):
+    """(body, error) - the ONE body named `s` inside `scope`.
+
+    The candidates are the DESIGN-WIDE walk's, FILTERED by the scope's keys: that is the same
+    per-placement set the unscoped name path resolves from, where ``_candidates_of_one_body`` has
+    already decided native-vs-proxy. So a scope chooses WHICH candidate answers and never changes
+    what a body reference resolves to - and a body in a component placed twice stays ambiguous under
+    that component's name rather than collapsing onto one placement the caller never picked.
+
+    Only when that filter answers NOTHING is the scope asked directly, which is the one case the
+    design-wide walk cannot reach: a component no occurrence places anywhere. Gating that on the
+    empty ANSWER - never on an exception - is what keeps a placed component's body out of the list a
+    second time (``_qualified_body`` narrows in the same order, for the same reason)."""
+    host, keys, spelled = scope
+    hits = [(b, ctx) for b, ctx in _collect_bodies_by_name(des, _common.target_component(des), s)
+            if keys & _body_scope_keys(b, ctx)]
+    if len(hits) > 1:
+        # Case-insensitive matching WIDENS the hit list, and a widened list must not manufacture an
+        # ambiguity: one hit spelled exactly as asked is the answer (the unscoped path narrows the
+        # same way, so a spelling that resolves scoped resolves unscoped).
+        cased = [m for m in hits if _common.safe(lambda b=m[0]: b.name) == s]
+        if len(cased) == 1:
+            hits = cased
+    if len(hits) == 1:
+        return hits[0][0], None
+    if len(hits) > 1:
+        cands = _common.named_with_remainder([f"'{q}'" for q in _qualified_body_names(hits)])
+        return None, (f"'{label}': inside '{spelled}', '{s}' still names {len(hits)} bodies "
+                      f"({cands}) - a component name answers every placement of that component. "
+                      "Pass one of those qualified names, or a find_geometry 'handle'.")
+    named = _bodies_named_in(host, s)
+    if len(named) == 1:
+        return named[0], None
+    if len(named) > 1:
+        cands = _common.named_with_remainder([f"'{qualified_body_name(b)}'" for b in named])
+        return None, (f"'{label}': '{spelled}' holds {len(named)} bodies named '{s}' ({cands}).")
+    held = _common.named_with_remainder([f"'{_common.safe(lambda b=b: b.name) or '?'}'"
+                                         for b in _component_bodies(host)])
+    return None, (f"'{label}': '{spelled}' holds no body named '{s}'"
+                  + (f" - it holds {held}." if held else " - it holds no bodies."))
+
+
+def _resolve_any_body(name, raw, source=None, scope=None, scope_input=None):
     """Resolve `raw` to a live body (BRepBody OR MeshBody), handle-first then name. Returns
     (body, error). KIND-AGNOSTIC: any kind-checking is the caller's job, so the wrong-kind error can
     name the required kind. Shared by BodyRef / BodyRefList for every kind in _BODY_KINDS.
@@ -1041,7 +1147,11 @@ def _resolve_any_body(name, raw, source=None):
     `source`: an optional list this appends the word for the vocabulary that answered to - 'handle'
     or 'name' - so a caller wording a refusal ABOUT the resolved body describes what it was actually
     given. It is appended once, at the point the two vocabularies part, which is ahead of every
-    return that hands back a body: a caller that got a body always reads one."""
+    return that hands back a body: a caller that got a body always reads one.
+
+    `scope`: a resolved ``_body_scope`` record, which narrows every NAME vocabulary below to one
+    component or one placement. `scope_input`: the name of the input that record came from, which
+    the shared-name refusal offers as a second way out when NO scope was passed."""
     s = (raw or "").strip() if isinstance(raw, str) else raw
     if not s:
         return None, f"'{name}' is required (a body handle or name)."
@@ -1069,6 +1179,11 @@ def _resolve_any_body(name, raw, source=None):
     # OVERWRITES the refusal channel with a bare-token reason describing a string the caller never
     # passed (measured: the accurate "co-located" reason was replaced by "no position locator").
     handle_suffix = _handle_refusal_suffix()
+    # A scope narrows every NAME vocabulary below to one component or one placement. The HANDLE path
+    # above has already run: a handle addresses one body and the resolver refuses anything less, so
+    # a scope has nothing to narrow there.
+    if scope is not None:
+        return _scoped_body(name, des, s, scope)
     # Name path: refuse an AMBIGUOUS name (2+ distinct bodies share it) with the QUALIFIED candidate
     # list rather than grabbing the first - one of those qualified names, or a find_geometry handle,
     # picks the exact one. A single match resolves.
@@ -1082,10 +1197,10 @@ def _resolve_any_body(name, raw, source=None):
     if len(matches) == 1:
         return matches[0][0], None
     if len(matches) > 1:
-        cands = ", ".join(f"'{q}'" for q in _qualified_body_names(matches)[:8])
+        cands = _common.named_with_remainder([f"'{q}'" for q in _qualified_body_names(matches)])
         return None, (f"'{name}': '{s}' is ambiguous - it names {len(matches)} bodies ({cands}). "
                       "Pass one of those qualified '<occurrence-or-component>:<body>' names, or a "
-                      "find_geometry 'handle'.")
+                      "find_geometry 'handle'." + _body_scope_remedy(scope_input))
     # A qualified '<occurrence-or-component>:<body name>' - the form the refusal above lists - picks
     # one body out of a name several components share.
     qbody, qerr = _qualified_body(name, des, s)
@@ -1113,7 +1228,8 @@ def _resolve_any_body(name, raw, source=None):
         if len(bodies) == 1:
             return bodies[0], None
         if len(bodies) > 1:
-            cands = ", ".join(f"'{_common.safe(lambda b=b: b.name) or '?'}'" for b in bodies[:8])
+            cands = _common.named_with_remainder(
+                [f"'{_common.safe(lambda b=b: b.name) or '?'}'" for b in bodies])
             return None, (f"'{name}': '{s}' is a component holding {len(bodies)} bodies ({cands}) - "
                           "name one of them, or pass a find_geometry handle.")
         return None, f"'{name}': component '{s}' holds no bodies to act on."
@@ -1143,6 +1259,10 @@ class BodyRef(InputKind):
 
     MAP_HINT = "a body by handle (precise), body name, or single-body component name; kind=solid/surface/mesh"
 
+    # The consuming tool's component-scope input, when it declares one - BodyRefList takes it as a
+    # constructor argument. A plain BodyRef carries none, so its refusals name no scope.
+    scope_input = None
+
     def __init__(self, name, kind="any", **kw):
         super().__init__(name, **kw)
         self.kind = kind if kind in _BODY_KINDS else "any"
@@ -1171,14 +1291,15 @@ class BodyRef(InputKind):
             return None, self._redirect(body, raw, source)
         return body, None
 
-    def resolve(self, raw):
+    def resolve(self, raw, scope=None):
         s = (raw or "").strip() if isinstance(raw, str) else raw
         if not s:
             if self.required:
                 return None, f"'{self.name}' is required (a body handle or name)."
             return self.default, None
         source = []
-        body, err = _resolve_any_body(self.name, s, source=source)
+        body, err = _resolve_any_body(self.name, s, source=source, scope=scope,
+                                      scope_input=self.scope_input)
         if err:
             return None, err
         return self._check_kind(body, s, source[0])
@@ -1186,10 +1307,27 @@ class BodyRef(InputKind):
 
 class BodyRefList(BodyRef):
     """A LIST of body references (handles or names) - for tools that act on several bodies. Kind-checks
-    EVERY element BEFORE returning, so a wrong-kind body fails the call before any mutation runs."""
+    EVERY element BEFORE returning, so a wrong-kind body fails the call before any mutation runs.
+
+    ``scope_input`` names the consuming tool's own component-scope input (wired with
+    _sketch_detail.COMPONENT_SCOPE); every NAME in the list then resolves inside that ONE component
+    or placement, and a shared-name refusal names that input as a second way out. Fusion auto-names
+    every component's first body 'Body1', so a design-wide body name is shared BY CONSTRUCTION and
+    this is the narrowing a caller has for it. A HANDLE is unaffected - it addresses one body
+    already. A scope that WAS passed is always resolved and validated, even where the name would
+    have identified one body on its own, and a scope passed with an EMPTY list is REFUSED: an input
+    a caller can get wrong without being told is a trap, and one that applies to nothing is the same
+    trap. Left None, this resolves design-wide and names no scope, because a refusal may only name
+    an input the consuming tool's schema actually takes."""
 
     json_type = "array"
     MAP_HINT = "several bodies (handles or names)"
+
+    # KEYWORD-ONLY: BodyRef takes `kind` at this position, so a positional value here would mean one
+    # thing on the base class and another on this one.
+    def __init__(self, name, *, scope_input=None, **kw):
+        super().__init__(name, **kw)
+        self.scope_input = scope_input or None
 
     def schema(self) -> dict:
         return {"type": "array", "items": {"type": "string"}, "description": self._full_desc()}
@@ -1199,15 +1337,36 @@ class BodyRefList(BodyRef):
         suffix = "" if self.kind == "any" else f" (each must be {label})"
         return f"A list of bodies, each a find_geometry 'handle' or a name{suffix}."
 
-    def resolve(self, raw):
+    def resolve(self, raw, component=""):
+        scoped = bool(self.scope_input) and bool((component or "").strip())
         if raw in (None, "", []):
             if self.required:
                 return None, f"'{self.name}' needs at least one body (handle or name)."
+            # A scope narrows the NAMES in this list, so on an empty list it applies to nothing and
+            # the consuming tool goes on to act on the empty form - which is the form the caller
+            # asked to narrow. Refused for the reason a scope is refused on an input that reads no
+            # name at all, rather than resolved-and-dropped: only the refusal tells the caller.
+            if scoped:
+                return None, (f"'{self.scope_input}' was passed with an empty '{self.name}' - a "
+                              f"scope narrows the names in '{self.name}', and there are none, so it "
+                              f"would apply to nothing. Name the bodies to act on in '{self.name}', "
+                              f"or drop '{self.scope_input}'.")
             return [], None
         items = raw if isinstance(raw, (list, tuple)) else [s.strip() for s in str(raw).split(",") if s.strip()]
+        scope = None
+        if scoped:
+            des = _common.design()
+            if des is None:
+                return None, "No active design to resolve the body names against."
+            # Resolved ONCE for the whole list, then applied to EVERY name: a scope that narrowed
+            # only the first element would let one component's body ride along beside another's and
+            # report the same count either way.
+            scope, serr = _body_scope(des, component, self.scope_input)
+            if serr:
+                return None, serr
         out = []
         for i, item in enumerate(items):
-            b, err = BodyRef.resolve(self, item)
+            b, err = BodyRef.resolve(self, item, scope=scope)
             if err:
                 return None, f"'{self.name}'[{i}]: {err}"
             out.append(b)
@@ -1297,8 +1456,9 @@ def resolve_timeline_object(objs, want, label, miss_hint=None):
                       f"{sample or '(none)'}. Use design_get(include=['timeline']) for the full "
                       "list.")
     if len(hits) > 1:
-        cands = ", ".join(f"{_common.safe(lambda o=o: o.name)}@{_common.safe(lambda o=o: o.index)}"
-                          for o in hits[:8])
+        cands = _common.named_with_remainder(
+            [f"{_common.safe(lambda o=o: o.name)}@{_common.safe(lambda o=o: o.index)}"
+             for o in hits])
         return None, (f"{label}: '{want}' matches {len(hits)} timeline objects ({cands}) - name "
                       "one with the 'name@index' form.")
     return hits[0], None
@@ -1696,7 +1856,8 @@ class PlaneRef(InputKind):
         fix = (" The bare name reaches the ROOT component's own plane only while the root is active "
                "(design_activate_component)." if any(":" not in c for c in cands) else "")
         return (f"'{self.name}': '{s}' is ambiguous - {len(matches)} construction planes share that "
-                f"name ({', '.join(cands[:8])}). Pass one of these qualified names.{fix}")
+                f"name ({_common.named_with_remainder(cands)}). Pass one of these qualified "
+                f"names.{fix}")
 
     def _instance_refusal(self, des, cp, owner):
         """The refusal for a plane whose owning component is placed several times (each instance
@@ -1711,7 +1872,8 @@ class PlaneRef(InputKind):
                     "space.")
         return (f"'{self.name}': construction plane '{nm}' is on component '{owner_name}', which is "
                 f"placed {len(cands)} times. Each instance holds it somewhere different, so the "
-                f"instance is not guessed - pass one of: {', '.join(cands[:8])}.")
+                f"instance is not guessed - pass one of: "
+                f"{_common.named_with_remainder(cands)}.")
 
 
 # ── the 'surface' operand: a plane, or - where the API takes one - any face ─────────────────────
@@ -1887,8 +2049,11 @@ def single_placement(label, ent, comp, design):
                           "could not be read, so it cannot be brought into the assembly's space.")
         return occ, None
     if count > 1:
-        paths = ", ".join(str(_common.safe(lambda i=i: occs.item(i).fullPathName))
-                          for i in range(count))
+        # Through _common.named_with_remainder, the ONE capped-wire-list renderer: a component can
+        # be placed dozens of times, and the caller picks the instance it re-addresses out of this
+        # list - a silently unbounded one is a refusal as long as the assembly.
+        paths = _common.named_with_remainder(
+            [str(_common.safe(lambda i=i: occs.item(i).fullPathName)) for i in range(count)])
         return None, (f"{label} belongs to component '{owner_name}', which is placed {count} times "
                       f"({paths}). Each instance holds it somewhere different, so the instance must "
                       "not be guessed. Pass a handle at geometry in the instance you mean, or a "
@@ -2118,7 +2283,8 @@ class AxisRef(InputKind):
         where = f" in the active component '{comp_name}'" if comp_name else ""
         found = ""
         if names:
-            found = f" Construction axes in '{comp_name}': " + ", ".join(names[:10]) + "."
+            found = (f" Construction axes in '{comp_name}': "
+                     + _common.named_with_remainder(names, cap=10) + ".")
         elif comp_name:
             found = f" '{comp_name}' has no construction axes of its own."
         return None, (f"'{self.name}': '{s}' is not a world axis (x/y/z), a construction-axis name"
@@ -2521,6 +2687,27 @@ class OccurrenceRefList(InputKind):
 # Composes the ONE JO walk in _joints (all_joint_origins / find_joint_origins_by_name /
 # jo_assembly_proxy) - it never re-rolls the traversal.
 
+def _jo_available_rows(des):
+    """The ``(name, discriminator)`` rows a Joint Origin MISS lists - one per JointOrigin, in
+    ``_joints.all_joint_origins`` order, each side already quoted so the two render alike.
+
+    The discriminator is the qualified '<occurrence fullPathName>:<name>' form(s) this input
+    resolves, joined on ' / ' so a row carrying several stays ONE entry of the ', '-joined listing
+    around it. ``_common.told_apart`` decides which rows need one: a name no other Joint Origin
+    carries prints as that name - the string a caller passes straight back - while a name SEVERAL
+    carry prints the forms that separate them, since a listing showing one name twice has restated
+    the count and named nothing. A form EQUAL to the name is dropped: a root-owned JO is reachable
+    by the bare name and has nothing to qualify it with."""
+    rows = []
+    for jo, comp in _joints.all_joint_origins(des):
+        nm = _common.safe(lambda jo=jo: jo.name)
+        if not nm:
+            continue
+        forms = [f for f in _joints.jo_reference_names(des, jo, comp) if f and f != nm]
+        rows.append((f"'{nm}'", " / ".join(f"'{f}'" for f in forms)))
+    return rows
+
+
 class JointOriginRef(InputKind):
     """A reference to a Joint Origin (a reusable WCS coordinate frame), as EITHER a 'handle' (the
     entityToken assembly_get(include=['joint_origins']) mints) OR a name - bare when the name is unique
@@ -2680,11 +2867,11 @@ class JointOriginRef(InputKind):
             tail = (f" {bare_only} further match(es) carry no reference form other than '{name}' "
                     "itself - reach those by handle." if bare_only else "")
             return None, (f"'{self.name}': '{name}' is ambiguous - {len(matches)} Joint Origins share "
-                          f"that name ({', '.join(cands[:8])}). Pass one of these qualified names, or a "
-                          f"handle from assembly_get(include=['joint_origins']).{tail}")
-        avail = [n for n in (_common.safe(lambda jo=jo: jo.name)
-                             for jo, _ in _joints.all_joint_origins(des)) if n][:8]
-        hint = (" Available: " + ", ".join(f"'{n}'" for n in avail)) if avail else ""
+                          f"that name ({_common.named_with_remainder(cands)}). Pass one of these "
+                          f"qualified names, or a handle from "
+                          f"assembly_get(include=['joint_origins']).{tail}")
+        avail = _common.told_apart(_jo_available_rows(des))
+        hint = (" Available: " + _common.named_with_remainder(avail) + ".") if avail else ""
         return None, (f"'{self.name}': no Joint Origin named '{name}'.{hint} "
                       "Use assembly_get(include=['joint_origins']) to list them.")
 
@@ -2956,9 +3143,10 @@ def _profile_sketch(name, sketch_name, component="", scope_input=None):
     if ambiguous:
         return None, f"'{name}': {ambiguous}"
     if sk_name:
-        names = _common.all_sketch_names(des)
-        return None, (f"'{name}': no sketch named '{sk_name}'. Available: "
-                      + (", ".join(n for n in names if n) or "(none)") + ".")
+        # The SAME listing SketchRefList's miss prints, so the two answers to "which sketches does
+        # this design hold" cannot differ in length on one design - it caps whole names and counts
+        # what it held back, where a joined list of every name grows with the design.
+        return None, f"'{name}': no sketch named '{sk_name}'. Available: {_available_sketch_names(des)}."
     return None, f"'{name}': no sketch to take a profile from. Create one with a closed region."
 
 
@@ -3216,14 +3404,16 @@ _SKETCH_NAMES_LISTED = 30
 
 
 def _available_sketch_names(d):
-    """The 'Available: ...' list for a sketch-name miss - up to _SKETCH_NAMES_LISTED whole names,
-    then a count of the ones not listed. '(none)' when the design carries no named sketch."""
+    """The 'Available: ...' list every sketch-name MISS prints - up to _SKETCH_NAMES_LISTED whole
+    names, then a count of the ones not listed. '(none)' when the design carries no named sketch.
+
+    Rendered by ``_common.named_with_remainder``, the ONE capped-wire-list renderer, so this listing
+    discloses its remainder in the same words as every other refusal a caller reads - a wording of
+    its own would make one held-back count read differently from the next."""
     names = [n for n in _common.all_sketch_names(d) if n]
     if not names:
         return "(none)"
-    listed = ", ".join(names[:_SKETCH_NAMES_LISTED])
-    hidden = len(names) - _SKETCH_NAMES_LISTED
-    return f"{listed}, ... (+{hidden} more)" if hidden > 0 else listed
+    return _common.named_with_remainder(names, cap=_SKETCH_NAMES_LISTED)
 
 
 class SketchRefList(InputKind):
@@ -3370,9 +3560,10 @@ def frame_axis(name="axis", default="z", description="Axis: x, y, or z."):
     return Choice(name, ["x", "y", "z"], default=default, description=description)
 
 
-# The canonical joint motion types. joint_create/edit support all six; tools that support a SUBSET
-# (e.g. joint_at_geometry omits planar) pass `options=` explicitly - but always as a Choice, so the
-# prose can't silently drift the way joint_type (6) and joint_at_geometry.motion (5) did.
+# The canonical joint motion types - the ONE set a joint tool's motion input is cut from. A tool
+# whose set differs passes `options=` explicitly (joint_at_geometry.motion omits planar), always
+# as a Choice, so the options an agent reads ARE the ones the input accepts, never prose beside
+# them that can differ.
 JOINT_MOTIONS = ("rigid", "revolute", "slider", "cylindrical", "planar", "ball")
 
 

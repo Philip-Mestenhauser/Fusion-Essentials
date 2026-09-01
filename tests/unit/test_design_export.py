@@ -546,14 +546,79 @@ class TestOptionsApplied:
         res = dx.handler(format="stl", file_path=str(tmp_path / "p.stl"), stl_units="parsecs")
         assert res["isError"] is True and "stl_units" in res["message"]
 
-    def test_stl_binary_ignored_for_other_formats(self, tmp_path, monkeypatch):
-        # stl_binary carries no cross-format refusal - it is dropped on a non-STL format, so the
-        # options object must come back with neither STL property written on it.
+    def test_a_binary_flag_asked_for_on_a_non_stl_format_is_refused_naming_it(self, tmp_path,
+                                                                              monkeypatch):
+        # Dropped, it hands back a file whose ASCII-vs-binary shape the caller chose and did not
+        # get, with nothing on the wire saying so - the same defect the sibling unit refusal below
+        # closes. It names the value AND the format it was asked with, so neither is guesswork.
         _, em, _ = _install(monkeypatch)
-        dx.handler(format="step", file_path=str(tmp_path / "p.step"), stl_binary=True)
-        opts = em.calls[-1]
-        assert not hasattr(opts, "isBinaryFormat")
-        assert not hasattr(opts, "unitType")
+        res = dx.handler(format="step", file_path=str(tmp_path / "p.step"), stl_binary=True)
+        assert res["isError"] is True
+        assert "'stl_binary' (true)" in res["message"] and "format=step" in res["message"]
+        assert em.calls == []                              # nothing was written
+
+    def test_the_FALSE_binary_flag_is_refused_too_not_read_as_omitted(self, tmp_path, monkeypatch):
+        # THE BOUNDARY. false is the value that CHANGES an STL (ASCII rather than the factory's
+        # binary), and it is the one a truthiness guard would go on dropping while the true case
+        # read as fixed. The refusal keys on 'passed at all', so both values are turned away and
+        # the message names the one it saw.
+        _, em, _ = _install(monkeypatch)
+        res = dx.handler(format="step", file_path=str(tmp_path / "p.step"), stl_binary=False)
+        assert res["isError"] is True
+        assert "'stl_binary' (false)" in res["message"] and "format=step" in res["message"]
+        assert em.calls == []                              # nothing was written
+
+    @pytest.mark.parametrize("fmt", [f for f in dx._FORMAT.options if f != "stl"])
+    def test_every_format_but_stl_refuses_a_binary_flag_it_writes_into_nothing(self, fmt, tmp_path,
+                                                                               monkeypatch):
+        # stl is the ONE format this tool writes isBinaryFormat for, so the refusal is a rule over
+        # the whole format Choice rather than a property of any one format: a guard narrowed to exempt
+        # obj/3mf - the mesh-shaped siblings an agent is likeliest to pass this to by mistake -
+        # reads as correct against a sample of two. dxf is in the list for a second reason: it is
+        # reached by its OWN dispatch, so a guard sitting behind that branch never sees it, and the
+        # sketch named here is the one that would be exported instead if it did.
+        _, em, _ = _install(monkeypatch)
+        res = dx.handler(format=fmt, stl_binary=True, dxf_sketch="Profile1",
+                         file_path=str(tmp_path / ("p." + fmt)))
+        assert res["isError"] is True, fmt
+        assert "'stl_binary' (true)" in res["message"], res["message"]
+        assert f"format={fmt}" in res["message"], res["message"]
+        assert em.calls == [], fmt                         # nothing was written
+
+    def test_the_split_path_refuses_the_binary_flag_too(self, tmp_path, monkeypatch):
+        # The refusal fires before the split walk as well: a guard only the single-target branch
+        # reaches would write per-component files while dropping the caller's ASCII-vs-binary
+        # choice - the same silent drop, on the entry path the live sweep drives (a split STEP
+        # export carrying stl_binary).
+        _, em, _ = _install(monkeypatch, occurrences=[FakeOcc("Body:1"), FakeOcc("Cab:1")])
+        res = dx.handler(format="step", split_by_component=True, stl_binary=True,
+                         file_path=str(tmp_path))
+        assert res["isError"] is True
+        assert "'stl_binary' (true)" in res["message"] and "format=step" in res["message"]
+        assert em.calls == []                              # nothing built, nothing written
+
+    def test_an_omitted_binary_flag_on_a_non_stl_format_is_not_refused(self, tmp_path, monkeypatch):
+        # The refusal keys on what the CALLER passed, never on the knob existing - a STEP export
+        # that never mentioned it must still run, with the STL property absent from its options
+        # object rather than written with some stand-in value.
+        _, em, _ = _install(monkeypatch)
+        out = _payload(dx.handler(format="step", file_path=str(tmp_path / "p.step")))
+        assert out["exported"] is True
+        assert not hasattr(em.calls[-1], "isBinaryFormat")
+
+    @pytest.mark.parametrize("other", [f for f in dx._FORMAT.options if f not in ("stl", "dxf")])
+    def test_stl_is_the_one_format_this_tool_bakes_a_unit_into(self, other, tmp_path, monkeypatch):
+        # The refusals here are one half of "stl is the ONE format this tool bakes a unit into" -
+        # they prove the REQUEST is turned away. This is the other half, the ASSIGNMENT: unitType
+        # reaches the stl path's options object and no other, so a baking gate widened to a sibling
+        # would write a unit onto an options object nothing asked one of, with every refusal test
+        # still green. dxf is out of the list because it takes its own dispatch and builds no
+        # *ExportOptions object at all.
+        _, em, _ = _install(monkeypatch)
+        dx.handler(format="stl", file_path=str(tmp_path / "p.stl"))
+        assert em.calls[-1].unitType is dx.adsk.fusion.DistanceUnits.MillimeterDistanceUnits
+        dx.handler(format=other, file_path=str(tmp_path / ("p." + other)))
+        assert not hasattr(em.calls[-1], "unitType"), other
 
     def test_a_unit_asked_for_on_a_non_stl_format_is_refused_naming_it(self, tmp_path, monkeypatch):
         # Dropping it silently hands back a file whose unit nothing states - the defect this input
@@ -583,6 +648,21 @@ class TestOptionsApplied:
         assert res["isError"] is True, fmt
         assert "'in'" in res["message"] and f"format={fmt}" in res["message"], res["message"]
         assert em.calls == [], fmt                         # nothing was written
+
+    def test_the_split_path_refuses_the_unit_too(self, tmp_path, monkeypatch):
+        # The refusal fires before the split walk as well - the same entry-path hole its
+        # binary-flag sibling closes one guard above. A guard only the single-target branch
+        # reaches writes a file per component while dropping the unit the caller asked for, and
+        # every other unit refusal here goes through the single-target path, so that narrowing
+        # reads as correct. The unit is not the Choice's default, so the message is pinned to the
+        # value the CALL names.
+        _, em, _ = _install(monkeypatch, occurrences=[FakeOcc("Body:1"), FakeOcc("Cab:1")])
+        res = dx.handler(format="step", split_by_component=True, stl_units="in",
+                         file_path=str(tmp_path))
+        assert res["isError"] is True
+        assert "'stl_units'" in res["message"] and "'in'" in res["message"]
+        assert "format=step" in res["message"]
+        assert em.calls == []                              # nothing built, nothing written
 
     def test_an_omitted_unit_on_a_non_stl_format_is_not_refused(self, tmp_path, monkeypatch):
         # The refusal keys on what the CALLER asked for, not on the Choice's default - a STEP export

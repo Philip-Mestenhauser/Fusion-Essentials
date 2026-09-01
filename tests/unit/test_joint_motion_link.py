@@ -11,7 +11,7 @@ import pytest
 
 import adsk.fusion
 
-from conftest import FakeVector3D, load_tool
+from conftest import FakeVector3D, _NamedCollection, load_tool
 
 jml = load_tool("joint_motion_link")
 jt = load_tool("_joints")          # the ratio codec, to pin the payload against its own output
@@ -94,10 +94,18 @@ class FakeRoot:
         self.motionLinks = FakeMotionLinks()
 
 
+def FakeComponents(comps):
+    """design.allComponents: conftest's shared collection, counted AND iterable alike (measure_api
+    allcomponents-design-only) - the two halves a bare list models neither of. It holds the
+    components THE ROOT INCLUDED, the contract _common.all_components holds; a collection without
+    the root hides every root joint from a design-wide walk."""
+    return _NamedCollection(comps)
+
+
 class FakeDesign:
-    def __init__(self, names, asbuilt=()):
+    def __init__(self, names, asbuilt=(), subs=()):
         self.rootComponent = FakeRoot(names, asbuilt)
-        self.allComponents = []
+        self.allComponents = FakeComponents([self.rootComponent] + list(subs))
 
 
 def _install(monkeypatch, joint_names, asbuilt=()):
@@ -143,7 +151,7 @@ class TestFindJoint:
                                                FakeJoint("Wheel_Spin")])
         sub = type("Sub", (), {"joints": FakeJoints([tokened("Revolute1", "t2", "Gripper")]),
                                "asBuiltJoints": FakeJoints([])})()
-        des.allComponents = [sub]
+        des.allComponents = FakeComponents([des.rootComponent, sub])
         res = jml.handler(joint_one="Revolute1", joint_two="Wheel_Spin")
         assert res["isError"] is True
         assert "Arm" in res["message"] and "Gripper" in res["message"]
@@ -155,36 +163,44 @@ class TestAllJoints:
         return type("Sub", (), {"joints": FakeJoints([FakeJoint(n) for n in joints]),
                                 "asBuiltJoints": FakeJoints([FakeJoint(n) for n in asbuilt])})()
 
+    def _wrapper(self, joints):
+        return type("Comp", (), {"joints": FakeJoints(joints),
+                                 "asBuiltJoints": FakeJoints([])})()
+
     def test_walks_root_and_subcomponents_and_asbuilt(self):
         # a root-only walk would miss Sub_J / Sub_AB - the under-reporting failure mode this guards.
         root = FakeRoot(["Root_A"], asbuilt=["Root_AB"])
         sub = self._sub(joints=["Sub_J"], asbuilt=["Sub_AB"])
-        des = type("D", (), {"rootComponent": root, "allComponents": [sub]})()
+        des = type("D", (), {"rootComponent": root,
+                             "allComponents": FakeComponents([root, sub])})()
         names = sorted(j.name for j in jml.all_joints(des))
         assert names == ["Root_A", "Root_AB", "Sub_AB", "Sub_J"]
 
-    def test_dedups_root_when_allcomponents_includes_it(self):
-        # the live API lists the root component INSIDE allComponents; all_joints must not count root's
-        # joints twice.
-        root = FakeRoot(["Root_A"])
-        des = type("D", (), {"rootComponent": root, "allComponents": [root]})()
-        assert [j.name for j in jml.all_joints(des)] == ["Root_A"]
+    def test_the_walk_asks_the_component_collection_and_never_a_prepended_root(self):
+        # allComponents already CARRIES the root, so prepending design.rootComponent reads every
+        # root joint twice, as two distinct wrappers - and the de-dup cannot always collapse that
+        # pair: a joint answering neither a token nor a name keys on id(), which two wrappers never
+        # share. Asking only the collection is what keeps the row single.
+        def anonymous():
+            return type("J", (), {"name": "", "entityToken": None})()
+        des = type("D", (), {"rootComponent": self._wrapper([anonymous()]),
+                             "allComponents": FakeComponents([self._wrapper([anonymous()])])})()
+        assert len(jml.all_joints(des)) == 1
 
-    def test_dedups_root_reached_via_distinct_proxy(self):
-        # the live API returns the root from allComponents as a proxy that is NOT `is`-identical to
-        # design.rootComponent, so identity de-dup misses it and the root's joints count twice. The
-        # two proxies' joints share an entityToken, so de-dup by token holds across them. (Identity
-        # de-dup returned ["Root_A", "Root_A"] here - joint_count must not double-count one joint.)
+    def test_dedups_one_joint_reached_through_two_component_wrappers(self):
+        # the token de-dup, the SECOND line over the joint objects: two readings answering ONE token
+        # are one joint. Component wrappers are never identity-stable, so nothing above this can
+        # collapse them - without it joint_count double-counts and find_joint refuses its own hit.
         def tokened(name, token):
             return type("J", (), {"name": name, "entityToken": token})()
-        def root_proxy():
-            return type("Root", (), {"joints": FakeJoints([tokened("Root_A", "TOKEN_ROOT_A")]),
-                                     "asBuiltJoints": FakeJoints([])})()
-        des = type("D", (), {"rootComponent": root_proxy(), "allComponents": [root_proxy()]})()
+        wrappers = [self._wrapper([tokened("Root_A", "TOKEN_ROOT_A")]) for _ in range(2)]
+        des = type("D", (), {"rootComponent": wrappers[0],
+                             "allComponents": FakeComponents(wrappers)})()
         assert [j.name for j in jml.all_joints(des)] == ["Root_A"]
 
     def test_empty_design_is_safe(self):
-        des = type("D", (), {"rootComponent": FakeRoot([]), "allComponents": []})()
+        root = FakeRoot([])
+        des = type("D", (), {"rootComponent": root, "allComponents": FakeComponents([root])})()
         assert jml.all_joints(des) == []
 
 

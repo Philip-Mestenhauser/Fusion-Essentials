@@ -124,6 +124,21 @@ def _minted_keys():
     return frozenset(found)
 
 
+@functools.lru_cache(maxsize=1)
+def _string_literals():
+    """Every whole string CONSTANT in tools/, key position and value position alike - what a scan
+    reading literals instead of key position returns. No frame is judged by this: it is what lets
+    the key-position test show its value-position carrier is really in the corpus, so that test's
+    negative cannot pass by the word being absent from the package altogether."""
+    found = set()
+    for fn in sorted(os.listdir(TOOLS_DIR)):
+        if fn.endswith(".py"):
+            found |= {node.value
+                      for node in ast.walk(_corpus.tree(os.path.join(TOOLS_DIR, fn)))
+                      if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+    return frozenset(found)
+
+
 def _minted_as_key(key):
     return key in _minted_keys()
 
@@ -188,6 +203,15 @@ class TestFrameBlocksMintTheKeysTheyClaim:
         # reaches that without naming any file or any sentence.
         assert _minted_as_key("space")
         assert not _minted_as_key("somewhere")
+        # and the VALUE-position carrier, which is the half that negative cannot reach: a word only
+        # prose carries is no string literal either, so a scan collecting whole literals instead of
+        # key positions passes it. 'world' is what the frame's own 'space' key is SET to
+        # (_sketch_detail.WORLD_SPACE), a literal this package writes while standing in key position
+        # nowhere - so a literal-collecting scan counts it here, and a text scan finds it inside the
+        # minted 'x_world'/'y_world'. The presence assertion is what keeps the negative load-bearing:
+        # drop the carrier out of tools/ and this says so instead of quietly passing on absence.
+        assert "world" in _string_literals()
+        assert not _minted_as_key("world")
 
 
 class TestEveryPublishedFrameIsClassified:

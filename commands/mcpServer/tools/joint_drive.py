@@ -18,12 +18,9 @@ from . import _common
 from . import _geom
 from . import _inputs
 from . import _write_guard
-from ._joints import (find_joint as _find_joint, current_joint_type as _current_joint_type,
+from ._joints import (DRIVES_ANGLE, DRIVES_SLIDE, find_joint as _find_joint,
+                      current_joint_type as _current_joint_type,
                       motion_link_record as _motion_link_record)
-
-# joint_type -> which value(s) it drives.
-_DRIVES_ANGLE = {"revolute", "cylindrical"}
-_DRIVES_SLIDE = {"slider", "cylindrical"}
 
 # The bands a member's placement change must EXCEED to count as motion, one per quantity, because the
 # placement record publishes them at different resolutions: its origin carries 3 decimals of a
@@ -121,18 +118,27 @@ def _pair_is_plain(j1, j2):
 
 
 def _current_value_text(jm, jtype):
-    """The joint's current driven value as display text ('12.5 mm' / '30.0 deg'), for the refusal
-    message - so the caller gets the read-the-partner answer without another call."""
+    """The joint's current driven value as display text ('12.5 mm' / '30.0 deg'), or None when no DOF
+    of this kind answered - the read-side twin of _limits_text, over the same per-type DOF split. A
+    caller renders that None through _value_clause rather than dropping it into a sentence."""
     parts = []
-    if jtype in _DRIVES_ANGLE:
+    if jtype in DRIVES_ANGLE:
         rv = safe(lambda: jm.rotationValue)
         if rv is not None:
             parts.append(f"{round(math.degrees(rv), 4)} deg")
-    if jtype in _DRIVES_SLIDE:
+    if jtype in DRIVES_SLIDE:
         sv = safe(lambda: jm.slideValue)
         if sv is not None:
             parts.append(f"{round(sv * 10.0, 4)} mm")
-    return ", ".join(parts) or "unknown"
+    return ", ".join(parts) or None
+
+
+def _value_clause(name, jm, jtype, verb="reads"):
+    """One joint's driven value as a clause - "'JawR' reads 12.5 mm" - or the sentence saying the
+    value did not read. The ONE home for that negative, so no wire string states a reading for a DOF
+    that answered nothing."""
+    text = _current_value_text(jm, jtype)
+    return f"'{name}' {verb} {text}" if text else f"the current value of '{name}' did not read"
 
 
 # joint type -> (the JointMotion property holding its driven value, the JointLimits property bounding
@@ -200,10 +206,10 @@ def _limits_text(jm, jtype):
     are enabled or nothing read - the read-side twin of _current_value_text, over the same per-type
     DOF split."""
     parts = []
-    if jtype in _DRIVES_ANGLE:
+    if jtype in DRIVES_ANGLE:
         parts += _enabled_bounds(safe(lambda: jm.rotationLimits),
                                  lambda v: f"{round(math.degrees(v), 4)} deg")
-    if jtype in _DRIVES_SLIDE:
+    if jtype in DRIVES_SLIDE:
         parts += _enabled_bounds(safe(lambda: jm.slideLimits),
                                  lambda v: f"{round(v * 10.0, 4)} mm")
     return ", ".join(parts) or None
@@ -376,6 +382,22 @@ def _moved_rows(members):
     return [r[2] for r in rows], readable
 
 
+def _value_move(before, after, unit):
+    """What the joint's OWN driven value did across this drive, as (moved, clause).
+
+    `moved` is True when the published value CHANGED, False when it did not, None when the
+    pre-drive value did not read - a caller branches with ``is``, since an unread before-value
+    neither proves a move nor rules one out. The two numbers are compared at the resolution the
+    receipt publishes them at (4 decimals), so the clause states only what both reads show: the
+    before value, the after value and their difference. It elects no cause for either answer."""
+    if before is None or after is None:
+        return None, "has no readable pre-drive value here, so whether it moved is not known"
+    delta = round(after - before, 4)
+    if delta == 0.0:
+        return False, f"did not move at all (before and after both read {before} {unit})"
+    return True, f"moved from {before} {unit} to {after} {unit} (a change of {delta} {unit})"
+
+
 def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "mm") -> dict:
     """See TOOL_DESCRIPTION."""
     if angle_deg is None and distance is None:
@@ -402,9 +424,9 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
                      "pose the part with assembly_move.)")
 
     # Validate the caller gave the value(s) the joint actually has.
-    if angle_deg is not None and jtype not in _DRIVES_ANGLE:
+    if angle_deg is not None and jtype not in DRIVES_ANGLE:
         return error(f"Joint '{joint_name}' is a slider - it has no rotation. Use 'distance', not 'angle_deg'.")
-    if distance is not None and jtype not in _DRIVES_SLIDE:
+    if distance is not None and jtype not in DRIVES_SLIDE:
         return error(f"Joint '{joint_name}' is a revolute - it has no slide. Use 'angle_deg', not 'distance'.")
 
     jm = safe(lambda: joint.jointMotion)
@@ -430,15 +452,20 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
     partner_driven = bool(partner_joint and _reg_key(doc_id, partner_joint) in _driven_this_session)
     plain_pair = _pair_is_plain(joint, partner_joint) if partner_joint else True
     if partner_driven and not plain_pair and couples is not False:
-        moved_claim = (f"The link ALREADY moved '{resolved_name}' (current value: "
-                       f"{_current_value_text(jm, jtype)}) - read it back with assembly_get; do not "
-                       f"re-drive it. ")
+        # What was READ: the link's two states (both clean - that is what couples is True) and this
+        # joint's current value. Whether the partner's drive moved THIS joint is a comparison no
+        # read here makes - there is no pre-drive value of it to compare against - so the refusal
+        # states the two readings and sends the caller to the read that settles it.
+        moved_claim = (f"The link reads neither suppressed nor compute-failed, and "
+                       f"{_value_clause(resolved_name, jm, jtype, 'now reads')} - whether the "
+                       f"partner's drive moved it is not read here. Read it back with assembly_get "
+                       f"rather than re-driving it. ")
         if couples is None:
             moved_claim = (f"The link {_link_state_text(link)}, so whether it moved "
-                           f"'{resolved_name}' is not known here - the value now reads "
-                           f"{_current_value_text(jm, jtype)}; read it back with assembly_get. The "
-                           f"refusal stands on that unread state, not on a coupling that was "
-                           f"observed. ")
+                           f"'{resolved_name}' is not known here - "
+                           f"{_value_clause(resolved_name, jm, jtype, 'now reads')}; read it back "
+                           f"with assembly_get. The refusal stands on that unread state, not on a "
+                           f"coupling that was observed. ")
         return error(
             f"Refused: '{resolved_name}' is motion-linked to '{partner}', which was already driven "
             f"this session, and the pair is in an XREF/referenced context where driving BOTH members "
@@ -470,10 +497,13 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
             + "; ".join(refusals) + ". Fusion IGNORES an out-of-range drive (the value stays "
             "where it was), so nothing would move. Command a value inside the limits (a command "
             "exactly AT a bound lands on it), or widen them with joint_edit.")
-    # The PRE-drive angle, for the equivalence gate below: a read-back that only matches the command
-    # modulo 360 leaves two possible receipts - the mechanism sat there already, or it turned to get
-    # there - and only the before-value tells them apart.
-    rv_before = safe(lambda: jm.rotationValue) if jtype in _DRIVES_ANGLE else None
+    # The PRE-drive values, for the two read-back verdicts below. The equivalence gate: a read-back
+    # that only matches the command modulo 360 leaves two possible receipts - the mechanism sat there
+    # already, or it turned to get there - and only the before-value tells them apart. The mismatch
+    # verdict: a read-back that misses the command is reported WITH the move the value made, so a
+    # drive that moved and landed near the command is told apart from one that did not move at all.
+    rv_before = safe(lambda: jm.rotationValue) if jtype in DRIVES_ANGLE else None
+    sv_before = safe(lambda: jm.slideValue) if jtype in DRIVES_SLIDE else None
     # The pre-drive placement of BOTH members, plus the joint's own motion vector for each DOF being
     # commanded: sampling the same placements again after the drive is what says WHICH member the
     # mechanism displaced, rather than only that the joint value took.
@@ -496,19 +526,22 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
             jm.slideValue = cm
             applied["distance"] = round(float(distance), 6)
     except Exception as e:
-        # A cylindrical drive can land its rotation and then fail on the slide: the joint (and via a
-        # motion link, its partner) HAS moved, so the session guard must register the attempt or the
-        # xref both-members refusal fails open on exactly the partial-drive sequence it exists for.
+        # A cylindrical drive can land its rotation and then fail on the slide: the earlier
+        # assignment was ACCEPTED, so the session guard registers the attempt - it fails toward
+        # refusal, or the xref both-members refusal fails open on exactly the partial-drive sequence
+        # it exists for. Nothing on this path reads a value back, this joint's or the partner's, so
+        # the receipt names the accepted assignments and the read that settles the rest.
         if applied:
             _driven_this_session.add(_reg_key(doc_id, joint))
-            return error(f"Could not drive joint '{joint_name}': {e}. PARTIALLY applied first "
-                         f"({applied}) - the joint (and any motion-linked partner) has moved; read "
-                         "the pose back with assembly_get.")
+            return error(f"Could not drive joint '{joint_name}': {e}. The assignments made before "
+                         f"the failure ({applied}) were accepted; no value was read back here, so "
+                         "where the mechanism stands now is not known from this receipt. Read the "
+                         "pose back with assembly_get.")
         return error(f"Could not drive joint '{joint_name}': {e}")
 
     # Read the values back off the joint so the caller sees what actually took (the joint may clamp).
     read_back = {}
-    if jtype in _DRIVES_ANGLE:
+    if jtype in DRIVES_ANGLE:
         rv = safe(lambda: jm.rotationValue)
         if rv is not None:
             acc = round(math.degrees(rv), 4)
@@ -519,7 +552,7 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
             norm = round(acc % 360.0, 4)
             if abs(acc - norm) > 1e-9:
                 read_back["angle_deg_normalized"] = norm
-    if jtype in _DRIVES_SLIDE:
+    if jtype in DRIVES_SLIDE:
         sv = safe(lambda: jm.slideValue)
         if sv is not None:
             read_back["distance_mm"] = round(sv * 10.0, 4)   # cm -> mm
@@ -546,6 +579,9 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
     # user action). Limits cannot explain a mismatch here: an out-of-range command was already
     # refused before the assignment.
     mismatched = []
+    # What each MISSED value did anyway, from its own before/after pair: the tri-states decide the
+    # verdict's wording, the clauses publish the numbers behind it.
+    moves, move_clauses = [], []
     angle_landed = slide_landed = None      # per-value outcome, for the PARTIAL diagnosis below
     if "angle_deg" in applied and "angle_deg" in read_back:
         angle_landed = True
@@ -581,14 +617,27 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
             else:
                 angle_landed = False
                 mismatched.append(
-                    f"angle {read_back['angle_deg']} deg vs commanded {applied['angle_deg']}")
+                    f"angle {read_back['angle_deg']} deg vs commanded {applied['angle_deg']} deg "
+                    f"(a residual of "
+                    f"{round(read_back['angle_deg'] - applied['angle_deg'], 4)} deg)")
+                moved, clause = _value_move(
+                    round(math.degrees(rv_before), 4) if rv_before is not None else None,
+                    read_back["angle_deg"], "deg")
+                moves.append(moved)
+                move_clauses.append(f"the angle {clause}")
     if "distance" in applied and "distance_mm" in read_back:
         slide_landed = True
         exp_mm = round(float(applied["distance"]) * k * 10.0, 4)
         if abs(read_back["distance_mm"] - exp_mm) > 1e-3:
             slide_landed = False
             mismatched.append(
-                f"slide {read_back['distance_mm']} mm vs commanded {exp_mm} mm")
+                f"slide {read_back['distance_mm']} mm vs commanded {exp_mm} mm "
+                f"(a residual of {round(read_back['distance_mm'] - exp_mm, 4)} mm)")
+            moved, clause = _value_move(
+                round(sv_before * 10.0, 4) if sv_before is not None else None,
+                read_back["distance_mm"], "mm")
+            moves.append(moved)
+            move_clauses.append(f"the slide {clause}")
     if mismatched:
         # A detected no-take is a FAILED drive - isError, never ok (a success whose effect
         # did not land is the cardinal sin). The guard still registers the attempt: the
@@ -599,13 +648,16 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
             landed_bits.append(f"angle landed at {read_back['angle_deg']} deg")
         if slide_landed:
             landed_bits.append(f"slide landed at {read_back['distance_mm']} mm")
+        moved_at_all = any(m is True for m in moves)
         if landed_bits:
-            # One value landed: the mechanism HAS moved - a partial drive, not a frozen chain,
-            # so no lock diagnosis (the observed facts contradict it).
+            # One value read back AT the command: whatever held the other value did not hold this
+            # one, so no frozen-chain diagnosis is elected here. The missed value states what it did
+            # anyway, since a value that moved and stopped short is not a value that never moved.
+            # Nothing on this path reads the motion-link PARTNER, so nothing here says what it did.
             return error(
                 f"PARTIAL drive of '{resolved_name}': " + ", ".join(landed_bits) + "; "
-                + "; ".join(mismatched) + " DID NOT TAKE. The mechanism has moved (and any "
-                "motion-linked partner with it) - read the pose back with assembly_get.")
+                + "; ".join(mismatched) + " did NOT land the commanded value - "
+                + "; ".join(move_clauses) + ". Read the pose back with assembly_get.")
         # A total no-take publishes OBSERVATIONS and elects a cause only where the reads prove one.
         # A parent-locked occurrence EXISTING is no proof it held this drive: measured on a rack
         # whose command was held by its linked pinion's enabled limit, parent-locked members were
@@ -629,7 +681,7 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
             if p_jm is not None:
                 p_type = _current_joint_type(partner_joint)
                 p_limits = _limits_text(p_jm, p_type)
-                seen.append(f"'{partner}' reads {_current_value_text(p_jm, p_type)}, "
+                seen.append(_value_clause(partner, p_jm, p_type) + ", "
                             + (f"enabled limits {p_limits}" if p_limits
                                else "with no enabled limits"))
         elif link["linked"] is False:
@@ -639,7 +691,9 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
         cause = _partner_limit_cause(link, partner_joint, jtype, jm, rad, cm)
         if cause:
             verdict = " " + cause
-        elif link["linked"] is False and locked:
+        elif link["linked"] is False and locked and not moved_at_all:
+            # A frozen chain is the only shape this candidate describes, so a value that MOVED
+            # across the drive takes it off the table - the observation still stands in `seen`.
             verdict = (" With no motion link on this joint, a parent-locked member is the CANDIDATE "
                        "cause - release it with assembly_ground(ground_to_parent=false) and re-drive "
                        "to test it.")
@@ -647,9 +701,23 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
             verdict = (" These observations do not single out a cause. Read the mechanism with "
                        "assembly_get (per-occurrence ground_to_parent, and the joint limits of every "
                        "joint in the chain), then re-drive.")
-        return error(
-            f"Drive of '{resolved_name}' DID NOT TAKE - value_now reads "
-            + "; ".join(mismatched) + ". Observed: " + "; ".join(seen) + "." + verdict)
+        # The headline states which of the three the before/after pair shows: a value that moved
+        # and stopped off the command, one that never moved, or one whose move is unknown because
+        # the pre-drive value did not read. 'DID NOT TAKE' is reserved for the second - on a value
+        # that moved it reads as a frozen chain, which its own two reads contradict. That pair is
+        # this joint's OWN value: no headline says what the PARTNER did, which no read here
+        # establishes - the link's state is published among the observations instead.
+        if moved_at_all:
+            headline = (f"Drive of '{resolved_name}' MOVED the joint but did NOT land the command - "
+                        f"value_now reads " + "; ".join(mismatched) + "; "
+                        + "; ".join(move_clauses) + ".")
+        elif any(m is None for m in moves):
+            headline = (f"Drive of '{resolved_name}' did NOT land the command - value_now reads "
+                        + "; ".join(mismatched) + "; " + "; ".join(move_clauses) + ".")
+        else:
+            headline = (f"Drive of '{resolved_name}' DID NOT TAKE - value_now reads "
+                        + "; ".join(mismatched) + "; " + "; ".join(move_clauses) + ".")
+        return error(headline + " Observed: " + "; ".join(seen) + "." + verdict)
     # WHICH member the drive displaced, from the placement samples taken either side of it. This is
     # an observation, never a prediction: the rows name the occurrence that moved and its measured
     # change, and a drive after which neither placement changed says exactly that.

@@ -15,7 +15,7 @@ import math
 import adsk.fusion
 import pytest
 
-from conftest import load_tool
+from conftest import _NamedCollection, load_tool
 
 jd = load_tool("joint_drive")
 
@@ -152,6 +152,32 @@ def _revolute_moving(target, vector=(0.0, 0.0, 1.0)):
     return RevoluteJointMotion()
 
 
+def _blind_slider():
+    """A slider whose slideValue READ raises - the DOF answering nothing at all, which is neither a
+    value nor the number zero."""
+    class SliderJointMotion:                        # the NAME is what current_joint_type keys on
+        def __init__(self):
+            self.slideLimits = FakeLimits()
+
+        @property
+        def slideValue(self):
+            raise RuntimeError("value unreadable")
+    return SliderJointMotion()
+
+
+def _blind_revolute():
+    """The rotation twin of _blind_slider: rotationValue raises, so a partner observation has no
+    number to publish."""
+    class RevoluteJointMotion:                      # the NAME is what current_joint_type keys on
+        def __init__(self):
+            self.rotationLimits = FakeLimits()
+
+        @property
+        def rotationValue(self):
+            raise RuntimeError("value unreadable")
+    return RevoluteJointMotion()
+
+
 def _plain_occ():
     return _occ(referenced=False, parent=None)
 
@@ -162,7 +188,7 @@ class FakeJoint:
         self.jointMotion = motion
         self.motionLinks = []      # Joint.motionLinks is a plain sequence (MotionLinkVector)
         # occurrences drive the xref-vs-plain decision; a fake without them reads as NOT provably plain
-        # (so the guard stays on - the historical default the refusal tests rely on).
+        # (so the guard stays on - the default the refusal tests pin).
         self.occurrenceOne = occ_one
         self.occurrenceTwo = occ_two
         if token is not None:
@@ -247,9 +273,13 @@ class _Root:
 
 
 class _Design:
-    def __init__(self, joints, asbuilt=()):
+    def __init__(self, joints, asbuilt=(), subs=()):
         self.rootComponent = _Root(joints, asbuilt)
-        self.allComponents = []
+        # design.allComponents is conftest's shared collection: counted AND iterable alike
+        # (measure_api allcomponents-design-only), the two halves a bare list models neither of. The
+        # root is IN it - the contract _common.all_components holds - and a collection without the
+        # root hides every root joint from a design-wide walk.
+        self.allComponents = _NamedCollection([self.rootComponent] + list(subs))
 
 
 def _install(monkeypatch, joint, asbuilt=()):
@@ -552,9 +582,8 @@ class TestSecondMemberRefusal:
         jaw_l = FakeJoint("Slider_JawL", SliderJointMotion())
         jaw_r = FakeJoint("Slider_JawR", SliderJointMotion())
         link_pair(jaw_l, jaw_r)
-        design = _Design([])                              # root: no joints
         sub = _Root([jaw_l, jaw_r])
-        design.allComponents = [sub]
+        design = _Design([], subs=[sub])                   # root: no joints
         monkeypatch.setattr(jd._common, "design", lambda: design)
         monkeypatch.setattr(jd._write_guard, "app", _FakeApp("DocA"))
         monkeypatch.setattr(jd, "_driven_this_session", set())
@@ -635,9 +664,10 @@ class TestSecondMemberRefusal:
         assert ("unsaved:other", "tok:elsewhere") in jd._driven_this_session
 
     def test_partial_drive_still_arms_the_guard(self, monkeypatch):
-        # A cylindrical drive that lands its rotation and then fails on the slide HAS moved the
-        # joint (and, via the link, its partner) - the error must say so, and the session registry
-        # must arm anyway, or the both-members xref refusal fails open on exactly this sequence.
+        # A cylindrical drive whose rotation assignment is accepted and whose slide then raises: the
+        # receipt names the accepted assignment and withholds every verdict it did not read, and the
+        # session registry arms anyway - the guard fails toward refusal, or the both-members xref
+        # refusal fails open on exactly this sequence.
         class CylindricalJointMotion:                     # name keys the shared type map
             def __init__(self):
                 self.rotationValue = 0.0
@@ -657,7 +687,13 @@ class TestSecondMemberRefusal:
         monkeypatch.setattr(jd._write_guard, "app", _FakeApp("DocA"))
         monkeypatch.setattr(jd, "_driven_this_session", set())
         res = jd.handler(joint_name="Cyl_A", angle_deg=30, distance=10, units="mm")
-        assert res["isError"] is True and "PARTIALLY" in res["message"]
+        assert res["isError"] is True
+        assert "The assignments made before the failure ({'angle_deg': 30.0}) were accepted" \
+            in res["message"]
+        # The receipt reads nothing back on this path - not this joint's value, not the partner's -
+        # so it claims neither a motion for the joint nor one carried to the linked 'Cyl_B'.
+        assert "no value was read back here" in res["message"]
+        assert "motion-linked partner" not in res["message"] and "has moved" not in res["message"]
         assert abs(a.jointMotion.rotationValue - math.radians(30)) < 1e-9   # rotation DID land
         res2 = jd.handler(joint_name="Cyl_B", distance=-16)
         assert res2["isError"] is True and "Cyl_A" in res2["message"]       # guard armed
@@ -775,6 +811,11 @@ class TestLinkStateGating:
         assert "the link couples the two joints" in out["note"]
         res = jd.handler(joint_name="Slider_JawR", distance=-16)
         assert res["isError"] is True and "Slider_JawL" in res["message"]
+        # The refusal states the two things it READ - the link's clean states, and this joint's
+        # current value - and claims no motion for a joint whose pre-drive value it never took.
+        assert "The link reads neither suppressed nor compute-failed" in res["message"]
+        assert "'Slider_JawR' now reads 0.0 mm" in res["message"]
+        assert "whether the partner's drive moved it is not read here" in res["message"]
         assert jaw_r.jointMotion.slideValue == 0.0
 
     def test_a_suppressed_link_makes_no_moved_partner_claim(self, monkeypatch):
@@ -843,7 +884,9 @@ class TestLinkStateGating:
         res = jd.handler(joint_name="Slider_JawR", distance=-16)
         assert res["isError"] is True
         assert "stands on that unread state" in res["message"]
-        assert "ALREADY moved" not in res["message"]       # the withheld claim, in the refusal too
+        # the two arms must stay apart: the clean-state clause belongs only to a link that READ
+        # clean, so an unread state can never borrow it.
+        assert "reads neither suppressed nor compute-failed" not in res["message"]
         assert jaw_r.jointMotion.slideValue == 0.0
 
     def test_only_the_suppression_reading_none_is_enough_to_withhold(self, monkeypatch):
@@ -856,6 +899,62 @@ class TestLinkStateGating:
                                       "value_self": 1.0, "value_partner": 1.0, "reversed": False}
         assert "did not answer its suppression" in out["note"]
         assert jd.handler(joint_name="Slider_JawR", distance=-16)["isError"] is True
+
+
+class TestTheValueClauseWithholdsAnUnreadValue:
+    """Every sentence stating a joint's current value goes through _value_clause, whose text answers
+    None when the DOF read nothing. Each consumer branches on that itself, so each one is driven
+    here: a value that did not read is published as unread, never as a reading."""
+
+    def _xref_pair_with_a_blind_second_member(self, monkeypatch, **link_kw):
+        """The JawL/JawR xref pair the second-member refusal exists for, with JawR's slideValue READ
+        raising - the joint the refusal states a current value for."""
+        jaw_l = FakeJoint("Slider_JawL", SliderJointMotion(),
+                          occ_one=_occ(referenced=True), occ_two=_occ(referenced=True))
+        jaw_r = FakeJoint("Slider_JawR", _blind_slider(),
+                          occ_one=_occ(referenced=True), occ_two=_occ(referenced=True))
+        link_pair(jaw_l, jaw_r, **link_kw)
+        design = _Design([jaw_l, jaw_r])
+        monkeypatch.setattr(jd._common, "design", lambda: design)
+        monkeypatch.setattr(jd._write_guard, "app", _FakeApp("DocA"))
+        monkeypatch.setattr(jd, "_driven_this_session", set())
+        return jaw_l, jaw_r
+
+    def test_the_clean_link_refusal_states_that_the_value_did_not_read(self, monkeypatch):
+        self._xref_pair_with_a_blind_second_member(monkeypatch)
+        assert _payload(jd.handler(joint_name="Slider_JawL", distance=16))["driven"] is True
+        res = jd.handler(joint_name="Slider_JawR", distance=-16)
+        assert res["isError"] is True
+        assert "the current value of 'Slider_JawR' did not read" in res["message"]
+        assert "now reads" not in res["message"]
+        # the rest of the refusal is unchanged - only the reading it does not have is withheld.
+        assert "The link reads neither suppressed nor compute-failed" in res["message"]
+
+    def test_the_unread_link_state_refusal_states_it_too(self, monkeypatch):
+        # the second arm of the same refusal, worded separately, so it needs its own read.
+        self._xref_pair_with_a_blind_second_member(monkeypatch, link_cls=BlindMotionLink)
+        assert _payload(jd.handler(joint_name="Slider_JawL", distance=16))["driven"] is True
+        res = jd.handler(joint_name="Slider_JawR", distance=-16)
+        assert res["isError"] is True
+        assert "stands on that unread state" in res["message"]
+        assert "the current value of 'Slider_JawR' did not read" in res["message"]
+        assert "now reads" not in res["message"]
+
+    def test_a_value_that_DOES_read_still_states_the_reading(self, monkeypatch):
+        # the discriminating twin: the clause is withheld only where the read answers nothing.
+        jaw_l = FakeJoint("Slider_JawL", SliderJointMotion(),
+                          occ_one=_occ(referenced=True), occ_two=_occ(referenced=True))
+        jaw_r = FakeJoint("Slider_JawR", SliderJointMotion(),
+                          occ_one=_occ(referenced=True), occ_two=_occ(referenced=True))
+        link_pair(jaw_l, jaw_r)
+        design = _Design([jaw_l, jaw_r])
+        monkeypatch.setattr(jd._common, "design", lambda: design)
+        monkeypatch.setattr(jd._write_guard, "app", _FakeApp("DocA"))
+        monkeypatch.setattr(jd, "_driven_this_session", set())
+        assert _payload(jd.handler(joint_name="Slider_JawL", distance=16))["driven"] is True
+        res = jd.handler(joint_name="Slider_JawR", distance=-16)
+        assert "'Slider_JawR' now reads 0.0 mm" in res["message"]
+        assert "did not read" not in res["message"]
 
 
 class TestLinkCouplesTriState:
@@ -1068,6 +1167,264 @@ class TestDriveTookGate:
         assert "drive_took" not in out and abs(out["value_now"]["angle_deg"] - 25.0) < 1e-4
 
 
+# ── a value that MOVED and missed the command vs one that never moved ───────
+# A read-back that misses the command has two shapes behind it, and only the joint's own before/after
+# pair tells them apart: a mechanism that turned and settled a fraction off the commanded value, and
+# one that never moved. "DID NOT TAKE" describes the second; on the first it reads as a frozen chain.
+
+def _quantizing_revolute(at_deg, step_deg=0.1):
+    """A revolute starting at `at_deg` that STORES what it is given rounded to `step_deg` - so a
+    drive turns the joint and the stored value settles a fraction of a degree off the command."""
+    class RevoluteJointMotion:                      # the NAME is what current_joint_type keys on
+        def __init__(self):
+            self.rotationLimits = FakeLimits()
+            self._v = math.radians(at_deg)
+
+        @property
+        def rotationValue(self):
+            return self._v
+
+        @rotationValue.setter
+        def rotationValue(self, v):
+            self._v = math.radians(round(math.degrees(v) / step_deg) * step_deg)
+    return RevoluteJointMotion()
+
+
+def _cylindrical_quantized_angle_frozen_slide(at_deg=-11.6, step_deg=0.1):
+    """A cylindrical joint whose ROTATION turns and stores a quantized value while its SLIDE lands
+    nowhere. Two commanded values, two DIFFERENT answers and NEITHER landing: the shape that makes
+    the verdict aggregate across values instead of reading one of them."""
+    class CylindricalJointMotion:                   # the NAME is what current_joint_type keys on
+        def __init__(self):
+            self.rotationLimits = FakeLimits()
+            self.slideLimits = FakeLimits()
+            self._v = math.radians(at_deg)
+
+        @property
+        def rotationValue(self):
+            return self._v
+
+        @rotationValue.setter
+        def rotationValue(self, v):
+            self._v = math.radians(round(math.degrees(v) / step_deg) * step_deg)
+
+        @property
+        def slideValue(self):
+            return 0.0
+
+        @slideValue.setter
+        def slideValue(self, v):
+            pass                                    # accepted, lands nowhere
+    return CylindricalJointMotion()
+
+
+class TestValueMove:
+    """_value_move over the two published numbers - the tri-state the verdict's wording branches on."""
+
+    def test_a_change_of_one_published_step_is_a_move(self):
+        moved, clause = jd._value_move(0.0, 0.0001, "deg")
+        assert moved is True
+        assert clause == "moved from 0.0 deg to 0.0001 deg (a change of 0.0001 deg)"
+
+    def test_a_value_that_did_not_change_states_both_reads_and_the_unit(self):
+        # the boundary's other side, over the pair shape the handler builds: two values already
+        # rounded to the 4 decimals the receipt publishes, and equal. The WHOLE clause is pinned
+        # rather than its opening words - the numbers and the unit are what a caller reads the
+        # stillness off, and a substring assert leaves them free to say anything.
+        moved, clause = jd._value_move(0.0, 0.0, "deg")
+        assert moved is False
+        assert clause == "did not move at all (before and after both read 0.0 deg)"
+
+    def test_an_unread_before_value_is_neither_a_move_nor_a_stillness(self):
+        # None is its own answer: it must not collapse into False, which would publish a stillness
+        # nothing read.
+        moved, clause = jd._value_move(None, 12.0, "mm")
+        assert moved is None and "not known" in clause
+
+    def test_a_move_states_both_values_and_the_difference(self):
+        moved, clause = jd._value_move(-11.6, -20.1, "deg")
+        assert moved is True
+        assert clause == "moved from -11.6 deg to -20.1 deg (a change of -8.5 deg)"
+
+
+class TestNearLandingIsNotAFrozenChain:
+    def test_a_quantized_landing_reports_the_move_and_is_not_called_a_no_take(self, monkeypatch):
+        # the joint turns 8.5 deg and settles 0.003 deg off the command: a failed drive (the
+        # commanded value is not what reads back), but not a mechanism that never moved.
+        j = FakeJoint("Vane", _quantizing_revolute(-11.6))
+        _install(monkeypatch, j)
+        res = jd.handler(joint_name="Vane", angle_deg=-20.103)
+        assert res["isError"] is True                       # the command did not land
+        assert "DID NOT TAKE" not in res["message"]
+        assert "MOVED the joint but did NOT land the command" in res["message"]
+        assert "angle -20.1 deg vs commanded -20.103 deg (a residual of 0.003 deg)" in res["message"]
+        assert ("the angle moved from -11.6 deg to -20.1 deg (a change of -8.5 deg)"
+                in res["message"])
+
+    def test_a_chain_that_never_moved_still_reads_as_a_no_take_and_says_it_stood_still(
+            self, monkeypatch):
+        # the discriminating twin of the case above: same gate, same error, and the wording that
+        # names a frozen chain is kept for the drive that actually produced one.
+        j = FakeJoint("J", _frozen_revolute())
+        _install(monkeypatch, j)
+        res = jd.handler(joint_name="J", angle_deg=25)
+        assert res["isError"] is True and "DID NOT TAKE" in res["message"]
+        assert "the angle did not move at all (before and after both read 0.0 deg)" in res["message"]
+
+    def test_a_slider_that_moved_and_stopped_short_reports_the_move(self, monkeypatch):
+        # the slide half of the same verdict, read off the pre-drive slideValue.
+        class SliderJointMotion:                    # the NAME is what current_joint_type keys on
+            def __init__(self):
+                self.slideLimits = FakeLimits()
+                self._v = 0.0
+
+            @property
+            def slideValue(self):
+                return self._v
+
+            @slideValue.setter
+            def slideValue(self, v):
+                self._v = min(v, 0.8)               # settles at 8 mm of the 10 mm commanded
+        j = FakeJoint("Rail", SliderJointMotion())
+        _install(monkeypatch, j)
+        res = jd.handler(joint_name="Rail", distance=10, units="mm")
+        assert res["isError"] is True and "DID NOT TAKE" not in res["message"]
+        assert "slide 8.0 mm vs commanded 10.0 mm (a residual of -2.0 mm)" in res["message"]
+        assert "the slide moved from 0.0 mm to 8.0 mm (a change of 8.0 mm)" in res["message"]
+
+    def test_an_unreadable_pre_drive_value_leaves_the_move_unknown(self, monkeypatch):
+        # the first rotationValue read raises, so there is no before-value to compare: the receipt
+        # says the command did not land, and claims neither a move nor a frozen chain.
+        class RevoluteJointMotion:                  # the NAME is what current_joint_type keys on
+            def __init__(self):
+                self.rotationLimits = FakeLimits()
+                self._reads = 0
+
+            @property
+            def rotationValue(self):
+                self._reads += 1
+                if self._reads == 1:
+                    raise RuntimeError("transient read failure")
+                return 0.0
+
+            @rotationValue.setter
+            def rotationValue(self, v):
+                pass
+        j = FakeJoint("Crank", RevoluteJointMotion())
+        _install(monkeypatch, j)
+        res = jd.handler(joint_name="Crank", angle_deg=25)
+        assert res["isError"] is True and "DID NOT TAKE" not in res["message"]
+        assert "did NOT land the command" in res["message"]
+        assert "the angle has no readable pre-drive value here" in res["message"]
+
+    def test_a_parent_lock_is_not_elected_as_the_cause_when_the_value_moved(self, monkeypatch):
+        # the lock is still OBSERVED, but a value that moved across the drive is not the frozen
+        # chain that candidate describes - electing it sends the caller to release a lock the
+        # observed move already rules out.
+        j = FakeJoint("Vane", _quantizing_revolute(-11.6))
+        design = _install(monkeypatch, j)
+        rotor = types.SimpleNamespace(name="Rotor:1", isGroundToParent=True)
+        design.rootComponent.occurrences = types.SimpleNamespace(count=1, item=lambda i: rotor)
+        res = jd.handler(joint_name="Vane", angle_deg=-20.103)
+        assert "ground_to_parent is SET on Rotor:1" in res["message"]      # still an observation
+        assert "CANDIDATE" not in res["message"]
+        assert "do not single out a cause" in res["message"]
+
+    def test_a_partial_drive_states_what_the_missed_value_did(self, monkeypatch):
+        # the PARTIAL branch carries the same distinction per value: the slide that missed says it
+        # never moved, beside the angle that landed.
+        class CylindricalJointMotion:               # the NAME is what current_joint_type keys on
+            def __init__(self):
+                self.rotationValue = 0.0
+                self.rotationLimits = FakeLimits()
+                self.slideLimits = FakeLimits()
+
+            @property
+            def slideValue(self):
+                return 0.0
+
+            @slideValue.setter
+            def slideValue(self, v):
+                pass                                # accepted, lands nowhere
+        j = FakeJoint("Cyl", CylindricalJointMotion())
+        _install(monkeypatch, j)
+        res = jd.handler(joint_name="Cyl", angle_deg=30, distance=50, units="mm")
+        assert res["isError"] is True and "PARTIAL" in res["message"]
+        assert "the slide did not move at all (before and after both read 0.0 mm)" in res["message"]
+        assert "DID NOT TAKE" not in res["message"]
+
+    def test_one_commanded_value_moving_and_the_other_frozen_is_not_a_no_take(self, monkeypatch):
+        # BOTH commanded values miss, so nothing lands and the TOTAL-no-take verdict runs over two
+        # answers at once: the angle turned 8.5 deg and stopped short, the slide never moved. One
+        # value that moved is enough to rule out the frozen chain 'DID NOT TAKE' describes, and each
+        # value publishes its own clause - reading the two the other way round would print a
+        # frozen-chain headline beside a clause reporting 8.5 deg of motion.
+        j = FakeJoint("Cyl", _cylindrical_quantized_angle_frozen_slide())
+        _install(monkeypatch, j)
+        res = jd.handler(joint_name="Cyl", angle_deg=-20.103, distance=50, units="mm")
+        assert res["isError"] is True
+        assert "MOVED the joint but did NOT land the command" in res["message"]
+        assert "DID NOT TAKE" not in res["message"]
+        assert ("the angle moved from -11.6 deg to -20.1 deg (a change of -8.5 deg)"
+                in res["message"])
+        assert "the slide did not move at all (before and after both read 0.0 mm)" in res["message"]
+
+    def test_a_parent_lock_is_not_elected_when_only_ONE_of_two_values_moved(self, monkeypatch):
+        # the same two-value rig with a parent-locked member: the frozen-chain candidate is off the
+        # table as soon as ANY commanded value moved. Aggregating the two answers the other way
+        # would send the caller to release a lock the angle's own 8.5 deg already rules out.
+        j = FakeJoint("Cyl", _cylindrical_quantized_angle_frozen_slide())
+        design = _install(monkeypatch, j)
+        rotor = types.SimpleNamespace(name="Rotor:1", isGroundToParent=True)
+        design.rootComponent.occurrences = types.SimpleNamespace(count=1, item=lambda i: rotor)
+        res = jd.handler(joint_name="Cyl", angle_deg=-20.103, distance=50, units="mm")
+        assert res["isError"] is True
+        assert "ground_to_parent is SET on Rotor:1" in res["message"]       # still an observation
+        assert "CANDIDATE" not in res["message"]
+        assert "do not single out a cause" in res["message"]
+
+
+class TestTheMissedCommandPathClaimsNothingAboutThePartner:
+    """A missed-command receipt reports the DRIVEN joint's own value before and after; nothing on
+    that path samples the motion-link partner, so neither verdict says the partner moved. A
+    SUPPRESSED link is where such a claim reads as the contradiction it always was - the same
+    message reports the suppression among its observations."""
+
+    def _linked(self, monkeypatch, motion, suppressed=True):
+        """`motion` on a joint named 'Driven', motion-linked to a 'Follower' revolute, in a fresh
+        session registry."""
+        driven = FakeJoint("Driven", motion)
+        follower = FakeJoint("Follower", RevoluteJointMotion())
+        link_pair(driven, follower, suppressed=suppressed)
+        design = _Design([driven, follower])
+        monkeypatch.setattr(jd._common, "design", lambda: design)
+        monkeypatch.setattr(jd._write_guard, "app", _FakeApp("DocA"))
+        monkeypatch.setattr(jd, "_driven_this_session", set())
+
+    def test_a_moved_no_take_on_a_suppressed_link_claims_no_partner_motion(self, monkeypatch):
+        # the joint turned 8.5 deg and missed, so the MOVED headline runs - and the same message
+        # reports the link SUPPRESSED a few clauses later. A headline claiming the partner came
+        # along contradicts the observation printed beside it.
+        self._linked(monkeypatch, _quantizing_revolute(-11.6))
+        res = jd.handler(joint_name="Driven", angle_deg=-20.103)
+        assert res["isError"] is True
+        assert "MOVED the joint but did NOT land the command" in res["message"]
+        assert "which reads SUPPRESSED" in res["message"]      # the link state the receipt DID read
+        assert "motion-linked partner" not in res["message"]   # and no claim about what it carried
+
+    def test_a_PARTIAL_drive_on_a_suppressed_link_claims_no_partner_motion(self, monkeypatch):
+        # the PARTIAL branch reads the partner no more than the branch above does, and here there is
+        # not even an observation block to hold the link's state - the receipt stays at the two
+        # values it measured and the read that settles the rest.
+        self._linked(monkeypatch, _cylindrical_quantized_angle_frozen_slide(at_deg=0.0))
+        res = jd.handler(joint_name="Driven", angle_deg=30, distance=50, units="mm")
+        assert res["isError"] is True
+        assert "PARTIAL drive of 'Driven'" in res["message"]
+        assert "angle landed at 30.0 deg" in res["message"]
+        assert "motion-linked partner" not in res["message"]
+        assert "Read the pose back with assembly_get" in res["message"]
+
+
 def _frozen_slider():
     """A slider whose slideValue setter lands nowhere - the read-back keeps its pre-drive value, the
     way a rack does when the chain it drives cannot follow."""
@@ -1152,6 +1509,23 @@ class TestNoTakeCauseElection:
         self._rack_and_pinion(monkeypatch, math.radians(200.0), pinion_at_deg=15.0)
         res = jd.handler(joint_name="Rack", distance=10, units="mm")
         assert "'Pinion' reads 15.0 deg, enabled limits max 120.0 deg" in res["message"]
+
+    def test_a_partner_whose_value_does_not_read_publishes_no_reading(self, monkeypatch):
+        # the third sentence that states a joint's current value. A partner DOF answering nothing
+        # publishes no number - and the implied-value clause drops with it, since the arithmetic has
+        # no starting value to add the scaled command to.
+        rack = FakeJoint("Rack", _frozen_slider())
+        pinion = FakeJoint("Pinion", _blind_revolute())
+        link_pair(rack, pinion, value_one=1.0, value_two=math.radians(200.0))
+        design = _Design([rack, pinion])
+        monkeypatch.setattr(jd._common, "design", lambda: design)
+        monkeypatch.setattr(jd._write_guard, "app", _FakeApp("DocA"))
+        monkeypatch.setattr(jd, "_driven_this_session", set())
+        res = jd.handler(joint_name="Rack", distance=10, units="mm")
+        assert res["isError"] is True and "DID NOT TAKE" in res["message"]
+        assert "the current value of 'Pinion' did not read, with no enabled limits" in res["message"]
+        assert "'Pinion' reads" not in res["message"]
+        assert "do not single out a cause" in res["message"]
 
     def test_a_reversed_link_scales_the_other_way(self, monkeypatch):
         # reversed sends the pinion the other way, so the same command lands below a MINIMUM instead

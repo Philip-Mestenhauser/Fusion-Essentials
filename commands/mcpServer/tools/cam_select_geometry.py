@@ -11,9 +11,10 @@ import adsk.cam
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import CM_TO_UNIT, ok, error, safe, scale, set_verified
+from ._common import CM_TO_UNIT, named_with_remainder, ok, error, safe, scale, set_verified
 from ._cam_common import get_cam, resolve_cam_node, register_future
 from . import _inputs
+from . import _sketch_detail
 
 # The selection kinds. All but 'holes' are the CURVE (A) family - one CurveSelections builder each;
 # 'holes' is the DIRECT (B) family and handled separately.
@@ -75,13 +76,25 @@ _POCKET_FILTER_KEYS = ("holes",) + tuple(k for k, _ in _POCKET_FILTER_LENGTHS)
 _KNOB_SELECTIONS = {"is_open": (_CHAIN,), "reverted": (_CHAIN,),
                     "loop_type": _LOOP_SIDE_SELECTIONS, "side_type": _LOOP_SIDE_SELECTIONS,
                     "pocket_filter": (_POCKET_RECOGNITION,),
-                    "min_diameter": (_HOLES,), "max_diameter": (_HOLES,)}
+                    "min_diameter": (_HOLES,), "max_diameter": (_HOLES,),
+                    # 'component' is a SCOPE on whichever BY-NAME geometry input the kind reads -
+                    # 'sketches' for sketch, 'bodies' for the two body kinds - not a property to
+                    # set. On a handle-driven kind it narrows nothing (a handle addresses one entity
+                    # already), so it takes the same refusal for the same reason as a property the
+                    # kind's class does not carry.
+                    "component": (_SKETCH,) + _BODY_SELECTIONS}
 
 
 # The geometry inputs the body/sketch kinds resolve through - one instance each, shared by the
 # schema and the resolver so the wire contract and the resolution cannot describe different things.
-BODIES = _inputs.BodyRefList("bodies", description="silhouette/pocket_recognition: what to machine.")
-SKETCHES = _inputs.SketchRefList("sketches", description="sketch: what to machine.", required=True)
+# Both take scope_input: each is addressed BY NAME, and Fusion's own defaults make those names
+# shared - it numbers sketches per component from 1 and names every component's first body 'Body1' -
+# so a name two components carry is refused, with the remedy spelled as this tool's own 'component'
+# input, which the schema below declares. ONE such input scopes whichever list the kind reads.
+BODIES = _inputs.BodyRefList("bodies", scope_input="component",
+                             description="silhouette/pocket_recognition: what to machine.")
+SKETCHES = _inputs.SketchRefList("sketches", scope_input="component",
+                                 description="sketch: what to machine.", required=True)
 
 
 # ── seams (patched in tests) ─────────────────────────────────────────────────
@@ -115,8 +128,9 @@ def _launch_generation(cam, op, op_name):
 # ── input guards ─────────────────────────────────────────────────────────────
 
 def _knob_guard(selection, knobs):
-    """The error for a knob passed to a selection kind whose class does not carry that property, or
-    None. Silently dropping it would leave the caller believing an option applied that never did."""
+    """The error for an option passed to a selection kind it does not apply to - a property the
+    kind's own class does not carry, or the component scope on a kind that reads no NAME - or None.
+    Silently dropping it would leave the caller believing an option applied that never did."""
     for key in sorted(knobs):
         if knobs[key] is None:
             continue
@@ -127,19 +141,20 @@ def _knob_guard(selection, knobs):
     return None
 
 
-def _resolve_geometry(selection, handles, bodies, sketches):
+def _resolve_geometry(selection, handles, bodies, sketches, component):
     """(entities, error) - the live objects this selection kind's inputGeometry takes, resolved
     through the input the kind uses. A body kind with no bodies resolves to an empty list: that is
-    the setup-models form, switched on by isSetupModelSelected."""
+    the setup-models form, switched on by isSetupModelSelected. `component` narrows EVERY name in
+    whichever by-name list the kind reads - the sketches, or the bodies - to that one component."""
     want = _GEOMETRY_INPUT[selection]
     for name, raw in (("handles", handles), ("bodies", bodies), ("sketches", sketches)):
         if name != want and raw not in (None, "", []):
             return None, (f"the '{selection}' selection takes its geometry from '{want}', not "
                           f"'{name}'. Move the values to '{want}', or change 'selection'.")
     if want == "bodies":
-        return BODIES.resolve(bodies)
+        return BODIES.resolve(bodies, component)
     if want == "sketches":
-        return SKETCHES.resolve(sketches)
+        return SKETCHES.resolve(sketches, component)
     return _inputs.GeometryHandleList("handles", require=_HANDLE_REQUIRE[selection],
                                       required=True).resolve(handles)
 
@@ -287,6 +302,27 @@ def _read_back(cs, selection):
     return record, None
 
 
+def _selected_labels(selection, entities):
+    """What the BY-NAME geometry references resolved to, one label per entity - or [] for a kind
+    whose input is a handle.
+
+    A count says a selection landed and cannot say WHICH sketch or body it landed on, and both name
+    inputs address a space Fusion fills with shared defaults (a per-component 'Sketch1', a
+    'Body1' in every component), so a wrong pick reads exactly like a right one in the payload. Each
+    label is written in the spelling that ADDRESSES the thing back: a sketch as its name plus its
+    owning component (the shape the shared-name refusal names owners in), a body as the
+    qualified '<occurrence-or-component>:<body>' form _inputs resolves and lists candidates in.
+
+    A handle kind publishes nothing here: the caller supplied the entity's own token, the resolver
+    refuses a token that names more than one entity, and a face or edge carries no name to print."""
+    if selection == _SKETCH:
+        return [f"'{safe(lambda s=s: s.name) or '?'}' in "
+                f"{safe(lambda s=s: s.parentComponent.name) or '?'}" for s in entities]
+    if selection in _BODY_SELECTIONS:
+        return [f"'{_inputs.qualified_body_name(b)}'" for b in entities]
+    return []
+
+
 def _apply_curve(op, selection, entities, knobs, factor, units, extra):
     """Mechanism (A): build a CurveSelection of the given kind from `entities`, apply it, and read the
     applied selection back. Returns (record, None) or (None, error)."""
@@ -397,6 +433,7 @@ def _set_height(op, which, mode, offset):
 
 
 def handler(operation: str = "", selection: str = "", handles=None, bodies=None, sketches=None,
+            component: str = "",
             is_open: bool = None, reverted: bool = None,
             loop_type: str = None, side_type: str = None, pocket_filter=None,
             min_diameter: float = None, max_diameter: float = None,
@@ -408,8 +445,10 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
     if selection not in _SELECTIONS:
         return error(f"selection must be one of {', '.join(_SELECTIONS)}; got '{selection}'.")
 
+    scope = (component or "").strip()
     knobs = {"is_open": is_open, "reverted": reverted, "pocket_filter": pocket_filter or None,
-             "min_diameter": min_diameter, "max_diameter": max_diameter}
+             "min_diameter": min_diameter, "max_diameter": max_diameter,
+             "component": scope or None}
     for kind in (LOOP_TYPE, SIDE_TYPE):
         raw = loop_type if kind is LOOP_TYPE else side_type
         if raw is None:
@@ -436,7 +475,7 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
         return error(oerr)
     op = node.obj
 
-    entities, herr = _resolve_geometry(selection, handles, bodies, sketches)
+    entities, herr = _resolve_geometry(selection, handles, bodies, sketches, scope)
     if herr:
         return error(herr)
 
@@ -492,6 +531,11 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
                      "for sketch, cylinder faces for holes)."))
     result.update(record)
     result.update(extra)
+    # Bounded through the shared capped-list renderer: this list is as long as the selection, and a
+    # silently cut one would read as the complete set of what is now being machined.
+    labels = _selected_labels(selection, entities)
+    if labels:
+        result["selected"] = named_with_remainder(labels)
     if diam_note:
         result["diameter_filter"] = diam_note
 
@@ -542,6 +586,7 @@ tool = (
             "description": "find_geometry handles: edges for chain, faces for pocket/face/holes."})
     .add_input_property(*BODIES.as_property())
     .add_input_property(*SKETCHES.as_property())
+    .add_input_property(*_sketch_detail.component_scope("component", narrows="sketches / bodies"))
     .add_input_property("is_open", {"type": "boolean", "description": "Chain: open profile (default closed)."})
     .add_input_property("reverted", {"type": "boolean", "description": "Chain: flip side/direction."})
     .add_input_property(*LOOP_TYPE.as_property())

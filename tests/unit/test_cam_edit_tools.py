@@ -16,6 +16,8 @@ import json
 import re
 from types import SimpleNamespace
 
+import pytest
+
 from conftest import FakeOperation, _NamedCollection, load_tool
 
 ct = load_tool("cam_edit_tools")
@@ -1192,6 +1194,16 @@ def _speed_param(preset):
     return cp._preset_param_of(preset, cp._SPEED_PARAM_CANDIDATES, "speed")
 
 
+# The feed candidates are a priority ORDER. The expected order is pinned HERE rather than read off
+# _FEED_PARAM_CANDIDATES, so a reorder of the tuple cannot reorder its own expectation: every pair
+# below is driven through the resolver, which makes any transposition fail at that pair.
+_FEED_PRIORITY = ("tool_feedCutting", "tool_feedPlunge", "tool_feedRamp",
+                  "tool_feedRetract", "tool_feedEntry", "tool_feedTransition")
+_FEED_PAIRS = [(earlier, later)
+               for i, earlier in enumerate(_FEED_PRIORITY)
+               for later in _FEED_PRIORITY[i + 1:]]
+
+
 class TestPresetParamOf:
     def test_mill_uses_tool_feed_cutting(self):
         p, avail = _feed_param(_preset_with(["tool_spindleSpeed", "tool_feedCutting"]))
@@ -1207,6 +1219,18 @@ class TestPresetParamOf:
         # {feed} value drives the CUTTING feed, never whichever feed the preset lists first
         p, avail = _feed_param(_preset_with(["tool_feedPlunge", "tool_feedCutting"]))
         assert p is not None and p.name == "tool_feedCutting" and avail is None
+
+    def test_every_feed_candidate_has_a_pinned_priority(self):
+        # a candidate added to (or dropped from) the tuple without a place in _FEED_PRIORITY has no
+        # pinned priority at all - the pair sweep below never reaches it
+        assert sorted(cp._FEED_PARAM_CANDIDATES) == sorted(_FEED_PRIORITY)
+
+    @pytest.mark.parametrize("earlier,later", _FEED_PAIRS)
+    def test_the_earlier_feed_candidate_beats_the_later_one(self, earlier, later):
+        # the preset lists the LATER candidate first, so what decides is candidate order and not
+        # the preset's own collection order
+        p, avail = _feed_param(_preset_with([later, earlier]))
+        assert p is not None and p.name == earlier and avail is None
 
     def test_no_known_feed_names_what_exists(self):
         # nothing from the candidate list -> refuse, naming the feed-ish params actually present
@@ -1738,6 +1762,18 @@ class TestPresetValues:
         assert res["isError"] is True and "rpm" in res["message"]
         assert tool.presets.count == 0
 
+    def test_a_boolean_value_is_refused_before_it_reaches_the_parameter(self, monkeypatch):
+        # bool is a SUBCLASS of int, so a number check alone accepts True and the expression 'True'
+        # reaches the preset parameter; the spec gate refuses it by TYPE instead, and no preset is
+        # created to roll back.
+        tool = _tool_with_presets("EM")
+        _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        res = ct.handler(action="add_preset", scope="document", tool=0,
+                         preset={"name": "Alu", "feed": True})
+        assert res["isError"] is True
+        assert "must be a number" in res["message"] and "mm/min" in res["message"]
+        assert tool.presets.count == 0
+
     def test_creation_time_presets_are_validated_too(self, monkeypatch):
         # add_tools[].presets[] runs the same spec gate, before any preset is created
         tgt = _install(monkeypatch)
@@ -1745,6 +1781,32 @@ class TestPresetValues:
                          add_tools=[{"from_type": "drill", "presets": [{"feed_rate": 900}]}])
         assert res["isError"] is True and "feed_rate" in res["message"]
         assert len(tgt.tools) == 2 and tgt.persisted == 0
+
+
+class TestPresetSpecNumberGate:
+    """_preset_spec_error is the FIRST judge of a preset spec's VALUES - it refuses by TYPE before
+    any preset is created, where the downstream read-back gate judges only what LANDED - and a bool
+    is what an isinstance(int, float) test alone lets through: True IS an int. The gate is read
+    directly here because branch coverage cannot see an 'or' sub-clause: the bool half can be
+    deleted with the line still counted covered."""
+
+    def test_a_boolean_feed_is_refused_and_named(self):
+        err = cp._preset_spec_error({"name": "Alu", "feed": True})
+        assert err is not None
+        assert "must be a number" in err and "mm/min" in err
+        assert "True" in err                    # the refusal names the offending value
+
+    def test_a_boolean_spindle_speed_is_refused(self):
+        # False is the other bool AND falsy - the skip above the type test is `is None`, so it
+        # reaches the test rather than reading as "no speed asked for"
+        err = cp._preset_spec_error({"name": "Alu", "spindle_speed": False})
+        assert err is not None and "must be a number" in err and "rpm" in err
+
+    @pytest.mark.parametrize("value", [900, 900.5, 0, -1])
+    def test_a_plain_number_clears_the_gate(self, value):
+        # the boundary the bool clause sits beside: an int or a float is legal, 0 and a negative
+        # included, so refusing bools can never become refusing numbers
+        assert cp._preset_spec_error({"name": "Alu", "feed": value}) is None
 
 
 class TestRemovePreset:
@@ -2402,8 +2464,8 @@ class TestPresetValuePlumbing:
         assert p is None and avail == []
 
     def test_a_boolean_is_never_a_plain_number(self):
-        # the isinstance guard refuses a bool outright; float('True') raises rather than reaching
-        # 1.0, and _set_preset_param checks a read-back against whatever number this returns
+        # the float is taken off str(value), so True reads as 'True' and refuses rather than as the
+        # 1.0 float(True) gives - and _set_preset_param checks a read-back against this number
         assert cp._plain_number(True) is None and cp._plain_number(False) is None
         assert cp._plain_number("900") == 900.0
         assert cp._plain_number("35in/min") is None      # units carried, not a plain number

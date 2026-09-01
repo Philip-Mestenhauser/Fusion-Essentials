@@ -57,8 +57,8 @@ _JOINT_TYPES = {
 "pin_slot": ("pin_slot", True),
 }
 
-# The motion Choice offered by joint_create/joint_edit = the shared six + pin_slot (this pair is the
-# write side for pin_slot; other joint tools stay on the shared JOINT_MOTIONS subset).
+# The motion Choice for a joint WRITE surface: the shared six + pin_slot. A consumer imports THIS
+# list rather than re-spelling it, so the wire vocabulary cannot drift per tool.
 _MOTIONS = list(_inputs.JOINT_MOTIONS) + ["pin_slot"]
 
 

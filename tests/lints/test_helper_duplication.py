@@ -359,6 +359,11 @@ _DENYLIST = {
     # other.
     "lump_count": ("_geom", "def"),
     "aabb_gap": ("_geom", "def"),
+    # The ONE occurrence name a measure disclosure addresses a row by: fullPathName, which the
+    # measure tools' own target input resolves back, else name. A local re-roll names an occurrence
+    # by its LEAF, which two sub-assemblies can each answer to - so the row hands back an address
+    # that resolves to a different occurrence than the one measured.
+    "address": ("_geom", "def"),
     # The ONE bounded-gap measure for two PARALLEL PLANAR faces, and the sentence it discloses the
     # result with. A per-tool copy is how one measure tool starts judging a clearance on a plane
     # separation the other has already bounded - the two would then answer differently about the
@@ -376,6 +381,12 @@ _DENYLIST = {
     "find_joint": ("_joints", "def"),
     "all_joints": ("_joints", "def"),
     "current_joint_type": ("_joints", "def"),
+    # The ONE joint-kind -> drivable-DOF pairing (revolute+cylindrical turn, slider+cylindrical
+    # slide). Every rotate-or-slide member a caller reads is selected through it - the driven value,
+    # the limits bounding it, the heading published beside it - so a local copy is how one surface
+    # starts reading a member off a kind the other says has no such DOF.
+    "DRIVES_ANGLE": ("_joints", "assign"),
+    "DRIVES_SLIDE": ("_joints", "assign"),
     # The ONE JointOrigin walk + its leaf ops - the traversal joint_create_edit and model_inspect share
     # (resolve-one / collect-names / read-axes all sit on all_joint_origins).
     "all_joint_origins": ("_joints", "def"),

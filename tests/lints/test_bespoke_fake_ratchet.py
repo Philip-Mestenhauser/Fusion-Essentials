@@ -120,7 +120,10 @@ _PER_FILE_BASELINE = {
     "test_family_gating.py": 3,
     "test_find_geometry.py": 6,
     "test_inputs.py": 39,   # -2: _install_profiles builds its design from conftest's make_design/MakeComp
-    "test_joint_at_geometry.py": 7,   # +1 AsBuiltJoint: is_as_built_joint isinstance-checks adsk.fusion.AsBuiltJoint, a class conftest does not model
+    # the JointInput/Joints/Design createInput-add transaction graph, plus the AsBuiltJoint
+    # is_as_built_joint isinstance-checks - neither an object model conftest carries. The faces,
+    # edges, vertices and surfaces come from the shared fakes.
+    "test_joint_at_geometry.py": 4,
     "test_joint_create_edit.py": 4,
     "test_joint_create_origin.py": 14,
     "test_joint_drive.py": 6,

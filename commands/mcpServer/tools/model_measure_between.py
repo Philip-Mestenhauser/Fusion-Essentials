@@ -36,6 +36,21 @@ _A = _inputs.TargetRef("a", required=True, allow=("body", "face", "edge", "occur
 _B = _inputs.TargetRef("b", required=True, allow=("body", "face", "edge", "occurrence", "component"))
 
 
+def _echo(kind, entity, given):
+    """How the payload names one measured target: its fullPathName where that reads, else its name,
+    else the value the caller passed.
+
+    fullPathName FIRST because an occurrence's `name` is the LEAF only - a target given as
+    'Frame:1+Pedestal:1' answers 'Pedestal:1' to name, and echoing that back names a DIFFERENT
+    address than the one measured (the leaf is not unique - two sub-assemblies can each hold a
+    'Pedestal:1'). It is also the address this tool's own target input resolves, so the echo can be
+    passed straight back in, and the address _geom.address already names the nested children with -
+    which is why the echo IS that call. The caller's own value is the last resort rather than
+    _geom's '(unreadable name)': a face or edge target carries neither property, and the
+    find_geometry handle that was passed is a real address for it."""
+    return "%s '%s'" % (kind, _geom.address(entity, fallback=given))
+
+
 def _gap_to(point, entity):
     """The measured distance in cm from ``point`` to ``entity``, or None when it will not read.
     measureMinimumDistance takes a Point3D as either operand (live API doc: "The temporary geometry
@@ -128,8 +143,8 @@ def handler(a: str = "", b: str = "", mode: str = "distance", units: str = "mm")
                   if kind_a == "face" and kind_b == "face" else None)
         out = {
             "mode": "distance",
-            "a": f"{kind_a} '{safe(lambda: ent_a.name) or a}'",
-            "b": f"{kind_b} '{safe(lambda: ent_b.name) or b}'",
+            "a": _echo(kind_a, ent_a, a),
+            "b": _echo(kind_b, ent_b, b),
             "units": units,
             "distance": round(dist_cm * f, 6),
             "closest_point_on_a": _common.ptxyz(pa, f),
@@ -187,8 +202,8 @@ def handler(a: str = "", b: str = "", mode: str = "distance", units: str = "mm")
                      "the angle is UNKNOWN - reporting it as 0 would read as parallel.")
     return ok({
         "mode": "angle",
-        "a": f"{kind_a} '{safe(lambda: ent_a.name) or a}'",
-        "b": f"{kind_b} '{safe(lambda: ent_b.name) or b}'",
+        "a": _echo(kind_a, ent_a, a),
+        "b": _echo(kind_b, ent_b, b),
         "angle_deg": round(math.degrees(rad), 6),
         "angle_rad": round(rad, 6),
         "note": "Angle between the two targets. Two planar faces give the angle between their planes; "

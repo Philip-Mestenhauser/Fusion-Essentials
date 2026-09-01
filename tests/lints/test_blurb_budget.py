@@ -36,10 +36,10 @@ _BLURB_CHARS = {
     "_data_read": 478,
     "_drawing_common": 1752,
     "_export": 2196,
-    "_geom": 1982,
+    "_geom": 2186,   # was 1982: the 'address' clause - the symbol is public because model_measure_between._echo consumes it cross-module and the helper-duplication denylist locks the reuse in; the clause is scoped to the MEASURE tools' rows, its only consumers
     "_holder": 85,
     "_inputs": 1148,
-    "_joints": 2278,   # +617: the DRIVE-2 motion_link_record tri-state contract and the MOTION-1 ratio codec (link_ratio_values + dof_motion_kind display-unit semantics) - two new shared seams whose reuse rules the catalog must teach
+    "_joints": 2455,   # +177: names DRIVES_ANGLE/DRIVES_SLIDE, the joint-kind -> drivable-DOF pairing joint_drive and assembly_get's motion rows had each carried their own copy of - a shared constant the catalog must name or the copies come back
     "_materials": 468,
     "_outputs": 91,
     "_pmi": 755,

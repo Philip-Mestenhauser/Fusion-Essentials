@@ -31,6 +31,8 @@ _FLOORS = {
     "tools/__init__.py": 100,
     "tools/_assert.py": 90,
     "tools/_cam_common.py": 97,
+    # cam_get's per-slice read cores - one handler per include= slice.
+    "tools/_cam_read.py": 98,
     "tools/_common.py": 92,
     "tools/_contacts.py": 95,
     "tools/_data_common.py": 93,
@@ -39,7 +41,7 @@ _FLOORS = {
     "tools/_export.py": 100,
     "tools/_geom.py": 100,
     "tools/_holder.py": 77,
-    "tools/_inputs.py": 86,
+    "tools/_inputs.py": 90,   # was 86
     "tools/_joints.py": 94,   # was 90
     "tools/_materials.py": 96,
     "tools/_outputs.py": 96,

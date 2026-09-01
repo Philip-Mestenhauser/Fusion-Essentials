@@ -5,9 +5,9 @@ is ONE JO), the Joint-Origin leaf ops whose root test decides between "already i
 context" and "must be proxied into its occurrence", and the motion-link ratio codec that turns a
 display-unit ratio into the native pair setMotionData takes.
 
-The two root proxies are modelled the way the API hands them over: each scope holds its OWN wrapper
-object and the two share an entityToken. One object placed in both scopes is collapsed by any key at
-all, so it pins no de-dup.
+Two readings of ONE joint or JO are modelled the way the API hands them over: each scope holds its
+OWN wrapper object and the two share an entityToken. One object placed in both scopes is collapsed
+by any key at all, so it pins no de-dup.
 """
 
 import pytest
@@ -20,7 +20,9 @@ jt = load_tool("_joints")
 
 
 class _Coll:
-    """A Fusion collection: count/item (the walk) plus itemByName."""
+    """A Fusion collection: count/item (the walk) plus itemByName, and ITERABLE - design.allComponents
+    is counted and iterable alike (measure_api allcomponents-design-only), and the two joint walks
+    read it the two different ways."""
 
     def __init__(self, items):
         self._i = list(items)
@@ -34,6 +36,9 @@ class _Coll:
 
     def itemByName(self, name):
         return next((x for x in self._i if x.name == name), None)
+
+    def __iter__(self):
+        return iter(self._i)
 
 
 def _joint(name, token, comp_name):
@@ -49,7 +54,10 @@ def _comp(joints=(), asbuilt=(), origins=()):
 
 
 def _design(root, subs=()):
-    return type("D", (), {"rootComponent": root, "allComponents": list(subs)})()
+    # allComponents lives on the DESIGN, is a COUNTED collection, and CARRIES THE ROOT - the live
+    # shape the walks read. A bare list models neither, and a collection without the root would let a
+    # root-only walk pass here while under-reporting every joint on a live design.
+    return type("D", (), {"rootComponent": root, "allComponents": _Coll([root] + list(subs))})()
 
 
 # ── find_joints_by_name: the list form (never grab the first) ────────────────
@@ -125,13 +133,49 @@ class TestFindJoint:
         _j, err = jt.find_joint(des, "R1")
         assert "(unreadable component)" in err and "Arm" in err
 
-    def test_one_joint_reached_through_both_root_proxies_is_not_ambiguous(self):
-        # allComponents lists the root as a proxy DISTINCT from design.rootComponent, so one root
-        # joint arrives as two wrappers sharing one entityToken. Only the token collapses them:
-        # without that de-dup every root joint refuses as a pair of itself.
+    def test_two_readings_of_one_joint_sharing_a_token_are_not_ambiguous(self):
+        # The rig: two scopes the walk reaches, each handing back its OWN wrapper of ONE joint, the
+        # two sharing an entityToken. Only that token collapses the pair - without the de-dup the
+        # joint refuses as a pair of itself.
         native, proxy = _joint("Revolute1", "t1", "Root"), _joint("Revolute1", "t1", "Root")
         des = _design(_comp([native]), [_comp([proxy])])
         assert jt.find_joint(des, "Revolute1") == (native, None)
+
+
+# ── all_joints: the identity key that runs when entityToken does not read ───
+
+class _TokenlessJoint:
+    """A joint whose entityToken read RAISES - the state a SUPPRESSED joint degrades toward - so the
+    walk keys it on (name, objectType, owning component) instead."""
+
+    def __init__(self, name, comp_name, obj_type="adsk::fusion::Joint"):
+        self.name = name
+        self.objectType = obj_type
+        self.parentComponent = type("C", (), {"name": comp_name})()
+
+    @property
+    def entityToken(self):
+        raise RuntimeError("no token")
+
+
+class TestAllJointsFallbackKey:
+    """The key that carries identity where entityToken answers nothing. Every part of it is
+    load-bearing: two DIFFERENT joints can agree on the parts a narrower key keeps, and collapsing
+    them drops one joint out of the walk every rollup and resolver counts over."""
+
+    def test_two_tokenless_joints_sharing_a_name_in_two_components_both_survive(self):
+        # A joint name is only component-locally unique, so a key of name ALONE reads these two real
+        # joints as one and hides the second from every consumer of the walk.
+        arm = _TokenlessJoint("Revolute1", "Arm")
+        grip = _TokenlessJoint("Revolute1", "Gripper")
+        assert jt.all_joints(_design(_comp([arm]), [_comp([grip])])) == [arm, grip]
+
+    def test_two_tokenless_joints_differing_only_in_objectType_both_survive(self):
+        # joints and asBuiltJoints are separate collections on ONE component: same name, same owner,
+        # different class. Dropping objectType from the key collapses that pair too.
+        joint = _TokenlessJoint("Fix1", "Arm", "adsk::fusion::Joint")
+        as_built = _TokenlessJoint("Fix1", "Arm", "adsk::fusion::AsBuiltJoint")
+        assert jt.all_joints(_design(_comp([joint], asbuilt=[as_built]))) == [joint, as_built]
 
 
 # ── motion_link_record: a link's own STATE, not just its partner's name ─────
@@ -499,10 +543,10 @@ class _JO:
 
 class TestAllJointOrigins:
     def test_one_jo_reached_through_both_root_proxies_is_listed_once(self):
-        # allComponents lists the root as a proxy DISTINCT from design.rootComponent, and each read
-        # hands back its OWN wrapper object, so ONE root JO arrives as two objects sharing nothing
-        # but their entityToken. A key those two wrappers do not share double-lists every root JO.
-        # The walk's first scope is design.rootComponent, so its own wrapper is the one kept.
+        # ONE JO read through two scopes arrives as two wrapper objects sharing nothing but their
+        # entityToken - the rig hands the second wrapper back from another component in the
+        # collection. A key those two wrappers do not share double-lists every such JO. The walk's
+        # first scope is design.rootComponent, so its own wrapper is the one kept.
         native, proxy = _JO(token="JO1"), _JO(token="JO1")
         root = _comp(origins=[native])
         assert jt.all_joint_origins(_design(root, [_comp(origins=[proxy])])) == [(native, root)]

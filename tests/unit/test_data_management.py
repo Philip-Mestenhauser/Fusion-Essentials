@@ -349,6 +349,29 @@ class TestActivateDocument:
         res = dm.activate_document_handler(name="Ghost")
         assert res["isError"] is True and "No open document matched" in res["message"]
 
+    def test_a_lineage_urn_activates_the_twin_a_bare_name_cannot(self):
+        # The URN is accepted wherever the display NAME is, and it resolves EXACTLY: two open docs
+        # answer to 'P1-Gimbal', so only the URN can say which one to bring forward.
+        a = FakeDocument("P1-Gimbal", data_file_id="urn:adsk.wipprod:dm.lineage:AAA")
+        b = FakeDocument("P1-Gimbal", data_file_id="urn:adsk.wipprod:dm.lineage:BBB")
+        _install_app([a, b], active=a)
+        dm.app.activeDocument = b                  # model the switch having taken
+        out = _payload(dm.activate_document_handler(name="urn:adsk.wipprod:dm.lineage:BBB"))
+        assert b.activated is True and a.activated is False
+        assert out["is_active"] is True
+
+    def test_the_bare_name_refusal_hands_back_both_lineage_urns(self):
+        # The same pair by NAME: refused, and the refusal carries the two URNs the retry needs -
+        # naming only the shared display name would ask for the value that just failed.
+        a = FakeDocument("P1-Gimbal", data_file_id="urn:adsk.wipprod:dm.lineage:AAA")
+        b = FakeDocument("P1-Gimbal", data_file_id="urn:adsk.wipprod:dm.lineage:BBB")
+        _install_app([a, b], active=a)
+        res = dm.activate_document_handler(name="P1-Gimbal")
+        assert res["isError"] is True
+        assert "P1-Gimbal (urn:adsk.wipprod:dm.lineage:AAA)" in res["message"]
+        assert "P1-Gimbal (urn:adsk.wipprod:dm.lineage:BBB)" in res["message"]
+        assert a.activated is False and b.activated is False
+
 
 class TestFindOpenDocument:
     def test_exact_match_case_insensitive(self):
@@ -363,13 +386,14 @@ class TestFindOpenDocument:
 
     def test_partial_name_is_refused(self):
         # a partial name must NOT resolve to a substring sibling - documents can share names, so
-        # the first partial hit could be the wrong document. Refused: returns None + the names.
+        # the first partial hit could be the wrong document. Refused: returns None + the listing,
+        # whose row names the open document and the address that reaches it.
         a = FakeDocument("PartA_CAM")
         _install_app([a])
         found, names, ambiguous = dm._find_open_document("CAM")
         assert found is None
         assert ambiguous is False           # a partial miss is NOT a name-twin ambiguity
-        assert "PartA_CAM" in names
+        assert names == ["PartA_CAM (no lineage URN - open:0)"]
 
     def test_shared_name_is_ambiguous_not_first_match(self):
         # TWO open docs share the display name 'P1-Gimbal' (Fusion allows this). Resolving by that

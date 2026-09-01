@@ -218,6 +218,10 @@ def load_tool(module_name):
         module = importlib.util.module_from_spec(spec)
         sys.modules[full_name] = module
         spec.loader.exec_module(module)
+        # Record the seams of everything that import just put in sys.modules - the module itself and
+        # the substrate its `from . import _common`/`_inputs` chain pulled in - while they still hold
+        # their as-imported values. See _capture_pristine_seams.
+        _capture_pristine_seams()
         return module
 
 
@@ -382,6 +386,18 @@ def _pristine_seam(key, mod):
     return _PRISTINE_SEAMS[key]
 
 
+def _capture_pristine_seams():
+    """Record the as-imported seam values of every loaded tool module that has none recorded yet.
+
+    Called from load_tool the moment a module is executed, and again at each test's SETUP. The
+    load-time call is what makes the recording pristine: a module first imported inside a test BODY
+    is already past that setup sweep, so without it the module's first recording happens at
+    TEARDOWN - and a body that patched a seam imperatively (``mod.app = fake``) has the PATCHED
+    value recorded as pristine and restored into the module for every test that follows."""
+    for name, mod in _loaded_tool_modules().items():
+        _pristine_seam(name, mod)
+
+
 # Install mocks at collection time, before any test module imports a tool.
 install_mock_adsk()
 
@@ -446,11 +462,9 @@ def _restore_shared_adsk_mocks():
     # tested by patching those on the _common module (the seam _inputs.py uses). Snapshot them at SETUP
     # and restore after, so a test's patch can't leak into a later test. _common is loaded lazily by
     # load_tool, so it may not exist yet on the very first tests — guard for that.
-    # Capture pristine substrate seams at SETUP (before the test body patches them). _pristine_seam
-    # only records the first time it sees each module — so the very first test to load a substrate
-    # captures it clean, and later (patched) setups don't overwrite the cache.
-    for _name, _mod in _loaded_tool_modules().items():
-        _pristine_seam(_name, _mod)
+    # Capture pristine substrate seams at SETUP (before the test body patches them) - the backstop
+    # under load_tool's own load-time capture, for a module that reached sys.modules another way.
+    _capture_pristine_seams()
     # A few tests stub a tool's filesystem check by assigning `mod.os.path.isfile = lambda …`. Because
     # `mod.os` is the REAL os module, that mutates process-wide os.path and would leak into a later test
     # (e.g. a left-behind `isfile -> False` makes an unrelated upload report "file not found"). Snapshot
@@ -505,6 +519,13 @@ class FakePoint:
         # Mirrors adsk.core.Point3D.distanceTo -> Euclidean distance.
         return ((self.x - other.x) ** 2 + (self.y - other.y) ** 2
                 + (self.z - other.z) ** 2) ** 0.5
+
+    def copy(self):
+        # Mirrors adsk.core.Point3D.copy -> an independent point at the same coordinates. A world
+        # lift copies a surface's own origin BEFORE transforming it, so the surface keeps its
+        # untouched reading (_joints._world_torus_centre). type(self), not FakePoint: a subclass
+        # modelling a platform that DECLINES the transform must survive that copy.
+        return type(self)(self.x, self.y, self.z)
 
     def transformBy(self, m):
         """Move this point by `m` (a FakeMatrix3D) IN PLACE, answering the bool a caller gates
@@ -944,6 +965,16 @@ class Cone:
 
 class Sphere:
     pass
+
+
+class Torus:
+    """A toroidal surface - surfaceType is intrinsic, see Plane. `origin` is the torus CENTRE, the
+    point the torus keypoint gate lifts into world and compares a JointGeometry against: MEASURED
+    (shape-dump-torus) - a torus created centred at (2, 3, -1) reads that point back, and the
+    surface's own origin reads unchanged after a transform of a COPY of it."""
+    def __init__(self, origin=None):
+        self.origin = origin
+        self.surfaceType = _api_facts.ENUMS["core.SurfaceTypes"]["TorusSurfaceType"]
 
 
 class Line3D:

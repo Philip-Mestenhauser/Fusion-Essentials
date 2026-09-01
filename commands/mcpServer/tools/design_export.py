@@ -430,6 +430,14 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
         return error(f"'stl_units' ('{stl_unit_key}') applies to format=stl only, and this call "
                      f"asked for format={fmt} - refusing rather than dropping it. Export as stl to "
                      "bake the unit into the file, or omit 'stl_units'.")
+    # The same refusal for the other STL-only knob, for the same reason: dropped, the caller who
+    # asked for ASCII gets a file nothing tells them the shape of. Keyed on `is not None` rather
+    # than on truthiness - stl_binary=False IS a request (ASCII), and a truthy test would drop the
+    # half of this input that changes the file. Ahead of the dxf dispatch, as above.
+    if stl_binary is not None and fmt != "stl":
+        return error(f"'stl_binary' ({'true' if stl_binary else 'false'}) applies to format=stl "
+                     f"only, and this call asked for format={fmt} - refusing rather than dropping "
+                     "it. Export as stl to choose binary or ASCII, or omit 'stl_binary'.")
 
     if fmt == "dxf":
         return _export_dxf(dxf_sketch, dxf_face, file_path,

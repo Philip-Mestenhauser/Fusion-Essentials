@@ -242,6 +242,66 @@ class TestApplyNamedView:
             assert vp.assigned_camera is None and vp.fit_called == 0
 
 
+class TestApplyNamedViewEyeSide:
+    """WHICH SIDE of the target the eye lands on - the half of the orient the standoff and the
+    camera-type assertions above cannot see. apply_named_view rebuilds the eye from the target along
+    a direction, and both signs keep the same standoff and the same camera type: negating it (the
+    look direction applied where the view direction belongs, or either table entry flipped) renders
+    the far side of the model under the near side's name - a 'bottom' shot showing the top face.
+
+    The expected sides are world facts written out here rather than read from the module's own
+    table, so a flipped TABLE entry fails this test instead of flipping the expectation with it -
+    a flip of the table AND its consumer together cancels inside apply_named_view and is caught by
+    TestViewDirection and view_set's front pin instead. Fusion is Z-up:
+    'front' views the model from -Y, 'top' from above, and an iso corner's name spells its three
+    signs (top/bottom = eye z, right/left = eye x; every iso sits on the -Y viewer side).
+    """
+
+    _EYE_SIDE = {
+        "front": (0, -1, 0),
+        "back": (0, 1, 0),
+        "top": (0, 0, 1),
+        "bottom": (0, 0, -1),
+        "right": (1, 0, 0),
+        "left": (-1, 0, 0),
+        "iso-top-right": (1, -1, 1),
+        "iso-top-left": (-1, -1, 1),
+        "iso-bottom-right": (1, -1, -1),
+        "iso-bottom-left": (-1, -1, -1),
+    }
+
+    @pytest.mark.parametrize("name,side", sorted(_EYE_SIDE.items()))
+    def test_the_eye_lands_on_the_named_side_of_the_target(self, name, side, monkeypatch):
+        import adsk.core
+        monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: FakePoint(x, y, z))
+        cam = _FakeCam()
+        # An OFF-ORIGIN focus, and a starting eye whose own offset (3, 4, 12) shares no sign
+        # pattern with any named view - so a side that reads correct came from the orient rather
+        # than from the camera it started on.
+        cam.target = FakePoint(2, -3, 4)
+        cam.eye = FakePoint(5, 1, 16)
+        vp = _FakeViewport(cam=cam)
+        vc.apply_named_view(vp, name)
+        eye, tgt = vp._cam.eye, vp._cam.target
+        offset = (eye.x - tgt.x, eye.y - tgt.y, eye.z - tgt.z)
+        for axis, want in enumerate(side):
+            got = offset[axis]
+            if want == 0:
+                assert math.isclose(got, 0.0, abs_tol=1e-9), (name, axis, got)
+            else:
+                assert got * want > 0, (name, axis, got)
+
+    def test_the_target_is_left_where_the_camera_had_it(self):
+        # The eye moves around the focus; the focus itself is not re-aimed by an orient, or every
+        # named view would also recentre the model.
+        cam = _FakeCam()
+        cam.target = FakePoint(2, -3, 4)
+        vp = _FakeViewport(cam=cam)
+        vc.apply_named_view(vp, "front")
+        tgt = vp._cam.target
+        assert (tgt.x, tgt.y, tgt.z) == (2, -3, 4)
+
+
 class TestCapturePngB64:
     def test_refreshes_before_the_grab(self):
         # the refresh must precede saveAsImageFile - the capture otherwise races an un-refreshed

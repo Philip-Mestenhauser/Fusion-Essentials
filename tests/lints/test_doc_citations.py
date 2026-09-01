@@ -349,6 +349,19 @@ class TestSymbolCitations:
             "citations are now unchecked, or every one of them is repeated in source prose, or "
             "the last doc-only one was reworded away (a doc that still writes a module.symbol "
             "pointer says it is the surface that broke, not the prose)")
+        # and the margin this pin keeps over the underscore-head pin below: a doc-only citation of
+        # an UNDERSCORE-spelled module leaves the surface WITH that head group, so a set holding
+        # only those empties for a regex reason while reporting a doc-surface one. The plain-spelled
+        # member is what lets this pin fail for its own reason alone, so its loss is reported here
+        # rather than left to shrink this test into a second copy of that one.
+        plain = {mod for mod, _sym in doc_only if not mod.startswith("_")}
+        assert plain, (
+            "every doc-only module citation names an underscore-spelled module, so this pin holds "
+            "nothing the underscore-head pin below does not already hold: a head group that stops "
+            "opening on an underscore empties this set too, and reports itself here as 'the docs "
+            "dropped out of the SYMBOL surface'. Give a constitution doc a <module>.<symbol> "
+            "pointer at a plain-spelled module that no source comment or docstring repeats, or "
+            "re-derive this pin from something that head group cannot take with it")
 
     def test_underscore_spelled_modules_are_collected(self):
         # the COLLECTION's regex-head half, over the real corpus: this repo spells its shared

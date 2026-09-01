@@ -43,9 +43,12 @@ MAP_BLURB = (
     "coordinate space; parallel_plane_facts - the ONE bounded-gap measure for two PARALLEL PLANAR "
     "faces, a pair whose plane-to-plane separation alone under-states the gap, handing back the "
     "proven distance, the three disclosure flags and the ONE sentence both measure tools publish "
-    "it with; subtree_facts - the ONE nested-child disclosure both measure tools publish, since an "
-    "occurrence is measured on its OWN bodies and NOT on what is nested inside it, which makes a "
-    "gap read off a parent silently optimistic about the assembly under it")
+    "it with; address - the ONE occurrence name the MEASURE tools' disclosure rows carry: "
+    "fullPathName, which their own target input resolves back, else name, else the "
+    "fallback= a caller holding a real address passes; subtree_facts - the ONE nested-child "
+    "disclosure both measure tools publish, since an occurrence is measured on its OWN bodies and "
+    "NOT on what is nested inside it, which makes a gap read off a parent silently optimistic "
+    "about the assembly under it")
 
 # The body entity-types for boundingBox2: solid + surface + mesh, so the box spans real geometry and
 # NOT the sketch/construction datums that the plain .boundingBox counts. The construction contribution
@@ -443,7 +446,7 @@ def parallel_plane_facts(face_a, face_b, measured_cm, inv, units):
 SUBTREE_NAMES_MAX = 12
 
 
-def _address(entity):
+def address(entity, fallback="(unreadable name)"):
     """How a disclosure addresses an occurrence: its fullPathName where that reads - the address a
     measure tool's own target input resolves, MEASURED to round-trip - else its name.
 
@@ -451,8 +454,9 @@ def _address(entity):
     reference is unresolved RAISES on fullPathName and still answers name (measured, see
     _common.broken_reference), and a row that could name nothing says so rather than vanishing: the
     caller is being told a target holds parts the number does not cover, which is true whether or
-    not they name."""
-    return safe(lambda: entity.fullPathName) or safe(lambda: entity.name) or "(unreadable name)"
+    not they name. `fallback` is what a caller that HOLDS a real address for such an entity names it
+    with instead - a payload echoing back the value the caller passed, say."""
+    return safe(lambda: entity.fullPathName) or safe(lambda: entity.name) or fallback
 
 
 def _child_occurrences(entity, kind):
@@ -522,11 +526,11 @@ def _subtree_record(label, entity, kind, other_label, other, inv):
         return None
     children, deeper = [], False
     for child in _common.iter_collection(coll):
-        children.append({"name": _address(child), "distance": _child_gap(child, other, inv)})
+        children.append({"name": address(child), "distance": _child_gap(child, other, inv)})
         deeper = deeper or bool(counted(lambda c=child: c.childOccurrences.count))
         if len(children) >= SUBTREE_NAMES_MAX:
             break
-    rec = {"target": label, "name": _address(entity), "child_count": total,
+    rec = {"target": label, "name": address(entity), "child_count": total,
            "children": children, "measured_against": other_label}
     if len(children) < total:
         rec["children_truncated"] = True

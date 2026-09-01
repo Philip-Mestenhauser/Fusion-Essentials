@@ -393,6 +393,21 @@ class TestCreate:
         assert out["members_unreadable"] == 1
         assert "counted in member_count" in out["note"]
 
+    def test_a_fully_readable_membership_omits_the_unreadable_count(self, world):
+        # the key's ABSENCE is what says every member was named. A published 0 would make
+        # "members_unreadable" in out true for every membership that read back cleanly, and the key
+        # otherwise carries a POSITIVE count - so a zero there reads as "some members went
+        # unnamed". Two named members is the 0 side of that boundary and one body member the 1 side
+        # (test_a_body_member_is_counted_but_not_named). A membership of NO members never reaches
+        # this read-back: the >= 2 DISTINCT guard refuses it first, and a set that came back empty
+        # is caught by the count gate - so set_members, which publishes the same key through the
+        # same read-back, is the other arm of this pin rather than an empty set.
+        world(occurrences=["A:1", "B:1"])
+        out = payload(ec.handler(action="create", members=["A:1", "B:1"]))
+        assert "members_unreadable" not in out
+        assert out["member_count"] == 2 and out["members"] == ["A:1", "B:1"]
+        assert "not named in members" not in out["note"]
+
     def test_a_create_that_raises_but_lands_reports_the_set_and_the_raise(self, world):
         # a raise is not proof nothing landed - reporting failure over a created set would leave the
         # caller unable to address it.
@@ -514,6 +529,29 @@ class TestSetMembers:
         world(sets=_ContactSets([cs]), occurrences=["A:1", "B:1"])
         assert "2 DISTINCT" in error_message(
             ec.handler(action="set_members", name="ContactSet1", members=["A:1"]))
+
+    def test_a_body_member_is_counted_but_not_named(self, world):
+        # the read-back a body member takes here is create's: an object both casts reject counts
+        # toward member_count and is disclosed as unreadable, rather than dropped from the
+        # membership the caller is being told the set now holds.
+        cs = _ContactSet("ContactSet1", members=[_Occ("A:1"), _Occ("B:1")])
+        world(sets=_ContactSets([cs]), occurrences=["A:1"], bodies=["Block"])
+        out = payload(ec.handler(action="set_members", name="ContactSet1",
+                                 members=["A:1", "Block"]))
+        assert out["member_count"] == 2 and out["members"] == ["A:1"]
+        assert out["members_unreadable"] == 1
+        assert "counted in member_count" in out["note"]
+
+    def test_a_fully_readable_membership_omits_the_unreadable_count(self, world):
+        # the other arm of create's pin, on the second action publishing the key: withholding it at
+        # zero has to hold here too, or a fully named replacement membership tells the caller it
+        # landed members the set cannot name.
+        cs = _ContactSet("ContactSet1", members=[_Occ("A:1"), _Occ("B:1")])
+        world(sets=_ContactSets([cs]), occurrences=["A:1", "B:1", "C:1"])
+        out = payload(ec.handler(action="set_members", name="ContactSet1", members=["A:1", "C:1"]))
+        assert "members_unreadable" not in out
+        assert out["member_count"] == 2 and out["members"] == ["A:1", "C:1"]
+        assert "not named in members" not in out["note"]
 
 
 class TestRename:

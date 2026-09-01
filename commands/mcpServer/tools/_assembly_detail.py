@@ -161,12 +161,13 @@ def _value_now(j):
     return out or None
 
 
-# Wire key -> (the JointMotion member holding that heading, the joint kinds whose DOF has it). A
-# revolute and a cylindrical TURN, a slider and a cylindrical SLIDE. The kinds NOT in this table -
-# pin_slot, planar, ball - are deliberately unread: which heading members those motion classes
-# expose is unmeasured, so their rows carry no direction rather than a guessed one.
-_MOTION_AXES = (("rotation_axis", "rotationAxisVector", ("revolute", "cylindrical")),
-                ("slide_direction", "slideDirectionVector", ("slider", "cylindrical")))
+# Wire key -> (the JointMotion member holding that heading, the joint kinds whose DOF has it). The
+# kind sets are _joints' shared pairing, the same one joint_drive picks its value and limit members
+# through. The kinds in NEITHER set - rigid, ball, planar, pin_slot - are deliberately unread here:
+# which heading members those motion classes expose is unmeasured, so their rows carry no direction
+# rather than a guessed one.
+_MOTION_AXES = (("rotation_axis", "rotationAxisVector", _joints.DRIVES_ANGLE),
+                ("slide_direction", "slideDirectionVector", _joints.DRIVES_SLIDE))
 
 
 def _motion_axes(j, kind):

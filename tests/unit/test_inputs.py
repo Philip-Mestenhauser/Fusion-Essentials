@@ -3886,6 +3886,27 @@ class TestTargetRef:
         assert "occurrence name/fullPathName" in err and "find_geometry" in err
         assert "rename" not in err.lower()
 
+    def test_a_placed_components_name_answers_with_its_OCCURRENCE(self):
+        # Fusion names an instance '<component>:<n>', so the occurrence step's name match reaches a
+        # placed component's own name before the component step below it ever runs. The occurrence
+        # is the right answer - it carries the placement - and this is the boundary the next test
+        # marks the other side of: the component step is what answers for a component NOTHING places.
+        _install_target(occurrences=[_FakeOcc("Frame:1", "Frame:1")], components=["Frame"])
+        (ent, kind), err = inp.TargetRef("target").resolve("Frame")
+        assert err is None and kind == "occurrence" and ent.fullPathName == "Frame:1"
+
+    def test_an_UNPLACED_components_name_resolves_through_the_component_step(self):
+        # A component no occurrence places has no occurrence spelling at all, so the component step
+        # is its ONLY address: the root component (never placed - it IS the design) and a component
+        # whose instances were removed both land here. Every occurrence in the design is unrelated,
+        # so the step above answers a plain miss and this one answers the name.
+        _install_target(occurrences=[_FakeOcc("Frame:1", "Frame:1")], components=["Fixture"])
+        (ent, kind), err = inp.TargetRef("target").resolve("Fixture")
+        assert err is None and kind == "component" and ent.name == "Fixture"
+        # the root is the always-present case of the same shape - no occurrence places it either
+        (root_ent, root_kind), root_err = inp.TargetRef("target").resolve("Root")
+        assert root_err is None and root_kind == "component" and root_ent.name == "Root"
+
     def test_body_by_name(self):
         b = FakeBRep("Plate", is_solid=True)
         _install_target(brep_named={"Plate": b})
@@ -4724,14 +4745,16 @@ class TestSketchRefListRunsTheOneSharedWalk:
     def test_the_cap_lists_every_name_at_the_limit(self, monkeypatch):
         names = [f"S{i:02d}" for i in range(inp._SKETCH_NAMES_LISTED)]
         _got, err = self._resolve(monkeypatch, [self._comp("Root", names)], "Ghost")
-        assert "more)" not in err              # nothing was held back, so nothing is counted
+        assert "not listed" not in err         # nothing was held back, so nothing is counted
         for n in names:
             assert n in err
 
     def test_one_name_over_the_limit_is_counted_not_printed(self, monkeypatch):
+        # The remainder is worded by the shared renderer, so this listing discloses what it held
+        # back in the same words every other refusal a caller reads uses.
         names = [f"S{i:02d}" for i in range(inp._SKETCH_NAMES_LISTED + 1)]
         _got, err = self._resolve(monkeypatch, [self._comp("Root", names)], "Ghost")
-        assert "... (+1 more)" in err
+        assert "... (+1 more not listed)" in err
         assert names[-1] not in err
 
     def test_a_design_holding_no_sketch_says_none(self, monkeypatch):
@@ -4779,3 +4802,540 @@ class TestEntityComponent:
         owner = MakeComp(name="Plate")
         line = types.SimpleNamespace(parentSketch=types.SimpleNamespace(parentComponent=owner))
         assert inp.entity_component(line) is owner
+
+
+# ── every list a refusal prints DISCLOSES what it left out ───────────────────────────────────────
+#
+# A refusal that lists names is the caller's whole vocabulary for the retry: the names printed are
+# the ones it can pass back. Each of these lists is rendered by _common.named_with_remainder, so a
+# list longer than the cap COUNTS what it held back instead of stopping at the last named one - a
+# silently cut list reads as the complete set, and the entry the caller wanted may be the one gone.
+
+# The shared cap itself, read from its owner: these tests pin the DISCLOSURE, not the number.
+_CAP = inp._common._MAX_NAMED_CANDIDATES
+# The one over-cap design every test here builds: cap + 1 candidates, so exactly one is held back.
+_OVER = _CAP + 1
+_HELD_BACK = "(+1 more not listed)"
+
+
+def _pin_placed(count, comp_name="Jaw", body_name="Pin"):
+    """One body named `body_name` placed `count` times - the shape a bare body name is ambiguous
+    in, since each placement is its own candidate."""
+    native = BRepBody(body_name, entity_token="TOK-NATIVE")
+    occ_bodies = []
+    for i in range(1, count + 1):
+        path = f"{comp_name}:{i}"
+        occ = types.SimpleNamespace(name=path, fullPathName=path)
+        occ_bodies.append((path, [body_proxy(native, occ)]))
+    _install_native_and_proxy(comp_bodies=[native], comp_name=comp_name, occ_bodies=occ_bodies)
+
+
+def _case_variants(word, n):
+    """`n` distinct case spellings of `word`, the first being `word` itself - the shape ONE scope
+    holds several bodies of one name in, since the body-name match is case-insensitive."""
+    out = [word]
+    for bits in range(1, 2 ** len(word)):
+        v = "".join(c.upper() if bits >> i & 1 else c.lower() for i, c in enumerate(word))
+        if v not in out:
+            out.append(v)
+        if len(out) == n:
+            break
+    return out
+
+
+class _TokenBody(FakeBody):
+    """A body carrying its own entityToken - what tells two same-named bodies in ONE scope apart
+    (_body_key groups on the token first, and falls back to (name, scope), which they share)."""
+    def __init__(self, name, token, owner="Frame"):
+        super().__init__(name)
+        self.entityToken = token
+        self.parentComponent = types.SimpleNamespace(name=owner)
+
+
+class TestRefusalListsDiscloseTheirRemainder:
+    def test_a_bare_body_name_over_the_cap_counts_the_placements_it_did_not_name(self):
+        _pin_placed(_OVER)
+        val, err = inp.BodyRef("body").resolve("Pin")
+        assert val is None and f"names {_OVER} bodies" in err
+        assert err.count(":Pin'") == _CAP                  # the cap still bounds the list
+        assert f"'Jaw:{_OVER}:Pin'" not in err and _HELD_BACK in err
+
+    def test_a_bare_body_name_AT_the_cap_names_every_placement_and_counts_nothing(self):
+        # The boundary the disclosure must not fire at: the cap'th candidate is printed, and a
+        # refusal that named everything it had says nothing about a remainder.
+        _pin_placed(_CAP)
+        val, err = inp.BodyRef("body").resolve("Pin")
+        assert val is None and f"names {_CAP} bodies" in err
+        assert err.count(":Pin'") == _CAP and f"'Jaw:{_CAP}:Pin'" in err
+        assert "not listed" not in err
+
+    def test_a_qualified_prefix_over_the_cap_counts_the_placements_it_did_not_name(self):
+        # 'Jaw:Pin' names the component, which every instance answers to - so the prefix narrows
+        # nothing and the same list is refused, one entry per placement.
+        _pin_placed(_OVER)
+        val, err = inp.BodyRef("body").resolve("Jaw:Pin")
+        assert val is None and f"still names {_OVER} bodies" in err
+        assert f"'Jaw:{_CAP}:Pin'" in err and f"'Jaw:{_OVER}:Pin'" not in err
+        assert _HELD_BACK in err
+
+    def test_a_scope_holding_over_the_cap_of_ONE_body_name_counts_the_rest(self):
+        # _bodies_named_in answers EVERY body of that name in one scope, so this list is as long as
+        # the scope makes it. Asked in the '/' spelling, which resolves like the ':' one and keeps
+        # the echoed spec out of the candidate count.
+        _install_bodies(components={"Frame": [_TokenBody("Pin", f"TOK-{i}") for i in range(_OVER)]})
+        val, err = inp.BodyRef("body").resolve("Frame/Pin")
+        assert val is None and f"names {_OVER} bodies" in err
+        assert err.count("'Frame:Pin'") == _CAP and _HELD_BACK in err
+
+    def test_a_scope_that_holds_no_such_name_counts_the_bodies_it_did_not_list(self):
+        # The miss lists what the scope DOES hold, which is what the caller picks its retry from.
+        _install_bodies(components={"Frame": [FakeBody(f"Body{i}") for i in range(_OVER)]})
+        val, err = inp.BodyRef("body").resolve("Frame:Ghost")
+        assert val is None and "holds no body named 'Ghost'" in err
+        assert err.count("'Body") == _CAP and _HELD_BACK in err
+
+    def test_a_multi_body_component_over_the_cap_counts_the_bodies_it_did_not_name(self):
+        _install_bodies(components={"Frame": [FakeBody(f"Body{i}") for i in range(_OVER)]})
+        val, err = inp.BodyRef("body").resolve("Frame")
+        assert val is None and f"holding {_OVER} bodies" in err
+        assert err.count("'Body") == _CAP and _HELD_BACK in err
+
+    # The SCOPED resolve prints three lists of its own - the placements a component scope cannot
+    # separate, the bodies one scope holds under a single name, and what a scope holds when the name
+    # misses - and each is as long as the design makes it.
+
+    def _scoped_bodies(self, raw, component):
+        return inp.BodyRefList("bodies", scope_input="component").resolve(raw, component)
+
+    def test_a_scope_over_the_cap_of_placements_counts_the_ones_it_did_not_name(self, monkeypatch):
+        # A component name answers EVERY placement of it, so a component placed this often leaves
+        # that many candidates inside the scope the caller did narrow to.
+        _install_shared_body_name(
+            monkeypatch, placements=tuple(f"Bracket:{i}" for i in range(1, _OVER + 1)))
+        got, err = self._scoped_bodies(["Body1"], "Bracket")
+        assert got is None and f"still names {_OVER} bodies" in err
+        assert err.count(":Body1'") == _CAP and f"'Bracket:{_CAP}:Body1'" in err
+        assert f"'Bracket:{_OVER}:Body1'" not in err and _HELD_BACK in err
+
+    def test_a_scope_AT_the_cap_of_placements_names_every_one_and_counts_nothing(self, monkeypatch):
+        _install_shared_body_name(
+            monkeypatch, placements=tuple(f"Bracket:{i}" for i in range(1, _CAP + 1)))
+        got, err = self._scoped_bodies(["Body1"], "Bracket")
+        assert got is None and f"still names {_CAP} bodies" in err
+        assert err.count(":Body1'") == _CAP and f"'Bracket:{_CAP}:Body1'" in err
+        assert "not listed" not in err
+
+    def test_one_scope_holding_over_the_cap_of_ONE_name_counts_the_rest(self, monkeypatch):
+        # The scope is asked directly - the one path a component no occurrence places is reached by -
+        # and it answers every body of that name at once.
+        names = _case_variants("pins", _OVER)
+        _install_unplaced_component(monkeypatch, names)
+        got, err = self._scoped_bodies([names[0]], "Bracket")
+        assert got is None and f"holds {_OVER} bodies named '{names[0]}'" in err
+        assert err.count("'Bracket:") == _CAP and f"'Bracket:{names[_CAP - 1]}'" in err
+        assert f"'Bracket:{names[_OVER - 1]}'" not in err and _HELD_BACK in err
+
+    def test_one_scope_holding_the_cap_of_ONE_name_names_every_body(self, monkeypatch):
+        names = _case_variants("pins", _CAP)
+        _install_unplaced_component(monkeypatch, names)
+        got, err = self._scoped_bodies([names[0]], "Bracket")
+        assert got is None and f"holds {_CAP} bodies named '{names[0]}'" in err
+        assert err.count("'Bracket:") == _CAP and f"'Bracket:{names[_CAP - 1]}'" in err
+        assert "not listed" not in err
+
+    def test_a_scoped_miss_over_the_cap_counts_the_bodies_it_did_not_list(self, monkeypatch):
+        # What the scope DOES hold is the caller's whole vocabulary for the retry.
+        _install_unplaced_component(monkeypatch, [f"Body{i}" for i in range(_OVER)])
+        got, err = self._scoped_bodies(["Ghost"], "Bracket")
+        assert got is None and "holds no body named 'Ghost'" in err
+        assert err.count("'Body") == _CAP and f"'Body{_CAP - 1}'" in err
+        assert f"'Body{_OVER - 1}'" not in err and _HELD_BACK in err
+
+    def test_a_scoped_miss_AT_the_cap_names_every_body_it_holds(self, monkeypatch):
+        _install_unplaced_component(monkeypatch, [f"Body{i}" for i in range(_CAP)])
+        got, err = self._scoped_bodies(["Ghost"], "Bracket")
+        assert got is None and "holds no body named 'Ghost'" in err
+        assert err.count("'Body") == _CAP and f"'Body{_CAP - 1}'" in err
+        assert "not listed" not in err
+
+    def test_an_ambiguous_feature_name_over_the_cap_counts_the_objects_it_did_not_name(self):
+        objs = [_tl_obj("Fillet1", i) for i in range(_OVER)]
+        obj, err = inp.resolve_timeline_object(objs, "Fillet1", "'feature'")
+        assert obj is None and f"matches {_OVER} timeline objects" in err
+        assert err.count("Fillet1@") == _CAP and _HELD_BACK in err
+
+    def test_an_ambiguous_feature_name_AT_the_cap_names_every_object(self):
+        objs = [_tl_obj("Fillet1", i) for i in range(_CAP)]
+        obj, err = inp.resolve_timeline_object(objs, "Fillet1", "'feature'")
+        assert obj is None and f"matches {_CAP} timeline objects" in err
+        assert err.count("Fillet1@") == _CAP and f"Fillet1@{_CAP - 1}" in err
+        assert "not listed" not in err
+
+    def test_a_shared_plane_name_over_the_cap_counts_the_candidates_it_did_not_name(self):
+        _install_planes(subs=[(f"C{i}", ["Mid"], [f"C{i}:1"]) for i in range(_OVER)])
+        val, err = inp.PlaneRef("plane").resolve("Mid")
+        assert val is None and f"{_OVER} construction planes share that name" in err
+        assert err.count(":1:Mid") == _CAP and _HELD_BACK in err
+
+    def test_a_plane_whose_owner_is_placed_over_the_cap_times_counts_the_instances(self):
+        _install_planes(subs=[("Jaw", ["Mid"], [f"Jaw:{i}" for i in range(1, _OVER + 1)])])
+        val, err = inp.PlaneRef("plane").resolve("Mid")
+        assert val is None and f"placed {_OVER} times" in err
+        assert err.count("Jaw:") == _CAP and _HELD_BACK in err
+
+    def test_the_construction_axis_miss_counts_the_axes_it_did_not_list(self, axis_env):
+        listed = 10                 # this listing carries a cap of its own, wider than the shared one
+        axis_env(axes=[_FakeConstructionAxis(f"Ax{i:02d}") for i in range(listed + 1)])
+        val, err = inp.AxisRef("axis").resolve("Nope")
+        assert val is None and "Construction axes in 'Active':" in err
+        assert err.count("Ax") == listed and _HELD_BACK in err
+
+    def test_an_ambiguous_joint_origin_name_over_the_cap_counts_the_candidates(self):
+        comps = [_Comp(f"C{i}", [_JO("Center")]) for i in range(_OVER)]
+        root = _RootJO(jos=[], occ_by_comp={c.name: [_OccJO(f"{c.name}:1", c)] for c in comps})
+        jo, err = _install_jo(_DesignJO(root, subs=comps)).resolve("Center")
+        assert jo is None and f"{_OVER} Joint Origins share that name" in err
+        assert err.count(":1:Center") == _CAP and _HELD_BACK in err
+
+    def test_the_joint_origin_miss_counts_the_names_it_did_not_list(self):
+        design = _DesignJO(_RootJO(jos=[_JO(f"JO{i}") for i in range(_OVER)]))
+        jo, err = _install_jo(design).resolve("Nope")
+        assert jo is None and "no Joint Origin named 'Nope'" in err
+        assert err.count("'JO") == _CAP and _HELD_BACK in err
+
+    def test_a_token_naming_more_entities_than_its_cap_counts_the_rest(self, token_env):
+        # The candidate list a handle's ambiguity refusal prints is what the caller judges "which of
+        # these did I mean" from, so a hit past the cap has to be COUNTED, not dropped.
+        n = inp._TOKEN_CANDIDATES_LISTED + 1
+        token_env({"TOK": [_SplitFace((float(i), 0.0, 0.0), context=f"Arm:{i}") for i in range(n)]})
+        val, err = inp.GeometryHandle("on_face", require="planar_face").resolve("TOK")
+        assert val is None and f"{n} entities" in err
+        assert err.count("Arm:") == inp._TOKEN_CANDIDATES_LISTED
+        assert f"Arm:{n - 1}" not in err and _HELD_BACK in err
+
+    def test_a_token_naming_exactly_its_cap_of_entities_names_every_one(self, token_env):
+        n = inp._TOKEN_CANDIDATES_LISTED
+        token_env({"TOK": [_SplitFace((float(i), 0.0, 0.0), context=f"Arm:{i}") for i in range(n)]})
+        val, err = inp.GeometryHandle("on_face", require="planar_face").resolve("TOK")
+        assert val is None and f"{n} entities" in err
+        assert err.count("Arm:") == n and f"Arm:{n - 1}" in err
+        assert "not listed" not in err
+
+    def test_a_datum_whose_owner_is_placed_over_the_cap_times_counts_the_paths(self, axis_env):
+        # single_placement's refusal IS the caller's list of instances to re-address from, and it
+        # reaches the wire through every consumer of a possibly-foreign entity (an axis, a moved
+        # body, a pattern direction) - one line per placement is what an unbounded join costs there.
+        env = axis_env()
+        wheel = MakeComp(name="Wheel", entity_token="TOKEN:Wheel")
+        axis, _ = _datum_in(wheel, (0, 0, 0), world_origin=(5, 0, 0))
+        env.place(wheel, *[f"Assy:1+Wheel:{i}" for i in range(1, _OVER + 1)])
+        pair, err = inp.axis_line_of("rotate_axis", axis)
+        assert pair is None and f"placed {_OVER} times" in err
+        assert err.count("Assy:1+Wheel:") == _CAP and _HELD_BACK in err
+
+    def test_a_datum_whose_owner_is_placed_AT_the_cap_names_every_path(self, axis_env):
+        env = axis_env()
+        wheel = MakeComp(name="Wheel", entity_token="TOKEN:Wheel")
+        axis, _ = _datum_in(wheel, (0, 0, 0), world_origin=(5, 0, 0))
+        env.place(wheel, *[f"Assy:1+Wheel:{i}" for i in range(1, _CAP + 1)])
+        pair, err = inp.axis_line_of("rotate_axis", axis)
+        assert pair is None and f"placed {_CAP} times" in err
+        assert err.count("Assy:1+Wheel:") == _CAP and f"Assy:1+Wheel:{_CAP}" in err
+        assert "not listed" not in err
+
+    def test_the_profile_selectors_sketch_miss_counts_the_names_it_did_not_list(self, monkeypatch):
+        # Both answers to "which sketches does this design hold" render through
+        # _available_sketch_names, so the profile selector's miss and SketchRefList's miss cannot
+        # differ in length on one design.
+        n = inp._SKETCH_NAMES_LISTED + 1
+        _install_profiles(sketches=[(f"S{i:02d}", [FakeProfile(f"p{i}")]) for i in range(n)],
+                          monkeypatch=monkeypatch)
+        val, err = inp.ProfileRef("profile").resolve({"sketch": "Nope", "profile_index": 0})
+        assert val is None and "no sketch named 'Nope'" in err
+        assert f"S{n - 2:02d}" in err and f"S{n - 1:02d}" not in err
+        assert _HELD_BACK in err
+
+    def test_the_profile_selectors_sketch_miss_names_every_sketch_AT_the_cap(self, monkeypatch):
+        n = inp._SKETCH_NAMES_LISTED
+        _install_profiles(sketches=[(f"S{i:02d}", [FakeProfile(f"p{i}")]) for i in range(n)],
+                          monkeypatch=monkeypatch)
+        val, err = inp.ProfileRef("profile").resolve({"sketch": "Nope", "profile_index": 0})
+        assert val is None and f"S{n - 1:02d}" in err
+        assert "not listed" not in err
+
+
+class TestJointOriginMissTellsNamesakesApart:
+    """The MISS listing is the caller's whole vocabulary for the retry. A name it prints twice has
+    restated the count and named nothing, so a repeated name gives way to its qualified form."""
+
+    def _design(self, *comp_names_and_jos):
+        comps = [_Comp(name, [_JO(jo) for jo in jos]) for name, jos in comp_names_and_jos]
+        root = _RootJO(jos=[], occ_by_comp={c.name: [_OccJO(f"{c.name}:1", c)] for c in comps})
+        return _DesignJO(root, subs=comps)
+
+    def test_a_name_two_joint_origins_share_prints_the_forms_that_tell_them_apart(self):
+        jo, err = _install_jo(self._design(("A", ["Center"]), ("B", ["Center"]))).resolve("Nope")
+        assert jo is None and "no Joint Origin named 'Nope'" in err
+        assert "'A:1:Center'" in err and "'B:1:Center'" in err
+        assert "'Center'" not in err          # the bare name addresses neither of them
+
+    def test_a_name_only_one_joint_origin_carries_stays_the_bare_name(self):
+        # A discriminator where the name already identifies one separates nothing, and the bare name
+        # is the string this input resolves.
+        jo, err = _install_jo(self._design(("A", ["Grip"]), ("B", ["Center"]))).resolve("Nope")
+        assert jo is None
+        assert "'Grip'" in err and "'Center'" in err
+        assert "A:1:Grip" not in err and "B:1:Center" not in err
+
+
+# ── BodyRefList's component SCOPE: the answer to the auto-named 'Body1' ──────────────────────────
+#
+# Fusion names every component's first body 'Body1', so a design-wide body NAME is shared by
+# construction. The scope narrows the name to ONE component (or ONE placement) exactly as the sketch
+# scope does, and it filters the SAME per-placement candidate set the unscoped walk resolves from -
+# so a scope decides WHICH candidate answers and never changes what a body reference resolves to.
+
+def _install_shared_body_name(monkeypatch, name="Body1", placements=("Bracket:1",)):
+    """A root component 'Carrier' owning a body called `name` natively, plus a sub-component
+    'Bracket' owning one of the SAME name reached through each path in `placements`. Returns
+    (the root's native body, [each placement's proxy])."""
+    import adsk.fusion
+    monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
+    sub_body = BRepBody(name, entity_token="TOK-SUB")
+    sub = MakeComp(name="Bracket", bodies=[sub_body], entity_token="TOKEN:Bracket")
+    sub_body.parentComponent = sub
+    occs, proxies = [], []
+    for path in placements:
+        occ = types.SimpleNamespace(name=path, fullPathName=path, component=sub)
+        proxy = body_proxy(sub_body, occ)
+        occ.bRepBodies = _NamedCollection([proxy])
+        occs.append(occ)
+        proxies.append(proxy)
+    root_body = BRepBody(name, entity_token="TOK-ROOT")
+    root = MakeComp(name="Carrier", bodies=[root_body], occurrences=occs,
+                    entity_token="TOKEN:Carrier")
+    root_body.parentComponent = root
+    design = make_design(comp=root, all_components=[root, sub])
+    monkeypatch.setattr(inp._common, "design", lambda: design)
+    monkeypatch.setattr(inp._common, "target_component", lambda _d=None: root)
+    return root_body, proxies
+
+
+def _install_cased_bodies(monkeypatch):
+    """One PLACED component holding 'Pin' and 'pin' - the pair a case-insensitive match widens to.
+    Returns (the 'Pin' proxy, the 'pin' proxy)."""
+    import adsk.fusion
+    monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
+    upper, lower = BRepBody("Pin", entity_token="TOK-UPPER"), BRepBody("pin", entity_token="TOK-LOWER")
+    sub = MakeComp(name="Bracket", bodies=[upper, lower], entity_token="TOKEN:Bracket")
+    upper.parentComponent = lower.parentComponent = sub
+    occ = types.SimpleNamespace(name="Bracket:1", fullPathName="Bracket:1", component=sub)
+    proxies = (body_proxy(upper, occ), body_proxy(lower, occ))
+    occ.bRepBodies = _NamedCollection(list(proxies))
+    root = MakeComp(name="Carrier", occurrences=[occ], entity_token="TOKEN:Carrier")
+    design = make_design(comp=root, all_components=[root, sub])
+    monkeypatch.setattr(inp._common, "design", lambda: design)
+    monkeypatch.setattr(inp._common, "target_component", lambda _d=None: root)
+    return proxies
+
+
+def _install_unplaced_component(monkeypatch, body_names):
+    """A 'Bracket' component holding `body_names` that NO occurrence places - the one scope the
+    design-wide walk cannot reach. Returns its native bodies."""
+    import adsk.fusion
+    monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
+    bodies = [BRepBody(n, entity_token=f"TOK-{n}") for n in body_names]
+    sub = MakeComp(name="Bracket", bodies=bodies, entity_token="TOKEN:Bracket")
+    for b in bodies:
+        b.parentComponent = sub
+    root = MakeComp(name="Carrier", entity_token="TOKEN:Carrier")
+    design = make_design(comp=root, all_components=[root, sub])
+    monkeypatch.setattr(inp._common, "design", lambda: design)
+    monkeypatch.setattr(inp._common, "target_component", lambda _d=None: root)
+    return bodies
+
+
+class _UnnamedOcc:
+    """An occurrence whose COMPONENT reads while its own fullPathName and name do not - what a scope
+    resolved by HANDLE can still be left holding."""
+
+    def __init__(self, comp):
+        self.component = comp
+
+    @property
+    def fullPathName(self):
+        raise RuntimeError("path unavailable")
+
+    @property
+    def name(self):
+        raise RuntimeError("name unavailable")
+
+
+def _install_unnamed_placement(monkeypatch):
+    """A design whose handle 'OCCTOK' resolves to an occurrence that will not name itself."""
+    import adsk.fusion
+    monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
+    monkeypatch.setattr(adsk.fusion, "Occurrence", _UnnamedOcc, raising=False)
+    pin = BRepBody("Pin", entity_token="TOK-PIN")
+    sub = MakeComp(name="Bracket", bodies=[pin], entity_token="TOKEN:Bracket")
+    pin.parentComponent = sub
+    root = MakeComp(name="Carrier", entity_token="TOKEN:Carrier")
+    design = make_design(comp=root, all_components=[root, sub],
+                         tokens={"OCCTOK": _UnnamedOcc(sub)})
+    monkeypatch.setattr(inp._common, "design", lambda: design)
+    monkeypatch.setattr(inp._common, "target_component", lambda _d=None: root)
+    return design
+
+
+class TestBodyRefListComponentScope:
+    def _scoped(self, **kw):
+        return inp.BodyRefList("bodies", scope_input="component", **kw)
+
+    def test_a_shared_body_name_with_no_scope_is_refused_naming_the_scope_input(self, monkeypatch):
+        # The qualified spellings stay the primary remedy; the scope is the second way out, and a
+        # tool that declares one must say so or the caller never learns its own input narrows this.
+        _install_shared_body_name(monkeypatch)
+        got, err = self._scoped().resolve(["Body1"])
+        assert got is None and "names 2 bodies" in err
+        assert "'Carrier:Body1'" in err and "'Bracket:1:Body1'" in err
+        assert "'component'" in err
+
+    def test_a_kind_declaring_no_scope_input_never_names_one(self, monkeypatch):
+        # A refusal may only name an input the consuming tool's schema actually takes.
+        _install_shared_body_name(monkeypatch)
+        got, err = inp.BodyRefList("bodies").resolve(["Body1"])
+        assert got is None and "names 2 bodies" in err
+        assert "'component'" not in err
+
+    def test_the_scope_picks_the_named_components_body(self, monkeypatch):
+        _native, proxies = _install_shared_body_name(monkeypatch)
+        got, err = self._scoped().resolve(["Body1"], "Bracket")
+        assert err is None and got == [proxies[0]]
+
+    def test_the_scope_picks_the_ROOT_owned_body_when_it_names_the_root(self, monkeypatch):
+        native, _proxies = _install_shared_body_name(monkeypatch)
+        got, err = self._scoped().resolve(["Body1"], "Carrier")
+        assert err is None and got == [native]
+
+    def test_the_scope_narrows_EVERY_name_in_the_list(self, monkeypatch):
+        # A list resolves one name at a time, so a scope applied to the first element only would
+        # machine one component's body beside another's and report the same count either way.
+        _native, proxies = _install_shared_body_name(monkeypatch)
+        got, err = self._scoped().resolve(["Body1", "Body1"], "Bracket")
+        assert err is None and got == [proxies[0], proxies[0]]
+
+    def test_a_scope_the_design_does_not_hold_is_refused(self, monkeypatch):
+        # An input a caller can get wrong without being told is a trap: dropping the unusable scope
+        # would resolve against a design the caller never scoped.
+        _install_shared_body_name(monkeypatch)
+        got, err = self._scoped().resolve(["Body1"], "Ghost")
+        assert got is None and "No component named 'Ghost'" in err
+
+    def test_a_name_the_scope_does_not_hold_lists_what_it_holds(self, monkeypatch):
+        _install_shared_body_name(monkeypatch)
+        got, err = self._scoped().resolve(["Ghost"], "Bracket")
+        assert got is None
+        assert "'Bracket'" in err and "no body named 'Ghost'" in err and "'Body1'" in err
+
+    def test_a_handle_still_resolves_under_a_scope(self, monkeypatch):
+        # The scope narrows the NAME vocabulary; a handle addresses one body already, and refusing
+        # it for sitting outside the scope would reject a reference that names its instance.
+        native, _proxies = _install_shared_body_name(monkeypatch)
+        design = inp._common.design()
+        monkeypatch.setattr(design, "_tokens", {"TOK-ROOT": native}, raising=False)
+        got, err = self._scoped().resolve(["TOK-ROOT"], "Bracket")
+        assert err is None and got == [native]
+
+    def test_a_component_scope_cannot_separate_two_placements_and_says_so(self, monkeypatch):
+        # A component NAME answers every instance of it, so a body in a twice-placed component stays
+        # ambiguous under that scope - resolving there would pick a placement the caller did not.
+        _install_shared_body_name(monkeypatch, placements=("Bracket:1", "Bracket:2"))
+        got, err = self._scoped().resolve(["Body1"], "Bracket")
+        assert got is None and "names 2 bodies" in err
+        assert "'Bracket:1:Body1'" in err and "'Bracket:2:Body1'" in err
+
+    def test_an_occurrence_path_scope_picks_ONE_placement(self, monkeypatch):
+        # The remedy the refusal above leaves has to work: the occurrence half of the scope's own
+        # vocabulary names one instance, and that instance's proxy is what resolves.
+        _native, proxies = _install_shared_body_name(monkeypatch,
+                                                     placements=("Bracket:1", "Bracket:2"))
+        got, err = self._scoped().resolve(["Body1"], "Bracket:2")
+        assert err is None and got == [proxies[1]]
+
+    def test_a_scope_with_no_active_design_is_refused_in_its_own_words(self, monkeypatch):
+        # The scope is resolved against the design, so with none there is nothing to narrow to. The
+        # sentence has to describe what THIS call was resolving: the vocabularies underneath refuse
+        # in their own nouns ("to resolve the occurrence against"), which sends the caller to fix a
+        # scope spelling when the design is what is missing.
+        monkeypatch.setattr(inp._common, "design", lambda: None)
+        got, err = self._scoped().resolve(["Body1"], "Bracket")
+        assert got is None
+        assert err == "No active design to resolve the body names against."
+
+    def test_a_case_variant_inside_the_scope_does_not_manufacture_an_ambiguity(self, monkeypatch):
+        # The match is case-insensitive, so a scope holding 'Pin' and 'pin' WIDENS to two hits. The
+        # one spelled exactly as asked is the answer, exactly as on the unscoped path.
+        upper, _lower = _install_cased_bodies(monkeypatch)
+        got, err = self._scoped().resolve(["Pin"], "Bracket")
+        assert err is None and got == [upper]
+
+    def test_a_scope_no_occurrence_places_is_asked_directly(self, monkeypatch):
+        # A component nothing places is the one scope the design-wide walk cannot reach - it walks
+        # the active component, the root and each occurrence - so the scope answers for itself.
+        native = _install_unplaced_component(monkeypatch, ["Pin"])[0]
+        got, err = self._scoped().resolve(["Pin"], "Bracket")
+        assert err is None and got == [native]
+
+    def test_an_unplaced_scope_holding_the_name_twice_is_refused(self, monkeypatch):
+        # Two bodies answering one name inside the ONE scope that was asked directly: picking either
+        # would be the first-match this resolver exists to refuse.
+        _install_unplaced_component(monkeypatch, ["Pin", "pin"])
+        got, err = self._scoped().resolve(["Pin"], "Bracket")
+        assert got is None and "holds 2 bodies named 'Pin'" in err
+        assert "'Bracket:Pin'" in err and "'Bracket:pin'" in err
+
+    def test_a_scope_whose_placement_will_not_name_itself_is_refused(self, monkeypatch):
+        # The scope RESOLVED - its component read - but neither its path nor its name did, so there
+        # is no key to narrow a body reference by. Narrowing on the empty key set would match every
+        # candidate and silently resolve design-wide under a scope the caller did pass.
+        _install_unnamed_placement(monkeypatch)
+        got, err = self._scoped().resolve(["Pin"], "OCCTOK")
+        assert got is None and "nothing that names what it resolved to could be read" in err
+
+    def test_a_scope_passed_with_an_EMPTY_list_is_refused(self, monkeypatch):
+        # There is no name for the scope to narrow, so it applies to nothing while the consuming
+        # tool goes on acting on the empty form - the form the caller asked to narrow. Dropping it
+        # leaves that caller believing a scope took.
+        _install_shared_body_name(monkeypatch)
+        got, err = self._scoped().resolve([], "Bracket")
+        assert got is None
+        assert "'component' was passed with an empty 'bodies'" in err
+        assert "would apply to nothing" in err
+
+    def test_an_unresolvable_scope_with_an_empty_list_is_refused_too(self, monkeypatch):
+        # The empty-list refusal fires ahead of any scope resolution, so it refuses whatever the
+        # scope spells - a component the design does not hold included.
+        _install_shared_body_name(monkeypatch)
+        got, err = self._scoped().resolve([], "Ghost")
+        assert got is None and "'component'" in err and "'bodies'" in err
+
+    def test_an_empty_list_with_no_scope_still_resolves_to_no_bodies(self, monkeypatch):
+        # The empty form is what a consumer switches its whole-scope behaviour on (cam_select_geometry
+        # machines the setup's own models there) - only a scope beside it is refused.
+        _install_shared_body_name(monkeypatch)
+        got, err = self._scoped().resolve([], "")
+        assert err is None and got == []
+
+    def test_a_kind_declaring_no_scope_input_never_refuses_on_a_component(self, monkeypatch):
+        # A refusal may only name an input the consuming tool's schema takes, and a kind carrying no
+        # scope input takes no component value at all.
+        _install_shared_body_name(monkeypatch)
+        got, err = inp.BodyRefList("bodies").resolve([], "Bracket")
+        assert err is None and got == []
+
+    def test_a_REQUIRED_empty_list_still_asks_for_a_body_first(self, monkeypatch):
+        # The scope is the secondary problem there: the call cannot proceed without a body either
+        # way, so the refusal names the missing list rather than the input beside it.
+        _install_shared_body_name(monkeypatch)
+        got, err = self._scoped(required=True).resolve([], "Bracket")
+        assert got is None and err == "'bodies' needs at least one body (handle or name)."

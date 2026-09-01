@@ -524,6 +524,124 @@ class TestIsEmptyToolpath:
             operation_state=adsk.cam.OperationStates.IsInvalidOperationState)) is False
 
 
+class _UnreadableSuppressionFlagOp:
+    """A warned operation whose isSuppressed read RAISES while operationState reads Suppressed.
+    op_state_facts reads that flag through safe(read, False), so the facts it hands on carry
+    is_suppressed False beside operation_state 2 - the one shape only the state half answers for."""
+
+    def __init__(self):
+        self.name = "Chamfer1"
+        self.hasError = False
+        self.hasWarning = True
+        self.isGenerating = False
+        self.operationState = adsk.cam.OperationStates.SuppressedOperationState
+        self.generatingProgress = None
+        self.hasToolpath = False
+        self.isToolpathValid = False
+
+    @property
+    def isSuppressed(self):
+        raise RuntimeError("isSuppressed cannot be read on this operation")
+
+
+class TestCountsAsWarningSuppressionHalves:
+    """The overlay drops a SUPPRESSED op's warning, and it reads suppression TWO ways because the
+    two shapes carrying these facts answer differently: cam_get's per-op record
+    (_cam_read._operation_summary) publishes is_suppressed and no operation_state at all, while
+    op_state_facts reads isSuppressed through safe(read, False), which lands an unreadable flag as
+    False beside operation_state 2. Each half is pinned on the shape the other cannot answer for -
+    a fake setting both together leaves either one deletable."""
+
+    def _facts(self, **over):
+        base = {"name": "Contour1", "has_error": False, "has_warning": True, "is_suppressed": False,
+                "is_generating": False,
+                "operation_state": adsk.cam.OperationStates.IsValidOperationState,
+                "generating_progress": None, "has_toolpath": False, "is_toolpath_valid": True}
+        base.update(over)
+        return base
+
+    def test_a_warned_unsuppressed_op_counts(self):
+        assert cc.counts_as_warning(self._facts()) is True
+
+    def test_the_flag_alone_drops_the_warning_where_no_operation_state_rides(self):
+        facts = self._facts(is_suppressed=True)
+        del facts["operation_state"]                 # the record shape carries no such key
+        assert cc.counts_as_warning(facts) is False
+
+    def test_the_flag_alone_drops_the_warning_whatever_state_rides_beside_it(self):
+        # the two halves are OR'd, not coupled: the flag answers on its own, so a state reading
+        # anything but Suppressed cannot carry a flagged op's warning back into the count.
+        assert cc.counts_as_warning(self._facts(
+            is_suppressed=True,
+            operation_state=adsk.cam.OperationStates.IsInvalidOperationState)) is False
+
+    def test_the_state_alone_drops_the_warning_where_the_flag_did_not_read(self):
+        facts = cc.op_state_facts(_UnreadableSuppressionFlagOp())
+        assert facts["is_suppressed"] is False       # the raise was coerced, not observed as False
+        assert facts["operation_state"] == adsk.cam.OperationStates.SuppressedOperationState
+        assert cc.counts_as_warning(facts) is False
+
+    @pytest.mark.parametrize("state", [adsk.cam.OperationStates.IsInvalidOperationState,
+                                       adsk.cam.OperationStates.NoToolpathOperationState])
+    def test_only_the_suppressed_state_drops_the_warning_not_its_neighbours(self, state):
+        # the exact boundary of the == comparison: IsInvalid (1) and NoToolpath (3) sit either side
+        # of Suppressed (2) and are ordinary lifecycle buckets a warning still demotes.
+        assert cc.counts_as_warning(self._facts(operation_state=state)) is True
+
+
+class _UnreadableStateOp:
+    """A warned operation whose operationState read RAISES while every other lifecycle member reads.
+    op_state_facts reads that member through safe() with NO default, so the facts it hands on carry
+    operation_state None."""
+
+    def __init__(self):
+        self.name = "Contour1"
+        self.hasError = False
+        self.hasWarning = True
+        self.warning = "no geometry is selected\nassign a machining boundary"
+        self.isSuppressed = False
+        self.isGenerating = False
+        self.generatingProgress = None
+        self.hasToolpath = False
+        self.isToolpathValid = False
+
+    @property
+    def operationState(self):
+        raise RuntimeError("operationState cannot be read on this operation")
+
+
+class TestOpStateFactsUnreadableState:
+    """operationState is read with NO safe() default, because EVERY value it can answer IS a state
+    (IsValid 0, IsInvalid 1, Suppressed 2, NoToolpath 3): any default publishes one of them off a
+    read that never happened. None is what the classifiers below have to answer for."""
+
+    def _facts(self):
+        return cc.op_state_facts(_UnreadableStateOp())
+
+    def test_a_raising_state_reads_none_not_a_lifecycle_value(self):
+        facts = self._facts()
+        assert facts["operation_state"] is None
+        assert facts["has_warning"] is True and facts["is_suppressed"] is False
+
+    def test_the_warning_survives_a_state_that_did_not_read(self):
+        # the overlay drops a warning only where suppression was OBSERVED - a state that never
+        # answered is not suppression, and dropping the warning here buries a live fault
+        assert cc.counts_as_warning(self._facts()) is True
+
+    def test_the_op_is_not_bucketed_suppressed(self):
+        # the negative is the whole claim: an op nothing read a state off is not a PARKED op
+        assert cc.op_primary_state(self._facts()) != "suppressed"
+
+    def test_the_tally_counts_the_warning_and_claims_no_lifecycle_bucket(
+            self, operation_cast_passthrough):
+        tally = cc.op_state_tally([_UnreadableStateOp()])
+        assert tally["total"] == 1 and tally["warnings"] == 1
+        assert tally["warning_sample"] == {"name": "Contour1",
+                                           "warning": "no geometry is selected"}
+        assert (tally["valid"], tally["out_of_date"],
+                tally["suppressed"], tally["errored"]) == (0, 0, 0, 0)
+
+
 class TestOpPrimaryState:
     def _facts(self, **kw):
         base = dict(isSuppressed=False, hasError=False, isGenerating=False, operationState=0)
@@ -2467,6 +2585,28 @@ class TestOperationSummaryDisclosure:
         assert row["state"] == "no_toolpath"                    # its own bucket, not 'out_of_date'
         assert row["is_out_of_date"] is True                    # and still work cam_generate redoes
         assert row["blocked_by"] == ["toolpath_out_of_date"]
+
+    @pytest.mark.parametrize("state", [adsk.cam.OperationStates.IsInvalidOperationState,
+                                       adsk.cam.OperationStates.NoToolpathOperationState])
+    def test_a_suppressed_op_is_never_out_of_date_whichever_state_it_reads(
+            self, install, operation_cast_passthrough, state):
+        # The row's suppression answer comes off the isSuppressed flag alone: op_primary_state
+        # buckets a suppressed op before it reads operationState, and this conjunct is what keeps
+        # the two reads from disagreeing on one row. Suppressing DISCARDS the toolpath (measured,
+        # measure_api cam-suppress-discards-toolpath), and a parked op is not work
+        # cam_generate(skip_valid=true) redoes: the row must not call it out of date, nor hang the
+        # invalidation diagnostic that answer gates off it.
+        op = SimpleNamespace(
+            name="Chamfer", tool=SimpleNamespace(description="chamfer 6mm"), strategy="chamfer",
+            operationState=state, hasWarning=False, hasError=False,
+            hasToolpath=False, isToolpathValid=False, isGenerating=False,
+            isSuppressed=True, isOptional=False,
+            messageLog="2024-01-01 I Invalidated: Design changed: Model")
+        install(FakeCAM([_OpSetup("S1", [op])]))
+        row = _payload(cr.get_cam_operations_handler())["setups"][0]["operations"][0]
+        assert row["state"] == "suppressed"
+        assert row["is_out_of_date"] is False
+        assert "invalidation_reasons" not in row     # the WHY rides only on an out-of-date row
 
     def test_the_distinct_tools_are_tallied_across_the_returned_ops(self, install,
                                                                     operation_cast_passthrough):

@@ -72,9 +72,9 @@ def _preset_param_of(preset, candidates, word):
 
 def _plain_number(value):
     """`value` as a float when it is a number or a bare numeric string, else None (a units-carrying
-    expression like '35in/min' is None - its stored value is the converted number, not the text)."""
-    if isinstance(value, bool):
-        return None
+    expression like '35in/min' is None - its stored value is the converted number, not the text). A
+    bool is None too: the float is taken off str(value), so True reads as 'True' and refuses rather
+    than as the 1.0 float(True) gives."""
     try:
         return float(str(value).strip())
     except (TypeError, ValueError):
