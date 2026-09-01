@@ -14,7 +14,7 @@ import json
 
 import adsk.cam
 
-from conftest import load_tool
+from conftest import FakeOperation, load_tool
 
 wo = load_tool("workspace_orient")
 
@@ -601,6 +601,20 @@ class TestCam:
         assert cam["ungenerated_operations"] == 0        # NOT 78
         assert cam["suppressed_operations"] == 65
         assert cam["empty_toolpath_operations"] == 13
+
+    def test_an_op_whose_state_did_not_read_is_not_named_an_empty_toolpath(self, monkeypatch):
+        # both the count and the named row gate on _cam_common.is_empty_toolpath, and this op's
+        # operationState RAISED - it has no lifecycle to publish, so the row that says it cut
+        # nothing would be built on a state nothing read. It still counts in the census. The unread
+        # op carries the EMPTY class's own toolpath pair (isToolpathValid True, hasToolpath False),
+        # so those flags alone would name it.
+        out = self._orient(monkeypatch, [FakeOperation("Unread", has_toolpath=False,
+                                                       state_readable=False),
+                                         FakeOp(False, name="Empty1")])
+        cam = out["cam"]
+        assert cam["total_operations"] == 2
+        assert cam["empty_toolpath_operations"] == 1
+        assert cam["empty_toolpaths"] == ["Empty1"]
 
     def test_the_pointer_names_the_empty_toolpaths(self, monkeypatch):
         out = self._orient(monkeypatch, [FakeOp(True, name="Cut"),

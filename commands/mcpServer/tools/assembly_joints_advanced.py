@@ -32,7 +32,7 @@ from .joint_create_edit import (_JOINT_TYPES, _MOTIONS, _parse_snap, _resolve_in
 # locates parts, so it reports the reposition through that same reader rather than a second one.
 from .joint_at_geometry import _MOVE_TOL_CM, _move_delta, _occ_origin
 from . import _joints
-from ._joints import (AXES as _AXES, apply_motion as _apply_motion,
+from ._joints import (AXES as _AXES, DRIVES_ANY as _DRIVES_ANY, apply_motion as _apply_motion,
                       current_joint_type as _current_joint_type, is_joint_origin as _is_joint_origin,
                       pending_move_guard as _pending_move_guard)
 
@@ -291,9 +291,8 @@ _AXIS_ROLE = {
 # not claim one.
 _BALL_AXIS_NOTE = "ball motion (pitch Z / yaw X - the API accepts no other pair)"
 
-# joint_drive drives a single-value DOF and REFUSES every other motion ("only revolute, slider, and
-# cylindrical joints can be driven by value" - joint_drive.py), so the next-step pointer has to split.
-_DRIVABLE = ("revolute", "slider", "cylindrical")
+# joint_drive drives a single-value DOF and REFUSES every other motion, on the SAME shared set this
+# pointer splits on (_joints.DRIVES_ANY), so the two can never disagree about which result is posable.
 _POSE_HINT_OTHER = ("joint_drive does not drive this motion type (only revolute/slider/cylindrical "
                     "take a value) - pose the part with assembly_move.")
 
@@ -443,7 +442,7 @@ def as_built_joint_handler(occurrence_one: str = "", occurrence_two: str = "", g
             moved += f" and sliding along the frame {out['slide_axis']} axis"
     else:
         moved = _BALL_AXIS_NOTE if jtype == "ball" else f"{jtype} motion"
-    pose_hint = "Pose it with joint_drive." if jtype in _DRIVABLE else _POSE_HINT_OTHER
+    pose_hint = "Pose it with joint_drive." if jtype in _DRIVES_ANY else _POSE_HINT_OTHER
     out["note"] = (f"Occurrences joined where they already are with {moved} - an as-built joint "
                    f"moves neither part. {pose_hint}")
     # AsBuiltJoint.geometry reads null when (and only when) the motion is rigid (live-verified across

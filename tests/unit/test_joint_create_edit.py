@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import adsk.core
 
-from conftest import load_tool
+from conftest import load_tool, _NamedCollection
 
 joint = load_tool("joint_create_edit")
 
@@ -472,7 +472,10 @@ def _install_resolve_seam(monkeypatch, token_map):
     class FakeDesign:
         def __init__(self):
             self.rootComponent = SimpleNamespace(name="Root", jointOrigins=_JOCollection({}))
-            self.allComponents = []
+            # allComponents lives on the DESIGN, is a COUNTED collection (count/item) and CARRIES the
+            # root - the live shape _common.all_components reads, and the walk the shared JO walk
+            # sits on. A bare list models neither half.
+            self.allComponents = _NamedCollection([self.rootComponent])
 
         def findEntityByToken(self, h):
             e = token_map.get(h)
@@ -560,7 +563,7 @@ class TestResolveErrorListsJointOrigins:
             {"Center of Model": sub_jo}))
         design = _install_resolve_seam(monkeypatch, {})
         design.rootComponent = root
-        design.allComponents = [root, sub]
+        design.allComponents = _NamedCollection([root, sub])
         return design
 
     def test_error_names_each_jo_and_owner(self, monkeypatch):
@@ -774,13 +777,15 @@ def _install_create(monkeypatch, jo_names=("JO_A", "JO_B")):
     import adsk.fusion, adsk.core
     jos = {n: SimpleNamespace(name=n) for n in jo_names}
     joints_coll = _CreateJoints()
+    # No allComponents on the COMPONENT: that collection is a Design property in the live API.
     root = SimpleNamespace(name="Root", jointOrigins=_JOCollection(jos), joints=joints_coll,
-                           allOccurrences=[], allComponents=[])
+                           allOccurrences=[])
 
     class FakeDesign:
         def __init__(self):
             self.rootComponent = root
-            self.allComponents = []
+            # counted, and carrying the root - the collection _common.all_components walks.
+            self.allComponents = _NamedCollection([root])
         def findEntityByToken(self, h):
             return []
     d = FakeDesign()
@@ -1334,7 +1339,7 @@ class TestResolveInputAmbiguousJointOrigin:
         sub = SimpleNamespace(name="Tower",
                               jointOrigins=_IterableJOs({shared: SimpleNamespace(name=shared)}))
         design.rootComponent = root
-        design.allComponents = [root, sub]
+        design.allComponents = _NamedCollection([root, sub])
         g, label, err = joint._resolve_input(design, shared)
         assert g is None and label == shared
         assert "ambiguous" in err and "2 Joint Origins share that name" in err

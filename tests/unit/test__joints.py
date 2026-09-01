@@ -21,8 +21,8 @@ jt = load_tool("_joints")
 
 class _Coll:
     """A Fusion collection: count/item (the walk) plus itemByName, and ITERABLE - design.allComponents
-    is counted and iterable alike (measure_api allcomponents-design-only), and the two joint walks
-    read it the two different ways."""
+    is counted and iterable alike (measure_api allcomponents-design-only); the shared component walk
+    under both joint walks reads it with count/item."""
 
     def __init__(self, items):
         self._i = list(items)
@@ -525,6 +525,24 @@ class TestLinkRatioMismatch:
             assert jt.link_ratio_mismatch(2.0, *pair) is None
 
 
+# ── DRIVES_ANY: the union both drive-side surfaces gate on ──────────────────
+
+class TestDrivesAny:
+    """The kinds carrying a drivable value AT ALL. joint_drive REFUSES anything outside this set and
+    joint_create_as_built's pose pointer sends anything outside it to assembly_move, so the refusal
+    and the pointer stand on ONE membership test."""
+
+    def test_it_names_exactly_the_kinds_that_turn_or_slide(self):
+        # spelled as either half alone it drops a kind that drives: the angle half has no slider,
+        # the slide half no revolute.
+        assert jt.DRIVES_ANY == {"revolute", "slider", "cylindrical"}
+
+    def test_a_kind_with_no_single_drivable_value_is_outside_it(self):
+        # rigid carries no value; ball/planar/pin_slot carry several, so none is driven by value.
+        for kind in ("rigid", "ball", "planar", "pin_slot"):
+            assert kind not in jt.DRIVES_ANY
+
+
 # ── all_joint_origins: the ONE JO walk, de-duplicated across the two root proxies ─
 
 class _JO:
@@ -545,8 +563,8 @@ class TestAllJointOrigins:
     def test_one_jo_reached_through_both_root_proxies_is_listed_once(self):
         # ONE JO read through two scopes arrives as two wrapper objects sharing nothing but their
         # entityToken - the rig hands the second wrapper back from another component in the
-        # collection. A key those two wrappers do not share double-lists every such JO. The walk's
-        # first scope is design.rootComponent, so its own wrapper is the one kept.
+        # collection. A key those two wrappers do not share double-lists every such JO. The rig puts
+        # the root first in allComponents, so its own wrapper is the one kept.
         native, proxy = _JO(token="JO1"), _JO(token="JO1")
         root = _comp(origins=[native])
         assert jt.all_joint_origins(_design(root, [_comp(origins=[proxy])])) == [(native, root)]
@@ -565,6 +583,30 @@ class TestAllJointOrigins:
         a, b = _JO("Frame"), _JO("Base")
         root, sub = _comp(origins=[a]), _comp(origins=[b])
         assert jt.all_joint_origins(_design(root, [sub])) == [(a, root), (b, sub)]
+
+    def test_the_walk_asks_the_component_collection_and_never_a_prepended_root(self):
+        # allComponents already CARRIES the root, so prepending design.rootComponent reads every
+        # root JO twice, as two distinct wrappers - and the entityToken de-dup cannot collapse that
+        # pair: a JO whose token does not read keys on id(), which two wrappers never share. Asking
+        # only the collection is what keeps the row single.
+        root, mirror = _comp(origins=[_JO()]), _comp(origins=[_JO()])
+        des = type("D", (), {"rootComponent": root, "allComponents": _Coll([mirror])})()
+        assert len(jt.all_joint_origins(des)) == 1
+
+    def test_an_unreadable_component_collection_still_reaches_the_root_s_JOs(self):
+        # the shared walk degrades to [root] when design.allComponents will not read, and this walk
+        # inherits that: a design whose collection is silent still lists what the root carries,
+        # instead of answering with nothing.
+        jo = _JO("Frame", token="JO1")
+        root = _comp(origins=[jo])
+
+        class _Blind:
+            rootComponent = root
+
+            @property
+            def allComponents(self):
+                raise RuntimeError("collection unavailable")
+        assert jt.all_joint_origins(_Blind()) == [(jo, root)]
 
     def test_the_resolve_one_over_the_walk_sees_ONE_hit_through_both_root_proxies(self):
         # the consumer of this walk (the JointOriginRef kind) REFUSES at two hits, so a root JO the

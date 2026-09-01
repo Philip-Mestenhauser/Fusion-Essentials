@@ -387,6 +387,10 @@ _DENYLIST = {
     # starts reading a member off a kind the other says has no such DOF.
     "DRIVES_ANGLE": ("_joints", "assign"),
     "DRIVES_SLIDE": ("_joints", "assign"),
+    # Their union - which joint kinds carry a drivable value AT ALL. joint_drive REFUSES every other
+    # kind and joint_create_as_built's pose pointer sends every other kind to assembly_move, so a
+    # second copy is how one of them starts offering joint_drive for a motion the other refuses.
+    "DRIVES_ANY": ("_joints", "assign"),
     # The ONE JointOrigin walk + its leaf ops - the traversal joint_create_edit and model_inspect share
     # (resolve-one / collect-names / read-axes all sit on all_joint_origins).
     "all_joint_origins": ("_joints", "def"),

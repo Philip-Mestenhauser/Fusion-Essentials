@@ -11,6 +11,9 @@ from types import SimpleNamespace
 from conftest import load_tool, error_message
 
 dg = load_tool("doc_get")
+# The consumer of what this read publishes: 'open:N' is resolved in doc_lifecycle, so the addresses
+# doc_get offers are pinned against the resolver that has to accept them.
+dl = load_tool("doc_lifecycle")
 
 
 def _payload(result):
@@ -38,14 +41,16 @@ class _Doc:
 
 
 class _Docs:
-    """item_raises_at models a stale collection slot: item(i) raises while count still includes it."""
+    """item_raises_at models a stale collection slot: item(i) raises while count still includes it.
+    One index, or a set of them - a session can hold more than one such slot."""
     def __init__(self, docs, item_raises_at=None):
         self._d = docs
         self._raises_at = item_raises_at
     @property
     def count(self): return len(self._d)
     def item(self, i):
-        if i == self._raises_at:
+        at = self._raises_at
+        if i == at or (isinstance(at, (set, list, tuple)) and i in at):
             raise RuntimeError("4 : An API Object refers to a deleted Object")
         return self._d[i]
 
@@ -162,18 +167,20 @@ class TestOpenList:
         rows = _payload(dg.handler())["open_documents"]
         assert [r["open_index"] for r in rows] == [0, 1]
 
-    def test_a_doc_whose_item_read_raises_holds_its_open_index_as_a_null_row(self):
-        # documents.item(i) raising (a stale proxy) must not slide the 'open:N' address space or
-        # claim anything about the dead slot's save state - it holds its index as a null row and
-        # stays out of the unsaved-work exceptions.
+    def test_a_doc_whose_item_read_raises_is_a_null_row_offering_no_index(self):
+        # documents.item(i) raising (a stale proxy) leaves the slot answering NO document: the row is
+        # published so the listing counts what the session holds, it claims nothing about the dead
+        # slot's save state, and it carries NO open_index - the index at that position is the one
+        # doc_activate/doc_close refuse (TestASlotThatAnsweredNoDocument drives that side). The
+        # documents around it keep the indexes they had.
         a = _Doc("A", data_file=_DataFile())
         c = _Doc("C", saved=False, data_file=None)
         _install(a, [a, _Doc("dead"), c])
         dg.app.documents._raises_at = 1
         out = _payload(dg.handler())
         rows = out["open_documents"]
-        assert [r["open_index"] for r in rows] == [0, 1, 2]
-        assert rows[1] == {"name": None, "open_index": 1}
+        assert rows[1] == {"name": None, "readable": False}
+        assert [r["open_index"] for r in rows if "open_index" in r] == [0, 2]
         assert rows[2]["name"] == "C"                    # the third doc, at its own address
         assert out["summary"]["open_count"] == 3
         assert [e["name"] for e in out["summary"]["exceptions"]] == ["C"]
@@ -200,6 +207,81 @@ class TestOpenList:
         _install(active, [active, dep])
         rows = {r["name"]: r for r in _payload(dg.handler())["open_documents"]}
         assert rows["Ref"]["is_modified"] is True          # the interesting flag survives the razor
+
+
+class TestASlotThatAnsweredNoDocument:
+    """A slot whose documents.item(i) answered NOTHING is a hole in the listing, not a document.
+
+    The row is published, so the listing counts what the session holds - but it carries no
+    'open:N' offer: doc_activate/doc_close resolve that index through doc_lifecycle, which refuses
+    the one naming such a slot and lists it as carrying no handle. Both sides are read off ONE
+    session here, since an address is only an offer if the tool it names accepts it."""
+
+    def _session(self, monkeypatch, docs, raises_at):
+        class _App:
+            activeDocument = docs[0]
+            documents = _Docs(docs, item_raises_at=raises_at)
+        for mod in (dg, dl):
+            monkeypatch.setattr(mod, "app", _App())
+
+    def _three(self, monkeypatch):
+        """A readable document, a slot that answers nothing, and an unsaved document behind it."""
+        self._session(monkeypatch, [_Doc("A", data_file=_DataFile()), _Doc("dead"),
+                                    _Doc("Untitled", saved=False, data_file=None)], 1)
+
+    def test_every_open_index_published_reaches_a_document(self, monkeypatch):
+        # the offer side: an index this read publishes is one the resolver behind 'open:N' accepts,
+        # and only the hole's row goes without one.
+        self._three(monkeypatch)
+        rows = _payload(dg.handler())["open_documents"]
+        offered = [r["open_index"] for r in rows if "open_index" in r]
+        assert offered == [0, 2]
+        for idx in offered:
+            assert dl._find_open_document("open:%d" % idx)[0] is not None
+        # the razor holds: only the hole is marked, so readable=false IS the hole test
+        assert [r.get("readable") for r in rows] == [None, False, None]
+
+    def test_the_hole_offers_no_index_because_open_N_there_is_refused(self, monkeypatch):
+        # the refusal side, at the position the hole occupies: both tools the note names refuse
+        # 'open:1', and their own listing calls that slot handle-less - so publishing the index
+        # would offer an address rejected on arrival.
+        self._three(monkeypatch)
+        assert _payload(dg.handler())["open_documents"][1] == {"name": None, "readable": False}
+        for handler in (dl.activate_document_handler, dl.close_document_handler):
+            res = handler(name="open:1")
+            assert res["isError"] is True
+            assert "no handle - the document did not read" in error_message(res)
+
+    def test_the_note_discloses_the_slot_and_promises_nothing_for_it(self, monkeypatch):
+        self._three(monkeypatch)
+        note = _payload(dg.handler())["note"]
+        assert "1 open slot(s) answered NO document" in note
+        assert "carries no open_index" in note and "nothing there to retry" in note
+
+    def test_a_session_without_a_hole_says_nothing_about_one(self, monkeypatch):
+        # the zero boundary: the disclosure is paid for only by a session that has one.
+        self._session(monkeypatch, [_Doc("A", data_file=_DataFile())], None)
+        assert "answered NO document" not in _payload(dg.handler())["note"]
+
+    def test_two_holes_are_counted_not_merely_flagged(self, monkeypatch):
+        self._session(monkeypatch, [_Doc("A", data_file=_DataFile()), _Doc("dead"), _Doc("gone")],
+                      {1, 2})
+        out = _payload(dg.handler())
+        assert [r for r in out["open_documents"] if r.get("readable") is False] == \
+            [{"name": None, "readable": False}] * 2
+        assert "2 open slot(s) answered NO document" in out["note"]
+        assert out["open_count"] == 3          # the count still states what the session holds
+
+    def test_a_hole_at_the_cap_is_listed_and_the_one_past_it_is_not(self, monkeypatch):
+        # the cap boundary both ways: the sentence speaks of the rows LISTED, so a hole the cap cut
+        # is neither published nor counted - 'truncated' is what reports that one.
+        self._session(monkeypatch, [_Doc("A", data_file=_DataFile()), _Doc("dead")], 1)
+        at_cap = _payload(dg.handler(max_results=2))
+        assert at_cap["open_documents"][1] == {"name": None, "readable": False}
+        assert "1 open slot(s) answered NO document" in at_cap["note"]
+        past_cap = _payload(dg.handler(max_results=1))
+        assert len(past_cap["open_documents"]) == 1 and past_cap["truncated"] is True
+        assert "answered NO document" not in past_cap["note"]
 
 
 class TestGuards:

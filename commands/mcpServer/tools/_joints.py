@@ -47,7 +47,8 @@ MAP_BLURB = (
     "resolve-one over it, which REFUSES a name SEVERAL joints carry, since a joint name is only "
     "component-locally unique; DRIVES_ANGLE/DRIVES_SLIDE - which joint kinds TURN and which SLIDE, "
     "the ONE pairing every rotation/slide member is selected through (the driven value, its limits, "
-    "its heading); motion_link_record - a joint's own MotionLink membership as ONE "
+    "its heading), and DRIVES_ANY their union - the ONE drivable-at-all gate (joint_drive's "
+    "refusal, the as-built pose pointer); motion_link_record - a joint's own MotionLink membership as ONE "
     "TRI-STATE record (partner, link, suppressed, broken, the two coupled values, reversed), which "
     "joint_drive's coupling claim and its second-member refusal gate on, with "
     "motion_link_partner its NAME projection; link_ratio_values/dof_motion_kind - the ONE "
@@ -468,6 +469,10 @@ def current_joint_type(joint):
 DRIVES_ANGLE = frozenset(("revolute", "cylindrical"))
 DRIVES_SLIDE = frozenset(("slider", "cylindrical"))
 
+# Their union - the kinds that carry a drivable value AT ALL, which is the set joint_drive's refusal
+# and the as-built create's pose pointer each gate on before either half is selected.
+DRIVES_ANY = frozenset(DRIVES_ANGLE | DRIVES_SLIDE)
+
 
 # JointMotion subclass -> the single JointMotionTypes DOF a MotionLink.setMotionData couples. This is
 # the DEGREE OF FREEDOM enum (RevoluteJointRotateMotionType, ...), a DIFFERENT enum from JointTypes:
@@ -812,24 +817,28 @@ def motion_link_partner(joint):
 
 
 def all_joint_origins(design):
-    """Every JointOrigin in the design as a flat list of (jo, owning_component): the root component plus
-    every sub-component (a JO internal to a sub-component lives on that component, so a root-only walk
+    """Every JointOrigin in the design as a flat list of (jo, owning_component): every component
+    once (a JO internal to a sub-component lives on that component, so a root-only walk
     under-reports). The ONE JointOrigin walk that the three JO leaf ops share: collect-names
     (joint_create's available-JO list), read-axes (model_inspect's oriented bbox frame), and
     resolve-one-by-name (find_joint_origins_by_name, under the JointOriginRef kind). Joints know
     'which joints exist' one way; this answers 'which joint origins exist' the same way everywhere.
 
-    This scope list PREPENDS design.rootComponent to a collection that already carries the root, so
-    the root is walked TWICE and every root JO is read through two distinct wrappers. The entityToken
-    de-dup below is what collapses that pair back into one row, and it is the only thing that does:
-    the id() fallback under it collapses the pair only where both scopes hand back ONE object, so a
-    JO whose token does not read is returned twice. all_joints asks ``_common.all_components`` alone
-    and carries no such doubling - this walk still does."""
+    The component walk is ``_common.all_components`` and nothing else - the ONE design-wide component
+    walk, which holds the contract for how ``design.allComponents`` reaches the root and for what it
+    answers when that collection does not read. That collection already carries the root, so
+    prepending ``design.rootComponent`` to it reads every root JO twice: the root arrives a second
+    time as a distinct wrapper. A JO answering a token collapses to one row; one whose token does not
+    read falls to id(), which two wrappers never share, and that one escapes the de-dup - it is
+    returned twice, over-reporting the JO list and making its own name ambiguous to the resolve-one
+    over this walk.
+
+    The entityToken de-dup is a SECOND line, over the JointOrigin objects themselves: two readings
+    that answer ONE token collapse to one row."""
     out, seen = [], set()
-    scopes = [safe(lambda: design.rootComponent)] + list(safe(lambda: design.allComponents, []) or [])
-    for c in scopes:
-        if c is None:
-            continue
+    # No None guard on the component: all_components drops the rows its own collection read as None,
+    # so every component reaching here is one that read.
+    for c in _common.all_components(design):
         jos = safe(lambda c=c: c.jointOrigins)
         for i in range(safe(lambda: jos.count, 0) or 0 if jos else 0):
             jo = safe(lambda i=i: jos.item(i))

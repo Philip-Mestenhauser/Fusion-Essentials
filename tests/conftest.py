@@ -1009,17 +1009,35 @@ class Circle3D:
 # .operations/.folders/.patterns walk, exactly like live Fusion.
 
 class FakeOperation:
-    """A CAM Operation leaf. Every attribute is real per live_api_facts.SHAPES['Operation']."""
+    """A CAM Operation leaf. Every attribute is real per live_api_facts.SHAPES['Operation'].
+
+    state_readable=False models an operationState whose READ raises (the _InspPoint shape): the one
+    lifecycle member that answers nothing while the flags beside it read normally. Callers
+    read it through safe() with no default, so the facts carry operation_state None - every value
+    operationState CAN answer is itself a state, so a coerced default would publish one of them off
+    a read that never happened."""
     def __init__(self, name, has_toolpath=True, valid=True, suppressed=False, shown=False,
-                 operation_state=0, has_error=False, error=""):
+                 operation_state=0, has_error=False, error="", has_warning=False, warning="",
+                 state_readable=True):
         self.name = name
         self.hasToolpath = has_toolpath
         self.isToolpathValid = valid
         self.isSuppressed = suppressed
         self.isLightBulbOn = shown
-        self.operationState = operation_state
         self.hasError = has_error
         self.error = error
+        self.hasWarning = has_warning
+        self.warning = warning
+        self.isGenerating = False
+        self.generatingProgress = None
+        self._operation_state = operation_state
+        self._state_readable = state_readable
+
+    @property
+    def operationState(self):
+        if not self._state_readable:
+            raise RuntimeError("operationState cannot be read on this operation")
+        return self._operation_state
 
 
 class FakeCAMFolder:

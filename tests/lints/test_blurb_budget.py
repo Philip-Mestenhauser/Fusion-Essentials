@@ -39,7 +39,7 @@ _BLURB_CHARS = {
     "_geom": 2186,   # was 1982: the 'address' clause - the symbol is public because model_measure_between._echo consumes it cross-module and the helper-duplication denylist locks the reuse in; the clause is scoped to the MEASURE tools' rows, its only consumers
     "_holder": 85,
     "_inputs": 1148,
-    "_joints": 2455,   # +177: names DRIVES_ANGLE/DRIVES_SLIDE, the joint-kind -> drivable-DOF pairing joint_drive and assembly_get's motion rows had each carried their own copy of - a shared constant the catalog must name or the copies come back
+    "_joints": 2565,   # +110: names DRIVES_ANY beside the DRIVES_ANGLE/DRIVES_SLIDE pair it unions - the drivable-at-all gate joint_drive's refusal and the as-built pose pointer both consume; a shared constant the catalog must name or the copies come back
     "_materials": 468,
     "_outputs": 91,
     "_pmi": 755,

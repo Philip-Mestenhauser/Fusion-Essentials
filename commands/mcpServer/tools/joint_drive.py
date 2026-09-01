@@ -18,7 +18,7 @@ from . import _common
 from . import _geom
 from . import _inputs
 from . import _write_guard
-from ._joints import (DRIVES_ANGLE, DRIVES_SLIDE, find_joint as _find_joint,
+from ._joints import (DRIVES_ANGLE, DRIVES_ANY, DRIVES_SLIDE, find_joint as _find_joint,
                       current_joint_type as _current_joint_type,
                       motion_link_record as _motion_link_record)
 
@@ -418,7 +418,7 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
                      "joint names.")
 
     jtype = _current_joint_type(joint)
-    if jtype not in ("revolute", "slider", "cylindrical"):
+    if jtype not in DRIVES_ANY:
         return error(f"Joint '{joint_name}' is {jtype or 'an unknown type'} - only revolute, slider, and "
                      "cylindrical joints can be driven by value. (rigid has no value; for a ball joint "
                      "pose the part with assembly_move.)")

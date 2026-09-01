@@ -579,8 +579,15 @@ def is_empty_toolpath(facts: dict) -> bool:
     hasToolpath False) and 65 read suppressed - no overlap. So an empty op is machine-readable
     from the flags alone; nothing has to match warning text. Classifies from op_state_facts (which
     reads both toolpath flags honestly), so an UNREADABLE flag answers False here rather than
-    inventing the state."""
+    inventing the state.
+
+    The raw operationState is required BESIDE the bucket, never through it: op_primary_state falls
+    through to 'valid' for every state it has no name for - a state that did not read (None) and
+    Suppressed (2) carried by an op whose isSuppressed flag was coerced to False both land there -
+    and 'this op generated and cut nothing' names a lifecycle. So the state must have ANSWERED
+    IsValid (0), not merely failed to answer one of the other buckets."""
     return (op_primary_state(facts) == "valid"
+            and facts.get("operation_state") == 0
             and facts.get("is_toolpath_valid") is True
             and facts.get("has_toolpath") is False)
 

@@ -908,11 +908,9 @@ class _SliceDesign:
 
     @property
     def allComponents(self):
-        # counted AND iterable alike (measure_api allcomponents-design-only), the two ways the joint
-        # walks read it: _common.all_components takes .count/.item, _joints.all_joint_origins
-        # iterates. The root is IN it - the contract _common.all_components holds - so all_joints
-        # asks this collection alone, while all_joint_origins still prepends design.rootComponent and
-        # leans on its entityToken de-dup to collapse the doubled root read.
+        # counted AND iterable alike (measure_api allcomponents-design-only); _common.all_components
+        # reads it with .count/.item. The root is IN it - the contract _common.all_components holds -
+        # so both joint walks ask this collection alone, neither prepending design.rootComponent.
         return _NamedCollection([self.rootComponent] + self._subs)
 
 
@@ -1046,6 +1044,21 @@ class TestJointOriginsSlice:
         assert r["frame"]["x_axis"] == [0.866, 0.5, 0.0]
         assert r["frame"]["y_axis"] == [-0.5, 0.866, 0.0]
         assert r["frame"]["z_axis"] == [0.0, 0.0, 1.0]      # the rotation axis is unmoved
+
+    def test_the_lift_leaves_the_SOURCE_axis_vector_untouched(self):
+        # _world_axes copies each axis BEFORE transforming it, and the copy is the whole of that
+        # discipline: transformBy moves a Vector3D IN PLACE. Lifting the frame's own vector would
+        # rewrite the JointOrigin's stored axis, so the NEXT read of that same frame - the second
+        # instance's row, or any later reader - would lift an already-lifted axis and publish a
+        # doubly-rotated heading. Only a source read AFTER the lift can see that.
+        sub = _SliceComp("Tower")
+        jo = _SliceJO("Center", token="C", comp=sub)
+        source = jo.secondaryAxisVector
+        occ = _SliceOcc("Tower:1", sub, transform2=_zrot(30.0, 0.0))
+        design = _SliceDesign(_SliceRoot(occ_by_comp={"Tower": [occ]}), subs=[sub])
+        _z, x, _y = ad._world_axes(design, jo, sub, occ)
+        assert x == [0.866, 0.5, 0.0]                              # the lift ran
+        assert (source.x, source.y, source.z) == (1.0, 0.0, 0.0)   # and consumed nothing
 
     def test_the_world_position_projects_the_offsets_along_the_WORLD_axes(self):
         # MEASURED live: geometry.origin reads WORLD (5,0,0) cm for a component 50 mm out in X, so a

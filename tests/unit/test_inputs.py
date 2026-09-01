@@ -4247,8 +4247,10 @@ class _DesignJO:
 
     @property
     def allComponents(self):
-        # like the live API: the root appears here too (as a proxy), so the walk must de-dup it.
-        return [self.rootComponent] + self._subs
+        # Like the live API: a COUNTED collection on the DESIGN that already CARRIES the root (a bare
+        # list models neither), which is what _common.all_components - the walk under the shared JO
+        # walk - reads with count/item.
+        return _NamedCollection([self.rootComponent] + self._subs)
 
     def findEntityByToken(self, token):
         e = self._tokens.get(token)

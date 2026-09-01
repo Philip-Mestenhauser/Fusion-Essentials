@@ -117,12 +117,17 @@ def _open_documents(max_results=_OPEN_DOCS_CAP):
     total = safe(lambda: docs.count, 0)
     cap = max(1, int(max_results))
     for i in range(total):
-        # item(i) guarded: a stale document proxy holds its open_index slot as a null row (the
-        # 'open:N' address space must not slide), and states nothing about its save state.
+        # item(i) guarded: a stale document proxy answers NO document. The slot keeps its place in
+        # the 'open:N' numbering (indices come from the count, so no later document slides), but its
+        # row carries no open_index: doc_activate/doc_close resolve 'open:N' through
+        # _find_open_document, which refuses the index naming such a slot and lists it as carrying no
+        # handle - so an index published here would be an address those consumers reject on arrival.
+        # The row is still PUBLISHED, so the listing counts what the session holds, and it states
+        # nothing about a save state nothing was read from.
         d = safe(lambda i=i: docs.item(i))
         if d is None:
             if i < cap:
-                rows.append({"name": None, "open_index": i})
+                rows.append({"name": None, "readable": False})
             continue
         name = safe(lambda d=d: d.name)
         # never-saved / modified / saved all come from the DataFile, not doc.isSaved (which can read
@@ -592,7 +597,7 @@ def handler(max_results: int = _OPEN_DOCS_CAP, include=None, versions_max: int =
     note = ("active = the focused document (document_id is its lineage URN, for doc_copy/doc_open). "
                  "open_documents is a SUPERSET of visible tabs - referenced/dependency docs load as real "
                  "Documents (is_visible=true means loaded, not tabbed). Healthy docs show just their name "
-                 "+ open_index; an unsaved/modified/hidden one keeps the flag. Each row's 'open_index' is a "
+                 "+ open_index; an unsaved/modified/hidden one keeps the flag. A row's 'open_index' is a "
                  "stable session address - pass 'open:N' to doc_activate/doc_close to reach an UNSAVED doc "
                  "that shares a name and has no URN. This is the SESSION; for cloud "
                  "projects/files see data_get. include=['versions'] adds the active doc's cloud version "
@@ -604,6 +609,16 @@ def handler(max_results: int = _OPEN_DOCS_CAP, include=None, versions_max: int =
                  "made from it, parent assemblies that insert it), with a by-type rollup.")
     if truncated:
         note += f" open_documents was capped at {max_results} of {summary['open_count']}; raise max_results to see the rest."
+    # A row that answered no document is disclosed as such, since it is the one row the 'open:N'
+    # sentence above does not hold for.
+    unreadable_slots = sum(1 for r in rows if r.get("readable") is False)
+    if unreadable_slots:
+        note += (f" {unreadable_slots} open slot(s) answered NO document (documents.item did not "
+                 "read): each is listed with name null and readable=false and carries no "
+                 "open_index. The slot keeps its place in the 'open:N' numbering, so no later row's "
+                 "index shifted, but doc_activate/doc_close refuse the 'open:N' that names it - "
+                 "their own listing calls it a slot with no handle - so there is nothing there to "
+                 "retry.")
     payload = {
         "active": active,
         "document_id": active["document_id"],     # surfaced at top level for the URN consumers

@@ -478,9 +478,10 @@ class TestOpStateFactsToolpathFlags:
 
 
 class TestIsEmptyToolpath:
-    """The EMPTY class is a THREE-flag conjunction: not suppressed / not errored / state IsValid
-    (op_primary_state), isToolpathValid True, hasToolpath False. Every other combination - including
-    an unreadable flag - is not empty, because 'this op cut nothing' is a claim about what was read."""
+    """The EMPTY class needs the bucket AND the raw state: not suppressed / not errored / not
+    generating (op_primary_state), operationState reading IsValid, isToolpathValid True, hasToolpath
+    False. Every other combination - including an unreadable flag or an unreadable state - is not
+    empty, because 'this op cut nothing' is a claim about what was read."""
 
     def _facts(self, **over):
         base = {"name": "Op", "has_error": False, "has_warning": False, "is_suppressed": False,
@@ -522,6 +523,23 @@ class TestIsEmptyToolpath:
     def test_an_out_of_date_op_is_not_empty(self):
         assert cc.is_empty_toolpath(self._facts(
             operation_state=adsk.cam.OperationStates.IsInvalidOperationState)) is False
+
+    def test_a_no_toolpath_state_is_not_empty(self):
+        # the far side of the IsValid boundary: NoToolpath (3) is the never-generated state
+        assert cc.is_empty_toolpath(self._facts(
+            operation_state=adsk.cam.OperationStates.NoToolpathOperationState)) is False
+
+    def test_a_suppressed_state_whose_flag_did_not_read_is_not_empty(self):
+        # the shape where only the STATE half answers suppression - isSuppressed raised and
+        # op_state_facts coerced it to False, so the bucket alone reads 'valid'. Suppressed (2) is
+        # not the IsValid the empty claim rests on.
+        assert cc.is_empty_toolpath(self._facts(
+            operation_state=adsk.cam.OperationStates.SuppressedOperationState)) is False
+
+    def test_an_unreadable_operation_state_is_not_empty(self):
+        # None is the state that RAISED: op_primary_state falls through to 'valid' on it, and
+        # publishing EMPTY off that fall-through states a lifecycle nothing read
+        assert cc.is_empty_toolpath(self._facts(operation_state=None)) is False
 
 
 class _UnreadableSuppressionFlagOp:
@@ -589,25 +607,15 @@ class TestCountsAsWarningSuppressionHalves:
         assert cc.counts_as_warning(self._facts(operation_state=state)) is True
 
 
-class _UnreadableStateOp:
+def _unread_state_op(has_toolpath=False, is_toolpath_valid=False):
     """A warned operation whose operationState read RAISES while every other lifecycle member reads.
     op_state_facts reads that member through safe() with NO default, so the facts it hands on carry
-    operation_state None."""
-
-    def __init__(self):
-        self.name = "Contour1"
-        self.hasError = False
-        self.hasWarning = True
-        self.warning = "no geometry is selected\nassign a machining boundary"
-        self.isSuppressed = False
-        self.isGenerating = False
-        self.generatingProgress = None
-        self.hasToolpath = False
-        self.isToolpathValid = False
-
-    @property
-    def operationState(self):
-        raise RuntimeError("operationState cannot be read on this operation")
+    operation_state None. The toolpath pair is a parameter because the EMPTY-class combination
+    (isToolpathValid True, hasToolpath False) rides on this same unread state."""
+    return FakeOperation("Contour1", has_toolpath=has_toolpath, valid=is_toolpath_valid,
+                         has_warning=True,
+                         warning="no geometry is selected\nassign a machining boundary",
+                         state_readable=False)
 
 
 class TestOpStateFactsUnreadableState:
@@ -616,7 +624,7 @@ class TestOpStateFactsUnreadableState:
     read that never happened. None is what the classifiers below have to answer for."""
 
     def _facts(self):
-        return cc.op_state_facts(_UnreadableStateOp())
+        return cc.op_state_facts(_unread_state_op())
 
     def test_a_raising_state_reads_none_not_a_lifecycle_value(self):
         facts = self._facts()
@@ -632,9 +640,17 @@ class TestOpStateFactsUnreadableState:
         # the negative is the whole claim: an op nothing read a state off is not a PARKED op
         assert cc.op_primary_state(self._facts()) != "suppressed"
 
+    def test_the_empty_class_is_not_claimed_off_a_state_that_did_not_read(self):
+        # 'generated and cut nothing' rests on IsValid having been OBSERVED. op_primary_state falls
+        # through to 'valid' for a state that never answered, so the toolpath pair alone must not
+        # carry the claim - the fall-through this predicate reads BESIDE, not through.
+        facts = cc.op_state_facts(_unread_state_op(has_toolpath=False, is_toolpath_valid=True))
+        assert facts["operation_state"] is None
+        assert cc.is_empty_toolpath(facts) is False
+
     def test_the_tally_counts_the_warning_and_claims_no_lifecycle_bucket(
             self, operation_cast_passthrough):
-        tally = cc.op_state_tally([_UnreadableStateOp()])
+        tally = cc.op_state_tally([_unread_state_op()])
         assert tally["total"] == 1 and tally["warnings"] == 1
         assert tally["warning_sample"] == {"name": "Contour1",
                                            "warning": "no geometry is selected"}
