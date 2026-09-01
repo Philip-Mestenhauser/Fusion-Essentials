@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 187  |  **description breadcrumbs:** 702  |  **note/error breadcrumbs:** 490
+**Tools:** 187  |  **description breadcrumbs:** 703  |  **note/error breadcrumbs:** 490
   |  **guidance smells flagged:** 4
 ## Blindspots to engineer
 
