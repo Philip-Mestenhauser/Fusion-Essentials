@@ -1,38 +1,34 @@
-"""Lint: every WRITE/DESTRUCTIVE tool is accounted for - a kernel declaration, a verification
-classification, or a reasoned exemption. Exactly one of the three, never two.
+"""Lint: every WRITE/DESTRUCTIVE tool declares HOW its effect is proven - a kernel postcondition or
+a verification classification - and every structured reference that declaration carries RESOLVES.
 
 The postcondition kernel (tools/_assert.py) is the third kind system: _inputs types what a tool is
-GIVEN, _outputs types what it RETURNS, _assert types what it DID (capture -> mutate -> verify).
-Verifying the effect INLINE, in the handler, is the audited NORM here - most write tools construct
-their payload fields or author their error text from a live read-back, so the verify logic stays
-where the values it reads feed straight into the response (the _EXEMPT table below is that audit's
-ledger, one line per tool naming which class its inline verification falls into). The kernel
-DECLARATION (``postconditions=[...]``) is for a DETACHABLE effect - one a shared _assert.Postcondition
-kind can capture/verify without touching handler-local payload assembly.
+GIVEN, _outputs types what it RETURNS, _assert types what it DID (capture -> mutate -> verify). A
+kernel DECLARATION (``postconditions=[...]``) is for a DETACHABLE effect - one a shared
+_assert.Postcondition kind can capture/verify without touching handler-local payload assembly.
 
-The third route is a ``verification=Verification(...)`` classification at registration
+The other route is a ``verification=Verification(...)`` classification at registration
 (mcp_primitives/item.py): a closed kind - inline / effect / deferred / external / dynamic / gap -
-carrying STRUCTURED references instead of prose. Every one of them is resolved here rather than
-believed: an ``evidence_test`` node id must name a test file, class and function that exist and
-that no other tool claims; a ``deferred`` poller must be a registered read tool; an ``external``
-``evidence_receipt`` must name a receipt row that RECORDS AN OBSERVATION (a skipped or pending row
-is refused - those record the absence of one); ``dynamic`` reaches exactly one tool; a ``gap``
-carries a defect id that must resolve to an OPEN row of the defect ledger, and counts against the
-same ceiling. The obligation each kind's evidence test carries is stated in Verification's own
-docstring - what this lint checks is that the named test is REAL, not what it asserts.
+carrying STRUCTURED references instead of prose. Verifying the effect INLINE, in the handler, is
+the NORM here - most write tools construct their payload fields or author their error text from a
+live read-back, so the verify logic stays where the values it reads feed straight into the
+response - and that is what ``inline`` and ``effect`` classify, each naming the test that proves
+the read-back bites.
 
-The trade a declaring tool makes, stated where it is enforced: it gives up the positional
-source-scan below - which re-derives on every run that a read-back FOLLOWS the mutation its reason
-names - for a resolved reference to an evidence test that was mutation-proved to bite at the moment
-of migration. What this lint checks forever after is that the reference stays real.
+Every reference is resolved here rather than believed: an ``evidence_test`` node id must name a
+test file, class and function that exist and that no other tool claims; a ``deferred`` poller must
+be a registered read tool; an ``external`` ``evidence_receipt`` must name a receipt row that
+RECORDS AN OBSERVATION (a skipped or pending row is refused - those record the absence of one);
+``dynamic`` reaches exactly one tool; a ``gap`` carries a defect id that must resolve to an OPEN
+row of the defect ledger, and counts against a shrink-only ceiling. The obligation each kind's
+evidence test carries is stated in Verification's own docstring - what this lint checks is that the
+named test is REAL, not what it asserts.
 
-Entries come and go as tools gain declarations; the gap COUNT is what only shrinks (_GAP_CEILING
-below, counted across both routes), and adding a new write tool here needs the same deliberation
-as adding a naming-vocabulary verb.
+A write tool carrying neither route is named by the check below, with the kinds it must pick from:
+there is no third way to be accounted for. The gap COUNT is what only shrinks (_GAP_CEILING below),
+and adding a new write tool here needs the same deliberation as adding a naming-vocabulary verb.
 """
 
 import ast
-import inspect
 import os
 import re
 from types import SimpleNamespace
@@ -57,31 +53,10 @@ def _postconditions_of(item):
     return None
 
 
-# Write tools WITHOUT a kernel declaration. Format: name -> the audited reason it lacks one.
-# Each reason carries its class from a per-handler audit of the actual verify code:
-#   inline: - real verification lives in the handler because it constructs payload fields or
-#             authors error text (the inseparability rule). Appropriate permanently. Machine-checked:
-#             TestInlineExemptionsActuallyReadBack requires the read-back shape AFTER the mutation
-#             the reason NAMES - as a call token `foo()` (snaps.add(), deleteMe()) or a property
-#             assignment token `attr=` (isGroundToParent=, expression=). A reason that names no
-#             mutation cannot confirm.
-#   effect: - the payload's own claim IS a live read-back of the mutated state; nothing further
-#             to independently verify.
-#   gap:    - NO effective read-back exists; the platform can report success while changing
-#             nothing and the tool returns ok. Each is a defect awaiting an inline gate or a
-#             new kernel kind, not an accepted state. The gap: COUNT is ratcheted shrink-only
-#             below (_GAP_CEILING): a new gap: is a deliberate, visible diff to that number,
-#             never a quiet exit from the inline read-back detector.
-# A few async/system entries keep bespoke reasons. Entries come and go as tools gain or lose
-# postconditions; what only shrinks is the gap: count.
-_EXEMPT = {
-}
-
-
-# The measured gap count, over BOTH routes (a 'gap:' _EXEMPT reason and a kind="gap" declaration).
+# The measured count of kind="gap" declarations - a tool whose success no read-back can confirm.
 # Shrink-only: closing a gap (an inline gate or a kernel kind lands) lowers it; raising it means a
 # NEW tool shipped with no effective read-back, which is a deliberate decision this number makes
-# visible instead of a free exit from the detector. The ceiling is an alarm that UN-RINGS itself:
+# visible instead of a quiet reclassification. The ceiling is an alarm that UN-RINGS itself:
 # the shrink-only half of the test below forces the number back down the moment a gap closes, so
 # a tool parked here while its evidence is unrecorded cannot quietly stay parked.
 _GAP_CEILING = 6
@@ -93,13 +68,9 @@ def _verification_of(item):
 
 
 def _gap_tools(items):
-    """Every tool whose accounting says its effect cannot be verified, from either route."""
-    gaps = {t for t, r in _EXEMPT.items() if r.startswith("gap:")}
-    for it in items:
-        v = _verification_of(it)
-        if v is not None and v.kind == "gap":
-            gaps.add(it.get_name())
-    return sorted(gaps)
+    """Every tool whose declaration says its effect cannot be verified."""
+    return sorted(it.get_name() for it in items
+                  if _verification_of(it) is not None and _verification_of(it).kind == "gap")
 
 
 class TestPostconditionsDeclared:
@@ -115,7 +86,7 @@ class TestPostconditionsDeclared:
                 f"only {len(gaps)} gap entries remain - lower _GAP_CEILING to {len(gaps)} to "
                 "lock the win in:\n  " + "\n  ".join(gaps))
 
-    def test_every_write_tool_declares_or_is_exempt(self):
+    def test_every_write_tool_declares_how_its_effect_is_verified(self):
         missing = []
         for it in register_all_tools():
             if not is_write_tool(it):
@@ -124,18 +95,12 @@ class TestPostconditionsDeclared:
                 continue
             if _verification_of(it) is not None:
                 continue
-            if it.get_name() in _EXEMPT:
-                continue
             missing.append(it.get_name())
         assert not missing, (
-            "write tools with none of postconditions=[...], verification=Verification(...) or a "
-            "reasoned _EXEMPT entry:\n  " + "\n  ".join(sorted(missing)))
-
-    def test_exemptions_only_name_real_undeclared_write_tools(self):
-        items = {it.get_name(): it for it in register_all_tools()}
-        stale = [f"{name} ({why})" for name in _EXEMPT
-                 if (why := _accounting_conflict(items.get(name), name))]
-        assert not stale, "stale _EXEMPT entries:\n  " + "\n  ".join(stale)
+            "a write tool declares how its effect is proven: postconditions=[...] for a detachable "
+            "effect, else verification=Verification(kind=...) - one of inline / effect / deferred / "
+            "external / dynamic / gap, each carrying the reference this lint resolves (see the "
+            "Verification kinds in item.py). These declare neither:\n  " + "\n  ".join(sorted(missing)))
 
     def test_declared_postconditions_are_postcondition_kinds(self):
         kernel = load_tool("_assert")
@@ -242,22 +207,6 @@ def _resolve_defect(defect_id):
     return ""
 
 
-def _accounting_conflict(item, name):
-    """Why an _EXEMPT row for `name` is stale, or '' when that row is the tool's ONLY account.
-
-    A tool accounted for twice is a tool whose two accounts can disagree, so a declaration of
-    either kind retires the row rather than sitting beside it."""
-    if item is None:
-        return "no such tool"
-    if not is_write_tool(item):
-        return "not a write tool"
-    if _postconditions_of(item):
-        return "double-accounted: postconditions=[...] - drop the exemption"
-    if _verification_of(item) is not None:
-        return "double-accounted: verification=Verification(...) - drop the exemption"
-    return ""
-
-
 def _poller_problem(items, poller_name):
     """Why a deferred declaration's named poller cannot confirm the effect, or ''."""
     poller = items.get(poller_name)
@@ -268,16 +217,12 @@ def _poller_problem(items, poller_name):
     return ""
 
 
-def _fake_item(name, write=True, posts=None, verification=None):
+def _fake_item(name, write=True, verification=None):
     """A registered Item's shape as the checks above read it: the name, the write annotation, the
-    handler wrapper chain, the declaration. Doctoring one is how the registry-side detectors are
-    self-tested - the real registry offers no way to stage a conflict."""
-    def handler(**kwargs):
-        return None
-    if posts is not None:
-        handler.__assert_postconditions__ = posts
+    declaration. Doctoring one is how the registry-side detectors are self-tested - the real
+    registry offers no way to stage an unregistered poller or a shared evidence claim."""
     return SimpleNamespace(
-        get_name=lambda: name, handler=handler, verification=verification,
+        get_name=lambda: name, verification=verification,
         primitive=SimpleNamespace(annotations=SimpleNamespace(read_only=not write)))
 
 
@@ -445,23 +390,12 @@ class TestVerificationDeclarations:
         assert "not a ledger id" in _resolve_defect(None)
 
     def test_the_registry_detectors_bite(self):
-        # The three checks that read the REGISTRY rather than a file, driven through the real
-        # helpers on doctored items - each one live-proved on a real state, and self-covered here
-        # so a helper rewritten to always answer clean cannot pass silently.
+        # The checks that read the REGISTRY rather than a file, driven through the real helpers on
+        # doctored items - self-covered here so a helper rewritten to always answer clean cannot
+        # pass silently.
+        register_all_tools()                # also bootstraps the mcpServer package path
         from mcpServer.mcp_primitives.item import Verification
         node = "tests/unit/test_probe.py::TestThing::test_real"
-        clean = _fake_item("model_extrude")
-        assert _accounting_conflict(clean, "model_extrude") == ""
-        assert "no such tool" in _accounting_conflict(None, "gone_tool")
-        assert "not a write tool" in _accounting_conflict(_fake_item("design_get", write=False),
-                                                          "design_get")
-        assert "postconditions" in _accounting_conflict(
-            _fake_item("doc_save", posts=["a postcondition"]), "doc_save")
-        # the double-accounting the pilot exists to prevent: an _EXEMPT row beside a declaration
-        declared = _fake_item("param_set",
-                              verification=Verification(kind="inline", evidence_test=node))
-        assert "double-accounted" in _accounting_conflict(declared, "param_set")
-
         items = {"doc_get": _fake_item("doc_get", write=False), "doc_save": _fake_item("doc_save")}
         assert _poller_problem(items, "doc_get") == ""
         assert "not a registered tool" in _poller_problem(items, "doc_get_status")
@@ -475,199 +409,3 @@ class TestVerificationDeclarations:
         shared = one_each[:1] + [_fake_item("d", verification=Verification(kind="effect",
                                                                           evidence_test=node))]
         assert _duplicate_evidence_claims(shared) == {node: ["a", "d"]}
-
-
-# ── the inline: shape check - an 'inline:' claim is machine-checked, not taken on faith ─────────
-#
-# An entry classed 'inline:' asserts the handler verifies its effect in its own body. The check
-# below is POSITIONAL: the reason must NAME the mutation - a call token `foo()` or a property
-# assignment token `attr=` - and the read-back evidence must appear AFTER that mutation in the
-# handler's source (or a same-module helper it directly calls - action= dispatchers put the verify
-# in _do_*/_slice_* helpers). Read-back evidence is a state re-read idiom - a safe() read, a
-# live-object property re-read (.count/.healthState/.isValid/.expression/...), a timeline_health
-# diff, a deleteMe() rollback - or a call to a same-module helper whose own source re-reads state
-# (a summary/verify reader counts at its call site). The evidence window opens at the START of the
-# mutation's line (minus the mutation token itself), so the `did = safe(lambda: x.deleteMe())`
-# call-site idiom counts, while evidence that only precedes the mutation never does. An error(...)
-# gate must exist somewhere on the surface. Deliberately simple, reviewable text heuristics (the
-# no-first-match lint's approach), not AST guessing. A tool the detector cannot confirm is either
-# reclassified to 'gap:' (with a named defect) or gets a real read-back - the detector is never
-# weakened to pass it.
-
-_ERROR_CALL = re.compile(r"\berror\(")
-_READBACK = re.compile(
-    r"\bsafe\(|\.count\b|\.healthState\b|timeline_health|\.isValid\b|\.isOutOfDate\b|"
-    r"\.isActive\b|\.isGroundToParent\b|\.isLightBulbOn\b|\.isFavorite\b|\.isReferencedComponent\b|"
-    r"\.deleteMe\(\)|computeAll|current_design_type|\.appearance\b|\.expression\b|\.value\b|\.name\b|"
-    r"verify_written|latestVersionNumber|versionNumber|\.area\b|\.volume\b|entityToken")
-_CALLED_NAME = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
-
-# the mutation anchors an inline: reason names: `foo()` (a call, matched by its last name part)
-# and `attr=` (a glued property-assignment token; the lookahead keeps prose like `key=value` out).
-_ANCHOR_CALL_TOKEN = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\(\)")
-_ANCHOR_SET_TOKEN = re.compile(r"(?<![A-Za-z0-9_.])([A-Za-z_][A-Za-z0-9_]*)=(?![=A-Za-z0-9_'\"])")
-
-
-def _original_handler(item):
-    """Unwrap the write-guard/assert chain (__wrapped__) to the tool module's own handler."""
-    h = item.handler
-    seen = set()
-    while h is not None and id(h) not in seen:
-        seen.add(id(h))
-        nxt = getattr(h, "__wrapped__", None)
-        if nxt is None:
-            return h
-        h = nxt
-    return h
-
-
-def _handler_parts(item):
-    """The source parts the shape check scans, in order: the handler itself, then every same-module
-    function it directly calls (depth 1, sorted by name). Dispatch handlers (action= routers) verify
-    inside their _do_*/leaf helpers, so the handler body alone would under-read them; keeping the
-    parts SEPARATE keeps the positional check honest (source order across different functions is
-    meaningless). Returns None when no source exists."""
-    h = _original_handler(item)
-    try:
-        handler_src = inspect.getsource(h)
-    except (OSError, TypeError):
-        return None
-    module_globals = getattr(h, "__globals__", {})
-    parts = [handler_src]
-    for called in sorted(set(_CALLED_NAME.findall(handler_src))):
-        fn = module_globals.get(called)
-        if (callable(fn) and getattr(fn, "__module__", None) == h.__module__
-                and called != h.__name__):
-            try:
-                parts.append(inspect.getsource(fn))
-            except (OSError, TypeError):
-                pass
-    return parts
-
-
-def _anchor_patterns(reason):
-    """Source patterns for every mutation token the reason names: `foo()` matches the call
-    `foo(...)`; `attr=` matches the property assignment `.attr = ...`."""
-    pats = []
-    for name in _ANCHOR_CALL_TOKEN.findall(reason):
-        pats.append(re.compile(r"(?<![A-Za-z0-9_])" + re.escape(name) + r"\s*\("))
-    for name in _ANCHOR_SET_TOKEN.findall(reason):
-        pats.append(re.compile(r"\.\s*" + re.escape(name) + r"\s*=(?!=)"))
-    return pats
-
-
-def _readback_evidence(parts):
-    """The evidence pattern for these parts: the _READBACK idioms, plus a call to any same-module
-    helper in `parts` whose own source re-reads state (its call site is where that read-back runs)."""
-    reader_names = []
-    for part in parts:
-        m = re.match(r"\s*def\s+([A-Za-z_][A-Za-z0-9_]*)", part)
-        if m and _READBACK.search(part):
-            reader_names.append(re.escape(m.group(1)))
-    if not reader_names:
-        return _READBACK
-    return re.compile(_READBACK.pattern + r"|\b(?:" + "|".join(reader_names) + r")\s*\(")
-
-
-def _confirms_inline(reason, parts):
-    """True when some part contains a mutation the reason names WITH read-back evidence after it
-    (window from the mutation's line start, the mutation token itself excluded) and an error(...)
-    gate exists on the surface."""
-    if parts is None:
-        return False
-    anchors = _anchor_patterns(reason)
-    if not anchors:
-        return False                      # the reason names no mutation - nothing to check after
-    if not any(_ERROR_CALL.search(p) for p in parts):
-        return False
-    evidence = _readback_evidence(parts)
-    for part in parts:
-        for pat in anchors:
-            for m in pat.finditer(part):
-                line_start = part.rfind("\n", 0, m.start()) + 1
-                window = part[line_start:m.start()] + part[m.end():]
-                if evidence.search(window):
-                    return True
-    return False
-
-
-class TestInlineExemptionsActuallyReadBack:
-    def test_every_inline_entry_reads_back_after_its_named_mutation(self):
-        items = {it.get_name(): it for it in register_all_tools()}
-        unconfirmed = []
-        for name, reason in _EXEMPT.items():
-            if not reason.startswith("inline:"):
-                continue
-            item = items.get(name)
-            if item is None:
-                continue    # test_exemptions_only_name_real_undeclared_write_tools reports it
-            if not _confirms_inline(reason, _handler_parts(item)):
-                unconfirmed.append(name)
-        assert not unconfirmed, (
-            "these _EXEMPT entries are classed 'inline:' (the handler verifies its effect in its own "
-            "body), but the detector CANNOT confirm the claim: the reason must NAME the mutation "
-            "(`foo()` or `attr=`), that mutation must exist in the handler or its directly-called "
-            "same-module helpers, and read-back evidence must appear AFTER it (plus an error(...) "
-            "gate on the surface). For each: name the real mutation in the reason, make the "
-            "read-back real, or reclassify the entry to 'gap:' with a named defect. Do NOT weaken "
-            "this detector to pass it:\n  " + "\n  ".join(sorted(unconfirmed)))
-
-    def test_the_shape_check_bites(self):
-        # (a) against a REAL registered handler with no read-back: sys_reload_addin restarts the
-        # server and reads nothing back - if it were classed 'inline:' the lint must fire, whether
-        # the reason names no mutation or names one the source does not carry.
-        items = {it.get_name(): it for it in register_all_tools()}
-        parts = _handler_parts(items["sys_reload_addin"])
-        assert not _confirms_inline("inline: the restart is verified", parts)
-        assert not _confirms_inline("inline: restart() is gated and read back", parts)
-        # (b) POSITION is load-bearing: the same mutation+evidence confirms when the re-read
-        # follows the mutation, and does NOT when every re-read precedes it.
-        after = ("def handler():\n"
-                 "    feature.deleteMe()\n"
-                 "    n = safe(lambda: body.count)\n"
-                 "    if n == before:\n"
-                 "        return error('nothing was deleted')\n")
-        before = ("def handler():\n"
-                  "    n = safe(lambda: body.count)\n"
-                  "    if n == 0:\n"
-                  "        return error('nothing to delete')\n"
-                  "    feature.deleteMe()\n"
-                  "    return {'deleted': True}\n")
-        assert _confirms_inline("inline: deleteMe() is gated by a count re-read", [after])
-        assert not _confirms_inline("inline: deleteMe() is gated by a count re-read", [before])
-        # ...the call-site idiom (safe() wrapping the mutation on its own line) still confirms...
-        call_site = ("def handler():\n"
-                     "    did = safe(lambda: node.deleteMe(), False)\n"
-                     "    if not did:\n"
-                     "        return error('declined')\n")
-        assert _confirms_inline("inline: deleteMe() bool is read at the call site", [call_site])
-        # ...and an assignment anchor (`attr=`) is positional the same way.
-        set_after = ("def handler():\n"
-                     "    occ.isGroundToParent = True\n"
-                     "    if not safe(lambda: occ.isGroundToParent):\n"
-                     "        return error('did not take')\n")
-        set_before = ("def handler():\n"
-                      "    was = safe(lambda: occ.isGroundToParent)\n"
-                      "    if was:\n"
-                      "        return error('already grounded')\n"
-                      "    occ.isGroundToParent = True\n"
-                      "    return {'grounded': True}\n")
-        assert _confirms_inline("inline: re-read after the isGroundToParent= set", [set_after])
-        assert not _confirms_inline("inline: re-read after the isGroundToParent= set", [set_before])
-        # (c) an error() gate is still required, a reason naming no mutation never confirms, and
-        # missing source (a builtin) is never confirmed.
-        no_gate = "def handler():\n    x.deleteMe()\n    n = safe(lambda: body.count)\n"
-        assert not _confirms_inline("inline: deleteMe() then re-read", [no_gate])
-        assert not _confirms_inline("inline: the effect is read back and gated", [after])
-        assert not _confirms_inline("inline: deleteMe() is gated", None)
-        # (d) a same-module reader helper called after the mutation counts at its call site.
-        helper_readback = ("def handler():\n"
-                           "    p.expression = expr\n"
-                           "    after = _summary(p)\n"
-                           "    if after == before:\n"
-                           "        return error('did not take')\n")
-        helper_src = "def _summary(p):\n    return {'expression': safe(lambda: p.expression)}\n"
-        assert _confirms_inline("inline: re-read after the expression= set",
-                                [helper_readback, helper_src])
-        assert not _confirms_inline("inline: re-read after the expression= set",
-                                    [helper_readback.replace("after = _summary(p)\n    ", "")])

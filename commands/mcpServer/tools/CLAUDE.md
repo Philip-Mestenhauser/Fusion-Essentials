@@ -100,11 +100,11 @@ return success while changing nothing: `Document.save()` versioning nothing and
   `verification=` declaration on `Item.create_tool_item` (inline / effect / deferred / external /
   dynamic / gap - each carrying the reference `test_postconditions_declared.py` RESOLVES: an
   evidence-test node id, a poller tool, a live-receipt row that records a real observation, or an
-  open ledger defect id; `dynamic` alone carries none, its effect being caller-authored) - or,
-  transitionally, an entry in that lint's `_EXEMPT` table with a one-line audited reason. The
-  table only shrinks; a silent omission is not an option.
+  open ledger defect id; `dynamic` alone carries none, its effect being caller-authored). One route
+  or the other, for every write tool; a silent omission is not an option.
 - Verify-the-effect logic that is intrinsically entangled with payload assembly, per-file loops, or
-  compensation/rollback may stay in the handler — name that in the exemption reason.
+  compensation/rollback stays in the handler — that is what `inline` and `effect` classify, and the
+  evidence test each one names is where the reasoning lives.
 
 ## What an excellent tool looks like — the bar, stated positively
 

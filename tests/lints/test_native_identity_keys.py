@@ -90,9 +90,8 @@ from conftest import TOOLS_DIR
 
 # (module basename without .py, enclosing function) -> why this site is exempt. A reason must state
 # a fact about THIS site. An entry prefixed 'gap:' is NOT an exemption-as-correct: it is a named
-# open defect nobody has fixed yet (the convention test_postconditions_declared._EXEMPT uses), and
-# it only stays legal while the reason names what was measured. Kept honest by
-# test_allowlist_entries_still_trip; the table only shrinks.
+# open defect nobody has fixed yet, and it only stays legal while the reason names what was
+# measured. Kept honest by test_allowlist_entries_still_trip; the table only shrinks.
 _ALLOWLIST = {}
 
 

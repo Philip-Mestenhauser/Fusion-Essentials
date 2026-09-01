@@ -22,10 +22,10 @@ to catch. A tool that genuinely cannot take a material reading goes in ``_MATERI
 reason naming why; that table only shrinks.
 """
 
+import inspect
 import re
 
 from conftest import is_write_tool, register_all_tools
-from test_postconditions_declared import _handler_parts
 
 # The mutation this lint anchors on: a features collection's add(). A tool that reaches its
 # features collection through a local variable does not match, and needs an exemption saying so.
@@ -38,6 +38,8 @@ _MATERIAL = re.compile(
     r"census_host|native_token|native_identity)\b")
 
 _ERROR_CALL = re.compile(r"\berror\(")
+# every name called in a source part - how the handler's own same-module helpers are found.
+_CALLED_NAME = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 
 # Tools in the target set that cannot take a material reading. Format: name -> the audited reason,
 # prefixed by its class:
@@ -67,11 +69,47 @@ def _cut_capable(item):
     return bool({"cut", "intersect"} & set(enum))
 
 
+def _original_handler(item):
+    """Unwrap the write-guard/assert chain (__wrapped__) to the tool module's own handler."""
+    h = item.handler
+    seen = set()
+    while h is not None and id(h) not in seen:
+        seen.add(id(h))
+        nxt = getattr(h, "__wrapped__", None)
+        if nxt is None:
+            return h
+        h = nxt
+    return h
+
+
+def _handler_parts(item):
+    """The source parts this lint scans, in order: the handler itself, then every same-module
+    function it directly calls (depth 1, sorted by name). Dispatch handlers (action= routers) verify
+    inside their _do_*/leaf helpers, so the handler body alone would under-read them; keeping the
+    parts SEPARATE keeps the positional check honest (source order across different functions is
+    meaningless). Returns None when no source exists."""
+    h = _original_handler(item)
+    try:
+        handler_src = inspect.getsource(h)
+    except (OSError, TypeError):
+        return None
+    module_globals = getattr(h, "__globals__", {})
+    parts = [handler_src]
+    for called in sorted(set(_CALLED_NAME.findall(handler_src))):
+        fn = module_globals.get(called)
+        if (callable(fn) and getattr(fn, "__module__", None) == h.__module__
+                and called != h.__name__):
+            try:
+                parts.append(inspect.getsource(fn))
+            except (OSError, TypeError):
+                pass
+    return parts
+
+
 def _verifies_material(parts):
     """True when some part performs a features.<x>.add(...) mutation with material evidence AFTER it
-    in that same part, and an error(...) gate exists on the surface. Parts are kept separate the way
-    test_postconditions_declared keeps them: source order across two different functions says
-    nothing about what ran first."""
+    in that same part, and an error(...) gate exists on the surface. Parts are kept separate because
+    source order across two different functions says nothing about what ran first."""
     if not parts:
         return False
     if not any(_ERROR_CALL.search(p) for p in parts):
