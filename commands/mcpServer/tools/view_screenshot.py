@@ -17,7 +17,7 @@ import base64
 import adsk.core
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, safe
 from . import _common
@@ -271,7 +271,12 @@ tool = (
 # write="write": 'file_path' writes a caller-named PNG to local disk and an existing file at that
 # path is overwritten without a refusal, so this tool cannot sit in the auto-approve read bucket -
 # the name keeps its Acquire verb (see test_tool_naming.py's write-verb exemption).
-item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(
+    tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_view_screenshot.py::TestFilePathWrite"
+                      "::test_a_zero_byte_write_is_a_failure_not_an_ok_carrying_the_image"))
 
 
 def register_tool():

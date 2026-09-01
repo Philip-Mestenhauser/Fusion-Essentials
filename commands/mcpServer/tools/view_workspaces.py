@@ -11,7 +11,7 @@
 import adsk.core
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from . import _common
@@ -174,7 +174,11 @@ _switch_tool = Tool.create_with_string_input(
     input_param_description="Workspace id, visible name, or alias (design/manufacture/cam).",
 ).strict_schema()
 switch_workspace_item = Item.create_tool_item(
-    tool=_switch_tool, write="write", handler=switch_workspace_handler, run_on_main_thread=True
+    tool=_switch_tool, write="write", handler=switch_workspace_handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_view_workspaces.py::TestSwitchReadBack"
+                      "::test_an_activate_that_lies_is_an_error_not_a_switch"),
 )
 
 

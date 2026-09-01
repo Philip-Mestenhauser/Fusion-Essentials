@@ -161,17 +161,12 @@ _EXEMPT = {
     'sketch_dimension': 'inline: the reported value is dim.parameter.expression read back after the addDistanceDimension()-family call sets it',
     'sketch_project': 'inline: addressable entity counts are diffed around each action call - project2() / projectToSurface() / intersectWithSketchPlane(); zero created is an error, and intersect additionally attributes the created curves back to their source entities',
     "sketch_set_text": "inline: sketchTexts count is diffed around add() on create and the created text's definition objectType is matched against the requested mode; expression before/after read on edit, and the font read back off the landed/edited SketchText on both paths",
-    "sys_set_preferences": "inline: setattr() assigns the member and the same member is re-read after it - a read-back that differs from the request is an error naming requested, current and previous, and the ok payload publishes previous beside now",
     "design_set_name": 'inline: the name= assignment is followed by a read of the entity name - the payload publishes the name that LANDED (the platform dedupes a taken name to "Name (1)"), and a name that reads back unchanged is an error(...)',
     "design_add_instance": "inline: addExistingComponent() is followed by a re-walk of root.allOccurrences - the assembly paths it added ARE the payload, and an occurrence returned while the tree gained none is an error(...)",
     "design_move_occurrence": "inline: moveToComponent() is followed by a re-walk of root.allOccurrences plus a body bounding-box re-read through the returned proxy - an unchanged tree is an error(...) and a shifted world position is published as a warning",
     'surface_delete_face': 'inline: face counts are diffed around the features add() and author bodies_consumed and the warning',
     'surface_reverse_normal': 'inline: isParamReversed counts are diffed around add() into reversed_confirmed',
     'surface_untrim': 'inline: face area is diffed around add() into extent_grew and the conditional note',
-    'view_screenshot': 'inline: the only mutation is the optional file_path PNG - fh.write() is followed by _export.verify_written on the landed path, and an absent or zero-byte file becomes an error(...) that suppresses the inline image; the kernel cannot see it either way, since this tool returns image/text content blocks rather than an ok() payload',
-    'view_set': 'camera/visibility state actions - inline read-backs; not model mutations',
-    'view_section': 'section analyses are view state; clear() has inline count read-back',
-    'view_switch_workspace': 'workspace state read-back is inline; camera/UI state, not model state',
 }
 
 

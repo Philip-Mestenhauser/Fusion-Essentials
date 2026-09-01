@@ -14,7 +14,7 @@ import math
 import adsk.core
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from . import _outputs
@@ -228,8 +228,12 @@ tool = (
             "description": "The new value, or an enum member NAME for an enum member."})
     .strict_schema()
 )
-item = Item.create_tool_item(tool=tool, write="destructive", handler=handler,
-                             run_on_main_thread=True)
+item = Item.create_tool_item(
+    tool=tool, write="destructive", handler=handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_sys_preferences.py::TestWriteProtocol"
+                      "::test_a_silent_noop_setter_is_an_error"))
 
 
 def register_tool():
