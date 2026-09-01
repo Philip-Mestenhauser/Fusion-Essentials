@@ -75,7 +75,6 @@ def _postconditions_of(item):
 # A few async/system entries keep bespoke reasons. Entries come and go as tools gain or lose
 # postconditions; what only shrinks is the gap: count.
 _EXEMPT = {
-    'appearance_set': 'inline: each appearance= assignment is read back and a mismatch is an error or lands in failed; an OCCURRENCE-level write additionally re-reads EVERY body and compares Appearance.id, never the name (measured: same-named appearances are distinct assets, so a name compare calls a body that kept its own color reached) - reached / bodies_not_reached / unverified_bodies are published, and reaching no body while at least one demonstrably kept another is an error',
 }
 
 

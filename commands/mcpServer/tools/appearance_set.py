@@ -13,7 +13,7 @@ import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe
 from . import _common
@@ -465,7 +465,19 @@ tool = (
             "description": "Optional name for the created appearance."})
     .strict_schema()
 )
-item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(
+    tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    # The appearance-ASSIGNMENT arms re-read through the two-key _reads_as compare (id AND name -
+    # neither alone identifies an instance) and error on a mismatch: a single target that still
+    # reads another appearance, the component loop collecting per-body failures and erroring when
+    # no body took, and an occurrence write that reached NO body while at least one demonstrably
+    # kept another. Two residuals disclose instead of gating: opacity publishes opacity_rendered
+    # off visibleOpacity beside the requested percent and never turns a divergence into an error,
+    # and the albedo write itself carries no value read-back (APPEAR-2).
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_appearance_set.py::TestApply"
+                      "::test_a_body_left_holding_a_same_base_copy_is_not_a_success"))
 
 
 def register_tool():
