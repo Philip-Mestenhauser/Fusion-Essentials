@@ -5,7 +5,7 @@
 
 gen_manifest splices these blurbs into the tools/CLAUDE.md catalog table, so every one of them is
 context an agent loads before authoring a tool - the same kind of session cost a tool description
-carries on the wire, where test_wire_budget.py makes each byte of growth one visible diff line.
+carries on the wire, which test_wire_budget.py bounds with fleet-level caps.
 This is that manifest's shape on this surface: a NAMED entry per module, deliberately no aggregate
 constant, so a blurb that grows by a paragraph arrives as a line a reviewer sees rather than as
 prose absorbed into a block nobody measures.

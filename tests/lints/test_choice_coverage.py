@@ -8,9 +8,9 @@ scripted, excused or pending). That gate is satisfied by calling a tool ONCE, wh
 about the choices inside it - a `mode` with nineteen values and one exercised value reads as fully
 covered there. A choice nothing ever sends is a choice nothing has ever proven the tool accepts.
 
-So this pins the COUNT, the way test_wire_budget.py pins per-tool wire weight: it may rise freely
-and may only fall deliberately, by editing the number below and saying why in the same diff. The
-figure is a LOWER bound on what the sweep really sends - a step whose arguments are computed from
+So this pins the COUNT: it may rise freely and may only fall deliberately, by editing the number
+below and saying why in the same diff.
+The figure is a LOWER bound on what the sweep really sends - a step whose arguments are computed from
 run context contributes only the string constants readable in its code object - so treat it as a
 direction, not a percentage.
 
