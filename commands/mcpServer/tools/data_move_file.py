@@ -8,7 +8,7 @@ URN and its parentFolder re-read - a true return over an unchanged parent is rep
 """
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from ._data_common import (resolve_file_reference, _resolve_data_file, navigate_folder_path,
@@ -160,7 +160,12 @@ tool = (
     .strict_schema()
 )
 
-item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(
+    tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_data_move_file.py::TestMoveVerification"
+                      "::test_true_with_an_unchanged_parent_is_an_error"))
 
 
 def register_tool():

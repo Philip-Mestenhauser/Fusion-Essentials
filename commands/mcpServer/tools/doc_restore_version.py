@@ -10,7 +10,7 @@ creates a NEW tip version whose content matches the restored one.
 import adsk.core
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import iter_collection, ok, error, safe
 from . import _export
@@ -158,7 +158,12 @@ tool = (
     .strict_schema()
 )
 
-item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(
+    tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="effect",
+        evidence_test="tests/unit/test_doc_restore_version.py::TestRestoreHonesty"
+                      "::test_a_settled_equal_tip_is_not_restored"))
 
 
 def register_tool():

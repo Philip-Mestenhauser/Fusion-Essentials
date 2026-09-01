@@ -20,7 +20,7 @@ import adsk.fusion
 app = adsk.core.Application.get()
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import iter_collection, ok, error, safe, all_components
 
@@ -191,7 +191,12 @@ tool = (
     .strict_schema()
 )
 
-item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(
+    tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_doc_update_xref.py::TestUpdateBehavior"
+                      "::test_still_stale_after_true_return_is_an_error"))
 
 
 def register_tool():

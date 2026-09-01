@@ -1207,7 +1207,11 @@ _copy_document_tool = (
     .strict_schema()
 )
 copy_document_item = Item.create_tool_item(
-    tool=_copy_document_tool, write="write", handler=copy_document_handler, run_on_main_thread=True
+    tool=_copy_document_tool, write="write", handler=copy_document_handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="effect",
+        evidence_test="tests/unit/test_doc_lifecycle.py::TestCopyDocument"
+                      "::test_rename_failure_surfaces_warning_not_error")
 )
 
 _delete_document_tool = (
@@ -1231,7 +1235,12 @@ _delete_document_tool = (
     .strict_schema()
 )
 delete_document_item = Item.create_tool_item(
-    tool=_delete_document_tool, write="destructive", handler=delete_document_handler, run_on_main_thread=True
+    tool=_delete_document_tool, write="destructive", handler=delete_document_handler,
+    run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_doc_lifecycle.py::TestDeleteDocument"
+                      "::test_delete_me_false_reported")
 )
 
 _save_document_as_tool = (
@@ -1265,7 +1274,12 @@ _save_document_as_tool = (
     .strict_schema()
 )
 save_document_as_item = Item.create_tool_item(
-    tool=_save_document_as_tool, write="write", handler=save_document_as_handler, run_on_main_thread=True
+    tool=_save_document_as_tool, write="write", handler=save_document_as_handler,
+    run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_doc_lifecycle.py::TestSaveDocumentAs"
+                      "::test_saveas_false_return_is_an_error")
 )
 
 _new_document_tool = Tool.create_simple(
@@ -1279,7 +1293,11 @@ _new_document_tool = Tool.create_simple(
     ),
 ).strict_schema()
 new_document_item = Item.create_tool_item(
-    tool=_new_document_tool, write="write", handler=new_document_handler, run_on_main_thread=True
+    tool=_new_document_tool, write="write", handler=new_document_handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="effect",
+        evidence_test="tests/unit/test_doc_lifecycle.py::TestNewDocument"
+                      "::test_a_different_active_document_reads_inactive")
 )
 
 _save_document_tool = (
@@ -1319,7 +1337,12 @@ _close_document_tool = (
     .strict_schema()
 )
 close_document_item = Item.create_tool_item(
-    tool=_close_document_tool, write="destructive", handler=close_document_handler, run_on_main_thread=True)
+    tool=_close_document_tool, write="destructive", handler=close_document_handler,
+    run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_doc_lifecycle.py::TestCloseDocument"
+                      "::test_close_returning_false_is_now_an_error"))
 
 _activate_document_tool = (
     Tool.create_with_string_input(

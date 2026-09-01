@@ -15,7 +15,7 @@ import os
 import time
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe, counted
 from ._data_common import (
@@ -579,7 +579,12 @@ _create_project_tool = (
     .strict_schema()
 )
 create_project_item = Item.create_tool_item(
-    tool=_create_project_tool, write="write", handler=create_project_handler, run_on_main_thread=True
+    tool=_create_project_tool, write="write", handler=create_project_handler,
+    run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_data_management.py::TestCreateProject"
+                      "::test_a_project_that_never_relists_is_an_error")
 )
 
 _create_folder_tool = (
@@ -602,7 +607,11 @@ _create_folder_tool = (
     .strict_schema()
 )
 create_folder_item = Item.create_tool_item(
-    tool=_create_folder_tool, write="write", handler=create_folder_handler, run_on_main_thread=True
+    tool=_create_folder_tool, write="write", handler=create_folder_handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_data_management.py::TestCreateFolder"
+                      "::test_a_folder_that_never_relists_is_an_error")
 )
 
 _upload_tool = (
@@ -631,7 +640,11 @@ _upload_tool = (
     .strict_schema()
 )
 upload_file_item = Item.create_tool_item(
-    tool=_upload_tool, write="write", handler=upload_file_handler, run_on_main_thread=True
+    tool=_upload_tool, write="write", handler=upload_file_handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="deferred", poller="data_get_upload_status",
+        evidence_test="tests/unit/test_data_management.py::TestUploadFile"
+                      "::test_the_start_names_the_poller_and_claims_no_completion")
 )
 
 # list_folders_handler is the folder-tree read core that data_get delegates to (data_get(project=...,
@@ -661,7 +674,12 @@ _delete_folder_tool = (
     .strict_schema()
 )
 delete_folder_item = Item.create_tool_item(
-    tool=_delete_folder_tool, write="destructive", handler=delete_folder_handler, run_on_main_thread=True
+    tool=_delete_folder_tool, write="destructive", handler=delete_folder_handler,
+    run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_data_management.py::TestDeleteFolderGate"
+                      "::test_a_declined_delete_is_an_error_not_a_reported_delete")
 )
 
 

@@ -655,6 +655,10 @@ class TestCopyDocument:
             name="PartA_CAM"))
         assert out["requested_name"] == "PartA_CAM"
         assert out["copied_name"] == "PartA_CAM"   # rename applied after copy
+        # the payload's machine-usable handle is the COPY's lineage, never the source's: an agent
+        # feeds copied_id straight into doc_open/doc_activate, so an echo of src.id misdirects it.
+        assert out["copied_id"] == "urn:adsk.file:copy"
+        assert out["copied_id"] != out["source_id"]
 
     def test_duplicate_name_in_destination_refuses(self):
         proj = FakeProject("CAM")
@@ -804,8 +808,11 @@ class TestCopyDocument:
         assert out["copied"] is True
         assert "rename_warning" in out
         assert "rename to 'PartA_CAM' failed" in out["rename_warning"]
-        # the copy still carries the SOURCE name (caller is warned, not silently misled)
+        # the copy still carries the SOURCE name (caller is warned, not silently misled) - and
+        # both payload identities are READ off the created file, not echoed: the name disagrees
+        # with the request and the id is the copy's own lineage.
         assert out["copied_name"] == "Template"
+        assert out["copied_id"] == "urn:adsk.file:copy"
 
 
 class TestCopyByNameWalkBound:
@@ -1094,6 +1101,16 @@ class TestDeleteDocument:
         assert res["isError"] is True
         assert "Name mismatch" in res["message"]
         assert "RealName" in res["message"]
+        assert f.deleted is False
+
+    def test_a_case_mismatched_confirm_is_refused(self):
+        # the confirmation gate is case-SENSITIVE by its own comment - a destructive delete demands
+        # the exact name, so 'realname' is a mismatch, never a match that happens to read well.
+        f = FakeDeleteFile("RealName", fid="urn:f")
+        _install_delete({"urn:f": f})
+        res = _doc_lifecycle.delete_document_handler(document_id="urn:f", confirm_name="realname")
+        assert res["isError"] is True
+        assert "Name mismatch" in res["message"]
         assert f.deleted is False
 
     def test_open_file_refused(self):

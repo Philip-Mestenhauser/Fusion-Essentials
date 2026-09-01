@@ -549,6 +549,17 @@ class TestDeleteFolderGate:
         assert out["isError"] is False
         assert outer.deleted is True
 
+    def test_a_declined_delete_is_an_error_not_a_reported_delete(self, monkeypatch):
+        # deleteMe() answering false leaves the folder in the data model, so the bool read at the
+        # call site gates the claim: the payload may not report a delete the platform declined.
+        empty = FakeDelFolder("e", "Empty")
+        _install_folder_tree(empty)
+        monkeypatch.setattr(FakeDelFolder, "deleteMe", lambda self: False)
+        res = _del("e", confirm_name="Empty")
+        assert res["isError"] is True
+        assert "declined to delete folder 'Empty'" in res["message"]
+        assert "No change was made" in res["message"]
+
     def test_recursive_confirm_must_match_name(self):
         outer, inner = self._nested()
         _install_folder_tree(outer)
@@ -852,6 +863,20 @@ class TestCreateProject:
         assert "already exists" in res["message"]
         assert data.dataProjects.added == []            # nothing created
 
+    def test_a_project_that_never_relists_is_an_error(self, monkeypatch):
+        # add() handing back a project object is not the project existing. The re-list is the
+        # verification: a hub that does not carry the name afterwards is an error, never created:true.
+        _install_proj_data([])
+
+        def ghost(self, name, purpose, contributors):
+            self.added.append((name, purpose, contributors))
+            return FakeProj(name, "newid:" + name, FakeProjFolder("Root", is_root=True))
+
+        monkeypatch.setattr(FakeProjects, "add", ghost)
+        res = dm.create_project_handler(name="Alpha")
+        assert res["isError"] is True
+        assert "re-listed" in res["message"] and "did not land" in res["message"]
+
 
 class TestCreateFolder:
     def _proj(self):
@@ -927,6 +952,21 @@ class TestCreateFolder:
         res = dm.create_folder_handler(folder_name="Parts", project="Proj")
         assert res["isError"] is True
         assert "NOT removed" not in res["message"]
+
+    def test_a_folder_that_never_relists_is_an_error(self, monkeypatch):
+        # dataFolders.add() answering with a folder object is not the folder existing. The parent is
+        # re-listed after the add, and a folder missing from that listing is an error, not created:true.
+        proj, root = self._proj()
+        _install_proj_data([proj])
+
+        def ghost(self, child_name):
+            return FakeProjFolder(child_name, parent=self)   # returned, never listed by the parent
+
+        monkeypatch.setattr(FakeProjFolder, "_add_child", ghost)
+        res = dm.create_folder_handler(folder_name="Parts", project="Proj")
+        assert res["isError"] is True
+        assert "re-listed" in res["message"] and "did not land" in res["message"]
+        assert [c.name for c in root._children] == []
 
 
 class TestUploadFile:
@@ -1058,6 +1098,21 @@ class TestUploadFile:
                                      create_path=True)
         assert res["isError"] is True and "FAILED" in res["message"]
         assert "'New'" in res["message"] and "'Deep'" in res["message"]
+
+    def test_the_start_names_the_poller_and_claims_no_completion(self, tmp_path):
+        # The upload LANDS asynchronously on the cloud, so this call claims only that it started and
+        # hands back the handle data_get_upload_status polls - the payload confirms no completion of
+        # its own, and the future it registers is what the poller reads the real state off.
+        proj, _ = self._proj_with_path()
+        _install_proj_data([proj])
+        f = tmp_path / "p.step"
+        f.write_text("x")
+        self._set_future(0)                      # still transferring: no DataFile exists yet
+        out = _payload(dm.upload_file_handler(file_path=str(f), project="Proj"))
+        assert out["upload_started"] is True
+        assert out["uploaded_id"] is None and out["uploaded_name"] is None
+        assert out["upload_handle"] in dm._UPLOADS
+        assert "data_get_upload_status" in out["note"] and "upload_handle" in out["note"]
 
     def test_a_failed_upload_into_an_existing_folder_claims_no_retained_folders(self, tmp_path):
         # The boundary: create_path made nothing, so there is no partial success to disclose.
