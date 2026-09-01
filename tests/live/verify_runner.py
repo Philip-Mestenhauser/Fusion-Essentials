@@ -5,10 +5,10 @@
 
 `run_steps` is the ONE (tool, args, expect, save) engine every live harness judges its steps
 through, so the status vocabulary cannot fork; `judged_steps` is the list that pairs positionally
-with its rows. `run` walks the acts, takes each one's narrative or fallback lane, and turns the
-rows into the per-tool ledger. `source_hash`/`write_verified`/`check` are the receipt: a green run
-stamps VERIFIED_TOOLS.md with a hash of the tool source AND this harness, and `--check` recomputes
-it offline.
+with its rows. `run` walks the acts, takes each one's narrative or fallback lane, fires the reload
+beat once every act has run, and turns the rows into the per-tool ledger.
+`source_hash`/`write_verified`/`check` are the receipt: a green run stamps VERIFIED_TOOLS.md with
+a hash of the tool source AND this harness, and `--check` recomputes it offline.
 
 Orchestration only - no step rows, no domain knowledge. The names a consumer patches (`call`,
 `ACTS`, `STORY`, `source_hash`, ...) are read off the FACADE namespace through `verify_core.facade`
@@ -265,7 +265,7 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None):
     # the run starts - see verify_core.facade for why they are not this module's own globals.
     health_gate, registered_tools = facade("health_gate"), facade("registered_tools")
     source_hash, write_verified = facade("source_hash"), facade("write_verified")
-    poll_generation = facade("poll_generation")
+    poll_generation, reload_smoke = facade("poll_generation"), facade("reload_smoke")
     ACTS, POLL_AFTER, STORY, EXCLUDED = (facade("ACTS"), facade("POLL_AFTER"), facade("STORY"),
                                          facade("EXCLUDED"))
     health = health_gate()
@@ -304,6 +304,10 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None):
         if name in POLL_AFTER:
             poll_generation(rows, notes, POLL_AFTER[name][mode], valued=valued)
         act_seconds.append((name, time.time() - act_started))
+    # THE RELOAD BEAT, after every act: it restarts the server, so no step can be dispatched
+    # afterwards and no act can hold it. It appends its own row rather than running through the
+    # step engine, because what it has to judge is a reconnect, not one wire call (reload_smoke).
+    reload_smoke(rows, notes, valued=valued)
     if keep_open:
         print("\n--keep-open: the story document is left open for inspection.")
 

@@ -30,6 +30,10 @@ _GUIDANCE_SRC = tuple(os.path.join(_REPO, "commands", "mcpServer", "guidance", n
 
 _IDS = list(gd.loader.SECTION_IDS)
 
+# The most rules one section read answers with - the packaged number, which gen_guidance.validate
+# also refuses a section past (test_gen_guidance.py holds the two sides against each other).
+_CAP = gd.loader.MAX_SECTION_RULES
+
 
 def _canonical():
     """The shipped document, read straight off disk - the tests' own copy of the truth."""
@@ -169,25 +173,60 @@ class TestTheResourceAddress:
 
 class TestRuleBound:
     def test_a_section_holding_exactly_the_cap_is_returned_whole(self, serve):
-        serve(_doctored(rule_count=gd.MAX_RULES))
+        serve(_doctored(rule_count=_CAP))
         out = _payload(gd.handler(section="kernel"))
-        assert out["rule_count"] == gd.MAX_RULES
-        assert len(out["rules"]) == gd.MAX_RULES
+        assert out["rule_count"] == _CAP
+        assert len(out["rules"]) == _CAP
         assert "truncated" not in out and "rule_total" not in out
 
     def test_one_rule_past_the_cap_truncates_and_counts_what_was_dropped(self, serve):
-        serve(_doctored(rule_count=gd.MAX_RULES + 1))
+        serve(_doctored(rule_count=_CAP + 1))
         out = _payload(gd.handler(section="kernel"))
         assert out["truncated"] is True
-        assert out["rule_total"] == gd.MAX_RULES + 1
-        assert out["rule_count"] == gd.MAX_RULES
-        assert len(out["rules"]) == gd.MAX_RULES
+        assert out["rule_total"] == _CAP + 1
+        assert out["rule_count"] == _CAP
+        assert len(out["rules"]) == _CAP
 
     def test_the_shipped_document_is_served_untruncated(self):
         # the cap exists for a document that grows; today every section fits under it, so no
         # section read reports a truncation the caller would have to page around.
         for section_id in _IDS:
             assert "truncated" not in _payload(gd.handler(section=section_id))
+
+    def test_the_cap_the_tool_serves_is_the_packaged_one_read_at_call_time(self, serve,
+                                                                          monkeypatch):
+        # the number lives in the guidance package so the authoring gate can refuse a section past
+        # it; a copy taken in this module would keep serving 8 while the gate moved.
+        monkeypatch.setattr(gd.loader, "MAX_SECTION_RULES", 2)
+        serve(_doctored(rule_count=3))
+        out = _payload(gd.handler(section="kernel"))
+        assert out["rule_count"] == 2 and out["rule_total"] == 3
+
+
+class TestTheTruncationNamesTheUncappedChannel:
+    def test_a_truncated_section_points_at_the_resource_that_serves_them_all(self, serve):
+        serve(_doctored(rule_count=_CAP + 1))
+        out = _payload(gd.handler(section="kernel"))
+        assert gd.TRUNCATED_NOTE.strip() in out["note"]
+        assert "resource_uri" in out["note"] and out["resource_uri"].endswith("/doctored")
+
+    def test_an_untruncated_section_carries_no_escape_sentence(self, serve):
+        # the pointer ships where it is needed and nowhere else: a section that came back whole has
+        # nothing to page around, and a standing "read it elsewhere" sentence would say it does.
+        serve(_doctored(rule_count=_CAP))
+        assert _payload(gd.handler(section="kernel"))["note"] == gd.SECTION_NOTE
+
+    def test_the_shipped_section_reads_carry_only_the_record_note(self):
+        for section_id in _IDS:
+            assert _payload(gd.handler(section=section_id))["note"] == gd.SECTION_NOTE
+
+    def test_the_note_glosses_the_kind_field_the_rules_carry(self):
+        # 'kind' is the one field a rule carries that names nothing in the record shape, and the
+        # rendered document marks it - a client reading records alone has only this sentence.
+        note = _payload(gd.handler(section="finish"))["note"]
+        assert "'kind'" in note and "safety invariant" in note
+        kinds = [r.get("kind") for r in _payload(gd.handler(section="finish"))["rules"]]
+        assert "safety_invariant" in kinds
 
 
 # ── refusals ────────────────────────────────────────────────────────────────

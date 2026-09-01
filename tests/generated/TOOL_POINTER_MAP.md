@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 187  |  **description breadcrumbs:** 703  |  **note/error breadcrumbs:** 490
+**Tools:** 187  |  **description breadcrumbs:** 703  |  **note/error breadcrumbs:** 493
   |  **guidance smells flagged:** 4
 ## Blindspots to engineer
 
@@ -29,6 +29,7 @@ close orphans, factor duplicated guards into shared helpers.
 - **5x** across 4 module(s): "'. Use: new, join, cut, intersect."
 - **5x** across 5 module(s): "Fusion declined to delete '"
 - **5x** across 5 module(s): "is not available on this Fusion version."
+- **4x** across 1 module(s): "Edits already applied before the failure:"
 - **4x** across 3 module(s): "No active design (open a document with design geometry)."
 - **4x** across 1 module(s): "setMotionData reported success on '"
 
@@ -38,8 +39,8 @@ close orphans, factor duplicated guards into shared helpers.
 - `view_screenshot`  <- 56  (desc 22, note 34)
 - `design_get`  <- 45  (desc 20, note 25)
 - `design_delete_feature`  <- 41  (desc 20, note 21)
+- `cam_get`  <- 37  (desc 22, note 15)
 - `sketch_create`  <- 36  (desc 19, note 17)
-- `cam_get`  <- 35  (desc 22, note 13)
 - `data_get`  <- 33  (desc 19, note 14)
 - `sketch_get`  <- 32  (desc 14, note 18)
 - `assembly_get`  <- 25  (desc 12, note 13)
@@ -78,7 +79,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ). Color the bodies directly (target = the body name).
 
 ### `assembly_capture_position`
-- Latest captured position discarded (back to the joint-defined state).
+- Latest captured position discarded - back to the last captured position that remains (or the joint-defined state when nothing else was ever captured).
 - has_pending = a moved-but-uncaptured position exists (a joint_drive pose sets it the same way a free move does; a design_add_instance placement does NOT). Use capture to record it into the timeline...
 - Current position captured into the timeline.
 - Uncaptured move thrown away - the assembly is back at its last captured position (or the joint-defined state when nothing was ever captured). Captured markers are untouched; use revert to drop the ...
@@ -87,6 +88,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - has_pending is null - the pending-position flag could not be read, so whether a moved-but-uncaptured position exists is UNKNOWN here (it is not a 'no'). The captured markers below were still read.
 - Nothing to revert - there are no captured positions.
 - Fusion declined to revert the latest captured position.
+- - the latest captured position was not removed. List the markers with assembly_capture_position(action='status').
+- Revert reported success but
 - Nothing to capture - there is no pending position change. Move a jointed component first (its pose is transient until captured).
 - snapshots.add() returned nothing - the position was not captured.
 - Capture reported success but the snapshot count did not advance (
@@ -277,9 +280,13 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not create rigid group:
 
 ### `cam_activate_setup`
+- Setup activated and view fit. Use view_screenshot to capture it.
+- Setup activated. The view fit did not complete (
+- ), so the camera may not frame this setup - orient it with view_set before view_screenshot.
 - Provide 'setup' - the name of the setup to activate.
 - ' still reads isActive=false - the setup did not become active.
-- Setup activated and view fit. Use view_screenshot to capture it.
+- activate() ran but isActive cannot be read on '
+- ', so the activation is UNCONFIRMED. Re-read the setups with cam_get.
 
 ### `cam_apply_template`
 - Provide 'setup' - the name of the setup to apply the template to.
@@ -324,6 +331,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Provide 'tool_index' (with 'tool_scope=document' for this doc's library, or 'tool_library_url' for a shared one) - both from cam_edit_tools.
 - operations.add returned no operation.
 - operations.add returned '
+- ' but the setup's operation count could not be read
+- the add, so the operation's landing is UNCONFIRMED. Re-read the setup with cam_get(include=['operations']).
 - ' but the setup's operation count did not increase (
 - after) - the operation did not land.
 - Operation created but toolpath generation errored:
@@ -428,11 +437,15 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Folders organise the operation tree. Create with action='create', move ops in with action='move'. (Patterns are created in the UI - the API won't add them.)
 - Provide 'name' for the new folder.
 - ' already exists in setup '
-- Folder created. Move operations into it with action='move'.
+- ' did not take - addFolder returned a folder whose name reads back as
+- Folder created and found in the setup's re-listed folders. Move operations into it with action='move'.
 - Provide 'folder' (the existing folder) and 'new_name'.
 - Could not rename folder '
+- Each move was read back off the destination folder's own membership; 'operations' are the names it carries them under.
 - Provide 'folder' (destination) and 'operations' (names to move into it).
 - ' (move not allowed). (Moved so far:
+- ' did not take - moveInto returned true, but the folder re-lists
+- before this move, and the moved item reads its name back as
 
 ### `cam_edit_operation`
 - Provide 'operation' - the CAM operation name to edit (see cam_get(include=['operations'])).
@@ -449,7 +462,6 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Nothing to do. Provide 'parameters' {name: expression}, 'models'/'fixtures'/'stock' body lists, a 'machine', and/or a 'wcs' binding.
 - ' has no parameter(s):
 - . (Read the setup's parameter names first; only existing ones are settable.)
-- ': expression did not evaluate -
 - parameter(s); no change was applied. (A CAM stock/setup expression must reference existing parameters and resolve to a value - check names and units.)
 - - the assignment did not take.
 - Machine assignment did not take on setup '
@@ -585,8 +597,18 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Provide 'entity' (to move) and 'reference' (to move it relative to).
 - '. Use 'before' or 'after'.
 - 'entity' and 'reference' are the same item - nothing to reorder.
+- ' resolve to the SAME item (at '
+- ') - nothing to reorder.
 - ' was not allowed (e.g. moving an operation out of its setup, or across incompatible parents (setup or folder)).
-- CAM item reordered (the machining sequence changed). Toolpaths stay valid; reordering doesn't invalidate them.
+- Fusion allowed the move, but the order could NOT be read back here: '
+- '), which a parent holds in separate collections, so the two share no ordered list. Read the sequence with cam_get(include=['operations']).
+- ' collection to re-read. Read the sequence with cam_get(include=['operations']).
+- ' was allowed but did not land: re-reading the collection under '
+- , where the requested move leaves
+- CAM item reordered - 'order' is the sibling collection re-read off the parent after the move, matching the requested placement, with the moved item at 'entity_index'.
+- Fusion allowed the move and the collection under '
+- ' re-reads as the order the requested placement leaves, but WHICH item landed was not measured: that collection carries
+- ', which the row of names cannot tell apart. Read the sequence with cam_get(include=['operations']).
 
 ### `cam_save_template`
 - Provide 'template_name' for the new template.
@@ -633,17 +655,16 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 
 ### `cam_show_toolpath`
 - Toolpath shown. Toolpaths render in the Manufacture workspace; pair with view_screenshot.
-- operation(s) still read isLightBulbOn=true after the hide.
+- operation(s) did not read back isLightBulbOn=false after the hide.
 - Only this folder's generated toolpaths are shown.
-- operation(s) still read isLightBulbOn=false after the show - see toggle_failures.
+- operation(s) did not read back isLightBulbOn=true after the show - see toggle_failures.
+- operation(s) did not read back isLightBulbOn=false after the hide - see hide_failures; their toolpaths may still be drawn.
 - Provide 'operation' - the operation name to
 - Use cam_show_toolpath(list) to see every operation.
 - isLightBulbOn did not take for '
-- ' - it still reads hidden.
+- This operation has no generated toolpath yet - nothing to display. Generate it first (cam_generate).
 - Provide 'folder' - the folder or setup name to show.
 - Use cam_show_toolpath(list) or cam_get(include=['operations']).
-- ' - it still reads shown.
-- This operation has no generated toolpath yet - nothing to display. Generate it first (cam_generate).
 
 ### `data_create_folder`
 - Provide 'folder_name'.
@@ -1611,7 +1632,7 @@ A planar face's 'frame' is th...
 - Could not read the motion of joint '
 - ' (delete+recreate, a new token) clears this refusal.
 - ' is motion-linked to '
-- ', which was already driven this session, and the pair is in an XREF/referenced context where driving BOTH members has killed the Fusion process.
+- ', which was already driven this session, and the pair did NOT read as wholly native: an occurrence read for one of the two joints did not come back POSITIVELY native - it reads as a REFERENCED com...
 - . Fusion IGNORES an out-of-range drive (the value stays where it was), so nothing would move. Command a value inside the limits (a command exactly AT a bound lands on it), or widen them with joint_...
 - Refused: the command lies beyond the enabled joint limits of '
 - Could not drive joint '
@@ -1636,10 +1657,10 @@ A planar face's 'frame' is th...
 - ) than the joint (position
 - ). Editing a joint rolls the timeline to just before it, where a later feature does not exist yet. Create the Joint Origin before the joint, or delete the joint and recreate it after the Joint Orig...
 - setter returned false
+- Edits already applied before the failure:
 - This joint has no offset parameter (rigid/inferred or already 0-DOF).
 - This joint has no angle parameter.
 - This joint has no editable motion (rigid/inferred has no limits).
-- Edits already applied before the failure:
 - ' is an AS-BUILT joint, which exposes no offset parameter for ANY motion type - its position cannot be driven by a parameter or an expression. Delete it (design_delete_feature) and build the pair w...
 - ' is an AS-BUILT joint, which exposes no offset/angle ModelParameter for ANY motion type - no expression can drive it. Delete it (design_delete_feature) and build the pair with joint_create instead.
 

@@ -100,7 +100,9 @@ from verify_layout import (  # noqa: F401
     _place_owner, _place_num, _place_points, _place_walk, _place_shift, _place_slots, _placed,
     _px, _py, _SLOTS)
 
-from verify_acts_doc import _OVERTURE, _FINALE  # noqa: F401
+from verify_acts_doc import (  # noqa: F401
+    _OVERTURE, _FINALE, _RELOAD_PROBE_GAP_S, _RELOAD_PROBE_TIMEOUT_S, _RELOAD_DOWN_POLLS,
+    _RELOAD_UP_POLLS, _RELOAD_SMOKE_QUERY, _server_answers, _poll_health, reload_smoke)
 
 from verify_acts_sketch import _SKELETON, _SKETCHWORK  # noqa: F401
 
@@ -113,7 +115,7 @@ from verify_acts_motion import _MOTION, _MOTION_FB, _plate, _second_plate, _VISE
 from verify_acts_mesh import _MACHINING, _NESTING, _MESH  # noqa: F401
 
 from verify_acts_cam import (  # noqa: F401
-    _REORDER_PARKED, _op_created, _toolpath_shown, _CAM_STORY, _tmpl_names, _CAM_DELIVER,
+    _op_created, _toolpath_shown, _CAM_STORY, _tmpl_names, _CAM_DELIVER,
     poll_generation, _CAM, _CAM_FB_DELIVER)
 
 from verify_program import (  # noqa: F401

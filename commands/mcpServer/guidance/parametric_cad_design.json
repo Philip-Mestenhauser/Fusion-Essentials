@@ -66,7 +66,7 @@
           ],
           "when": "a milestone lands",
           "do": "read it back against intent, not at the end; a half-turn seating error shows in a bounding box",
-          "except": "a write whose result reports the effect",
+          "except": "a milestone already proved under verify-the-write",
           "prove": [
             {"tool": "model_inspect", "observe": "the bounding box of what was built"}
           ]

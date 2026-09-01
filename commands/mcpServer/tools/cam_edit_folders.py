@@ -11,7 +11,7 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import iter_collection, ok, error, safe
-from ._cam_common import get_cam, find_setup, resolve_cam_node
+from ._cam_common import CHILD_COLLECTIONS, get_cam, find_setup, resolve_cam_node
 
 app = adsk.core.Application.get()
 
@@ -33,17 +33,46 @@ def _do_list(setup):
                        "with action='move'. (Patterns are created in the UI - the API won't add them.)"})
 
 
+def _folder_names(setup):
+    """Every name in the setup's OWN folders collection, in its order - the membership list a
+    create is read back against."""
+    return [safe(lambda f=f: f.name) for f in iter_collection(safe(lambda: setup.folders))]
+
+
+def _member_names(folder):
+    """Every DIRECT child name of a folder - its operations, sub-folders and patterns, each read
+    from its own collection - the membership list a moveInto is read back against."""
+    names = []
+    for attr in CHILD_COLLECTIONS.values():
+        for c in iter_collection(safe(lambda a=attr: getattr(folder, a))):
+            names.append(safe(lambda c=c: c.name))
+    return names
+
+
 def _do_create(setup, name):
     name = (name or "").strip()
     if not name:
         return error("Provide 'name' for the new folder.")
+    setup_name = safe(lambda: setup.name)
     if safe(lambda: setup.folders.itemByName(name)):
-        return error(f"A folder named '{name}' already exists in setup '{safe(lambda: setup.name)}'.")
+        return error(f"A folder named '{name}' already exists in setup '{setup_name}'.")
+    before = _folder_names(setup)
     f = safe(lambda: setup.folders.addFolder(name))
     if not f:
         return error(f"Creating folder '{name}' failed.")
-    return ok({"created": True, "folder": safe(lambda: f.name), "setup": safe(lambda: setup.name),
-               "note": "Folder created. Move operations into it with action='move'."})
+    # addFolder handing back a folder is not proof the SETUP carries one: the returned folder's own
+    # name is re-read and looked for in the setup's re-listed folders, which must also have GROWN -
+    # the name alone would be satisfied by a folder that was already there.
+    landed = safe(lambda: f.name)
+    after = _folder_names(setup)
+    if landed is None or landed not in after or len(after) <= len(before):
+        return error(
+            f"Creating folder '{name}' did not take - addFolder returned a folder whose name reads "
+            f"back as {landed!r}, and setup '{setup_name}' re-lists {len(after)} folder(s) "
+            f"({', '.join(n for n in after if n) or 'none'}) against {len(before)} before the call.")
+    return ok({"created": True, "folder": landed, "setup": setup_name, "folder_count": len(after),
+               "note": "Folder created and found in the setup's re-listed folders. Move operations "
+                       "into it with action='move'."})
 
 
 def _do_rename(setup, folder, new_name):
@@ -80,15 +109,53 @@ def _do_move(setup, folder, operations):
         if rerr:
             return error(rerr)
         resolved.append((nm, node.obj))
-    moved = []
+    moved, unattributed, counts = [], [], []
+    # The destination's membership, re-read after every moveInto: a call that returns true and
+    # leaves the item out of the folder is caught rather than counted, and every published name is
+    # the moved item's own re-read found in that membership.
+    members = _member_names(dest)
     for nm, o in resolved:
         okmove = safe(lambda o=o: o.moveInto(dest), False)
         if not okmove:
             return error(f"Could not move '{nm}' into '{folder}' (move not allowed). "
                          f"(Moved so far: {', '.join(moved) or 'none'}.)")
-        moved.append(nm)
-    return ok({"moved": len(moved), "into": folder, "operations": moved,
-               "setup": safe(lambda: setup.name)})
+        landed = safe(lambda o=o: o.name)
+        after = _member_names(dest)
+        if landed is None or landed not in after:
+            return error(
+                f"Move of '{nm}' into '{folder}' did not take - moveInto returned true, but the "
+                f"folder re-lists {len(after)} item(s) "
+                f"({', '.join(n for n in after if n) or 'none'}) against {len(members)} before this "
+                f"move, and the moved item reads its name back as {landed!r}. "
+                f"(Moved so far: {', '.join(moved) or 'none'}.)")
+        # What the compare measures is the folder's count under the moved item's OWN name, before
+        # this move and after it - never which item is which, since the membership is a row of
+        # names. One MORE says something joined the folder here, which is what a move is counted
+        # on. No growth says nothing joined it, and against a name the folder ALREADY listed that
+        # reads identically whether the item was one of the items already listed under it or its
+        # moveInto did nothing - so it is disclosed, neither counted as a move nor refused as a
+        # no-take.
+        held, now = members.count(landed), after.count(landed)
+        if now > held:
+            moved.append(landed)
+        else:
+            unattributed.append(landed)
+            counts.append((landed, held, now))
+        members = after
+    out = {"moved": len(moved), "into": folder, "operations": moved,
+           "setup": safe(lambda: setup.name),
+           "note": "Each move was read back off the destination folder's own membership; "
+                   "'operations' are the names it carries them under."}
+    if unattributed:
+        out["unattributed"] = unattributed
+        tally = "; ".join(f"{b} item(s) named '{n}' before that move and {a} after"
+                          for n, b, a in counts)
+        out["note"] += (
+            f" {len(unattributed)} requested item(s) are in 'unattributed' rather than 'moved': "
+            f"'{folder}' listed {tally} - so nothing joined it under those names, and whether each "
+            "item was already one of the items listed under its name or its move did not take was "
+            "not measured.")
+    return ok(out)
 
 
 def handler(action: str = "list", setup: str = "", name: str = "", folder: str = "",
@@ -141,10 +208,13 @@ tool = (
 )
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
-    # Only rename re-reads its effect (f.name); create trusts addFolder's returned object without
-    # re-listing setup.folders, and move gates the moveInto bool while publishing the caller's own
-    # names - 1 of 3 acting arms verified, so the honest class is a gap, not inline.
-    verification=Verification(kind="gap", defect_id="CAM-44"))
+    # Every acting arm re-reads its effect: rename off f.name, create off the setup's re-listed
+    # folders, and move off the destination folder's own membership - each publishing that re-read
+    # and erroring when the collection did not carry the change.
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_cam_edit_folders.py::TestLyingReturns::"
+                      "test_a_create_that_never_joined_the_setup_errors"))
 
 
 def register_tool():

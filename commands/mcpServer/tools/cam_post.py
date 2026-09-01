@@ -25,7 +25,9 @@ from . import _assert
 from . import _inputs
 from . import _outputs
 from ._cam_common import (get_cam, library_assets, live_readiness, resolve_cam_node,
-                          setups as cam_setups, operations_under)
+                          setups as cam_setups, operations_under,
+                          # the CAM string-parameter codec, one home for every writer of one
+                          quote_expression as _quote, unquote_expression as _unquote)
 from ._export import verify_written   # the file-landed proof (postProcess() true != a file)
 
 app = adsk.core.Application.get()
@@ -210,22 +212,13 @@ def _new_or_changed(folder, before):
     return out
 
 
-def _unquote(expr):
-    if expr is None:
-        return None
-    s = str(expr)
-    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
-        return s[1:-1]
-    return s
-
-
 def _set_str_param(params, name, value):
     """Set a string CAMParameter by name and read it back. Returns the read-back value, or _MISSING if
     the parameter is not present on this program."""
     p = safe(lambda: params.itemByName(name))
     if p is None:
         return _MISSING
-    quoted = "'" + str(value).replace("'", "\\'") + "'"
+    quoted = _quote(value)
     try:
         p.expression = quoted
     except Exception as e:

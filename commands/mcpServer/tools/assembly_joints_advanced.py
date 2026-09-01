@@ -263,13 +263,36 @@ def capture_position_handler(action: str = "status", marker: str = "") -> dict:
         return error(f"Revert failed: {e}")
     if not did:
         return error("Fusion declined to revert the latest captured position.")
+    # deleteMe() answering True is not a removal - the delete arm re-reads its own target for the
+    # same reason. This arm holds the object it deleted, so the collection is re-read for THAT
+    # object by IDENTITY: the latest marker is addressed by index and a name lookup would match a
+    # DIFFERENT marker wearing the same name (Fusion enforces no uniqueness on them). The count
+    # comparison stays as the second gate - a marker the collection no longer hands back while its
+    # count has not dropped is a removal that did not take either - and neither read alone covers
+    # the other: a survivor can arrive with a count that will not re-read, which is the state the
+    # count gate abstains on. An unreadable count (None) is no evidence either way and stays the
+    # null disclosure below.
+    survived = any(s is latest for s in _common.iter_collection(snaps))
     # The count the collection reports, never the arithmetic the delete expected: an unreadable
     # re-read publishes null, so no caller reads a computed number back as a measurement.
     count_after = _common.counted(lambda: snaps.count)
-    note = "Latest captured position discarded (back to the joint-defined state)."
+    count_held = count_after is not None and count_after >= count
+    if survived or count_held:
+        seen = (["the marker is still in the snapshot collection"] if survived else []) + (
+            [f"the snapshot count did not drop ({count} before, {count_after} after)"]
+            if count_held else [])
+        return error("Revert reported success but " + " and ".join(seen)
+                     + " - the latest captured position was not removed. List the markers with "
+                       "assembly_capture_position(action='status').")
+    note = ("Latest captured position discarded - back to the last captured position that remains "
+            "(or the joint-defined state when nothing else was ever captured).")
     if count_after is None:
+        # The survivor check runs off the same count (_common.iter_collection ranges over it), so a
+        # count that will not re-read leaves BOTH confirming reads untaken - saying only that the
+        # count is null would let a caller read the marker as looked for and not found.
         note += (" 'snapshot_count' is null - the snapshot count could not be re-read after the "
-                 f"delete; {count} marker(s) were counted before it.")
+                 "delete, and the collection is enumerated through that same count, so the marker "
+                 f"could not be looked for either; {count} marker(s) were counted before it.")
     return ok({"reverted": True, "snapshot_count": count_after, "note": note})
 
 

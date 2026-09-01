@@ -1470,52 +1470,75 @@ class FakeOccurrence:
 
     ``transform2`` is what the occurrence PLACES its component with (a FakeMatrix3D) and
     ``assemblyContext`` the occurrence placing THIS one, or None where the chain ends at the root -
-    the pair a placement ladder walks. Both answer through ``raises`` like every other read here,
-    and holding a new read to that contract is what stops a caller reading a placement off an
-    occurrence whose component will not load.
+    the pair a placement ladder walks. ``isGroundToParent`` is the ground-to-parent lock, which sits
+    on a NESTED instance as readily as a top-level one, and ``childOccurrences`` is the level below
+    this one - the pair a design-wide census walks and asks. All four answer through ``raises`` like
+    every other read here, and holding a new read to that contract is what stops a caller reading a
+    placement or a lock off an occurrence whose component will not load.
+
+    ``raises_on`` narrows the same worst case to ONE read - {property name: message} - for the row
+    that is otherwise readable while a single property declines: a lock flag that will not answer,
+    a path that will not read, a child collection that will not enumerate. Like ``raises`` it is a
+    DECLARED worst case, not a shape any measurement row carries.
 
     ONE class, so a test can point ``adsk.fusion.Occurrence`` at it and the shared occurrence
     resolver's isinstance check passes on a handle it resolved.
     """
 
     def __init__(self, path="Comp:1", component=None, raises=None, transform2=None,
-                 assembly_context=None):
+                 assembly_context=None, ground_to_parent=None, children=(), raises_on=None):
         self._path = path
         self._component = component
         self._raises = raises
         self._transform2 = transform2
         self._assembly_context = assembly_context
+        self._ground_to_parent = ground_to_parent
+        self._children = _NamedCollection(list(children))
+        self._raises_on = dict(raises_on or {})
         self.name = path.split("+")[-1]
 
-    def _read(self, value):
+    def _read(self, prop, value):
         if self._raises:
             raise RuntimeError(self._raises)
+        if prop in self._raises_on:
+            raise RuntimeError(self._raises_on[prop])
         return value
 
     @property
     def fullPathName(self):
-        return self._read(self._path)
+        return self._read("fullPathName", self._path)
 
     @property
     def component(self):
-        return self._read(self._component)
+        return self._read("component", self._component)
 
     @property
     def transform2(self):
-        return self._read(self._transform2)
+        return self._read("transform2", self._transform2)
 
     @property
     def assemblyContext(self):
-        return self._read(self._assembly_context)
+        return self._read("assemblyContext", self._assembly_context)
+
+    @property
+    def isGroundToParent(self):
+        return self._read("isGroundToParent", self._ground_to_parent)
+
+    @property
+    def childOccurrences(self):
+        return self._read("childOccurrences", self._children)
 
 
 @fusion_fake(factory_for="FakeOccurrence")
 def make_occurrence(path="Comp:1", component=None, raises=None, transform2=None,
-                    assembly_context=None):
+                    assembly_context=None, ground_to_parent=None, children=(), raises_on=None):
     """An occurrence placing `component` at assembly path `path`, with the placement matrix
-    ``transform2`` and the occurrence ``assembly_context`` that places it. Pass ``raises`` to model
-    an unresolved external reference, where every read but ``name`` throws that message."""
-    return FakeOccurrence(path, component, raises, transform2, assembly_context)
+    ``transform2`` and the occurrence ``assembly_context`` that places it, the ground-to-parent lock
+    ``ground_to_parent`` and the nested ``children`` a census descends into. Pass ``raises`` to model
+    an unresolved external reference, where every read but ``name`` throws that message, or
+    ``raises_on`` = {property: message} for the row where only that one read declines."""
+    return FakeOccurrence(path, component, raises, transform2, assembly_context,
+                          ground_to_parent, children, raises_on)
 
 
 def make_sketch_curve(token="curve0", length=1.0, is_closed=None):

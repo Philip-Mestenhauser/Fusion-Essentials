@@ -11,8 +11,10 @@ runs: red when the receipt is missing, stampless, or the source has moved since 
 """
 
 import hashlib
+import json
 import os
 import sys
+import urllib.request
 
 TESTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(TESTS_DIR, "live"))
@@ -321,7 +323,7 @@ class TestParkedSteps:
 
 
 class TestFacadeLateBinding:
-    """The four call-time facade() sites with no other offline pin: each must see what a consumer
+    """The call-time facade() sites with no other offline pin: each must see what a consumer
     stubs ON tool_verify at CALL time. An import-time binding of its own copy leaves the stub
     unread while every other offline test stays green, so these assertions are each site's one
     offline bite."""
@@ -365,3 +367,207 @@ class TestFacadeLateBinding:
         assert tool_verify.check(verified_path=str(receipt)) == 0
         monkeypatch.setattr(tool_verify, "source_hash", lambda root=None: "cd" * 32)
         assert tool_verify.check(verified_path=str(receipt)) == 1
+
+
+_SCHEDULED = ("Reload scheduled. Make your next tool call after ~3 seconds - the connection "
+              "reconnects automatically.")
+
+
+def _reload_wire(reload_answer=(False, _SCHEDULED), found=("sys_reload_addin", "doc_get")):
+    """The two wire calls the reload beat makes, stubbed: sys_reload_addin's own answer, and the
+    registry search the smoke reads."""
+    def call(tool, args):
+        if tool == "sys_reload_addin":
+            if isinstance(reload_answer, Exception):
+                raise reload_answer
+            return reload_answer
+        return False, {"query": args.get("query"), "tool_count": len(found),
+                       "tools": [{"tool": name} for name in found]}
+    return call
+
+
+def _health(*states):
+    """A stubbed /health probe answering `states` in order and then holding the last one, so a
+    poll that keeps asking sees a server that stays where the sequence left it."""
+    seq = list(states)
+    return lambda timeout=None: seq.pop(0) if len(seq) > 1 else seq[0]
+
+
+def _urlopen(body=None, raises=None):
+    """A stand-in for urllib.request.urlopen: a context manager whose read() answers `body` as a
+    JSON document, or a raise standing in for a socket that answers nothing."""
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return json.dumps(body).encode("utf-8")
+
+    def urlopen(url, timeout=None):
+        if raises is not None:
+            raise raises
+        return _Response()
+    return urlopen
+
+
+class TestReloadBeat:
+    """The post-run beat that drives sys_reload_addin. It claims a covered row ONLY for a restart
+    it watched happen: the reload is deferred, so the server is still answering when the call
+    returns, and every path below that cannot see /health go down and come back leaves the tool in
+    its skipped bucket instead of banking a row."""
+
+    @staticmethod
+    def _drive(monkeypatch, call, answers, story="stubbed reload story"):
+        monkeypatch.setattr(tool_verify, "call", call)
+        monkeypatch.setattr(tool_verify, "_server_answers", answers)
+        monkeypatch.setattr(tool_verify, "STORY", {"sys_reload_addin": story})
+        monkeypatch.setattr(tool_verify.time, "sleep", lambda s: None)
+        rows, notes, valued = [], {}, set()
+        tool_verify.reload_smoke(rows, notes, valued=valued, down_polls=3, up_polls=3)
+        return rows, notes, valued
+
+    def test_a_watched_restart_banks_one_covered_row(self, monkeypatch):
+        rows, notes, valued = self._drive(
+            monkeypatch, _reload_wire(), _health(True, False, True))
+        assert [(t, s) for t, s, _ in rows] == [("sys_reload_addin", "pass")]
+        assert "answered again" in rows[0][2] and "sys_reload_addin among them" in rows[0][2]
+        assert notes["sys_reload_addin"] == "stubbed reload story"
+        assert valued == {"sys_reload_addin"}
+
+    def test_a_server_that_never_goes_down_banks_nothing(self, monkeypatch):
+        # The false positive the down-then-up watch exists to refuse: the reload is DEFERRED, so a
+        # /health read taken when the call returns answers healthy whether or not the reload ever
+        # fires. A beat that only waited for /health to answer would call this a restart.
+        rows, notes, valued = self._drive(monkeypatch, _reload_wire(), _health(True))
+        assert rows == [] and notes == {} and valued == set()
+
+    def test_a_server_that_does_not_come_back_banks_nothing(self, monkeypatch):
+        rows, _notes, valued = self._drive(monkeypatch, _reload_wire(), _health(True, False))
+        assert rows == [] and valued == set()
+
+    def test_a_reload_that_was_not_scheduled_banks_nothing(self, monkeypatch):
+        # the tool's own refusal path (its deferred-reload event is not installed): nothing was
+        # scheduled, so nothing restarts and the beat must not go on to watch for one.
+        rows, _notes, valued = self._drive(
+            monkeypatch, _reload_wire(reload_answer=(True, "Reload NOT scheduled: ...")),
+            _health(True, False, True))
+        assert rows == [] and valued == set()
+
+    def test_an_ok_that_does_not_say_scheduled_banks_nothing(self, monkeypatch):
+        rows, _notes, valued = self._drive(
+            monkeypatch, _reload_wire(reload_answer=(False, "something else entirely")),
+            _health(True, False, True))
+        assert rows == [] and valued == set()
+
+    def test_a_call_cut_off_by_the_teardown_banks_nothing(self, monkeypatch):
+        # the response can be cut mid-flush; the beat reports that rather than raising through run
+        rows, _notes, valued = self._drive(
+            monkeypatch, _reload_wire(reload_answer=OSError("connection reset")),
+            _health(True, False, True))
+        assert rows == [] and valued == set()
+
+    def test_a_registry_missing_the_tool_banks_nothing(self, monkeypatch):
+        # /health answering is the SERVER being back; the registry answering with the tool is the
+        # add-in being back. A restart that loaded no tools passes the first and fails here.
+        rows, _notes, valued = self._drive(
+            monkeypatch, _reload_wire(found=()), _health(True, False, True))
+        assert rows == [] and valued == set()
+
+    def test_the_smoke_read_failing_banks_nothing(self, monkeypatch):
+        def call(tool, args):
+            return (False, _SCHEDULED) if tool == "sys_reload_addin" else (True, "no such tool")
+        rows, _notes, valued = self._drive(monkeypatch, call, _health(True, False, True))
+        assert rows == [] and valued == set()
+
+    def test_the_probe_answers_true_only_for_this_server(self, monkeypatch):
+        # /health answering is not the add-in being back: another server holding the port answers
+        # it too - the state health_gate hard-exits the run on - and reading that as the restart
+        # would bank a covered row for a reload nobody observed.
+        monkeypatch.setattr(urllib.request, "urlopen",
+                            _urlopen({"server": tool_verify.SERVER_NAME, "version": "t"}))
+        assert tool_verify._server_answers() is True
+        monkeypatch.setattr(urllib.request, "urlopen",
+                            _urlopen({"server": "Autodesk Fusion 360"}))
+        assert tool_verify._server_answers() is False
+
+    def test_a_probe_that_cannot_be_read_answers_not_up(self, monkeypatch):
+        # connection-refused is the state the down-watch waits FOR. Reading a failed probe as 'up'
+        # would leave that watch unable to fire, and the beat unable to record anything, silently.
+        monkeypatch.setattr(urllib.request, "urlopen",
+                            _urlopen(raises=OSError("connection refused")))
+        assert tool_verify._server_answers() is False
+
+    def test_poll_health_reads_the_stubbed_probe_and_gives_up_on_its_budget(self, monkeypatch):
+        # the facade site: _poll_health must read the probe a consumer stubs ON tool_verify, and a
+        # budget that runs out is False - never the state it was waiting for.
+        monkeypatch.setattr(tool_verify.time, "sleep", lambda s: None)
+        monkeypatch.setattr(tool_verify, "_server_answers", _health(True, True, False))
+        assert tool_verify._poll_health(False, 3) is True
+        monkeypatch.setattr(tool_verify, "_server_answers", _health(True))
+        assert tool_verify._poll_health(False, 3) is False
+
+    def test_run_fires_the_beat_after_every_act(self, monkeypatch):
+        # the call SITE: the beat runs once the acts are done (it restarts the server, so nothing
+        # can follow it) and its covered row reaches the ledger.
+        ledger = {}
+
+        def fake_write(rows, version, date, src_hash, notes=None, act_modes=None):
+            ledger.update(rows)
+            return "VERIFIED_TOOLS.md"
+
+        seen = []
+        wire = _reload_wire()
+
+        def call(tool, args):
+            seen.append(tool)
+            return (False, {"n": 1}) if tool == "a_get" else wire(tool, args)
+
+        monkeypatch.setattr(tool_verify, "call", call)
+        monkeypatch.setattr(tool_verify, "_server_answers", _health(True, False, True))
+        monkeypatch.setattr(tool_verify.time, "sleep", lambda s: None)
+        monkeypatch.setattr(tool_verify, "health_gate", lambda: {"server": "ok", "version": "t"})
+        monkeypatch.setattr(tool_verify, "registered_tools",
+                            lambda: ["a_get", "sys_reload_addin"])
+        monkeypatch.setattr(tool_verify, "source_hash", lambda *a, **k: "0" * 64)
+        monkeypatch.setattr(tool_verify, "write_verified", fake_write)
+        monkeypatch.setattr(tool_verify, "POLL_AFTER", {})
+        monkeypatch.setattr(tool_verify, "EXCLUDED", {"sys_reload_addin": "not confirmed"})
+        monkeypatch.setattr(tool_verify, "STORY", {})
+        monkeypatch.setattr(tool_verify, "ACTS",
+                            [("ACT T", None, [("a_get", {}, lambda p: p["n"] == 1, None)], None)])
+
+        assert tool_verify.run(write_json=False) == 0
+        assert ledger == {"a_get": "covered", "sys_reload_addin": "covered"}
+        assert seen == ["a_get", "sys_reload_addin", "sys_find_tool"]
+
+    def test_an_unconfirmed_beat_leaves_the_skipped_row_standing(self, monkeypatch):
+        # the other half of the same site: the run stays green and the receipt keeps the tool's
+        # EXCLUDED row, so an unlanded reconnect never reads as coverage.
+        ledger = {}
+
+        def fake_write(rows, version, date, src_hash, notes=None, act_modes=None):
+            ledger.update(rows)
+            return "VERIFIED_TOOLS.md"
+
+        wire = _reload_wire()
+        monkeypatch.setattr(tool_verify, "call",
+                            lambda tool, args: ((False, {"n": 1}) if tool == "a_get"
+                                                else wire(tool, args)))
+        monkeypatch.setattr(tool_verify, "_server_answers", _health(True))   # never goes down
+        monkeypatch.setattr(tool_verify.time, "sleep", lambda s: None)
+        monkeypatch.setattr(tool_verify, "health_gate", lambda: {"server": "ok", "version": "t"})
+        monkeypatch.setattr(tool_verify, "registered_tools",
+                            lambda: ["a_get", "sys_reload_addin"])
+        monkeypatch.setattr(tool_verify, "source_hash", lambda *a, **k: "0" * 64)
+        monkeypatch.setattr(tool_verify, "write_verified", fake_write)
+        monkeypatch.setattr(tool_verify, "POLL_AFTER", {})
+        monkeypatch.setattr(tool_verify, "EXCLUDED", {"sys_reload_addin": "not confirmed"})
+        monkeypatch.setattr(tool_verify, "STORY", {})
+        monkeypatch.setattr(tool_verify, "ACTS",
+                            [("ACT T", None, [("a_get", {}, lambda p: p["n"] == 1, None)], None)])
+
+        assert tool_verify.run(write_json=False) == 0
+        assert ledger == {"a_get": "covered", "sys_reload_addin": "skipped: not confirmed"}

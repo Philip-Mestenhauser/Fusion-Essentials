@@ -22,7 +22,7 @@ When you take on a brief: state what the design must satisfy, and each interface
 When a value carries a decision: hold it in a named, commented parameter and derive the rest; a buried literal freezes while geometry moves. Except a measured value, in one parameter saying so; audits only read. Prove `param_get`: each driving parameter's expression and comment.
 
 **build-and-observe-in-milestones**
-When a milestone lands: read it back against intent, not at the end; a half-turn seating error shows in a bounding box. Except a write whose result reports the effect. Prove `model_inspect`: the bounding box of what was built.
+When a milestone lands: read it back against intent, not at the end; a half-turn seating error shows in a bounding box. Except a milestone already proved under verify-the-write. Prove `model_inspect`: the bounding box of what was built.
 
 **prove-structure-before-detail**
 When detail is next: prove the structure first - detail on a part sitting on the wrong plane is drawn twice. Except detail that is itself the requirement. Prove `model_measure_relation`: perpendicular, coaxial or concentric where claimed.

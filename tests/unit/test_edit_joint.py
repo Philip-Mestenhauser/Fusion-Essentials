@@ -60,11 +60,27 @@ class SliderJointMotion:
         self.slideLimits = FakeLimits()
 
 
+# The unit an expression may carry -> its factor into Fusion's DATABASE units (cm for a length,
+# radians for an angle), which is what Parameter.value reads in whatever the expression said.
+_EXPRESSION_UNITS = {"mm": 0.1, "cm": 1.0, "in": 2.54, "deg": math.pi / 180.0}
+
+
 class FakeModelParameter:
-    """Matches Joint.offset / Joint.angle — a ModelParameter with settable expression/value."""
+    """Matches Joint.offset / Joint.angle - a ModelParameter whose `expression` is settable in
+    display units and whose `value` reads back in DATABASE units (cm / radians)."""
     def __init__(self):
-        self.expression = None
+        self._expression = None
         self.value = None
+
+    @property
+    def expression(self):
+        return self._expression
+
+    @expression.setter
+    def expression(self, text):
+        self._expression = text
+        number, _, unit = (text or "").strip().rpartition(" ")
+        self.value = float(number) * _EXPRESSION_UNITS[unit]
 
 
 class FakeJoint:
@@ -166,18 +182,23 @@ class FakeDesign:
         return self._timeline
 
 
-def _install(joint_names=("BoomPivot",), motion="revolute", timeline_items=None):
-    joints = [FakeJoint(n) for n in joint_names]
-    if motion == "slider":
-        for j in joints:
-            j.jointMotion = SliderJointMotion()
+def _install_joints(joints, timeline_items=None):
+    """Wire a design holding these joint objects into the tool module."""
     design = FakeDesign(joints, timeline_items=timeline_items)
     jt.app = type("A", (), {"activeProduct": design})()
     jt._common.app = jt.app
     import adsk.fusion, adsk.core
     adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
     adsk.core.ValueInput.createByReal = staticmethod(lambda v: ("real", v))
-    return design, joints[0]
+    return design
+
+
+def _install(joint_names=("BoomPivot",), motion="revolute", timeline_items=None):
+    joints = [FakeJoint(n) for n in joint_names]
+    if motion == "slider":
+        for j in joints:
+            j.jointMotion = SliderJointMotion()
+    return _install_joints(joints, timeline_items), joints[0]
 
 
 def _install_as_built(monkeypatch, name="Slider_R"):
@@ -219,6 +240,19 @@ class TestFindAndGuards:
         res = jt.edit_handler(joint_name="BoomPivot")
         assert res["isError"] is True
         assert "nothing to change" in res["message"].lower()
+
+    def test_a_name_two_joints_carry_is_refused_with_both_owners(self):
+        # a joint name is only unique within a component, so editing by a shared name would target
+        # an arbitrary assembly's joint - the resolver's refusal is returned, naming both owners
+        a, b = FakeJoint("Revolute1"), FakeJoint("Revolute1")
+        a.parentComponent = type("C", (), {"name": "ArmA"})()
+        b.parentComponent = type("C", (), {"name": "ArmB"})()
+        _install_joints([a, b])
+        res = jt.edit_handler(joint_name="Revolute1", flip=True)
+        assert res["isError"] is True
+        assert "names 2 joints" in res["message"]
+        assert "ArmA" in res["message"] and "ArmB" in res["message"]
+        assert a.isFlipped is False and b.isFlipped is False
 
 
 # ── rollTo orchestration ─────────────────────────────────────────────────────
@@ -421,6 +455,157 @@ class TestLimitsAreReadBackOnEdit:
         _install(["BoomPivot"], motion="revolute")
         out = _payload(jt.edit_handler(joint_name="BoomPivot", min_deg=-45))
         assert "limits_unverified" not in out and "Limits published null" not in out["note"]
+
+
+# ── flip / offset / angle: the joint's own read-back, never the request ─────
+#
+# The limits arm above has always re-read its set; these three carry the same plumbing, so a joint
+# that ACCEPTS the assignment and keeps its own value is an error rather than a published success.
+
+class _StuckFlipJoint(FakeJoint):
+    """A joint that accepts the isFlipped assignment and keeps False - the swallowed flag write."""
+    def __setattr__(self, name, value):
+        if name == "isFlipped":
+            return object.__setattr__(self, name, False)
+        return object.__setattr__(self, name, value)
+
+
+class _BlindFlipJoint(FakeJoint):
+    """A joint whose isFlipped READ raises - the re-read that cannot be taken."""
+    def __getattribute__(self, name):
+        if name == "isFlipped":
+            raise RuntimeError("flip flag unreadable")
+        return object.__getattribute__(self, name)
+
+
+class _StuckParameter(FakeModelParameter):
+    """A ModelParameter that accepts the expression assignment and keeps the value it holds -
+    nothing raises, so only the read-back catches it."""
+    def __init__(self, value=0.0):
+        super().__init__()
+        self.value = value
+
+    @FakeModelParameter.expression.setter
+    def expression(self, text):
+        pass
+
+
+class _BlindParameter(FakeModelParameter):
+    """A ModelParameter whose value READ raises - the re-read that cannot be taken."""
+    def __getattribute__(self, name):
+        if name == "value":
+            raise RuntimeError("parameter value unreadable")
+        return object.__getattribute__(self, name)
+
+
+class _DriftingParameter(FakeModelParameter):
+    """A ModelParameter that lands its own value a fixed distance (in DATABASE units) from the one
+    the expression asked for."""
+    def __init__(self, drift):
+        super().__init__()
+        self._drift = drift
+
+    @FakeModelParameter.expression.setter
+    def expression(self, text):
+        FakeModelParameter.expression.fset(self, text)
+        self.value += self._drift
+
+
+class TestSwallowedSets:
+    def test_a_flip_that_did_not_take_errors_naming_it(self):
+        _install_joints([_StuckFlipJoint("BoomPivot")])
+        res = jt.edit_handler(joint_name="BoomPivot", flip=True)
+        assert res["isError"] is True
+        assert "flip did not take" in res["message"]
+        assert "reads isFlipped back as False" in res["message"]
+        assert "it read False before the set" in res["message"]
+
+    def test_an_unreadable_flip_publishes_null_and_the_marker(self):
+        _install_joints([_BlindFlipJoint("BoomPivot")])
+        out = _payload(jt.edit_handler(joint_name="BoomPivot", flip=True))
+        assert out["flipped"] is None and out["changes"]["flipped"] is None
+        assert out["edits_unverified"] == ["flipped"]
+        assert "Published null (flipped)" in out["note"]
+
+    def test_a_flip_that_took_publishes_the_joints_own_flag(self):
+        _, joint = _install(["BoomPivot"])
+        out = _payload(jt.edit_handler(joint_name="BoomPivot", flip=True))
+        assert out["flipped"] is True and joint.isFlipped is True
+        assert "edits_unverified" not in out and "Published null" not in out["note"]
+
+    def test_an_offset_that_did_not_take_errors_naming_it(self):
+        joint = FakeJoint("BoomPivot")
+        joint.offset = _StuckParameter(value=0.0)
+        _install_joints([joint])
+        res = jt.edit_handler(joint_name="BoomPivot", offset=-200, units="mm")
+        assert res["isError"] is True
+        assert "offset did not take" in res["message"]
+        assert "-200.0 was requested" in res["message"]
+        assert "reads back 0.0 in the same units" in res["message"]
+
+    def test_an_angle_that_did_not_take_errors_naming_it(self):
+        joint = FakeJoint("BoomPivot")
+        joint.angle = _StuckParameter(value=0.0)
+        _install_joints([joint])
+        res = jt.edit_handler(joint_name="BoomPivot", angle=30)
+        assert res["isError"] is True
+        assert "angle did not take" in res["message"] and "30.0 was requested" in res["message"]
+
+    def test_a_swallowed_offset_names_the_edits_that_had_landed(self):
+        # PARTIAL SUCCESS: the flip before it really took, and a bare refusal would hide that
+        joint = FakeJoint("BoomPivot")
+        joint.offset = _StuckParameter(value=0.0)
+        _install_joints([joint])
+        res = jt.edit_handler(joint_name="BoomPivot", flip=True, offset=5)
+        assert res["isError"] is True
+        assert "Edits already applied before the failure: flipped=True" in res["message"]
+        assert joint.isFlipped is True
+
+    def test_an_unreadable_offset_publishes_null_and_the_marker(self):
+        joint = FakeJoint("BoomPivot")
+        joint.offset = _BlindParameter()
+        _install_joints([joint])
+        out = _payload(jt.edit_handler(joint_name="BoomPivot", offset=5, units="mm"))
+        assert out["offset"] is None and out["changes"]["offset"] is None
+        assert out["edits_unverified"] == ["offset"]
+        assert "Published null (offset)" in out["note"]
+        # the units the expression was written in are still reported - that is the call's own fact
+        assert out["changes"]["units"] == "mm"
+
+    def test_an_unreadable_angle_publishes_null_and_the_marker(self):
+        joint = FakeJoint("BoomPivot")
+        joint.angle = _BlindParameter()
+        _install_joints([joint])
+        out = _payload(jt.edit_handler(joint_name="BoomPivot", angle=30))
+        assert out["angle"] is None and out["changes"]["angle"] is None
+        assert out["edits_unverified"] == ["angle"]
+        assert "Published null (angle)" in out["note"]
+
+    def test_the_published_offset_is_the_parameters_own_value(self):
+        # 0.0009 mm off the request - inside the band, so it lands; what is PUBLISHED is the
+        # parameter's own read-back, not the 5 that was asked for.
+        joint = FakeJoint("BoomPivot")
+        joint.offset = _DriftingParameter(9e-5)      # cm, the parameter's own unit
+        _install_joints([joint])
+        out = _payload(jt.edit_handler(joint_name="BoomPivot", offset=5, units="mm"))
+        assert out["offset"] == 5.0009
+
+    def test_a_read_back_past_the_band_does_not_land(self):
+        # the other side of that boundary: 0.0011 mm off is past _LIMIT_BAND and is a no-take
+        joint = FakeJoint("BoomPivot")
+        joint.offset = _DriftingParameter(1.1e-4)
+        _install_joints([joint])
+        res = jt.edit_handler(joint_name="BoomPivot", offset=5, units="mm")
+        assert res["isError"] is True and "offset did not take" in res["message"]
+
+    def test_an_inch_offset_is_judged_in_inches(self):
+        # the expression is written in inches and the parameter reads cm - the compare happens in
+        # the unit the request was made in, so a correct inch offset is not a 2.54x mismatch
+        _, joint = _install(["BoomPivot"])
+        out = _payload(jt.edit_handler(joint_name="BoomPivot", offset=2, units="in"))
+        assert joint.offset.expression == "2 in"
+        assert abs(joint.offset.value - 5.08) < 1e-9      # cm, the database unit
+        assert out["offset"] == 2.0
 
 
 class _DeafLimits(FakeLimits):

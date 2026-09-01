@@ -1,11 +1,14 @@
 """Unit tests for the text-parameter quoting helpers.
 
-Both ``sketch_set_text.py`` and ``cam_set_nc_comment.py`` carry a
-``_quote`` / ``_unquote`` pair for Fusion's quoted text-parameter expressions
-('foo'). Quoting bugs corrupt user text silently (a stray quote breaks the
-expression, or escaping is lost on round-trip), so these get round-trip and
-edge coverage. The two copies are tested together to confirm they behave
-identically — if they ever diverge, that's a finding.
+``sketch_set_text.py`` and ``cam_set_nc_comment.py`` each expose a ``_quote`` /
+``_unquote`` pair for Fusion's quoted text-parameter expressions ('foo'): the
+CAM tool through ``_cam_common``'s ``quote_expression`` / ``unquote_expression``
+(the codec its read-back compare runs on), the sketch tool through
+``_sketch_detail.unquote_text`` plus its own quoting half. Quoting bugs corrupt
+user text silently (a stray quote breaks the expression, or escaping is lost on
+round-trip), so these get round-trip and edge coverage. The two are tested
+together to confirm they behave identically — if they ever diverge, that's a
+finding.
 """
 
 import pytest

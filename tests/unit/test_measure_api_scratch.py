@@ -42,6 +42,12 @@ class TestActiveOpenIndex:
         assert measure_api._active_open_index(_rows((0, False, False))) is None
         assert measure_api._active_open_index([]) is None
 
+    def test_a_hole_row_is_passed_over_for_the_row_that_answered(self):
+        # a hole carries neither is_active nor open_index: it can never be read as the active row,
+        # and it must not stop the walk before the row that is.
+        rows = [{"name": None, "readable": False}] + _rows((1, True, False))
+        assert measure_api._active_open_index(rows) == 1
+
 
 class TestStrayIndices:
     def test_only_indices_strictly_above_the_scratch(self):
@@ -59,8 +65,10 @@ class TestStrayIndices:
         rows = _rows((0, False, False), (1, False, False), (2, True, False))
         assert measure_api._stray_indices(rows, 2) == []
 
-    def test_a_row_with_no_readable_index_is_skipped(self):
-        rows = [{"name": None, "open_index": None}, {"name": "Untitled", "open_index": 3}]
+    def test_a_hole_row_is_skipped(self):
+        # the shape doc_get really emits for a slot whose document would not read: readable=false
+        # and NO open_index key at all, since that index addresses nothing doc_close would accept.
+        rows = [{"name": None, "readable": False}, {"name": "Untitled", "open_index": 3}]
         assert measure_api._stray_indices(rows, 1) == [3]
 
 
@@ -74,6 +82,11 @@ class TestScratchStillUnsaved:
         # never read as "never saved", or the teardown closes the user's own file.
         assert measure_api._scratch_still_unsaved(
             _rows((0, False, False), (1, True, None)), 1) is False
+
+    def test_a_hole_row_never_answers_for_the_scratch_address(self):
+        # nothing read from that slot, so "never saved" is not something to conclude about it - and
+        # concluding it would aim doc_close at an index that addresses nothing.
+        assert measure_api._scratch_still_unsaved([{"name": None, "readable": False}], 0) is False
 
     def test_false_when_the_index_is_gone(self):
         assert measure_api._scratch_still_unsaved(_rows((0, True, False)), 1) is False

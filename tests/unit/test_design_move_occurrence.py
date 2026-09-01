@@ -105,6 +105,7 @@ def _move(des, node, target):
     if not hasattr(target, "fullPathName"):
         raise TypeError(_TYPE_ERROR)
     des.moved_into = target.fullPathName
+    was = _path(node)
     if des.refuse == "raise":
         raise RuntimeError("the occurrence is locked")
     if des.refuse == "none":
@@ -123,16 +124,25 @@ def _move(des, node, target):
     if des.drift:
         node.corner = tuple(c + des.drift for c in (node.corner or (0.0, 0.0, 0.0)))
     _refresh(des)
-    return _proxy(des, node)                     # the new proxy: its path IS the assembly path
+    returned = _proxy(des, node)                 # the new proxy: its path IS the assembly path
+    if des.stale_return:
+        # A returned wrapper answering a path the census does not carry - the same silent staleness a
+        # HELD wrapper is measured to have. Whatever produced it, that string names no occurrence the
+        # assembly reports, so it is not evidence of where this instance landed.
+        returned.fullPathName = was
+    return returned
 
 
-def _make(names=("A", "B"), refuse=None, drift=0.0, corner=(1.0, 2.0, 3.0)):
+def _make(names=("A", "B"), refuse=None, drift=0.0, corner=(1.0, 2.0, 3.0),
+          stale_return=False):
     """A design with one root instance per named component. 'refuse' models the failures the
-    read-back exists to catch; 'drift' moves the part in world space during the re-parent."""
+    read-back exists to catch; 'drift' moves the part in world space during the re-parent;
+    'stale_return' makes the RETURNED proxy answer a path the post-move census does not hold."""
     root = _comp("Root")
     des = MakeDesign(comp=root)
     des.tree, des.counter, des.comps = [], {}, {"Root": root}
     des.refuse, des.drift, des.moved_into = refuse, drift, None
+    des.stale_return = stale_return
     for name in names:
         des.comps[name] = _comp(name)
         _instance(des, des.comps[name], corner=corner)
@@ -213,6 +223,16 @@ class TestReParent:
         assert out["full_path"] == "B:1+A:1"
         assert out["paths"] == ["B:1+A:1", "B:1+A:1+C:1"]
         assert "B:1+A:1+C:1" in _paths(des)
+
+    def test_a_returned_path_the_census_does_not_hold_is_not_published(self, wire):
+        # 'full_path' is the caller's next handle, so it may only be a path the assembly CENSUS
+        # answers with: taking the returned proxy's own string on trust publishes an address
+        # design_get resolves nothing at. Here the proxy answers its PRE-move path - absent from
+        # (after - before) - while the census names exactly one new path, and that is the answer.
+        des = wire(stale_return=True)
+        out = payload(mo.handler(occurrence="A:1", into_component="B:1"))
+        assert out["full_path"] == "B:1+A:1"       # the census-confirmed path, not 'A:1'
+        assert _paths(des) == ["B:1", "B:1+A:1"]
 
     def test_declared_outputs_present(self, wire):
         wire()

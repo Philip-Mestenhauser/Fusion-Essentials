@@ -564,6 +564,11 @@ STORY = {
                        "design) and stays out of the default sweep"),
     "doc_get": "read the document identity before discarding",
     "doc_close": "discard the document on camera - clean teardown",
+    "sys_reload_addin": ("the last beat of the run, once the document is discarded: reload the "
+                         "add-in, watch /health stop answering and answer again as this server, "
+                         "then read the restarted registry back through sys_find_tool. It "
+                         "restarts the server, so nothing can be dispatched after it - which is "
+                         "why it is a post-run beat and not a row in an act"),
 }
 
 # Tools deliberately not swept unattended, each with its reason (the ledger's skipped rows). This is
@@ -575,7 +580,10 @@ EXCLUDED = {
                            "drawing ends with 'Re-read the sheets before assuming this call changed "
                            "nothing.', a design one does not), which would need this tool driven "
                            "against two document kinds"),
-    "sys_reload_addin": "restarts the server mid-sweep",
+    "sys_reload_addin": ("restarts the server, so no STEP can follow it - the run drives it as a "
+                         "post-run beat instead (reload_smoke), and this row is what stands when "
+                         "that beat could not confirm the restart: the call, the /health "
+                         "down-then-up watch or the sys_find_tool smoke did not come back"),
     "sys_request_selection": "waits on a human pick (user-present tier)",
     "drawing_update": "user-present tier (drawing docs)",
     "drawing_export": "user-present tier (drawing docs)",

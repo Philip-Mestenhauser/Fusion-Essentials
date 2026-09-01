@@ -17,9 +17,11 @@ skill and the resource are one render, not two that agree today.
 
 The structural limits are here, not in a lint: the kernel is capped at five rules and 300 rendered
 words, the whole skill at 750 rendered words excluding frontmatter, and a conditional playbook
-section carries at most one example. Validation is authoring-time gating - it decides what may be
-committed, never what the server answers - so it lives with the generator. Whether a rule's wording
-is honest is a review judgment; this script checks shape, routing, and size.
+section carries at most one example. The per-section rule cap is the exception - it is the shipped
+``loader.MAX_SECTION_RULES``, imported rather than restated, because it is also the number
+``sys_get_guidance`` truncates one section read at. Validation is authoring-time gating - it decides
+what may be committed, never what the server answers - so it lives with the generator. Whether a
+rule's wording is honest is a review judgment; this script checks shape, routing, and size.
 
 Run from the repo root:
 
@@ -44,7 +46,7 @@ import gen_manifest  # noqa: E402
 # the build in the order it happens. A document declaring anything else is rejected below rather
 # than reordered, so the skill is a function of the file alone; importing the render (instead of
 # holding a second copy) is what keeps the skill and the served resource one text.
-from mcpServer.guidance.loader import SECTION_IDS  # noqa: E402
+from mcpServer.guidance.loader import MAX_SECTION_RULES, SECTION_IDS  # noqa: E402
 from mcpServer.guidance.render import SAFETY_INVARIANT, body, section_text  # noqa: E402
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -228,6 +230,11 @@ def validate(doc, tool_names):
         section_rules = sec.get("rules") or []
         if not section_rules:
             problems.append(f"section '{section_id}' has no rules")
+        if len(section_rules) > MAX_SECTION_RULES:
+            # The serving cap, asked of the DATA: one sys_get_guidance call returns at most this
+            # many rules, so a section authored past it would ship rules no section read answers.
+            problems.append(f"section '{section_id}' holds {len(section_rules)} rules - at most "
+                            f"{MAX_SECTION_RULES}, which is all one sys_get_guidance call serves")
         examples = 0
         for rule in section_rules:
             problems += _rule_problems(rule, section_id, known, tool_names)

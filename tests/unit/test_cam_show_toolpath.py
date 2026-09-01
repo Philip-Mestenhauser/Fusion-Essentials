@@ -121,6 +121,81 @@ class _StuckOffOp(FakeOp):
         pass
 
 
+class _UnreadableBulbOp(FakeOp):
+    """The bulb takes the assignment and isLightBulbOn cannot be READ back. An unconfirmed toggle is
+    not a done one, so every arm has to treat it as a failure rather than as a success."""
+    @property
+    def isLightBulbOn(self):
+        raise RuntimeError("isLightBulbOn is unreadable")
+
+    @isLightBulbOn.setter
+    def isLightBulbOn(self, v):
+        pass
+
+
+class _OpCell:
+    """One operation's real state, shared by every wrapper minted for it."""
+    def __init__(self, name, operation_id, shown=False, has_toolpath=True, stuck_on=False):
+        self.name = name
+        self.operationId = operation_id
+        self.shown = shown
+        self.has_toolpath = has_toolpath
+        self.stuck_on = stuck_on
+
+
+class _Refetched:
+    """A FETCHED Operation. Live, two walks of the CAM tree hand back DIFFERENT Python objects for
+    one operation, carrying the same operationId (measured - cam_post._op_id_set), so a wrapper is
+    minted per fetch here and the bulb state lives in the shared cell. 'stuck_on' models the bulb
+    that swallows every write and always reads lit - the shape a hide must report."""
+    def __init__(self, cell):
+        self._cell = cell
+        self.name = cell.name
+        self.operationId = cell.operationId
+        self.hasToolpath = cell.has_toolpath
+        self.isToolpathValid = True
+        self.isSuppressed = False
+
+    @property
+    def isLightBulbOn(self):
+        return True if self._cell.stuck_on else self._cell.shown
+
+    @isLightBulbOn.setter
+    def isLightBulbOn(self, value):
+        if not self._cell.stuck_on:
+            self._cell.shown = bool(value)
+
+
+class _IdlessRefetched(_Refetched):
+    """The same, with an operationId that will not read - no identity to match a hide to a show."""
+    @property
+    def operationId(self):
+        raise RuntimeError("operationId is unavailable on this object")
+
+    @operationId.setter
+    def operationId(self, value):
+        pass
+
+
+class _RefetchSetup:
+    """A setup whose .operations mints a fresh wrapper per fetch, as the live collection does."""
+    def __init__(self, name, cells, is_active=True, wrapper=_Refetched):
+        self.name = name
+        self._cells = list(cells)
+        self._wrapper = wrapper
+        self.isActive = is_active
+        self.folders = _NamedCollection([])
+        self.patterns = _NamedCollection([])
+
+    @property
+    def operations(self):
+        return _NamedCollection([self._wrapper(c) for c in self._cells])
+
+    def activate(self):
+        self.isActive = True
+        return True
+
+
 class TestBulbReadBack:
     def test_hide_of_a_stuck_bulb_is_an_error(self):
         stuck = _StuckOnOp("Stuck")
@@ -149,7 +224,7 @@ class TestBulbReadBack:
         out = _payload(st.handler(action="show_folder", folder="S1"))
         assert out["shown"] == ["Good"]
         assert out["toggle_failures"] == ["Stuck"]
-        assert "still read isLightBulbOn=false" in out["note"]
+        assert "did not read back isLightBulbOn=true" in out["note"]
 
     def test_show_folder_surfaces_a_setup_activation_warning(self):
         op = FakeOp("Face1", shown=False)
@@ -161,6 +236,195 @@ class TestBulbReadBack:
         assert "isActive=false" in out["note"]
 
 
+class TestUnreadableBulb:
+    """A bulb whose read does not answer is a toggle this call cannot confirm. Every arm has to
+    treat it as a failure - the sibling flag write (cam_edit_operation._set_suppressed) does."""
+
+    def test_show_of_an_unreadable_bulb_is_an_error_naming_the_read(self):
+        _install([FakeSetup("S1", [_UnreadableBulbOp("Ghost")], is_active=True)])
+        res = st.handler(action="show", operation="Ghost")
+        assert res["isError"] is True and "did not take" in res["message"]
+        # 'unreadable', never 'hidden': the read did not answer, so no state may be reported for it
+        assert "unreadable" in res["message"] and "reads back hidden" not in res["message"]
+
+    def test_hide_of_an_unreadable_bulb_is_an_error(self):
+        _install([FakeSetup("S1", [_UnreadableBulbOp("Ghost")], is_active=True)])
+        res = st.handler(action="hide", operation="Ghost")
+        assert res["isError"] is True and "unreadable" in res["message"]
+
+    def test_a_stuck_bulb_still_reports_the_state_it_read(self):
+        # the other side of _bulb_word: a bulb that DID answer is named by its answer, so the
+        # unreadable wording above is a distinction the message really makes.
+        _install([FakeSetup("S1", [_StuckOnOp("Stuck")], is_active=True)])
+        res = st.handler(action="hide", operation="Stuck")
+        assert "reads back shown" in res["message"]
+
+    def test_hide_all_counts_an_unreadable_bulb_as_a_failure_not_a_hide(self):
+        good = FakeOp("Good", shown=True)
+        _install([FakeSetup("S1", [good, _UnreadableBulbOp("Ghost")], is_active=True)])
+        out = _payload(st.handler(action="hide_all"))
+        assert out["hidden_count"] == 1 and out["toggle_failures"] == 1
+        # the note may not say they read back true - one of them read back nothing at all
+        assert "did not read back isLightBulbOn=false" in out["note"]
+
+    def test_show_folder_names_an_unreadable_bulb_among_its_failures(self):
+        good = FakeOp("Good", shown=False)
+        _install([FakeSetup("S1", [good, _UnreadableBulbOp("Ghost")], is_active=True)])
+        out = _payload(st.handler(action="show_folder", folder="S1"))
+        assert out["shown"] == ["Good"] and out["toggle_failures"] == ["Ghost"]
+
+
+class TestMassHideReadBacks:
+    """isolate and show_folder hide every OTHER operation first. Discarding those read-backs left a
+    toolpath that would not go dark invisible in a payload that says only this one is displayed."""
+
+    def test_isolate_reports_the_op_whose_hide_did_not_take(self):
+        target = FakeOp("Target", shown=False)
+        stuck = _StuckOnOp("Stuck")
+        _install([FakeSetup("S1", [target, stuck], is_active=True)])
+        out = _payload(st.handler(action="isolate", operation="Target"))
+        assert target.isLightBulbOn is True
+        assert out["hide_failures"] == ["Stuck"]
+        assert "hide_failures" in out["note"]
+
+    def test_isolate_reports_an_unreadable_bulb_among_them(self):
+        target = FakeOp("Target", shown=False)
+        _install([FakeSetup("S1", [target, _UnreadableBulbOp("Ghost")], is_active=True)])
+        out = _payload(st.handler(action="isolate", operation="Target"))
+        assert out["hide_failures"] == ["Ghost"]
+
+    def test_an_isolate_onto_a_pathless_op_still_discloses_its_hide_failures(self):
+        # this arm returns early with a warning; the mass-hide already ran, so dropping its
+        # read-backs here would hide a lit toolpath behind an ok-with-warning.
+        target = FakeOp("Target", has_toolpath=False)
+        stuck = _StuckOnOp("Stuck")
+        _install([FakeSetup("S1", [target, stuck], is_active=True)])
+        out = _payload(st.handler(action="isolate", operation="Target"))
+        assert out["has_toolpath"] is False
+        assert out["hide_failures"] == ["Stuck"]
+
+    def test_a_clean_isolate_carries_no_hide_failures_key(self):
+        target = FakeOp("Target", shown=False)
+        other = FakeOp("Other", shown=True)
+        _install([FakeSetup("S1", [target, other], is_active=True)])
+        out = _payload(st.handler(action="isolate", operation="Target"))
+        assert "hide_failures" not in out and other.isLightBulbOn is False
+
+    def test_show_folder_reports_a_stuck_op_outside_the_folder(self):
+        inside = FakeOp("Inside", shown=False)
+        outside = _StuckOnOp("Outside")
+        _install([FakeSetup("SetupA", [inside], is_active=True),
+                  FakeSetup("SetupB", [outside])])
+        out = _payload(st.handler(action="show_folder", folder="SetupA"))
+        assert out["shown"] == ["Inside"]
+        assert out["hide_failures"] == ["Outside"]
+        assert "did not read back isLightBulbOn=false" in out["note"]
+
+    def test_an_op_whose_id_does_not_read_is_reported_not_matched_away(self):
+        # a hide read-back is matched to a later show by operationId; an operation that answers no
+        # id matches nothing, so what this call READ - a bulb that would not go dark - is reported
+        # rather than dropped on an identity nobody has.
+        inside = _StuckOnOp("Inside")     # the shared fake carries no operationId
+        _install([FakeSetup("SetupA", [inside], is_active=True)])
+        out = _payload(st.handler(action="show_folder", folder="SetupA"))
+        assert out["shown"] == ["Inside"]
+        assert out["hide_failures"] == ["Inside"]
+
+    def test_a_pathless_op_inside_the_folder_that_will_not_hide_IS_reported(self):
+        # the other side of the line above: a path-less op is never shown, so it was meant to stay
+        # dark and its refused hide is a real failure.
+        class _StuckPathless(_StuckOnOp):
+            pass
+        stuck = _StuckPathless("Empty", has_toolpath=False)
+        shown_op = FakeOp("Real", shown=False)
+        _install([FakeSetup("SetupA", [shown_op, stuck], is_active=True)])
+        out = _payload(st.handler(action="show_folder", folder="SetupA"))
+        assert out["shown"] == ["Real"]
+        assert out["hide_failures"] == ["Empty"]
+
+
+class TestIdentityAcrossWalks:
+    """The mass-hide walks the whole tree and the show walks the folder (or the resolver hands back
+    the isolate target): two fetches of ONE operation, and each hands back a DIFFERENT Python
+    object. Matching a hide read-back to a show therefore runs on operationId - id() matches
+    nothing across those fetches, which reports an operation this call deliberately lit."""
+
+    def test_a_stuck_on_op_INSIDE_the_folder_is_not_a_hide_failure(self):
+        # it is hidden, then shown - and it ends lit, exactly as asked. Reporting the hide it
+        # refused would name a failure that changed nothing about the result.
+        inside = _OpCell("Inside", 7, stuck_on=True)
+        _install([_RefetchSetup("SetupA", [inside])])
+        out = _payload(st.handler(action="show_folder", folder="SetupA"))
+        assert out["shown"] == ["Inside"]
+        assert "hide_failures" not in out
+
+    def test_a_stuck_on_op_OUTSIDE_the_folder_is_still_reported(self):
+        # the other side of the match: nothing showed this one, so its refused hide leaves a
+        # toolpath drawn that 'show only this folder' said would be dark.
+        _install([_RefetchSetup("SetupA", [_OpCell("Inside", 7)]),
+                  _RefetchSetup("SetupB", [_OpCell("Outside", 8, stuck_on=True)],
+                                is_active=False)])
+        out = _payload(st.handler(action="show_folder", folder="SetupA"))
+        assert out["shown"] == ["Inside"]
+        assert out["hide_failures"] == ["Outside"]
+
+    def test_a_pathless_op_in_the_folder_that_will_not_hide_is_reported(self):
+        # a path-less op is never shown, so it is not in the shown set to match against and its
+        # refused hide is a real failure.
+        _install([_RefetchSetup("SetupA", [_OpCell("Real", 7),
+                                           _OpCell("Empty", 8, has_toolpath=False,
+                                                   stuck_on=True)])])
+        out = _payload(st.handler(action="show_folder", folder="SetupA"))
+        assert out["shown"] == ["Real"]
+        assert out["hide_failures"] == ["Empty"]
+
+    def test_an_isolated_op_is_never_reported_as_its_own_hide_failure(self):
+        # the mass-hide runs over a walk that does not hold the resolved target object, so the
+        # target's refused hide has to be matched away by id - it is lit immediately afterwards.
+        _install([_RefetchSetup("SetupA", [_OpCell("Target", 7, stuck_on=True)])])
+        out = _payload(st.handler(action="isolate", operation="Target"))
+        assert out["operation"] == "Target"
+        assert "hide_failures" not in out
+
+    def test_isolate_still_reports_another_op_that_would_not_go_dark(self):
+        _install([_RefetchSetup("SetupA", [_OpCell("Target", 7),
+                                           _OpCell("Stuck", 8, stuck_on=True)])])
+        out = _payload(st.handler(action="isolate", operation="Target"))
+        assert out["hide_failures"] == ["Stuck"]
+
+    def test_an_isolate_target_with_no_readable_id_reports_what_it_read(self):
+        # no identity means no match: the target's own refused hide is what this call observed, and
+        # the note states that observation rather than claiming it was another operation's.
+        _install([_RefetchSetup("SetupA", [_OpCell("Target", 7, stuck_on=True)],
+                                wrapper=_IdlessRefetched)])
+        out = _payload(st.handler(action="isolate", operation="Target"))
+        assert out["hide_failures"] == ["Target"]
+        assert "other operation" not in out["note"]
+
+
+class TestToggleCheckedBeforeToolpath:
+    def test_a_pathless_op_whose_bulb_did_not_take_is_an_error(self):
+        # the took check runs BEFORE the has-toolpath branch: a failed toggle that returned
+        # ok-with-warning reported a call that changed nothing as a call that did its job.
+        class _StuckOffPathless(_StuckOffOp):
+            pass
+        _install([FakeSetup("S1", [_StuckOffPathless("Empty", has_toolpath=False)],
+                            is_active=True)])
+        res = st.handler(action="show", operation="Empty")
+        assert res["isError"] is True and "did not take" in res["message"]
+
+    def test_a_pathless_op_whose_bulb_took_still_warns(self):
+        # the ordering must not turn the warning path into an error: a working bulb on a path-less
+        # op is still an ok-with-warning, and the setup is left alone.
+        drill = FakeOp("Drill", has_toolpath=False)
+        sa = FakeSetup("SetupA", [drill])
+        sb = FakeSetup("SetupB", [FakeOp("B1")], is_active=True)
+        _install([sa, sb])
+        out = _payload(st.handler(action="show", operation="Drill"))
+        assert out["has_toolpath"] is False and "no generated toolpath" in out["warning"]
+        assert sa._activate_calls == 0 and sb.isActive is True
+
+
 class TestActivateOwningSetup:
     def test_no_setup_name_is_a_silent_noop(self):
         assert st._activate_owning_setup(object(), "") == (None, None)
@@ -170,6 +434,24 @@ class TestActivateOwningSetup:
                             lambda cam, n: (None, [], "no setup named 'Ghost'"))
         activated, warn = st._activate_owning_setup(object(), "Ghost")
         assert activated is None and "Ghost" in warn
+
+    def test_an_unreadable_isActive_is_unconfirmed_not_reported_as_inactive(self, monkeypatch):
+        # a flag that did not answer has not said the setup stayed inactive: the two outcomes get
+        # separate sentences, so 'still reads isActive=false' is never stated off a read that
+        # nothing answered.
+        class _S:
+            @property
+            def isActive(self):
+                raise RuntimeError("isActive is unreadable")
+
+            def activate(self):
+                pass
+
+        monkeypatch.setattr(st, "find_setup", lambda cam, n: (_S(), [], None))
+        activated, warn = st._activate_owning_setup(object(), "SetupA")
+        assert activated is None
+        assert "UNCONFIRMED" in warn and "isActive cannot be read" in warn
+        assert "isActive=false" not in warn
 
     def test_an_activate_that_raises_warns_instead_of_crashing(self, monkeypatch):
         class _S:

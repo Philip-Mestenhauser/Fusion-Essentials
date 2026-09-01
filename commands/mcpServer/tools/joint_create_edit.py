@@ -290,10 +290,11 @@ def _world_axis_entity(design, axis_idx):
     return _inputs.world_construction_axis(root, "xyz"[axis_idx])
 
 
-# The band a limit's read-back may differ from the request by, expressed in the REQUEST'S OWN units
-# (degrees, or the caller's length unit). A limit makes a units round trip in each direction - degrees
-# to radians, display length to cm - so the read-back is converted back and compared there, against
-# the same display-unit band joint_drive's value_now gate holds its own round trip to.
+# The band a read-back may differ from the request by, expressed in the REQUEST'S OWN units
+# (degrees, or the caller's length unit). A limit and a joint offset/angle each make a units round
+# trip in each direction - degrees to radians, display length to cm - so the read-back is converted
+# back and compared there, against the same display-unit band joint_drive's value_now gate holds its
+# own round trip to.
 _LIMIT_BAND = 1e-3
 
 # native -> degrees, for the radians a rotation limit stores.
@@ -314,6 +315,19 @@ def _unverified_limits_note(keys):
     return (f" Limits published null ({', '.join(keys)}) - each was assigned but could not be read "
             "back off the joint, so whether it TOOK is UNKNOWN here (it is not a 'yes'). Read the "
             "joint's limits with assembly_get before relying on them.")
+
+
+def _unverified_edits_note(keys):
+    """The same sentence for joint_edit's non-limit sets (flip / offset / angle) whose read-back
+    could not be taken - published null in 'changes' rather than as the request echoed back."""
+    return (f" Published null ({', '.join(keys)}) - each was assigned but could not be read back "
+            "off the joint, so whether it TOOK is UNKNOWN here (it is not a 'yes').")
+
+
+def _applied_so_far(changed):
+    """The edits recorded before a failing one, for the partial-success disclosure a bare error
+    would hide."""
+    return ", ".join(f"{k}={v}" for k, v in changed.items()) if changed else "none"
 
 
 def _set_one_limit(limits, flag_prop, value_prop, key, wanted, native, unit_scale):
@@ -343,6 +357,48 @@ def _set_one_limit(limits, flag_prop, value_prop, key, wanted, native, unit_scal
     if abs(landed - float(wanted)) > _LIMIT_BAND:
         return None, (f"{key} did not take - {wanted} was requested and the joint reads back "
                       f"{landed} in the same units.")
+    return landed, None
+
+
+def _set_flip(joint, wanted):
+    """Set Joint.isFlipped, then read the flag BACK off the live joint - the same set-then-re-read
+    _set_one_limit holds a JointLimits to, over the joint's own flag.
+
+    Returns (published, error): `published` is the flag as the JOINT reads it, or None when the
+    re-read could not be taken - never the request echoed back; `error` names the value asked for
+    and the one the joint answers with."""
+    before = _common.read_flag(lambda: joint.isFlipped)
+    # NOT safe()-wrapped: this is the mutation the tool was ASKED to do - let a failure raise into
+    # the handler's try/except so it is reported, not swallowed into a false success.
+    joint.isFlipped = bool(wanted)
+    after = _common.read_flag(lambda: joint.isFlipped)
+    if after is None:
+        return None, None
+    if after != bool(wanted):
+        return None, (f"flip did not take - {bool(wanted)} was requested and the joint reads "
+                      f"isFlipped back as {after} (it read {before} before the set).")
+    return after, None
+
+
+def _set_one_parameter(param, key, wanted, expression, unit_scale):
+    """Assign ONE of the joint's own ModelParameters (offset / angle) by EXPRESSION, then read its
+    VALUE back - the same set-then-re-read _set_one_limit holds a JointLimits to.
+
+    The expression carries the caller's unit; a Parameter's `value` reads in Fusion's DATABASE units
+    (cm / radians, never the parameter's own unit), which `unit_scale` converts back so the compare
+    happens in the units the request was made in, within _LIMIT_BAND.
+
+    Returns (published, error): `published` is the read-back in the caller's units, or None when the
+    re-read could not be taken - never the request echoed back; `error` names both values."""
+    before = _common.measured(lambda: param.value, scale=unit_scale, places=9)
+    # NOT safe()-wrapped: the mutation the tool was ASKED to do (see _set_flip).
+    param.expression = expression
+    landed = _common.measured(lambda: param.value, scale=unit_scale, places=9)
+    if landed is None:
+        return None, None
+    if abs(landed - float(wanted)) > _LIMIT_BAND:
+        return None, (f"{key} did not take - {wanted} was requested and the joint's parameter reads "
+                      f"back {landed} in the same units (it read {before} before the set).")
     return landed, None
 
 
@@ -714,6 +770,7 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
 
     changed = {}
     limits_unverified = []
+    edits_unverified = []
     rolled = False
     try:
         # The marker MUST be before the joint to edit geometry/flip/motion.
@@ -742,8 +799,13 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
                 changed["slide_axis"] = _slide_name(slide_idx, ax_name if ax_name in _AXES else "z")
 
         if want_flip:
-            joint.isFlipped = bool(flip)
-            changed["flipped"] = bool(flip)
+            published, ferr = _set_flip(joint, flip)
+            if ferr:
+                return error(f"{ferr} Edits already applied before the failure: "
+                             f"{_applied_so_far(changed)}.")
+            changed["flipped"] = published
+            if published is None:
+                edits_unverified.append("flipped")
 
         # offset / angle are ModelParameters on the Joint - set via an explicit-units expression
         # (robust regardless of document units), matching the create-joint tool's behaviour.
@@ -763,11 +825,18 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
                 return error("This joint has no offset parameter (rigid/inferred or already 0-DOF).")
             u = (units or "mm").strip().lower()
             u = "in" if u == "inch" else u
-            # NOT safe()-wrapped: this is the mutation the tool was ASKED to do - let a failure raise
-            # into the handler's try/except below so it's reported, not swallowed into a false success.
-            op.expression = f"{_fmt_num(offset)} {u}"
-            changed["offset"] = float(offset)
+            # `u` passed the units guard above, so it is a key of the shared cm-to-unit table -
+            # the factor that turns the parameter's internal cm back into the unit asked for.
+            published, oerr = _set_one_parameter(op, "offset", float(offset),
+                                                 f"{_fmt_num(offset)} {u}",
+                                                 _common.CM_TO_UNIT[u])
+            if oerr:
+                return error(f"{oerr} Edits already applied before the failure: "
+                             f"{_applied_so_far(changed)}.")
+            changed["offset"] = published
             changed["units"] = u
+            if published is None:
+                edits_unverified.append("offset")
 
         if want_angle:
             ap = safe(lambda: joint.angle)
@@ -778,8 +847,14 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
                         "ModelParameter for ANY motion type - no expression can drive it. Delete "
                         "it (design_delete_feature) and build the pair with joint_create instead.")
                 return error("This joint has no angle parameter.")
-            ap.expression = f"{_fmt_num(angle)} deg"
-            changed["angle"] = float(angle)
+            published, aerr = _set_one_parameter(ap, "angle", float(angle),
+                                                 f"{_fmt_num(angle)} deg", _DEG_PER_RAD)
+            if aerr:
+                return error(f"{aerr} Edits already applied before the failure: "
+                             f"{_applied_so_far(changed)}.")
+            changed["angle"] = published
+            if published is None:
+                edits_unverified.append("angle")
 
         if want_limits:
             jm = safe(lambda: joint.jointMotion)
@@ -794,9 +869,8 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
                 # PARTIAL SUCCESS disclosed: every edit recorded in `changed` so far HAS landed
                 # (earlier fields and any limit applied before the failing one) - a bare error
                 # would hide the writes that took.
-                applied_txt = (", ".join(f"{k}={v}" for k, v in changed.items())
-                               if changed else "none")
-                return error(f"{lim_err} Edits already applied before the failure: {applied_txt}.")
+                return error(f"{lim_err} Edits already applied before the failure: "
+                             f"{_applied_so_far(changed)}.")
     except Exception as e:
         msg = f"Edit failed: {e}"
         if "findObjectPath" in str(e) or "InternalValidationError" in str(e):
@@ -856,6 +930,11 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
     if limits_unverified:
         out["limits_unverified"] = limits_unverified
         out["note"] += _unverified_limits_note(limits_unverified)
+    # Same rule for the flip/offset/angle arms: each publishes the joint's own read-back, and a
+    # read-back that could not be taken is null plus its name here, never the request.
+    if edits_unverified:
+        out["edits_unverified"] = edits_unverified
+        out["note"] += _unverified_edits_note(edits_unverified)
     if any(k in changed for k in ("rest_mm", "rest_deg")):
         out["note"] += _REST_LIMIT_NOTE
     mp = _motion_param_names(joint)
@@ -968,10 +1047,14 @@ edit_tool = (
 )
 edit_item = Item.create_tool_item(
     tool=edit_tool, write="write", handler=edit_handler, run_on_main_thread=True,
-    # Only the limits arm re-reads its set (_set_one_limit) and _apply_motion gates on the setter's
-    # bool; the flip/offset/angle/input arms echo the request with no read-back, so a swallowed set
-    # returns a false ok there. That majority-ungated shape is a gap, not inline.
-    verification=Verification(kind="gap", defect_id="JOINT-3"))
+    # Every VALUE the tool sets is re-read off the joint and published as that read-back: the limits
+    # through _set_one_limit, flip through _set_flip, offset/angle through _set_one_parameter - each
+    # erroring when the joint keeps its own value. The motion arm gates on the platform's own setter
+    # bool (_apply_motion), and re-selecting an input publishes the label the resolver resolved.
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_edit_joint.py::TestSwallowedSets::"
+                      "test_a_flip_that_did_not_take_errors_naming_it"))
 
 
 def register_tool():

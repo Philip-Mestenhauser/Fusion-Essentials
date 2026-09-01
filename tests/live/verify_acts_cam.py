@@ -16,15 +16,6 @@ from verify_core import (
     _fg, _fgn, _imported, _joint_origin_computed, _measured, _param_read, _recall, _watch, facade)
 
 
-# cam_reorder's ok payload is moved/position/reference - the three arguments the call was handed,
-# echoed back. The one thing the call establishes is that Fusion ALLOWED the move (a moveBefore
-# returning false is an error), and a bare "ok" carries that in full - so a predicate over those
-# keys would add no evidence while moving the tool into the bucket the receipt calls evidence-
-# carrying. Reading the order back needs its own cam_get(include=['operations']) step.
-_REORDER_PARKED = ("payload echoes the request arguments; the move-allowed gate is what a bare ok "
-                   "already proves - the ORDER needs a cam_get read-back step")
-
-
 def _op_created(setup, strategy):
     """A created CAM operation. ONE key here is a read: 'operation' is op.name off the operation
     the platform added, read after the setup's own count went up. 'setup' and 'strategy' are the
@@ -278,9 +269,13 @@ _CAM_STORY = [
      lambda p: p["edited"] is True and p["updated_count"] == 1
      and p["changed"][0]["name"] == "tool_feedCutting"
      and "1200" in str(p["changed"][0]["after"]), None),
+    # The payload's order/entity_index/reference_index are the destination collection re-read off
+    # the parent AFTER the move - the moved item must sit at entity_index on the asked side.
     ("cam_reorder", lambda c: {"entity": _ctx_get(c, "adaptive_op", "the created adaptive op"),
                                "position": "before", "reference": "Face1"},
-     Parked(_REORDER_PARKED), None),
+     lambda p: p["order"][p["entity_index"]] == p["moved"]
+     and p["order"][p["reference_index"]] == "Face1"
+     and p["entity_index"] < p["reference_index"], None),
     # 'activated' is Setup.name read back AFTER the isActive gate - the tool errors when the setup
     # reads inactive, so the name here is the setup that actually became active.
     ("cam_activate_setup", {"setup": "DemoSetup"},
@@ -300,8 +295,9 @@ _CAM_STORY = [
     ("cam_edit_folders", {"action": "create", "setup": "DemoSetup", "name": "Drilling"},
      lambda p: p["created"] is True and p["folder"] == "Drilling" and p["setup"] == "DemoSetup",
      None),
-    # 'moved' counts only the moveInto calls that returned true - the first one that does not is an
-    # error naming what had already moved, so the count IS the operations that landed in the folder.
+    # 'moved' counts the moves whose destination-membership re-read GREW the folder under that
+    # name; an item the folder already listed lands in 'unattributed', and the first failed move
+    # errors naming what had landed - so the count IS the operations measured into the folder.
     ("cam_edit_folders", lambda c: {"action": "move", "setup": "DemoSetup", "folder": "Milling",
                                     "operations": ["Face1",
                                                    _ctx_get(c, "adaptive_op",
@@ -627,7 +623,9 @@ _CAM = (
          and p["setup"] == "Setup1", None),
         ("cam_reorder", lambda c: {"entity": _ctx_get(c, "adaptive_op", "the created adaptive op"),
                                    "position": "before", "reference": "Face1"},
-         Parked(_REORDER_PARKED), None),
+         lambda p: p["order"][p["entity_index"]] == p["moved"]
+         and p["order"][p["reference_index"]] == "Face1"
+         and p["entity_index"] < p["reference_index"], None),
         ("cam_activate_setup", {"setup": "Setup1"},
          lambda p: p["activated"] == "Setup1", None),
         ("cam_compare_operations", lambda c: {"operation_a": "Face1",

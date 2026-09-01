@@ -163,15 +163,19 @@ class SimpleMCPServer:
         # and handed in whole: this transport serves what it was given and opens no product file of
         # its own. An entry with no address or no body cannot be served, so it is dropped here
         # rather than listed - an advertised resource whose read then fails is the one outcome to
-        # avoid.
+        # avoid. A NAME is required on the same terms: the spec's listing row carries uri + name,
+        # the projection below copies a present-but-null name straight onto the wire, and a row
+        # naming nothing is a resource a client can only show as blank.
         self.resources = []
         for resource in (resources or []):
             if (isinstance(resource, dict) and isinstance(resource.get("uri"), str)
-                    and resource.get("uri") and isinstance(resource.get("text"), str)):
+                    and resource.get("uri") and isinstance(resource.get("name"), str)
+                    and resource.get("name") and isinstance(resource.get("text"), str)):
                 self.resources.append(dict(resource))
             else:
                 uri = resource.get("uri") if isinstance(resource, dict) else None
-                futil.log(f"MCP resource skipped (needs a 'uri' and a 'text' to serve): {uri!r}")
+                futil.log("MCP resource skipped (needs a 'uri', a 'name' and a 'text' to serve): "
+                          f"{uri!r}")
         self._resources_by_uri = {r["uri"]: r for r in self.resources}
 
     def register(self, item: Item):
@@ -221,7 +225,7 @@ class SimpleMCPServer:
             elif method == "resources/read":
                 return self._handle_resources_read(request_id, params)
             elif method == "resources/templates/list":
-                return self._handle_resource_templates_list(request_id)
+                return self._handle_resource_templates_list(request_id, params)
             else:
                 return self._error(request_id, -32601, f"Method not found: {method}")
         except Exception as e:
@@ -447,6 +451,20 @@ class SimpleMCPServer:
             return params, None
         return {}, "Invalid params: 'params' must be a JSON object."
 
+    def _listing_refusal(self, method: str, params: Any) -> Optional[str]:
+        """Why either resources listing cannot answer `params`, or None to proceed. The params
+        member must be a JSON object, and a 'cursor' is one this server never issued - both
+        listings answer in one page and neither result carries a nextCursor, so answering a page
+        for a cursor would tell a paginating client it had resumed something. Asked in ONE place,
+        so the two listings cannot refuse the same call differently."""
+        params, invalid = self._object_params(params)
+        if invalid:
+            return invalid
+        if params.get("cursor") is not None:
+            return (f"Invalid params: {method} answers in one page and issues no cursor to "
+                    "continue. Retry without 'cursor'.")
+        return None
+
     def _published(self) -> str:
         """The addresses this server actually serves - what a client that guessed one needs next."""
         if not self.resources:
@@ -454,16 +472,9 @@ class SimpleMCPServer:
         return "This server publishes: " + ", ".join(sorted(self._resources_by_uri))
 
     def _handle_resources_list(self, request_id: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-        params, invalid = self._object_params(params)
+        invalid = self._listing_refusal("resources/list", params)
         if invalid:
             return self._error(request_id, -32602, invalid)
-        if params.get("cursor") is not None:
-            # The whole catalog comes back in one page and the result carries no nextCursor, so a
-            # cursor is one this server never issued. Answering a page for it would tell a
-            # paginating client it had resumed something.
-            return self._error(request_id, -32602,
-                               "Invalid params: resources/list answers in one page and issues no "
-                               "cursor to continue. Retry without 'cursor'.")
         return {"jsonrpc": "2.0", "id": request_id,
                 "result": {"resources": [_resource_row(r) for r in self.resources]}}
 
@@ -487,10 +498,16 @@ class SimpleMCPServer:
             content["mimeType"] = resource["mimeType"]
         return {"jsonrpc": "2.0", "id": request_id, "result": {"contents": [content]}}
 
-    def _handle_resource_templates_list(self, request_id: Any) -> Dict[str, Any]:
-        # Every published resource is a fixed address, so there is no URI template to expand and
-        # nothing a cursor could continue: a probe gets the empty list whatever it sends, which is
-        # the true answer rather than an error the client would have to special-case.
+    def _handle_resource_templates_list(self, request_id: Any,
+                                        params: Dict[str, Any]) -> Dict[str, Any]:
+        # Every published resource is a fixed address, so there is no URI template to expand: a
+        # well-formed probe gets the empty list, which is the true answer rather than an error the
+        # client would have to special-case. A malformed one is refused on the same terms the other
+        # listing uses - one server answering one bad call two ways is what a client cannot code
+        # against.
+        invalid = self._listing_refusal("resources/templates/list", params)
+        if invalid:
+            return self._error(request_id, -32602, invalid)
         return {"jsonrpc": "2.0", "id": request_id, "result": {"resourceTemplates": []}}
 
     def _error(self, request_id: Any, code: int, message: str) -> Dict[str, Any]:

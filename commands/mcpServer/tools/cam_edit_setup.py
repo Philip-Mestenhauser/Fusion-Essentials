@@ -15,7 +15,7 @@ from ._common import ok, error, safe
 # The machine catalog read + the by-name machine resolver are the shared CAM substrate's (one home,
 # so cam_get's catalog, this assignment and cam_create_machine's reachability gate cannot drift).
 from ._cam_common import (get_cam, find_setup, expression_error, machine_catalog, machine_label,
-                          parse_parameters, resolve_machine)
+                          parse_parameters, resolve_machine, unquote_expression)
 from . import _inputs
 
 app = adsk.core.Application.get()
@@ -205,6 +205,8 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
     # ── apply parameters first (before bodies/machine/wcs, so a rollback here leaves the setup as found) ──
     changed = []
     eval_failures = []
+    no_takes = []
+    unreadable = []
     for name, expr in wanted.items():
         p = resolved_params[name]
         before = safe(lambda p=p: p.expression)
@@ -216,21 +218,46 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
         # Read the expression BACK for its evaluation state: the platform stores an unresolvable
         # expression silently (edited==true, .expression echoes the text) - only .error exposes it.
         eval_err, eval_warn = expression_error(p)
-        rec = {"name": name, "before": before, "after": safe(lambda p=p: p.expression)}
+        after = safe(lambda p=p: p.expression)
+        rec = {"name": name, "before": before, "after": after}
         if eval_warn:
             rec["warning"] = eval_warn
         changed.append(rec)
-        if eval_err:
+        if after is None:
+            unreadable.append((name, str(expr)))
+        elif eval_err:
             eval_failures.append((name, str(expr), eval_err))
+        elif unquote_expression(after) != unquote_expression(str(expr)):
+            # Receipt cam-parameter-expressions measured two things about this store: a NUMERIC
+            # parameter's expression reads back the text written ('777 mm/min'), and a STRING
+            # parameter's stored expression is single-quoted (its probe reads 'context' and
+            # 'strategy' back starting with a quote). A setup takes string parameters too
+            # (wcs_origin_boxPoint), which a caller may send either spelling of, so the compare runs
+            # both sides through the shared codec instead of over bytes. A read-back that differs
+            # THERE is a write this setup did not take - whether it kept the expression it held or
+            # stored a third value.
+            no_takes.append((name, str(expr), after))
 
-    # A stored-but-unevaluated expression is a swallowed no-op the platform reports as success. Roll
-    # EVERY parameter we set back to its prior expression - nothing else is touched yet - and fail,
-    # naming each offending value and Fusion's own reason, so the setup is left exactly as found.
-    if eval_failures:
+    # A stored-but-unevaluated expression is a swallowed no-op the platform reports as success, and
+    # so is a parameter that reads back anything but what was written - including a parameter whose
+    # expression will not read at all, which leaves the write unconfirmed. Roll EVERY parameter we
+    # set back to its prior expression - nothing else is touched yet - and fail, naming what each
+    # offending one did, so the setup is left exactly as found.
+    if eval_failures or no_takes or unreadable:
         for rec in changed:
             safe(lambda rec=rec: setattr(resolved_params[rec["name"]], "expression", rec["before"]))
-        detail = "; ".join(f"'{n}' = '{e}' ({why})" for n, e, why in eval_failures)
-        return error(f"Setup '{setup}': expression did not evaluate - {detail}. Rolled back all "
+        parts = []
+        if eval_failures:
+            detail = "; ".join(f"'{n}' = '{e}' ({why})" for n, e, why in eval_failures)
+            parts.append(f"expression did not evaluate - {detail}")
+        if no_takes:
+            detail = "; ".join(f"'{n}' = '{e}' (it reads back '{a}')" for n, e, a in no_takes)
+            parts.append(f"the assignment did not take - {detail}")
+        if unreadable:
+            detail = "; ".join(f"'{n}' = '{e}'" for n, e in unreadable)
+            parts.append("the expression cannot be read back, so the change is UNCONFIRMED - "
+                         + detail)
+        return error(f"Setup '{setup}': {'; '.join(parts)}. Rolled back all "
                      f"{len(changed)} parameter(s); no change was applied. (A CAM stock/setup expression "
                      "must reference existing parameters and resolve to a value - check names and units.)")
 
@@ -377,8 +404,8 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
     # The body, machine and wcs arms each re-read what they wrote and error on a mismatch. The
-    # parameter arm errors on the parameter's evaluation channel and rolls back, and publishes
-    # before beside after rather than comparing after to the request.
+    # parameter arm errors on the parameter's evaluation channel AND on a read-back that is not the
+    # expression written (an unreadable one included), rolling every parameter in the call back.
     verification=Verification(
         kind="inline",
         evidence_test="tests/unit/test_cam_edit_setup.py::TestMachine"

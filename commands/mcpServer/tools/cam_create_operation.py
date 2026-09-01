@@ -10,7 +10,7 @@ import adsk.cam
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe
+from ._common import counted, ok, error, safe
 from ._cam_common import get_cam, find_setup, register_future
 
 app = adsk.core.Application.get()
@@ -109,12 +109,21 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
     except Exception as e:
         return error(f"Could not assign the tool to a '{strategy}' operation: {e}")
 
-    ops_before = safe(lambda: target.operations.count)
+    # counted, not safe(): the landing gate COMPARES these two, and a non-int (an unmodelled
+    # property handing back a truthy object) is not a count either side of the add.
+    ops_before = counted(lambda: target.operations.count)
     op = target.operations.add(opin)        # MUTATION
     if not op:
         return error("operations.add returned no operation.")
-    ops_after = safe(lambda: target.operations.count)
-    if ops_before is not None and ops_after is not None and ops_after <= ops_before:
+    ops_after = counted(lambda: target.operations.count)
+    # A count that does not READ cannot clear the landing, so it is UNCONFIRMED rather than a pass.
+    if ops_before is None or ops_after is None:
+        unread = " and ".join(word for word, value in (("before", ops_before), ("after", ops_after))
+                              if value is None)
+        return error(f"operations.add returned '{safe(lambda: op.name)}' but the setup's operation "
+                     f"count could not be read {unread} the add, so the operation's landing is "
+                     "UNCONFIRMED. Re-read the setup with cam_get(include=['operations']).")
+    if ops_after <= ops_before:
         return error(f"operations.add returned '{safe(lambda: op.name)}' but the setup's operation "
                      f"count did not increase ({ops_before} before, {ops_after} after) - the "
                      "operation did not land.")
@@ -189,7 +198,9 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
     # The synchronous effect only: generate=true LAUNCHES a background generation this call never
-    # reads back, and the payload sends the caller to cam_get_status for it.
+    # reads back, and the payload sends the caller to cam_get_status for it. The landing gate is the
+    # setup's operation count either side of the add, unreadable included. Residual: the tool is set
+    # on the INPUT and never re-read off the created operation (CAM-49).
     verification=Verification(
         kind="inline",
         evidence_test="tests/unit/test_cam_create_operation.py::TestOperationLanding"

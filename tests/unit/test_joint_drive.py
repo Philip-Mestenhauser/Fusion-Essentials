@@ -15,7 +15,7 @@ import math
 import adsk.fusion
 import pytest
 
-from conftest import _NamedCollection, load_tool
+from conftest import MakeComp, _NamedCollection, load_tool, make_occurrence
 
 jd = load_tool("joint_drive")
 
@@ -736,6 +736,74 @@ class TestXrefScopingAndTokens:
         res = jd.handler(joint_name="R", distance=-16)
         assert res["isError"] is True and "R" in res["message"]
         assert jaw_r.jointMotion.slideValue == 0.0         # refused BEFORE mutating
+        assert "did NOT read as wholly native" in res["message"]
+        assert "isReferencedComponent" in res["message"]
+
+    def test_the_refusal_does_not_assert_an_xref_context_it_never_read(self, monkeypatch):
+        # _pair_is_plain answers False for an occurrence that would not ANSWER isReferencedComponent
+        # just as it does for one that reads true, so the guard arms on both. Wording the refusal as
+        # "the pair is in an XREF/referenced context" states a context nothing here established - the
+        # sentence has to name the reading that was taken, which is that the pair did not read native.
+        blind = types.SimpleNamespace(assemblyContext=None)      # isReferencedComponent raises
+        jaw_l = FakeJoint("L", SliderJointMotion(), occ_one=blind, occ_two=_plain_occ())
+        jaw_r = FakeJoint("R", SliderJointMotion(), occ_one=blind, occ_two=_plain_occ())
+        link_pair(jaw_l, jaw_r)
+        self._install(monkeypatch, [jaw_l, jaw_r])
+        assert _payload(jd.handler(joint_name="L", distance=16))["driven"] is True
+        res = jd.handler(joint_name="R", distance=-16)
+        assert res["isError"] is True
+        assert "did NOT read as wholly native" in res["message"]
+        assert "did not answer isReferencedComponent" in res["message"]
+        assert "the pair is in an XREF" not in res["message"]
+        assert jaw_r.jointMotion.slideValue == 0.0         # still refused, still before mutating
+
+    def test_a_pair_with_NO_occurrences_claims_no_referenced_reading(self, monkeypatch):
+        # _pair_is_plain refuses an occurrence that read as None before it reads any flag, so a
+        # joint whose occurrenceOne and occurrenceTwo are both None arms the guard with NOTHING
+        # having been read off an occurrence. A refusal naming only the referenced/ancestor/unread
+        # arms states a reading nothing took here; the fourth arm is the one that applies.
+        jaw_l = FakeJoint("L", SliderJointMotion())          # occ_one/occ_two default to None
+        jaw_r = FakeJoint("R", SliderJointMotion())
+        link_pair(jaw_l, jaw_r)
+        self._install(monkeypatch, [jaw_l, jaw_r])
+        assert _payload(jd.handler(joint_name="L", distance=16))["driven"] is True
+        res = jd.handler(joint_name="R", distance=-16)
+        assert res["isError"] is True
+        assert "did NOT read as wholly native" in res["message"]
+        assert "did not read as an occurrence at all" in res["message"]
+        # and it claims no COUNT of readings: _pair_is_plain SHORT-CIRCUITS, and this rig is the
+        # one-read case - the first occurrence reads None, so the other three are never asked. A
+        # refusal saying both joints' occurrenceOne and occurrenceTwo "were read" states three
+        # readings that were never taken.
+        assert "were read" not in res["message"]
+        assert jaw_r.jointMotion.slideValue == 0.0         # still refused, still before mutating
+
+    def test_the_short_circuit_really_stops_at_the_first_non_native_read(self, monkeypatch):
+        # What licenses dropping the count clause: the reads are RECORDED here, and the all-None
+        # pair takes exactly ONE of the four. A _pair_is_plain that asked all four regardless would
+        # make the dropped clause true again - and would be reading occurrences the answer does not
+        # need.
+        read = []
+
+        class _RecordingJoint:
+            """Records which of its two occurrence reads was taken; both answer None, the shape
+            that lets the very FIRST read decide the answer."""
+
+            def __init__(self, name):
+                self.name = name
+
+            @property
+            def occurrenceOne(self):
+                read.append((self.name, "occurrenceOne"))
+                return None
+
+            @property
+            def occurrenceTwo(self):
+                read.append((self.name, "occurrenceTwo"))
+                return None
+
+        assert jd._pair_is_plain(_RecordingJoint("L"), _RecordingJoint("R")) is False
+        assert read == [("L", "occurrenceOne")]
 
     def test_xref_via_referenced_ancestor_refused(self, monkeypatch):
         # The pair is native but nested INSIDE a referenced parent -> refused.
@@ -954,7 +1022,10 @@ class TestTheValueClauseWithholdsAnUnreadValue:
         assert _payload(jd.handler(joint_name="Slider_JawL", distance=16))["driven"] is True
         res = jd.handler(joint_name="Slider_JawR", distance=-16)
         assert "'Slider_JawR' now reads 0.0 mm" in res["message"]
-        assert "did not read" not in res["message"]
+        # the value clause's own negative, verbatim - the sentence the two tests above pin. A bare
+        # "did not read" would also match the refusal's occurrence-reading clause, which is about
+        # the pair's nativeness and not about this joint's value at all.
+        assert "the current value of 'Slider_JawR' did not read" not in res["message"]
 
 
 class TestLinkCouplesTriState:
@@ -1044,6 +1115,61 @@ def _frozen_revolute():
     return RevoluteJointMotion()
 
 
+# The census rows below are the shared conftest Occurrence fake (make_occurrence), so the members
+# this tool's census reads - component, childOccurrences, fullPathName, isGroundToParent - are the
+# ones swept against the live Occurrence shape in test_fake_shapes_exist.py.
+
+def _census_occ(name, locked=False, children=(), path=None):
+    """One occurrence as the DESIGN-WIDE census reads it. ``component`` must READ - a raise there is
+    the census's unresolved-reference detector - ``children`` is the nested level the walk descends
+    into, ``path`` is the unique label a lock is named by, and ``locked`` is the flag the census asks
+    each row for."""
+    return make_occurrence(path or name, component=MakeComp(name=name.split(":")[0]),
+                           ground_to_parent=locked, children=children)
+
+
+def _silent_lock_occ(name):
+    """A census row the walk sees but whose LOCK FLAG raises - the occurrence was enumerated, its
+    ground state was not. The fake is handed a FALSE flag it must never let through, so a census
+    that read the value behind the raise reads as a free member rather than an unanswered one."""
+    return make_occurrence(name, component=MakeComp(name=name), ground_to_parent=False,
+                           raises_on={"isGroundToParent": "flag unavailable"})
+
+
+def _broken_ref_occ(name):
+    """An unresolved external reference: reading ``component`` RAISES - the ONE detector - and so
+    does every other read but the name (measured). Its ground state is unknowable, never free - and
+    the fake is handed a FALSE lock flag it must never let through, so a census that read the value
+    behind the raise reads as a free member rather than an unanswered one."""
+    return make_occurrence(name, raises="2 : InternalValidationError : occ",
+                           ground_to_parent=False)
+
+
+def _pathless_lock_occ(path):
+    """A LOCKED census row whose fullPathName raises while the lock flag answers - the row the
+    label's name fallback exists for. Its path and its leaf name DIFFER, so a label taken from the
+    path is told apart from the fallback. Its component reads, so it is not an unresolved
+    reference."""
+    leaf = path.split("+")[-1]
+    return make_occurrence(path, component=MakeComp(name=leaf.split(":")[0]),
+                           ground_to_parent=True,
+                           raises_on={"fullPathName": "path unreadable"})
+
+
+def _unwalkable_occ(name):
+    """A census row the walk reaches but cannot descend INTO: its childOccurrences will not
+    enumerate, so whatever sits beneath it was never asked and the walk stops there incomplete. Its
+    own component and lock flag read, so it is neither an unresolved reference nor a silent flag."""
+    return make_occurrence(name, component=MakeComp(name=name), ground_to_parent=False,
+                           raises_on={"childOccurrences": "children unavailable"})
+
+
+def _census(design, occs):
+    """Install `occs` as the root's own occurrence collection - where the shared design-wide walk
+    starts when ``allOccurrences`` does not answer (this _Root carries none)."""
+    design.rootComponent.occurrences = _NamedCollection(occs)
+
+
 class TestDriveTookGate:
     def test_silently_ignored_drive_is_an_ERROR_listing_the_locked_member(self, monkeypatch):
         # a detected no-take is a FAILED drive: isError, never a success wearing a warning. The lock
@@ -1052,8 +1178,7 @@ class TestDriveTookGate:
         # limit, parent-locked members were present and releasing them changed nothing.
         j = FakeJoint("J", _frozen_revolute())
         design = _install(monkeypatch, j)
-        rotor = types.SimpleNamespace(name="Rotor:1", isGroundToParent=True)
-        design.rootComponent.occurrences = types.SimpleNamespace(count=1, item=lambda i: rotor)
+        _census(design, [_census_occ("Rotor:1", locked=True)])
         res = jd.handler(joint_name="J", angle_deg=25)
         assert res["isError"] is True
         assert "DID NOT TAKE" in res["message"]
@@ -1062,14 +1187,94 @@ class TestDriveTookGate:
         assert "CANDIDATE cause" in res["message"]
         assert "assembly_ground(ground_to_parent=false)" in res["message"]
 
+    def test_a_lock_on_a_NESTED_occurrence_is_seen(self, monkeypatch):
+        # ground_to_parent is not a top-level-only property - the lock that froze this chain sits on
+        # an instance INSIDE a sub-assembly. A root-collection-only census reports such a design as
+        # carrying no lock at all, which is the one reading that rules grounding out; the design-wide
+        # walk reaches it, and the CANDIDATE branch downstream is what a caller acts on.
+        j = FakeJoint("J", _frozen_revolute())
+        design = _install(monkeypatch, j)
+        nested = _census_occ("Rotor:1", locked=True, path="Gearbox:1+Rotor:1")
+        _census(design, [_census_occ("Gearbox:1", children=[nested])])
+        res = jd.handler(joint_name="J", angle_deg=25)
+        assert res["isError"] is True
+        assert "ground_to_parent is SET on Gearbox:1+Rotor:1" in res["message"]
+        assert "no occurrence in the design reads ground_to_parent set" not in res["message"]
+        assert "did not answer ground_to_parent" not in res["message"]   # both rows answered
+        assert "CANDIDATE cause" in res["message"]
+
+    def test_a_design_wide_lock_list_is_capped_with_the_remainder_disclosed(self, monkeypatch):
+        # The census reaches every depth, so the locked list grows with the assembly - it goes
+        # out through the ONE capped renderer, whose remainder is COUNTED. A bare join would put an
+        # unbounded array in an error string; a silent slice would read as the complete set.
+        j = FakeJoint("J", _frozen_revolute())
+        design = _install(monkeypatch, j)
+        _census(design, [_census_occ(f"Part{i}:1", locked=True) for i in range(12)])
+        res = jd.handler(joint_name="J", angle_deg=25)
+        assert res["isError"] is True
+        assert "Part7:1, ... (+4 more not listed)" in res["message"]      # 8 named, 4 counted
+        assert "Part8:1" not in res["message"]
+
+    def test_an_unresolved_reference_is_counted_as_unanswered_not_free(self, monkeypatch):
+        # A broken xref answers nothing - not its component, not its lock flag. Folding it in with
+        # the free rows would let the receipt say no member is locked over a row never asked, so it
+        # is counted among the unanswered and the census total still holds it.
+        j = FakeJoint("J", _frozen_revolute())
+        design = _install(monkeypatch, j)
+        _census(design, [_census_occ("Ok:1"), _broken_ref_occ("Ghost:1")])
+        res = jd.handler(joint_name="J", angle_deg=25)
+        assert res["isError"] is True
+        assert "1 of 2 occurrences did not answer ground_to_parent" in res["message"]
+        assert "ground_to_parent is SET on" not in res["message"]
+        assert "CANDIDATE" not in res["message"]
+
+    def test_a_walk_that_stopped_early_publishes_no_design_wide_negative(self, monkeypatch):
+        # The census is the walk's answer, not the design's: a node whose collection will not
+        # enumerate leaves its whole subtree unasked, and a lock in there was never seen. Publishing
+        # "no occurrence in the design reads ground_to_parent set" off that walk is the one reading
+        # that rules grounding out, so the scope word follows the walk and the hole is disclosed.
+        j = FakeJoint("J", _frozen_revolute())
+        design = _install(monkeypatch, j)
+        _census(design, [_unwalkable_occ("Gearbox:1")])
+        res = jd.handler(joint_name="J", angle_deg=25)
+        assert res["isError"] is True
+        assert "no occurrence in the design reads ground_to_parent set" not in res["message"]
+        assert "no occurrence the walk reached reads ground_to_parent set" in res["message"]
+        assert "did not run to the end" in res["message"]
+        assert "CANDIDATE" not in res["message"]
+
+    def test_a_complete_walk_discloses_no_hole(self, monkeypatch):
+        # The other side of that flag: a walk that ran to the end must NOT hedge its own reading,
+        # or the disclosure appears on every receipt and stops meaning anything.
+        j = FakeJoint("J", _frozen_revolute())
+        design = _install(monkeypatch, j)
+        _census(design, [_census_occ("Gearbox:1", children=[_census_occ("Rotor:1")])])
+        res = jd.handler(joint_name="J", angle_deg=25)
+        assert res["isError"] is True
+        assert "no occurrence in the design reads ground_to_parent set" in res["message"]
+        assert "did not run to the end" not in res["message"]
+
+    def test_a_locked_row_whose_PATH_does_not_read_is_named_by_its_name(self, monkeypatch):
+        # fullPathName is the label because a nested leaf name is shared by every instance of its
+        # component - but a row that answers the lock flag and not the path still has to be NAMED,
+        # or the one member the caller must go release reads as '(unnamed occurrence)'. The row's
+        # path and leaf name differ, so the fallback is told apart from a path that did read.
+        j = FakeJoint("J", _frozen_revolute())
+        design = _install(monkeypatch, j)
+        _census(design, [_pathless_lock_occ("Gearbox:1+Rotor:1")])
+        res = jd.handler(joint_name="J", angle_deg=25)
+        assert res["isError"] is True
+        assert "ground_to_parent is SET on Rotor:1" in res["message"]
+        assert "(unnamed occurrence)" not in res["message"]
+        assert "CANDIDATE" in res["message"]
+
     def test_gate_elects_nothing_when_no_member_is_locked(self, monkeypatch):
         j = FakeJoint("J", _frozen_revolute())
         design = _install(monkeypatch, j)
-        free = types.SimpleNamespace(name="Rotor:1", isGroundToParent=False)
-        design.rootComponent.occurrences = types.SimpleNamespace(count=1, item=lambda i: free)
+        _census(design, [_census_occ("Rotor:1")])
         res = jd.handler(joint_name="J", angle_deg=25)
         assert res["isError"] is True
-        assert "no top-level occurrence reads ground_to_parent set" in res["message"]
+        assert "no occurrence in the design reads ground_to_parent set" in res["message"]
         # every row ANSWERED, so there is nothing to disclose beside that sentence
         assert "did not answer ground_to_parent" not in res["message"]
         assert "do not single out a cause" in res["message"]
@@ -1090,8 +1295,8 @@ class TestDriveTookGate:
         design.rootComponent = _BlindRoot([j])
         res = jd.handler(joint_name="J", angle_deg=25)
         assert res["isError"] is True
-        assert "the top-level occurrence census did not read" in res["message"]
-        assert "no top-level occurrence reads ground_to_parent set" not in res["message"]
+        assert "the design's occurrence census did not read" in res["message"]
+        assert "no occurrence in the design reads ground_to_parent set" not in res["message"]
         assert "CANDIDATE" not in res["message"]
 
     def test_an_occurrence_whose_lock_flag_does_not_answer_is_DISCLOSED(self, monkeypatch):
@@ -1099,18 +1304,10 @@ class TestDriveTookGate:
         # free ones, so the count of unanswered rows is published beside the verdict.
         j = FakeJoint("J", _frozen_revolute())
         design = _install(monkeypatch, j)
-
-        class _Silent:
-            name = "Rotor:1"
-
-            @property
-            def isGroundToParent(self):
-                raise RuntimeError("flag unavailable")
-        design.rootComponent.occurrences = types.SimpleNamespace(count=1,
-                                                                 item=lambda i: _Silent())
+        _census(design, [_silent_lock_occ("Rotor:1")])
         res = jd.handler(joint_name="J", angle_deg=25)
         assert res["isError"] is True
-        assert "1 of 1 top-level occurrences did not answer ground_to_parent" in res["message"]
+        assert "1 of 1 occurrences did not answer ground_to_parent" in res["message"]
         assert "ground_to_parent is SET on" not in res["message"]
         assert "CANDIDATE" not in res["message"]
 
@@ -1119,8 +1316,7 @@ class TestDriveTookGate:
         # link whose partner limit is what held the drive.
         j = BlindLinkJoint("J", _frozen_revolute())
         design = _install(monkeypatch, j)
-        rotor = types.SimpleNamespace(name="Rotor:1", isGroundToParent=True)
-        design.rootComponent.occurrences = types.SimpleNamespace(count=1, item=lambda i: rotor)
+        _census(design, [_census_occ("Rotor:1", locked=True)])
         res = jd.handler(joint_name="J", angle_deg=25)
         assert res["isError"] is True
         assert "motion-link membership of 'J' did not read" in res["message"]
@@ -1323,8 +1519,7 @@ class TestNearLandingIsNotAFrozenChain:
         # observed move already rules out.
         j = FakeJoint("Vane", _quantizing_revolute(-11.6))
         design = _install(monkeypatch, j)
-        rotor = types.SimpleNamespace(name="Rotor:1", isGroundToParent=True)
-        design.rootComponent.occurrences = types.SimpleNamespace(count=1, item=lambda i: rotor)
+        _census(design, [_census_occ("Rotor:1", locked=True)])
         res = jd.handler(joint_name="Vane", angle_deg=-20.103)
         assert "ground_to_parent is SET on Rotor:1" in res["message"]      # still an observation
         assert "CANDIDATE" not in res["message"]
@@ -1375,8 +1570,7 @@ class TestNearLandingIsNotAFrozenChain:
         # would send the caller to release a lock the angle's own 8.5 deg already rules out.
         j = FakeJoint("Cyl", _cylindrical_quantized_angle_frozen_slide())
         design = _install(monkeypatch, j)
-        rotor = types.SimpleNamespace(name="Rotor:1", isGroundToParent=True)
-        design.rootComponent.occurrences = types.SimpleNamespace(count=1, item=lambda i: rotor)
+        _census(design, [_census_occ("Rotor:1", locked=True)])
         res = jd.handler(joint_name="Cyl", angle_deg=-20.103, distance=50, units="mm")
         assert res["isError"] is True
         assert "ground_to_parent is SET on Rotor:1" in res["message"]       # still an observation
@@ -1477,9 +1671,7 @@ class TestNoTakeCauseElection:
         monkeypatch.setattr(jd._write_guard, "app", _FakeApp("DocA"))
         monkeypatch.setattr(jd, "_driven_this_session", set())
         if locked:
-            chassis = types.SimpleNamespace(name=locked, isGroundToParent=True)
-            design.rootComponent.occurrences = types.SimpleNamespace(count=1,
-                                                                     item=lambda i: chassis)
+            _census(design, [_census_occ(locked, locked=True)])
         return rack, pinion
 
     def test_the_partner_limit_is_named_and_grounding_is_not_blamed(self, monkeypatch):

@@ -216,28 +216,38 @@ def _limits_text(jm, jtype):
 
 
 def _ground_lock_census(design):
-    """The top-level ground_to_parent census as (locked names, unanswered, total).
+    """The DESIGN-WIDE ground_to_parent census as (locked paths, unanswered, total, complete).
 
-    `total` is how many occurrences the ROOT component's collection handed over, or None when the
-    collection itself did not read - which is a different answer from a design whose members are all
-    free, and the one an empty `locked` list would otherwise publish as "nothing is locked".
-    `unanswered` counts the rows whose flag gave no answer (``read_flag``, never
-    ``safe(read, False)``), so a census that saw the occurrences but not their flags says so instead
-    of reading silence as freedom. A row the collection would not hand over answers nothing either,
-    and is counted the same way."""
-    occs = safe(lambda: design.rootComponent.occurrences)
-    total = _common.counted(lambda: occs.count) if occs is not None else None
+    The lock is not a top-level property - ground_to_parent can be set on a nested instance - so the
+    walk is the shared design-wide occurrence census (``_common.occurrence_walk``), which reaches
+    every depth and, when ``allOccurrences`` RAISES on an unresolved external reference, rebuilds the
+    census from the component-local collections instead of answering with an empty design. A
+    root-only collection read would leave a nested lock invisible.
+
+    `total` is that census's own count, or None when neither walk enumerated - which is a different
+    answer from a design whose members are all free, and the one an empty `locked` list would
+    otherwise publish as "nothing is locked". `complete` is the walk's OWN completeness flag: a node
+    whose collection would not enumerate, or a depth/node cap, stops the recursion with the subtree
+    behind it never asked, so on False every count and every negative here is a LOWER BOUND and the
+    caller discloses that rather than publishing a whole-design claim. `unanswered` counts the rows
+    whose flag gave no answer (``read_flag``, never ``safe(read, False)``), so a census that saw the
+    occurrences but not their flags says so instead of reading silence as freedom; the unresolved
+    rows are asked too, and whatever they do not answer is counted there. A locked row is named by
+    its fullPathName, since a nested instance's leaf name is shared by every instance of its
+    component - falling back to the name for a row that answers the flag but not the path."""
+    walk = _common.occurrence_walk(design)
+    total = walk.total
     if total is None:
-        return [], 0, None
+        return [], 0, None, False
     locked, unanswered = [], 0
-    for i in range(total):
-        o = safe(lambda i=i: occs.item(i))
+    for o in list(walk.occurrences) + list(walk.broken_occurrences):
         flag = _common.read_flag(lambda o=o: o.isGroundToParent)
         if flag is None:
             unanswered += 1
         elif flag:
-            locked.append(safe(lambda o=o: o.name) or "(unnamed occurrence)")
-    return locked, unanswered, total
+            locked.append(safe(lambda o=o: o.fullPathName)
+                          or safe(lambda o=o: o.name) or "(unnamed occurrence)")
+    return locked, unanswered, total, walk.complete
 
 
 def _limit_refusal(limits, value, fmt):
@@ -466,10 +476,26 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
                            f"{_value_clause(resolved_name, jm, jtype, 'now reads')}; read it back "
                            f"with assembly_get. The refusal stands on that unread state, not on a "
                            f"coupling that was observed. ")
+        # What the context clause may claim is what _pair_is_plain READ, and it SHORT-CIRCUITS:
+        # between ONE and four occurrence reads - each joint's occurrenceOne then occurrenceTwo -
+        # stopping at the first that does not come back positively native. A pair whose first
+        # occurrence reads None arms the guard on that single read, so a refusal claiming four
+        # readings would name reads that were never taken. Any ONE occurrence answers non-native on
+        # any of four outcomes: it reads isReferencedComponent true, an ancestor up its
+        # assemblyContext chain does, the flag would not answer, or the occurrence itself read as
+        # None. Naming an xref context here would state a context no read established, and naming
+        # only the first three outcomes would state a referenced-component reading nothing took on
+        # an occurrence-less pair. The refusal names the reading it has - the pair did not read as
+        # wholly native - with all four outcomes, and the crash beside it as the reason the
+        # unproven case refuses too.
         return error(
             f"Refused: '{resolved_name}' is motion-linked to '{partner}', which was already driven "
-            f"this session, and the pair is in an XREF/referenced context where driving BOTH members "
-            f"has killed the Fusion process. " + moved_claim
+            f"this session, and the pair did NOT read as wholly native: an occurrence read for one "
+            f"of the two joints did not come back POSITIVELY native - it reads as a REFERENCED "
+            f"component, sits under one, did not answer isReferencedComponent, or did not read as "
+            f"an occurrence at all. Driving BOTH members of a linked pair has killed the Fusion "
+            f"process in an xref/referenced context, and nothing read here places this pair outside "
+            f"one. " + moved_claim
             + f"Rebuilding '{partner}' (delete+recreate, a new token) clears this refusal.")
 
     applied = {}
@@ -662,16 +688,29 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
         # A parent-locked occurrence EXISTING is no proof it held this drive: measured on a rack
         # whose command was held by its linked pinion's enabled limit, parent-locked members were
         # present and releasing them changed nothing.
-        locked, unanswered, census = _ground_lock_census(design)
+        locked, unanswered, census, census_whole = _ground_lock_census(design)
         if census is None:
-            seen = ["the top-level occurrence census did not read, so no ground_to_parent state "
+            seen = ["the design's occurrence census did not read, so no ground_to_parent state "
                     "was seen"]
         else:
-            seen = [f"ground_to_parent is SET on {', '.join(locked)}" if locked
-                    else "no top-level occurrence reads ground_to_parent set"]
+            # The scope word follows the walk: a census that stopped early asked only the rows it
+            # reached, so "no occurrence in the design" would state a design-wide negative over a
+            # subtree nothing looked in - the reading that rules grounding out. The count is a lower
+            # bound for the same reason, and the closing clause says so for both.
+            if locked:
+                seen = [f"ground_to_parent is SET on {_common.named_with_remainder(locked)}"]
+            elif census_whole:
+                seen = ["no occurrence in the design reads ground_to_parent set"]
+            else:
+                seen = ["no occurrence the walk reached reads ground_to_parent set"]
             if unanswered:
-                seen.append(f"{unanswered} of {census} top-level occurrences did not answer "
+                seen.append(f"{unanswered} of {census} occurrences did not answer "
                             "ground_to_parent")
+            if not census_whole:
+                seen.append("the occurrence walk did not run to the end (a collection would not "
+                            "enumerate, or a depth/node cap was hit), so part of the design was "
+                            "not scanned and these ground_to_parent readings cover only the rows "
+                            "it reached")
         if link["linked"] is True:
             state = _link_state_text(link)
             seen.append(f"'{resolved_name}' is motion-linked to '{partner}' by "

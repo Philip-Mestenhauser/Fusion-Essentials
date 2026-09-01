@@ -1194,6 +1194,189 @@ class TestHeights:
         assert res["isError"] is True and "topHeight_offset" in res["message"]
 
 
+# ── heights: what the payload states as SET is the parameter's own re-read ───
+#
+# An ungated height write is an echo: heights_set built from the request strings states a value
+# nothing read. A height that stores but does not evaluate, or that the operation simply keeps out,
+# is indistinguishable from an applied one until the parameter is read back.
+
+
+class _StuckHeightParam(_Param):
+    """Accepts the expression assignment and keeps the one it already held."""
+    def __init__(self, prior):
+        super().__init__(None)
+        object.__setattr__(self, "_prior", prior)
+
+    @property
+    def expression(self):
+        return self._prior
+
+    @expression.setter
+    def expression(self, _v):
+        pass
+
+
+class _ThirdValueHeightParam(_Param):
+    """Takes the expression and stores one of its OWN - neither the expression it held nor the one
+    written. A gate keyed on 'it kept the prior expression' passes this write."""
+    def __init__(self):
+        super().__init__(None)
+
+    @property
+    def expression(self):
+        return self.__dict__.get("_expr")
+
+    @expression.setter
+    def expression(self, v):
+        self.__dict__["_expr"] = f"{v} mm"
+
+
+class _QuotedStoreHeightParam(_Param):
+    """Stores the SINGLE-QUOTED form of whatever is written - the shape a CAM string parameter's
+    stored expression carries (receipt cam-parameter-expressions, whose probe reads 'context' and
+    'strategy' back starting with a quote). A height _mode is a string parameter this tool writes
+    UNQUOTED, so a byte compare against the read-back convicts a store that did what it was asked."""
+    def __init__(self):
+        super().__init__(None)
+
+    @property
+    def expression(self):
+        return self.__dict__.get("_expr")
+
+    @expression.setter
+    def expression(self, v):
+        self.__dict__["_expr"] = "'" + str(v) + "'"
+
+
+class _UnevaluatedHeightParam(_Param):
+    """Stores the expression verbatim and reports the failure ONLY through .error - the CAM
+    parameter store's shape (see _cam_common.expression_error)."""
+    @property
+    def error(self):
+        return "Failed to evaluate expression."
+
+
+class _UnreadableHeightParam:
+    """Takes the expression; nothing reads back off it afterwards."""
+    def __init__(self):
+        self._written = False
+        self.value = None
+
+    @property
+    def expression(self):
+        if self._written:
+            raise RuntimeError("expression is unreadable")
+        return None
+
+    @expression.setter
+    def expression(self, _v):
+        self._written = True
+
+
+class TestHeightReadBack:
+    def test_a_height_the_operation_keeps_out_is_an_error(self, monkeypatch):
+        op = _curve_op()
+        op.parameters._d["bottomHeight_mode"] = _StuckHeightParam("from stock top")
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        res = cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
+                         bottom_mode="from contour", generate=False)
+        assert res["isError"] is True and "did not take" in res["message"]
+        assert "bottomHeight_mode" in res["message"] and "from stock top" in res["message"]
+
+    def test_a_height_that_lands_as_a_THIRD_value_is_an_error_naming_it(self, monkeypatch):
+        # the gate is "the read-back is the expression written" (live-verified receipt
+        # cam-parameter-expressions), so a store keeping neither the prior expression nor the
+        # request is caught too - and the error states the value the operation actually reads.
+        op = _curve_op()
+        op.parameters._d["bottomHeight_offset"] = _ThirdValueHeightParam()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        res = cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
+                         bottom_offset="-10", generate=False)
+        assert res["isError"] is True and "did not take" in res["message"]
+        assert "reads back '-10 mm'" in res["message"]
+
+    def test_heights_set_publishes_what_the_operation_reads_back(self, monkeypatch):
+        # the payload key states the height the operation will run on, read off the parameter after
+        # the write - the gate above is what makes that the same string as the request.
+        op = _curve_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        out = _payload(cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
+                                  bottom_offset="-10 mm", generate=False))
+        assert out["heights_set"] == ["bottomHeight_offset=-10 mm"]
+
+    def test_a_height_that_does_not_evaluate_is_an_error(self, monkeypatch):
+        # the expression is STORED and echoed back - only .error exposes that it resolves to nothing
+        op = _curve_op()
+        op.parameters._d["topHeight_offset"] = _UnevaluatedHeightParam(None)
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        res = cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
+                         top_offset="NoSuchParam * 2", generate=False)
+        assert res["isError"] is True and "did not evaluate" in res["message"]
+        assert "Failed to evaluate expression." in res["message"]
+
+    def test_a_height_that_cannot_be_read_back_is_unconfirmed(self, monkeypatch):
+        op = _curve_op()
+        op.parameters._d["topHeight_mode"] = _UnreadableHeightParam()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        res = cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
+                         top_mode="from stock top", generate=False)
+        assert res["isError"] is True and "UNCONFIRMED" in res["message"]
+
+    def test_a_mode_that_lands_before_a_refused_offset_is_named_as_retained(self, monkeypatch):
+        # both halves belong to ONE height group: the mode already landed when the offset is
+        # refused, and an error that named neither would read as "nothing happened".
+        op = _curve_op()
+        op.parameters._d["bottomHeight_offset"] = _StuckHeightParam("0 mm")
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        res = cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
+                         bottom_mode="from contour", bottom_offset="-10 mm", generate=False)
+        assert res["isError"] is True and "did not take" in res["message"]
+        assert "bottomHeight_mode=from contour" in res["message"] and "REMAIN" in res["message"]
+
+    def test_a_store_that_quotes_the_request_is_not_called_a_no_take(self, monkeypatch):
+        # What the receipt measured is two-sided: a numeric parameter's expression reads back the
+        # text written, and a STRING parameter's stored expression is single-quoted. A height _mode
+        # is a string parameter written here unquoted, so the compare goes through the shared codec
+        # - a byte compare would refuse this whole call and call a landed write a no-take.
+        op = _curve_op()
+        op.parameters._d["bottomHeight_mode"] = _QuotedStoreHeightParam()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        out = _payload(cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
+                                  bottom_mode="from contour", generate=False))
+        # heights_set publishes the parameter's OWN read-back, wrapper and all
+        assert out["heights_set"] == ["bottomHeight_mode='from contour'"]
+
+    def test_a_quoting_store_that_keeps_its_prior_expression_is_still_an_error(self, monkeypatch):
+        # The codec strips the wrapper, not the comparison: a store that quotes AND keeps the
+        # expression it already held is the swallowed write, and it stays convicted.
+        op = _curve_op()
+        op.parameters._d["bottomHeight_mode"] = _StuckHeightParam("'from stock top'")
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        res = cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
+                         bottom_mode="from contour", generate=False)
+        assert res["isError"] is True and "did not take" in res["message"]
+        assert "from stock top" in res["message"]
+
+    def test_a_height_set_to_what_it_already_reads_is_not_called_a_no_take(self, monkeypatch):
+        # the gate is "the read-back is the expression written", and a caller re-asserting the value
+        # the operation already carries reads it back - the state they asked for.
+        op = _curve_op()
+        op.parameters._d["bottomHeight_mode"] = _StuckHeightParam("from contour")
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        out = _payload(cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
+                                  bottom_mode="from contour", generate=False))
+        assert out["heights_set"] == ["bottomHeight_mode=from contour"]
+
+
 # ── generation: launch-and-return (it runs in the background on its own) ─────
 
 class TestGenerate:

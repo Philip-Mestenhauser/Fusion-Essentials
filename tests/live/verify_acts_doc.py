@@ -4,12 +4,19 @@
 """ACT rows: the overture that opens the document, and the finale that discards it.
 
 The two acts bracketing the sweep - the orientation reads and the one `doc_new` at the top, then
-the beauty shots, the export/import round trips and the document close at the end.
+the beauty shots, the export/import round trips and the document close at the end. `reload_smoke`
+is the post-run beat run() fires after every act: the add-in reload, which restarts the server and
+so can be no act's step.
 """
 
+import json
+import time
+import urllib.request
+
 from verify_core import (
-    EXPORT_DIR, SVG_PATH, _ctx_get, _document_closed, _document_read, _exported_bytes, _extruded,
-    _fg, _imported_curves, _imported_sketches, _made_component, _new_document, _refused, _watch)
+    BASE, EXPORT_DIR, NOTE_MAX, SERVER_NAME, SVG_PATH, _ctx_get, _document_closed, _document_read,
+    _exported_bytes, _extruded, _fg, _imported_curves, _imported_sketches, _made_component,
+    _new_document, _refused, _watch, facade)
 
 
 # --- ACT 0: OVERTURE - orient, then open the one document the whole gyroscope lives in ---------
@@ -322,3 +329,101 @@ _FINALE = [
     ("doc_get", {}, _document_read, None),
     ("doc_close", {"save_changes": False}, _document_closed, None),
 ]
+
+
+# --- the reload beat: the one tool no act can hold, driven after every act has run ---------------
+# sys_reload_addin restarts the server the sweep is talking to, so it can be no step: the call
+# after it would reach a socket that is coming down. It is a post-run beat instead, and what it
+# has to establish is that the restart HAPPENED. The reload is DEFERRED - the handler starts a
+# timer and returns while the server is still answering - so a /health read taken when the call
+# comes back describes the state before the teardown, and would pass identically against a server
+# that never left. Watching /health go DOWN and then answer again is what tells those apart.
+_RELOAD_PROBE_GAP_S = 0.25
+_RELOAD_PROBE_TIMEOUT_S = 1.0
+# Attempt budgets, not deadlines, so the beat's cost is bounded the way poll_generation's is: 40
+# probes to catch the teardown and 60 to see the re-import answer, a quarter-second apart, each
+# probe itself capped by the timeout above. A budget that runs out ends the beat, never the wait.
+_RELOAD_DOWN_POLLS = 40
+_RELOAD_UP_POLLS = 60
+# The smoke read: a registry search. sys_find_tool is registered run_on_main_thread=False, so it
+# answers off the registry rather than queuing behind Fusion's main thread, and entry.start()
+# collects and registers every tool BEFORE it starts the HTTP server - so a /health that answers
+# is a registry already populated, and this read is of the restarted add-in, not a race with it.
+_RELOAD_SMOKE_QUERY = "reload addin"
+
+
+def _server_answers(timeout=_RELOAD_PROBE_TIMEOUT_S):
+    """True when GET /health answers right now AS THIS SERVER. Every other outcome is False -
+    refused, reset, timed out, or a different server holding the port - because none of them is
+    this add-in answering, and the caller reads the two states apart, never the reason."""
+    try:
+        with urllib.request.urlopen(BASE + "/health", timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return False
+    return data.get("server") == SERVER_NAME
+
+
+def _poll_health(up, polls):
+    """Poll /health until it reads `up` (True = answering as this server, False = not), bounded by
+    `polls` attempts. True when that state was OBSERVED, False when the budget ran out - a budget
+    that runs out is never read as the state it was waiting for."""
+    answers = facade("_server_answers")
+    for i in range(polls):
+        if i:
+            time.sleep(_RELOAD_PROBE_GAP_S)
+        if bool(answers()) is up:
+            return True
+    return False
+
+
+def reload_smoke(rows, notes, valued=None, down_polls=_RELOAD_DOWN_POLLS,
+                 up_polls=_RELOAD_UP_POLLS):
+    """Reload the add-in, watch the server go down and come back, and read the fresh registry.
+
+    Appends ONE row for sys_reload_addin and, only on a restart it OBSERVED end to end, registers
+    the tool in 'valued' - the receipt's covered bucket - the same way a STEPS value predicate
+    does. Its pass reads values: the scheduling sentence off the call, the two /health states, and
+    the tool's own name out of the restarted registry.
+
+    A beat that cannot confirm the restart appends NO row and prints why. The tool then falls to
+    its EXCLUDED entry and the receipt keeps a skipped row, which is the honest reading of what
+    happened: nothing was observed to claim, and the evidence every other tool's rows carry was
+    gathered before this beat ran and is untouched by it."""
+    # the wire read and the shot-list note as the facade holds them - see verify_core.facade
+    call, STORY = facade("call"), facade("STORY")
+    try:
+        is_error, payload = call("sys_reload_addin", {})
+    except Exception as e:
+        # the teardown can cut the response short; nothing was observed either way
+        is_error, payload = True, f"the reload call did not come back: {e}"
+    if is_error or "Reload scheduled" not in str(payload):
+        print(f"  reload beat: no reload was scheduled - {str(payload)[:NOTE_MAX]}")
+        return
+    if not _poll_health(False, down_polls):
+        print(f"  reload beat: /health kept answering across {down_polls} probes - the restart was "
+              "not observed, so the run claims nothing for it")
+        return
+    if not _poll_health(True, up_polls):
+        print(f"  reload beat: /health did not answer again within {up_polls} probes - the add-in "
+              "is down; start it from Fusion's Scripts and Add-Ins dialog (Shift+S)")
+        return
+    try:
+        found = call("sys_find_tool", {"query": _RELOAD_SMOKE_QUERY})[1]
+    except Exception as e:
+        found = f"the registry read did not come back: {e}"
+    # a refusal answers with the error TEXT rather than a payload, so the match list reads empty
+    # off it and needs no separate error flag
+    matches = found.get("tools") or [] if isinstance(found, dict) else []
+    names = [m.get("tool") for m in matches if isinstance(m, dict)]
+    if "sys_reload_addin" not in names:
+        print("  reload beat: the restarted server answered, but its registry did not return "
+              f"sys_reload_addin - {str(found)[:NOTE_MAX]}")
+        return
+    rows.append(("sys_reload_addin", "pass",
+                 f"/health stopped answering and answered again as {SERVER_NAME}; the restarted "
+                 f"registry returned {len(names)} match(es) for '{_RELOAD_SMOKE_QUERY}', "
+                 "sys_reload_addin among them"))
+    notes["sys_reload_addin"] = STORY.get("sys_reload_addin", "")
+    if valued is not None:
+        valued.add("sys_reload_addin")

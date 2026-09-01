@@ -167,11 +167,68 @@ class _DeafOperations(_Operations):
         return _Operation(inp)
 
 
+class _MuteOperations(_Operations):
+    """The count cannot be READ at all - the state a gate written as `before is not None and after
+    is not None and after <= before` skips entirely, letting an unconfirmed create report ok."""
+    @property
+    def count(self):
+        raise RuntimeError("operations.count is unreadable")
+
+
+class _NonNumericCount(_Operations):
+    """count answers with something that is not a number at all - what an unmodelled property hands
+    back. Comparing the two sides of the add against it is not a count comparison."""
+    @property
+    def count(self):
+        return object()
+
+
+class _NonNumericCountBeforeAdd(_Operations):
+    """count answers with something that is not a number BEFORE the add and a real count after it -
+    the one-sided shape, which the two sides being read separately makes possible."""
+    def __init__(self, strategies):
+        super().__init__(strategies)
+        self._landed = False
+
+    @property
+    def count(self):
+        return len(self.added) if self._landed else object()
+
+    def add(self, inp):
+        op = super().add(inp)
+        self._landed = True
+        return op
+
+
+class _CountStopsAfterAdd(_Operations):
+    """count answers BEFORE the add and stops answering after it - only one side of the gate is
+    missing, and the message has to name which."""
+    def __init__(self, strategies):
+        super().__init__(strategies)
+        self._mute = False
+
+    @property
+    def count(self):
+        if self._mute:
+            raise RuntimeError("operations.count is unreadable")
+        return len(self.added)
+
+    def add(self, inp):
+        op = super().add(inp)
+        self._mute = True
+        return op
+
+
+def _with_operations(cam, cls):
+    setup = cam.setups.item(0)
+    setup.operations = cls([s.name for s in setup.operations.compatibleStrategies])
+    return setup
+
+
 class TestOperationLanding:
     def test_an_operation_that_never_lands_in_the_setup_is_an_error(self, monkeypatch):
         cam = _install(monkeypatch)
-        setup = cam.setups.item(0)
-        setup.operations = _DeafOperations([s.name for s in setup.operations.compatibleStrategies])
+        setup = _with_operations(cam, _DeafOperations)
         res = cco.handler(setup="Setup1", strategy="face",
                           tool_library_url="u", tool_index=0, generate=False)
         assert res["isError"] is True
@@ -179,6 +236,52 @@ class TestOperationLanding:
         assert setup.operations.count == 0
         # the other side of `ops_after <= ops_before` is TestCreate.test_creates_operation_with_tool,
         # where the same add grows the setup by exactly one and the call succeeds.
+
+    def test_an_unreadable_count_is_unconfirmed_not_a_pass(self, monkeypatch):
+        # a count that does not answer cannot CLEAR the landing, so the gate may not be skipped for
+        # it - an unlanded operation would report ok on exactly this read.
+        cam = _install(monkeypatch)
+        _with_operations(cam, _MuteOperations)
+        res = cco.handler(setup="Setup1", strategy="face",
+                          tool_library_url="u", tool_index=0, generate=False)
+        assert res["isError"] is True
+        assert "UNCONFIRMED" in res["message"]
+        assert "could not be read before and after the add" in res["message"]
+
+    def test_a_count_that_is_not_a_number_is_unconfirmed_too(self, monkeypatch):
+        # the count is read through _common.counted, so a non-int answer is UNKNOWN rather than a
+        # value to compare: `after <= before` against a bare object either raises or compares
+        # something that is not a count at all.
+        cam = _install(monkeypatch)
+        _with_operations(cam, _NonNumericCount)
+        res = cco.handler(setup="Setup1", strategy="face",
+                          tool_library_url="u", tool_index=0, generate=False)
+        assert res["isError"] is True and "UNCONFIRMED" in res["message"]
+        # BOTH sides answered a non-count here, so both are named: a message naming one side is a
+        # gate reading only the OTHER side as a count.
+        assert "could not be read before and after the add" in res["message"]
+
+    def test_a_non_numeric_count_on_the_BEFORE_side_alone_is_unconfirmed(self, monkeypatch):
+        # The two sides are read separately, so each needs its own not-a-number read: a gate that
+        # took the before count as whatever answered would compare an int against a bare object.
+        cam = _install(monkeypatch)
+        _with_operations(cam, _NonNumericCountBeforeAdd)
+        res = cco.handler(setup="Setup1", strategy="face",
+                          tool_library_url="u", tool_index=0, generate=False)
+        assert res["isError"] is True and "UNCONFIRMED" in res["message"]
+        assert "could not be read before the add" in res["message"]
+        assert "before and after" not in res["message"]
+
+    def test_the_message_names_which_side_of_the_add_went_unread(self, monkeypatch):
+        # both counts unreadable and only the after one are different observations; naming the side
+        # is what tells the reader whether the before-count was ever taken.
+        cam = _install(monkeypatch)
+        _with_operations(cam, _CountStopsAfterAdd)
+        res = cco.handler(setup="Setup1", strategy="face",
+                          tool_library_url="u", tool_index=0, generate=False)
+        assert res["isError"] is True
+        assert "could not be read after the add" in res["message"]
+        assert "before and after" not in res["message"]
 
 
 # ── create (no generate) ─────────────────────────────────────────────────────

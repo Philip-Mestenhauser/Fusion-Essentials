@@ -15,7 +15,9 @@ response - and that is what ``inline`` and ``effect`` classify, each naming the 
 the read-back bites.
 
 Every reference is resolved here rather than believed: an ``evidence_test`` node id must name a
-test file, class and function that exist and that no other tool claims; a ``deferred`` poller must
+test pytest would COLLECT - file, class and function alike - and that no other tool claims; a
+symbol that merely exists under a spendable-looking id proves nothing, because nothing runs it.
+Beyond that: a ``deferred`` poller must
 be a registered read tool; an ``external`` ``evidence_receipt`` must name a receipt row that
 RECORDS AN OBSERVATION (a skipped or pending row is refused - those record the absence of one);
 ``dynamic`` reaches exactly one tool; a ``gap`` carries a defect id that must resolve to an OPEN
@@ -29,6 +31,7 @@ and adding a new write tool here needs the same deliberation as adding a naming-
 """
 
 import ast
+import fnmatch
 import os
 import re
 from types import SimpleNamespace
@@ -59,7 +62,7 @@ def _postconditions_of(item):
 # visible instead of a quiet reclassification. The ceiling is an alarm that UN-RINGS itself:
 # the shrink-only half of the test below forces the number back down the moment a gap closes, so
 # a tool parked here while its evidence is unrecorded cannot quietly stay parked.
-_GAP_CEILING = 6
+_GAP_CEILING = 3
 
 
 def _verification_of(item):
@@ -135,16 +138,36 @@ _OPEN_ROW = r"^- \[ \] {id}\b"
 # passes when it cannot find it.
 _LEDGER_NAME = "fix-backlog.md"
 
+# pytest's COLLECTION rules, which are what make a node id spendable: python_files
+# (test_*.py / *_test.py), python_classes (Test*) and python_functions (test*) are its defaults,
+# and pytest.ini overrides none of them. A class carrying __init__ is skipped with a collection
+# warning rather than instantiated, so its methods never run either. Existing under a
+# test-shaped id is not the same as running: a fixture, a module helper, a private method, a
+# plain class's method and anything at all in conftest.py all parse and none of them is a test.
+_PYTEST_FILE_GLOBS = ("test_*.py", "*_test.py")
+_PYTEST_CLASS_PREFIX = "Test"
+_PYTEST_FUNC_PREFIX = "test"
+
+
+def _is_def(node, name):
+    return isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name
+
 
 def _resolve_node_id(node_id):
-    """'' when the node id resolves to a real test, else why it does not.
+    """'' when the node id names a test pytest would COLLECT, else why it does not.
 
     Resolves '<file>.py::test_x' and '<file>.py::TestClass::test_x' by PARSING the file: the class
     is looked up at module level and the test function inside it, so a renamed or deleted test is
-    a miss rather than a claim that still reads well."""
+    a miss rather than a claim that still reads well. Every part is also held to the collection
+    rules above, so a symbol that exists but never runs is a miss too - the obligation a
+    declaration points at has to be one someone can spend."""
     if not _NODE_ID.match(node_id):
         return "not a 'tests/<file>.py::[Class::]test_name' node id"
     parts = node_id.split("::")
+    base = os.path.basename(parts[0])
+    if not any(fnmatch.fnmatch(base, glob) for glob in _PYTEST_FILE_GLOBS):
+        return (f"{base} is not a file pytest collects "
+                f"({' / '.join(_PYTEST_FILE_GLOBS)}) - nothing in it runs as a test")
     path = os.path.join(REPO_ROOT, *parts[0].split("/"))
     if not os.path.isfile(path):
         return f"no such test file: {parts[0]}"
@@ -156,10 +179,18 @@ def _resolve_node_id(node_id):
                     if isinstance(n, ast.ClassDef) and n.name == parts[1]), None)
         if cls is None:
             return f"{parts[0]} defines no class {parts[1]}"
+        if not cls.name.startswith(_PYTEST_CLASS_PREFIX):
+            return (f"{parts[0]}'s {cls.name} is not a class pytest collects "
+                    f"({_PYTEST_CLASS_PREFIX}*)")
+        if any(_is_def(n, "__init__") for n in cls.body):
+            return (f"{parts[0]}'s {cls.name} defines __init__, so pytest skips the class and "
+                    "none of its methods run")
         body, where = cls.body, f"{parts[0]}::{parts[1]}"
     fn = parts[-1]
-    if not any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == fn
-               for n in body):
+    if not fn.startswith(_PYTEST_FUNC_PREFIX):
+        return (f"{fn} is not a name pytest collects ({_PYTEST_FUNC_PREFIX}*) - a fixture or "
+                "helper of that name is never run as this tool's proof")
+    if not any(_is_def(n, fn) for n in body):
         return f"{where} defines no test named {fn}"
     return ""
 
@@ -339,12 +370,49 @@ class TestVerificationDeclarations:
         probe = tmp_path / "tests" / "unit"
         probe.mkdir(parents=True)
         (probe / "test_probe.py").write_text(
-            "class TestThing:\n    def test_real(self):\n        pass\n\n\ndef test_loose():\n"
+            "class TestThing:\n"
+            "    class test_shaped_like_a_test:\n"
+            "        pass\n"
+            "\n"
+            "    def _helper(self):\n"
+            "        pass\n"
+            "\n"
+            "    def test_real(self):\n"
+            "        pass\n"
+            "\n"
+            "\n"
+            "class test_shaped_like_a_test:\n"
+            "    pass\n"
+            "\n"
+            "\n"
+            "class TestConstructed:\n"
+            "    def __init__(self):\n"
+            "        pass\n"
+            "\n"
+            "    def test_never_runs(self):\n"
+            "        pass\n"
+            "\n"
+            "\n"
+            "class Helper:\n"
+            "    def test_in_a_plain_class(self):\n"
+            "        pass\n"
+            "\n"
+            "\n"
+            "def test_loose():\n"
+            "    pass\n"
+            "\n"
+            "\n"
+            "def a_fixture():\n"
             "    pass\n", encoding="utf-8")
+        (probe / "probe_test.py").write_text("def test_second_glob():\n    pass\n",
+                                             encoding="utf-8")
+        (probe / "conftest.py").write_text("def test_in_conftest():\n    pass\n", encoding="utf-8")
         import test_postconditions_declared as mod
         monkeypatch.setattr(mod, "REPO_ROOT", str(tmp_path))
         assert _resolve_node_id("tests/unit/test_probe.py::TestThing::test_real") == ""
         assert _resolve_node_id("tests/unit/test_probe.py::test_loose") == ""
+        # BOTH file globs pytest collects, or the rule would refuse half the tree
+        assert _resolve_node_id("tests/unit/probe_test.py::test_second_glob") == ""
         assert "defines no test" in _resolve_node_id(
             "tests/unit/test_probe.py::TestThing::test_renamed")
         assert "defines no class" in _resolve_node_id(
@@ -356,6 +424,24 @@ class TestVerificationDeclarations:
             "tests/unit/test_probe.py::TestThing::test_loose")
         assert "node id" in _resolve_node_id("test_probe.py::test_real")
         assert "node id" in _resolve_node_id("tests/unit/test_probe.py")
+        # EXISTING is not RUNNING: each of these parses to a real symbol pytest never collects, so
+        # a declaration pointing at one would claim a proof nobody can spend.
+        assert "is not a file pytest collects" in _resolve_node_id(
+            "tests/unit/conftest.py::test_in_conftest")
+        assert "is not a class pytest collects" in _resolve_node_id(
+            "tests/unit/test_probe.py::Helper::test_in_a_plain_class")
+        assert "defines __init__" in _resolve_node_id(
+            "tests/unit/test_probe.py::TestConstructed::test_never_runs")
+        assert "is not a name pytest collects" in _resolve_node_id(
+            "tests/unit/test_probe.py::a_fixture")
+        assert "is not a name pytest collects" in _resolve_node_id(
+            "tests/unit/test_probe.py::TestThing::_helper")
+        # a CLASS under a test-shaped name is not a test either, at module level or nested: the
+        # last part of a node id has to be a def, or pytest runs nothing for it.
+        assert "defines no test" in _resolve_node_id(
+            "tests/unit/test_probe.py::test_shaped_like_a_test")
+        assert "defines no test" in _resolve_node_id(
+            "tests/unit/test_probe.py::TestThing::test_shaped_like_a_test")
         live = tmp_path / "tests" / "live"
         live.mkdir()
         (live / "R.md").write_text(

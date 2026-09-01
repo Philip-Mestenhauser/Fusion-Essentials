@@ -445,9 +445,10 @@ class TestOpenDocumentsSessionWalk:
         assert payload["candidates"][0] == {"name": "Bracket", "document_id": "urn:lineage:abc"}
         assert payload["candidates"][1]["open_index"] == 1   # the unsaved twin's session address
 
-    def test_unreadable_doc_is_skipped_not_fatal_to_the_walk(self, live_app):
-        # A doc that raises on item() (mid-close) is skipped; the docs AROUND it are still walked,
-        # so the twin at index 2 is still found and the collision still refuses.
+    def test_unreadable_doc_is_not_fatal_to_the_walk(self, live_app):
+        # A doc that raises on item() (mid-close) names nothing, so it is no collision candidate;
+        # the docs AROUND it are still walked, so the twin at index 2 is still found and the
+        # collision still refuses.
         active = _FakeDoc("Bracket", "urn:lineage:abc")
         twin = _FakeDoc("Bracket", None)
         live_app(active=active, docs=_FakeDocs([active, _FakeDoc("X", "urn:x"), twin],
@@ -458,6 +459,34 @@ class TestOpenDocumentsSessionWalk:
         assert payload["blocked_by"] == ["ambiguous_document_name"]
         assert len(payload["candidates"]) == 2
         assert payload["candidates"][1]["open_index"] == 2   # true session index, not a renumbering
+
+    def test_an_unreadable_slot_is_published_as_the_hole_it_is(self, live_app):
+        # doc_get publishes the same hole row, so the two listings count the session the same way -
+        # a dropped row shows one document fewer than doc_get does. It carries NO open_index: that
+        # index addresses nothing doc_activate/doc_close would accept, so offering it would be a
+        # false address, and no name, so it can never become a collision candidate.
+        active = _FakeDoc("Bracket", "urn:a")
+        live_app(active=active, docs=_FakeDocs([active, _FakeDoc("Other", "urn:o")],
+                                               broken_indices=(1,)))
+        rows = wg._open_documents()
+        assert len(rows) == 2
+        assert rows[1] == {"name": None, "readable": False}
+        assert rows[0]["open_index"] == 0 and rows[0]["is_active"] is True
+
+    def test_a_slot_answering_no_document_is_published_the_same_way(self, live_app):
+        # item(i) can ANSWER None rather than raise (a stale proxy); both are the same hole.
+        active = _FakeDoc("Bracket", "urn:a")
+        live_app(active=active, docs=_FakeDocs([active, None]))
+        assert wg._open_documents()[1] == {"name": None, "readable": False}
+
+    def test_a_published_hole_never_becomes_a_name_collision_candidate(self, live_app):
+        # publishing the hole must not invent an ambiguity: the row names nothing, so the one
+        # readable 'Bracket' is still session-unique and the write proceeds.
+        active = _FakeDoc("Bracket", "urn:a")
+        live_app(active=active, docs=_FakeDocs([active, _FakeDoc("Bracket", None)],
+                                               broken_indices=(1,)))
+        out = _decode(wg.wrap(lambda **kw: _ok({"created": True}))(expect_document="Bracket"))
+        assert out["created"] is True
 
     def test_doc_with_unreadable_name_does_not_count_toward_collision(self, live_app):
         active = _FakeDoc("Bracket", "urn:lineage:abc")

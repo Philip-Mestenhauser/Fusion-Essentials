@@ -11,8 +11,12 @@ A file that has clearly outgrown its floor is reported with a paste-ready raised
 win in); raising is routine, LOWERING an entry is a reviewed decision the commit message must own.
 
 Run standalone: py -3 -m pytest tests/unit tests/lints -q --cov=commands/mcpServer/tools
-  --cov=commands/mcpServer/server --cov-branch --cov-report=json:<path> ; then
+  --cov=commands/mcpServer/server --cov=commands/mcpServer/guidance
+  --cov=commands/mcpServer/mcp_primitives --cov-branch --cov-report=json:<path> ; then
   py -3 tests/check_coverage.py <path>
+
+The roots are the four check_all passes (see its pytest stage): a package left out of them is
+measured by nothing, so no floor here can hold it.
 """
 
 import json
@@ -25,6 +29,20 @@ _NEW_FILE_FLOOR = 85
 _RAISE_HINT_MARGIN = 4
 
 _FLOORS = {
+    "guidance/__init__.py": 100,
+    "guidance/loader.py": 100,
+    "guidance/render.py": 94,
+    "guidance/resources.py": 100,
+    "mcp_primitives/__init__.py": 100,
+    "mcp_primitives/annotations.py": 88,
+    "mcp_primitives/item.py": 90,
+    "mcp_primitives/registry.py": 87,
+    # 83, below the new-code bar, pinned rather than tested up: what the suite leaves unreached in
+    # the schema builder is its unused defaults, not new logic. The two "bootstrap the missing key"
+    # branches never run because create_simple pre-seeds properties and required; the title and
+    # outputSchema branches of to_dict never run because nothing outside this module sets either;
+    # the rest is __str__ and __repr__.
+    "mcp_primitives/tool.py": 83,
     "server/__init__.py": 100,
     "server/mcp_server.py": 77,   # was 68
     "server/task_manager.py": 83,

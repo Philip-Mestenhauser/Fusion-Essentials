@@ -11,7 +11,7 @@ import adsk.core
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe
+from ._common import ok, error, read_flag, safe
 from ._cam_common import get_cam, resolve_cam_node, operation_nodes, operations_under, find_setup
 
 app = adsk.core.Application.get()
@@ -20,10 +20,32 @@ _ACTIONS = ("show", "hide", "isolate", "show_folder", "hide_all", "list")
 
 
 def _set_bulb(o, on):
-    """Set the lightbulb and confirm it took. False = the re-read contradicts the set."""
+    """Set the lightbulb and confirm it took. Returns (took, read_back).
+
+    took is True only when the re-read ANSWERS the value that was set: a bulb whose isLightBulbOn
+    does not read leaves the toggle unconfirmed, and unconfirmed is not done (the sibling flag
+    write, cam_edit_operation._set_suppressed, fails the same way). The read-back goes through
+    read_flag, so an unreadable bulb answers None - safe(read, False) would pass the `now == wanted`
+    gate on every hide."""
     o.isLightBulbOn = bool(on)
-    now = safe(lambda: o.isLightBulbOn)
-    return now is None or bool(now) == bool(on)
+    now = read_flag(lambda: o.isLightBulbOn)
+    return (now is not None and now == bool(on)), now
+
+
+def _op_identity(o):
+    """An operation's operationId - what a mass-hide's read-back is matched to a later show by.
+
+    Two independent walks of the CAM tree hand back DIFFERENT Python objects for one operation
+    (measured - cam_post._op_id_set), so id() matches nothing across them. An operationId that does
+    not read is None, which matches nothing either: the read-back is then reported rather than
+    dropped on a stand-in identity."""
+    return safe(lambda: o.operationId)
+
+
+def _bulb_word(now):
+    """What a bulb read ANSWERED, for a wire sentence: 'shown' / 'hidden' / 'unreadable' - never a
+    bare None, which reads as a state the property held rather than a read that did not answer."""
+    return "unreadable" if now is None else ("shown" if now else "hidden")
 
 
 def _activate_owning_setup(cam, setup_name):
@@ -46,9 +68,16 @@ def _activate_owning_setup(cam, setup_name):
     except Exception as e:
         return None, (f"Setup '{setup_name}' could not be activated ({e}) - the viewport still "
                       "shows the ACTIVE setup's models, not this operation's part.")
-    if safe(lambda: s.isActive) is not True:
+    # A flag that does not READ has not said the setup became active, and it has not said it stayed
+    # inactive either - so the two get separate sentences, each stating only what was read.
+    state = safe(lambda: s.isActive)
+    if state is False:
         return None, (f"activate() ran but setup '{setup_name}' still reads isActive=false - the "
                       "viewport still shows another setup's models, not this operation's part.")
+    if state is not True:
+        return None, (f"activate() ran but isActive cannot be read on setup '{setup_name}', so the "
+                      "activation is UNCONFIRMED - the viewport may still show another setup's "
+                      "models rather than this operation's part.")
     return setup_name, None
 
 
@@ -87,7 +116,8 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
         for node in operation_nodes(cam):
             o = node.obj
             if safe(lambda o=o: o.hasToolpath):
-                if _set_bulb(o, False):
+                took, _now = _set_bulb(o, False)
+                if took:
                     n += 1
                 else:
                     failed += 1
@@ -95,7 +125,10 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
         out = {"action": "hide_all", "hidden_count": n}
         if failed:
             out["toggle_failures"] = failed
-            out["note"] = f"{failed} operation(s) still read isLightBulbOn=true after the hide."
+            # Worded on the read, not on a state: a bulb that reads back true and one that does not
+            # read at all both FAIL to read back false, and this count cannot tell them apart.
+            out["note"] = (f"{failed} operation(s) did not read back isLightBulbOn=false after the "
+                           "hide.")
         return ok(out)
 
     if action == "show_folder":
@@ -105,17 +138,32 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
         if ferr:
             return error(ferr + " Use cam_show_toolpath(list) or cam_get(include=['operations']).")
         ops, matched = operations_under(fnode.obj), fnode.name
-        # hide everything, then show this folder's generated ops
+        # hide everything, then show this folder's generated ops. The mass-hide's own read-backs are
+        # KEPT: an op that would not go dark is still on screen, which is the opposite of what
+        # 'show only this folder' promised.
+        hide_failed = []
         for node in operation_nodes(cam):
-            _set_bulb(node.obj, False)
+            took, _now = _set_bulb(node.obj, False)
+            if not took:
+                hide_failed.append((_op_identity(node.obj), node.name))
         shown = []
         failed = []
+        shown_ids = set()
         for o in ops:
             if safe(lambda o=o: o.hasToolpath):
-                if _set_bulb(o, True):
+                took, _now = _set_bulb(o, True)
+                if took:
                     shown.append(safe(lambda o=o: o.name))
+                    oid = _op_identity(o)
+                    if oid is not None:
+                        shown_ids.add(oid)
                 else:
                     failed.append(safe(lambda o=o: o.name))
+        # A hide that did not take on an op this call then SHOWED ends lit, as asked, so it is
+        # dropped - matched by operationId, the identity the two walks share (see _op_identity).
+        # An operation either side of that match whose id did not read matches nothing, and its
+        # read-back is reported rather than dropped.
+        still_lit = [nm for oid, nm in hide_failed if oid is None or oid not in shown_ids]
         activated, setup_warning = _activate_owning_setup(cam, fnode.setup)
         app.activeViewport.refresh()
         out = {"action": "show_folder", "folder": matched, "shown": shown,
@@ -130,8 +178,13 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
             out["note"] += " " + setup_warning
         if failed:
             out["toggle_failures"] = failed
-            out["note"] = (f"{len(failed)} operation(s) still read isLightBulbOn=false after the "
-                           "show - see toggle_failures. " + out["note"])
+            out["note"] = (f"{len(failed)} operation(s) did not read back isLightBulbOn=true after "
+                           "the show - see toggle_failures. " + out["note"])
+        if still_lit:
+            out["hide_failures"] = still_lit
+            out["note"] = (f"{len(still_lit)} operation(s) did not read back isLightBulbOn=false "
+                           "after the hide - see hide_failures; their toolpaths may still be "
+                           "drawn. " + out["note"])
         return ok(out)
 
     # show / hide / isolate a single operation - the shared resolver REFUSES a duplicated name
@@ -145,26 +198,46 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
     name = onode.name
 
     if action == "hide":
-        if not _set_bulb(o, False):
-            return error(f"isLightBulbOn did not take for '{name}' - it still reads shown.")
+        took, now = _set_bulb(o, False)
+        if not took:
+            return error(f"isLightBulbOn did not take for '{name}' - it reads back "
+                         f"{_bulb_word(now)}.")
         app.activeViewport.refresh()
         return ok({"action": "hide", "operation": name})
 
+    still_lit = []
     if action == "isolate":
+        # The mass-hide's read-backs are KEPT: an op that would not go dark is still drawn, and
+        # 'isolate' is the one action that promised nothing else would be.
+        target_id = _op_identity(o)
+        hide_failed = []
         for node in operation_nodes(cam):
-            _set_bulb(node.obj, False)
-        took = _set_bulb(o, True)
-    else:  # show
-        took = _set_bulb(o, True)
+            hid, _now = _set_bulb(node.obj, False)
+            if not hid:
+                hide_failed.append((_op_identity(node.obj), node.name))
+        # The target is shown immediately below, so its own refused hide ends lit as asked and is
+        # dropped - matched by operationId, since this walk and the resolver that produced `o` hold
+        # different objects for one operation (see _op_identity). An id that did not read on either
+        # side matches nothing, and that read-back is reported rather than dropped.
+        still_lit = [nm for oid, nm in hide_failed
+                     if target_id is None or oid is None or oid != target_id]
+    took, now = _set_bulb(o, True)
 
+    # The toggle is judged BEFORE the toolpath branch: a bulb that did not take is an error whether
+    # or not the operation has a path to draw, so the pathless warning cannot carry a failed toggle.
+    if not took:
+        return error(f"isLightBulbOn did not take for '{name}' - it reads back {_bulb_word(now)}.")
     if not safe(lambda: o.hasToolpath):
         app.activeViewport.refresh()
-        return ok({"action": action, "operation": name,
+        out = {"action": action, "operation": name,
         "warning": "This operation has no generated toolpath yet - nothing to display. "
         "Generate it first (cam_generate).",
-        "has_toolpath": False})
-    if not took:
-        return error(f"isLightBulbOn did not take for '{name}' - it still reads hidden.")
+        "has_toolpath": False}
+        # an isolate that reached here still ran its mass-hide, so its read-backs are disclosed on
+        # this arm too rather than dropped with the early return
+        if still_lit:
+            out["hide_failures"] = still_lit
+        return ok(out)
 
     # BEFORE the fit: the displayed model is the active setup's, so the operation's own setup has to
     # be active or the fit frames another setup's part.
@@ -186,6 +259,10 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
     if setup_warning:
         out["setup_activation_warning"] = setup_warning
         note += " " + setup_warning
+    if still_lit:
+        out["hide_failures"] = still_lit
+        note += (f" {len(still_lit)} operation(s) did not read back isLightBulbOn=false during the "
+                 "hide - see hide_failures; their toolpaths may still be drawn.")
     out["note"] = note
     return ok(out)
 
@@ -220,9 +297,9 @@ tool = (
 
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
-    # show / hide / isolate error on a bulb that reads back the WRONG value; the two bulk arms publish
-    # the ops whose toggle did not take instead. A bulb whose READ does not answer passes every arm
-    # (_set_bulb fails open, CAM-45), so an unreadable toggle is still reported as done.
+    # show / hide / isolate error on a bulb that does not read back the value set - an unreadable
+    # isLightBulbOn included, since an unconfirmed toggle is not a done one. The bulk arms publish
+    # the ops whose toggle did not take (toggle_failures / hide_failures) instead of erroring.
     verification=Verification(
         kind="inline",
         evidence_test="tests/unit/test_cam_show_toolpath.py::TestBulbReadBack"

@@ -217,6 +217,10 @@ def _refusal(expect, name, urn):
 def _open_documents():
     """Every document open in the session as {name, document_id(URN or None), open_index, is_active}.
     Mirrors doc_get's open_index convention (the stable session address of an UNSAVED doc with no URN).
+    A slot whose document will not read is published as doc_get publishes it - {name: None,
+    readable: False}, carrying NO open_index, since that index addresses nothing a caller could act
+    on - so this listing counts what the session holds rather than one document fewer. It names no
+    name, so it is never a name-collision candidate.
     Fully defensive: any read failure yields an empty list, never a raise - so the guard degrades to
     the single-doc pass path rather than inventing a false ambiguity."""
     out = []
@@ -235,6 +239,9 @@ def _open_documents():
         try:
             d = docs.item(i)
         except Exception:
+            d = None
+        if d is None:
+            out.append({"name": None, "readable": False})
             continue
         name = urn = None
         try:

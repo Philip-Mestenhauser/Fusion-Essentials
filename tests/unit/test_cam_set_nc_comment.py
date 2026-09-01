@@ -208,11 +208,12 @@ class TestProgramTargeting:
         assert ncp.parameters.itemByName("nc_program_comment").expression == "'keepc'"
 
 
-# ── what the payload states as LANDED is the parameter's own re-read ─────────
+# ── the re-read is COMPARED, not just published ──────────────────────────────
 #
 # A parameter that accepts the assignment and keeps its old expression is the platform shape this
-# tool's before/after pair exists for: comment_after has to be what the program reads afterwards,
-# never the text that was asked for, or the receipt launders the request into a result.
+# tool's read-back exists for. Publishing the re-read is not enough on its own: set:true with a
+# comment_after that never changed is a swallowed write reported as a success, so the compare is
+# what turns it into an error.
 
 
 class _StuckParam(FakeParam):
@@ -221,6 +222,26 @@ class _StuckParam(FakeParam):
         if key == "expression" and "expression" in self.__dict__:
             return
         object.__setattr__(self, key, value)
+
+
+class _UnreadableParam(FakeParam):
+    """Takes the assignment; its expression cannot be READ afterwards - the write is unconfirmed,
+    which is not the same as landed."""
+    def __init__(self, expr="'old'"):
+        super().__init__(expr)
+        object.__setattr__(self, "_reads", 0)
+
+    @property
+    def expression(self):
+        # the pre-write read answers (so 'before' is real); every later read raises
+        self._reads += 1
+        if self._reads > 1:
+            raise RuntimeError("expression is unreadable")
+        return self.__dict__["_expr"]
+
+    @expression.setter
+    def expression(self, v):
+        self.__dict__["_expr"] = v
 
 
 class _StuckNCP(FakeNCP):
@@ -233,21 +254,49 @@ class _StuckNCP(FakeNCP):
 
 
 class TestStuckParameter:
-    def test_a_stuck_comment_is_published_as_the_program_reads_it(self, monkeypatch):
+    def test_a_stuck_comment_is_an_error_not_a_reported_success(self, monkeypatch):
         cam = _install(monkeypatch, [_StuckNCP("P1", "'keep me'")])
-        out = _payload(nc.handler(comment="Job 42", program="P1"))
-        rec = out["programs"][0]
-        # the request is reported under its own key; comment_after is the re-read, and here the two
-        # disagree - which is the whole point of publishing both
-        assert out["comment"] == "Job 42"
-        assert rec["comment_before"] == "keep me"
-        assert rec["comment_after"] == "keep me"
+        res = nc.handler(comment="Job 42", program="P1")
+        assert res["isError"] is True
+        # the message names BOTH values, so the caller can see it is a no-take and not a typo
+        assert "did not take" in res["message"]
+        assert "keep me" in res["message"] and "Job 42" in res["message"]
         assert cam.ncPrograms.item(0).parameters.itemByName(
             "nc_program_comment").expression == "'keep me'"
 
-    def test_a_stuck_name_is_published_as_the_program_reads_it(self, monkeypatch):
+    def test_a_stuck_name_is_an_error_not_a_reported_success(self, monkeypatch):
         _install(monkeypatch, [_StuckNCP("P1", "'c'")])
-        out = _payload(nc.handler(comment="", program="P1", set_name="Renamed"))
-        rec = out["programs"][0]
-        assert out["set_name"] == "Renamed"
-        assert rec["name_before"] == "P1" and rec["name_after"] == "P1"
+        res = nc.handler(comment="", program="P1", set_name="Renamed")
+        assert res["isError"] is True
+        assert "did not take" in res["message"] and "Renamed" in res["message"]
+
+    def test_a_stuck_name_after_a_landed_comment_says_the_comment_remains(self, monkeypatch):
+        # the comment write already landed on this program and this call does not undo it - an
+        # isError the caller reads as "nothing happened" would be the false part.
+        ncp = FakeNCP("P1", "'old'")
+        ncp.parameters = FakeParams(nc_program_comment=FakeParam("'old'"),
+                                    nc_program_name=_StuckParam("'P1'"))
+        _install(monkeypatch, [ncp])
+        res = nc.handler(comment="Job 42", program="P1", set_name="Renamed")
+        assert res["isError"] is True
+        assert "The comment on 'P1' reads 'Job 42' and remains." in res["message"]
+        assert ncp.parameters.itemByName("nc_program_comment").expression == "'Job 42'"
+
+    def test_a_comment_that_cannot_be_read_back_is_unconfirmed_not_ok(self, monkeypatch):
+        # a write whose effect cannot be READ is unconfirmed; reporting set:true would state a
+        # landing this call never observed.
+        ncp = FakeNCP("P1")
+        ncp.parameters = FakeParams(nc_program_comment=_UnreadableParam("'old'"),
+                                    nc_program_name=FakeParam("'P1'"))
+        _install(monkeypatch, [ncp])
+        res = nc.handler(comment="Job 42", program="P1")
+        assert res["isError"] is True and "UNCONFIRMED" in res["message"]
+
+    def test_an_apostrophe_that_round_trips_is_not_read_as_a_no_take(self, monkeypatch):
+        # _quote escapes the apostrophe and _unquote does not un-escape it, so comparing the raw
+        # request against the unquoted read-back would convict every landed write carrying one.
+        cam = _install(monkeypatch, [FakeNCP("P1", "'old'")])
+        res = nc.handler(comment="O'Brien", program="P1")
+        assert res["isError"] is False
+        assert cam.ncPrograms.item(0).parameters.itemByName(
+            "nc_program_comment").expression == "'O\\'Brien'"

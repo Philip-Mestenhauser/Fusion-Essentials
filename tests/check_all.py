@@ -109,7 +109,13 @@ def main():
             print("repair:    py -3 -m pip install pytest-cov")
             return 1
         cov_json = os.path.join(TESTS, ".coverage_report.json")
+        # The four packages under commands/mcpServer/ the mocked suite reaches: the tools and the
+        # HTTP server, plus the packaged guidance a tool serves and the primitives every tool is
+        # built and registered through. A package outside these roots appears in no report, so
+        # check_coverage can pin no floor for it and a regression there is invisible to the gate.
         pytest_cmd += ["--cov=commands/mcpServer/tools", "--cov=commands/mcpServer/server",
+                       "--cov=commands/mcpServer/guidance",
+                       "--cov=commands/mcpServer/mcp_primitives",
                        "--cov-branch", "--cov-report=json:" + cov_json]
     if not _run("pytest" + (" (lints only)" if args.fast else " (with coverage)"), pytest_cmd,
                 "read the failure above - a lint names its own repair; a unit test names the "

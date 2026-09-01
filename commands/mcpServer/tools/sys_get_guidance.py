@@ -17,11 +17,6 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 
-# The most rules one response carries: a section that grows can never make one call answer with the
-# whole document. test_sys_get_guidance.py pins that no shipped section reaches it, so a truncation
-# would be a document change, not a normal read.
-MAX_RULES = 8
-
 _SECTION = _inputs.Choice(
     "section", loader.SECTION_IDS,
     description="Which section's rules to return. Omit for the section index.")
@@ -36,8 +31,17 @@ INDEX_NOTE = (
 SECTION_NOTE = (
     "Each rule is a record: 'when' the condition it applies under, 'do' the practice, 'except' "
     "where it does not apply, 'prove' the tool call to read the result back through and what to "
-    "observe in it, 'scenarios' the cases it declares itself for. 'next_sections' names what is "
-    "left to ask for.")
+    "observe in it, 'scenarios' the cases it declares itself for. 'kind' is carried only by a "
+    "safety invariant - the one declared kind, rendered as '(safety invariant)' in the document "
+    "text; a rule without it is strategy. 'next_sections' names what is left to ask for.")
+
+# Appended to SECTION_NOTE only when rules were dropped, so the escape is named exactly where it is
+# needed: the resource channel serves the document whole (render.body renders every rule of every
+# section), while this tool answers at most loader.MAX_SECTION_RULES per call.
+TRUNCATED_NOTE = (
+    " This section holds more rules than one call returns: 'rule_count' of 'rule_total' are in "
+    "'rules' and the rest are not here. Read the document at 'resource_uri' over the resource "
+    "channel for all of them - it is rendered whole, with no per-section cap.")
 
 
 def handler(section=None) -> dict:
@@ -73,16 +77,21 @@ def handler(section=None) -> dict:
                      + ", ".join(str(i) for i in ids) + ".")
 
     rules = list(sec.get("rules") or [])
-    shown = rules[:MAX_RULES]
+    # The most rules one response carries, so a section that grows can never make one call answer
+    # with the whole document. The number lives in the guidance package because
+    # gen_guidance.validate refuses a section authored past it: one cap, read by the tool that
+    # truncates and by the gate that decides what may ship.
+    shown = rules[:loader.MAX_SECTION_RULES]
     result.update({"section": wanted,
                    "section_title": sec.get("title"),
                    "rule_count": len(shown),
                    "rules": shown,
                    "next_sections": [i for i in ids if i != wanted],
                    "note": SECTION_NOTE})
-    if len(rules) > MAX_RULES:
+    if len(rules) > loader.MAX_SECTION_RULES:
         result["truncated"] = True
         result["rule_total"] = len(rules)
+        result["note"] = SECTION_NOTE + TRUNCATED_NOTE
     return ok(result)
 
 

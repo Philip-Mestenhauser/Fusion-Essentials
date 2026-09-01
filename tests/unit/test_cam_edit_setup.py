@@ -295,6 +295,151 @@ class TestParameterEvaluation:
         assert rec["after"] == "2.5" and rec["warning"] == "stock less than model width"
 
 
+class _StuckSetupParam(_Param):
+    """Accepts an expression assignment and keeps the one it already holds - the swallowed write the
+    platform reports as success, with a clean .error channel."""
+    def __setattr__(self, key, value):
+        if key == "expression" and "expression" in self.__dict__:
+            return
+        object.__setattr__(self, key, value)
+
+
+class _ThirdValueSetupParam(_Param):
+    """Takes the assignment and stores a value of its OWN - neither the expression it held nor the
+    one written. A gate keyed on 'it kept the prior expression' passes this one."""
+    def __setattr__(self, key, value):
+        if key == "expression" and "expression" in self.__dict__:
+            object.__setattr__(self, key, "999")
+            return
+        object.__setattr__(self, key, value)
+
+
+class _QuotedStoreSetupParam(_Param):
+    """Takes the assignment and stores the SINGLE-QUOTED form of it - the shape a CAM string
+    parameter's stored expression carries (receipt cam-parameter-expressions, whose probe reads
+    'context' and 'strategy' back starting with a quote). A caller sends either spelling."""
+    def __setattr__(self, key, value):
+        if key == "expression" and "expression" in self.__dict__:
+            object.__setattr__(self, key, "'" + str(value) + "'")
+            return
+        object.__setattr__(self, key, value)
+
+
+class _UnreadableSetupParam(_Param):
+    """Reads its prior expression, takes the assignment, and will not read one back afterwards -
+    the write is neither a landed change nor a no-take, because nothing answered either way."""
+    def __init__(self, name, expr):
+        object.__setattr__(self, "_writes", 0)
+        super().__init__(name, expr)
+
+    @property
+    def expression(self):
+        if self._writes > 1:
+            raise RuntimeError("expression is unreadable")
+        return self._expr
+
+    @expression.setter
+    def expression(self, v):
+        object.__setattr__(self, "_expr", v)
+        object.__setattr__(self, "_writes", self._writes + 1)
+
+
+class TestParameterNoTake:
+    """The evaluation channel is one swallowed write; a parameter whose read-back is not the
+    expression written is the other, and .error says nothing about it. Publishing before beside
+    after is not enough on its own - updated_count with an unchanged 'after' reads as a success."""
+
+    def test_a_parameter_that_keeps_its_prior_expression_is_an_error(self, monkeypatch):
+        cam = _install(monkeypatch)
+        sp = cam.setups.item(0).parameters
+        sp._d["stockZHigh"] = _StuckSetupParam("stockZHigh", "0.0")
+        res = ces.handler(setup="Setup1", parameters={"stockZHigh": "2.5"})
+        assert res["isError"] is True
+        assert "the assignment did not take" in res["message"]
+        assert "it reads back '0.0'" in res["message"]
+        # and it is NOT reported as the other failure - .error said nothing here
+        assert "did not evaluate" not in res["message"]
+
+    def test_a_parameter_that_lands_as_a_THIRD_value_is_an_error_naming_it(self, monkeypatch):
+        # the gate is "the read-back is the expression written" (live-verified receipt
+        # cam-parameter-expressions), so a store that keeps neither the prior expression nor the
+        # request is caught too - and the message states the value it actually reads.
+        cam = _install(monkeypatch)
+        sp = cam.setups.item(0).parameters
+        sp._d["stockZHigh"] = _ThirdValueSetupParam("stockZHigh", "0.0")
+        res = ces.handler(setup="Setup1", parameters={"stockZHigh": "2.5"})
+        assert res["isError"] is True
+        assert "the assignment did not take" in res["message"]
+        assert "it reads back '999'" in res["message"]
+
+    def test_a_parameter_that_cannot_be_read_back_is_unconfirmed_not_edited(self, monkeypatch):
+        # nothing read after the write, so nothing was observed to report - and 'edited: true' with
+        # an after of null is the swallowed mutation this arm exists to refuse.
+        cam = _install(monkeypatch)
+        sp = cam.setups.item(0).parameters
+        sp._d["stockZHigh"] = _UnreadableSetupParam("stockZHigh", "0.0")
+        res = ces.handler(setup="Setup1", parameters={"stockZHigh": "2.5"})
+        assert res["isError"] is True
+        assert "UNCONFIRMED" in res["message"] and "stockZHigh" in res["message"]
+        # and NOT worded as a no-take: no expression was read to say what it still holds
+        assert "reads back" not in res["message"]
+
+    def test_an_unreadable_parameter_rolls_the_siblings_back_too(self, monkeypatch):
+        cam = _install(monkeypatch)
+        sp = cam.setups.item(0).parameters
+        sp._d["stockZHigh"] = _UnreadableSetupParam("stockZHigh", "0.0")
+        res = ces.handler(setup="Setup1", parameters={
+            "wcs_origin_boxPoint": "'top left'", "stockZHigh": "2.5"})
+        assert res["isError"] is True and "UNCONFIRMED" in res["message"]
+        assert sp.itemByName("wcs_origin_boxPoint").expression == "'top center'"   # rolled back
+
+    def test_a_no_take_rolls_the_sibling_parameters_back_too(self, monkeypatch):
+        # params apply before bodies/machine/wcs, so the whole call can still leave the setup as
+        # found - a valid write beside a swallowed one must not be left standing.
+        cam = _install(monkeypatch)
+        sp = cam.setups.item(0).parameters
+        sp._d["stockZHigh"] = _StuckSetupParam("stockZHigh", "0.0")
+        res = ces.handler(setup="Setup1", parameters={
+            "wcs_origin_boxPoint": "'top left'", "stockZHigh": "2.5"})
+        assert res["isError"] is True
+        assert sp.itemByName("wcs_origin_boxPoint").expression == "'top center'"   # rolled back
+        assert "Rolled back all 2 parameter(s)" in res["message"]
+
+    def test_a_store_that_quotes_the_request_is_not_a_no_take(self, monkeypatch):
+        # What the receipt measured is two-sided: a numeric parameter's expression reads back the
+        # text written, and a STRING parameter's stored expression is single-quoted.
+        # wcs_origin_boxPoint is a string parameter and a caller may send its value unquoted, so the
+        # compare goes through the shared codec - a byte compare would roll this whole call back and
+        # call a landed write a no-take.
+        cam = _install(monkeypatch)
+        sp = cam.setups.item(0).parameters
+        sp._d["wcs_origin_boxPoint"] = _QuotedStoreSetupParam("wcs_origin_boxPoint", "'top center'")
+        out = _payload(ces.handler(setup="Setup1",
+                                   parameters={"wcs_origin_boxPoint": "top left"}))
+        assert out["updated_count"] == 1
+        # 'changed' publishes the parameter's OWN read-back, wrapper and all
+        assert out["changed"][0]["after"] == "'top left'"
+
+    def test_a_quoting_store_that_keeps_its_prior_expression_is_still_an_error(self, monkeypatch):
+        # The codec strips the wrapper, not the comparison: a store that quotes AND keeps what it
+        # already held is the swallowed write, and it stays convicted.
+        cam = _install(monkeypatch)
+        sp = cam.setups.item(0).parameters
+        sp._d["wcs_origin_boxPoint"] = _StuckSetupParam("wcs_origin_boxPoint", "'top center'")
+        res = ces.handler(setup="Setup1", parameters={"wcs_origin_boxPoint": "top left"})
+        assert res["isError"] is True
+        assert "the assignment did not take" in res["message"] and "top center" in res["message"]
+
+    def test_setting_a_parameter_to_the_value_it_already_reads_is_not_a_no_take(self, monkeypatch):
+        # the gate is "the read-back is the expression written": a caller re-asserting the value the
+        # setup already carries reads it back, which is the state they asked for.
+        cam = _install(monkeypatch)
+        sp = cam.setups.item(0).parameters
+        sp._d["stockZHigh"] = _StuckSetupParam("stockZHigh", "0.0")
+        out = _payload(ces.handler(setup="Setup1", parameters={"stockZHigh": "0.0"}))
+        assert out["updated_count"] == 1 and out["changed"][0]["after"] == "0.0"
+
+
 # ── set body collections (models / fixtures / stock) ────────────────────────
 
 class TestBodies:

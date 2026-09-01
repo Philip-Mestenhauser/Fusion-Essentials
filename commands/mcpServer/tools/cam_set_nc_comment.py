@@ -12,38 +12,44 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import iter_collection, ok, error, safe
-from ._cam_common import get_cam
+# The CAM string-parameter codec is the shared substrate's: one home, so the write's quoting and the
+# read-back's unquoting cannot be right here and stale in the next CAM tool that compares them.
+from ._cam_common import (get_cam, quote_expression as _quote,
+                          unquote_expression as _unquote)
 
 _COMMENT_PARAM = "nc_program_comment"
 _NAME_PARAM = "nc_program_name"
 
 
-def _unquote(expr):
-    if expr is None:
-        return None
-    s = str(expr)
-    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
-        return s[1:-1]
-    return s
-
-
-def _quote(text):
-    return "'" + str(text).replace("'", "\\'") + "'"
-
-
 def _set_param(ncp, internal_name, value):
-    """Set a CAM string parameter on the NC program. Returns (before, after, error)."""
+    """Set a CAM string parameter on the NC program and CONFIRM the program kept it. Returns
+    (before, after, error).
+
+    The read-back is COMPARED to what was written, not just published: a parameter that accepts the
+    assignment and keeps the expression it already held is a swallowed write the platform reports as
+    success. Both sides of the compare go through the same _quote/_unquote codec, so the comparison
+    is of the value this call wrote against the value the program now reads - an escaped apostrophe
+    cannot make a landed write look like a stuck one."""
     param = safe(lambda: ncp.parameters.itemByName(internal_name))
     if param is None:
         return None, None, f"parameter '{internal_name}' not found on this NC program"
     if not safe(lambda: param.isEditable, True):
         return None, None, f"parameter '{internal_name}' is not editable"
     before = _unquote(safe(lambda: param.expression))
+    wrote = _quote(value)
     try:
-        param.expression = _quote(value)
+        param.expression = wrote
     except Exception as e:
         return before, None, str(e)
-    return before, _unquote(safe(lambda: param.expression)), None
+    raw_after = safe(lambda: param.expression)
+    if raw_after is None:
+        return before, None, (f"'{internal_name}' cannot be read back after the write, so the "
+                              "change is UNCONFIRMED")
+    after = _unquote(raw_after)
+    if after != _unquote(wrote):
+        return before, after, (f"the write did not take - '{internal_name}' reads back '{after}' "
+                               f"after being set to '{_unquote(wrote)}'")
+    return before, after, None
 
 
 def handler(comment: str = "", program: str = "", set_name: str = "") -> dict:
@@ -108,8 +114,10 @@ def handler(comment: str = "", program: str = "", set_name: str = "") -> dict:
         if write_name:
             before, after, e = _set_param(ncp, _NAME_PARAM, set_name)
             if e:
+                kept = (f" The comment on '{nm}' reads '{rec.get('comment_after')}' and remains."
+                        if write_comment else "")
                 return error(f"Failed to set name on NC program '{nm}': {e}. NOTE: any programs "
-    "processed before this one were already changed.")
+    f"processed before this one were already changed.{kept}")
             rec["name_before"] = before
             rec["name_after"] = after
         results.append(rec)
@@ -151,11 +159,12 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
     # comment_before / comment_after (and the name pair) are re-read off the parameter after the
-    # set, so what the payload states as landed is the read-back, never the request.
+    # set, so what the payload states as landed is the read-back, never the request - and a
+    # read-back that does not match what was written is an error, not an ok carrying both.
     verification=Verification(
         kind="effect",
         evidence_test="tests/unit/test_cam_set_nc_comment.py::TestStuckParameter"
-                      "::test_a_stuck_comment_is_published_as_the_program_reads_it"))
+                      "::test_a_stuck_comment_is_an_error_not_a_reported_success"))
 
 
 def register_tool():

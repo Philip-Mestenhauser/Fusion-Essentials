@@ -12,7 +12,8 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import CM_TO_UNIT, named_with_remainder, ok, error, safe, scale, set_verified
-from ._cam_common import get_cam, resolve_cam_node, register_future
+from ._cam_common import (expression_error, get_cam, resolve_cam_node, register_future,
+                          unquote_expression)
 from . import _inputs
 from . import _sketch_detail
 
@@ -410,26 +411,57 @@ def _retained(applied, msg):
             "is not going to be applied.")
 
 
+def _set_height_param(op, param_name, value):
+    """Set ONE height parameter's expression and CONFIRM the operation kept it, returning WHAT IT
+    READS BACK - the only value a payload may publish, since the expression written and the
+    expression kept are not the same claim. Returns (read_back, '') or (None, error).
+
+    Four ways the write is not done: the parameter is absent, the assignment raises, the expression
+    does not read back at all, or it reads back as something other than the one written. A
+    stored-but-UNEVALUATED expression is the fifth, and the CAM parameter store reports that only
+    through .error (_cam_common.expression_error) - never through the expression it echoes back."""
+    p = safe(lambda: op.parameters.itemByName(param_name))
+    if p is None:
+        return None, f"{param_name} not found on this operation."
+    before = safe(lambda: p.expression)
+    try:
+        p.expression = str(value)         # ChoiceParameterValue takes the choice string
+    except Exception as e:
+        return None, f"Could not set {param_name}='{value}': {e}"
+    after = safe(lambda: p.expression)
+    if after is None:
+        return None, (f"{param_name} cannot be read back after being set to '{value}', so the "
+                      "height is UNCONFIRMED.")
+    eval_err, _warn = expression_error(p)
+    if eval_err:
+        return None, (f"{param_name} was set to '{value}' and reads back '{after}', but the "
+                      f"parameter reports '{eval_err}' - the expression did not evaluate.")
+    # Receipt cam-parameter-expressions measured two things about this store: a NUMERIC parameter's
+    # expression reads back the text written ('777 mm/min'), and a STRING parameter's stored
+    # expression is single-quoted (its probe reads 'context' and 'strategy' back starting with a
+    # quote). A height _mode is a string parameter written here UNQUOTED, so the compare runs both
+    # sides through the shared codec instead of over bytes. A read-back that differs THERE is a
+    # write the operation did not take, whether it kept the expression it held or a third one.
+    if unquote_expression(after) != unquote_expression(str(value)):
+        return None, (f"Setting {param_name}='{value}' did not take - it reads back '{after}' "
+                      f"(it held '{before}').")
+    return after, ""
+
+
 def _set_height(op, which, mode, offset):
-    """Set a top/bottom height via _mode and/or _offset (never the resolved _value). Returns an error
-    string, or None on success. Validates each param exists before mutating it."""
-    if mode is not None:
-        p = safe(lambda: op.parameters.itemByName(f"{which}Height_mode"))
-        if p is None:
-            return f"{which}Height_mode not found on this operation."
-        try:
-            p.expression = str(mode)          # ChoiceParameterValue takes the choice string
-        except Exception as e:
-            return f"Could not set {which}Height_mode='{mode}': {e}"
-    if offset is not None:
-        p = safe(lambda: op.parameters.itemByName(f"{which}Height_offset"))
-        if p is None:
-            return f"{which}Height_offset not found on this operation."
-        try:
-            p.expression = str(offset)
-        except Exception as e:
-            return f"Could not set {which}Height_offset='{offset}': {e}"
-    return None
+    """Set a top/bottom height via _mode and/or _offset (never the resolved _value), each write
+    confirmed by its own read-back. Returns (applied, error-or-None); `applied` carries one
+    '<param>=<read-back>' entry per write that LANDED, so a half-applied pair still names its half."""
+    applied = []
+    for suffix, value in (("mode", mode), ("offset", offset)):
+        if value is None:
+            continue
+        param_name = f"{which}Height_{suffix}"
+        back, err = _set_height_param(op, param_name, value)
+        if err:
+            return applied, err
+        applied.append(f"{param_name}={back}")
+    return applied, None
 
 
 def handler(operation: str = "", selection: str = "", handles=None, bodies=None, sketches=None,
@@ -504,13 +536,12 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
     for which, mode, offset in (("top", top_mode, top_offset), ("bottom", bottom_mode, bottom_offset)):
         if mode is None and offset is None:
             continue
-        herr = _set_height(op, which, mode, offset)
+        landed, herr = _set_height(op, which, mode, offset)
+        # The writes that LANDED are kept whichever way the group ends: they are what _retained
+        # names as remaining on the operation, and what heights_set publishes when it succeeds.
+        applied.extend(landed)
         if herr:
             return error(_retained(applied, herr))
-        if mode is not None:
-            applied.append(f"{which}Height_mode={mode}")
-        if offset is not None:
-            applied.append(f"{which}Height_offset={offset}")
     if applied:
         result["heights_set"] = applied
 
@@ -608,9 +639,8 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
     # The selection effect only: generate=true LAUNCHES a background generation this call never
-    # reads back, and the payload sends the caller to cam_get_status for it. The height arm is the
-    # residual: _set_height writes {which}Height_mode/_offset with no read-back and heights_set is
-    # built from the request (CAM-48).
+    # reads back, and the payload sends the caller to cam_get_status for it. The height arm reads
+    # each {which}Height_mode/_offset back and heights_set publishes those read-backs.
     verification=Verification(
         kind="inline",
         evidence_test="tests/unit/test_cam_select_geometry.py::TestCurveSelection"

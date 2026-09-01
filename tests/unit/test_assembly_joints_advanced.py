@@ -3,8 +3,8 @@
 The nuances pinned, no live Fusion:
 
   assembly_capture_position — the timeline pose mechanic. Capture is only valid when a move
-  is pending (Design.snapshots.hasPendingSnapshot); 'revert' deletes the latest
-  snapshot back to the joint-defined state; 'status' reports pending + count.
+  is pending (Design.snapshots.hasPendingSnapshot); 'revert' deletes the latest snapshot and
+  re-reads the collection for it; 'status' reports pending + count.
 
   joint_create_as_built — a joint where parts ALREADY are; createInput(occ1, occ2, None)
   for a rigid as-built, and createInput with a real JointGeometry for every other motion
@@ -30,27 +30,43 @@ ja = load_tool("assembly_joints_advanced")
 # ── fakes ───────────────────────────────────────────────────────────────────
 
 class FakeSnapshot:
-    def __init__(self, name="Snapshot1", timeline_index=0, delete_ok=True, survives_delete=False):
+    def __init__(self, name="Snapshot1", timeline_index=0, delete_ok=True, survives_delete=False,
+                 spawns_on_delete=False, deletes_instead=None):
         self.name = name
         self.deleted = False
         self.timelineObject = type("TL", (), {"index": timeline_index})()
         self._delete_ok = delete_ok
         self._survives_delete = survives_delete   # simulate deleteMe()==True but no actual removal
+        # deleteMe()==True and the collection ends up LARGER: the count moves the other way, which
+        # is the only reading that tells the two numbers in the refusal apart
+        self._spawns_on_delete = spawns_on_delete
+        # deleteMe()==True and the collection gives up a DIFFERENT marker: the count drops exactly
+        # as a working removal's does while THIS one still stands, the shape no count comparison sees
+        self._deletes_instead = deletes_instead
         self._parent = None
 
     def deleteMe(self):
         if not self._delete_ok:
             return False
         self.deleted = True
-        if self._parent is not None and not self._survives_delete:
-            self._parent._remove(self)
+        if self._parent is not None:
+            if self._spawns_on_delete:
+                self._parent._add(FakeSnapshot(f"{self.name}_extra"))
+            elif self._deletes_instead is not None:
+                self._parent._remove(self._deletes_instead)
+            elif not self._survives_delete:
+                self._parent._remove(self)
+            # armed whether or not the collection gave the marker up - a lying delete can leave a
+            # survivor AND an unreadable count, a pairing _remove never reaches
+            self._parent._delete_attempted()
         return True
 
 
 class FakeSnapshots:
     def __init__(self, pending=False, items=(), revert_pending_ok=True, revert_pending_lies=False,
                  blind_after_revert=False, blind_count_after_delete=False,
-                 blind_count_after_add=False, blind_count_after_discard=False):
+                 blind_count_after_add=False, blind_count_after_discard=False,
+                 blind_count_after_any_delete=False):
         self._pending = pending
         self._items = list(items)
         for it in self._items:
@@ -66,6 +82,10 @@ class FakeSnapshots:
         self._blind_count_after_delete = blind_count_after_delete
         self._blind_count_after_add = blind_count_after_add
         self._blind_count_after_discard = blind_count_after_discard
+        # blind_count_after_delete arms from _remove, which a marker that SURVIVES its own deleteMe
+        # never reaches; this one arms from the deleteMe itself, so a survivor can arrive with a
+        # count that will not re-read
+        self._blind_count_after_any_delete = blind_count_after_any_delete
         self._blind_count = False
 
     @property
@@ -117,6 +137,16 @@ class FakeSnapshots:
         if snap in self._items:
             self._items.remove(snap)
         if self._blind_count_after_delete:
+            self._blind_count = True
+
+    def _add(self, snap):
+        snap._parent = self
+        self._items.append(snap)
+
+    def _delete_attempted(self):
+        """Called by every deleteMe() that answered True, removal or not - where
+        blind_count_after_any_delete blinds the count read the handler takes next."""
+        if self._blind_count_after_any_delete:
             self._blind_count = True
 
 
@@ -540,6 +570,81 @@ class TestCapturePosition:
         out = _payload(ja.capture_position_handler(action="revert"))
         assert snap.deleted is True
         assert out["reverted"] is True
+
+    def test_revert_that_KEEPS_the_marker_is_an_error(self):
+        # The lying delete: deleteMe() answers True while the marker stays in the collection.
+        # Gating on the bool alone publishes reverted:true for a timeline nothing left; here both
+        # re-reads convict it, and the refusal states each one it took.
+        snap = FakeSnapshot("Position1", survives_delete=True)
+        _install([], snapshot_items=[snap])
+        res = ja.capture_position_handler(action="revert")
+        assert res["isError"] is True
+        assert "still in the snapshot collection" in res["message"]
+        assert "did not drop" in res["message"]
+        assert "1 before, 1 after" in res["message"]
+
+    def test_a_surviving_marker_is_caught_even_when_the_COUNT_DROPPED(self):
+        # The narrower state no count comparison sees: the collection gave up a DIFFERENT marker,
+        # so the count falls exactly as a working revert's does (2 before, 1 after) while the one
+        # this arm deleted is still standing. The count gate passes it; the object the arm HELD,
+        # read back by identity, is the only read that convicts it.
+        other = FakeSnapshot("Position1")
+        latest = FakeSnapshot("Position2", deletes_instead=other)
+        _install([], snapshot_items=[other, latest])
+        res = ja.capture_position_handler(action="revert")
+        assert res["isError"] is True
+        assert "still in the snapshot collection" in res["message"]
+        assert "was not removed" in res["message"]
+        assert "did not drop" not in res["message"]      # the count gate passed it, as it must
+
+    def test_a_revert_whose_count_will_not_read_says_the_marker_could_not_be_looked_for(self):
+        # BOTH confirming reads run off the collection's own count (_common.iter_collection ranges
+        # over it), so a count that will not re-read leaves the survivor check unable to run at
+        # all. The receipt says that too - 'snapshot_count is null' alone would let a caller read
+        # the marker as looked for and not found.
+        snap = FakeSnapshot("Position1", survives_delete=True)
+        _install([], snapshot_items=[snap], blind_count_after_any_delete=True)
+        out = _payload(ja.capture_position_handler(action="revert"))
+        assert out["snapshot_count"] is None
+        assert "the marker could not be looked for either" in out["note"]
+
+    def test_revert_reads_back_the_object_it_DELETED_not_a_marker_of_the_same_name(self):
+        # The re-read is by IDENTITY, not by name: Fusion enforces no uniqueness on marker names,
+        # so a second marker wearing the deleted one's name makes a name-keyed re-read refuse a
+        # removal that took. The count DID drop here, so nothing else in this arm can refuse.
+        twin, gone = FakeSnapshot("Position1"), FakeSnapshot("Position1")
+        _install([], snapshot_items=[twin, gone])
+        out = _payload(ja.capture_position_handler(action="revert"))
+        assert out["reverted"] is True and gone.deleted is True and twin.deleted is False
+        assert out["snapshot_count"] == 1
+
+    def test_the_revert_note_does_not_claim_the_joint_defined_state_with_markers_LEFT(self):
+        # Dropping the latest of several markers does not put the assembly back at the
+        # joint-defined state - that is where it lands only when nothing else was ever captured,
+        # which is how the discard arm words the same restore target.
+        _install([], snapshot_items=[FakeSnapshot("Position1"), FakeSnapshot("Position2")])
+        out = _payload(ja.capture_position_handler(action="revert"))
+        assert "the last captured position that remains" in out["note"]
+        assert "(back to the joint-defined state)" not in out["note"]
+        assert "when nothing else was ever captured" in out["note"]
+
+    def test_a_revert_after_which_the_count_GREW_labels_the_two_numbers(self):
+        # The equal-count refusal reads the same whichever way round its two numbers are printed,
+        # so it cannot pin the labels. A count that moved the other way can: the number taken
+        # BEFORE the delete is 1 and the one read back after is 2, and a receipt that swaps them
+        # sends the caller looking for a marker that never existed.
+        _install([], snapshot_items=[FakeSnapshot("Position1", spawns_on_delete=True)])
+        res = ja.capture_position_handler(action="revert")
+        assert res["isError"] is True
+        assert "did not drop" in res["message"]
+        assert "1 before, 2 after" in res["message"]
+
+    def test_revert_that_drops_the_count_by_one_is_accepted(self):
+        # The other side of that comparison's boundary: one fewer than before IS the removal, so a
+        # gate written as "did not change" rather than "did not drop" would refuse a working revert.
+        _install([], snapshot_items=[FakeSnapshot("Position1"), FakeSnapshot("Position2")])
+        out = _payload(ja.capture_position_handler(action="revert"))
+        assert out["reverted"] is True and out["snapshot_count"] == 1
 
     def test_revert_with_an_unreadable_count_publishes_null_not_the_arithmetic(self):
         # the count re-read RAISES after the delete: publishing "one fewer than before" would hand

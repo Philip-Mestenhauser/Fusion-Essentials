@@ -66,6 +66,26 @@ def expression_error(p):
     return (err or None), (warn or None)
 
 
+def unquote_expression(expr):
+    """The VALUE inside a CAM parameter's stored expression. A STRING parameter's stored expression
+    is single-quoted (receipt cam-parameter-expressions, whose probe reads 'context' and 'strategy'
+    back starting with a quote), so a write compared against its read-back sends BOTH sides through
+    here rather than comparing bytes. None stays None, and text carrying no matching outer pair is
+    returned as read (the escaping inside is left alone: this strips the wrapper, nothing else)."""
+    if expr is None:
+        return None
+    s = str(expr)
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
+        return s[1:-1]
+    return s
+
+
+def quote_expression(text):
+    """The single-quoted expression a CAM string parameter is written as, with each apostrophe in
+    the text escaped so the expression stays closed. unquote_expression takes the wrapper back off."""
+    return "'" + str(text).replace("'", "\\'") + "'"
+
+
 def clamp_rows(max_results, default: int, ceiling: int) -> int:
     """The row cap a capped CAM read runs under - the ONE clamp every 'max_results' goes through.
     `max_results` arrives off the wire, so a value that is not a number falls back to `default`
@@ -185,6 +205,15 @@ def _segment(name):
     return _UNREAD_SEGMENT if name is None else name
 
 
+# The collection a parent (Setup/CAMFolder/CAMPattern) holds each KIND of child in, keyed by the
+# node kind the walk below stamps. A parent keeps its operations, its folders and its patterns in
+# three SEPARATE collections, so only same-kind children of ONE parent sit in a single ordered list;
+# two items out of different collections share no order. The ONE spelling of that mapping: the walk
+# reads its children through it, and a caller re-reading one collection off a resolved node's parent
+# names the attribute through it too.
+CHILD_COLLECTIONS = {"operation": "operations", "folder": "folders", "pattern": "patterns"}
+
+
 def _walk_children(parent, setup_name, path, out, parent_node=None):
     """Collect CamNodes for everything nested under `parent` (a Setup/CAMFolder/CAMPattern).
     `.operations` lists only the DIRECT children, and setup.allOperations flattens folder children
@@ -196,15 +225,14 @@ def _walk_children(parent, setup_name, path, out, parent_node=None):
     path instead of printing as the literal 'None'. `name` still carries the raw read (None when it
     did not answer), which is what a consumer deciding per LEVEL - workspace_orient._op_breadcrumb -
     climbs the parent links for."""
-    ops = safe(lambda: parent.operations)
+    ops = safe(lambda: getattr(parent, CHILD_COLLECTIONS["operation"]))
     if ops is not None:
         for o in iter_collection(ops):
             nm = safe(lambda o=o: o.name)
             out.append(CamNode(o, "operation", nm, setup_name,
                                f"{path} / {_segment(nm)}", parent_node))
-        for kind, getter in (("folder", lambda: parent.folders),
-                             ("pattern", lambda: parent.patterns)):
-            for c in iter_collection(safe(getter)):
+        for kind in ("folder", "pattern"):
+            for c in iter_collection(safe(lambda k=kind: getattr(parent, CHILD_COLLECTIONS[k]))):
                 nm = safe(lambda c=c: c.name)
                 child_path = f"{path} / {_segment(nm)}"
                 child_node = CamNode(c, kind, nm, setup_name, child_path, parent_node)

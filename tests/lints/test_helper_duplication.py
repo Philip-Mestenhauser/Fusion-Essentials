@@ -28,6 +28,10 @@ _DENYLIST = {
     "find_setup": ("_cam_common", "def"),
     "find_operation": ("_cam_common", "def"),
     "walk_operations": ("_cam_common", "def"),
+    # The kind -> child-collection map (operations/folders/patterns) the walk and both leaf
+    # readers share - a local copy is how a reorder's re-read comes to read a DIFFERENT
+    # collection than the walk that resolved its nodes.
+    "CHILD_COLLECTIONS": ("_cam_common", "assign"),
     # The ONE operation pool (walk_cam_tree filtered to kind == 'operation') and the ONE unscoped
     # resolve that hands back the refusal AND the available list off a single walk of it. A local
     # re-filter is how a caller's remedy comes to describe a different census than the refusal it

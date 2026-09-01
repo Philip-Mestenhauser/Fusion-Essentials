@@ -15,12 +15,13 @@ reading judgment and stays in review; these tests check shape, routing, and size
 """
 
 import copy
+import json
 import re
 
 import pytest
 
 import gen_guidance
-from conftest import register_all_tools
+from conftest import load_tool, register_all_tools
 
 
 @pytest.fixture(scope="module")
@@ -349,6 +350,9 @@ class TestSizeCapsBiteAtTheirBoundary:
     def _kernel_of(self, count):
         return [_rule(f"kernel-rule-{i}", gen_guidance.KERNEL) for i in range(count)]
 
+    def _plan_of(self, count):
+        return [_rule(f"plan-rule-{i}", "plan", scenarios=["alpha"]) for i in range(count)]
+
     def test_the_kernel_rule_count_cap(self):
         at_cap = _doc()
         _section(at_cap, gen_guidance.KERNEL)["rules"] = self._kernel_of(
@@ -371,6 +375,17 @@ class TestSizeCapsBiteAtTheirBoundary:
         over = _pad(_doc(), "plan", _body_words, gen_guidance.SKILL_MAX_WORDS + 1)
         _one(_problems(over), f"the skill renders {gen_guidance.SKILL_MAX_WORDS + 1} words")
 
+    def test_the_per_section_rule_cap(self):
+        # the cap is on ANY section, not just the kernel: 'plan' carries the probe so the kernel's
+        # own (lower) rule cap cannot be what fires.
+        at_cap = _doc()
+        _section(at_cap, "plan")["rules"] = self._plan_of(gen_guidance.MAX_SECTION_RULES)
+        assert _problems(at_cap) == []
+        over = _doc()
+        _section(over, "plan")["rules"] = self._plan_of(gen_guidance.MAX_SECTION_RULES + 1)
+        _one(_problems(over),
+             f"section 'plan' holds {gen_guidance.MAX_SECTION_RULES + 1} rules")
+
     def test_the_examples_per_section_cap(self):
         at_cap = _doc()
         plan = _section(at_cap, "plan")
@@ -382,13 +397,51 @@ class TestSizeCapsBiteAtTheirBoundary:
         _one(_problems(over), "carries 2 examples")
 
 
+class TestTheSectionCapIsOneNumberOnBothSides:
+    """The authoring gate and the serving cap are the same number, asserted by driving BOTH: the
+    largest section validate accepts comes back whole from sys_get_guidance, and the first section
+    it refuses is the first one that truncates. A gate looser than the cap would ship rules no
+    section read answers with; a gate tighter than it would refuse a document the tool serves fine."""
+
+    def _plan_rules(self, count):
+        return [_rule(f"plan-rule-{i}", "plan", scenarios=["alpha"]) for i in range(count)]
+
+    def _served(self, monkeypatch, doc):
+        tool = load_tool("sys_get_guidance")
+        monkeypatch.setattr(tool.loader, "load", lambda path=None: (doc, "0" * 64))
+        result = tool.handler(section="plan")
+        assert result["isError"] is False, result
+        return json.loads(result["content"][0]["text"])
+
+    def test_the_largest_section_the_gate_accepts_is_served_whole(self, monkeypatch):
+        doc = _doc()
+        _section(doc, "plan")["rules"] = self._plan_rules(gen_guidance.MAX_SECTION_RULES)
+        assert _problems(doc) == []
+        out = self._served(monkeypatch, doc)
+        assert out["rule_count"] == gen_guidance.MAX_SECTION_RULES
+        assert "truncated" not in out
+
+    def test_the_first_section_the_gate_refuses_is_the_first_one_that_truncates(self, monkeypatch):
+        doc = _doc()
+        _section(doc, "plan")["rules"] = self._plan_rules(gen_guidance.MAX_SECTION_RULES + 1)
+        _one(_problems(doc), "section 'plan' holds")
+        out = self._served(monkeypatch, doc)
+        assert out["truncated"] is True
+        assert out["rule_total"] == gen_guidance.MAX_SECTION_RULES + 1
+
+
 # ── scenario routing ──────────────────────────────────────────────────────────
 
-# Rules that CANNOT apply to a scenario: a mechanism practice has nothing to say about a single
-# part, and an audit of an imported body authors no sketch, pattern or configuration. A rule that
-# declared one of these would route guidance into a case it does not fit, which is a data defect
-# no prose check could see.
+# Rules that CANNOT apply to a scenario, one entry per declared scenario: a mechanism practice has
+# nothing to say about a single part, an audit of an imported body authors no sketch, pattern or
+# configuration, a fixed mechanism is one built assembly rather than a variant table, and a
+# configurable template is authored as configurations rather than as a mechanism to drive. A rule
+# that declared one of these would route guidance into a case it does not fit, which is a data
+# defect no prose check could see. Each entry is a judgment about applicability, so it names the
+# rules that must never route here - not every rule that happens not to today.
 _INAPPLICABLE = {
+    "configurable_template": ("connected-reference-path", "exercise-the-mechanism"),
+    "fixed_mechanism": ("variants-are-configurations",),
     "simple_part": ("connected-reference-path", "exercise-the-mechanism",
                     "variants-are-configurations"),
     "parametric_family": ("connected-reference-path", "exercise-the-mechanism"),
@@ -416,7 +469,12 @@ class TestScenarioRouting:
         known = {r["id"] for r in gen_guidance.rules(shipped)}
         named = {rid for ids in _INAPPLICABLE.values() for rid in ids}
         assert named <= known, sorted(named - known)
-        assert set(_INAPPLICABLE) <= set(gen_guidance.scenario_ids(shipped))
+
+    def test_every_declared_scenario_carries_a_negative_oracle(self, shipped):
+        # EQUALITY, not containment: a scenario with no entry has no negative oracle at all, so
+        # handing it a rule it cannot apply to leaves validate clean, the render byte-identical and
+        # the suite green - the routing would be silently mutable.
+        assert set(_INAPPLICABLE) == set(gen_guidance.scenario_ids(shipped))
 
     def test_routing_follows_the_declaration_and_nothing_else(self):
         doc = _doc()

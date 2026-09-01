@@ -221,14 +221,42 @@ class TestResourceTemplatesList:
     def test_the_template_listing_is_exactly_empty(self, served):
         assert _result(_request(served, "resources/templates/list")) == {"resourceTemplates": []}
 
-    def test_a_probe_carrying_params_still_gets_the_empty_list(self, served):
-        # every published resource is a fixed address, so there is no template to expand and
-        # nothing a cursor could continue: the empty list is the true answer to any probe.
-        assert _result(_request(served, "resources/templates/list",
-                                {"cursor": "page-2"})) == {"resourceTemplates": []}
+    def test_a_bare_probe_carrying_an_empty_params_object_still_gets_the_empty_list(self, served):
+        # every published resource is a fixed address, so there is no template to expand: the empty
+        # list is the true answer to a well-formed probe, not an error to special-case.
+        assert _result(_request(served, "resources/templates/list", {})) == {"resourceTemplates": []}
 
     def test_an_empty_catalog_answers_the_same(self, bare):
         assert _result(_request(bare, "resources/templates/list")) == {"resourceTemplates": []}
+
+    def test_a_cursor_this_server_never_issued_is_refused_here_too(self, served):
+        # one server, one answer to one bad call: this listing issues no cursor either, so
+        # succeeding on one would tell a paginating client it had resumed something.
+        error = _error(_request(served, "resources/templates/list", {"cursor": "page-2"}))
+        assert error["code"] == -32602
+        assert "cursor" in error["message"]
+        assert "resources/templates/list" in error["message"], "the refusal names the method called"
+
+    def test_params_that_are_not_an_object_are_refused(self, served):
+        assert _error(_request(served, "resources/templates/list", ["cursor"]))["code"] == -32602
+
+    def test_an_explicitly_null_cursor_is_not_a_refusal(self, served):
+        assert _result(_request(served, "resources/templates/list",
+                                {"cursor": None})) == {"resourceTemplates": []}
+
+    def test_an_explicitly_null_params_member_reads_as_no_arguments(self, served):
+        response = asyncio.run(served.handle_request(
+            {"jsonrpc": "2.0", "id": _REQUEST_ID, "method": "resources/templates/list",
+             "params": None}))
+        assert _result(response) == {"resourceTemplates": []}
+
+    def test_the_two_listings_refuse_the_same_bad_call_the_same_way(self, served):
+        # the consistency itself: a client cannot code against a server that answers one malformed
+        # call two ways, so the pair is asserted together rather than one handler at a time.
+        for params in ({"cursor": "page-2"}, ["cursor"], "not-an-object", 7):
+            codes = {method: _error(_request(served, method, params))["code"]
+                     for method in ("resources/list", "resources/templates/list")}
+            assert set(codes.values()) == {-32602}, (params, codes)
 
 
 # ── what this server does NOT implement ─────────────────────────────────────
@@ -251,23 +279,47 @@ class TestUnimplementedMethodsAreMethodNotFound:
 
 class TestUnservableEntriesAreDropped:
     @pytest.mark.parametrize("entry", [
-        {"uri": URI},                        # nothing to serve
-        {"text": "# body"},                  # no address to serve it at
-        {"uri": "", "text": "# body"},       # an empty address is no address
-        {"uri": URI, "text": None},
+        {"uri": URI, "name": "guidance"},                 # nothing to serve
+        {"name": "guidance", "text": "# body"},           # no address to serve it at
+        {"uri": "", "name": "guidance", "text": "# body"},  # an empty address is no address
+        {"uri": URI, "name": "guidance", "text": None},
+        {"uri": URI, "text": "# body"},                   # nameless: the row would name nothing
+        {"uri": URI, "name": None, "text": "# body"},     # a present-but-null name reaches the wire
+        {"uri": URI, "name": "", "text": "# body"},       # an empty name is no name
+        {"uri": URI, "name": 7, "text": "# body"},
         "not-a-resource",
     ])
-    def test_an_entry_with_no_address_or_no_body_is_not_published(self, mcp, entry):
+    def test_an_entry_missing_an_address_a_name_or_a_body_is_not_published(self, mcp, entry):
         server = mcp.SimpleMCPServer(resources=[entry])
         assert _rows(server) == []
         assert "resources" not in _result(_request(server, "initialize", {}))["capabilities"]
 
+    def test_a_nameless_entry_is_dropped_rather_than_listed_as_one_field(self, mcp):
+        # the projection copies whatever fields an entry carries, so a nameless entry that got in
+        # would be advertised as a row with a uri and nothing else - and a null name would cross the
+        # wire as `"name": null`, which is worse than not offering the resource at all.
+        server = mcp.SimpleMCPServer(resources=[{"uri": "x://nameless", "text": "# body"},
+                                                {"uri": "x://null-name", "name": None,
+                                                 "text": "# body"}])
+        assert server.resources == []
+        assert _error(_request(server, "resources/read",
+                               {"uri": "x://nameless"}))["code"] == -32002
+
     def test_a_servable_entry_beside_an_unservable_one_is_still_served(self, mcp):
-        server = mcp.SimpleMCPServer(resources=[{"uri": "x://broken"},
-                                                {"uri": "x://ok", "text": "# body"}])
+        server = mcp.SimpleMCPServer(resources=[{"uri": "x://broken", "name": "broken"},
+                                                {"uri": "x://ok", "name": "ok",
+                                                 "text": "# body"}])
         assert [row["uri"] for row in _rows(server)] == ["x://ok"]
+        assert _rows(server)[0]["name"] == "ok"
         assert _result(_request(server, "resources/read",
                                 {"uri": "x://ok"}))["contents"][0]["text"] == "# body"
+
+    def test_every_published_row_carries_the_two_fields_the_spec_requires(self, served):
+        # uri + name are what a client addresses and shows; admission is what guarantees both,
+        # since the listing projection only copies the fields an entry happens to carry.
+        for row in _rows(served):
+            assert isinstance(row["uri"], str) and row["uri"]
+            assert isinstance(row["name"], str) and row["name"]
 
 
 # ── the last hop: start_server hands the catalog to the server it builds ────

@@ -17,6 +17,13 @@ import os
 # OF the JSON: test_sys_get_guidance.py holds this tuple against the shipped document's own ids.
 SECTION_IDS = ("kernel", "plan", "sketch", "model", "assemble", "validate", "finish")
 
+# The most rules ONE section may carry, held here so the serving side and the authoring gate read
+# the same number: sys_get_guidance truncates a section read at it, and gen_guidance.validate
+# refuses a document whose section holds more - so no shipped section can carry rules that one call
+# would silently drop. The resource channel is not bound by it: render.body renders every rule of
+# every section.
+MAX_SECTION_RULES = 8
+
 GUIDANCE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              "parametric_cad_design.json")
 
