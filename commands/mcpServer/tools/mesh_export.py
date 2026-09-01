@@ -14,7 +14,7 @@ import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from . import _assert
@@ -710,8 +710,12 @@ save_as_mesh_tool = (
             "description": "Optional name for the new mesh body."})
     .strict_schema()
 )
-save_as_mesh_item = Item.create_tool_item(tool=save_as_mesh_tool, write="write", handler=save_as_mesh_handler,
-                                          run_on_main_thread=True)
+save_as_mesh_item = Item.create_tool_item(
+    tool=save_as_mesh_tool, write="write", handler=save_as_mesh_handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_mesh_export.py::TestSaveAsMesh"
+                      "::test_phantom_body_that_never_lands_bites"))
 
 
 def register_tool():

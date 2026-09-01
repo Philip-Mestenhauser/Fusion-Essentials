@@ -12,7 +12,7 @@ import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, target_component
 from . import _common
@@ -229,7 +229,12 @@ surface_delete_face_tool = (
     .strict_schema()
 )
 surface_delete_face_item = Item.create_tool_item(
-    tool=surface_delete_face_tool, write="write", handler=delete_face_handler, run_on_main_thread=True)
+    tool=surface_delete_face_tool, write="write", handler=delete_face_handler,
+    run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_surface_delete_face.py::TestParametricFaceCountGate"
+                      "::test_unchanged_face_count_is_an_error"))
 
 
 def register_tool():

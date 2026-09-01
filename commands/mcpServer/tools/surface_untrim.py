@@ -12,7 +12,7 @@ import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, scale, target_component
 from . import _common
@@ -156,7 +156,10 @@ surface_untrim_tool = (
     .strict_schema()
 )
 surface_untrim_item = Item.create_tool_item(
-    tool=surface_untrim_tool, write="write", handler=untrim_handler, run_on_main_thread=True)
+    tool=surface_untrim_tool, write="write", handler=untrim_handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="effect",
+        evidence_test="tests/unit/test_surface_untrim.py::test_no_growth_reported_honestly"))
 
 
 def register_tool():

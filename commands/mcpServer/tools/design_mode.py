@@ -568,7 +568,11 @@ _base_feature_tool = (
     .strict_schema()
 )
 base_feature_item = Item.create_tool_item(
-    tool=_base_feature_tool, write="write", handler=base_feature_handler, run_on_main_thread=True)
+    tool=_base_feature_tool, write="write", handler=base_feature_handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_design_mode.py::TestBaseFeature"
+                      "::test_start_errors_and_cleans_up_when_startEdit_returns_false"))
 
 
 _activate_component_tool = (

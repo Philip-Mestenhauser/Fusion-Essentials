@@ -11,7 +11,7 @@ import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe
 from . import _common
@@ -561,7 +561,11 @@ mesh_generate_face_groups_tool = (
 )
 mesh_generate_face_groups_item = Item.create_tool_item(
     tool=mesh_generate_face_groups_tool, write="write", handler=mesh_generate_face_groups_handler,
-    run_on_main_thread=True)
+    run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_mesh_edit.py::TestFaceGroups"
+                      "::test_none_feature_with_zero_face_groups_is_a_failure"))
 
 _CUT_SPEC = [_CUT_MESH, _CUT_PLANE, _CUT_TYPE, _CUT_FILL]
 mesh_plane_cut_tool = (
@@ -579,7 +583,12 @@ mesh_plane_cut_tool = (
     .strict_schema()
 )
 mesh_plane_cut_item = Item.create_tool_item(
-    tool=mesh_plane_cut_tool, write="write", handler=mesh_plane_cut_handler, run_on_main_thread=True)
+    tool=mesh_plane_cut_tool, write="write", handler=mesh_plane_cut_handler,
+    run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_mesh_edit.py::TestPlaneCut"
+                      "::test_trim_refuses_when_the_triangle_count_is_unchanged"))
 
 
 def register_tool():

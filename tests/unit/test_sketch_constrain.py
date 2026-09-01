@@ -901,6 +901,28 @@ class TestSingleLine:
         assert res["isError"] is True
         assert "fix" in res["message"].lower()
 
+    def test_a_silently_declined_fix_is_an_error_not_a_false_success(self, install):
+        # the platform ACCEPTS the isFixed assignment and leaves the curve free: no exception is
+        # raised, so only the read-back can convict. An ok here would report a locked curve that
+        # the solver is still free to move.
+        s = _two_line_sketch(); install(s)
+
+        class _SwallowsFix:
+            name = "L1"
+
+            @property
+            def isFixed(self):
+                return False
+
+            @isFixed.setter
+            def isFixed(self, v):
+                pass                              # accepted and ignored
+
+        s.sketchCurves.sketchLines._i[1] = _SwallowsFix()
+        res = sc.handler(constraint="fix", sketch_name="S", entity_one="line:1")
+        assert res["isError"] is True
+        assert "fix" in res["message"].lower()
+
 
 # ── 'text:<i>' - the SketchText anchor, fix/unfix only ───────────────────────
 

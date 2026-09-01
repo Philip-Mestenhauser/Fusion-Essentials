@@ -13,7 +13,7 @@ import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe
 from ._cam_common import clamp_rows
@@ -886,7 +886,12 @@ mesh_insert_tool = (
     .add_required_input("file_path")
     .strict_schema()
 )
-mesh_insert_item = Item.create_tool_item(tool=mesh_insert_tool, write="write", handler=mesh_insert_handler, run_on_main_thread=True)
+mesh_insert_item = Item.create_tool_item(
+    tool=mesh_insert_tool, write="write", handler=mesh_insert_handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_mesh_ops.py::TestMeshInsert"
+                      "::test_empty_import_result_errors"))
 
 _REDUCE_SPEC = [_REDUCE_MESH, _REDUCE_TARGET, _REDUCE_METHOD, _REDUCE_UNITS]
 mesh_reduce_tool = (
@@ -902,7 +907,12 @@ mesh_reduce_tool = (
     .add_required_input("value")
     .strict_schema()
 )
-mesh_reduce_item = Item.create_tool_item(tool=mesh_reduce_tool, write="write", handler=mesh_reduce_handler, run_on_main_thread=True)
+mesh_reduce_item = Item.create_tool_item(
+    tool=mesh_reduce_tool, write="write", handler=mesh_reduce_handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_mesh_ops.py::TestMeshReduce"
+                      "::test_unreduced_count_is_an_error_not_success"))
 
 mesh_remesh_tool = (
     Tool.create_simple(
@@ -915,7 +925,12 @@ mesh_remesh_tool = (
     .add_input_property("density", {"type": "number", "description": "Optional relative target density (>0). Read back after the set; refused if this build does not take it."})
     .strict_schema()
 )
-mesh_remesh_item = Item.create_tool_item(tool=mesh_remesh_tool, write="write", handler=mesh_remesh_handler, run_on_main_thread=True)
+mesh_remesh_item = Item.create_tool_item(
+    tool=mesh_remesh_tool, write="write", handler=mesh_remesh_handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="effect",
+        evidence_test="tests/unit/test_mesh_ops.py::TestMeshRemesh"
+                      "::test_unchanged_count_is_flagged_not_asserted"))
 
 _CONVERT_SPEC = [_CONVERT_MESH, _CONVERT_METHOD, _CONVERT_RES, _CONVERT_ACC, _CONVERT_OP]
 mesh_to_brep_tool = (
@@ -934,7 +949,12 @@ mesh_to_brep_tool = (
     .add_input_property("face_count", {"type": "integer", "description": "Organic + resolution=by_facet_number: target BRep face count."})
     .strict_schema()
 )
-mesh_to_brep_item = Item.create_tool_item(tool=mesh_to_brep_tool, write="write", handler=mesh_to_brep_handler, run_on_main_thread=True)
+mesh_to_brep_item = Item.create_tool_item(
+    tool=mesh_to_brep_tool, write="write", handler=mesh_to_brep_handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_mesh_ops.py::TestMeshToBrep"
+                      "::test_none_feature_with_no_new_body_is_real_failure_with_hint"))
 
 
 def register_tool():

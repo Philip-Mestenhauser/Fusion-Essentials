@@ -10,7 +10,7 @@ import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe
 from . import _common
@@ -157,7 +157,12 @@ TOOL_DESCRIPTION = (
 
 tool = _inputs.apply_to_tool(
     Tool.create_simple(name="mesh_separate", description=TOOL_DESCRIPTION), _SPEC).strict_schema()
-item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(
+    tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_mesh_separate.py::TestVerification"
+                      "::test_no_new_bodies_is_an_error_naming_the_census"))
 
 
 def register_tool():

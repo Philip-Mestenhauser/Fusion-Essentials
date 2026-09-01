@@ -14,7 +14,7 @@ import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import apply_rename, error, ok, safe, scale, target_component
 from ._sketch_detail import COMPONENT_SCOPE, frame_space_note, sketch_world_frame
@@ -1076,8 +1076,12 @@ create_sketch_tool = (
     .add_input_property(_ON_FACE.name, _ON_FACE.schema())
     .strict_schema()
 )
-create_sketch_item = Item.create_tool_item(tool=create_sketch_tool, write="write", handler=create_sketch_handler,
-                                           run_on_main_thread=True)
+create_sketch_item = Item.create_tool_item(
+    tool=create_sketch_tool, write="write", handler=create_sketch_handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="effect",
+        evidence_test="tests/unit/test_sketch_core.py::TestCreateRenameDisclosure"
+                      "::test_a_swallowed_rename_is_disclosed_beside_the_actual_name"))
 
 _ADD_DESC = (
                                            "Draw one geometry entity on a sketch (coords/sizes in 'units' = mm [default]/cm/in; "
@@ -1121,8 +1125,13 @@ add_geometry_tool = (
     .add_input_property("is_construction", {"type": "boolean", "description": "Draw as CONSTRUCTION geometry (reference, not a profile edge). Default false."})
     .strict_schema()
 )
-add_geometry_item = Item.create_tool_item(tool=add_geometry_tool, write="write", handler=add_sketch_geometry_handler,
-                                          run_on_main_thread=True)
+add_geometry_item = Item.create_tool_item(
+    tool=add_geometry_tool, write="write", handler=add_sketch_geometry_handler,
+    run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_sketch_core.py::TestKindCollectionFallback"
+                      "::test_a_line_that_never_lands_is_an_error"))
 
 _3DLINE_DESC = (
                                           "Draw a line in 3D on a sketch, where the END point may be OFF the sketch plane (z != 0): "
@@ -1150,8 +1159,12 @@ draw_3d_line_tool = (
             "description": "Draw as CONSTRUCTION geometry (reference, not a profile edge). Default false."})
     .strict_schema()
 )
-draw_3d_line_item = Item.create_tool_item(tool=draw_3d_line_tool, write="write", handler=draw_3d_line_handler,
-                                          run_on_main_thread=True)
+draw_3d_line_item = Item.create_tool_item(
+    tool=draw_3d_line_tool, write="write", handler=draw_3d_line_handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="effect",
+        evidence_test="tests/unit/test_sketch_core.py::TestDraw3dLine"
+                      "::test_a_stuck_construction_flag_is_published_as_the_line_reads_it"))
 
 
 def register_tool():

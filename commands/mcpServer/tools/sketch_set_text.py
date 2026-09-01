@@ -14,7 +14,7 @@ import adsk.fusion
 app = adsk.core.Application.get()
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, scale, all_sketch_names
 from . import _common
@@ -806,7 +806,12 @@ tool = (
     .strict_schema()
 )
 
-item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(
+    tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_sketch_set_text.py::TestCreate"
+                      "::test_create_silent_noop_is_error_not_false_ok"))
 
 
 def register_tool():

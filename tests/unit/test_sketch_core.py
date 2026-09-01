@@ -1556,6 +1556,31 @@ class TestDraw3dLine:
         out = _payload(sk.draw_3d_line_handler(x2=1, y2=1, z2=1))
         assert out["is_construction"] is False
 
+    def test_a_stuck_construction_flag_is_published_as_the_line_reads_it(self, monkeypatch):
+        # the flag assignment is accepted and changes nothing: the payload is a READ of the line
+        # that landed, so it publishes false. Echoing the request would claim construction geometry
+        # over a line that is still a profile edge.
+        s = self._line_sketch(); _install_draw(monkeypatch, s)
+
+        class _Stuck:
+            def __init__(self, p1, p2):
+                self.startSketchPoint = type("SP", (), {"geometry": p1})()
+                self.endSketchPoint = type("SP", (), {"geometry": p2})()
+
+            @property
+            def isConstruction(self):
+                return False
+
+            @isConstruction.setter
+            def isConstruction(self, v):
+                pass                                  # accepted and ignored
+
+        s.sketchLines.addByTwoPoints = lambda p1, p2: _Stuck(p1, p2)
+        res = sk.draw_3d_line_handler(x2=1, y2=1, z2=1, is_construction=True)
+        assert res["isError"] is False                # the line WAS drawn - not an error
+        out = _payload(res)
+        assert out["is_construction"] is False        # as it READS, not as it was asked for
+
     def test_is_construction_set_failure_is_reported(self, monkeypatch):
         # the API rejecting the flag must surface (naming the drawn-but-unmarked state), not no-op
         s = self._line_sketch(); _install_draw(monkeypatch, s)

@@ -15,7 +15,7 @@ import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, target_component, root_body_advisory, build_path
 from . import _common
@@ -313,7 +313,12 @@ sweep_tool = (
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
     .strict_schema()
 )
-sweep_item = Item.create_tool_item(tool=sweep_tool, write="write", handler=handler, run_on_main_thread=True)
+sweep_item = Item.create_tool_item(
+    tool=sweep_tool, write="write", handler=handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_model_sweep.py::TestCutMovesMaterial"
+                      "::test_unscoped_cut_that_moves_no_volume_is_an_error"))
 
 
 def register_tool():

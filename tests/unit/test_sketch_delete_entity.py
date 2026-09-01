@@ -282,6 +282,34 @@ class TestDeleteCurve:
         assert res["isError"] is True and "did not take" in res["message"].lower()
         assert s.sketchCurves.sketchLines.count == 1     # still there
 
+    def test_a_delete_that_reports_true_but_removes_nothing_is_an_error(self):
+        # deleteMe() returns True while the line count holds - the COUNT diff, not the return
+        # value, is what convicts: without it a lying delete reaches the caller as deleted:true.
+        class _ClaimsSuccess(FakeEntity):
+            def deleteMe(self):
+                return True                       # and stays in the collection
+
+        s = FakeSketch("S", lines=[_ClaimsSuccess("GHOST")])
+        _install(s)
+        res = sd.handler(sketch_name="S", target="line:0")
+        assert res["isError"] is True
+        assert "did not take" in res["message"].lower()
+        assert s.sketchCurves.sketchLines.count == 1     # still there
+
+    def test_a_constraint_delete_that_lies_is_an_error_too(self):
+        # the constraint path runs the same two-part gate on its own collection; a lying
+        # deleteMe() there must be convicted by the constraint count, not the bool.
+        class _ClaimsSuccess(FakeEntity):
+            def deleteMe(self):
+                return True                       # and stays in the collection
+
+        s = FakeSketch("S", constraints=[_ClaimsSuccess("K-GHOST")])
+        _install(s)
+        res = sd.handler(sketch_name="S", target="constraint:0")
+        assert res["isError"] is True
+        assert "did not take" in res["message"].lower()
+        assert s.geometricConstraints.count == 1         # still there
+
     def test_delete_exception_is_reported(self):
         s = FakeSketch("S", lines=[_RaisesOnDelete("L0")])
         _install(s)

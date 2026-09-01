@@ -10,7 +10,7 @@ import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, scale, target_component
 from . import _common
@@ -457,7 +457,12 @@ stitch_tool = (
     .add_required_input("bodies")
     .strict_schema()
 )
-stitch_item = Item.create_tool_item(tool=stitch_tool, write="write", handler=stitch_handler, run_on_main_thread=True)
+stitch_item = Item.create_tool_item(
+    tool=stitch_tool, write="write", handler=stitch_handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="effect",
+        evidence_test="tests/unit/test_surface_ops.py::TestStitch"
+                      "::test_became_solid_false_when_gaps_remain"))
 
 
 UNSTITCH_DESCRIPTION = (

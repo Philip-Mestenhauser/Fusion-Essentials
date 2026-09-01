@@ -12,7 +12,7 @@ import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe, all_sketch_names
 from . import _common
@@ -926,7 +926,12 @@ tool = (
     .add_input_property(*_inputs.UNITS.as_property())
     .strict_schema()
 )
-item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(
+    tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_sketch_constrain.py::TestSingleLine"
+                      "::test_a_silently_declined_fix_is_an_error_not_a_false_success"))
 
 
 def register_tool():

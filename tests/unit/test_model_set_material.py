@@ -181,6 +181,25 @@ class TestPartialSuccess:
         assert out["failed"][0]["body"] == "Stuck"
         assert "OldPaint" in out["failed"][0]["error"]
 
+    def test_a_swallowed_assignment_on_the_only_body_is_an_error(self, wired):
+        # the same swallowed assignment with nothing else to succeed: the read-back is the only
+        # thing that can convict, and with no body applied the call must be isError - an ok here
+        # would report a material assignment over a body still carrying its old one.
+        class _StuckBody(_Body):
+            @property
+            def material(self):
+                return _material("OldPaint")
+
+            @material.setter
+            def material(self, m):
+                pass                                  # accepted and ignored
+
+        wired([_StuckBody("Stuck")], libraries=[_Lib("Lib", [_material("Steel")])])
+        res = mm.handler(target="", material="Steel")
+        assert res["isError"] is True
+        assert "Could not assign" in res["message"]
+        assert "OldPaint" in res["message"]           # names what the body actually reads
+
 
 class TestDesignGuard:
     def test_no_active_design(self, monkeypatch):

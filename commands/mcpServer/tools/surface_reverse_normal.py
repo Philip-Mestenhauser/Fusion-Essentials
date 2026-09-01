@@ -11,7 +11,7 @@ import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, target_component
 from . import _common
@@ -129,7 +129,11 @@ surface_reverse_normal_tool = (
 )
 surface_reverse_normal_item = Item.create_tool_item(
     tool=surface_reverse_normal_tool, write="write", handler=reverse_normal_handler,
-    run_on_main_thread=True)
+    run_on_main_thread=True,
+    verification=Verification(
+        kind="effect",
+        evidence_test="tests/unit/test_surface_reverse_normal.py"
+                      "::test_noop_reported_honestly_not_confirmed"))
 
 
 def register_tool():
