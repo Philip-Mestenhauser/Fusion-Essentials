@@ -23,6 +23,15 @@ _OVERTURE = [
     ("sys_find_tool", {"query": "revolve"},
      lambda p: "active_document" not in p and p.get("tool_count", 0) > 0, None),
     ("sys_get_api_doc", {"searchPattern": "RevolveFeatures", "max_results": 3}, "ok", None),
+    # the packaged design guidance, the way a client with tools and no skill loader reads it: the
+    # section index, then ONE section - its rule records keyed by the ids the canonical document
+    # carries, beside the content hash that says which version answered.
+    ("sys_get_guidance", {}, "ok", None),
+    ("sys_get_guidance", {"section": "assemble"},
+     lambda p: ({"connected-reference-path", "exercise-the-mechanism"}
+                <= {r.get("id") for r in (p.get("rules") or [])}
+                and len(p.get("sha256") or "") == 64
+                and all(c in "0123456789abcdef" for c in p.get("sha256") or "")), None),
     ("view_list_workspaces", {}, "ok", None),
     ("view_set", {"action": "orient", "orientation": "iso-top-right"}, "ok", None),
     # camera projection: a perspective orient carries the angle through to the camera and reads it

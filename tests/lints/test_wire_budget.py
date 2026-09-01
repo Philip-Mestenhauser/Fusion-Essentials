@@ -216,6 +216,7 @@ _TOOL_WEIGHTS = {
     "sys_execute_script": 2271,   # the read_only input, whose whole contract rides on the typed property: the description measures 1289 chars against the 1300 ceiling, 11 to spare, so there is no room to teach it there - measured, a design change from that context RAISES, and the same script with the flag off applied it, so the refusal is a fact the caller can rely on rather than a promise
     "sys_find_tool": 930,
     "sys_get_api_doc": 1595,
+    "sys_get_guidance": 1133,   # under the fleet P40 - add and go
     "sys_get_selection": 1858,
     "sys_reload_addin": 1364,
     "sys_request_selection": 2404,

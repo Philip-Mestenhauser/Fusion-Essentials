@@ -184,6 +184,7 @@ _FLOORS = {
     "tools/sys_capability_map.py": 94,
     "tools/sys_execute_script.py": 84,
     "tools/sys_find_tool.py": 95,
+    "tools/sys_get_guidance.py": 100,
     "tools/sys_get_preferences.py": 94,
     "tools/sys_reload_addin.py": 63,
     "tools/sys_selection.py": 86,

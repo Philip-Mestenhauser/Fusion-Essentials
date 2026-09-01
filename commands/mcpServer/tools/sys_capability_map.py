@@ -97,8 +97,9 @@ def handler() -> dict:
                      "permissions."),
         },
         "note": ("The BREADTH map (what families exist + each one's entry tool). To go deeper, search "
-                 "within a family with sys_find_tool (e.g. sys_find_tool('surface')). Facts about the "
-                 "registry, not a recommended order."),
+                 "within a family with sys_find_tool (e.g. sys_find_tool('surface')). sys_get_guidance "
+                 "carries this server's packaged design practice for building a part or an assembly. "
+                 "Facts about the registry, not a recommended order."),
     })
 
 

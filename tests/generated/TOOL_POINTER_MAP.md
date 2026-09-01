@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 186  |  **description breadcrumbs:** 702  |  **note/error breadcrumbs:** 489
+**Tools:** 187  |  **description breadcrumbs:** 702  |  **note/error breadcrumbs:** 490
   |  **guidance smells flagged:** 4
 ## Blindspots to engineer
 
@@ -3042,7 +3042,7 @@ A planar face's 'frame' is th...
 - 'extension' must be a number.
 
 ### `sys_capability_map`
-- The BREADTH map (what families exist + each one's entry tool). To go deeper, search within a family with sys_find_tool (e.g. sys_find_tool('surface')). Facts about the registry, not a recommended o...
+- The BREADTH map (what families exist + each one's entry tool). To go deeper, search within a family with sys_find_tool (e.g. sys_find_tool('surface')). sys_get_guidance carries this server's packag...
 - A gated tool with enabled_now false is disabled ON THIS SERVER - the client cannot see it until the checkbox at its enable_path is ticked. A tool this map names as present (enabled_now true, or any...
 
 ### `sys_find_tool`
@@ -3057,6 +3057,9 @@ A planar face's 'frame' is th...
 - No API modules in scope for filter '
 - '. Try 'adsk.core', 'adsk.fusion', 'adsk.cam', 'adsk.drawing', or 'adsk.sim'.
 - Invalid regex 'searchPattern':
+
+### `sys_get_guidance`
+- The packaged guidance document carries no section '
 
 ### `sys_get_preferences`
 - nest one level further, by product name: sys_set_preferences addresses those members as '<group>.<product>.<member>'. tier 'W' = sys_set_preferences can set it; tier 'R' = refused there, with the r...

@@ -38,7 +38,10 @@ from conftest import load_tool_verify as _load_verify, register_all_tools
 # this measure is a per-TOOL string bag - 'local' is also a value of cam_get's own 'scope' enum, so
 # the credit lands there. Named rather than absorbed: no step drives cam_get(scope='local') yet, so
 # this one point is the heuristic's coarseness and not new scope coverage.
-CHOICES_EXERCISED = 328
+# 328 -> 329: the overture reads the packaged guidance, and its section= call sends 'assemble' - one
+# of the seven section ids the tool declares. The other six ride the same closed set and the same
+# code path, so one section per sweep is the beat, not a gap to fill with six more reads.
+CHOICES_EXERCISED = 329
 
 
 def _strings(value, seen=None):

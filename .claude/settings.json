@@ -40,6 +40,7 @@
       "mcp__fusion-essentials__sys_capability_map",
       "mcp__fusion-essentials__sys_find_tool",
       "mcp__fusion-essentials__sys_get_api_doc",
+      "mcp__fusion-essentials__sys_get_guidance",
       "mcp__fusion-essentials__sys_get_preferences",
       "mcp__fusion-essentials__sys_get_selection",
       "mcp__fusion-essentials__view_list_workspaces",

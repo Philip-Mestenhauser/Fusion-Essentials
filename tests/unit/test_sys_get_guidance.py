@@ -1,0 +1,352 @@
+# Copyright (c) Fusion-Essentials contributors
+# Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
+
+"""Unit tests for ``sys_get_guidance`` - the packaged design guidance, one section per call.
+
+No adsk.*: the tool reads a JSON file that ships beside the server. The tests read that same file
+independently (never through the loader) so "the payload equals the canonical record" is a real
+comparison, drive the wire contract through the REAL SimpleMCPServer, and pin the two pointers - the
+cold-start instructions and the capability map - to a tool that actually registers.
+"""
+
+import asyncio
+import hashlib
+import json
+import os
+import re
+
+import pytest
+
+from conftest import load_mcp_server, load_tool, register_all_tools
+
+gd = load_tool("sys_get_guidance")
+
+_REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_JSON_PATH = os.path.join(_REPO, "commands", "mcpServer", "guidance", "parametric_cad_design.json")
+_SERVER_SRC = os.path.join(_REPO, "commands", "mcpServer", "server", "mcp_server.py")
+_TOOL_SRC = os.path.join(_REPO, "commands", "mcpServer", "tools", "sys_get_guidance.py")
+_GUIDANCE_SRC = (os.path.join(_REPO, "commands", "mcpServer", "guidance", "loader.py"),
+                 os.path.join(_REPO, "commands", "mcpServer", "guidance", "__init__.py"))
+
+_IDS = list(gd.loader.SECTION_IDS)
+
+
+def _canonical():
+    """The shipped document, read straight off disk - the tests' own copy of the truth."""
+    with open(_JSON_PATH, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def _payload(result):
+    assert result["isError"] is False, result
+    return json.loads(result["content"][0]["text"])
+
+
+def _rule(section_id, rule_id):
+    return {"id": rule_id, "section": section_id, "scenarios": ["simple_part"], "when": "w",
+            "do": "d", "except": "e", "prove": [{"tool": "design_get", "observe": "o"}]}
+
+
+def _doctored(rule_count=1, section_id="kernel"):
+    """A synthetic document with one section holding `rule_count` rules - the in-process stand-in
+    for data the shipped file does not carry (an oversized section, a missing one)."""
+    return {"guidance_id": "doctored", "title": "T", "scenarios": ["simple_part"],
+            "sections": [{"id": section_id, "title": "S",
+                          "rules": [_rule(section_id, f"r{i}") for i in range(rule_count)]}]}
+
+
+@pytest.fixture
+def serve(monkeypatch):
+    """Serve a doctored document instead of the packaged one, for the branches the shipped data
+    cannot reach. Returns a callable taking the document."""
+    def _install(doc, sha="0" * 64):
+        monkeypatch.setattr(gd.loader, "load", lambda path=None: (doc, sha))
+    return _install
+
+
+def _strings(node):
+    """Every string in a decoded payload - keys and values, at any depth."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            yield key
+            yield from _strings(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _strings(value)
+    elif isinstance(node, str):
+        yield node
+
+
+# ── the index: no arguments ─────────────────────────────────────────────────
+
+class TestSectionIndex:
+    def test_no_arguments_returns_one_row_per_section_in_document_order(self):
+        out = _payload(gd.handler())
+        assert [row["id"] for row in out["sections"]] == _IDS
+        assert out["section"] is None
+        assert out["next_sections"] == _IDS
+        assert out["guidance_id"] == _canonical()["guidance_id"]
+
+    def test_each_index_row_carries_its_title_and_rule_count(self):
+        counts = {sec["id"]: len(sec["rules"]) for sec in _canonical()["sections"]}
+        rows = {row["id"]: row for row in _payload(gd.handler())["sections"]}
+        assert {i: rows[i]["rule_count"] for i in _IDS} == counts
+        assert all(rows[i]["title"] for i in _IDS)
+
+    def test_the_index_carries_no_rules_at_all(self):
+        # the whole point of an index: a client that asked for nothing is not sent the document.
+        out = _payload(gd.handler())
+        assert "rules" not in out
+        assert all("rules" not in row for row in out["sections"])
+
+    def test_the_index_publishes_the_scenario_vocabulary_the_rules_declare_from(self):
+        assert _payload(gd.handler())["scenarios"] == _canonical()["scenarios"]
+
+    def test_sha256_is_the_hash_of_the_packaged_file_itself(self):
+        with open(_JSON_PATH, "rb") as fh:
+            expected = hashlib.sha256(fh.read()).hexdigest()
+        assert _payload(gd.handler())["sha256"] == expected
+
+    def test_an_empty_section_string_reads_as_no_section(self):
+        assert _payload(gd.handler(section=""))["section"] is None
+
+
+# ── one section ─────────────────────────────────────────────────────────────
+
+class TestOneSection:
+    @pytest.mark.parametrize("section_id", _IDS)
+    def test_each_section_returns_its_own_rules_and_nothing_else(self, section_id):
+        canonical = {sec["id"]: sec for sec in _canonical()["sections"]}[section_id]
+        out = _payload(gd.handler(section=section_id))
+        assert out["section"] == section_id
+        assert out["section_title"] == canonical["title"]
+        assert [r["id"] for r in out["rules"]] == [r["id"] for r in canonical["rules"]]
+
+    @pytest.mark.parametrize("section_id", _IDS)
+    def test_every_returned_rule_equals_the_canonical_record(self, section_id):
+        # Structure for structure, not a paraphrase: a renamed field, a dropped 'except' or a
+        # reworded 'prove' step in the payload builder fails here.
+        canonical = {sec["id"]: sec for sec in _canonical()["sections"]}[section_id]
+        assert _payload(gd.handler(section=section_id))["rules"] == canonical["rules"]
+
+    def test_next_sections_names_the_others_and_never_the_one_returned(self):
+        out = _payload(gd.handler(section="assemble"))
+        assert out["next_sections"] == [i for i in _IDS if i != "assemble"]
+
+    def test_a_section_read_carries_the_same_id_and_hash_as_the_index(self):
+        index, section = _payload(gd.handler()), _payload(gd.handler(section="kernel"))
+        assert section["guidance_id"] == index["guidance_id"]
+        assert section["sha256"] == index["sha256"]
+
+
+# ── the bound ───────────────────────────────────────────────────────────────
+
+class TestRuleBound:
+    def test_a_section_holding_exactly_the_cap_is_returned_whole(self, serve):
+        serve(_doctored(rule_count=gd.MAX_RULES))
+        out = _payload(gd.handler(section="kernel"))
+        assert out["rule_count"] == gd.MAX_RULES
+        assert len(out["rules"]) == gd.MAX_RULES
+        assert "truncated" not in out and "rule_total" not in out
+
+    def test_one_rule_past_the_cap_truncates_and_counts_what_was_dropped(self, serve):
+        serve(_doctored(rule_count=gd.MAX_RULES + 1))
+        out = _payload(gd.handler(section="kernel"))
+        assert out["truncated"] is True
+        assert out["rule_total"] == gd.MAX_RULES + 1
+        assert out["rule_count"] == gd.MAX_RULES
+        assert len(out["rules"]) == gd.MAX_RULES
+
+    def test_the_shipped_document_is_served_untruncated(self):
+        # the cap exists for a document that grows; today every section fits under it, so no
+        # section read reports a truncation the caller would have to page around.
+        for section_id in _IDS:
+            assert "truncated" not in _payload(gd.handler(section=section_id))
+
+
+# ── refusals ────────────────────────────────────────────────────────────────
+
+class TestRefusals:
+    def test_an_unknown_section_is_refused_naming_every_legal_id(self):
+        result = gd.handler(section="assembly")
+        assert result["isError"] is True
+        for section_id in _IDS:
+            assert section_id in result["message"]
+        assert "assembly" in result["message"]
+
+    def test_a_section_the_document_does_not_carry_is_refused_naming_what_it_does(self, serve):
+        # the declared list and the packaged data disagreeing is a data defect, reported as the
+        # sections the document actually holds - never as an empty rule list.
+        serve(_doctored(section_id="kernel"))
+        result = gd.handler(section="assemble")
+        assert result["isError"] is True
+        assert "assemble" in result["message"] and "kernel" in result["message"]
+
+    def test_a_packaged_document_that_did_not_load_is_reported_not_substituted(self, monkeypatch):
+        def _raise(path=None):
+            raise gd.loader.GuidanceUnavailable("the file is not there: guidance.json")
+        monkeypatch.setattr(gd.loader, "load", _raise)
+        result = gd.handler()
+        assert result["isError"] is True
+        assert "guidance.json" in result["message"]
+
+    def test_a_bad_section_is_refused_before_the_document_is_even_read(self, monkeypatch):
+        reads = []
+        monkeypatch.setattr(gd.loader, "load",
+                            lambda path=None: (reads.append(1), ({}, ""))[1])
+        assert gd.handler(section="nope")["isError"] is True
+        assert reads == []
+
+
+# ── ASCII ───────────────────────────────────────────────────────────────────
+
+class TestAscii:
+    def test_every_string_the_payload_carries_is_pure_ascii(self):
+        # the payload crosses the wire JSON-encoded with ensure_ascii, so a non-ASCII character
+        # ships as a 6-character escape. Checked on the DECODED values, where it is still visible.
+        payloads = [_payload(gd.handler())] + [_payload(gd.handler(section=i)) for i in _IDS]
+        bad = [(s, hex(ord(c))) for p in payloads for s in _strings(p)
+               for c in s if ord(c) > 127]
+        assert not bad, f"non-ASCII in the guidance payload: {bad}"
+
+    def test_the_ascii_walk_reaches_the_rule_records(self):
+        # the walk is only worth its lines while it descends into the nested rule dicts.
+        assert "connected-reference-path" in set(_strings(_payload(gd.handler(section="assemble"))))
+
+
+# ── the wire contract, through the real server ──────────────────────────────
+
+@pytest.fixture(scope="module")
+def server():
+    """The REAL SimpleMCPServer with every tool registered - the same object tools/list is served
+    from, so presence and dispatch are proven against the transport, not a stand-in."""
+    mcp_server = load_mcp_server()
+    srv = mcp_server.SimpleMCPServer()
+    for item in register_all_tools():
+        srv.register(item)
+    return srv
+
+
+def _entry(server):
+    tools = server._handle_tools_list(1)["result"]["tools"]
+    return {t["name"]: t for t in tools}["sys_get_guidance"]
+
+
+def _call(server, arguments):
+    return asyncio.run(server.handle_request({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "sys_get_guidance", "arguments": arguments},
+    }))["result"]
+
+
+class TestWireContract:
+    def test_the_tool_is_in_tools_list_read_only_and_strict(self, server):
+        entry = _entry(server)
+        assert entry["annotations"]["readOnlyHint"] is True
+        assert entry["annotations"].get("destructiveHint", False) is False
+        assert entry["inputSchema"]["additionalProperties"] is False
+
+    def test_the_section_input_carries_the_closed_id_set_as_a_schema_enum(self, server):
+        assert _entry(server)["inputSchema"]["properties"]["section"]["enum"] == _IDS
+
+    def test_it_runs_off_the_main_thread(self):
+        assert gd.item.run_on_main_thread is False
+
+    def test_the_module_never_touches_adsk(self):
+        # the whole chain this off-main-thread handler pulls in: the tool AND the guidance package
+        # behind it. An adsk call anywhere in it would run off Fusion's main thread.
+        for path in (_TOOL_SRC,) + _GUIDANCE_SRC:
+            with open(path, encoding="utf-8") as fh:
+                src = fh.read()
+            assert "import adsk" not in src, path
+            assert "adsk." not in src, path
+
+    def test_the_index_comes_back_through_a_real_tools_call(self, server):
+        out = _payload(_call(server, {}))
+        assert [row["id"] for row in out["sections"]] == _IDS
+
+    def test_one_section_comes_back_through_a_real_tools_call(self, server):
+        canonical = {sec["id"]: sec for sec in _canonical()["sections"]}["assemble"]
+        assert _payload(_call(server, {"section": "assemble"}))["rules"] == canonical["rules"]
+
+    def test_the_server_refuses_an_out_of_enum_section_before_dispatch(self, server):
+        # pinned on the SERVER's own wording: the handler refuses a bad section too, so a needle
+        # both messages carry would pass with the schema gate switched off entirely.
+        result = _call(server, {"section": "assembly"})
+        assert result["isError"] is True
+        assert "Valid values:" in result["message"] and "'section'" in result["message"]
+
+    def test_the_server_refuses_an_unknown_argument(self, server):
+        # same rule: a bare 'guidance_id' needle also matches the TypeError a lenient schema would
+        # produce, so the strict gate's own sentence is what this pins.
+        result = _call(server, {"guidance_id": "parametric-cad-design"})
+        assert result["isError"] is True
+        assert "Unknown argument for tool 'sys_get_guidance'" in result["message"]
+
+
+# ── the two pointers ────────────────────────────────────────────────────────
+
+class TestPointersNameARegisteredTool:
+    def test_the_cold_start_instructions_point_at_this_tool(self, server):
+        # read off the INSTRUCTIONS literal the way the cold-start test does (mcp_server imports
+        # Fusion utils this harness cannot load), so the pointer is checked in the text that ships.
+        with open(_SERVER_SRC, encoding="utf-8") as fh:
+            src = fh.read()
+        literal = re.search(r"INSTRUCTIONS\s*=\s*\((.*?)\)\n", src, re.DOTALL)
+        assert literal, "INSTRUCTIONS literal not found in mcp_server.py"
+        assert "sys_get_guidance" in "".join(re.findall(r'"([^"]*)"', literal.group(1)))
+        assert "sys_get_guidance" in server.tools
+
+    def test_the_capability_map_points_at_this_tool(self, server):
+        cm = load_tool("sys_capability_map")
+        note = _payload(cm.handler())["note"]
+        assert "sys_get_guidance" in note
+        assert "sys_get_guidance" in server.tools
+
+
+# ── the loader ──────────────────────────────────────────────────────────────
+
+class TestLoader:
+    def test_the_declared_section_ids_are_the_shipped_documents_own(self):
+        doc, _sha = gd.loader.load()
+        assert gd.loader.section_ids(doc) == _IDS
+
+    def test_the_document_loads_from_any_working_directory(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        doc, sha = gd.loader.load()
+        assert gd.loader.section_ids(doc) == _IDS
+        assert len(sha) == 64
+
+    def test_a_working_directory_relative_path_does_not_survive_the_same_move(self, monkeypatch,
+                                                                             tmp_path):
+        # what makes the test above non-vacuous: the same file named RELATIVELY is unreadable from
+        # there, so the module-relative resolution is what carried it.
+        relative = os.path.join("commands", "mcpServer", "guidance", "parametric_cad_design.json")
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(gd.loader.GuidanceUnavailable):
+            gd.loader.load(relative)
+
+    def test_a_missing_packaged_file_is_reported_by_name(self, tmp_path):
+        missing = str(tmp_path / "gone.json")
+        with pytest.raises(gd.loader.GuidanceUnavailable) as exc:
+            gd.loader.load(missing)
+        assert "gone.json" in str(exc.value)
+
+    def test_a_file_that_is_not_json_is_reported_as_such(self, tmp_path):
+        broken = tmp_path / "broken.json"
+        broken.write_text('{"sections": [', encoding="utf-8")
+        with pytest.raises(gd.loader.GuidanceUnavailable) as exc:
+            gd.loader.load(str(broken))
+        assert "JSON" in str(exc.value) and "broken.json" in str(exc.value)
+
+    def test_the_hash_follows_the_bytes(self, tmp_path):
+        one, two = tmp_path / "a.json", tmp_path / "b.json"
+        one.write_text('{"sections": []}', encoding="utf-8")
+        two.write_text('{"sections": [] }', encoding="utf-8")
+        assert gd.loader.load(str(one))[1] != gd.loader.load(str(two))[1]
+
+    def test_find_section_matches_exactly_and_answers_none_otherwise(self):
+        doc, _sha = gd.loader.load()
+        assert gd.loader.find_section(doc, "assemble")["id"] == "assemble"
+        assert gd.loader.find_section(doc, "assem") is None
+        assert gd.loader.find_section(doc, "Assemble") is None

@@ -54,7 +54,9 @@ INSTRUCTIONS = (
     "existing capability/input-kind: sys_find_tool. Most reads are RICH: a <domain>_get (cam_get, "
     "design_get, doc_get, data_get) gives a light default plus include=[...] for depth. Every write tool "
     "accepts expect_document (a doc name or URN from a prior read): if the active document changed since "
-    "that read, the write is REFUSED as active_document_changed - switch back with doc_activate and retry."
+    "that read, the write is REFUSED as active_document_changed - switch back with doc_activate and retry. "
+    "Design practice for building a part or an assembly, rather than running a fixed procedure, is "
+    "discovered through sys_get_guidance - its section index first, then one section per call."
 )
 
 # Header names (Streamable HTTP transport).

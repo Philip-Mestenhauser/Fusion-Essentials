@@ -153,6 +153,9 @@ STORY = {
     "sys_find_tool": ("search the surface for the revolve verb - a registry read, so it carries no "
                       "'active_document' stamp (design_get's final read is the other half)"),
     "sys_get_api_doc": "read the RevolveFeatures API doc",
+    "sys_get_guidance": ("read the packaged design guidance as a tool-only client does - the section "
+                        "index, then the assemble section's rule records beside the content hash "
+                        "that versions them"),
     "view_list_workspaces": "list the workspaces available",
     "view_set": ("orient the camera to the iso hero angle, with the perspective angle carried "
                  "through to the camera and read back; then the whole verb set on the finished "

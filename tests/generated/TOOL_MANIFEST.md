@@ -2,7 +2,7 @@
 
 _Auto-generated from the live registry by `tests/gen_manifest.py`. Do not edit by hand — re-run the generator after adding/renaming a tool or kind. `--check` fails the suite if this is stale. This is the batch form of the `sys_find_tool` live lookup: the one place to see what already exists before building it._
 
-**Tools:** 186  |  **Input-kinds:** 21  |  write-status: `·` read · `✎` write · `⚠` destructive
+**Tools:** 187  |  **Input-kinds:** 21  |  write-status: `·` read · `✎` write · `⚠` destructive
 
 ## Input kinds — reference EXISTING geometry/structure with these (don't hand-roll a name/index)
 
@@ -309,6 +309,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | ⚠ | `sys_execute_script` | Execute Fusion API Python in the user's live Fusion session |
 | · | `sys_find_tool` | SEARCH this server's tools by keyword when you do not know which tool does a job |
 | · | `sys_get_api_doc` | Search the LIVE Fusion API documentation (classes, methods, properties, enum values) by regex, returning names, signatures, and docstrings |
+| · | `sys_get_guidance` | Read this server's packaged CAD DESIGN GUIDANCE: task-agnostic practice for building a part or an assembly - what to settle before the first feature, how design... |
 | · | `sys_get_preferences` | Read the APPLICATION's preferences (app.preferences - settings that belong to no document: versioning, modelling orientation, default units, number display, gra... |
 | · | `sys_get_selection` | Read the user's CURRENT selection in Fusion and describe each selected entity so you can intuit what they meant |
 | ✎ | `sys_reload_addin` | Reload the Fusion-Essentials add-in to pick up code changes (developer tool) |
