@@ -71,9 +71,8 @@ def _build():
     ]
     import gen_all
     for name in gen_all._GENERATORS:
-        lines.append(f"- {name}.py")
+        lines.append(f"- {name}.py" + (" (this page)" if name == "gen_enforcement" else ""))
     lines += [
-        "- gen_enforcement.py (this page)",
         "",
         "## Typed seams - contracts enforced at construction, not by scanning",
         "",
