@@ -22,7 +22,8 @@ TESTS = Path(__file__).resolve().parent.parent
 _LINT_TESTS = frozenset({
     "test_api_fact_provenance",
     "test_assert_strength", "test_axis_vectors_shared",
-    "test_bespoke_fake_ratchet", "test_blurb_budget", "test_choice_coverage", "test_dead_code",
+    "test_bespoke_fake_ratchet", "test_blurb_budget", "test_capability_map_complete",
+    "test_choice_coverage", "test_dead_code",
     "test_doc_citations", "test_enum_families_measured",
     "test_evergreen_no_baggage", "test_export_knob_preread",
     "test_fake_shapes_exist", "test_frame_disclosure",

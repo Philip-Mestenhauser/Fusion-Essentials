@@ -25,6 +25,7 @@ _FAMILY = {
     "joint":     ("Joints between components: create/edit/drive joints and joint origins.", "joint_create"),
     "cam":       ("Manufacture (CAM): setups, operations, templates, tool libraries, generate toolpaths.", "cam_create_setup"),
     "data":      ("Cloud data model: hubs, projects, folders, files (create/list/upload/delete).", "data_get"),
+    "drawing":   ("2D drawings from designs: sheets, placed views, dimensions, annotations, export.", "drawing_create"),
     "doc":       ("Document lifecycle: open/new/save/close/activate/copy + insert/update references.", "doc_get"),
     "design":    ("The active design as a whole: read structure, mode, recompute, configure, delete.", "design_get"),
     "view":      ("Viewport/camera: screenshots, sections, isolate/orient, workspace switch.", "view_screenshot"),
