@@ -27,9 +27,9 @@ recomputes the hash and fails on any difference, so a green suite cannot ride on
 run that never saw the current code or a weakened predicate. Only a run with zero
 FAIL/blocked/pass* steps rewrites this file.
 
-Stamp: source 20ba935be436ed3fe8aeec11c52dd10f79908a7e9629751d0085c9877f32f8f5 | Fusion 2705.1.4 | verified 2026-08-31
+Stamp: source 84e5f05c7df9319292b44ca9ec6a7e657e4bfed1959080d76a8131298ddb5e8b | Fusion 2705.1.4 | verified 2026-09-01
 
-126 covered / 23 called / 5 refusals-only / 32 skipped(reason) / 0 pending
+127 covered / 23 called / 5 refusals-only / 32 skipped(reason) / 0 pending
 
 | act | mode |
 |---|---|
@@ -226,6 +226,7 @@ Stamp: source 20ba935be436ed3fe8aeec11c52dd10f79908a7e9629751d0085c9877f32f8f5 |
 | sys_execute_script | skipped: gated off by design; the sweep proves the typed surface suffices - and with it the beat for its DRAWING-document error tail (a raise inside a drawing ends with 'Re-read the sheets before assuming this call changed nothing.', a design one does not), which would need this tool driven against two document kinds |  |
 | sys_find_tool | covered | search the surface for the revolve verb - a registry read, so it carries no 'active_document' stamp (design_get's final read is the other half) |
 | sys_get_api_doc | called | read the RevolveFeatures API doc |
+| sys_get_guidance | covered | read the packaged design guidance as a tool-only client does - the section index, then the assemble section's rule records beside the content hash that versions them |
 | sys_get_preferences | covered | read the application's own configuration - the default projection, two decoded enum families, the compatibility group, and all three members the census found RAISING on this build, each published null and named in 'unreadable' with none of them miscategorised as a member the build does not carry |
 | sys_get_selection | refusals-only: every step is a guard refusal - no effect was produced or read back this run | expected refusal: nothing is selected yet |
 | sys_reload_addin | skipped: restarts the server mid-sweep |  |
