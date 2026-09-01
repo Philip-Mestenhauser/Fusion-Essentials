@@ -9,7 +9,7 @@ import adsk.core
 import adsk.cam
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import iter_collection, named_with_remainder, ok, error, safe
 # The shared CAM substrate: the ONE bounded library folder walk (and its collect-the-assets
@@ -697,7 +697,12 @@ _apply_tool = (
     .strict_schema()
 )
 apply_template_to_setup_item = Item.create_tool_item(
-    tool=_apply_tool, write="write", handler=apply_template_to_setup_handler, run_on_main_thread=True
+    tool=_apply_tool, write="write", handler=apply_template_to_setup_handler,
+    run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_cam_templates.py::TestApplyTemplateEffect"
+                      "::test_a_template_that_adds_no_operation_is_an_error")
 )
 
 _save_tool = (
@@ -721,7 +726,12 @@ _save_tool = (
     .strict_schema()
 )
 save_operations_as_template_item = Item.create_tool_item(
-    tool=_save_tool, write="write", handler=save_operations_as_template_handler, run_on_main_thread=True
+    tool=_save_tool, write="write", handler=save_operations_as_template_handler,
+    run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_cam_templates.py::TestSaveTemplateRename"
+                      "::test_saved_template_that_does_not_load_back_bites")
 )
 
 DELETE_TOOL_DESCRIPTION = (
@@ -744,7 +754,12 @@ _delete_tool = (
     .strict_schema()
 )
 delete_template_item = Item.create_tool_item(
-    tool=_delete_tool, write="destructive", handler=delete_template_handler, run_on_main_thread=True
+    tool=_delete_tool, write="destructive", handler=delete_template_handler,
+    run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_cam_templates.py::TestDeleteTemplateEffect"
+                      "::test_an_asset_still_listed_after_a_true_delete_is_an_error")
 )
 
 

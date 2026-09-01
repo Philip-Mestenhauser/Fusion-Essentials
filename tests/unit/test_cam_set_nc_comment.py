@@ -206,3 +206,48 @@ class TestProgramTargeting:
         assert res["isError"] is True
         # comment must be untouched (aborted in the pre-validation pass)
         assert ncp.parameters.itemByName("nc_program_comment").expression == "'keepc'"
+
+
+# ── what the payload states as LANDED is the parameter's own re-read ─────────
+#
+# A parameter that accepts the assignment and keeps its old expression is the platform shape this
+# tool's before/after pair exists for: comment_after has to be what the program reads afterwards,
+# never the text that was asked for, or the receipt launders the request into a result.
+
+
+class _StuckParam(FakeParam):
+    """Accepts an expression assignment after construction and keeps the one it holds."""
+    def __setattr__(self, key, value):
+        if key == "expression" and "expression" in self.__dict__:
+            return
+        object.__setattr__(self, key, value)
+
+
+class _StuckNCP(FakeNCP):
+    def __init__(self, name, comment="'old'"):
+        super().__init__(name, comment)
+        self.parameters = FakeParams(
+            nc_program_comment=_StuckParam(comment),
+            nc_program_name=_StuckParam("'" + name + "'"),
+        )
+
+
+class TestStuckParameter:
+    def test_a_stuck_comment_is_published_as_the_program_reads_it(self, monkeypatch):
+        cam = _install(monkeypatch, [_StuckNCP("P1", "'keep me'")])
+        out = _payload(nc.handler(comment="Job 42", program="P1"))
+        rec = out["programs"][0]
+        # the request is reported under its own key; comment_after is the re-read, and here the two
+        # disagree - which is the whole point of publishing both
+        assert out["comment"] == "Job 42"
+        assert rec["comment_before"] == "keep me"
+        assert rec["comment_after"] == "keep me"
+        assert cam.ncPrograms.item(0).parameters.itemByName(
+            "nc_program_comment").expression == "'keep me'"
+
+    def test_a_stuck_name_is_published_as_the_program_reads_it(self, monkeypatch):
+        _install(monkeypatch, [_StuckNCP("P1", "'c'")])
+        out = _payload(nc.handler(comment="", program="P1", set_name="Renamed"))
+        rec = out["programs"][0]
+        assert out["set_name"] == "Renamed"
+        assert rec["name_before"] == "P1" and rec["name_after"] == "P1"

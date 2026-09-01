@@ -10,7 +10,7 @@ import adsk.cam
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from ._cam_common import get_cam
@@ -118,7 +118,12 @@ tool = (
     .strict_schema()
 )
 
-item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(
+    tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_cam_create_setup.py::TestOperationType"
+                      "::test_phantom_setup_that_never_lands_bites"))
 
 
 def register_tool():

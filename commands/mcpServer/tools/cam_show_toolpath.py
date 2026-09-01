@@ -9,7 +9,7 @@ Toolpaths only render in the Manufacture workspace."""
 import adsk.core
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from ._cam_common import get_cam, resolve_cam_node, operation_nodes, operations_under, find_setup
@@ -218,7 +218,15 @@ tool = (
     .strict_schema()
 )
 
-item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(
+    tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    # show / hide / isolate error on a bulb that reads back the WRONG value; the two bulk arms publish
+    # the ops whose toggle did not take instead. A bulb whose READ does not answer passes every arm
+    # (_set_bulb fails open, CAM-45), so an unreadable toggle is still reported as done.
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_cam_show_toolpath.py::TestBulbReadBack"
+                      "::test_hide_of_a_stuck_bulb_is_an_error"))
 
 
 def register_tool():

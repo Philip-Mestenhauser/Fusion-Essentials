@@ -8,7 +8,7 @@ MachineLibrary itself exposes no create method. cam_delete_machine is the other 
 import adsk.cam
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from . import _inputs
@@ -204,7 +204,15 @@ tool = (
     .add_input_property("vendor", {"type": "string", "description": "Machine vendor to record (optional)."})
     .strict_schema()
 )
-item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(
+    tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    # Every identity field published (name, machine_id, vendor, model, kind, has_post) is read off
+    # the machine the resolver hands back after the store, not off the request.
+    verification=Verification(
+        kind="effect",
+        evidence_test="tests/unit/test_cam_create_machine.py"
+                      "::TestStoreAndGate"
+                      "::test_a_machine_that_does_not_resolve_back_is_an_error_that_discloses_the_residue"))
 
 
 def register_tool():

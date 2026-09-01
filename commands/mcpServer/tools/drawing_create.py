@@ -12,7 +12,7 @@ import adsk.core
 import adsk.drawing
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from . import _common
@@ -646,8 +646,15 @@ tool = (
 # views and commits a cloud DataFile - it can run past the server's call timeout even for a small
 # design. Timing it out would report a false failure for a drawing that WAS created, so this tool waits
 # for it (like sys_execute_script) rather than false-failing.
-item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True,
-                             enforce_timeout=False)
+item = Item.create_tool_item(
+    tool=tool, write="write", handler=handler, run_on_main_thread=True, enforce_timeout=False,
+    # drawing_name / file_id / version_id / file_extension are read off the DataFile createDrawing
+    # returned, and a create that hands back nothing or no readable id is an error. settings_requested
+    # is the request, published under its own key and named as not read back in the note.
+    verification=Verification(
+        kind="effect",
+        evidence_test="tests/unit/test_drawing_create.py::TestGuards"
+                      "::test_missing_file_id_on_created_drawing_errors"))
 
 
 def register_tool():

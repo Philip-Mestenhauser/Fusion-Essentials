@@ -9,7 +9,7 @@ import adsk.core
 import adsk.cam
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 # The machine catalog read + the by-name machine resolver are the shared CAM substrate's (one home,
@@ -374,7 +374,15 @@ tool = (
             "description": "Bind the WCS: {origin/z_axis/x_axis: a find_geometry handle OR a Joint Origin (handle/name from assembly_get)}. Binds as a live reference (bound_entities read back); the WCS re-derives from it (associative)."})
     .strict_schema()
 )
-item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(
+    tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    # The body, machine and wcs arms each re-read what they wrote and error on a mismatch. The
+    # parameter arm errors on the parameter's evaluation channel and rolls back, and publishes
+    # before beside after rather than comparing after to the request.
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_cam_edit_setup.py::TestMachine"
+                      "::test_assignment_that_does_not_take_is_error"))
 
 
 def register_tool():

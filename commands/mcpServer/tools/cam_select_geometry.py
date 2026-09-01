@@ -9,7 +9,7 @@ parameter group."""
 import adsk.cam
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import CM_TO_UNIT, named_with_remainder, ok, error, safe, scale, set_verified
 from ._cam_common import get_cam, resolve_cam_node, register_future
@@ -605,7 +605,16 @@ tool = (
     .add_input_property("generate", {"type": "boolean", "description": "Launch regeneration after (default true; async - read cam_get_status)."})
     .strict_schema()
 )
-item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(
+    tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    # The selection effect only: generate=true LAUNCHES a background generation this call never
+    # reads back, and the payload sends the caller to cam_get_status for it. The height arm is the
+    # residual: _set_height writes {which}Height_mode/_offset with no read-back and heights_set is
+    # built from the request (CAM-48).
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_cam_select_geometry.py::TestCurveSelection"
+                      "::test_zero_selections_is_error"))
 
 
 def register_tool():

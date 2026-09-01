@@ -78,7 +78,7 @@ _FLOORS = {
     "tools/cam_select_geometry.py": 91,
     "tools/cam_set_nc_comment.py": 88,
     "tools/cam_show_toolpath.py": 100,
-    "tools/cam_templates.py": 61,   # was 53
+    "tools/cam_templates.py": 69,   # was 61
     "tools/data_download_file.py": 100,
     "tools/data_get.py": 91,
     "tools/data_get_upload_status.py": 94,

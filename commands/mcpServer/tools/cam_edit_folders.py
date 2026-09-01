@@ -8,7 +8,7 @@ the API - only read and edited; create those in the Manufacture UI."""
 import adsk.core
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import iter_collection, ok, error, safe
 from ._cam_common import get_cam, find_setup, resolve_cam_node
@@ -139,7 +139,12 @@ tool = (
             "description": "Operation names to move into the folder (move)."})
     .strict_schema()
 )
-item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(
+    tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    # Only rename re-reads its effect (f.name); create trusts addFolder's returned object without
+    # re-listing setup.folders, and move gates the moveInto bool while publishing the caller's own
+    # names - 1 of 3 acting arms verified, so the honest class is a gap, not inline.
+    verification=Verification(kind="gap", defect_id="CAM-44"))
 
 
 def register_tool():

@@ -8,7 +8,7 @@ half-edited operation."""
 import adsk.core
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe, read_flag
 from ._cam_common import get_cam, expression_error, parse_parameters, resolve_cam_node
@@ -194,7 +194,16 @@ tool = (
     .strict_schema()
 )
 
-item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(
+    tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    # Both arms publish the parameter's / the flag's own post-set read: changed[].after and .value
+    # off the parameter, is_suppressed and has_toolpath off the operation. The suppression arm errors
+    # on a flag that reads back wrong; the parameter arm errors on the evaluation channel and rolls
+    # back, and publishes before beside after rather than comparing after to the request.
+    verification=Verification(
+        kind="effect",
+        evidence_test="tests/unit/test_cam_edit_operation.py::TestStuckParameter"
+                      "::test_a_stuck_parameter_publishes_the_reread_not_the_request"))
 
 
 def register_tool():

@@ -155,6 +155,32 @@ class TestGuards:
         assert res["isError"] is True and "tool" in res["message"].lower()
 
 
+# ── the operation has to LAND in the setup, not just come back from add() ────
+#
+# operations.add hands back an Operation object, and that return is not evidence the setup took it.
+# The count read either side of the add is what the created=... claim rests on.
+
+
+class _DeafOperations(_Operations):
+    """add() builds the operation and hands it back without the setup ever taking it."""
+    def add(self, inp):
+        return _Operation(inp)
+
+
+class TestOperationLanding:
+    def test_an_operation_that_never_lands_in_the_setup_is_an_error(self, monkeypatch):
+        cam = _install(monkeypatch)
+        setup = cam.setups.item(0)
+        setup.operations = _DeafOperations([s.name for s in setup.operations.compatibleStrategies])
+        res = cco.handler(setup="Setup1", strategy="face",
+                          tool_library_url="u", tool_index=0, generate=False)
+        assert res["isError"] is True
+        assert "did not land" in res["message"]
+        assert setup.operations.count == 0
+        # the other side of `ops_after <= ops_before` is TestCreate.test_creates_operation_with_tool,
+        # where the same add grows the setup by exactly one and the call succeeds.
+
+
 # ── create (no generate) ─────────────────────────────────────────────────────
 
 class TestCreate:

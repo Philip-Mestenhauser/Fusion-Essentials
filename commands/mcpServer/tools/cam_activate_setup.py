@@ -7,7 +7,7 @@ stays a standalone tool rather than a cam_get slice)."""
 import adsk.core
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from ._cam_common import get_cam, find_setup
@@ -57,7 +57,11 @@ _activate_tool = Tool.create_with_string_input(
     input_param_description="The setup name to activate.",
 ).strict_schema()
 activate_setup_item = Item.create_tool_item(
-    tool=_activate_tool, write="write", handler=activate_setup_handler, run_on_main_thread=True
+    tool=_activate_tool, write="write", handler=activate_setup_handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_cam_activate_setup.py"
+                      "::test_activate_that_does_not_take_is_an_error")
 )
 
 

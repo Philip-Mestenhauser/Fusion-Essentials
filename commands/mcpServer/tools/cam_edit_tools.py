@@ -10,7 +10,7 @@ import adsk.core
 import adsk.cam
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import iter_collection, ok, error, safe
 from ._cam_common import get_cam, expression_error, library_assets
@@ -1082,7 +1082,14 @@ tool = (
             "description": "The preset for add_preset / remove_preset, on the tool at 'tool': {name, spindle_speed?, feed?} to add, {name} to remove. A bare number is rpm / mm-per-min whatever units the document uses; pass a string to carry your own, e.g. '35in/min'."})
     .strict_schema()
 )
-item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(
+    tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    # Every write arm re-reads through Target.refetch and errors on a disagreement; a target whose
+    # refetch cannot answer publishes verified_in_memory_only rather than claiming storage.
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_cam_edit_tools.py::TestEdit"
+                      "::test_persist_readback_mismatch_bites"))
 
 
 def register_tool():

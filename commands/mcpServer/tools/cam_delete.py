@@ -9,7 +9,7 @@ an error, never a false success."""
 import adsk.core
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from ._cam_common import get_cam, resolve_cam_node
@@ -73,7 +73,12 @@ tool = (
     )
     .strict_schema()
 )
-item = Item.create_tool_item(tool=tool, write="destructive", handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(
+    tool=tool, write="destructive", handler=handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_cam_delete.py::TestDelete"
+                      "::test_a_lying_deleteme_true_is_caught_by_the_re_resolve"))
 
 
 def register_tool():

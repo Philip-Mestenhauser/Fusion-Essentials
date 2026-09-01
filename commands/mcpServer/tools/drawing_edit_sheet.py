@@ -11,7 +11,7 @@ import adsk.core
 import adsk.drawing
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe
 from . import _drawing_common
@@ -365,8 +365,15 @@ tool = (
     .add_input_property(*_ORIENTATION.as_property())
     .strict_schema()
 )
-item = Item.create_tool_item(tool=tool, write="destructive", handler=handler,
-                             run_on_main_thread=True)
+item = Item.create_tool_item(
+    tool=tool, write="destructive", handler=handler, run_on_main_thread=True,
+    # add / copy / rename / set_size / set_orientation / tidy_up each re-read what they wrote and
+    # error on a mismatch. delete is the one arm that cannot: a drawing delete is invisible inside
+    # its own call, so its payload publishes the boolean and marks the count a reading.
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_drawing_edit_sheet.py::TestRename"
+                      "::test_a_silently_ignored_rename_is_an_error"))
 
 
 def register_tool():

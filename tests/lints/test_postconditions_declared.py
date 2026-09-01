@@ -76,29 +76,6 @@ def _postconditions_of(item):
 # postconditions; what only shrinks is the gap: count.
 _EXEMPT = {
     'appearance_set': 'inline: each appearance= assignment is read back and a mismatch is an error or lands in failed; an OCCURRENCE-level write additionally re-reads EVERY body and compares Appearance.id, never the name (measured: same-named appearances are distinct assets, so a name compare calls a body that kept its own color reached) - reached / bodies_not_reached / unverified_bodies are published, and reaching no body while at least one demonstrably kept another is an error',
-    'drawing_add_sketch': 'inline: sketches.add() is followed by a per-collection count diff on the created sketch - lines/rectangles/arcs/circles/ellipses - and any collection short of its requested curve count is an error(...) naming what landed and what did not',
-    'drawing_edit_sheet': 'inline: Sheets.add() is followed by a re-read of the sheet count and of the name the created sheet REPORTS, the name= / sheetSize= / orientation= sets are each re-read off the sheet and a silent no-op becomes an error(...) naming what it still reports, copy() facts are read off the returned sheet, and tidyUp is gated on the isModified transition publishing modified_confirmed; deleteMe() alone cannot be verified in-call - a drawing delete is invisible inside its own transaction, so the payload publishes the boolean and marks the count a reading, never a verification',
-    'cam_activate_setup': 'inline: target.isActive is re-read after activate() and gates the claim',
-    'cam_apply_template': 'inline: allOperations is recounted around createFromCAMTemplate2(); no growth is an error',
-    'cam_create_operation': 'inline: operations recounted around add(); stale post-launch reads are omitted',
-    'cam_create_machine': 'effect: the payload re-resolves the created machine through the same _cam_common.resolve_machine query an assignment uses, after importMachine and a machineAtURL load-back; a create that does not resolve back returns isError',
-    'cam_create_setup': 'inline: cam.setups is re-listed after add() to confirm the setup landed',
-    'cam_delete': 'inline: deleteMe() bool is read at the call site and authors the named decline error',
-    'cam_delete_machine': 'inline: deleteAsset() is gated on its own bool, then the Local library assets are re-walked AND the name re-resolved through the assignment query - either read still finding the machine is an error(...), never a reported delete',
-    'cam_edit_folders': 'inline: addFolder()/moveInto() and the name= rename gate on read-backs; create trusts addFolder returning a live object',
-    'cam_edit_operation': 'inline: params re-read for .error after each expression= set (unevaluated -> rollback+error); the observed value is the payload, and the isSuppressed= set is re-read with hasToolpath on both sides - a flag that did not take, or one that stops reading, is an error(...) rather than a confirmed state',
-    'cam_edit_setup': 'inline: params re-read for .error after each expression= set (unevaluated -> rollback+error); machine/stock/fixture/wcs writes each re-read and gated',
-    'cam_edit_tools': 'inline: no path trusts an API return - after add()/remove() the library is persisted and RE-READ from its url, and a count that disagrees is an error; the auto-assigned tool numbers are checked twice (off the in-memory tools, then against the set the re-read stored library holds), and an edit or a preset change re-reads the parameter expression and the preset names off that same re-read, since updateTool/updateToolLibrary returning true is evidence of neither - a document-scope target has no url to re-read, so the payload publishes verified_in_memory_only',
-    'cam_reorder': 'inline: moveBefore()/moveAfter() bool is read and reported as a named error on false',
-    'cam_delete_template': 'inline: deleteAsset() is gated on its own bool, then the LOCAL template library assets are re-walked AND the deleted url re-loaded through templateAtURL - either read still finding the template is an error(...), and a walk that could not answer or did not finish is reported UNCONFIRMED rather than as a delete',
-    'cam_save_template': 'inline: the template is re-fetched at new_url (templateAtURL) after importTemplate()',
-    'cam_select_geometry': 'inline: applyCurveSelections() is followed by a re-read of what the operation now HOLDS - the selection count, the paths and segments Fusion resolved off outputGeometry, the entity set the selection reports, and its own error/warning channel - and a rejected selection or a count of 0 is an error naming what to re-select; the holes path gates on the applied face count the same way (the async generation this can launch is confirmed separately by cam_get_status, never here)',
-    'cam_show_toolpath': 'inline: isLightBulbOn is re-read after every isLightBulbOn= set; failed toggles error or are listed',
-    'cam_set_nc_comment': 'inline: each program comment/name expression= write is re-read post-set; before/after is the payload',
-    'drawing_create': 'inline: df.id is read back after createDrawing() and a missing file_id authors the specific failure text',
-    'pmi_create': 'inline: add() returning null is an error and the created annotation is re-read (name/text/markup) into the payload',
-    'pmi_delete': 'inline: deleteMe() bool is gated, then the name is re-resolved and isValid re-read; a survivor is an error',
-    'pmi_edit': 'inline: each action re-reads its own set (name=, segments=, isLightBulbOn=, annotationTextPoint=) or call (markUpToDate(), convertImportedToFusionPMI()) and gates the claim',
 }
 
 
@@ -108,7 +85,7 @@ _EXEMPT = {
 # visible instead of a free exit from the detector. The ceiling is an alarm that UN-RINGS itself:
 # the shrink-only half of the test below forces the number back down the moment a gap closes, so
 # a tool parked here while its evidence is unrecorded cannot quietly stay parked.
-_GAP_CEILING = 4
+_GAP_CEILING = 6
 
 
 def _verification_of(item):

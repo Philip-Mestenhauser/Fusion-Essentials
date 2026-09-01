@@ -9,7 +9,7 @@ import adsk.cam
 app = adsk.core.Application.get()
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import iter_collection, ok, error, safe
 from ._cam_common import get_cam
@@ -148,7 +148,14 @@ tool = (
     .strict_schema()
 )
 
-item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(
+    tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    # comment_before / comment_after (and the name pair) are re-read off the parameter after the
+    # set, so what the payload states as landed is the read-back, never the request.
+    verification=Verification(
+        kind="effect",
+        evidence_test="tests/unit/test_cam_set_nc_comment.py::TestStuckParameter"
+                      "::test_a_stuck_comment_is_published_as_the_program_reads_it"))
 
 
 def register_tool():

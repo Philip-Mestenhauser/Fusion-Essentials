@@ -309,6 +309,60 @@ class TestSaveTemplateRename:
         assert "did not land" in res["message"]
 
 
+# ── cam_apply_template: the setup's OWN operation count is what confirms the apply ───────────────
+#
+# createFromCAMTemplate2 hands back operation objects, and that return is not evidence: an
+# incompatible template can return them while the setup takes none. The count read either side of
+# the call is the read the claim rests on.
+
+
+class _ApplySetup:
+    """The apply target. `adds` is how many operations the template actually lands in it, so
+    adds=0 models the call returning operations the setup never took."""
+
+    def __init__(self, name, adds=1):
+        self.name = name
+        self.applied = []
+        self._adds = adds
+        self._count = 0
+
+    @property
+    def allOperations(self):
+        return SimpleNamespace(count=self._count)
+
+    def createFromCAMTemplate2(self, template_input):
+        self.applied.append(template_input)
+        self._count += self._adds
+        return [SimpleNamespace(name="Op%d" % (i + 1)) for i in range(self._adds)]
+
+
+def _wire_apply(monkeypatch, setup):
+    monkeypatch.setattr(ct, "get_cam", lambda: (SimpleNamespace(), None))
+    monkeypatch.setattr(ct, "_template_library", lambda: (SimpleNamespace(), None))
+    monkeypatch.setattr(ct, "find_setup", lambda cam, name: (setup, [setup.name], None))
+    monkeypatch.setattr(ct, "_find_template_by_name",
+                        lambda lib, loc, name: (_FakeTemplate(name), None))
+
+
+class TestApplyTemplateEffect:
+    def test_a_template_that_adds_no_operation_is_an_error(self, monkeypatch):
+        # The lying return: operations handed back while the setup's count stands still.
+        setup = _ApplySetup("Setup1", adds=0)
+        _wire_apply(monkeypatch, setup)
+        res = ct.apply_template_to_setup_handler(setup="Setup1", template_name="T")
+        assert res["isError"] is True
+        assert "did not increase" in res["message"]
+        assert setup.applied, "the template WAS applied - the count is what convicts the result"
+
+    def test_one_added_operation_clears_the_growth_gate(self, monkeypatch):
+        # The other side of `ops_after <= ops_before`: growth by exactly one is a landed apply.
+        setup = _ApplySetup("Setup1", adds=1)
+        _wire_apply(monkeypatch, setup)
+        out = _payload(ct.apply_template_to_setup_handler(setup="Setup1", template_name="T"))
+        assert out["applied"] is True
+        assert out["operations_added"] == 1 and out["created_count"] == 1
+
+
 # ── cam_delete_template: the guarded, LOCAL-only removal ────────────────────────────────────────
 #
 # The mirror of cam_delete_machine. ONE fake template library serves the resolve, the asset walk,

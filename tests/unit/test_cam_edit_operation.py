@@ -281,6 +281,30 @@ class TestEditOperation:
         assert c["value"] == 3000.0          # the evaluated value
 
 
+class StuckParam(FakeParam):
+    """Accepts the expression assignment and keeps the one it holds - the platform swallow."""
+    @FakeParam.expression.setter
+    def expression(self, v):
+        pass
+
+
+class TestStuckParameter:
+    """A parameter that accepts the assignment and keeps its old expression while still evaluating:
+    changed[].after and .value must be the parameter's own re-read, never the requested text, or
+    the payload launders the request into a result."""
+
+    def test_a_stuck_parameter_publishes_the_reread_not_the_request(self, monkeypatch):
+        _install(monkeypatch,
+                 params={"tool_feedCutting": StuckParam("tool_feedCutting", "1000.")})
+        out = _payload(ce.handler(operation="Adaptive1",
+                                  parameters={"tool_feedCutting": "3000"}))
+        c = out["changed"][0]
+        # the no-op is VISIBLE in the payload: before and after agree and neither is the request
+        assert c["before"] == "1000." and c["after"] == "1000."
+        assert c["after"] != "3000"
+        assert c["value"] == 1000.0
+
+
 class TestSuppression:
     """The WRITE side of Operation.isSuppressed: set, read back, and report what the set cost.
 

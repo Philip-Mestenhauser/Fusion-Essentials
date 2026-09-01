@@ -11,7 +11,7 @@ import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from . import _common
@@ -289,7 +289,15 @@ tool = (
     .add_required_input("geometry")
     .strict_schema()
 )
-item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(
+    tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    # The payload is annotation_record + segments_markup off the created annotation, a null add() is
+    # an error, and a name that did not take is published as the annotation reports it beside a
+    # rename_warning. The format knobs additionally gate inline (_pmi.apply_note_format).
+    verification=Verification(
+        kind="effect",
+        evidence_test="tests/unit/test_pmi_create.py::TestCreate"
+                      "::test_rename_that_does_not_take_is_reported"))
 
 
 def register_tool():

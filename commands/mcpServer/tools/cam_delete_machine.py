@@ -7,7 +7,7 @@ lifecycle. What gets deleted is the library ASSET; this tool reads no setup."""
 import adsk.cam
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe, named_with_remainder
 # The shared CAM substrate: the same machine-library handle and by-name resolver cam_create_machine
@@ -201,8 +201,12 @@ tool = (
             "description": "The resolved machine name again, case-sensitive (safety confirmation; must match)."})
     .strict_schema()
 )
-item = Item.create_tool_item(tool=tool, write="destructive", handler=handler,
-                             run_on_main_thread=True)
+item = Item.create_tool_item(
+    tool=tool, write="destructive", handler=handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_cam_create_machine.py::TestDeleteMachineEffect"
+                      "::test_an_asset_still_listed_after_a_true_delete_is_an_error"))
 
 
 def register_tool():
