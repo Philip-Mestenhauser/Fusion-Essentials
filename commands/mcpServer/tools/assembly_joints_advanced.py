@@ -13,7 +13,7 @@ import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, timeline_health
 from . import _common
@@ -772,8 +772,12 @@ capture_tool = (
         "description": "delete: the captured position's name (exact, case-insensitive; from action='status')."})
     .strict_schema()
 )
-capture_item = Item.create_tool_item(tool=capture_tool, write="write", handler=capture_position_handler,
-                                     run_on_main_thread=True)
+capture_item = Item.create_tool_item(
+    tool=capture_tool, write="write", handler=capture_position_handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_assembly_joints_advanced.py::TestCapturePosition"
+                      "::test_phantom_capture_bites"))
 
 _ASBUILT_DESC = (
                                      "Create an AS-BUILT joint between two occurrences WHERE THEY ALREADY ARE - no joint origins "
@@ -833,8 +837,13 @@ constraint_tool = (
     .add_input_property(*_inputs.units_property(description="Units for 'offset'."))
     .strict_schema()
 )
-constraint_item = Item.create_tool_item(tool=constraint_tool, write="write", handler=assembly_constraint_handler,
-                                        run_on_main_thread=True)
+constraint_item = Item.create_tool_item(
+    tool=constraint_tool, write="write", handler=assembly_constraint_handler,
+    run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_assembly_joints_advanced.py::TestConstraintSolveState"
+                      "::test_failed_solve_is_refused_naming_the_delete_path"))
 
 
 def register_tool():

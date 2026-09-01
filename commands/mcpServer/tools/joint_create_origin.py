@@ -16,7 +16,7 @@ import adsk.fusion
 app = adsk.core.Application.get()
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import apply_rename, error, ok, safe
 from . import _common
@@ -611,7 +611,12 @@ tool = (
     .strict_schema()
 )
 
-item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(
+    tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_joint_create_origin.py::TestBboxCenterHandler"
+                      "::test_wrong_landing_point_errors_and_rolls_back"))
 
 
 def register_tool():

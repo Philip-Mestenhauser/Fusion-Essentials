@@ -10,7 +10,7 @@ import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe
 from . import _common
@@ -213,7 +213,12 @@ motion_link_tool = (
             "description": "joint_two motion per ONE unit of joint_one, in each joint's DISPLAY unit - deg for a rotating DOF, mm for a sliding one (so a slider-to-revolute pair is deg per mm; default 1)."})
     .strict_schema()
 )
-motion_link_item = Item.create_tool_item(tool=motion_link_tool, write="write", handler=handler, run_on_main_thread=True)
+motion_link_item = Item.create_tool_item(
+    tool=motion_link_tool, write="write", handler=handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_joint_motion_link.py::TestValueReadBack"
+                      "::test_a_link_left_holding_a_different_coupling_is_an_error"))
 
 
 def register_tool():

@@ -375,7 +375,12 @@ move_tool = (
     .add_input_property("quiet", {"type": "boolean", "description": "Suppress the jointed_warning when moving a JOINTED occurrence (default false). The warning reminds you to assembly_capture_position the transient pose + assembly_get its health."})
     .strict_schema()
 )
-move_item = Item.create_tool_item(tool=move_tool, write="write", handler=move_handler, run_on_main_thread=True)
+move_item = Item.create_tool_item(
+    tool=move_tool, write="write", handler=move_handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_assembly_transform.py::TestMove"
+                      "::test_move_that_does_not_take_bites"))
 
 _RIGID_DESC = (
 "Lock two or more component occurrences together as a single rigid unit (Rigid Group). "
@@ -388,7 +393,12 @@ rigid_tool = (
     .add_input_property("include_children", {"type": "boolean", "description": "Also include the occurrences' children (default false)."})
     .strict_schema()
 )
-rigid_item = Item.create_tool_item(tool=rigid_tool, write="write", handler=rigid_group_handler, run_on_main_thread=True)
+rigid_item = Item.create_tool_item(
+    tool=rigid_tool, write="write", handler=rigid_group_handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_assembly_transform.py::TestRigidGroup"
+                      "::test_group_reporting_fewer_members_bites"))
 
 
 def register_tool():

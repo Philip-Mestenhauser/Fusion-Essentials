@@ -78,12 +78,6 @@ _EXEMPT = {
     'appearance_set': 'inline: each appearance= assignment is read back and a mismatch is an error or lands in failed; an OCCURRENCE-level write additionally re-reads EVERY body and compares Appearance.id, never the name (measured: same-named appearances are distinct assets, so a name compare calls a body that kept its own color reached) - reached / bodies_not_reached / unverified_bodies are published, and reaching no body while at least one demonstrably kept another is an error',
     'drawing_add_sketch': 'inline: sketches.add() is followed by a per-collection count diff on the created sketch - lines/rectangles/arcs/circles/ellipses - and any collection short of its requested curve count is an error(...) naming what landed and what did not',
     'drawing_edit_sheet': 'inline: Sheets.add() is followed by a re-read of the sheet count and of the name the created sheet REPORTS, the name= / sheetSize= / orientation= sets are each re-read off the sheet and a silent no-op becomes an error(...) naming what it still reports, copy() facts are read off the returned sheet, and tidyUp is gated on the isModified transition publishing modified_confirmed; deleteMe() alone cannot be verified in-call - a drawing delete is invisible inside its own transaction, so the payload publishes the boolean and marks the count a reading, never a verification',
-    'assembly_capture_position': 'inline: snaps.add() is gated and the snapshot count must advance; discard_pending gates revertPendingSnapshot() and re-reads hasPendingSnapshot; delete gates deleteMe() and re-reads the collection for a survivor',
-    'assembly_constrain': 'inline: the created constraint healthState is read after add() - error, warning and an UNREADABLE state all refuse, naming the delete path - plus a timeline-health delta that refuses an add which left other features unhealthy, and a before/after occurrence-transform diff whose moved rows the payload is assembled from',
-    'assembly_edit_relations': 'inline: each acting action gates on a read-back taken after it - the isSuppressed= set is re-read, deleteMe() is followed by a re-list of the kind, the isReversed= set by a re-read, and setMotionData() by the valueOne/valueTwo ratio plus an isReversed= re-read; every flag read-back is sentinelled, so an UNREADABLE flag is refused as UNCONFIRMED, never published as a confirmed False (set_occurrences mutates nothing: the platform refuses the edit, so the action refuses up front)',
-    'assembly_edit_contacts': 'inline: each acting action gates on a read-back taken after it - contactSets.add() is followed by a re-list of the design\'s sets and a member re-read, the occurencesAndBodies= and isSuppressed= and name= sets are each re-read, deleteMe() is followed by a re-list, and the isContactAnalysisEnabled= / isContactSetAnalysis= flags are re-read after assignment',
-    'assembly_move': 'inline: the transform is re-read after the transform2= set; an unchanged pose errors, position is the actual',
-    'assembly_rigid_group': 'inline: rg.occurrences count is read back after add() against the requested member set',
     'cam_activate_setup': 'inline: target.isActive is re-read after activate() and gates the claim',
     'cam_apply_template': 'inline: allOperations is recounted around createFromCAMTemplate2(); no growth is an error',
     'cam_create_operation': 'inline: operations recounted around add(); stale post-launch reads are omitted',
@@ -102,10 +96,6 @@ _EXEMPT = {
     'cam_show_toolpath': 'inline: isLightBulbOn is re-read after every isLightBulbOn= set; failed toggles error or are listed',
     'cam_set_nc_comment': 'inline: each program comment/name expression= write is re-read post-set; before/after is the payload',
     'drawing_create': 'inline: df.id is read back after createDrawing() and a missing file_id authors the specific failure text',
-    'joint_create_origin': 'inline: a computed anchor is read back and rolled back via deleteMe() past 0.001cm error',
-    'joint_drive': 'inline: rotationValue/slideValue are re-read after each rotationValue=/slideValue= set so value_now reports the clamped actual',
-    'joint_edit': 'inline: post-edit computeAll() + a timeline health walk build timeline_errors_after and note',
-    'joint_motion_link': 'inline: setMotionData failure rolls the link back via deleteMe() and authors the ratio error',
     'pmi_create': 'inline: add() returning null is an error and the created annotation is re-read (name/text/markup) into the payload',
     'pmi_delete': 'inline: deleteMe() bool is gated, then the name is re-resolved and isValid re-read; a survivor is an error',
     'pmi_edit': 'inline: each action re-reads its own set (name=, segments=, isLightBulbOn=, annotationTextPoint=) or call (markUpToDate(), convertImportedToFusionPMI()) and gates the claim',
@@ -118,7 +108,7 @@ _EXEMPT = {
 # visible instead of a free exit from the detector. The ceiling is an alarm that UN-RINGS itself:
 # the shrink-only half of the test below forces the number back down the moment a gap closes, so
 # a tool parked here while its evidence is unrecorded cannot quietly stay parked.
-_GAP_CEILING = 3
+_GAP_CEILING = 4
 
 
 def _verification_of(item):

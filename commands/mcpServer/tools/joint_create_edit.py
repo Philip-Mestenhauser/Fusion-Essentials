@@ -13,7 +13,7 @@ import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import apply_rename, error, ok, safe
 from . import _common
@@ -966,7 +966,12 @@ edit_tool = (
     .add_input_property("rest_mm", {"type": "number", "description": "Linear/slide rest value (in 'units') - slider/cylindrical."})
     .strict_schema()
 )
-edit_item = Item.create_tool_item(tool=edit_tool, write="write", handler=edit_handler, run_on_main_thread=True)
+edit_item = Item.create_tool_item(
+    tool=edit_tool, write="write", handler=edit_handler, run_on_main_thread=True,
+    # Only the limits arm re-reads its set (_set_one_limit) and _apply_motion gates on the setter's
+    # bool; the flip/offset/angle/input arms echo the request with no read-back, so a swallowed set
+    # returns a false ok there. That majority-ungated shape is a gap, not inline.
+    verification=Verification(kind="gap", defect_id="JOINT-3"))
 
 
 def register_tool():

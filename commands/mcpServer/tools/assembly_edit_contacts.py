@@ -10,7 +10,7 @@ twice) raises '3 : ContactSetRequest: bad occurrences'.
 import re
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe
 from . import _common
@@ -406,8 +406,12 @@ tool = (
     .add_input_property(*_SCOPE.as_property())
     .strict_schema()
 )
-item = Item.create_tool_item(tool=tool, write="destructive", handler=handler,
-                             run_on_main_thread=True)
+item = Item.create_tool_item(
+    tool=tool, write="destructive", handler=handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_assembly_edit_contacts.py::TestDelete"
+                      "::test_a_survivor_after_a_true_delete_is_an_error"))
 
 
 def register_tool():
