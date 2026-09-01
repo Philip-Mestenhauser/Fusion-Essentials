@@ -11,7 +11,7 @@ import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, scale
 from . import _common
@@ -344,7 +344,11 @@ ground_tool = (
     .add_input_property("ground_to_parent", {"type": "boolean", "description": "Set the parent lock on (true) or off (false)."})
     .strict_schema()
 )
-ground_item = Item.create_tool_item(tool=ground_tool, write="write", handler=ground_handler, run_on_main_thread=True)
+ground_item = Item.create_tool_item(
+    tool=ground_tool, write="write", handler=ground_handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_assembly_transform.py::TestGround::test_stuck_flag_bites"))
 
 _MOVE_DESC = (
 "Move an occurrence by editing its transform - a free reposition with NO joint created (use "

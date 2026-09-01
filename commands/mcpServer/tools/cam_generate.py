@@ -9,7 +9,7 @@ or Fusion abandons the in-progress generation."""
 import time
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe, told_apart
 from . import _outputs
@@ -678,8 +678,12 @@ generate_tool = (
             "description": "Only regenerate out-of-date operations (default true); false forces all in scope."})
     .strict_schema()
 )
-generate_item = Item.create_tool_item(tool=generate_tool, write="write", handler=generate_handler,
-                                       run_on_main_thread=True)
+generate_item = Item.create_tool_item(
+    tool=generate_tool, write="write", handler=generate_handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="deferred", poller="cam_get_status",
+        evidence_test="tests/unit/test_cam_generate.py::TestLaunchHandsOffToTheStatusRead"
+                      "::test_the_launch_claims_no_completion_and_names_the_poller"))
 
 STATUS_DESCRIPTION = (
     "Read toolpath generation progress - generation runs in the background on its own once "

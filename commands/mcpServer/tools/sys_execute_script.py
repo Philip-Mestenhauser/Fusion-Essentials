@@ -23,7 +23,7 @@ import traceback
 import adsk.core
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from . import _drawing_common
 
@@ -278,7 +278,8 @@ tool = Tool.create_with_string_input(
 # the server's 30s task timeout would only report a false failure for a change that applied. Let it
 # run to completion instead. (See _execute_on_main_thread.)
 item = Item.create_tool_item(tool=tool, write="destructive", handler=handler, run_on_main_thread=True,
-                             enforce_timeout=False)
+                             enforce_timeout=False,
+                             verification=Verification(kind="dynamic"))
 
 
 def register_tool():

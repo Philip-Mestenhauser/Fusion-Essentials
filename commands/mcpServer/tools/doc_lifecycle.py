@@ -19,7 +19,7 @@ in _data_common. Every save is tagged with the AI-agent marker via _agent_descri
 import adsk.core
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import counted, iter_collection, ok, error, read_flag, safe
 from . import _assert
@@ -1334,7 +1334,12 @@ _activate_document_tool = (
     ).strict_schema()
 )
 activate_document_item = Item.create_tool_item(
-    tool=_activate_document_tool, write="write", handler=activate_document_handler, run_on_main_thread=True)
+    tool=_activate_document_tool, write="write", handler=activate_document_handler,
+    run_on_main_thread=True,
+    verification=Verification(
+        kind="deferred", poller="doc_get",
+        evidence_test="tests/unit/test_data_management.py::TestActivateDocument"
+                      "::test_activate_async_pending_reports_pending_not_true"))
 
 def register_tool():
     register(copy_document_item)

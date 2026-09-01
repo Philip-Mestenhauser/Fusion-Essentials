@@ -235,6 +235,25 @@ class TestGenerateHandler:
         assert cam.generate_calls[0][0] == "target"
 
 
+# ── the launch hands completion to the status read, and claims none of its own ──────────────────
+
+
+class TestLaunchHandsOffToTheStatusRead:
+    """Generation runs in the background at its own pace once launched, so this call can only
+    report the LAUNCH. The payload therefore names the read that settles completion and mints the
+    handle that read is spent on - and asserts nothing about a toolpath being finished."""
+
+    def test_the_launch_claims_no_completion_and_names_the_poller(self, monkeypatch):
+        gen._GENERATIONS.clear()
+        cam = _FakeCAM([SharedSetup("S", ops=[SharedOp("Face1", operation_state=1)])])
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
+        out = _payload(gen.generate_handler(target=""))
+        assert out["launched"] is True                       # the launch, and only the launch
+        assert "completed" not in out and "generated" not in out
+        assert "cam_get_status" in out["note"]               # where completion IS confirmed
+        assert out["handle"] in gen._GENERATIONS             # the handle that read is spent on
+
+
 # ── status_handler: guards, handle resolution, clamp, stall warning ─────────────────────────────────
 
 class TestStatusHandler:

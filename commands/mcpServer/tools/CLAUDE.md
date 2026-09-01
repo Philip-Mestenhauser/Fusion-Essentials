@@ -96,12 +96,13 @@ return success while changing nothing: `Document.save()` versioning nothing and
   one; a new kind must capture/verify through `safe()` reads and NEVER mutate.
 - Evidence a postcondition reads (size_bytes, stale counts) is folded into the payload via setdefault —
   declare such keys in RETURNS and let the kernel supply them instead of computing them twice.
-- A write tool with NO postconditions needs an entry in `test_postconditions_declared.py`'s
-  `_EXEMPT` table with a one-line audited reason, prefixed by its class: `inline:` (the verify
-  constructs payload fields or error text, so it stays in the handler), `effect:` (the payload's
-  claim IS a live read-back of the mutated state), or `gap:` (no effective read-back exists - a
-  named defect awaiting a fix, not an accepted state). The table only shrinks; a silent omission
-  is not an option.
+- A write tool with NO postconditions declares its verification instead: a closed
+  `verification=` declaration on `Item.create_tool_item` (inline / effect / deferred / external /
+  dynamic / gap - each carrying the reference `test_postconditions_declared.py` RESOLVES: an
+  evidence-test node id, a poller tool, a live-receipt row that records a real observation, or an
+  open ledger defect id; `dynamic` alone carries none, its effect being caller-authored) - or,
+  transitionally, an entry in that lint's `_EXEMPT` table with a one-line audited reason. The
+  table only shrinks; a silent omission is not an option.
 - Verify-the-effect logic that is intrinsically entangled with payload assembly, per-file loops, or
   compensation/rollback may stay in the handler — name that in the exemption reason.
 

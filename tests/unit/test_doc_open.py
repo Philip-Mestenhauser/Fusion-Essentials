@@ -131,3 +131,37 @@ class TestCamTemplateGuard:
         payload = json.loads(res["content"][0]["text"])
         assert payload["refused_api_open"] is True
         assert touched["resolve"] is False
+
+
+# ── the async open hands confirmation to a read tool, and says so only when it must ──────────────
+
+
+class TestAsyncLoadHandoff:
+    """Opening a cloud document is asynchronous: the call can return before the design has loaded
+    and become active, and this handler deliberately does not block Fusion's main thread waiting
+    for it. So the payload publishes the state it READ and hands confirmation to a named read
+    tool - and that handoff sentence is itself a reading, not a fixture: an open that already
+    reads active carries none."""
+
+    def _open(self, monkeypatch, active):
+        opened = type("FakeDoc", (), {"name": "Plain"})()
+        monkeypatch.setattr(od, "_resolve_data_file",
+                            lambda raw: (type("DF", (), {"isConfiguredDesign": False,
+                                                         "name": "Plain"})(), raw, [raw]))
+        monkeypatch.setattr(od, "_open_document", lambda d: (opened, "openUsingContext", None))
+        monkeypatch.setattr(od, "app",
+                            type("A", (), {"activeDocument": opened if active else object()})())
+        res = od.handler(file_id="urn:plain", force_api_open=True)
+        assert res["isError"] is False, res
+        return json.loads(res["content"][0]["text"])
+
+    def test_a_document_not_yet_active_claims_no_load_and_names_the_poller(self, monkeypatch):
+        pending = self._open(monkeypatch, active=False)
+        assert pending["opened"] is True             # the call landed...
+        assert pending["is_active"] is False         # ...and the read says the load has not
+        assert "asynchronous" in pending["note"]
+        assert "workspace_orient" in pending["note"]  # where completion IS confirmed
+        # the twin: once the document reads active there is nothing to hand off, so a note that
+        # shipped either way would be prose rather than the state this call measured.
+        landed = self._open(monkeypatch, active=True)
+        assert landed["is_active"] is True and landed["note"] is None

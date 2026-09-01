@@ -15,7 +15,7 @@ import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, scale, target_component
 from . import _common
@@ -1048,7 +1048,12 @@ construction_tool = (
     .add_input_property("name", {"type": "string", "description": "Name for the datum."})
     .strict_schema()
 )
-construction_item = Item.create_tool_item(tool=construction_tool, write="write", handler=handler, run_on_main_thread=True)
+construction_item = Item.create_tool_item(
+    tool=construction_tool, write="write", handler=handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="effect",
+        evidence_test="tests/unit/test_model_construction.py::TestOffsetReadBack"
+                      "::test_a_mismatched_read_back_errors_naming_both_values"))
 
 
 def register_tool():

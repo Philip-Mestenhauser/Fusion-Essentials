@@ -16,7 +16,7 @@ import threading
 import adsk.core
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error
 
@@ -250,7 +250,9 @@ tool = Tool.create_simple(name="sys_reload_addin", description=TOOL_DESCRIPTION)
 
 # Runs on the main thread, but only to start a timer; the actual reload happens
 # later via the custom event (also main thread).
-item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(
+    tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    verification=Verification(kind="gap", defect_id="RELOAD-1"))
 
 
 def register_tool():

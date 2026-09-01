@@ -156,6 +156,9 @@ _RUN_NEUTRAL = frozenset({tokenize.NL, tokenize.COMMENT, tokenize.INDENT, tokeni
 _ALLOWLIST = {
     "tests/lints/test_generated_docs_current.py:10":
         "'remember to' states the human failure mode this gate compensates for, not an instruction",
+    "tests/lints/test_postconditions_declared.py:268":
+        "the defect ledger's filename is the path that lint OPENS to resolve a gap declaration's "
+        "id - a functional constant, not a pointer into a planning narrative",
     "tests/unit/test_joint_create_origin.py:513":
         "'Phase 2' names a step of the shipped insert-into-template skill, not a transient plan",
 }

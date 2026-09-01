@@ -1,4 +1,5 @@
-"""Lint: every WRITE/DESTRUCTIVE tool declares postconditions - or carries a reasoned exemption.
+"""Lint: every WRITE/DESTRUCTIVE tool is accounted for - a kernel declaration, a verification
+classification, or a reasoned exemption. Exactly one of the three, never two.
 
 The postcondition kernel (tools/_assert.py) is the third kind system: _inputs types what a tool is
 GIVEN, _outputs types what it RETURNS, _assert types what it DID (capture -> mutate -> verify).
@@ -7,17 +8,40 @@ their payload fields or author their error text from a live read-back, so the ve
 where the values it reads feed straight into the response (the _EXEMPT table below is that audit's
 ledger, one line per tool naming which class its inline verification falls into). The kernel
 DECLARATION (``postconditions=[...]``) is for a DETACHABLE effect - one a shared _assert.Postcondition
-kind can capture/verify without touching handler-local payload assembly. This lint makes the choice a
-structural requirement either way: a write tool either passes postconditions=[...] to
-Item.create_tool_item, or appears in _EXEMPT with a one-line audited reason. Entries come and go
-as tools gain or lose postconditions; the gap: COUNT is what only shrinks (_GAP_CEILING below),
-and adding a new write tool here needs the same deliberation as adding a naming-vocabulary verb.
+kind can capture/verify without touching handler-local payload assembly.
+
+The third route is a ``verification=Verification(...)`` classification at registration
+(mcp_primitives/item.py): a closed kind - inline / effect / deferred / external / dynamic / gap -
+carrying STRUCTURED references instead of prose. Every one of them is resolved here rather than
+believed: an ``evidence_test`` node id must name a test file, class and function that exist and
+that no other tool claims; a ``deferred`` poller must be a registered read tool; an ``external``
+``evidence_receipt`` must name a receipt row that RECORDS AN OBSERVATION (a skipped or pending row
+is refused - those record the absence of one); ``dynamic`` reaches exactly one tool; a ``gap``
+carries a defect id that must resolve to an OPEN row of the defect ledger, and counts against the
+same ceiling. The obligation each kind's evidence test carries is stated in Verification's own
+docstring - what this lint checks is that the named test is REAL, not what it asserts.
+
+The trade a declaring tool makes, stated where it is enforced: it gives up the positional
+source-scan below - which re-derives on every run that a read-back FOLLOWS the mutation its reason
+names - for a resolved reference to an evidence test that was mutation-proved to bite at the moment
+of migration. What this lint checks forever after is that the reference stays real.
+
+Entries come and go as tools gain declarations; the gap COUNT is what only shrinks (_GAP_CEILING
+below, counted across both routes), and adding a new write tool here needs the same deliberation
+as adding a naming-vocabulary verb.
 """
 
+import ast
 import inspect
+import os
 import re
+from types import SimpleNamespace
+
+import pytest
 
 from conftest import is_write_tool, load_tool, register_all_tools
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def _postconditions_of(item):
@@ -54,8 +78,6 @@ _EXEMPT = {
     'appearance_set': 'inline: each appearance= assignment is read back and a mismatch is an error or lands in failed; an OCCURRENCE-level write additionally re-reads EVERY body and compares Appearance.id, never the name (measured: same-named appearances are distinct assets, so a name compare calls a body that kept its own color reached) - reached / bodies_not_reached / unverified_bodies are published, and reaching no body while at least one demonstrably kept another is an error',
     'drawing_add_sketch': 'inline: sketches.add() is followed by a per-collection count diff on the created sketch - lines/rectangles/arcs/circles/ellipses - and any collection short of its requested curve count is an error(...) naming what landed and what did not',
     'drawing_edit_sheet': 'inline: Sheets.add() is followed by a re-read of the sheet count and of the name the created sheet REPORTS, the name= / sheetSize= / orientation= sets are each re-read off the sheet and a silent no-op becomes an error(...) naming what it still reports, copy() facts are read off the returned sheet, and tidyUp is gated on the isModified transition publishing modified_confirmed; deleteMe() alone cannot be verified in-call - a drawing delete is invisible inside its own transaction, so the payload publishes the boolean and marks the count a reading, never a verification',
-    'drawing_dimension': 'gap: adsk.drawing has NO dimension entity class, so the dimensions placed cannot be counted, listed or re-read - autoDimension() returning true plus an isModified flip is the whole gate, and it cannot discriminate a document that was already modified',
-    'drawing_insert_image': 'gap: the Images collection exposes only createInput and insert - no count, item or delete - so an inserted image cannot be re-read; insert() returning true plus an isModified flip is the whole gate, and it cannot discriminate a document that was already modified',
     'assembly_capture_position': 'inline: snaps.add() is gated and the snapshot count must advance; discard_pending gates revertPendingSnapshot() and re-reads hasPendingSnapshot; delete gates deleteMe() and re-reads the collection for a survivor',
     'design_edit_timeline': 'inline: rollTo/moveToEnd/isSuppressed=/groups.add/deleteMe/deleteAllAfterMarker each gate on a read-back taken after them - markerPosition plus isRolledBack, isSuppressed, and the group and timeline counts; attributes.add() gates on itemByName plus a value match and publishes previous_value, and the attribute deleteMe() gates on itemByName reading None in the same call, with a RAISING read-back refused as UNCONFIRMED rather than published as a claimed delete',
     'mesh_repair': 'inline: meshRepairFeatures.add() is followed by a re-read of the INPUT mesh (a MeshFeature reports no bodies of its own) - triangle and vertex counts, is_closed and volume - and an unverifiable or unrepaired result is an error(...)',
@@ -66,7 +88,6 @@ _EXEMPT = {
     'assembly_constrain': 'inline: the created constraint healthState is read after add() - error, warning and an UNREADABLE state all refuse, naming the delete path - plus a timeline-health delta that refuses an add which left other features unhealthy, and a before/after occurrence-transform diff whose moved rows the payload is assembled from',
     'assembly_edit_relations': 'inline: each acting action gates on a read-back taken after it - the isSuppressed= set is re-read, deleteMe() is followed by a re-list of the kind, the isReversed= set by a re-read, and setMotionData() by the valueOne/valueTwo ratio plus an isReversed= re-read; every flag read-back is sentinelled, so an UNREADABLE flag is refused as UNCONFIRMED, never published as a confirmed False (set_occurrences mutates nothing: the platform refuses the edit, so the action refuses up front)',
     'assembly_edit_contacts': 'inline: each acting action gates on a read-back taken after it - contactSets.add() is followed by a re-list of the design\'s sets and a member re-read, the occurencesAndBodies= and isSuppressed= and name= sets are each re-read, deleteMe() is followed by a re-list, and the isContactAnalysisEnabled= / isContactSetAnalysis= flags are re-read after assignment',
-    'assembly_ground': 'inline: the isGroundToParent= assignment is re-read (safe) and a flag that did not take is an error',
     'assembly_move': 'inline: the transform is re-read after the transform2= set; an unchanged pose errors, position is the actual',
     'assembly_rigid_group': 'inline: rg.occurrences count is read back after add() against the requested member set',
     'cam_activate_setup': 'inline: target.isActive is re-read after activate() and gates the claim',
@@ -80,7 +101,6 @@ _EXEMPT = {
     'cam_edit_operation': 'inline: params re-read for .error after each expression= set (unevaluated -> rollback+error); the observed value is the payload, and the isSuppressed= set is re-read with hasToolpath on both sides - a flag that did not take, or one that stops reading, is an error(...) rather than a confirmed state',
     'cam_edit_setup': 'inline: params re-read for .error after each expression= set (unevaluated -> rollback+error); machine/stock/fixture/wcs writes each re-read and gated',
     'cam_edit_tools': 'inline: no path trusts an API return - after add()/remove() the library is persisted and RE-READ from its url, and a count that disagrees is an error; the auto-assigned tool numbers are checked twice (off the in-memory tools, then against the set the re-read stored library holds), and an edit or a preset change re-reads the parameter expression and the preset names off that same re-read, since updateTool/updateToolLibrary returning true is evidence of neither - a document-scope target has no url to re-read, so the payload publishes verified_in_memory_only',
-    'cam_generate': 'effect: the launch handle is the effect; cam_get_status confirms completion separately',
     'cam_reorder': 'inline: moveBefore()/moveAfter() bool is read and reported as a named error on false',
     'cam_delete_template': 'inline: deleteAsset() is gated on its own bool, then the LOCAL template library assets are re-walked AND the deleted url re-loaded through templateAtURL - either read still finding the template is an error(...), and a walk that could not answer or did not finish is reported UNCONFIRMED rather than as a delete',
     'cam_save_template': 'inline: the template is re-fetched at new_url (templateAtURL) after importTemplate()',
@@ -100,13 +120,11 @@ _EXEMPT = {
     'design_delete_occurrence': "inline: the primary verify is an ABSENCE re-read - the assembly occurrence-path census is taken before and after deleteMe(), a path still present after it is an error, and a census that never carried the path publishes deleted:null with the unverified note; the timeline-health diff around the same call authors the downstream warning beside it",
     'design_recompute': 'inline: timeline health is diffed around computeAll(); new errors are named in new_errors',
     'design_set_mode': 'inline: designType is re-read (current_design_type) after the designType= assignment and gates the converted claim',
-    'doc_activate': 'activation is ASYNC - is_active cannot be confirmed synchronously (doc_get confirms)',
     'doc_close': 'inline: close() bool per document feeds the closed/errors lists and the combined message',
     'doc_copy': 'inline: post-copy() rename reads copied.name back and authors the rename_warning field',
     'doc_insert_derive': 'inline: healthState/documentReference.isOutOfDate/isDerived and the user-parameter delta are all read back after add() and gate or annotate the payload',
     'doc_insert_occurrence': 'inline: addByInsert() return is gated, the occurrence is checked isValid, and the reference link is verified isReferencedComponent',
     'doc_new': 'creation is its own evidence - the new doc IS the active document the guard stamps',
-    'doc_open': 'open is ASYNC - the note directs to workspace_orient for confirmation',
     'doc_restore_version': 'inline: promote() is gated and a findFileById re-fetch authors the pending/note fields; cloud promote lags',
     'doc_save_as': 'inline: the cloud id is ASYNC; after saveAs() the urn prefix check builds document_id in the handler',
     'doc_update_xref': 'inline: each ref isOutOfDate is re-read after getLatestVersion() or the version= set; a still-stale ref is an error',
@@ -124,7 +142,6 @@ _EXEMPT = {
     'mesh_remesh': 'inline: triangle counts are diffed around add(); an unchanged count is flagged in the payload',
     'mesh_to_brep': 'inline: BRep body tokens are diffed around add() and author the no-body-produced error',
     'model_base_feature': 'inline: startEdit()/finishEdit() bools are checked; a failed start deletes the orphan scope',
-    'model_construction': 'effect: the created datum name + its real geometry (normal/direction/position, read back per kind) are live; construction geometry has no healthState',
     'model_create_component': 'inline: rename mismatch is read back as name_warning; activate() bool reported as-is',
     'model_set_material': 'inline: each body material= assignment is read back by name; mismatches land in failed, all-fail errors',
     'model_shell': 'inline: body volume/faces are diffed around add(); an unchanged body is an error',
@@ -132,8 +149,6 @@ _EXEMPT = {
     'model_sweep': 'inline: a new-body sweep via add() with no result bodies is an error; is_solid drives the note',
     'param_add': 'inline: timeline health is diffed before/after; a regression rolls back via deleteMe()',
     'param_delete': 'inline: timeline health is diffed around deleteMe() and a regression is a named error',
-    'param_set': 'inline: the summary is re-read after the expression= set; unchanged-with-a-new-expression is an error',
-    'param_set_favorite': 'effect: the payload favorite field IS the live isFavorite re-read after the set',
     'pmi_create': 'inline: add() returning null is an error and the created annotation is re-read (name/text/markup) into the payload',
     'pmi_delete': 'inline: deleteMe() bool is gated, then the name is re-resolved and isValid re-read; a survivor is an error',
     'pmi_edit': 'inline: each action re-reads its own set (name=, segments=, isLightBulbOn=, annotationTextPoint=) or call (markUpToDate(), convertImportedToFusionPMI()) and gates the claim',
@@ -153,9 +168,6 @@ _EXEMPT = {
     'surface_delete_face': 'inline: face counts are diffed around the features add() and author bodies_consumed and the warning',
     'surface_reverse_normal': 'inline: isParamReversed counts are diffed around add() into reversed_confirmed',
     'surface_untrim': 'inline: face area is diffed around add() into extent_grew and the conditional note',
-    'sys_execute_script': 'arbitrary user code - there is no declared effect to verify',
-    'sys_reload_addin': 'restarts the server itself - nothing left in-process to verify',
-    'sys_request_selection': 'effect is a user interaction, not a model mutation',
     'view_screenshot': 'inline: the only mutation is the optional file_path PNG - fh.write() is followed by _export.verify_written on the landed path, and an absent or zero-byte file becomes an error(...) that suppresses the inline image; the kernel cannot see it either way, since this tool returns image/text content blocks rather than an ok() payload',
     'view_set': 'camera/visibility state actions - inline read-backs; not model mutations',
     'view_section': 'section analyses are view state; clear() has inline count read-back',
@@ -163,23 +175,41 @@ _EXEMPT = {
 }
 
 
-# The measured gap: count. Shrink-only: closing a gap (an inline gate or a kernel kind lands)
-# lowers it; raising it means a NEW tool shipped with no effective read-back, which is a
-# deliberate decision this number makes visible instead of a free exit from the detector.
-_GAP_CEILING = 2
+# The measured gap count, over BOTH routes (a 'gap:' _EXEMPT reason and a kind="gap" declaration).
+# Shrink-only: closing a gap (an inline gate or a kernel kind lands) lowers it; raising it means a
+# NEW tool shipped with no effective read-back, which is a deliberate decision this number makes
+# visible instead of a free exit from the detector. The ceiling is an alarm that UN-RINGS itself:
+# the shrink-only half of the test below forces the number back down the moment a gap closes, so
+# a tool parked here while its evidence is unrecorded cannot quietly stay parked.
+_GAP_CEILING = 3
+
+
+def _verification_of(item):
+    """The registration's verification classification, or None (mcp_primitives/item.py)."""
+    return getattr(item, "verification", None)
+
+
+def _gap_tools(items):
+    """Every tool whose accounting says its effect cannot be verified, from either route."""
+    gaps = {t for t, r in _EXEMPT.items() if r.startswith("gap:")}
+    for it in items:
+        v = _verification_of(it)
+        if v is not None and v.kind == "gap":
+            gaps.add(it.get_name())
+    return sorted(gaps)
 
 
 class TestPostconditionsDeclared:
     def test_the_gap_count_only_shrinks(self):
-        gaps = sorted(t for t, r in _EXEMPT.items() if r.startswith("gap:"))
+        gaps = _gap_tools(register_all_tools())
         assert len(gaps) <= _GAP_CEILING, (
-            f"{len(gaps)} gap: exemptions exceed the ceiling of {_GAP_CEILING}. A gap: entry is a "
-            "tool whose success cannot be verified at all - adding one is a deliberate decision: "
-            "raise _GAP_CEILING in the same diff with the new tool's named defect, or give the "
-            "tool a real read-back.\n  " + "\n  ".join(gaps))
+            f"{len(gaps)} gap entries exceed the ceiling of {_GAP_CEILING}. A gap is a tool whose "
+            "success cannot be verified at all - adding one is a deliberate decision: raise "
+            "_GAP_CEILING in the same diff with the new tool's named defect, or give the tool a "
+            "real read-back.\n  " + "\n  ".join(gaps))
         if len(gaps) < _GAP_CEILING:
             raise AssertionError(
-                f"only {len(gaps)} gap: exemptions remain - lower _GAP_CEILING to {len(gaps)} to "
+                f"only {len(gaps)} gap entries remain - lower _GAP_CEILING to {len(gaps)} to "
                 "lock the win in:\n  " + "\n  ".join(gaps))
 
     def test_every_write_tool_declares_or_is_exempt(self):
@@ -189,26 +219,19 @@ class TestPostconditionsDeclared:
                 continue                      # read tools mutate nothing to verify
             if _postconditions_of(it):
                 continue
+            if _verification_of(it) is not None:
+                continue
             if it.get_name() in _EXEMPT:
                 continue
             missing.append(it.get_name())
         assert not missing, (
-            "write tools with neither postconditions=[...] nor a reasoned _EXEMPT entry:\n  "
-            + "\n  ".join(sorted(missing)))
+            "write tools with none of postconditions=[...], verification=Verification(...) or a "
+            "reasoned _EXEMPT entry:\n  " + "\n  ".join(sorted(missing)))
 
     def test_exemptions_only_name_real_undeclared_write_tools(self):
-        # a stale exemption (tool removed, renamed, or since migrated) must be deleted, not linger.
         items = {it.get_name(): it for it in register_all_tools()}
-        stale = []
-        for name in _EXEMPT:
-            it = items.get(name)
-            if it is None:
-                stale.append(f"{name} (no such tool)")
-                continue
-            if not is_write_tool(it):
-                stale.append(f"{name} (not a write tool)")
-            elif _postconditions_of(it):
-                stale.append(f"{name} (already migrated - drop the exemption)")
+        stale = [f"{name} ({why})" for name in _EXEMPT
+                 if (why := _accounting_conflict(items.get(name), name))]
         assert not stale, "stale _EXEMPT entries:\n  " + "\n  ".join(stale)
 
     def test_declared_postconditions_are_postcondition_kinds(self):
@@ -218,6 +241,337 @@ class TestPostconditionsDeclared:
             for p in posts or []:
                 assert isinstance(p, kernel.Postcondition), (
                     f"{it.get_name()}: postconditions must be _assert.Postcondition kinds, got {type(p)}")
+
+
+# ── the verification classification - every structured reference is RESOLVED, never believed ─────
+#
+# A declaration names a pytest node id, a poller tool, a live receipt row or a defect id. Each is
+# looked up against the thing it points at, so a test deleted or renamed out from under a tool
+# fails HERE rather than leaving a claim nobody can spend. A node id is resolved by PARSING its
+# file with ast - neither importing the test module nor running pytest's collection, so a
+# reference costs one parse and a broken one cannot take the lint down with it.
+
+_DYNAMIC_TOOL = "sys_execute_script"          # the one caller-authored effect (the script hatch)
+_NODE_ID = re.compile(r"^tests/[\w/]+\.py(?:::\w+){1,2}$")
+_RECEIPT_REF = re.compile(r"^tests/live/[\w.]+\.md#\w+$")
+_DEFECT_ID = re.compile(r"^[A-Z][A-Z0-9]*-\d+$")
+# A receipt bucket that records the ABSENCE of an observation. A reference to one of these names a
+# row that exists but proves nothing, which is what a gap is for (the receipt's own header classes
+# a skipped row "Not verified - excused").
+_EMPTY_BUCKETS = ("skipped", "pending")
+# An OPEN row of the defect ledger: an unticked checkbox opening the line, then the id.
+_OPEN_ROW = r"^- \[ \] {id}\b"
+# The defect ledger's filename under plans/, as ONE literal both the resolver and its bite fixture
+# spend. The file is UNTRACKED (the plans tree is gitignored), so it is present on a working
+# machine and absent from a clean checkout - which is why the gap-id check skips rather than
+# passes when it cannot find it.
+_LEDGER_NAME = "fix-backlog.md"
+
+
+def _resolve_node_id(node_id):
+    """'' when the node id resolves to a real test, else why it does not.
+
+    Resolves '<file>.py::test_x' and '<file>.py::TestClass::test_x' by PARSING the file: the class
+    is looked up at module level and the test function inside it, so a renamed or deleted test is
+    a miss rather than a claim that still reads well."""
+    if not _NODE_ID.match(node_id):
+        return "not a 'tests/<file>.py::[Class::]test_name' node id"
+    parts = node_id.split("::")
+    path = os.path.join(REPO_ROOT, *parts[0].split("/"))
+    if not os.path.isfile(path):
+        return f"no such test file: {parts[0]}"
+    with open(path, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read(), filename=path)
+    body, where = tree.body, parts[0]
+    if len(parts) == 3:
+        cls = next((n for n in tree.body
+                    if isinstance(n, ast.ClassDef) and n.name == parts[1]), None)
+        if cls is None:
+            return f"{parts[0]} defines no class {parts[1]}"
+        body, where = cls.body, f"{parts[0]}::{parts[1]}"
+    fn = parts[-1]
+    if not any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == fn
+               for n in body):
+        return f"{where} defines no test named {fn}"
+    return ""
+
+
+def _resolve_receipt(ref):
+    """'' when the reference names a receipt row that records an OBSERVATION, else why it does not.
+
+    The row must be a real TABLE row - the tool named in the first cell, not merely mentioned in
+    the file's prose - and its bucket cell must not be one of _EMPTY_BUCKETS: a skipped or pending
+    row says the tool was not driven, so pointing a verification at it would cite the absence of
+    evidence as evidence."""
+    if not _RECEIPT_REF.match(ref):
+        return "not a 'tests/live/<receipt>.md#<tool>' reference"
+    rel, _, anchor = ref.partition("#")
+    path = os.path.join(REPO_ROOT, *rel.split("/"))
+    if not os.path.isfile(path):
+        return f"no such receipt: {rel}"
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    row = re.search(r"^\|\s*" + re.escape(anchor) + r"\s*\|([^|]*)\|", text, re.M)
+    if row is None:
+        return f"{rel} carries no row for '{anchor}'"
+    bucket = row.group(1).strip().lower()
+    if bucket.startswith(_EMPTY_BUCKETS):
+        return (f"{rel}'s row for '{anchor}' reads '{row.group(1).strip()}' - it records no "
+                "observation, so it is not evidence of anything")
+    return ""
+
+
+def _resolve_defect(defect_id):
+    """'' when the defect id is well shaped AND opens a row of the defect ledger, else why it does not.
+
+    Returns None - not a verdict - when the ledger file is absent, which the caller turns into a
+    visible skip. A well-shaped id that no ledger carries is exactly the shape this exists to
+    catch, so answering '' on a missing file would pass the mutant it was written for."""
+    if not _DEFECT_ID.match(defect_id or ""):
+        return f"{defect_id!r} is not a ledger id like 'DRAW-1'"
+    path = os.path.join(REPO_ROOT, "plans", _LEDGER_NAME)
+    if not os.path.isfile(path):
+        return None
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    if not re.search(_OPEN_ROW.format(id=re.escape(defect_id)), text, re.M):
+        return f"the defect ledger carries no OPEN row for {defect_id}"
+    return ""
+
+
+def _accounting_conflict(item, name):
+    """Why an _EXEMPT row for `name` is stale, or '' when that row is the tool's ONLY account.
+
+    A tool accounted for twice is a tool whose two accounts can disagree, so a declaration of
+    either kind retires the row rather than sitting beside it."""
+    if item is None:
+        return "no such tool"
+    if not is_write_tool(item):
+        return "not a write tool"
+    if _postconditions_of(item):
+        return "double-accounted: postconditions=[...] - drop the exemption"
+    if _verification_of(item) is not None:
+        return "double-accounted: verification=Verification(...) - drop the exemption"
+    return ""
+
+
+def _poller_problem(items, poller_name):
+    """Why a deferred declaration's named poller cannot confirm the effect, or ''."""
+    poller = items.get(poller_name)
+    if poller is None:
+        return f"poller '{poller_name}' is not a registered tool"
+    if is_write_tool(poller):
+        return f"poller '{poller_name}' is a write, not a read that confirms"
+    return ""
+
+
+def _fake_item(name, write=True, posts=None, verification=None):
+    """A registered Item's shape as the checks above read it: the name, the write annotation, the
+    handler wrapper chain, the declaration. Doctoring one is how the registry-side detectors are
+    self-tested - the real registry offers no way to stage a conflict."""
+    def handler(**kwargs):
+        return None
+    if posts is not None:
+        handler.__assert_postconditions__ = posts
+    return SimpleNamespace(
+        get_name=lambda: name, handler=handler, verification=verification,
+        primitive=SimpleNamespace(annotations=SimpleNamespace(read_only=not write)))
+
+
+def _duplicate_evidence_claims(items):
+    """node id -> the tools claiming it, for every node id claimed more than once."""
+    claimed = {}
+    for it in items:
+        v = _verification_of(it)
+        if v is None or not v.evidence_test:
+            continue
+        claimed.setdefault(v.evidence_test, []).append(it.get_name())
+    return {node: sorted(tools) for node, tools in claimed.items() if len(tools) > 1}
+
+
+class TestVerificationDeclarations:
+    """The declaration side: a closed kind whose every reference resolves."""
+
+    def test_every_declaration_is_a_verification_kind(self):
+        items = register_all_tools()        # also bootstraps the mcpServer package path
+        from mcpServer.mcp_primitives.item import Verification
+        wrong = []
+        for it in items:
+            v = _verification_of(it)
+            if v is None:
+                continue
+            if not isinstance(v, Verification):
+                wrong.append(f"{it.get_name()}: {type(v)}")
+            elif v.kind not in Verification.KINDS:
+                wrong.append(f"{it.get_name()}: kind {v.kind!r}")
+        assert not wrong, ("verification= must be a Verification kind from the closed set "
+                           f"{list(Verification.KINDS)}:\n  " + "\n  ".join(wrong))
+
+    def test_every_declared_evidence_test_resolves(self):
+        broken = []
+        for it in register_all_tools():
+            v = _verification_of(it)
+            if v is None or not v.evidence_test:
+                continue
+            why = _resolve_node_id(v.evidence_test)
+            if why:
+                broken.append(f"{it.get_name()} -> {v.evidence_test}: {why}")
+        assert not broken, (
+            "these tools name an evidence_test that does not resolve - the test was renamed, moved "
+            "or deleted, so the declaration claims a proof nobody can run. Point the declaration at "
+            "the test that now carries the obligation, or write one:\n  " + "\n  ".join(broken))
+
+    def test_no_evidence_test_is_claimed_by_two_tools(self):
+        shared = _duplicate_evidence_claims(register_all_tools())
+        assert not shared, (
+            "one test cannot carry two tools' obligations - each needs its own biting proof:\n  "
+            + "\n  ".join(f"{node}: {', '.join(t)}" for node, t in sorted(shared.items())))
+
+    def test_a_deferred_declaration_names_a_registered_read_tool_as_its_poller(self):
+        items = {it.get_name(): it for it in register_all_tools()}
+        bad = []
+        for name, it in items.items():
+            v = _verification_of(it)
+            if v is None or v.kind != "deferred":
+                continue
+            why = _poller_problem(items, v.poller)
+            if why:
+                bad.append(f"{name} -> {why}")
+        assert not bad, ("a deferred effect is confirmed by a NAMED read tool the payload sends "
+                         "the caller to:\n  " + "\n  ".join(sorted(bad)))
+
+    def test_an_external_receipt_names_a_row_of_a_live_receipt(self):
+        broken = []
+        for it in register_all_tools():
+            v = _verification_of(it)
+            if v is None or not v.evidence_receipt:
+                continue
+            why = _resolve_receipt(v.evidence_receipt)
+            if why:
+                broken.append(f"{it.get_name()} -> {v.evidence_receipt}: {why}")
+        assert not broken, ("an evidence_receipt points at the receipt row that carries the tool's "
+                            "live evidence:\n  " + "\n  ".join(broken))
+
+    def test_dynamic_reaches_only_the_script_hatch(self):
+        others = sorted(it.get_name() for it in register_all_tools()
+                        if (_verification_of(it) is not None
+                            and _verification_of(it).kind == "dynamic"
+                            and it.get_name() != _DYNAMIC_TOOL))
+        assert not others, (
+            f"kind='dynamic' says the requested effect is CALLER-AUTHORED, which is true of "
+            f"{_DYNAMIC_TOOL} alone - every other tool declares its own effect and can be held to "
+            "it. A second consumer is a redesign decision, not a classification:\n  "
+            + "\n  ".join(others))
+
+    def test_a_gap_declaration_resolves_to_an_open_ledger_row(self):
+        bad, unresolvable = [], []
+        for it in register_all_tools():
+            v = _verification_of(it)
+            if v is None or v.kind != "gap":
+                continue
+            why = _resolve_defect(v.defect_id)
+            if why is None:
+                unresolvable.append(f"{it.get_name()} -> {v.defect_id}")
+            elif why:
+                bad.append(f"{it.get_name()} -> {why}")
+        assert not bad, ("a gap names the id of a defect the defect ledger still carries OPEN, so an "
+                         "unverifiable tool is tracked where it can be closed:\n  "
+                         + "\n  ".join(sorted(bad)))
+        if unresolvable:
+            pytest.skip(
+                "the defect ledger is not in this checkout, so these gap ids could not be resolved: "
+                + ", ".join(sorted(unresolvable)) + ". The ledger is untracked (the plans tree is "
+                "gitignored) and lives on the working machine, so a clean checkout cannot see it - "
+                "this check SKIPS visibly there rather than passing on a file it never opened. Run "
+                "it where the ledger is present.")
+
+    def test_the_reference_resolvers_bite(self, tmp_path, monkeypatch):
+        # Each resolver must FAIL on the shapes it exists to catch, or a renamed test keeps its
+        # declaration green. Checked against a real file, not just malformed strings.
+        probe = tmp_path / "tests" / "unit"
+        probe.mkdir(parents=True)
+        (probe / "test_probe.py").write_text(
+            "class TestThing:\n    def test_real(self):\n        pass\n\n\ndef test_loose():\n"
+            "    pass\n", encoding="utf-8")
+        import test_postconditions_declared as mod
+        monkeypatch.setattr(mod, "REPO_ROOT", str(tmp_path))
+        assert _resolve_node_id("tests/unit/test_probe.py::TestThing::test_real") == ""
+        assert _resolve_node_id("tests/unit/test_probe.py::test_loose") == ""
+        assert "defines no test" in _resolve_node_id(
+            "tests/unit/test_probe.py::TestThing::test_renamed")
+        assert "defines no class" in _resolve_node_id(
+            "tests/unit/test_probe.py::TestGone::test_real")
+        assert "no such test file" in _resolve_node_id("tests/unit/test_absent.py::test_real")
+        # a method is not reachable as a module-level test, and a loose one is not in the class
+        assert "defines no test" in _resolve_node_id("tests/unit/test_probe.py::test_real")
+        assert "defines no test" in _resolve_node_id(
+            "tests/unit/test_probe.py::TestThing::test_loose")
+        assert "node id" in _resolve_node_id("test_probe.py::test_real")
+        assert "node id" in _resolve_node_id("tests/unit/test_probe.py")
+        live = tmp_path / "tests" / "live"
+        live.mkdir()
+        (live / "R.md").write_text(
+            "The run drove doc_save and mesh_export end to end.\n"
+            "| model_extrude | covered | volume delta read back |\n"
+            "| sys_reload_addin | skipped: restarts the server mid-sweep |  |\n"
+            "| cam_post | pending |  |\n", encoding="utf-8")
+        assert _resolve_receipt("tests/live/R.md#model_extrude") == ""
+        # a bucket that records the ABSENCE of an observation is not evidence of one
+        assert "records no observation" in _resolve_receipt("tests/live/R.md#sys_reload_addin")
+        assert "records no observation" in _resolve_receipt("tests/live/R.md#cam_post")
+        # named in the file's PROSE but in no table row - a mention is not a recorded run
+        assert "carries no row" in _resolve_receipt("tests/live/R.md#doc_save")
+        assert "no such receipt" in _resolve_receipt("tests/live/Absent.md#doc_save")
+        assert "reference" in _resolve_receipt("tests/live/R.md")
+        # the defect ledger: an OPEN row resolves, a closed one and an absent one do not, and a
+        # ledger this checkout does not carry answers None so the caller can SKIP visibly
+        assert _resolve_defect("DRAW-1") is None          # no ledger under the patched root yet
+        plans = tmp_path / "plans"
+        plans.mkdir()
+        (plans / _LEDGER_NAME).write_text(
+            "- [ ] DRAW-1 (the audited drawing_dimension gap) no dimension entity class.\n"
+            "- [x] OLD-9 (closed) the read-back landed.\n"
+            "- [ ] DRAW-10 a neighbour whose id merely starts the same way.\n",
+            encoding="utf-8")
+        assert _resolve_defect("DRAW-1") == ""
+        assert _resolve_defect("DRAW-10") == ""
+        assert "no OPEN row" in _resolve_defect("OLD-9")        # ticked is closed, not open
+        assert "no OPEN row" in _resolve_defect("DRAW-2")       # well shaped, in no ledger row
+        assert "not a ledger id" in _resolve_defect("draw-1")   # lowercase is not an id
+        assert "not a ledger id" in _resolve_defect("DRAW1")
+        assert "not a ledger id" in _resolve_defect(None)
+
+    def test_the_registry_detectors_bite(self):
+        # The three checks that read the REGISTRY rather than a file, driven through the real
+        # helpers on doctored items - each one live-proved on a real state, and self-covered here
+        # so a helper rewritten to always answer clean cannot pass silently.
+        from mcpServer.mcp_primitives.item import Verification
+        node = "tests/unit/test_probe.py::TestThing::test_real"
+        clean = _fake_item("model_extrude")
+        assert _accounting_conflict(clean, "model_extrude") == ""
+        assert "no such tool" in _accounting_conflict(None, "gone_tool")
+        assert "not a write tool" in _accounting_conflict(_fake_item("design_get", write=False),
+                                                          "design_get")
+        assert "postconditions" in _accounting_conflict(
+            _fake_item("doc_save", posts=["a postcondition"]), "doc_save")
+        # the double-accounting the pilot exists to prevent: an _EXEMPT row beside a declaration
+        declared = _fake_item("param_set",
+                              verification=Verification(kind="inline", evidence_test=node))
+        assert "double-accounted" in _accounting_conflict(declared, "param_set")
+
+        items = {"doc_get": _fake_item("doc_get", write=False), "doc_save": _fake_item("doc_save")}
+        assert _poller_problem(items, "doc_get") == ""
+        assert "not a registered tool" in _poller_problem(items, "doc_get_status")
+        assert "is a write" in _poller_problem(items, "doc_save")
+
+        one_each = [_fake_item("a", verification=Verification(kind="inline", evidence_test=node)),
+                    _fake_item("b", verification=Verification(kind="effect",
+                                                              evidence_test=node + "_other")),
+                    _fake_item("c", verification=Verification(kind="dynamic"))]
+        assert _duplicate_evidence_claims(one_each) == {}
+        shared = one_each[:1] + [_fake_item("d", verification=Verification(kind="effect",
+                                                                          evidence_test=node))]
+        assert _duplicate_evidence_claims(shared) == {node: ["a", "d"]}
 
 
 # ── the inline: shape check - an 'inline:' claim is machine-checked, not taken on faith ─────────

@@ -24,7 +24,7 @@ import adsk.core
 app = adsk.core.Application.get()
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import (ok, error, safe, iter_collection, measured, design as _active_design,
                       design_wide_counts)
@@ -720,8 +720,13 @@ request_tool = (
     .add_input_property(*_write_guard.EXPECT_DOCUMENT_PROP)
     .strict_schema()
 )
-request_item = Item.create_tool_item(tool=request_tool, write=None, handler=request_user_selection_handler,
-                                     run_on_main_thread=False)
+request_item = Item.create_tool_item(
+    tool=request_tool, write=None, handler=request_user_selection_handler,
+    run_on_main_thread=False,
+    verification=Verification(
+        kind="external",
+        evidence_test="tests/unit/test_sys_selection.py::TestRequestSelectionCompletedPick"
+                      "::test_pick_during_wait_returns_handle_and_classification_in_one_call"))
 
 _REQUIRE_KINDS = ("face", "edge", "vertex", "body", "component")
 

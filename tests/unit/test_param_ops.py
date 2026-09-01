@@ -437,6 +437,26 @@ class TestFavoriteHandler:
         assert res["isError"] is True
         assert "Provide 'name'" in res["message"]
 
+    def test_a_stuck_flag_is_published_as_it_reads_not_as_asked(self, monkeypatch):
+        # The payload's 'favorite' IS the post-write re-read, so an assignment the platform
+        # swallows shows up as the flag that is actually there. A payload echoing the REQUEST
+        # would report true over a parameter nothing was set on.
+        class StuckFavorite(FakeParam):
+            @property
+            def isFavorite(self):
+                return False
+
+            @isFavorite.setter
+            def isFavorite(self, v):
+                pass                                    # silently ignores the assignment
+
+        p = StuckFavorite("PartX", "10 mm")
+        design = FakeParamsDesign(FakeUserParams([p]), FakeTimeline([]))
+        _stub_design(monkeypatch, design)
+        out = _payload(params.favorite_handler(name="PartX", favorite=True))
+        assert out["favorite"] is False                 # the no-op is visible in the payload
+        assert out["name"] == "PartX"
+
 
 # ── param_get handler (read path) ──────────────────────────────────────────
 

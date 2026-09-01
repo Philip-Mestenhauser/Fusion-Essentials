@@ -3,9 +3,79 @@
 #
 # Adapted from Autodesk's Fusion MCP add-in sample (MIT-licensed).
 
-"""MCP Item wrapper that bundles a primitive (Tool) with its handler."""
+"""MCP Item wrapper that bundles a primitive (Tool) with its handler, plus the Verification kind a
+write declares when no postcondition kernel captures how its effect is proven."""
 
 from .tool import Tool
+
+
+class Verification:
+    """How a WRITE tool's effect is verified, where no kernel postcondition captures it.
+
+    A closed classification passed to ``Item.create_tool_item(verification=...)``: mutually
+    exclusive with ``postconditions=[...]`` (the kernel declaration is the stronger one) and
+    refused on a read, which mutates nothing to verify. It is DATA - the reasoning lives in the
+    evidence test each declaration names, never in prose here.
+
+      inline    the handler re-reads the requested effect and errors on a mismatch
+      effect    the success payload is built from the live post-write state
+      deferred  the effect lands asynchronously; a NAMED poller read tool confirms completion
+      external  the effect is outside the design state (a user interaction, server lifecycle)
+      dynamic   the requested effect is caller-authored (the script hatch)
+      gap       no adequate verification exists; carries the ledger id of the recorded defect
+
+    ``evidence_test`` is a pytest node id whose test proves the classification's obligation;
+    ``poller`` names the read tool a deferred payload sends the caller to; ``evidence_receipt``
+    points at the live receipt row for an effect no in-process test can observe; ``defect_id`` is
+    the ledger id a gap carries. tests/lints/test_postconditions_declared.py resolves each of them
+    against the test tree, the registry and the receipt.
+    """
+
+    KINDS = ("inline", "effect", "deferred", "external", "dynamic", "gap")
+
+    _FIELD_NAMES = ("evidence_test", "poller", "evidence_receipt", "defect_id")
+    # kind -> (fields it REQUIRES, fields it PERMITS)
+    _FIELDS = {
+        "inline": (("evidence_test",), ("evidence_test",)),
+        "effect": (("evidence_test",), ("evidence_test",)),
+        "deferred": (("evidence_test", "poller"), ("evidence_test", "poller")),
+        "external": ((), ("evidence_test", "evidence_receipt")),
+        "dynamic": ((), ()),
+        "gap": (("defect_id",), ("defect_id",)),
+    }
+
+    __slots__ = _FIELD_NAMES + ("kind",)
+
+    def __init__(self, kind: str, evidence_test: str = None, poller: str = None,
+                 evidence_receipt: str = None, defect_id: str = None):
+        if kind not in self.KINDS:
+            raise ValueError(f"verification kind must be one of {list(self.KINDS)}, got {kind!r}")
+        given = dict(zip(self._FIELD_NAMES,
+                         (evidence_test, poller, evidence_receipt, defect_id)))
+        required, permitted = self._FIELDS[kind]
+        for field, value in given.items():
+            if value is None:
+                continue
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"verification {field} must be a non-empty string, got {value!r}")
+            if field not in permitted:
+                raise ValueError(f"verification kind '{kind}' takes no {field}")
+        missing = [f for f in required if given[f] is None]
+        if missing:
+            raise ValueError(f"verification kind '{kind}' requires {', '.join(missing)}")
+        # An external effect proves itself in process or through a named live receipt - one
+        # channel, declared. Neither means no observable completion proof, which is a gap.
+        if kind == "external" and (evidence_test is None) == (evidence_receipt is None):
+            raise ValueError("verification kind 'external' declares exactly one of evidence_test "
+                             "(an in-process proof) or evidence_receipt (a live receipt row)")
+        self.kind = kind
+        for field, value in given.items():
+            setattr(self, field, value)
+
+    def __repr__(self) -> str:
+        parts = [f"kind={self.kind!r}"] + [f"{f}={getattr(self, f)!r}"
+                                           for f in self._FIELD_NAMES if getattr(self, f)]
+        return f"Verification({', '.join(parts)})"
 
 
 class Item:
@@ -17,7 +87,7 @@ class Item:
     """
 
     def __init__(self, primitive: Tool, handler: callable, run_on_main_thread: bool = True,
-                 enforce_timeout: bool = True):
+                 enforce_timeout: bool = True, verification: 'Verification' = None):
         if not isinstance(primitive, Tool):
             raise ValueError("Primitive must be a Tool instance")
         if not callable(handler):
@@ -31,6 +101,8 @@ class Item:
         # (e.g. sys_execute_script) - timing those out would report a false failure for a change
         # that actually applied. Default True keeps the safety timeout for everything else.
         self.enforce_timeout = enforce_timeout
+        # Registry-side metadata only: it never reaches to_dict(), so nothing here crosses the wire.
+        self.verification = verification
 
     def get_name(self) -> str:
         return self.primitive.name
@@ -50,7 +122,8 @@ class Item:
     @classmethod
     def create_tool_item(cls, tool: Tool, handler: callable, run_on_main_thread: bool = True,
                          enforce_timeout: bool = True, write: str = None,
-                         postconditions: list = None) -> 'Item':
+                         postconditions: list = None,
+                         verification: 'Verification' = None) -> 'Item':
         """Build a tool Item. ``write`` declares the tool's write-status, applied to the tool's
         annotations (readOnlyHint / destructiveHint) so the server reports it as structured data:
           'read'        -> read-only (does not modify state)
@@ -65,6 +138,22 @@ class Item:
             tool.writes(destructive=True)
         elif write is not None:
             raise ValueError(f"write must be 'read'/'write'/'destructive', got {write!r}")
+        # VERIFICATION CLASSIFICATION: how a write with no kernel postcondition proves its effect
+        # (see Verification). Registry metadata, resolved by the postcondition lint - it changes
+        # neither the handler nor the wire. Read the annotation the tool just declared rather than
+        # the `write` argument: a tool that wires its own guard passes write=None (sys_selection).
+        if verification is not None:
+            if not isinstance(verification, Verification):
+                raise ValueError(f"verification on '{tool.name}' must be a Verification kind, got "
+                                 f"{type(verification)}")
+            if postconditions:
+                raise ValueError(f"'{tool.name}' declares postconditions AND a verification "
+                                 "classification - the kernel declaration is the stronger one and "
+                                 "the two are mutually exclusive")
+            ann = tool.annotations
+            if ann is None or ann.read_only is not False:
+                raise ValueError(f"verification declared on a non-write tool '{tool.name}' - a "
+                                 "read mutates nothing to verify")
         # WRITE-DOCUMENT BINDING (the concurrency guard): a write can land on the WRONG document if the
         # active doc moved since the agent's read (async open / a human switching tabs). Wrap every
         # write/destructive handler with the shared guard - it accepts an optional expect_document
@@ -92,4 +181,4 @@ class Item:
             from ..tools import _write_guard
             handler = _write_guard.wrap_read(handler)
         return cls(primitive=tool, handler=handler, run_on_main_thread=run_on_main_thread,
-                   enforce_timeout=enforce_timeout)
+                   enforce_timeout=enforce_timeout, verification=verification)

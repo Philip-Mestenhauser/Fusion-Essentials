@@ -10,7 +10,7 @@ multi-reference CAM template.
 import adsk.core
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from ._data_common import _b64url_decode, _urn_candidates, _resolve_data_file
@@ -151,7 +151,12 @@ tool = (
     .strict_schema()
 )
 
-item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(
+    tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="deferred", poller="workspace_orient",
+        evidence_test="tests/unit/test_doc_open.py::TestAsyncLoadHandoff"
+                      "::test_a_document_not_yet_active_claims_no_load_and_names_the_poller"))
 
 
 def register_tool():

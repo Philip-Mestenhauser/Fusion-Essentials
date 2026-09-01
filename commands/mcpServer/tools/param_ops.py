@@ -14,7 +14,7 @@ import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from . import _common
@@ -410,7 +410,12 @@ set_tool = (
     .strict_schema()
 )
 
-set_item = Item.create_tool_item(tool=set_tool, write="write", handler=set_handler, run_on_main_thread=True)
+set_item = Item.create_tool_item(
+    tool=set_tool, write="write", handler=set_handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_param_ops.py::TestSetCreateOrUpdate"
+                      "::test_silent_no_op_assignment_bites"))
 
 # NOTE: built with create_simple + a PLAIN name property (not create_with_string_input, which marks
 # its input REQUIRED) - batch mode legitimately omits 'name', so the schema must not demand it.
@@ -466,7 +471,12 @@ _favorite_tool = (
             "description": "Favorite on/off (default true)."})
     .strict_schema()
 )
-favorite_item = Item.create_tool_item(tool=_favorite_tool, write="write", handler=favorite_handler, run_on_main_thread=True)
+favorite_item = Item.create_tool_item(
+    tool=_favorite_tool, write="write", handler=favorite_handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="effect",
+        evidence_test="tests/unit/test_param_ops.py::TestFavoriteHandler"
+                      "::test_a_stuck_flag_is_published_as_it_reads_not_as_asked"))
 
 
 def register_tool():
