@@ -33,20 +33,15 @@ app = adsk.core.Application.get()
 # mechanism behind a clause lives at the symbol itself, in its test, or in VERIFIED_API_FACTS.md.
 MAP_BLURB = (
     "_active_identity - the ONE active-document identity read ((name, urn), either may be None), "
-    "the same read the write guard stamps 'acted_on' from; _cam_common's generation registry and "
-    "cam_get_status use it to bind a launch to its document; one_open_document - the ONE test for "
-    "whether several open-document matches are really ONE document, since an assembly loads its "
+    "what a write guard stamps 'acted_on' from; one_open_document - the ONE test for whether "
+    "several open-document matches are really ONE document, since an assembly loads its "
     "references as real Documents and a tab plus its own dependency instance repeat one name AND "
-    "lineage URN (the write guard and doc_lifecycle's open-document resolver share it); "
-    "document_key - the ONE key a store that outlives one MCP call (a view snapshot, a driven-"
-    "joint registry, a live generation) remembers a document by: the data-file id where one "
-    "reads, else a token minted per document INSTANCE and matched by handle EQUALITY - never "
-    "by NAME, which several open documents answer 'Untitled' to; None when no document "
-    "reads at all, so each caller words its own placeholder; prune_closed_documents / "
-    "on_key_evicted / on_key_renamed - the eviction pass and the two hooks a store registers at "
-    "import, since the registry is SHARED: a closed document's key is dropped and a held "
-    "document's CHANGED key is announced, so a consumer moves or discards what it parked there "
-    "instead of stranding it")
+    "lineage URN; document_key - the ONE key a store outliving one MCP call remembers a document "
+    "by: the data-file id where one reads, else a token minted per document INSTANCE and matched "
+    "by handle EQUALITY - never by NAME, which several open documents answer 'Untitled' to; None "
+    "when no document reads at all; prune_closed_documents/on_key_evicted/on_key_renamed - the "
+    "eviction pass and the two hooks a store registers at import, since the registry is SHARED: a "
+    "closed document's key is dropped, and a held document's CHANGED key announced")
 
 
 def _active_identity():

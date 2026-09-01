@@ -15,21 +15,18 @@ from ._cam_common import expression_error
 # The "what to reuse from here" catalog line for the generated CLAUDE.md helper map (see
 # tests/gen_manifest.py): each symbol with the one clause that says WHEN to reach for it.
 MAP_BLURB = (
-    "the ToolPreset half of a CAM tool: _preset_spec_error - why a {name?, spindle_speed?, feed?} "
-    "spec is unusable, since nothing else validates a nested object and an unrecognised key would "
-    "apply nothing and still report success; _preset_param_of + _set_preset_param + "
-    "_apply_preset_values - the parameter a spec value drives (candidates in order, because the "
-    "cutting-data parameter names vary by tool CLASS), the ONE set-and-prove-it-landed for one of "
-    "them, and the whole spec applied with no silent skip; _preset_names + _presets_named + "
-    "_persisted_preset_names - the INDEX-ORDER name list a preset_count and a presets.remove(index) "
-    "are read against (an unreadable preset holds its slot as a null), every preset answering "
-    "EXACTLY to one name, and the same list off a tool re-fetched from its library; _preset_tool - "
-    "the guards both preset actions share (a valid tool index, a spec carrying a name, a tool "
-    "exposing presets); _persist_preset_change - the commit-then-re-read that says whether the "
-    "change reached the library, since updateTool/updateToolLibrary returning true proves nothing "
-    "and no preset change moves the library's tool COUNT; _plain_number - a value that is a bare "
-    "number, a units-carrying expression being stored as the converted number instead. Reach for "
-    "one only from cam_edit_tools' preset paths")
+    "the ToolPreset half of cam_edit_tools - reach for one only from its preset paths. "
+    "_preset_spec_error - why a {name?, spindle_speed?, feed?} spec is unusable; an unrecognised "
+    "key would otherwise apply nothing and still report success; _preset_param_of/"
+    "_set_preset_param/_apply_preset_values - the parameter a spec value drives (candidates in "
+    "order: the cutting-data names vary by tool CLASS), the set-and-prove-it-landed, and the whole "
+    "spec applied with no silent skip; _preset_names/_presets_named/_persisted_preset_names - the "
+    "INDEX-ORDER name list preset_count and presets.remove(index) read against (an unreadable "
+    "preset holds its slot as a null), the EXACT-name lookup, and the same list off a re-fetched "
+    "tool; _preset_tool - the guards both preset actions share; _persist_preset_change - the "
+    "commit-then-re-read that says whether the change reached the library; updateTool returning "
+    "true proves nothing, and no preset change moves the tool COUNT; _plain_number - a bare "
+    "number, a units-carrying expression being stored as the converted one")
 
 
 # A preset's cutting-data parameter names vary by tool CLASS. A mill preset carries

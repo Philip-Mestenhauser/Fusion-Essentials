@@ -21,24 +21,22 @@ from . import _relations
 # The "what to reuse from here" catalog line for the generated CLAUDE.md helper map (see
 # tests/gen_manifest.py): each symbol with the one clause that says WHEN to reach for it.
 MAP_BLURB = (
-    "the row SERIALIZERS behind assembly_get, one per array in its payload: _occ_record + "
-    "_unresolved_row + _all_occurrence_rows - an occurrence's identity, ground flags, body count "
-    "and world placement, plus the stand-in row an unresolved reference gets, since every one of "
-    "those reads RAISES on such an occurrence; _health + _health_fields - the compute-state "
-    "verdict every row states, which WITHHOLDS the healthy key where neither the entity nor its "
-    "timeline item answered a state; _joint_frame + _limit_facts + _value_now + _motion_axes - one "
-    "joint's WORLD frame (whose z_axis is the direction its offset drives along), its ENABLED "
-    "limits, its current driven value, and the heading its MOTION reports for each DOF "
-    "(rotation_axis / slide_direction, as the member answers - no placement lift); "
-    "_joint_origin_rows + _jo_row + _jo_world_origin + _jo_consumers - the "
-    "per-INSTANCE Joint Origin rows: the qualified reference, the world position built from the "
-    "base geometry origin PLUS the offsetX/Y/Z projected on the frame axes, the handle, and which "
-    "joints consume it; _world_axes - the placement lift both frame kinds take, since a "
-    "JointOrigin and a JointGeometry each report their axes in the OWNING COMPONENT's frame "
-    "(measured); _relation_rows + _contact_rows + _contact_analysis - the rigid-group / "
-    "motion-link / constraint rows and the contact sets, with the two design-level flags that "
-    "decide whether any set acts at all. Reach for one only from assembly_get - the walks they "
-    "sit on are the shared ones (_common.occurrence_walk, _joints, _relations, _contacts)")
+    "the row SERIALIZERS behind assembly_get, one per array in its payload - reach for one only "
+    "from there; the walks under them are the shared ones (_common.occurrence_walk, _joints, "
+    "_relations, _contacts). _occ_record/_unresolved_row/_all_occurrence_rows - an occurrence's "
+    "identity, ground flags, body count and world placement, plus the stand-in row an unresolved "
+    "reference gets, every one of those reads RAISING on such an occurrence; _health/"
+    "_health_fields - the compute-state verdict every row states, WITHHOLDING the healthy key "
+    "where nothing answered a state; _joint_frame/_limit_facts/_value_now/_motion_axes - one "
+    "joint's WORLD frame (its z_axis is the direction the offset drives along), ENABLED limits, "
+    "driven value, and the per-DOF heading its MOTION reports (rotation_axis / slide_direction, as "
+    "the member answers) - no placement lift; "
+    "_joint_origin_rows/_jo_row/_jo_world_origin/_jo_consumers - the per-INSTANCE Joint Origin "
+    "rows (world position, handle, consuming joints); _world_axes - the placement lift both frame "
+    "kinds take, since a JointOrigin and a JointGeometry each report axes in the OWNING "
+    "COMPONENT's frame (measured); _relation_rows/_contact_rows/_contact_analysis - the "
+    "rigid-group / motion-link / constraint rows, and the contact sets with the two design-level "
+    "flags that decide whether any set acts at all")
 
 
 def _occ_record(occ, inv_k, occ_joints, include_joints, full_path=False):

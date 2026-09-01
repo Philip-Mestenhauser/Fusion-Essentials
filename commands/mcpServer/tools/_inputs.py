@@ -25,20 +25,18 @@ from ._export import find_component as _find_component   # the one design-wide b
 # tests/gen_manifest.py): each symbol with the one clause that says WHEN to reach for it. The
 # mechanism behind a clause lives at the symbol itself.
 MAP_BLURB = (
-    "the typed reference kinds - see the kinds table above; resolve_inputs + apply_to_tool - wire a "
+    "the typed reference kinds - see the kinds table above; resolve_inputs/apply_to_tool - wire a "
     "declared input spec onto a Tool's schema and resolve every input in it in one call; "
-    "length_value_input + looks_like_expression + expression_report - for a length input taking a "
-    "literal number OR a parameter expression: the ValueInput to build with, the value in internal "
-    "cm to judge a sign or a read-back by, and the echo a payload publishes; "
-    "world_construction_axis - a world axis key as the origin ConstructionAxis ENTITY, where a "
-    "feature input will not take a vector; axis_line_of - the world line behind an AxisRef "
-    "('edge', entity) value, for a consumer needing a numeric axis; single_placement - the "
+    "length_value_input/looks_like_expression/expression_report - for a length taking a literal "
+    "number OR a parameter expression: the ValueInput to build with, the internal-cm value a "
+    "read-back is judged by, and the echo a payload publishes; world_construction_axis/"
+    "axis_line_of - a world axis key as the origin ConstructionAxis ENTITY, where a feature input "
+    "will not take a vector, and the world line behind an AxisRef; single_placement - the "
     "assembly-context walk to run before using a possibly-foreign entity: nothing to lift, the ONE "
     "occurrence to proxy into, or a refusal; entity_component - the owning component of a "
-    "geometric entity (face, edge, sketch line, or construction datum); resolve_surface + "
-    "surface_ref_label - the plane-then-face resolve every *_to_surface operand takes (see the "
-    "SurfaceRef kind), and the resolved-entity label its payload publishes instead of the raw "
-    "input")
+    "geometric entity; resolve_surface/surface_ref_label - the plane-then-face resolve every "
+    "*_to_surface operand takes (see the SurfaceRef kind), and the label its payload publishes "
+    "instead of the raw input")
 
 app = adsk.core.Application.get()
 

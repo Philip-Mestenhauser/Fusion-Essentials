@@ -22,11 +22,9 @@ MAP_BLURB = (
     "camera-orientation table for the standard named views; apply_named_view/capture_png_b64 - "
     "the orient + refresh-then-grab capture mechanics; DISPLAY_FOLDERS/all_display_components - "
     "the category -> Component folder-bulb map and the deduped component walk, for any toggle of "
-    "non-body clutter (view_set(display) and view_screenshot's fit_to both run it); "
-    "keep_visible/isolate_for_fit/restore_message - the ONE frame-on-one-occurrence isolate and "
-    "its restore-with-disclosure, for a viewport fit that must frame the target rather than the "
-    "whole scene (view_screenshot's fit_to and view_set(orient, focus=) frame through the same "
-    "walk)")
+    "non-body clutter; keep_visible/isolate_for_fit/restore_message - the ONE "
+    "frame-on-one-occurrence isolate and its restore-with-disclosure, for a viewport fit that must "
+    "frame the target rather than the whole scene")
 
 
 # Display category -> the Component FOLDER bulb that controls it (one switch per component; the

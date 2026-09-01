@@ -30,16 +30,15 @@ import adsk.fusion
 from . import _common
 from ._common import safe
 
-MAP_BLURB = ("walk_annotations (the ONE design-wide PMI walk) + find_annotation (resolve ONE by "
-             "name, a name found in several components is REFUSED naming each) + "
-             "build_segments/segments_markup (the {symbol} text markup <-> PMISegment codec) + "
-             "annotation_record (the shared light record) + kind_of (objectType -> kind label) + "
-             "enum_label (adsk PMI enum int -> snake name) + build_tolerance/tolerance_record + "
-             "build_display/display_record (PMIDisplaySettings codec) + apply_note_format "
-             "(every format set re-read) + apply_display (the ONE display writer) + "
-             "normalize_extension (the ONE below-floor lift) + set_text_point/set_leader_target "
-             "(verified anchor moves) + PLANE_TYPES/H_ALIGN/V_ALIGN (the closed choice "
-             "vocabularies) + the LEADER_EXT floor the tools refuse below")
+MAP_BLURB = ("the PMI substrate. walk_annotations/find_annotation - the ONE design-wide walk and "
+             "the resolve-one over it, which REFUSES a name several components carry; "
+             "build_segments/segments_markup/annotation_record/kind_of/enum_label - the {symbol} "
+             "markup <-> PMISegment codec, the shared light record, and the label decoders; "
+             "build_tolerance/tolerance_record/build_display/display_record - the tolerance and "
+             "PMIDisplaySettings codecs; apply_note_format/apply_display/normalize_extension/"
+             "set_text_point/set_leader_target - the writers, every one re-read after the set "
+             "(normalize_extension lifts a below-floor value); PLANE_TYPES/H_ALIGN/V_ALIGN/"
+             "LEADER_EXT - the closed choice vocabularies and the extension floor")
 
 # The extension floor these tools refuse below, and the extension pmi_create pins onto an input
 # that arrives under it. Whether the platform's own floor is this constant or is derived from the

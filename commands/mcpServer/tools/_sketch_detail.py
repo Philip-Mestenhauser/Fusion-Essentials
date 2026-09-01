@@ -25,27 +25,18 @@ app = adsk.core.Application.get()
 # mechanism behind a clause lives at the symbol itself, in its test, or in VERIFIED_API_FACTS.md.
 MAP_BLURB = (
     "the ONE-sketch X-ray behind sketch_get(sketch_name=...) - entities, construction geometry, "
-    "constraints, dimensions and profiles; sketch_world_frame + frame_space_note - the ONE frame "
-    "for a sketch plane (where sketch (0,0) lands in mm, the unit +X/+Y directions, the normal, "
-    "and the 'space' those numbers are in) and the matching wire sentence, for a caller placing "
-    "geometry by computed coords: sketch_create publishes the frame on the way in and sketch_get "
-    "on the way out, so the numbers placed against are the numbers verified against. It answers "
-    "for the DESIGN BEING READ, and the axis KEYS follow space - x_world/y_world or x_local/y_local "
-    "- so a consumer keyed on the world name reads a missing key rather than local numbers; "
-    "curve_id - the '<type>:<index>' entity id every sketch reference is written in, "
-    "which _common.resolve_entity_ref reads back; scope_component + scope_components - the "
-    "'component' scope a by-name sketch READ narrows through, answering the one component (plus "
-    "the occurrence a path-spelled scope named, which a frame lifts through) or the several a LIST "
-    "may show apart; COMPONENT_SCOPE + component_scope - the ONE wire declaration of that input, "
-    "and the same declaration under another name for a tool whose own 'component' means something "
-    "else or that scopes a SECOND sketch reference (_inputs.SketchRefList and ProfileRef take the "
-    "scope through their scope_input=); scoped_sketch + scoped_or_recent_sketch - the by-name and "
-    "the name-or-most-recent resolve for a sketch EDIT, narrowed to that component when one was "
-    "passed and never dropped because the name happened to be unique; scope_remedy - the sentence "
-    "a shared-name refusal ends on, so it names the input that actually narrows THAT reference "
-    "instead of a rename in another document; unquote_text + font_read_back - the SketchText "
-    "readers (.text/.height are retired: the expression holds the string QUOTED, and fontName "
-    "reads as a name-or-None)")
+    "constraints, dimensions and profiles. sketch_world_frame/frame_space_note - the ONE frame for "
+    "a sketch plane and its wire sentence, for a caller placing geometry by computed coords; the "
+    "axis KEYS follow space - x_world/y_world or x_local/y_local - so a consumer keyed on the "
+    "world name reads a MISSING key rather than local numbers; curve_id - the '<type>:<index>' "
+    "entity id a sketch reference is written in, read back by _common.resolve_entity_ref; "
+    "scope_component/scope_components/COMPONENT_SCOPE/component_scope - the 'component' scope a "
+    "by-name sketch READ narrows through, and its ONE wire declaration (under a second name where "
+    "a tool's own 'component' means something else); scoped_sketch/scoped_or_recent_sketch/"
+    "scope_remedy - the by-name and name-or-most-recent resolve for a sketch EDIT, kept narrowed "
+    "to a passed component even where the name happens to be unique, and the closing sentence "
+    "naming the input that narrows THAT reference; unquote_text/font_read_back - the SketchText "
+    "readers, where the expression holds the string QUOTED and fontName reads as a name-or-None")
 
 
 def unquote_text(expr):

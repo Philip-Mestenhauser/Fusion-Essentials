@@ -24,31 +24,21 @@ from . import _common
 # tests/gen_manifest.py): each symbol with the one clause that says WHEN to reach for it. The
 # mechanism behind a clause lives at the symbol itself, in its test, or in VERIFIED_API_FACTS.md.
 MAP_BLURB = (
-    "unit_vector/unit_vector_between - the normalize / point-to-point-direction math find_geometry "
-    "and sys_get_selection both need; evaluator_normal_at - the evaluator.getNormalAtPoint sample "
-    "find_geometry takes for every face's normal; body_aabb - the bodies-only (solid+surface+mesh) "
-    "AABB of an occurrence/component/body, for a size read that must not count sketch and "
-    "construction datums; occ_world_frame/axis_vec - the ONE occurrence world-placement record "
-    "every occurrence row is built from (origin, the rotation's basis axes, the bodies-only bbox "
-    "centre/size), and the 4dp basis-axis read under it; owning_bodies/volumes/volume_delta - the "
-    "owning-body set and the before/after volume diff a material-changing feature verifies its cut "
-    "with; signed_volume - ONE body's signed volume, for a feature judged on the SIGN (a reversed "
-    "mesh reports a negative volume) or on a ratio rather than a delta; face_counts/"
-    "face_count_delta - the same before/after pair over FACE counts, for a topology-changing "
-    "feature (delete-face, split-face) that moves no volume; lump_count - ONE BRep body's "
-    "DISCONNECTED-piece count, the read a JOIN is verified with, since fusing bodies that touch "
-    "yields fewer lumps than the inputs held between them; aabb_gap - the largest axis gap between "
-    "two bodies' AABBs, the sound not-touching proof for a body kind with no lump count: a LOWER "
-    "BOUND on the clearance rather than the clearance, and None unless both references live in ONE "
-    "coordinate space; parallel_plane_facts - the ONE bounded-gap measure for two PARALLEL PLANAR "
-    "faces, a pair whose plane-to-plane separation alone under-states the gap, handing back the "
-    "proven distance, the three disclosure flags and the ONE sentence both measure tools publish "
-    "it with; address - the ONE occurrence name the MEASURE tools' disclosure rows carry: "
-    "fullPathName, which their own target input resolves back, else name, else the "
-    "fallback= a caller holding a real address passes; subtree_facts - the ONE nested-child "
-    "disclosure both measure tools publish, since an occurrence is measured on its OWN bodies and "
-    "NOT on what is nested inside it, which makes a gap read off a parent silently optimistic "
-    "about the assembly under it")
+    "the measurement math the geometry reads share. unit_vector/unit_vector_between/"
+    "evaluator_normal_at - the vector and face-normal math; body_aabb/occ_world_frame/axis_vec - "
+    "the bodies-only (solid+surface+mesh) AABB, for a size read that must not count sketch and "
+    "construction datums, plus the occurrence world-placement record and its 4dp basis-axis read; "
+    "owning_bodies/volumes/volume_delta/signed_volume - the owning-body set and the before/after "
+    "volume diff a cut is verified with, signed for a feature judged on the SIGN (a reversed mesh "
+    "reports a negative volume); face_counts/face_count_delta - the same pair over FACE counts, "
+    "for a topology-changing feature that moves no volume; lump_count - a BRep body's "
+    "DISCONNECTED-piece count, the read a JOIN is verified with; aabb_gap - the largest axis gap "
+    "between two AABBs, for a body kind with no lump count: a LOWER BOUND on the clearance, and "
+    "None unless both references live in ONE coordinate space; parallel_plane_facts - the "
+    "bounded-gap measure for two PARALLEL PLANAR faces, whose plane-to-plane separation alone "
+    "under-states the gap; address/subtree_facts - the occurrence name a measure row carries "
+    "(fullPathName, else name, else a passed fallback=), and the nested-child disclosure, since an "
+    "occurrence is measured on its OWN bodies")
 
 # The body entity-types for boundingBox2: solid + surface + mesh, so the box spans real geometry and
 # NOT the sketch/construction datums that the plain .boundingBox counts. The construction contribution

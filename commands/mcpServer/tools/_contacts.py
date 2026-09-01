@@ -13,12 +13,12 @@ import adsk.fusion
 from ._common import safe
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
-MAP_BLURB = ("contact_sets / all_contact_sets / contact_set_names (the DESIGN-scoped contactSets "
-             "walk - no component carries one) + find_contact_set (resolve-one by case-insensitive "
-             "EXACT name, refusing a duplicate instead of taking the first) + membership / "
-             "member_label (the occurencesAndBodies read-back: the count from len() plus the name "
-             "of every member that casts) - the substrate assembly_get's contacts slice and "
-             "assembly_edit_contacts share")
+MAP_BLURB = ("the substrate assembly_get's contacts slice and assembly_edit_contacts share. "
+             "contact_sets/all_contact_sets/contact_set_names - the DESIGN-scoped contactSets walk "
+             "(no component carries one); find_contact_set - the EXACT resolve-one, refusing a "
+             "duplicate instead of taking the first; membership/member_label - the "
+             "occurencesAndBodies read-back: the count from len(), and the name of every member "
+             "that casts")
 
 
 def contact_sets(design):

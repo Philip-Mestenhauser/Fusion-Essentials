@@ -24,12 +24,12 @@ from ._common import counted, error, iter_collection, read_flag, safe
 app = adsk.core.Application.get()
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
-MAP_BLURB = ("browse - the ONE material/appearance catalog read: a library CENSUS (counts only, no "
-             "contents) plus the document-local set when no library is named, one library's "
-             "filtered and capped entries when it is; catalog_census / find_library / entries are its leaf "
-             "ops (the O(1) per-library counts, the EXACT-name library resolver that refuses a "
-             "duplicated name instead of taking the first, and the name-filtered page that reports "
-             "the TRUE match count beside a capped row list)")
+MAP_BLURB = ("browse - the ONE material/appearance catalog read: a library CENSUS (counts only) "
+             "plus the document-local set when no library is named, one library's filtered and "
+             "capped entries when it is; catalog_census/find_library/entries - its leaf ops: the "
+             "O(1) per-library counts, the EXACT-name library resolver that refuses a duplicate "
+             "instead of taking the first, and the page reporting the TRUE match count beside a "
+             "capped row list")
 
 # Design.materials / Design.appearances and MaterialLibrary.materials / MaterialLibrary.appearances
 # carry the same two attribute names, so one walk serves both owners.

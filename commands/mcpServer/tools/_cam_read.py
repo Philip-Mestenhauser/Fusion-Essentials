@@ -24,18 +24,14 @@ from ._cam_common import (_segment, _setup_node, _walk_children, blocked_setup_r
 # The "what to reuse from here" catalog line for the generated CLAUDE.md helper map (see
 # tests/gen_manifest.py): each symbol with the one clause that says WHEN to reach for it.
 MAP_BLURB = (
-    "the per-slice READ cores cam_get delegates to, one per include= slice: "
-    "get_cam_setups_handler - the orientation default (each setup's machine, bound WCS, "
-    "model/fixture/stock lists, op_states and invalidation reasons); get_cam_operations_handler - "
-    "the per-op rows (state, folder breadcrumb, preset, spindle-vs-machine) plus their "
-    "exception-first summary; get_setup_references_handler - the X-ref source document behind each "
-    "setup's selected entries; get_tool_list_handler - the distinct cutting tools and the ops using "
-    "each; get_machining_time_handler - the getMachiningTime estimate per setup and per operation; "
-    "get_nc_programs_handler - the NC programs and what each actually posts; "
-    "get_inspection_results_handler - the recorded probing measures, or ONE measure's "
-    "out-of-tolerance points; get_machine_limits_handler - the assigned machine's spindle and axis "
-    "limits per setup. Reach for one only from cam_get's router - every other CAM tool shares the "
-    "substrate in _cam_common instead")
+    "the per-slice READ cores cam_get delegates to, one per include= slice - reach for one only "
+    "from that router; every other CAM tool shares the substrate in _cam_common instead. "
+    "get_cam_setups_handler (the orientation default: machine, bound WCS, model/fixture/stock "
+    "lists, op_states), get_cam_operations_handler (the per-op rows plus an exception-first "
+    "summary), get_setup_references_handler (the X-ref source document behind each setup's "
+    "selected entries), get_tool_list_handler, get_machining_time_handler, "
+    "get_nc_programs_handler, get_inspection_results_handler (the recorded probing measures, or "
+    "one measure's out-of-tolerance points), get_machine_limits_handler")
 
 _MAX_ITEMS = 1000
 

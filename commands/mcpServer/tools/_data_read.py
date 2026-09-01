@@ -22,11 +22,10 @@ app = adsk.core.Application.get()
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
 MAP_BLURB = ("the three cloud READ cores data_get delegates to - list_projects_handler (the active "
-             "hub's projects), list_project_files_handler (one project's files, optionally scoped to "
-             "a folder path) and file_facts_handler (ONE file's metadata + link state) - plus "
-             "_walk_folder, the ONE capped/deadlined folder recursion every cloud listing and the "
-             "by-name file resolver share (it records a folder whose enumeration RAISED, so a hole "
-             "in the search space is never reported as an empty folder)")
+             "hub's projects), list_project_files_handler (one project's files, optionally "
+             "folder-scoped) and file_facts_handler (ONE file's metadata + link state) - over "
+             "_walk_folder, the ONE capped/deadlined folder recursion, which records a folder "
+             "whose enumeration RAISED so a hole is never reported as an empty folder")
 
 # Guard rails for enumeration of large/cloud-backed projects. Every DataFile property read and every
 # dataFolders/dataFiles enumeration is a synchronous cloud round-trip on Fusion's MAIN thread, so a

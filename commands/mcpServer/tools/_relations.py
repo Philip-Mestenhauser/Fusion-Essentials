@@ -17,13 +17,12 @@ that tells those apart, so nothing here branches on the difference.
 from ._common import all_components, safe
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
-MAP_BLURB = ("all_relations (the ONE walk over a design's rigid groups / motion links / assembly "
-             "constraints - every component once over _common.all_components, never a prepended "
-             "rootComponent, then de-duplicated by entityToken) + "
-             "relation_names / find_relation (the names for an error message, and the resolve-one "
-             "by case-insensitive EXACT name that REFUSES a duplicate instead of taking the first) "
-             "+ rigid_group_members (a rigid group's member fullPathNames) - the substrate "
-             "assembly_get's relations slice and assembly_edit_relations share")
+MAP_BLURB = ("the substrate assembly_get's relations slice and assembly_edit_relations share. "
+             "all_relations - the ONE walk over a design's rigid groups / motion links / assembly "
+             "constraints: every component once over _common.all_components, never a prepended "
+             "rootComponent, then de-duplicated by entityToken; relation_names/find_relation - the "
+             "names for an error message, and the EXACT resolve-one that REFUSES a duplicate "
+             "instead of taking the first; rigid_group_members - a group's member fullPathNames")
 
 # relation kind keyword -> (the Component collection it lives in, its wire label).
 _KINDS = {

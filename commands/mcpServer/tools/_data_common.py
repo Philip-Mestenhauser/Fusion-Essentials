@@ -18,13 +18,12 @@ from ._common import safe
 # tests/gen_manifest.py): each symbol with the one clause that says WHEN to reach for it. The
 # mechanism behind a clause lives at the symbol itself, in its test, or in VERIFIED_API_FACTS.md.
 MAP_BLURB = (
-    "cloud data-model helpers shared by data_ops, doc_lifecycle, _data_read, doc_open, "
-    "doc_insert_occurrence (hub/project/folder/URN); resolve_file_reference - the ONE "
+    "the cloud data-model substrate (hub/project/folder/URN). resolve_file_reference - the ONE "
     "URN-or-name-in-a-project DataFile resolver, which REFUSES a name matching several files; "
-    "navigate_folder_path - the ONE folder-PATH walk from a project root, creating nothing: it "
-    "hands back the folder and its cleaned path, or the miss triple each caller words its own "
-    "refusal from; FUSION_NATIVE_EXTENSIONS/name_extension - the download-refusal fact that the "
-    "NAME carries the true extension, fileExtension does not")
+    "navigate_folder_path - the ONE folder-PATH walk from a project root, creating nothing: the "
+    "folder and its cleaned path, or the miss triple each caller words its own refusal from; "
+    "FUSION_NATIVE_EXTENSIONS/name_extension - the download-refusal fact that the NAME carries the "
+    "true extension, fileExtension does not")
 
 app = adsk.core.Application.get()
 
