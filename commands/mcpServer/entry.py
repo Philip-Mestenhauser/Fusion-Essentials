@@ -215,6 +215,21 @@ def _collect_items():
     return registry.get_tools()
 
 
+def _resource_catalog():
+    """The static MCP Resources this server publishes: the packaged guidance, rendered whole.
+
+    Built HERE and handed to the server, so the transport never reaches into product content. A
+    document that does not load leaves the catalog EMPTY and says why in the log - the server then
+    advertises no resources capability at all, rather than an address that answers with an error.
+    """
+    try:
+        from .guidance import resources
+        return resources.catalog()
+    except Exception as e:
+        futil.log(f'{CMD_NAME}: no MCP resource published ({e})')
+        return []
+
+
 def start():
     """Called when the module is enabled and the add-in starts."""
     global _http_server, _server_thread, _mcp
@@ -227,7 +242,8 @@ def start():
         TaskManager.start()
 
         items = _collect_items()
-        result = mcp_server.start_server(HOST, PORT, items=items)
+        resources = _resource_catalog()
+        result = mcp_server.start_server(HOST, PORT, items=items, resources=resources)
         status = result.get("status")
 
         if status == mcp_server.START_OK:

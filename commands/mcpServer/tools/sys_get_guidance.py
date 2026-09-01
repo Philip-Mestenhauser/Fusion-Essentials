@@ -4,13 +4,15 @@
 """sys_get_guidance - the server's packaged CAD design guidance, one section per call.
 
 Static packaged content read through ``..guidance.loader``: no arguments gives the section index,
-``section`` gives that one section's rules as the records the document carries. Nothing here
-touches the Fusion API, so the tool runs off the main thread.
+``section`` gives that one section's rules as the records the document carries, and every payload
+names the resource URI where the same document is served whole as Markdown. Nothing here touches
+the Fusion API, so the tool runs off the main thread.
 """
 
 from ._common import ok, error
 from . import _inputs
 from ..guidance import loader
+from ..guidance import resources
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
@@ -27,7 +29,9 @@ _SECTION = _inputs.Choice(
 INDEX_NOTE = (
     "The one design-guidance document this server packages. Call again with section=<id> for that "
     "section's rules - one section per call. 'sha256' is the content hash of the document served, "
-    "and each rule declares which of 'scenarios' it applies to.")
+    "and each rule declares which of 'scenarios' it applies to. 'resource_uri' is where the same "
+    "guidance is served as one Markdown document over MCP's resource channel, for a client that "
+    "reads resources rather than calling tools.")
 
 SECTION_NOTE = (
     "Each rule is a record: 'when' the condition it applies under, 'do' the practice, 'except' "
@@ -48,7 +52,10 @@ def handler(section=None) -> dict:
         return error(str(exc))
 
     ids = loader.section_ids(doc)
-    result = {"guidance_id": doc.get("guidance_id"), "title": doc.get("title"), "sha256": sha256}
+    # The same address the resource catalog publishes, built from the document's own id by the one
+    # function that builds it - so the tool cannot name a document the resource channel does not.
+    result = {"guidance_id": doc.get("guidance_id"), "title": doc.get("title"), "sha256": sha256,
+              "resource_uri": resources.uri_for(doc.get("guidance_id"))}
 
     if not wanted:
         result.update({"section": None,

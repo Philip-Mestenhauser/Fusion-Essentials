@@ -11,10 +11,15 @@ back through. This script validates that data against the LIVE tool registry and
 anything the canonical data does not, and a proof step cannot name a tool the server does not
 register.
 
+The BODY is rendered by the shipped package (``render.body``), which is the same text the server
+serves over ``resources/read``; this script adds only the frontmatter a skill loader needs. So the
+skill and the resource are one render, not two that agree today.
+
 The structural limits are here, not in a lint: the kernel is capped at five rules and 300 rendered
 words, the whole skill at 750 rendered words excluding frontmatter, and a conditional playbook
-section carries at most one example. Whether a rule's wording is honest is a review judgment; this
-script checks shape, routing, and size.
+section carries at most one example. Validation is authoring-time gating - it decides what may be
+committed, never what the server answers - so it lives with the generator. Whether a rule's wording
+is honest is a review judgment; this script checks shape, routing, and size.
 
 Run from the repo root:
 
@@ -31,22 +36,23 @@ import textwrap
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # gen_manifest owns the registry walk (collect()) and installs the mocked adsk at its module top;
-# reuse it rather than rolling a second walk that could disagree about what is registered.
+# reuse it rather than rolling a second walk that could disagree about what is registered. It also
+# puts commands/ on sys.path, which is what makes the shipped guidance package importable below.
 import gen_manifest  # noqa: E402
+
+# The shipped package renders the body and declares the section order - what holds everywhere, then
+# the build in the order it happens. A document declaring anything else is rejected below rather
+# than reordered, so the skill is a function of the file alone; importing the render (instead of
+# holding a second copy) is what keeps the skill and the served resource one text.
+from mcpServer.guidance.loader import SECTION_IDS  # noqa: E402
+from mcpServer.guidance.render import SAFETY_INVARIANT, body, section_text  # noqa: E402
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GUIDANCE_PATH = os.path.join(REPO_ROOT, "commands", "mcpServer", "guidance",
                              "parametric_cad_design.json")
 SKILL_PATH = os.path.join(REPO_ROOT, ".claude", "skills", "parametric-cad-design", "SKILL.md")
 
-# The section order IS the reading order: what holds everywhere, then the build in the order it
-# happens. A document declaring anything else is rejected rather than reordered, so the rendered
-# skill is a function of the file alone.
-SECTION_IDS = ("kernel", "plan", "sketch", "model", "assemble", "validate", "finish")
 KERNEL = "kernel"
-
-# The one declared kind. A deterministic safety/API rule says so; every other rule is strategy.
-SAFETY_INVARIANT = "safety_invariant"
 
 RULE_FIELDS = ("id", "section", "scenarios", "when", "do", "except", "prove")
 
@@ -83,49 +89,11 @@ def rules_for(doc, scenario):
     return [r for r in rules(doc) if scenario in (r.get("scenarios") or [])]
 
 
-def section(doc, section_id):
-    for s in (doc.get("sections") or []):
-        if s.get("id") == section_id:
-            return s
-    raise KeyError(section_id)
-
-
-# ── rendering ─────────────────────────────────────────────────────────────────
+# ── rendering: the frontmatter this script adds to the shipped render ─────────
 
 def word_count(text):
     """Rendered words - what the size limits are stated in."""
     return len(text.split())
-
-
-def _rule_lines(rule):
-    head = f"**{rule['id']}**"
-    if rule.get("kind") == SAFETY_INVARIANT:
-        head += " (safety invariant)"
-    prove = "; ".join(f"`{s['tool']}`: {s['observe']}" for s in rule["prove"])
-    lines = [head,
-             f"When {rule['when']}: {rule['do']}. Except {rule['except']}. Prove {prove}."]
-    if rule.get("example"):
-        lines.append(f"Example: {rule['example']}.")
-    return lines
-
-
-def section_text(doc, section_id):
-    """One section's rendered Markdown, heading included - the unit the kernel limit measures."""
-    sec = section(doc, section_id)
-    lines = [f"## {sec['title']}", ""]
-    for rule in (sec.get("rules") or []):
-        lines += _rule_lines(rule)
-        lines.append("")
-    return "\n".join(lines).rstrip() + "\n"
-
-
-def body(doc):
-    """The skill BELOW its frontmatter - the text the size limit bounds."""
-    parts = [f"# {doc['title']}", "", doc["summary"], ""]
-    for section_id in SECTION_IDS:
-        parts.append(section_text(doc, section_id).rstrip())
-        parts.append("")
-    return "\n".join(parts).rstrip() + "\n"
 
 
 def frontmatter(doc):

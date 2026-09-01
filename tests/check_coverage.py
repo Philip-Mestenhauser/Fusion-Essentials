@@ -26,7 +26,7 @@ _RAISE_HINT_MARGIN = 4
 
 _FLOORS = {
     "server/__init__.py": 100,
-    "server/mcp_server.py": 68,
+    "server/mcp_server.py": 77,   # was 68
     "server/task_manager.py": 83,
     "tools/__init__.py": 100,
     "tools/_assert.py": 90,

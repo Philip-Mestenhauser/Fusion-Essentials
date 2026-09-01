@@ -5,8 +5,9 @@
 
 """A dependency-free MCP server over HTTP that runs inside Fusion's Python.
 
-Implements the MCP JSON-RPC methods we need (initialize, tools/list, tools/call)
-by hand, so no external packages are required.
+Implements the MCP JSON-RPC methods we need (initialize, tools/list, tools/call,
+and the resources/* reads over a static catalog the caller hands in) by hand, so
+no external packages are required.
 
 Differences from the sample this was adapted from:
   - The MCP endpoint is served on the path **/mcp** (to match Fusion's built-in
@@ -42,10 +43,11 @@ MCP_PATH = '/mcp'
 SUPPORTED_PROTOCOL_VERSIONS = ('2025-03-26',)
 PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[-1]    # the default we offer: newest supported
 
-# Server-level instructions, returned on `initialize` (the MCP spec field). This is the ONLY server text
-# a client sees BEFORE it fetches any tool schema - so it's the one place a cold agent is guaranteed to
-# read. When tools are deferred (names only until searched), a per-tool "call FIRST" instruction is
-# invisible at cold start; this routes the agent to the two orientation tools before it fishes blindly.
+# Server-level instructions, returned on `initialize` (the MCP spec field). They reach the client
+# before it fetches any tool schema; whether a host puts them in the model's context is the host's
+# decision, which no server can enforce. When tools are deferred (names only until searched), a
+# per-tool "call FIRST" instruction is invisible at cold start, so this routes an agent that does
+# read them to the two orientation tools before it fishes blindly.
 INSTRUCTIONS = (
     "Autodesk Fusion control. COLD START: before reaching for specific tools, call two orientation reads "
     "first - sys_capability_map (what this server can do: the tool families + each one's entry tool) "
@@ -102,6 +104,17 @@ def _refuse_json_constant(literal: str):
                      "valid JSON. Send a finite number.")
 
 
+# What one resources/list row carries: the two fields the spec requires (uri, name) plus what a
+# client shows and sizes a read against. 'text' is deliberately absent - a listing that carried the
+# body would ship the whole document to every client that only enumerated.
+_RESOURCE_LIST_FIELDS = ("uri", "name", "title", "description", "mimeType", "size")
+
+
+def _resource_row(resource: Dict[str, Any]) -> Dict[str, Any]:
+    """One catalog entry as a listing row: the advertised fields it carries, and nothing else."""
+    return {field: resource[field] for field in _RESOURCE_LIST_FIELDS if field in resource}
+
+
 def _in_set(value: Any, allowed: frozenset) -> bool:
     """value in allowed, but an unhashable value (a list/dict where a string enum is expected) is
     simply not a member rather than a TypeError."""
@@ -134,9 +147,10 @@ def _enum_specs(schema: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
 
 
 class SimpleMCPServer:
-    """Routes MCP JSON-RPC requests to registered tool handlers."""
+    """Routes MCP JSON-RPC requests to registered tool handlers, and serves a static resource
+    catalog the caller built."""
 
-    def __init__(self, name: str = SERVER_NAME):
+    def __init__(self, name: str = SERVER_NAME, resources=None):
         self.name = name
         # Session id assigned at initialize and echoed back to the client on every
         # response. Generated lazily so each server instance has a stable id.
@@ -145,6 +159,20 @@ class SimpleMCPServer:
         # tool name -> {prop: enum spec}, precomputed at registration so enum validation is O(1) per arg.
         self._enum_specs: Dict[str, Dict[str, Dict[str, Any]]] = {}
         self.server_info = {"name": name, "version": __version__}
+        # Application-controlled content published over resources/*, built by the caller (entry.py)
+        # and handed in whole: this transport serves what it was given and opens no product file of
+        # its own. An entry with no address or no body cannot be served, so it is dropped here
+        # rather than listed - an advertised resource whose read then fails is the one outcome to
+        # avoid.
+        self.resources = []
+        for resource in (resources or []):
+            if (isinstance(resource, dict) and isinstance(resource.get("uri"), str)
+                    and resource.get("uri") and isinstance(resource.get("text"), str)):
+                self.resources.append(dict(resource))
+            else:
+                uri = resource.get("uri") if isinstance(resource, dict) else None
+                futil.log(f"MCP resource skipped (needs a 'uri' and a 'text' to serve): {uri!r}")
+        self._resources_by_uri = {r["uri"]: r for r in self.resources}
 
     def register(self, item: Item):
         if not isinstance(item, Item):
@@ -188,6 +216,12 @@ class SimpleMCPServer:
                 return self._handle_tools_list(request_id)
             elif method == "tools/call":
                 return await self._handle_tools_call(request_id, params)
+            elif method == "resources/list":
+                return self._handle_resources_list(request_id, params)
+            elif method == "resources/read":
+                return self._handle_resources_read(request_id, params)
+            elif method == "resources/templates/list":
+                return self._handle_resource_templates_list(request_id)
             else:
                 return self._error(request_id, -32601, f"Method not found: {method}")
         except Exception as e:
@@ -204,15 +238,22 @@ class SimpleMCPServer:
             protocol_version = client_version
         else:
             protocol_version = PROTOCOL_VERSION
+        capabilities: Dict[str, Any] = {"tools": {}}
+        if self.resources:
+            # Advertised only when there is a servable resource in hand: a client that sees this
+            # capability may call resources/list and read what it names. No 'subscribe' and no
+            # 'listChanged' - the catalog is fixed for the server's lifetime, so there is nothing
+            # to subscribe to and nothing to notify about.
+            capabilities["resources"] = {}
         return {
             "jsonrpc": "2.0",
             "id": request_id,
             "result": {
                 "protocolVersion": protocol_version,
-                "capabilities": {"tools": {}},
+                "capabilities": capabilities,
                 "serverInfo": self.server_info,
-                # Visible to the client BEFORE any tool schema is fetched - the cold-start front door
-                # (routes a contextless agent to sys_capability_map / workspace_orient first).
+                # Sent before any tool schema is fetched; the host decides whether the model sees
+                # it (it routes a contextless agent to sys_capability_map / workspace_orient first).
                 "instructions": INSTRUCTIONS,
             },
         }
@@ -394,6 +435,64 @@ class SimpleMCPServer:
             "blindly retry - re-check the design/document state first, then retry only if the "
             "change did not take effect. (For long operations, prefer a fire-and-poll tool.)")
 
+    # ---- resources/*: the static catalog handed in at construction ----
+
+    @staticmethod
+    def _object_params(params: Any):
+        """(params as a dict, error message). Absent params are an empty object; anything that is
+        not a JSON object is invalid - saying so beats the -32603 the following .get would raise."""
+        if params is None:
+            return {}, None
+        if isinstance(params, dict):
+            return params, None
+        return {}, "Invalid params: 'params' must be a JSON object."
+
+    def _published(self) -> str:
+        """The addresses this server actually serves - what a client that guessed one needs next."""
+        if not self.resources:
+            return "This server publishes no resources."
+        return "This server publishes: " + ", ".join(sorted(self._resources_by_uri))
+
+    def _handle_resources_list(self, request_id: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+        params, invalid = self._object_params(params)
+        if invalid:
+            return self._error(request_id, -32602, invalid)
+        if params.get("cursor") is not None:
+            # The whole catalog comes back in one page and the result carries no nextCursor, so a
+            # cursor is one this server never issued. Answering a page for it would tell a
+            # paginating client it had resumed something.
+            return self._error(request_id, -32602,
+                               "Invalid params: resources/list answers in one page and issues no "
+                               "cursor to continue. Retry without 'cursor'.")
+        return {"jsonrpc": "2.0", "id": request_id,
+                "result": {"resources": [_resource_row(r) for r in self.resources]}}
+
+    def _handle_resources_read(self, request_id: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+        params, invalid = self._object_params(params)
+        if invalid:
+            return self._error(request_id, -32602, invalid)
+        uri = params.get("uri")
+        if not isinstance(uri, str) or not uri.strip():
+            return self._error(request_id, -32602,
+                               "Invalid params: resources/read needs 'uri', the address of one "
+                               f"resource. {self._published()}")
+        resource = self._resources_by_uri.get(uri)
+        if resource is None:
+            # -32002 is the spec's resource-not-found code, and it is a PROTOCOL error: the client
+            # asked for something this server does not publish, which is not a tool result.
+            return self._error(request_id, -32002,
+                               f"Resource not found: {uri}. {self._published()}")
+        content = {"uri": resource["uri"], "text": resource["text"]}
+        if resource.get("mimeType"):
+            content["mimeType"] = resource["mimeType"]
+        return {"jsonrpc": "2.0", "id": request_id, "result": {"contents": [content]}}
+
+    def _handle_resource_templates_list(self, request_id: Any) -> Dict[str, Any]:
+        # Every published resource is a fixed address, so there is no URI template to expand and
+        # nothing a cursor could continue: a probe gets the empty list whatever it sends, which is
+        # the true answer rather than an error the client would have to special-case.
+        return {"jsonrpc": "2.0", "id": request_id, "result": {"resourceTemplates": []}}
+
     def _error(self, request_id: Any, code: int, message: str) -> Dict[str, Any]:
         return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
@@ -524,7 +623,7 @@ class MCPHandler(BaseHTTPRequestHandler):
         pass  # silence default stderr logging
 
 
-def start_server(host: str, port: int, items=None):
+def start_server(host: str, port: int, items=None, resources=None):
     """Start the MCP HTTP server on host:port in a background thread.
 
     Returns a dict:
@@ -532,11 +631,16 @@ def start_server(host: str, port: int, items=None):
         {"status": START_PORT_IN_USE, "port": port}     # bind hit EADDRINUSE
         {"status": START_ERROR, "message": "..."}        # any other failure
 
+    `resources` is the static MCP Resource catalog the caller built (entry.py) -
+    entries of {uri, name, ..., text}. The transport publishes what it is handed
+    and loads no content itself; an empty catalog means the resources capability
+    is never advertised.
+
     The caller (entry.start) is responsible for surfacing the port-in-use case to
     the user (likely Autodesk's built-in MCP server holding 27182).
     """
     try:
-        mcp = SimpleMCPServer()
+        mcp = SimpleMCPServer(resources=resources)
         for item in (items or []):
             mcp.register(item)
 

@@ -25,8 +25,8 @@ _REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 _JSON_PATH = os.path.join(_REPO, "commands", "mcpServer", "guidance", "parametric_cad_design.json")
 _SERVER_SRC = os.path.join(_REPO, "commands", "mcpServer", "server", "mcp_server.py")
 _TOOL_SRC = os.path.join(_REPO, "commands", "mcpServer", "tools", "sys_get_guidance.py")
-_GUIDANCE_SRC = (os.path.join(_REPO, "commands", "mcpServer", "guidance", "loader.py"),
-                 os.path.join(_REPO, "commands", "mcpServer", "guidance", "__init__.py"))
+_GUIDANCE_SRC = tuple(os.path.join(_REPO, "commands", "mcpServer", "guidance", name)
+                      for name in ("__init__.py", "loader.py", "render.py", "resources.py"))
 
 _IDS = list(gd.loader.SECTION_IDS)
 
@@ -137,6 +137,32 @@ class TestOneSection:
         index, section = _payload(gd.handler()), _payload(gd.handler(section="kernel"))
         assert section["guidance_id"] == index["guidance_id"]
         assert section["sha256"] == index["sha256"]
+
+
+# ── the address the resource channel serves ─────────────────────────────────
+
+class TestTheResourceAddress:
+    def test_the_index_publishes_the_address_of_the_same_document(self):
+        assert (_payload(gd.handler())["resource_uri"]
+                == "fusion-essentials://guidance/parametric-cad-design")
+
+    def test_a_section_read_carries_the_same_address(self):
+        assert (_payload(gd.handler(section="kernel"))["resource_uri"]
+                == _payload(gd.handler())["resource_uri"])
+
+    def test_the_address_is_the_one_the_resource_catalog_actually_serves(self):
+        # a published address that resources/read does not answer at is worse than none: the tool
+        # and the catalog build it through the same function, and this is that seam.
+        assert _payload(gd.handler())["resource_uri"] == gd.resources.catalog()[0]["uri"]
+
+    def test_the_address_follows_the_document_that_answered(self, serve):
+        serve(_doctored())
+        assert _payload(gd.handler())["resource_uri"].endswith("/doctored")
+
+    def test_the_note_says_what_the_address_is_for(self):
+        # a bare URI in a payload teaches nothing; the note is where a client learns it can read
+        # the whole document there instead of calling this tool per section.
+        assert "resource_uri" in _payload(gd.handler())["note"]
 
 
 # ── the bound ───────────────────────────────────────────────────────────────
