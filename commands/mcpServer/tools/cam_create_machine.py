@@ -12,11 +12,9 @@ from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from . import _inputs
-# The by-name resolver is the shared CAM substrate's: this tool checks a new name through the SAME
-# query an assignment resolves by, and gates the created machine's reachability on it. The full
-# machine_catalog walk is deliberately NOT used here: an unfiltered walk reads capabilities on every
-# bundled machine (measured ~46s over 982 machines - past the 30s handler cap), while the resolver's
-# query is filtered and fast; both read the same Local + Fusion360 locations.
+# A new name is checked through resolve_machine, the same read an assignment resolves by. The
+# machine_catalog walk is not used: it reads capabilities on every bundled machine, which runs past
+# the handler cap.
 from ._cam_common import machine_kinds, machine_library, machine_location, resolve_machine
 
 # Wire value -> the adsk.cam.MachineTemplate member it builds from. The template fixes the new
@@ -117,12 +115,8 @@ def handler(name: str = "", template: str = "generic_3_axis", vendor: str = "") 
         return error(f"Machine.createFromTemplate('{key}') returned nothing - no machine was created.")
 
     # A machine off a template arrives carrying that template's own description/vendor/model, which
-    # every machine built from it shares, so the name REPLACES them. It goes on the MODEL too:
-    # _cam_common.resolve_machine widens a failed lookup by re-splitting a label into
-    # (vendor, model) precisely BECAUSE a label does not match the model field its query is keyed
-    # on - so a machine whose model stays the template default is not reachable by its own name.
-    # The gates below prove THIS machine's reachability per call rather than resting on which
-    # fields the library query indexes.
+    # every machine built from it shares, so the name REPLACES them. It goes on the MODEL too: the
+    # library query is keyed on that field, not on the description.
     for prop, value in (("description", name), ("vendor", (vendor or "").strip()),
                         ("model", name)):
         if not value:
@@ -159,9 +153,7 @@ def handler(name: str = "", template: str = "generic_3_axis", vendor: str = "") 
                      "machine. The stored machine is still there.")
 
     # The resolver gate above IS the catalog evidence: cam_get(include=['machines']) reads the same
-    # Local + Fusion360 locations through the same library queries, so a machine that resolves by
-    # its name is the machine that catalog lists. A second UNFILTERED catalog walk is deliberately
-    # not run - it reads capabilities on every bundled machine (~46s, past the handler cap).
+    # locations through the same library reads.
     has_sim = bool(safe(lambda: found.hasSimulationModel, False))
     note = ("Machine created and re-resolved through the query cam_edit_setup assigns from - the "
             f"same read the cam_get(include=['machines']) catalog is built on. Assign it: "
@@ -191,8 +183,7 @@ TOOL_DESCRIPTION = (
     "Create a MACHINE in the LOCAL machine library from a Fusion machine template - the answer when "
     "cam_edit_setup(machine=...) finds no match. 'name' becomes the machine's name "
     "(Machine.description) and model, what an assignment resolves by; a name that already reaches a "
-    "Local/Fusion360 machine (its name, model, or 'vendor model') is refused up front. Verified "
-    "reachable before this reports success; it persists in the Local library. "
+    "Local/Fusion360 machine (its name, model, or 'vendor model') is refused up front. "
     "Next: cam_edit_setup(setup=..., machine='<name>')."
 )
 

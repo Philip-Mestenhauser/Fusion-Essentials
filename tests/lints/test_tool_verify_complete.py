@@ -93,7 +93,7 @@ class TestToolVerifyLayout:
 
     def test_no_placed_chunk_lands_on_a_pinned_one(self):
         # measured against the pinned chunks' own footprints, not against the pin constant - the
-        # gyroscope, the vise and the CAM stock are what a stray cell would actually land on.
+        # bracket, the vise and the CAM stock are what a stray cell would actually land on.
         verify = _load_verify()
         box = _footprints(verify, lambda narr: verify._placed(narr, verify._SLOTS))
         pinned = {c: b for c, b in box.items() if c not in verify._SLOTS}
@@ -102,7 +102,7 @@ class TestToolVerifyLayout:
                    for c, b in sorted(box.items()) if c in verify._SLOTS
                    for p in sorted(pinned) if _hits(b, pinned[p])]
         assert not clashes, (
-            "placed chunks land on the origin world, where the gyroscope, the vise and the CAM "
+            "placed chunks land on the origin world, where the bracket, the vise and the CAM "
             "stock live and cannot move:\n  " + "\n  ".join(clashes))
 
     def test_chunks_that_address_each_other_stay_together(self):
@@ -128,7 +128,7 @@ class TestToolVerifyLayout:
     def test_no_frame_names_an_entity_the_story_already_deleted(self):
         # view_set REFUSES a focus it cannot resolve, so a camera row aimed at something a later
         # act deleted is a hard failure - and one that only shows up live, after three minutes of
-        # run. The finale framed the gyroscope, which ACT 8 strips away to reach the machinable part.
+        # run.
         verify = _load_verify()
         gone, offenders = {}, []
         for name, _pre, narr, _fb in verify._ACT_PROGRAM:

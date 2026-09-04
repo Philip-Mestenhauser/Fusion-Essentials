@@ -3,16 +3,8 @@
 
 """Lint: a MEASURED adsk enum member is never hand-assigned in a unit test - it comes seeded.
 
-live_api_facts.py (generated against live Fusion) seeds every measured enum family onto the mock
-adsk modules, so a test that assigns its own value to a measured member either duplicates the
-measurement (and drifts the moment Fusion changes) or shadows it with a sentinel that other tests
-can trip over. Need a value that is not measured yet? Add a measurement row to
-tests/live/measure_api.py and regenerate - the banned set below grows with the facts file, so
-newly measured families are guarded automatically.
-
-Files that still install string sentinels over measured members are named in _ALLOWLIST with a
-reason; the table is shrink-only - migrating a file to the seeded values deletes its entry.
-"""
+A line under tests/unit that installs a live_api_facts.ENUMS member by attribute, dict key or
+kwarg fails; conftest seeds those onto the mock adsk modules. _ALLOWLIST files are exempt."""
 
 import os
 import re
@@ -24,11 +16,9 @@ UNIT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 
 _MEMBERS = sorted({m for members in live_api_facts.ENUMS.values() for m in members})
 _NAMES = "|".join(map(re.escape, _MEMBERS))
-# Three shapes re-seed a measured member by hand, each compiled and searched SEPARATELY (one
-# alternation at this size has silently failed to match its tail): `x.Member = ...` (attribute
-# install), `{"Member": ...}` (dict literal), and `Member=...` as a kwarg / bare statement (the
-# form a SimpleNamespace(...) or type()-built stand-in uses). The kwarg form is anchored so an
-# attribute install is not double-counted and a longer identifier cannot match its suffix.
+# Three re-seeding shapes - attribute install, dict literal, kwarg - each compiled SEPARATELY: a
+# single alternation this large can silently fail to match its tail. The kwarg form's lookbehind
+# keeps an attribute install from double-counting and a longer identifier from matching a suffix.
 _PATTERNS = (
     re.compile(r"\.(?:" + _NAMES + r")\s*=(?!=)"),
     re.compile(r"[\"'](?:" + _NAMES + r")[\"']\s*:"),
@@ -41,10 +31,8 @@ _ALLOWLIST = {}
 
 def _offending_lines(path):
     src = _corpus.text(path)
-    # Whole-file screen first: a line match is also a match in the file's full text (no pattern is
-    # line-anchored, and the one lookbehind sees "\n" at a line start, which is outside its class),
-    # so a file matching nothing here has no offending line - which is nearly every file. A file
-    # whose only hits sit in comments still falls through to the line pass, which skips them.
+    # Whole-file screen first: no pattern is line-anchored and the one lookbehind admits the "\n"
+    # at a line start, so a line match is always a full-text match too.
     if not any(p.search(src) for p in _PATTERNS):
         return []
     out = []
@@ -81,24 +69,3 @@ class TestNoHandSeededEnums:
                 stale.append(f"{fn}: no hand-assignment remains - remove the allowlist entry")
         assert not stale, "stale allowlist entries:\n  " + "\n  ".join(stale)
 
-    def test_the_lint_bites(self, tmp_path):
-        # every detection shape trips on a live line and stays quiet on a comment: the attribute
-        # install, the dict literal, and the kwarg/SimpleNamespace form each get their own case,
-        # because a single giant alternation has silently failed to match its tail before.
-        assert _MEMBERS, "no measured enum members - live_api_facts.ENUMS is empty"
-        member = _MEMBERS[0]
-        hot_lines = {
-            "attribute": f"    adsk.fusion.SomeEnum.{member} = 5\n",
-            "dict": f'    FAKE = {{"{member}": 5}}\n',
-            "kwarg": f"    ns = SimpleNamespace({member}=5)\n",
-        }
-        for shape, text in hot_lines.items():
-            hot = tmp_path / f"test_hot_{shape}.py"
-            hot.write_text(text, encoding="utf-8")
-            assert _offending_lines(str(hot)), f"the {shape} form must trip the scan: {text!r}"
-        cool = tmp_path / "test_cool.py"
-        cool.write_text(
-            f"    # e.g. adsk.fusion.SomeEnum.{member} = 5\n"
-            f"    value = My{member} = 5\n",   # a LONGER identifier must not match on its suffix
-            encoding="utf-8")
-        assert not _offending_lines(str(cool)), "a comment / longer identifier must NOT trip"

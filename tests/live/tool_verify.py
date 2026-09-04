@@ -8,12 +8,12 @@ that builds its own world in a scratch document and tears it down. The gate: a l
 unexplained rows - every tool is pass / expected-refusal / skipped(reason).
 
 The sweep is the END-TO-END STORY the evals grade agents on, in one document: a parametric
-gyroscope is cast, turned solid, jointed and driven on every axis, detailed, resized, then
-REDUCED to its one machinable part (the Carrier bar), a self-centering VISE is modeled around
-it (sliders, motion link at ratio -1, grip proven by measure), and a real milling job runs on
-the REAL part in the REAL fixture - four operations, generated to completion (an empty toolpath
-fails the run), NC posted. Cameo fixtures for families with no home on the mechanism ride the
-same document.
+machined BRACKET is cast, turned solid (stepped top, radiused pocket, through bores, a
+counterbored mounting pattern, a boss, a broken edge), detailed, resized off its one driving
+length, sized into a billet and clamped in a modelled VISE (slider jaw, lead screw on a motion
+link, grip proven by measure), photographed, and finally machined - four operations on the REAL
+part in the REAL fixture, generated to completion (an empty toolpath fails the run), NC posted.
+Cameo fixtures for families with no home on the part ride the same document.
 
 A run with zero FAIL/blocked steps writes ``tests/live/VERIFIED_TOOLS.md`` - the tracked receipt: the
 per-tool ledger stamped with a SHA-256 of the ``commands/mcpServer/`` source tree, binding that
@@ -28,6 +28,8 @@ Run:  py -3 tests/live/tool_verify.py            (requires Fusion running + the 
                                                   or its source hash differs from the tree)
       py -3 tests/live/tool_verify.py --json     (also write tests/live/results/verify-<ts>.json)
       py -3 tests/live/tool_verify.py --keep-open  (leave the story document open for inspection)
+      py -3 tests/live/tool_verify.py --acts "ACT 10a..ACT 10e"  (walk only those acts against the
+                                                  document a --keep-open run left open; no receipt)
 
 Steps are DATA (see STEPS): each row is (tool, args, expect) where args may be a dict or a
 callable(ctx) reading what earlier steps stored, and expect is "ok", "refused" (a deliberate
@@ -68,9 +70,12 @@ from verify_core import (  # noqa: F401
     BASE, MCP, SERVER_NAME, DOC_PREFIX, MACHINE_NAME, TEMPLATE_NAME, NOTE_MAX, REFUSAL_NOTE_MAX,
     STEP_SLEEP_S, _SHELL_TIMEOUT_S, _RUNTIME_BUDGET_S, _DWELL, _HERE, REPO_ROOT, SRC_ROOT,
     VERIFIED, _post, call, health_gate, registered_tools, _ctx_get, _Refusal, _refused, Parked,
+    Needs, _needs, step_capability, parked_reason, CAPABILITY_PROBES, probe_capabilities,
+    capability_met, capability_skip_reason, _machining_extension_probe,
     _unparked, _PUSH_OPS, _INSPECT_OPS, _is_inspect, _ARG_LOAD_OPS, _arg_load_sites,
     _TRUTHY_ONLY_CALLS, _callee_name, _inspects_argument, _inspects_payload, predicate_kind,
-    EXPORT_DIR, SVG_PATH, SVG96_PATH, _fg, _fgn, _prof, _PATH_LABEL, _path_count, _measured,
+    EXPORT_DIR, SVG_PATH, SVG96_PATH, _fg, _fgn, _prof, _matched, _face_up_at,
+    _PATH_LABEL, _path_count, _measured,
     _RECALL, _recall, _SVG96_MM, _SVG96_TOL, _svg96_extent, _repair_no_op, _made_component,
     _made_component_inactive, _PLANE_NORMAL_AXIS, _datum_plane, _dim_measures, _datum,
     _result_bodies, _extruded, _revolved, _swept, _lofted, _material_assigned, _gap_measured,
@@ -101,29 +106,32 @@ from verify_layout import (  # noqa: F401
     _px, _py, _SLOTS)
 
 from verify_acts_doc import (  # noqa: F401
-    _OVERTURE, _FINALE, _RELOAD_PROBE_GAP_S, _RELOAD_PROBE_TIMEOUT_S, _RELOAD_DOWN_POLLS,
-    _RELOAD_UP_POLLS, _RELOAD_SMOKE_QUERY, _server_answers, _poll_health, reload_smoke)
+    _OVERTURE, _SHOWCASE, _FINALE, _RELOAD_PROBE_GAP_S, _RELOAD_PROBE_TIMEOUT_S,
+    _RELOAD_DOWN_POLLS, _RELOAD_UP_POLLS, _RELOAD_SMOKE_QUERY, _server_answers, _poll_health,
+    reload_smoke)
 
 from verify_acts_sketch import _SKELETON, _SKETCHWORK  # noqa: F401
 
 from verify_acts_model import (  # noqa: F401
-    _SOLIDS, _DETAILS, _RESIZE, _SOLIDS_FB, _DETAILS_FB, _RESIZE_FB, _GYRO_PARTS,
-    _gyro_rest_clean, _REDUCE)
+    _SOLIDS, _DETAILS, _RESIZE, _SOLIDS_FB, _DETAILS_FB, _RESIZE_FB)
 
-from verify_acts_motion import _MOTION, _MOTION_FB, _plate, _second_plate, _VISE  # noqa: F401
+from verify_acts_motion import (  # noqa: F401
+    _MOTION, _plate, _fixture_rest_clean, _VISE)
 
 from verify_acts_mesh import _MACHINING, _NESTING, _MESH  # noqa: F401
 
 from verify_acts_cam import (  # noqa: F401
+    PART_COMP, PART_DRIVER, STOCK_COMP, VISE_BASE, JAW_FIXED, JAW_MOVING, CAM_SETUP,
     _op_created, _toolpath_shown, _CAM_STORY, _tmpl_names, _CAM_DELIVER,
     poll_generation, _CAM, _CAM_FB_DELIVER)
 
 from verify_program import (  # noqa: F401
-    _ACT_PROGRAM, _SKETCH_PHASE, _placed_boxes, ACTS, POLL_AFTER, STEPS, STORY, EXCLUDED, PENDING)
+    _ACT_PROGRAM, _SKETCH_PHASE, _placed_boxes, ACTS, ACT_NEEDS, POLL_AFTER, STEPS, STORY,
+    EXCLUDED, PENDING)
 
 from verify_runner import (  # noqa: F401
     source_hash, _STAMP_RE, write_verified, check, _shoot, run_steps, judged_steps,
-    _precondition_holds, run)
+    _precondition_holds, _one_act, select_acts, run)
 
 # The patchable surface is patched ON THIS MODULE (a consumer stubs tool_verify.call,
 # tool_verify.ACTS, tool_verify.source_hash), so the runner and the post-act hook read
@@ -142,9 +150,14 @@ if __name__ == "__main__":
                          "can be judged by looking instead of by trusting its ratio")
     ap.add_argument("--trace", action="store_true",
                     help="print each step (flushed) before it runs, so a Fusion crash names its killer")
+    ap.add_argument("--acts", metavar="SPEC", default=None,
+                    help="walk only these acts, in ACTS order, against the document a prior "
+                         "--keep-open run left open: a comma list of act names as printed in the "
+                         "log (\"ACT 10a\", \"FINALE\"), each one act or an \"A..B\" range. Writes "
+                         "no receipt")
     args = ap.parse_args()
     shots = args.shots
     if shots:
         os.makedirs(shots, exist_ok=True)
     sys.exit(check() if args.check else run(args.json, keep_open=args.keep_open, trace=args.trace,
-                                            shots_dir=shots))
+                                            shots_dir=shots, acts_spec=args.acts))

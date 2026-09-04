@@ -115,11 +115,9 @@ def switch_workspace_handler(workspace: str = "") -> dict:
         if not did:
             return error(f"Activation of '{match.name}' failed (it may not be valid "
     "to switch to right now, e.g. no document open).")
-        # activate() returning true is not proof the workspace changed - re-read the workspace's
-        # own isActive, falling back to the UI's active workspace id when that flag will not read.
-        # The refusal is worded from WHICHEVER read produced the verdict: claiming
-        # "isActive=false" for a verdict the UI fallback made would name a read that never
-        # happened.
+        # activate() returning true is not proof the workspace changed - re-read isActive, falling
+        # back to the UI's active workspace id. The refusal is worded from WHICHEVER read produced
+        # the verdict.
         flag = _common.read_flag(lambda: match.isActive)
         now = flag
         if now is None:
@@ -152,9 +150,8 @@ _list_tool = Tool.create_simple(
     name="view_list_workspaces",
     description=(
     "List the Fusion workspaces the user can switch to (e.g. Design, "
-    "Manufacture, Render), with each workspace's id, visible name, product "
-    "type, and whether it is currently active. Use this to detect the current "
-    "workspace or to discover valid targets for view_switch_workspace."
+    "Manufacture, Render), each with its id, visible name, product type, and "
+    "whether it is active. The targets for view_switch_workspace."
     ),
 ).strict_schema()
 list_workspaces_item = Item.create_tool_item(
@@ -164,11 +161,9 @@ list_workspaces_item = Item.create_tool_item(
 _switch_tool = Tool.create_with_string_input(
     name="view_switch_workspace",
     description=(
-    "Switch the active Fusion workspace. Pass 'workspace' as a workspace id "
-    "('FusionSolidEnvironment', 'CAMEnvironment'), a visible name ('Design', "
-    "'Manufacture'), or an alias ('design', 'manufacture'/'cam'). Switching to "
-    "Manufacture is required for some CAM UI actions, though CAM data can be "
-    "read without switching (see cam_get)."
+    "Switch the active Fusion workspace ('workspace' takes an id, a visible "
+    "name, or an alias). Switching to Manufacture is required for some CAM UI "
+    "actions, though CAM data can be read without switching (see cam_get)."
     ),
     input_param_name="workspace",
     input_param_description="Workspace id, visible name, or alias (design/manufacture/cam).",

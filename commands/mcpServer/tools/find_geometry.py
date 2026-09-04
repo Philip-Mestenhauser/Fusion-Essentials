@@ -1,13 +1,7 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: find geometry on a part and return stable HANDLES to it.
-
-Scans faces/edges/vertices and returns each match's kind, world position, and shape data with a
-HANDLE (entityToken) other tools consume (joint_at_geometry, model_extrude, ...). Handles are
-SHORT-LIVED - Fusion does not guarantee a stable entityToken across separate queries, so use one
-promptly and re-run find_geometry if it is rejected as stale.
-"""
+"""MCP building block: scan a part's faces/edges/vertices and return short-lived HANDLES to them."""
 
 import adsk.core
 import adsk.fusion
@@ -22,8 +16,6 @@ from . import _geom
 from . import _inputs
 from . import _outputs
 
-# What this tool RETURNS (declared once; drives the PRODUCES: prose + the assert-present contract test).
-# The 'handle' lands inside each item of the 'matches' list. ~18 GeometryHandle/BodyRef inputs consume it.
 RETURNS = [
     _outputs.ReturnsHandle("handle", require="any", in_list=True, consumers=[
         "joint_at_geometry", "sketch_create", "model_extrude", "model_fillet", "model_chamfer",
@@ -44,35 +36,13 @@ _EDGE_KINDS = {"circular_edge": "Circle3D", "line_edge": "Line3D", "arc_edge": "
 
 
 def _resolve_target(design, target):
-    """Resolve 'target' (occurrence name/fullPathName, or component name, or body name, or
-    '' = whole design) to (pairs, label, error, walk), where pairs is a list of (occurrence_or_None,
-    body) to scan and `walk` is the occurrence census those pairs were drawn from - published so a
-    search space with a hole in it is never reported as a complete result. `error` is set only for a
-    REFUSAL the caller must see (an ambiguous name and its candidates); a plain miss returns no
-    error, leaving the caller its own target vocabulary.
-
-    DELIBERATE AGGREGATION (unlike OccurrenceRef, which refuses an ambiguous name): a 'target' that
-    matches MULTIPLE occurrences - e.g. a component name shared by every instance of a pattern, like
-    'Bolt' matching Bolt:1..Bolt:6 - scans ALL of them and returns geometry from every match, not just
-    the first. This is a READ tool whose whole job is to hand back a list of candidate handles (each
-    individually addressable), not to single out ONE instance to act on - so "every matching instance"
-    is the useful default, not a wrong-instance risk. Use a body/occurrence fullPathName in 'target'
-    to scan exactly one instance instead.
-
-    Scans root.allOccurrences (the flattened, RECURSIVE list - so a NESTED occurrence is reachable by
-    its fullPathName, the same key design_get(include=['tree'])/assembly_get emit) plus root-level bodies. This
-    keeps find_geometry's reach consistent with the self-heal path (_inputs._refind_by_locator), which
-    also scans allOccurrences - otherwise a deep occurrence resolves on re-find but not on the initial
-    query. A BODY name reaches just as far: it resolves through the shared body resolver, which walks
-    every occurrence and every component's meshes, not only the root's bodies."""
+    """Resolve 'target' (occurrence/component/body name, or '' for the whole design) to
+    (pairs, label, error, walk). A target matching several occurrences scans ALL of them - this read
+    hands back every candidate handle; `error` is set only for a refusal, never a plain miss."""
     root = design.rootComponent
     name = (target or "").strip()
-    # The SHARED census, not a bare root.allOccurrences: that property access RAISES on a design
-    # holding an unresolved external reference (measured), and `safe(read) or []` there turns "the
-    # assembly could not be enumerated" into "the design has no occurrences" - a root-bodies-only
-    # scan the payload would publish as the whole design. occurrence_walk falls back to the
-    # component.occurrences recursion and SAYS which walk answered, and that verdict is handed back
-    # for the payload to disclose.
+    # root.allOccurrences RAISES on a design holding an unresolved external reference, so the shared
+    # census is used - it falls back to component.occurrences and says which walk answered.
     walk = _common.occurrence_walk(design)
     all_occs = walk.occurrences
     root_bodies = safe(lambda: list(root.bRepBodies)) or []
@@ -85,16 +55,14 @@ def _resolve_target(design, target):
             for b in (safe(lambda o=o: list(o.bRepBodies)) or []):
                 pairs.append((o, b))
         return pairs, "whole design", None, walk
-    # by occurrence fullPathName, name, or component name - recursively. A path can be worn by two
-    # siblings (Fusion enforces no name uniqueness), which for this read means both get scanned.
+    # A fullPathName can be worn by two siblings - Fusion enforces no name uniqueness - and for this
+    # read that means both get scanned.
     matched = [o for o in all_occs
                if (safe(lambda o=o: o.fullPathName) == name or safe(lambda o=o: o.name) == name
                    or safe(lambda o=o: o.component.name) == name)]
     if matched:
-        # Scan the matched occurrence's whole SUBTREE, not just its direct bodies: geometry
-        # often lives on occurrences nested beneath the named one (an inserted xref wraps its
-        # own tree; a derive lands its solid one level down - live-verified: a wrapper target
-        # scanned direct-only returned 0 faces while its nested child held all 9).
+        # The whole SUBTREE, not just direct bodies: an inserted xref wraps its own tree and a
+        # derive lands its solid one level down, so a wrapper's own bodies can be none.
         prefixes = [p for p in (safe(lambda o=o: o.fullPathName) for o in matched) if p]
         seen = {id(o) for o in matched}
         subtree = list(matched)
@@ -108,31 +76,22 @@ def _resolve_target(design, target):
                 pairs.append((o, b))
     if pairs:
         return pairs, f"occurrence/component '{name}'", None, walk
-    # By BODY name - the shared ambiguity-refusing resolver (_inputs._resolve_any_body, the same one
-    # design_export's target resolves through), so a body inside ANY component resolves, the qualified
-    # '<occurrence-or-component>:<body>' form picks one instance, and a name several components answer
-    # to is REFUSED with those candidates instead of first-matched.
+    # By BODY name, through the shared ambiguity-refusing resolver.
     body, body_err = _inputs._resolve_any_body("target", name)
     if body is not None:
         if _inputs._is_mesh(body):
             return [], None, (f"Target '{name}' is a MESH body - find_geometry scans BRep "
                               "faces/edges/vertices, which a mesh has none of. Use mesh_get."), walk
-        # Label the body that RESOLVED, not the string asked for, in the qualified form that resolves
-        # back: a bare or mis-cased name then reads back as the exact body it reached.
+        # Label the body that RESOLVED, in the qualified form that resolves back.
         return [(None, body)], f"body '{_inputs.qualified_body_name(body)}'", None, walk
-    # Every REFUSAL the resolver raised carries a fix path the caller needs (which candidates to
-    # choose between, what the named scope actually holds) - pass it through. Only its plain miss is
-    # replaced below, by this tool's wider target vocabulary.
+    # A refusal carries its own fix path; only the plain miss is replaced by this tool's vocabulary.
     if body_err and _inputs.BODY_MISS not in body_err:
         return [], None, body_err, walk
     return [], None, None, walk
 
 
 def _search_space_note(walk):
-    """The sentence disclosing a hole in the occurrence census the scan ran over, or ''.
-
-    Each clause states what the walk itself reported - which collection answered, whether it ran to
-    the end, and how many rows carry an unresolved reference - and claims nothing about why."""
+    """The sentence disclosing a hole in the occurrence census the scan ran over, or ''."""
     if walk is None:
         return ""
     parts = []
@@ -160,15 +119,8 @@ def _dist(a, b):
 
 
 def _plane_frame(g, inv_k):
-    """A planar face's own orthonormal frame in WORLD coordinates, or None when it cannot be read.
-
-    adsk.core.Plane carries origin + uDirection/vDirection/normal (live-verified numerically on stock
-    faces: u x v = normal), which is what lets a caller express a point ON the face in local (u, v)
-    coordinates. The plane's origin is its PARAMETRIC origin - NOT the face centroid the record
-    reports as 'position' - so the two are different points and the record publishes both.
-
-    All-or-nothing on purpose: a frame missing its origin or one axis cannot locate a point at all,
-    so a partial read publishes null instead of three quarters of a coordinate system."""
+    """A planar face's own orthonormal frame in WORLD coordinates - origin plus x_world/y_world/
+    normal - or None when any part of it cannot be read (a partial frame locates nothing)."""
     def build():
         plane = adsk.core.Plane.cast(g)
         if plane is None:
@@ -193,8 +145,7 @@ def _face_record(face, inv_k):
             adsk.core.SurfaceTypes.SphereSurfaceType: "sphere_face",
             adsk.core.SurfaceTypes.TorusSurfaceType: "torus_face"}.get(st, "face")
     c = safe(lambda: face.centroid)
-    # Composite, self-healing handle: token + a kind+position locator (cm) so a stale token re-resolves
-    # to the same face by geometry instead of erroring (see _inputs.make_handle).
+    # Composite handle: token + a kind+position locator in cm, so a stale token re-resolves by geometry.
     handle = _inputs.make_handle(face, kind, (c.x, c.y, c.z)) if c else safe(lambda: face.entityToken)
     rec = {"handle": handle, "kind": kind,
             "position": [round(c.x * inv_k, 3), round(c.y * inv_k, 3), round(c.z * inv_k, 3)] if c else None,
@@ -204,8 +155,6 @@ def _face_record(face, inv_k):
     if nrm is not None:
         rec["normal"] = nrm
     if kind == "planar_face":
-        # The face plane's own frame, so a caller can compute a point on the face instead of
-        # guessing at world coordinates. Always published for a planar face; null when unreadable.
         rec["frame"] = _plane_frame(g, inv_k)
     if kind == "cylinder_face":
         rec["radius"] = _common.measured(lambda: g.radius, inv_k, 3)
@@ -222,8 +171,8 @@ def _edge_record(edge, inv_k):
             adsk.core.Curve3DTypes.Line3DCurveType: "line_edge",
             adsk.core.Curve3DTypes.Arc3DCurveType: "arc_edge"}.get(ct, "edge")
     pt = safe(lambda: edge.pointOnEdge)
-    # Self-healing handle keyed to pointOnEdge (the same point _refind_by_locator compares against for
-    # an edge - NOT the circle center the display 'position' may show below).
+    # Keyed to pointOnEdge - what _refind_by_locator compares an edge against, not the circle center
+    # the display 'position' may carry below.
     handle = _inputs.make_handle(edge, kind, (pt.x, pt.y, pt.z)) if pt else safe(lambda: edge.entityToken)
     rec = {"handle": handle, "kind": kind,
             "position": [round(pt.x * inv_k, 3), round(pt.y * inv_k, 3), round(pt.z * inv_k, 3)] if pt else None,
@@ -255,8 +204,6 @@ def handler(target: str = "", kind: str = "", radius: float = None,
     pairs, target_label, resolve_err, walk = _resolve_target(design, target)
     space_note = _search_space_note(walk)
     if not pairs:
-        # The disclosure rides on the MISS too: "no such target" is a claim about the design, and a
-        # census that did not enumerate cannot support it.
         miss = (resolve_err or
                 f"Could not resolve target '{target}'. Use an occurrence/component name, a body "
                 "name (bare, or '<occurrence-or-component>:<body>' when several components hold "
@@ -271,9 +218,8 @@ def handler(target: str = "", kind: str = "", radius: float = None,
 
     matches = []
     for occ, body in pairs:
-        # Omit-when-default visibility signal: BRepBody.isVisible is the EFFECTIVE state (it rolls up
-        # the body's own bulb AND every ancestor occurrence's - isLightBulbOn alone does not), so a
-        # hidden body's matches carry hidden:true and a visible body's records stay unchanged.
+        # BRepBody.isVisible is the EFFECTIVE state, rolling up every ancestor occurrence's bulb;
+        # isLightBulbOn alone does not.
         hidden = safe(lambda body=body: body.isVisible, True) is False
         recs = []
         if want_faces:
@@ -312,8 +258,6 @@ def handler(target: str = "", kind: str = "", radius: float = None,
         matches.sort(key=lambda m: _dist(m["position"], npt))
 
     total = len(matches)
-    # clamp_rows holds the cap inside 1.._MAX_RESULTS_CEILING: every match row crosses the wire,
-    # so a caller cannot lift the cap past the ceiling (the fleet's "Bound it" read rule).
     matches = matches[:clamp_rows(max_results, _MAX_RESULTS_DEFAULT, _MAX_RESULTS_CEILING)]
 
     payload = {
@@ -322,22 +266,15 @@ def handler(target: str = "", kind: str = "", radius: float = None,
         "match_count": total,
         "returned": len(matches),
         "units": units,
-        # Which occurrence census the scan ran over (allOccurrences / recursed / unreadable). Always
-        # published: a reader that must know whether the search space was whole cannot tell an absent
-        # key from a clean walk.
+        # Always published, so a reader can tell an absent key from a whole search space.
         "occurrences_walk": walk.method if walk is not None else None,
         "matches": matches,
-        # Producer prose generated from the RETURNS declaration (the chain is declared once, not
-        # hand-typed here and paraphrased in every consumer). Plus the one tool-specific tip.
-        "note": _outputs.produces_block(RETURNS) + "\nNarrow with kind / radius / nearest_to "
-        "when a part has many similar faces. A match on a body that is not visible carries "
-        "hidden:true (visible bodies' records omit it).\nA planar face's 'frame' is that face's "
-        "plane in world space: the point at local (u, v) on it is frame.origin + u*frame.x_world + "
-        "v*frame.y_world, and frame.normal is off-plane. frame.origin is the plane's PARAMETRIC "
-        "origin, NOT the face centre - 'position' stays the centroid, so the two differ. This is "
-        "NOT the frame of a sketch a tool creates on the face: that one is measured to differ in "
-        "origin AND in axis SIGN, so pass world coordinates (model_hole points_space='world') "
-        "rather than converting into a sketch frame by hand.",
+        "note": _outputs.produces_block(RETURNS) + "\nA match on a body that is not visible carries "
+        "hidden:true.\n"
+        "A planar face's 'frame' is that plane in world space: the point at local (u, v) is "
+        "frame.origin + u*frame.x_world + v*frame.y_world, and frame.origin is the plane's "
+        "PARAMETRIC origin while 'position' is the centroid. Feed consumers world coordinates "
+        "(model_hole points_space='world'), not a sketch frame converted by hand.",
     }
     if space_note:
         payload["note"] += "\n" + space_note
@@ -346,17 +283,12 @@ def handler(target: str = "", kind: str = "", radius: float = None,
 
 TOOL_DESCRIPTION = (
     "Scan a part's faces/edges/vertices and return handles to them (entity tokens), each with kind, "
-    "world position, and shape data (cylinder radius+axis, edge radius, face area, face outward "
-    "normal, linear-edge direction, plus a planar face's 'frame' - that face's plane in world space, "
-    "origin + x_world/y_world/normal, for computing a point ON the face). A 'target' matching "
-    "several occurrences (e.g. "
-    "every instance of a patterned component) scans all of them and returns candidates from each - by "
-    "design, not a first-match guess - so pass an exact fullPathName to scan just one instance. A body "
-    "inside a component resolves by its own name; a name several components hold is refused, naming "
-    "each qualified candidate. 'kind' "
-    "filters by geometry type; 'radius' keeps matching round geometry; 'nearest_to'=[x,y,z] sorts by "
-    "distance. Handles are short-lived - use them in the next call(s); if one is rejected as stale, "
-    "re-run find_geometry for a fresh one.\n"
+    "world position, and shape data (radius, axis, area, outward normal, plus a planar face's "
+    "'frame' - its plane in world space, for computing a point ON the face). A 'target' matching "
+    "several occurrences scans all of them, so pass an exact fullPathName for one instance; a body "
+    "name several components hold is refused. 'kind'/'radius'/'nearest_to' filter and sort the "
+    "matches. Handles are short-lived - use them in the next call(s), and re-run find_geometry if "
+    "one is rejected as stale.\n"
     + _outputs.produces_block(RETURNS)
 )
 

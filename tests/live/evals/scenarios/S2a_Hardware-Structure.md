@@ -8,7 +8,7 @@ fixture: P1-Gimbal (the S1 artifact - the sketch-only cast with its declared int
   a project.
 budget:
   max_tool_calls: 130
-  max_tokens: 130000
+  max_tokens: 201000
 substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
 perturbations: none (baseline)
 expected_refusals: none

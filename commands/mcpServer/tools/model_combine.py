@@ -5,9 +5,6 @@
 
   model_combine -> the Combine feature: fuse, subtract, or intersect one or more TOOL bodies into a
                    TARGET body. Optionally keep the tool bodies. WRITES.
-
-The body-on-body boolean that model_extrude/model_revolve's cut/join can't do (those act on a
-profile, not existing geometry).
 """
 
 import adsk.core
@@ -22,7 +19,6 @@ from . import _geom
 from . import _inputs
 from . import _assert
 
-# BodyRef inputs: target body + tool bodies, each by handle (precise) or name.
 _TARGET = _inputs.BodyRef("target", required=True, description="The target body (kept/modified).")
 _TOOLS = _inputs.BodyRefList("tools", required=True, description="The tool bodies to combine into the target.")
 
@@ -33,24 +29,10 @@ _OPERATIONS = ("join", "cut", "intersect")   # combine needs an existing target;
 
 def _join_verdict(result_bodies, result_lumps, input_lumps, direct_no_feature,
                   before_bodies, after_bodies, tool_count, keep_tools, new_component):
-    """(payload fields, warning sentence) for a JOIN that did not fuse - ({}, "") when nothing the
-    call could read says it failed.
-
-    MEASURED (parametric, 2705.0.87): a join of two DISJOINT solids reports success and its feature
-    result holds BOTH input bodies - nothing is consumed and nothing merges. So MORE THAN ONE RESULT
-    BODY is the nothing-fused verdict, and it is the primary one; the pieces are separate bodies, not
-    lumps of one.
-
-    The lump read is the second arm, for the single-result-body case: one body carrying several
-    DISCONNECTED lumps also fused nothing. It stays unstated when the count cannot be read.
-
-    Direct mode has no feature whose result bodies could be counted, so the census answers instead: a
-    join that consumed its tools drops the host's body count by one per tool body. Any tool body left
-    standing did not fuse. The census cannot speak when the tools were KEPT on purpose or the result
-    was moved to a new component, so neither case claims a verdict."""
-    # keep_tools is excluded from this arm: what a KEPT tool body does to the feature's result set is
-    # not measured, so a several-body result there could be the kept copies rather than a failed fuse,
-    # and a warning that can fire on a good join is worse than silence.
+    """(payload fields, warning sentence) for a JOIN that did not fuse - ({}, "") when nothing read
+    says it failed."""
+    # A kept tool body rides in the feature's own result set, so more than one result body there is
+    # not a failed fuse.
     if len(result_bodies) > 1 and not keep_tools:
         named = ", ".join(n for n in result_bodies if n)
         return ({"disjoint_join": True, "fused": False, "result_body_count": len(result_bodies)},
@@ -58,8 +40,6 @@ def _join_verdict(result_bodies, result_lumps, input_lumps, direct_no_feature,
                 f"({named}), which is what a join of pieces that do not touch produces.")
 
     if result_lumps is not None and result_lumps > 1:
-        # input_lump_total rides as DATA beside the verdict (null when any input's lumps would not
-        # read), so 'nothing fused' is computable from the payload instead of parsed out of prose.
         total_in = (sum(input_lumps) if all(isinstance(n, int) for n in input_lumps) else None)
         fields = {"disjoint_join": True, "input_lump_total": total_in}
         if total_in is not None:
@@ -92,8 +72,6 @@ def handler(target: str = "", tools=None, operation: str = "join",
         return error("No active design. Create or open a document first (see doc_new).")
     comp = target_component(design)
 
-    # target + tools are BodyRef / BodyRefList inputs: resolve each by HANDLE (precise - bodies are
-    # auto-named) or by name, with validation. The handler drops its bespoke body-by-name resolver.
     tgt, terr = _TARGET.resolve(target)
     if terr:
         return error(terr)
@@ -101,15 +79,9 @@ def handler(target: str = "", tools=None, operation: str = "join",
     if lerr:
         return error(lerr)
 
-    # same-body guard: compared by _common.native_identity, never by Python identity alone - the API
-    # mints a FRESH wrapper per access (live-measured on face.body/edge.body), so `is` can read False
-    # for two references to the same physical body and the guard would never fire. The NATIVE half of
-    # that key, because the target and a tool can name one body through DIFFERENT wrappers ('Jaw' - a
-    # single-body COMPONENT name - resolving to the native, 'Pin' / 'Jaw:1:Pin' to that occurrence's
-    # proxy), whose own tokens differ - in either direction. The SOURCE-DOCUMENT half, because a
-    # token is document-local: two bodies reached through two x-refs answer one token (measured), and
-    # keyed on that alone this guard REFUSES a legitimate combine of two distinct bodies. Same shape
-    # as mesh_combine's guard.
+    # Same-body guard keyed on _common.native_identity, not Python identity: the API mints a FRESH
+    # wrapper per access, so `is` reads False for two references to one body. The key needs its
+    # source-document half too - an entityToken is document-local, so two x-refs answer one token.
     tgt_key = _common.native_identity(tgt)
     coll = adsk.core.ObjectCollection.create()
     for b in tool_bodies:
@@ -120,39 +92,27 @@ def handler(target: str = "", tools=None, operation: str = "join",
     if coll.count == 0:
         return error("No valid tool bodies resolved.")
 
-    # Captured BEFORE the mutation, all of it:
-    #  - the census host, resolved ONCE off the TARGET (see _common.census_host). MEASURED: a
-    #    cross-component combine is ACCEPTED, and one whose target AND tool both sit in a
-    #    sub-component moves nothing the ACTIVE component can see (root 3 -> 3 throughout), so a
-    #    census scoped to target_component(design) would be blind to it;
-    #  - BOTH signals, because either one alone is blind to a real case. MEASURED: a direct cut that
-    #    severed a bar left the body COUNT at 5 -> 5 (the consumed cutter -1 and the new lump +1
-    #    cancel) while the target's VOLUME moved 240 -> 96; and a join of two NON-TOUCHING bodies
-    #    moved neither, with add() still returning None - which is why the effect, not the None,
-    #    decides;
-    #  - the NAMES, because a combine CONSUMES its tool bodies - reading b.name afterwards asks a
-    #    proxy whose body no longer exists and publishes nulls for bodies that resolved fine.
+    # Captured BEFORE the mutation: the census host off the TARGET (a combine whose bodies both sit
+    # in a sub-component moves nothing the active component can see), BOTH signals (a cut that
+    # severs a bar holds the body count flat while the volume drops), and the tool NAMES (consumed).
     host = _common.census_host(tgt, comp)
     before_bodies = _common.body_count(host)
     before_volume = _common.measured(lambda: tgt.volume)
-    # The LUMPS every input holds between them - the join's own effect check. A join of bodies that
-    # touch collapses lumps; a result still carrying the inputs' total fused nothing, which neither
-    # the body count nor the volume can see (both read a clean combine either way).
+    # A join of bodies that touch collapses lumps, so a result still carrying the inputs' lump total
+    # fused nothing - which neither the body count nor the volume can see.
     input_lumps = [_geom.lump_count(b) for b in [tgt] + list(tool_bodies)]
     target_name = safe(lambda: tgt.name)
     tool_names = [safe(lambda b=b: b.name) for b in tool_bodies]
     host_name = safe(lambda: host.name)
-    # Per-tool AABB gap, captured BEFORE the mutation (a cut/intersect CONSUMES its tools, so this
-    # evidence is unreadable afterwards). Only the no-effect refusal below reads it: a positive gap
-    # PROVES that tool never touched the target.
+    # Per-tool AABB gap, unreadable after the mutation (a cut/intersect consumes its tools). Only
+    # the no-effect refusal below reads it: a positive gap proves that tool never touched the target.
     tool_gaps = [_geom.aabb_gap(tgt, b) for b in tool_bodies]
 
     try:
         ci = comp.features.combineFeatures.createInput(tgt, coll)
         ci.operation = getattr(adsk.fusion.FeatureOperations, _common.OPERATIONS[op_key])
-        # Both flags go through set_verified: a SWIG proxy accepts an assignment it then ignores, and
-        # neither flag leaves a trace anywhere else in the result - a swallowed isKeepToolBodies
-        # consumes bodies the caller asked to keep and the census below still reads a clean combine.
+        # set_verified because a SWIG proxy accepts an assignment it then ignores, and neither flag
+        # leaves a trace in the result - a swallowed isKeepToolBodies consumes bodies silently.
         for prop, value, label in (("isKeepToolBodies", bool(keep_tools), "keep_tools"),
                                    ("isNewComponent", bool(new_component), "new_component")):
             seterr = _common.set_verified(ci, prop, value, label, "CombineFeatureInput")
@@ -162,9 +122,8 @@ def handler(target: str = "", tools=None, operation: str = "join",
     except Exception as e:
         return error(f"Combine failed: {e}. (Bodies must overlap for cut/intersect; all bodies "
     "must be solids in the same component.)")
-    # MEASURED: combineFeatures.add returns None in a DIRECT design while the boolean LANDS (a join
-    # took 2 bodies to 1). With no feature to read, the census below is the verdict; in parametric a
-    # None feature is unmeasured as a success and stays an honest error.
+    # combineFeatures.add returns None in a DIRECT design while the boolean lands, so the census
+    # below is the verdict there; in parametric a None feature stays an honest error.
     direct_no_feature = _common.direct_feature_absence(design, feature)
     if not feature and not direct_no_feature:
         return error(_common.no_feature_error(design, "Combine"))
@@ -180,8 +139,6 @@ def handler(target: str = "", tools=None, operation: str = "join",
                          "back - so whether the bodies were combined is UNVERIFIED. Check with "
                          "design_get(include=['tree']) / model_inspect.")
         if not (counted and after_bodies != before_bodies) and not (volumed and after_volume != before_volume):
-            # Built from what the reads ACTUALLY returned: a signal that could not be read is named
-            # as unread, never reported as an observed sameness.
             seen = [f"'{host_name}' still holds {before_bodies} bodies" if counted
                     else f"'{host_name}' body count could not be read",
                     f"'{target_name}' measures the same volume ({after_volume} cm3)" if volumed
@@ -191,24 +148,19 @@ def handler(target: str = "", tools=None, operation: str = "join",
                          "confirm with design_get(include=['tree']) / model_inspect. "
                          + _common.failed_effect_remedy(design, feature))
 
-    # body-split: a cut/intersect that DISCONNECTS the single target leaves it in >1 piece.
-    # CombineFeature.bodies returns the bodies this feature modified/created; the tool bodies were
-    # consumed, so for a cut/intersect more than one result body means the target split (there is
-    # exactly one target here, unlike an unscoped extrude, so no multi-body ambiguity). This read is
-    # SKIPPED in direct mode - there is no feature to read it off, and an empty list there would read
-    # as "no disconnection was found" rather than "the check could not run" (the note says which).
+    # body-split: CombineFeature.bodies holds what this feature modified/created and the tools were
+    # consumed, so for a cut/intersect more than one result body means the target came apart. Direct
+    # mode has no feature to read it off, so the check is skipped and the note says so.
     result_objs = [] if direct_no_feature else _common.result_bodies(feature)
     result_bodies = [f["name"] for f in _common.body_facts(result_objs)]
-    # split_pieces: the result set the DISCONNECT warning judges. With keep_tools the feature's
-    # result bodies INCLUDE the kept tool copies (measured: a kept disjoint tool was counted as a
-    # split piece of the target), so kept tool NAMES are excluded before the >1 verdict.
+    # With keep_tools the feature's result bodies include the kept tool copies - a kept disjoint tool
+    # counts as a split piece - so kept tool NAMES are excluded before the >1 verdict.
     split_pieces = ([n for n in result_bodies if n not in set(filter(None, tool_names))]
                     if keep_tools else result_bodies)
 
-    # cut/intersect no-effect gate, BOTH modes: a boolean that left the target's volume unmoved
-    # removed/kept nothing - the API reports success on a DISJOINT tool (measured: combined:true,
-    # volume unchanged, tool consumed). A split target can't be a no-op, so the gate only runs on a
-    # single-piece result; an unreadable volume skips it (cannot verify is not "verified same").
+    # cut/intersect no-effect gate, both modes: the API reports success on a DISJOINT tool, volume
+    # unchanged and tool consumed. A split target cannot be a no-op, so the gate runs only on a
+    # single-piece result; an unreadable volume skips it.
     if op_key in ("cut", "intersect") and len(split_pieces) <= 1:
         after_volume_now = _common.measured(lambda: tgt.volume)
         if (before_volume is not None and after_volume_now is not None
@@ -224,9 +176,8 @@ def handler(target: str = "", tools=None, operation: str = "join",
                          f"not overlap the target produces. Tools: {', '.join(clear)}; {fate}. "
                          "Move the tool into the target (model_move) and combine again.")
 
-    # The body a JOIN landed in: the feature's single result body, or - in direct mode, where there is
-    # no feature to read - the target the join was built on. Its lump count is read back FRESH off
-    # that body (an input reference can go invalid once the feature rebuilds).
+    # The body a JOIN landed in: the feature's single result body, or the target in direct mode. Its
+    # lumps read FRESH off that body - an input reference can go invalid once the feature rebuilds.
     joined = result_objs[0] if len(result_objs) == 1 else (tgt if direct_no_feature else None)
     result_lumps = _geom.lump_count(joined) if joined is not None else None
 
@@ -240,8 +191,7 @@ def handler(target: str = "", tools=None, operation: str = "join",
         "bodies_remaining": after_bodies,
         "note": "Bodies combined. Pair with view_screenshot to view the result.",
     }
-    # Direct mode: no feature object, so no name - and no feature.bodies, which is where the
-    # disconnection warning below comes from. Flag the omission instead of implying either exists.
+    # Direct mode has no feature object and no feature.bodies - flag the omission, never imply one.
     if direct_no_feature:
         payload["no_timeline_feature"] = True
         payload["note"] += (" " + _common.DIRECT_FEATURE_NOTE + " A cut/intersect that DISCONNECTED "
@@ -268,12 +218,9 @@ def handler(target: str = "", tools=None, operation: str = "join",
 
 
 TOOL_DESCRIPTION = (
-"Boolean-combine solid BODIES - the Combine feature. 'target' is the body to keep/modify; "
-"'tools' is the body name(s) to combine into it (a list, or comma-separated). 'operation': "
-"join (fuse into one) | cut (subtract the tools from the target - e.g. bore a hole with a "
-"cylinder body) | intersect (keep only the shared volume). This is the body-on-body boolean "
-"that model_extrude/model_revolve's cut/join can't do (those act on a profile). Bodies are "
-"referenced by handle or name within the active component."
+"Boolean-combine solid BODIES - the Combine feature. 'operation' subtracts, fuses or intersects "
+"'tools' into 'target'. This is the body-on-body boolean; model_extrude / model_revolve's "
+"cut and join act on a profile instead."
 )
 
 combine_tool = (

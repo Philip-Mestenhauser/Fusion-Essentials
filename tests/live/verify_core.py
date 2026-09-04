@@ -40,7 +40,7 @@ DOC_PREFIX = "EVAL_sweep"
 # one name - the machine create refuses a duplicate, and cam_save_template always writes a NEW
 # template, so a repeated template name leaves one more asset in the library per run.
 MACHINE_NAME = "SweepMach3Axis " + time.strftime("%Y%m%d-%H%M%S")
-TEMPLATE_NAME = "GyroTmpl " + time.strftime("%Y%m%d-%H%M%S")
+TEMPLATE_NAME = "SweepTmpl " + time.strftime("%Y%m%d-%H%M%S")
 
 # How much of a failing step's payload the ledger keeps. A FAIL row is read to DIAGNOSE, and the
 # keys that carry the diagnosis (a measured extent, a change list) sit late in a payload - at 160
@@ -182,10 +182,99 @@ class Parked:
         self.expect = expect
 
 
+class Needs:
+    """expect=Needs("<capability>", expect) - a step that RUNS only where that capability is
+    entitled.
+
+    The harness probes each declared capability ONCE, at the first row declaring it
+    (CAPABILITY_PROBES), and drops the unmet steps before the step engine sees them, so an
+    installation without the entitlement
+    reports skipped(<capability> not entitled) instead of a red. The expectation inside is judged
+    exactly as if it had been passed bare, and an act declares the same thing for all of its steps
+    through verify_program.ACT_NEEDS."""
+
+    def __init__(self, capability, expect="ok"):
+        self.capability = capability
+        self.expect = expect
+
+
+def _needs(capability, expect="ok"):
+    return Needs(capability, expect)
+
+
 def _unparked(expect):
-    """The expectation a step is actually judged by - a Parked wrapper's inner expectation, or the
-    expectation itself."""
-    return expect.expect if isinstance(expect, Parked) else expect
+    """The expectation a step is actually judged by - the innermost expectation of the Parked and
+    Needs wrappers, or the expectation itself. Both wrappers carry ledger routing, never a
+    judgement, so neither may change what a step is measured against."""
+    while isinstance(expect, (Parked, Needs)):
+        expect = expect.expect
+    return expect
+
+
+def step_capability(expect):
+    """The capability a step DECLARES, or None - read off the expectation object, so the
+    declaration travels with the row it gates however the wrappers are nested."""
+    while isinstance(expect, (Parked, Needs)):
+        if isinstance(expect, Needs):
+            return expect.capability
+        expect = expect.expect
+    return None
+
+
+def parked_reason(expect):
+    """The ledger reason a Parked wrapper carries, or None - read through a Needs wrapper, so a
+    step that is both gated and parked still renders its reason."""
+    while isinstance(expect, (Parked, Needs)):
+        if isinstance(expect, Parked):
+            return expect.reason
+        expect = expect.expect
+    return None
+
+
+def _machining_extension_probe():
+    """True/False/None for the Machining Extension: workspace_orient's own entitlement block, whose
+    observed_generation carries one isGenerationAllowed flag per sentinel strategy. Entitled means
+    ALL FOUR read true. None is 'the probe could not read it' - a block that did not answer, or any
+    flag published null - which is not an entitlement and is reported as such. The flags need no CAM
+    product and no setup; the workspace_orient CALL needs an ACTIVE DOCUMENT, so this probe answers
+    None until an act has opened one."""
+    is_error, payload = facade("call")("workspace_orient", {})
+    if is_error or not isinstance(payload, dict):
+        return None
+    observed = (payload.get("machining_capabilities") or {}).get("observed_generation")
+    if not isinstance(observed, dict) or not observed:
+        return None
+    if any(not isinstance(v, bool) for v in observed.values()):
+        return None
+    return all(observed.values())
+
+
+# One probe function per capability name. A capability a step or act declares is looked up here at
+# the start of a run; a name with no probe answers None and routes as unmet, so a typo cannot read
+# as entitled.
+CAPABILITY_PROBES = {"machining_extension": _machining_extension_probe}
+
+
+def probe_capabilities(names, probes=None):
+    """{capability: True | False | None} - each name probed ONCE. The probes are wire reads, so this
+    is where they are paid for; the runner asks for one at the first act or step declaring it and
+    keeps the answer for the rest of the run."""
+    probes = CAPABILITY_PROBES if probes is None else probes
+    return {name: (probes[name]() if name in probes else None) for name in sorted(set(names))}
+
+
+def capability_met(entitlements, capability):
+    """True where the run may execute a step declaring `capability`. A step declaring nothing is
+    always met; an unreadable probe is UNMET, because a flag that did not answer is not a licence."""
+    return capability is None or entitlements.get(capability) is True
+
+
+def capability_skip_reason(capability, entitlements):
+    """The receipt's bucket line for a step the capability tier held back - and, when the probe
+    itself could not read, the fact that no flag was ever seen."""
+    unread = entitlements.get(capability) is None
+    return (f"{capability} not entitled"
+            + (" - the capability probe did not read" if unread else ""))
 
 
 # Bytecode classes for the value-predicate guard below. A PUSH leaves the argument's fate to a later
@@ -338,6 +427,39 @@ def _fgn(key):
 
 def _prof(key):
     return (key, lambda p: p["profiles"][0]["handle"])          # sketch_get -> first profile handle
+
+
+def _matched(count, kind=None):
+    """find_geometry: the query found EXACTLY this many, of this kind. A bare "ok" passes on a
+    query that matched NOTHING - the save extractor then fails with an index error a step later,
+    and a query that matched the wrong number drills or fillets the wrong set."""
+    def check(p):
+        ms = p.get("matches") or []
+        return _measured(f"find_geometry matched {count}" + (f" {kind}" if kind else ""),
+                         {"count": len(ms), "kinds": [m.get("kind") for m in ms[:6]]},
+                         len(ms) == count and (kind is None
+                                               or all(m.get("kind") == kind for m in ms)))
+    return check
+
+
+def _face_up_at(x, y, z, tol=0.5):
+    """find_geometry(kind='planar_face'): the ONE face found, measured by its own 'position' (the
+    face centroid) and its outward normal facing +Z.
+
+    A face query is what a hole is drilled through or a selection is aimed at, and 'nearest_to'
+    answers with the nearest face whether or not it is the one meant. The normal is the other half:
+    an up-facing face has material under it, which is the direction a through-hole is drilled."""
+    def check(p):
+        ms = p.get("matches") or []
+        m = ms[0] if ms else {}
+        pos, nrm = m.get("position"), m.get("normal")
+        return _measured(f"one up-facing planar face centred near {[x, y, z]}",
+                         {"count": len(ms), "position": pos, "normal": nrm, "kind": m.get("kind")},
+                         len(ms) == 1 and m.get("kind") == "planar_face"
+                         and isinstance(pos, list) and len(pos) == 3
+                         and all(_num(v) and abs(v - w) < tol for v, w in zip(pos, (x, y, z)))
+                         and isinstance(nrm, list) and len(nrm) == 3 and nrm[2] > 0.999)
+    return check
 
 
 # build_path's published label - "N edge(s) from 1 seed handle" / "N edge(s) from K handles, used
@@ -1275,7 +1397,7 @@ def _exported_bytes(p):
 
 def _box(name, ox=0, oy=0, tint="", shape="box"):
     """Steps building a fresh free component 'name' holding one small solid (offset ox/oy in the
-    world grid - every cameo gets its own slot so nothing builds on top of the gyroscope or another
+    world grid - every cameo gets its own slot so nothing builds on top of the part or another
     cameo). The reusable free occurrence the joint/assembly steps mate.
 
     'shape' and 'tint' make the two halves of a jointed PAIR tell apart. Two identical grey 20 mm

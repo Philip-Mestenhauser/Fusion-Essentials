@@ -1,30 +1,15 @@
 """Lint/contract for the TOOL NAMING SCHEMA (CLAUDE.md "Read vs Edit").
 
-Every tool name is ``<domain>_<verb>[_<noun>]`` where ``<verb>`` is from a CLOSED set, and the verb's
-KIND must agree with the tool's write-status:
-
-  Orient  (orient)                                       -> read
-  Read    (get)                                          -> read
-  Acquire (find/measure/probe/inspect/select/screenshot/ -> read
-           section/compare/list/status)
-  Edit    (create/edit/delete/set/add/... the verbs that -> write | destructive
-           mutate or run an op)
-
-So a name declares its KIND, and readOnlyHint (from write=) must match: a read-verb tool must be
-read-only; an edit-verb tool must not be. This is what makes the name an honest type, not a label.
-"""
+Every tool name is ``<domain>_<verb>[_<noun>]`` with ``<verb>`` from the closed set below, and the
+verb's KIND must agree with write=: a read-verb tool is read-only, an edit-verb tool is not."""
 
 from conftest import register_all_tools
 
-# ── the closed verb vocabulary, grouped by kind ─────────────────────────────────────────────────────
-
 _ORIENT = {"orient"}
 _READ = {"get"}
-# Acquire: returns a handle/value/image to feed an Edit (no mutation). Expressive verbs kept.
-# 'request'/'find' = ask-for / locate (no doc mutation); 'inspect'/'measure'/'probe'/'screenshot'/
-# 'section' = derive a value/image; 'compare' = diff; 'list'/'status' = enumerate/poll.
-# NB 'select' is NOT here: cam_select_geometry SETS an op's machining geometry (an Edit). The user-pick
-# acquisition uses 'request'/'get' (sys_request_selection / sys_get_selection).
+# Acquire: returns a handle/value/image to feed an Edit (no mutation). 'select' is NOT here:
+# cam_select_geometry SETS an op's machining geometry (an Edit), and the user-pick acquisition uses
+# 'request'/'get' (sys_request_selection / sys_get_selection).
 _ACQUIRE = {"find", "measure", "probe", "inspect", "screenshot", "section", "compare",
             "list", "status", "capability", "interference", "request", "compute"}
 # Edit: mutates state or runs an async op. The open-ended action set.
@@ -120,8 +105,6 @@ class TestToolNaming:
         assert not stale, "stale naming-exemption entries:\n  " + "\n  ".join(stale)
 
     def test_verb_kind_matches_write_status(self):
-        # the honesty check: a read-kind verb (get/find/probe/...) MUST be read-only; an edit-kind verb
-        # MUST NOT be. A mismatch is a mislabeled tool (wrong write= OR a name that lies about what it does).
         mismatches = []
         for it in register_all_tools():
             name, readonly = _name_and_readonly(it)

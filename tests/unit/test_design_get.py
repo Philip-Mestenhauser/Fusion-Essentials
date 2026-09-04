@@ -3,8 +3,9 @@
 The rich-read shape tests/CLAUDE.md names as the canonical one to copy.
 
 Pinned: the DEFAULT call returns only the orientation slice (mode summary + health + tree_summary) and
-NONE of the heavy slices; each include= adds exactly its slice; the default note advertises the
-remaining slices; unknown include errors; no-active-design guards. What each slice reads out of Fusion
+NONE of the heavy slices; an include= returns exactly its slice, the orientation omitted unless
+'default' is named beside it; the default note advertises the remaining slices; unknown include
+errors; no-active-design guards. What each slice reads out of Fusion
 is proven by live validation, not re-mocked here.
 """
 
@@ -170,6 +171,38 @@ class TestIncludeSlices:
     def test_multiple_includes(self, stub_slices):
         out = _payload(dg.handler(include=["tree", "timeline"]))
         assert "tree" in out and "timeline" in out
+
+    def test_a_deep_include_omits_the_orientation_slice(self, stub_slices):
+        # a deep read returns the slice asked for, not the orientation block again - the
+        # design_get(include=['tree']) that re-sends design_type/contents pays for both every call.
+        out = _payload(dg.handler(include=["tree"]))
+        assert "tree" in out
+        for key in ("design_type", "feature_count", "timeline_healthy", "contents", "pointers",
+                    "note"):
+            assert key not in out
+
+    def test_default_beside_a_deep_slice_keeps_both(self, stub_slices):
+        out = _payload(dg.handler(include=["default", "tree"]))
+        assert out["design_type"] == "parametric" and out["contents"]["bodies"] == 2
+        assert "tree" in out and "include=" in out["note"]
+
+    def test_default_alone_is_the_orientation_read(self, stub_slices):
+        out = _payload(dg.handler(include=["default"]))
+        assert out["contents"] == {"bodies": 2, "sketches": 3} and "tree" not in out
+
+    def test_include_mode_still_answers_on_a_deep_read(self, stub_slices):
+        # the orientation headline and include=['mode'] share ONE _slice_mode call; omitting the
+        # orientation must not take the capability map with it.
+        out = _payload(dg.handler(include=["mode"]))
+        assert "can" in out["mode_detail"] and "design_type" not in out
+
+    def test_a_deep_read_takes_neither_orientation_read(self, monkeypatch, stub_slices):
+        # the mode + health reads ARE the orientation's cost; a slice-only read must not pay it.
+        calls = []
+        monkeypatch.setattr(dg, "_slice_mode", lambda d: (calls.append("mode") or ({}, None)))
+        monkeypatch.setattr(dg, "_slice_health", lambda d: (calls.append("health") or ({}, None)))
+        _payload(dg.handler(include=["tree"]))
+        assert calls == []
 
     def test_catalog_slices_are_independent(self, stub_slices):
         # materials and appearances are two projections of one walk but two separate slices:
@@ -739,6 +772,13 @@ class TestGuards:
         res = dg.handler(include=["bogus"])
         msg = error_message(res)
         assert "bogus" in msg.lower() or "unknown" in msg.lower()
+
+    def test_the_refusal_lists_default_beside_the_slices(self, monkeypatch):
+        # the refusal IS the vocabulary a caller that mistyped reads next; naming only the deep
+        # slices hides the token that keeps the orientation block beside them.
+        monkeypatch.setattr(dg._common, "design", lambda: object())
+        msg = error_message(dg.handler(include=["bogus"]))
+        assert "tree" in msg and "default" in msg
 
     def test_no_active_design_guard(self, monkeypatch):
         monkeypatch.setattr(dg._common, "design", lambda: None)

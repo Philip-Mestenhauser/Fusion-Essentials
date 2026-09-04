@@ -2,48 +2,31 @@
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
 """CAM tool PRESETS: one library tool's named cutting data - what a {name, spindle_speed, feed}
-spec may say, which parameter each value drives, and the name/index reads a preset change is
-proved by. Not a tool; cam_edit_tools builds and verifies presets through these, on the creation
-path of add and on add_preset / remove_preset.
-"""
+spec may say, which parameter each value drives, and the reads a preset change is proved by."""
 
 import re
 
-from ._common import iter_collection, safe
+from ._common import iter_collection, named_with_remainder, safe
 from ._cam_common import expression_error
 
-# The "what to reuse from here" catalog line for the generated CLAUDE.md helper map (see
-# tests/gen_manifest.py): each symbol with the one clause that says WHEN to reach for it.
 MAP_BLURB = (
-    "the ToolPreset half of cam_edit_tools - reach for one only from its preset paths. "
-    "_preset_spec_error - why a {name?, spindle_speed?, feed?} spec is unusable; an unrecognised "
-    "key would otherwise apply nothing and still report success; _preset_param_of/"
-    "_set_preset_param/_apply_preset_values - the parameter a spec value drives (candidates in "
-    "order: the cutting-data names vary by tool CLASS), the set-and-prove-it-landed, and the whole "
-    "spec applied with no silent skip; _preset_names/_presets_named/_persisted_preset_names - the "
-    "INDEX-ORDER name list preset_count and presets.remove(index) read against (an unreadable "
-    "preset holds its slot as a null), the EXACT-name lookup, and the same list off a re-fetched "
-    "tool; _preset_tool - the guards both preset actions share; _persist_preset_change - the "
-    "commit-then-re-read that says whether the change reached the library; updateTool returning "
-    "true proves nothing, and no preset change moves the tool COUNT; _plain_number - a bare "
-    "number, a units-carrying expression being stored as the converted one")
+    "the ToolPreset substrate: _preset_spec_error (why a {name?, spindle_speed?, feed?} spec is "
+    "unusable), _preset_param_of/_set_preset_param/_apply_preset_values (applying a spec with no "
+    "silent skip), _preset_names/_presets_named (the index-order list, the exact-name lookup), "
+    "_persist_preset_change (the commit-then-re-read), resolve_operation_preset (the preset an "
+    "OPERATION can be pointed at)")
 
 
-# A preset's cutting-data parameter names vary by tool CLASS. A mill preset carries
-# 'tool_feedCutting'; a drill / hole-making preset does not (it exposes plunge/drilling feeds
-# instead). A mill and a turning THREADING preset carry 'tool_spindleSpeed', while a general /
-# grooving / boring turning preset cuts at constant surface speed and carries 'tool_surfaceSpeed'
-# with no spindle speed at all. So a spec value maps to the FIRST candidate the preset actually
-# carries, and a miss names what IS there rather than asserting one class's parameter.
+# A preset's cutting-data parameter names vary by tool CLASS: a drill carries plunge/drilling feeds
+# rather than 'tool_feedCutting', and a turning preset cutting at constant surface speed carries
+# 'tool_surfaceSpeed' with no spindle speed at all.
 _FEED_PARAM_CANDIDATES = ("tool_feedCutting", "tool_feedPlunge", "tool_feedRamp",
                           "tool_feedRetract", "tool_feedEntry", "tool_feedTransition")
 _SPEED_PARAM_CANDIDATES = ("tool_spindleSpeed",)
 
-# A BARE number is a fixed unit whatever the document works in (live-verified): feed 900 reads back
-# 900.0 mm/min in a millimetre document AND in an inch-units one, and spindle_speed 12000 reads back
-# 12000.0 rpm unscaled. Only a units-carrying expression converts - '35in/min' stores verbatim and
-# evaluates to 889.0 mm/min - so a string value is passed straight through as the expression.
-# (spec key, the substring naming that parameter family, the bare number's unit, the candidates)
+# A BARE number is a fixed unit whatever the document works in - feed 900 reads back 900.0 mm/min
+# in an inch-units document too. Only a units-carrying expression converts, so a string value is
+# passed through as the expression. Rows: (spec key, parameter-family word, unit, candidates).
 _PRESET_VALUE_FIELDS = (
     ("spindle_speed", "speed", "rpm", _SPEED_PARAM_CANDIDATES),
     ("feed", "feed", "mm/min", _FEED_PARAM_CANDIDATES),
@@ -101,11 +84,8 @@ def _preset_spec_error(spec):
 
 
 def _set_preset_param(p, key, value, unit):
-    """Set ONE preset parameter and prove the value landed; returns an error string or None. A CAM
-    parameter STORES an expression it cannot evaluate verbatim and still reads a finite 0.0 back, so
-    .error (expression_error) is what reveals it. A bare number is additionally checked against the
-    value read back; a units-carrying expression is not, since its stored value is the converted
-    number rather than the text."""
+    """Set ONE preset parameter and prove the value landed, returning an error string or None - a
+    bare number is compared against the read-back, a units-carrying expression is not."""
     try:
         p.expression = str(value)
     except Exception as e:
@@ -202,6 +182,40 @@ def _preset_tool(target, tool_index, spec):
     if presets is None:
         return None, None, None, f"The tool at index {tool_index} exposes no presets collection."
     return tool, presets, name, None
+
+
+def resolve_operation_preset(op, op_name, name):
+    """(preset, index, error) - the ToolPreset named `name` on the OPERATION's OWN tool, matched
+    exactly and case-insensitively, with a shared name REFUSED. The tool is BOUND to a variable
+    before .presets is read: that collection off an unbound temporary raises uncatchably."""
+    # Operation.tool hands back a COPY of the assigned tool, so the preset resolved here comes off
+    # that copy. Whether it satisfies Operation.toolPreset's "already assigned tool" is unmeasured
+    # (PROBE NEEDED) - the caller reads the assignment back and errors when it did not take.
+    t = safe(lambda: op.tool)
+    if t is None:
+        return None, None, (f"Operation '{op_name}' carries no tool, so there is no preset to point "
+                            "it at.")
+    presets = safe(lambda: t.presets)
+    if presets is None:
+        return None, None, (f"The tool on operation '{op_name}' exposes no presets collection.")
+    matches = _presets_named(presets, name)
+    if not matches:
+        avail = [n for n in _preset_names(presets) if n]
+        if not avail:
+            return None, None, (
+                f"The tool on operation '{op_name}' carries no presets at all, so '{name}' names "
+                "none. cam_edit_tools(action='add_preset') authors one on a library tool.")
+        return None, None, (
+            f"The tool on operation '{op_name}' has no preset named '{name}'. Presets on this "
+            f"tool: {named_with_remainder(avail)}. cam_get(include=['tool'], "
+            f"operation='{op_name}') lists them all.")
+    if len(matches) > 1:
+        return None, None, (
+            f"'{name}' names {len(matches)} presets on the tool of operation '{op_name}' (indices "
+            f"{', '.join(str(i) for i, _ in matches)}) - the assignment is refused rather than "
+            "picking one of them.")
+    index, preset = matches[0]
+    return preset, index, None
 
 
 def _persist_preset_change(target, tool, tool_index, name, expect_present):

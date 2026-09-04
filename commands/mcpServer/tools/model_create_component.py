@@ -26,22 +26,16 @@ _PARENT = _inputs.OccurrenceRef("parent", required=False,
 
 
 def _ensure_multi_component_intent(design):
-    """A PART-intent design refuses addNewComponent ('Part Design documents can only contain one
-    component'). Since Jan-2026 a fresh doc defaults to PART intent, so a multi-component build
-    (an assembly, a template) dead-ends on the FIRST component. Promote PART -> HYBRID (not Assembly:
-    Hybrid keeps modeling ENABLED while allowing multiple internal components, which a part-and-parts
-    template needs; Assembly would forbid the bodies). Returns a one-line note if it promoted, else
-    None. Live-verified: PART refuses addNewComponent; after the promote it succeeds."""
+    """Promote a PART-intent design to HYBRID so it accepts components; a note, or None."""
     T = adsk.fusion.DesignIntentTypes
     intent = safe(lambda: design.designIntent)
     if intent != T.PartDesignIntentType:
-        return None      # ASSEMBLY / HYBRID already accept components; leave the intent as the user set it
+        return None      # ASSEMBLY / HYBRID already accept components; leave the intent as set
     try:
+        # HYBRID, not ASSEMBLY: it allows several internal components AND keeps modeling enabled.
         design.designIntent = T.HybridDesignIntentType
     except Exception:
-        return None      # promote refused (shouldn't happen for a bodyless/hybrid-able part) - let
-                         # addNewComponent raise its own clear error below
-    # Confirm the promotion took, so we only claim it when the intent actually changed.
+        return None      # let addNewComponent raise its own error below
     if safe(lambda: design.designIntent) == T.HybridDesignIntentType:
         return ("design intent was PART (one-component-only); promoted to HYBRID so multiple "
                 "components are allowed while modeling stays enabled.")
@@ -73,9 +67,7 @@ def handler(name: str = "", x: float = 0.0, y: float = 0.0, z: float = 0.0,
         axis_vec = _inputs._AXIS_VECS.get((rotate_axis or "z").strip().lower())
         if not axis_vec:
             return error(f"Unknown rotate_axis '{rotate_axis}'. Use x, y, or z.")
-        # Rotate about the world origin; the translation set below places the component. (Rotating
-        # about the placement point would only bake a pivot correction into the translation column
-        # that the next line overwrites anyway - net result is identical, so keep it explicit.)
+        # Rotate about the world origin; the translation assigned below places the component.
         matrix.setToRotation(math.radians(float(rotate_deg)),
                              adsk.core.Vector3D.create(*axis_vec), adsk.core.Point3D.create(0, 0, 0))
     if x or y or z:
@@ -98,14 +90,11 @@ def handler(name: str = "", x: float = 0.0, y: float = 0.0, z: float = 0.0,
     if not occ:
         return error("Component creation returned nothing.")
 
-    # apply_rename is the ONE create-flow rename: set, read back, disclose a declined/deduped
-    # rename (this site hand-rolled the same contract before adopting it).
     _final_name, name_warning = _common.apply_rename(occ.component, name)
 
-    # Read the nesting back: a component created via a sub-component's occurrences is NATIVE to it, so
-    # its own fullPathName shows only the child. Proxy it into the CHOSEN parent occurrence's assembly
-    # context to report the true nested path ('Parent:1+Child:1'); fall back to constructing it if the
-    # proxy can't be made (Fusion joins fullPathName segments with '+').
+    # A component created via a sub-component's occurrences is NATIVE to it, so its own fullPathName
+    # shows only the child; the proxy into the chosen parent's context carries the nested path.
+    # Fusion joins fullPathName segments with '+', which is the fallback's shape.
     read_occ = occ
     if parent_occ is not None:
         proxy = safe(lambda: occ.createForAssemblyContext(parent_occ))
@@ -121,11 +110,9 @@ def handler(name: str = "", x: float = 0.0, y: float = 0.0, z: float = 0.0,
     if activate:
         activated = bool(safe(lambda: read_occ.activate(), False))
 
-    # The parent lock the caller never asked for: measured on 2705.1.4, the FIRST component created
-    # in an empty design comes back with isGroundToParent True and the next one False. It decides
-    # which member a joint drive displaces, so it is disclosed at create time rather than left for
-    # the caller to discover from a part that would not move. read_flag keeps an unreadable flag
-    # None instead of coercing it to False.
+    # The FIRST component created in an empty design comes back with isGroundToParent True and the
+    # next one False; it decides which member a joint drive displaces, so it is disclosed at create
+    # time. read_flag keeps an unreadable flag None instead of coercing it to False.
     ground_to_parent = _common.read_flag(lambda: occ.isGroundToParent)
 
     out = {
@@ -158,16 +145,10 @@ def handler(name: str = "", x: float = 0.0, y: float = 0.0, z: float = 0.0,
 
 
 TOOL_DESCRIPTION = (
-"Create a new EMPTY component occurrence in the active design - the prerequisite for building an "
-"assembly of separate, independently jointable/groundable parts (one component per part). A fresh "
-"PART-design doc (one-component-only) "
-"is auto-promoted to HYBRID so a multi-part build just works. Added at ROOT by default; pass "
-"'parent' (an occurrence) to nest the new component INSIDE it ('full_path' shows the nesting). "
-"'name' names it; 'x'/'y'/'z' optionally "
-"place the occurrence (in 'units', mm default; omit for origin); 'activate' makes it the active "
-"edit target so subsequent sketch_create / extrude build into it. Placement COMPOSES with sketch "
-"coords: sketch in component-local coords after placing, or at world coords with no placement "
-"(doing both double-offsets)."
+"Create a new EMPTY component occurrence - one component per part, so the parts are independently "
+"jointable and groundable. A fresh one-component PART design is auto-promoted to HYBRID. Added at "
+"ROOT unless 'parent' nests it. Placement COMPOSES with sketch coordinates: after placing, sketch "
+"in component-local coords; doing both double-offsets."
 )
 
 tool = (

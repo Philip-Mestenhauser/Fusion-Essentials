@@ -6,9 +6,6 @@
   model_pattern_path -> duplicate occurrences/bodies along a curve (model edges or a path sketch):
                         a count plus either the spacing between instances or the total extent to
                         spread them over. WRITES.
-
-Sibling of model_pattern_rectangular / model_pattern_circular - same targets, a curve instead of a
-straight direction or a spin axis.
 """
 
 import adsk.core
@@ -26,14 +23,12 @@ from .model_pattern import _BODIES, _OCCURRENCES, _owning_component, _resolve_in
 
 app = adsk.core.Application.get()
 
-# distance_type -> the PatternDistanceType member. 'spacing' is the distance BETWEEN instances (the
-# rectangular/circular family's fixed choice); 'extent' spreads the quantity over a total distance.
+# 'spacing' is the distance BETWEEN instances; 'extent' spreads the quantity over a total distance.
 _DISTANCE_TYPES = {
     "spacing": "SpacingPatternDistanceType",
     "extent": "ExtentPatternDistanceType",
 }
 
-# What this tool RETURNS (declared once; drives the PRODUCES: prose + the assert-present contract test).
 RETURNS = [
     _outputs.ReturnsName("feature", of="feature", consumers=["design_delete_feature"]),
 ]
@@ -44,8 +39,7 @@ _DISTANCE = _inputs.Distance("distance", allow_zero=False, allow_negative=False,
 
 
 def _start_point(raw):
-    """(fraction along the path, error). The binding's own range: 0 = the path's start point,
-    1 = its end point."""
+    """(fraction along the path, error) - 0 is the path's start point, 1 its end point."""
     if raw is None or raw == "":
         return 0.0, None
     try:
@@ -85,8 +79,7 @@ def handler(occurrences: str = "", bodies=None, path=None, quantity: int = 2, di
     if rerr:
         return error(rerr)
 
-    # Build the path AND the feature in the component that OWNS the patterned entities - the same
-    # shared-component rule the rectangular/circular siblings follow.
+    # The path and the feature must share the component that owns the patterned entities.
     owner = _owning_component(design, coll, bodies)
     pattern_path, path_label, patherr = build_path(owner, path)
     if patherr:
@@ -126,8 +119,6 @@ def handler(occurrences: str = "", bodies=None, path=None, quantity: int = 2, di
     note = ("Instances placed along the path. Copies keep the seed's orientation; they do not "
             "rotate to follow the path. Pair with view_screenshot to view.")
     if real_total is None:
-        # An unreadable count is published as null and named, never defaulted to the request:
-        # echoing 'quantity' back would turn an unverifiable read into a confirmation of itself.
         note += (" 'quantity' could NOT be read back off the created feature, so it is reported as "
                  "null rather than as the count requested - confirm in Fusion, or with design_get.")
     if real_total is not None and int(real_total) != int(quantity):
@@ -149,8 +140,7 @@ def handler(occurrences: str = "", bodies=None, path=None, quantity: int = 2, di
         "units": units,
         "start_point": float(start),
         "symmetric": bool(symmetric),
-        # isOrientationAlongPath is False by default (measured), so the copies translate along the
-        # path without turning with it - stated here because nothing else in the payload shows it.
+        # isOrientationAlongPath is False by default, so the copies do not turn with the path.
         "note": note,
     })
 
@@ -167,7 +157,7 @@ pattern_path_tool = (
     .add_input_property(*_OCCURRENCES.as_property())
     .add_input_property("bodies", _BODIES.schema())
     .add_input_property("path", {"type": ["string", "array"], "items": {"type": "string"},
-            "description": "The curve to follow: a find_geometry edge 'handle' (a single handle chains across TANGENT connections; a sharp corner stops the chain - the 'path' count is the truth), a JSON list of edge handles (used exactly), or 'sketch:<name>' for a path sketch."})
+            "description": "The curve to follow: a find_geometry edge handle (chains across TANGENT connections; a sharp corner stops the chain - the 'path' count is the truth), a JSON list of edge handles (used exactly), or 'sketch:<name>'."})
     .add_input_property("quantity", {"type": "integer", "description": "Instance count (>=2)."})
     .add_input_property(*_DISTANCE.as_property())
     .add_input_property(*_DISTANCE_TYPE.as_property())

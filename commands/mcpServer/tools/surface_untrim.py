@@ -38,7 +38,7 @@ _LOOP_TYPES = {
 
 _FACES = _inputs.GeometryHandleList(
     "faces", require="face", required=True,
-    description="The trimmed OPEN-surface faces to restore (loops with no connected face are removed).")
+    description="The trimmed faces to restore.")
 
 
 def _sum_area(faces):
@@ -136,11 +136,8 @@ def untrim_handler(faces=None, loop_type="all", extension=None, units="mm") -> d
 
 
 _DESC = (
-"Untrim surface faces - restore a trimmed face to its underlying (natural) extent, or remove an "
-"internal hole loop. 'faces' are find_geometry face handles on OPEN surface bodies (a solid face is "
-"rejected). 'extension' "
-"optionally extends past the natural boundary (all/external only). Only loops with no connected face "
-"can be untrimmed. Reports 'area_after' vs 'area_before' as the read-back that the extent actually grew.\n"
+"Untrim surface faces on OPEN surface bodies - restore a trimmed face to its underlying (natural) "
+"extent, or remove an internal hole loop.\n"
 + _outputs.produces_block(RETURNS)
 )
 
@@ -150,7 +147,7 @@ surface_untrim_tool = (
     .add_input_property(*_inputs.Choice("loop_type", ["all", "external", "internal"], default="all",
         description="Which boundary loops to remove.").as_property())
     .add_input_property("extension", {"type": "number",
-        "description": "Extend past the natural boundary in 'units' (all/external only; 0 = no extension)."})
+        "description": "Extend past the natural boundary in 'units' (all/external only)."})
     .add_input_property(*_inputs.UNITS.as_property())
     .add_required_input("faces")
     .strict_schema()

@@ -694,6 +694,17 @@ class TestNoneFeatureSuccess:
 # The BaseFeature scope a PARAMETRIC design requires suppresses the feature object, so a featureless
 # add() supports no claim about the design's mode - only a read of the design itself does.
 
+class TestNoteStatesTheReach:
+    def test_the_note_names_the_component_reach(self):
+        # The reach of the write, on the wire where the caller meets it: the feature is built on
+        # the component that owns the target, so every occurrence placing that component shows the
+        # change - which the payload's names and counts do not say.
+        _build(design_type=1)
+        out = _payload(mc.handler(target="T", tools=["A"]))
+        assert "EVERY instance" in out["note"] and "COMPONENT" in out["note"]
+        assert "where that occurrence places it" in out["note"]
+
+
 class TestDesignModeReported:
     def test_parametric_design_reports_parametric_with_a_null_feature(self):
         des, feats, *_ = _build(design_type=1, none_feature=True)

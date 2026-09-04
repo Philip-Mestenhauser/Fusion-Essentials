@@ -1,20 +1,10 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building blocks for the DOCUMENT lifecycle: copy / save-as / new / save / close / activate,
-plus delete-file. (Reading the open-document session is doc_get.)
-
-  doc_copy        -> copy an existing cloud document into a project/folder
-  data_delete_file-> delete a cloud document by URN, guarded
-  doc_save_as     -> save the ACTIVE (possibly never-saved) document into a project/folder
-  doc_new         -> create+open a new empty design document (session-only until saved)
-  doc_save        -> save the active document in place (a new cloud version)
-  doc_close       -> close an open document (or all), saving or discarding unsaved changes
-  doc_activate    -> bring an open document to the foreground
-
-The data-model tools (projects/folders/upload) live in data_ops.py; shared helpers live
-in _data_common. Every save is tagged with the AI-agent marker via _agent_description.
-"""
+"""MCP building blocks for the DOCUMENT lifecycle: doc_copy, data_delete_file, doc_save_as, doc_new,
+doc_save, doc_close, doc_activate. Reading the open-document session is doc_get; the data-model
+tools (projects/folders/upload) live in data_ops.py. Every save is tagged with the AI-agent marker
+via _agent_description."""
 
 import adsk.core
 
@@ -35,20 +25,15 @@ app = adsk.core.Application.get()
 _MAX_XREFS = 64
 
 # Post-saveAs the cloud assigns the lineage URN asynchronously - doc.dataFile.id reads a local
-# pre-upload handle (not a 'urn:') for a moment first. Pump the main loop a few times to let the
-# lineage settle so the tool can report the URN that ADDRESSES the file it just wrote (identity is
-# the lineage URN, not the name - Fusion allows same-name docs). Bounded burst, same idiom as
-# cam_generate's status pump; capped so it never hangs the call if the URN never resolves.
+# pre-upload handle (not a 'urn:') for a moment first, so the main loop is pumped until it settles.
+# Capped, so a URN that never resolves cannot hang the call.
 _URN_POLL_TRIES = 12
 _URN_POLL_SLEEP = 0.25
 
 
 def _report_lineage_change(payload, doc, lineage_before):
-    """A save can move the document onto a NEW lineage URN - measured live: the first save after a
-    configured-design conversion forks the file, version history restarts at v1, the superseded URN
-    still opens the pre-conversion file, and the new URN reads immediately. A caller holding the
-    superseded URN must learn the new one from THIS payload, so the change is reported loudly,
-    never just swapped into acted_on."""
+    """Report a save that moved the document onto a NEW lineage URN: a caller holding the superseded
+    URN learns the new one from this payload, never from a silently swapped acted_on."""
     if not (isinstance(lineage_before, str) and lineage_before.startswith("urn:")):
         return
     lineage_after = safe(lambda: doc.dataFile.id)
@@ -58,14 +43,13 @@ def _report_lineage_change(payload, doc, lineage_before):
         payload["note"] = (payload.get("note", "") +
                            " THIS SAVE MOVED THE DOCUMENT TO A NEW LINEAGE URN. Address the file by "
                            "lineage_changed.to from now on - lineage_changed.from opens the file "
-                           "this one forked from, and its version history does not continue. One "
-                           "measured cause is the first save after a configured-design conversion; "
-                           "this payload reports the change, not why it happened.").strip()
+                           "this one forked from, and its version history does not "
+                           "continue.").strip()
 
 
 def _settled_lineage_urn(doc):
-    """Pump briefly and return doc.dataFile.id once it is a lineage 'urn:', else None. The URN is the
-    stable identity a caller needs to address the saved file unambiguously (two files may share a name)."""
+    """Pump briefly and return doc.dataFile.id once it is a lineage 'urn:', else None - the stable
+    identity that addresses the saved file when two files share a name."""
     import time
     for _ in range(_URN_POLL_TRIES):
         df = safe(lambda: doc.dataFile)
@@ -82,12 +66,9 @@ def _settled_lineage_urn(doc):
 # ---------------------------------------------------------------------------
 
 def _xref_summary(data_file):
-    """A DataFile's child references (bounded) and HOW MANY there are, so a caller can confirm a
-    copy still carries its referenced components (DataFile.copy does not re-copy reference targets).
-
-    Returns (rows, count). count is None when the reference read did not answer: an unreadable read
-    is not "this file references nothing", and a 0 published for it reads as exactly that. rows are
-    capped at _MAX_XREFS while count stays the true total."""
+    """A DataFile's child references and how many there are: (rows, count), rows capped at
+    _MAX_XREFS while count stays the true total. count is None when the reference read did not
+    answer - an unreadable read is not "this file references nothing"."""
     if read_flag(lambda: data_file.hasChildReferences) is False:
         return [], 0
     refs = safe(lambda: data_file.childReferences.asArray())
@@ -224,17 +205,12 @@ def copy_document_handler(document_id: str = "", name: str = "",
 
     src_name = safe(lambda: src.name) or "(unknown)"
     # The copied file's intended FINAL name: the requested 'name' if given, else the source's.
-    # (DataFile.copy() cannot set a name, so a requested rename is applied after the copy below.)
-    # 'name' doubles as the source lookup when copying by name, but renaming the copy to that same
-    # name is a harmless no-op, so we treat 'name' as the rename target in both branches.
+    # DataFile.copy() cannot set a name, so a requested rename is applied after the copy below.
     want_name = (name or "").strip()
     final_name = want_name or src_name
 
-    # The remedy is in THIS tool's own input vocabulary. 'folder' always narrows the collision;
-    # 'name' only does on the document_id path, because on the by-name path 'name' IS the source
-    # lookup, so a different one copies a different file rather than renaming this copy. BOTH
-    # destination-collision refusals below end on it: the branch a caller lands in depends on how
-    # many files already carry the name, and which of this tool's inputs it can still move does not.
+    # 'folder' always narrows the collision; 'name' only does on the document_id path, because on
+    # the by-name path 'name' IS the source lookup, so a different one copies a different file.
     rename_remedy = (" or give the copy a different 'name'." if document_id else
                      ". On this call 'name' selects the SOURCE file, so changing it copies a "
                      "different document - pass 'document_id' (the source's lineage URN from "
@@ -304,31 +280,16 @@ def copy_document_handler(document_id: str = "", name: str = "",
 
 
 # The by-name folder walk's HARD budget. Every folder visited costs TWO cloud fetches (dataFiles +
-# dataFolders) on Fusion's MAIN thread - measured live at ~0.8 s/folder - so an unbounded project-wide
-# walk over a folder-heavy project stalls the UI for tens of minutes (observed as a Fusion-killing
-# hang). 20 folders keeps the worst case around ~16 s; a bigger project must be addressed by
-# document_id (URN) or narrowed with source_folder.
+# dataFolders) on Fusion's MAIN thread at ~0.8 s/folder, so an unbounded walk stalls the UI; a
+# bigger project must be addressed by document_id (URN) or narrowed with source_folder.
 _WALK_FOLDER_BUDGET = 20
 
 
 def _find_file_by_name(root_folder, name):
-    """Every DataFile whose name matches `name` (case-insensitive) in the folder tree under
-    `root_folder` - Fusion allows same-name files in DIFFERENT folders, so this collects ALL matches
-    and the caller REFUSES an ambiguous (>1) result rather than picking the first one the walk reaches.
-
-    Breadth-first (shallow folders searched before deep run/archive subtrees) and HARD-bounded by
-    _WALK_FOLDER_BUDGET; `truncated` reports that the budget cut the walk short, in which case the
-    caller must refuse rather than trust a partial search (an unsearched folder could hold a
-    same-name twin).
-
-    A folder whose dataFiles/dataFolders enumeration RAISES is recorded in `unread` (its path) rather
-    than silently skipped - the same hole _data_read._walk_folder records: a folder that never opened
-    could hold a second file of this name, so a swallowed failure turns an ambiguity into a confident
-    unique match. Every caller carries the fact.
-
-    Returns (matches, seen_names, visited, truncated, unread), each match a (file,
-    folder_path_string) pair and `unread` the paths of the folders that would not enumerate.
-    """
+    """Every DataFile named `name` (case-insensitive) under `root_folder`, breadth-first and bounded
+    by _WALK_FOLDER_BUDGET: (matches, seen_names, visited, truncated, unread), each match a (file,
+    folder_path) pair. Fusion allows same-name files in DIFFERENT folders, so ALL matches are
+    collected; `truncated` and `unread` are the holes a caller must refuse on rather than trust."""
     want = (name or "").strip().lower()
     seen = []
     matches = []
@@ -359,12 +320,9 @@ def _find_file_by_name(root_folder, name):
 
 
 def _files_in_folder_by_name(folder, name):
-    """EVERY immediate child DataFile of `folder` carrying `name` (case-insensitive, whole name).
-
-    A folder holds several files of one name: two saveAs calls into one folder under one name
-    produce two DISTINCT lineages, and the folder reads back both files under that name. So a name
-    is not an identity here and every match is collected - the caller decides.
-    """
+    """EVERY immediate child DataFile of `folder` carrying `name` (case-insensitive, whole name). A
+    folder CAN hold several files of one name - two saveAs calls into one folder under one name
+    produce two DISTINCT lineages - so a name is not an identity here and the caller decides."""
     want = (name or "").strip().lower()
     out = []
     try:
@@ -395,12 +353,9 @@ def _same_name_refusal(folder, name, matches):
 
 
 def _file_in_folder_by_name(folder, name):
-    """The ONE immediate child DataFile of `folder` carrying `name`, or a REFUSAL when several do.
-
-    Returns (data_file, refusal): (file, None) for exactly one match, (None, None) when nothing
-    carries the name, and (None, sentence) when several do - never one of several, since the files
-    sharing that name are different lineages. The caller appends its own remedy to the sentence.
-    """
+    """The ONE immediate child DataFile of `folder` carrying `name`: (file, None) for exactly one
+    match, (None, None) when nothing carries it, (None, sentence) when several do - never one of
+    several, since those are different lineages. The caller appends its own remedy."""
     matches = _files_in_folder_by_name(folder, name)
     if len(matches) == 1:
         return matches[0], None
@@ -414,13 +369,10 @@ def _file_in_folder_by_name(folder, name):
 # ---------------------------------------------------------------------------
 
 def _parent_ref_summary(data_file):
-    """The files that REFERENCE this DataFile (its parents), bounded, plus the reference read that
-    would NOT answer - deleting a referenced file orphans them, so the tool refuses unless forced.
-
-    Returns (parents, unreadable): unreadable NAMES the read that failed ('hasParentReferences' or
-    'parentReferences.asArray()'), else None. It is a sentinel, not a formality: [] published for a
+    """The files that REFERENCE this DataFile, bounded: (parents, unreadable), where unreadable NAMES
+    the read that failed ('hasParentReferences' or 'parentReferences.asArray()') else None. [] for a
     failed read is indistinguishable from a file nothing points at, so the destructive path fails
-    CLOSED on it instead of proceeding to deleteMe() (see delete_document_handler)."""
+    CLOSED on that sentinel instead of proceeding to deleteMe()."""
     has = read_flag(lambda: data_file.hasParentReferences)
     if has is None:
         return [], "hasParentReferences"
@@ -495,10 +447,8 @@ def delete_document_handler(document_id: str = "", confirm_name: str = "",
 
     parents, refs_unreadable = _parent_ref_summary(df)
     if refs_unreadable and not force:
-        # Fail CLOSED: the read that would have shown the orphan risk is the one that failed, so
-        # this file is NOT provably unreferenced and the orphan guard cannot run. The refusal names
-        # WHICH read failed, since the caller's options differ (retry a transient cloud failure vs.
-        # accept a delete with no reference check at all).
+        # Fail CLOSED: the read that would have shown the orphan risk is the one that failed, so the
+        # file is NOT provably unreferenced. The refusal names WHICH read failed.
         return error(
             f"Whether '{actual_name}' is referenced by other files could not be read "
             f"({refs_unreadable} failed), so it is NOT provably unreferenced - deleting it may "
@@ -543,13 +493,9 @@ def delete_document_handler(document_id: str = "", confirm_name: str = "",
 # ---------------------------------------------------------------------------
 
 def _resolve_folder_eventual(root, segments):
-    """Resolve an existing folder path, with ONE bounded retry for cloud EVENTUAL-CONSISTENCY.
-
-    During a cloud-recovery outage the resolve can report a segment MISSING that IS present in the
-    freshly enumerated sibling list at the project root (the folder appears in its own
-    available-folders list yet will not resolve - observed live, where a plain retry then succeeded).
-    ONLY that exact self-contradiction is retried; a segment genuinely absent from the siblings is a
-    real miss and is NOT retried. Returns (folder, missing, retried)."""
+    """Resolve an existing folder path with ONE bounded retry: (folder, missing, retried). A cloud
+    listing can report a segment MISSING that IS in the freshly enumerated sibling list; only that
+    exact self-contradiction is retried, a segment absent from the siblings is a real miss."""
     target, missing = _resolve_folder_path(root, segments)
     if target is not None or not missing:
         return target, missing, False
@@ -618,12 +564,9 @@ def save_document_as_handler(name: str = "", project: str = "", project_id: str 
                                      "retry - cloud folder listings can lag right after a save/outage "
                                      "(eventual-consistency).")
 
-    # Fusion PERMITS same-name documents (identity is the lineage URN, not the name). saveAs on a
-    # colliding name FORKS a new lineage - legal, but rarely what was meant, so a pre-existing
-    # same-name file in the target folder is REFUSED by default (consistent with doc_copy). The fork
-    # is available deliberately via allow_duplicate_name=true, which keeps the permit+warn path below.
-    # Collect every same-name file, then decide: the guard's question is "is this name already
-    # taken here, and by which lineages", which several files answer as truthfully as one.
+    # Fusion PERMITS same-name documents (identity is the lineage URN, not the name), and saveAs on
+    # a colliding name FORKS a new lineage - so a pre-existing same-name file is refused by default,
+    # the fork available deliberately via allow_duplicate_name=true.
     existing_files = _files_in_folder_by_name(target, name)
     existing = existing_files[0] if len(existing_files) == 1 else None
     existing_id = safe(lambda: existing.id) if existing else None
@@ -642,22 +585,16 @@ def save_document_as_handler(name: str = "", project: str = "", project_id: str 
             "deliberately create a same-name fork anyway, pass allow_duplicate_name=true.")
 
     def _landed_after_error():
-        """saveAs can RAISE InternalValidationError (or return false) while the folder AND file DID
-        land. Read the GROUND TRUTH back before reporting a false negative: a same-name file now
-        present in the target that was NOT there before, or - for a never-saved doc - a settled lineage
-        urn on the doc. A pre-existing urn on an already-saved doc is deliberately
-        NOT trusted (it would false-positive an allow_duplicate_name fork).
-
-        Returns (landed, same_name_now): landed is the landed file's id/urn, True when it landed but
-        no single id names it, else None. same_name_now is every file now carrying the name when
-        SEVERAL do - the ambiguity the payload discloses - and [] otherwise."""
+        """Read back whether a saveAs that RAISED (or returned false) nevertheless landed:
+        (landed, same_name_now), landed being the file's id/urn, True when it landed under no single
+        id, else None. A pre-existing urn on an already-saved doc is NOT trusted - it would
+        false-positive an allow_duplicate_name fork. same_name_now is [] unless SEVERAL now match."""
         now = _files_in_folder_by_name(target, name)
         if now and not existing_files:
             if len(now) == 1:
                 return safe(lambda: now[0].id) or True, []
             # Several files carry the name now where none did before: this call landed, but WHICH
-            # lineage it wrote is not readable off the folder. The candidates travel up to be named
-            # in the payload rather than one of them being picked as this call's.
+            # lineage it wrote is not readable off the folder, so every candidate travels up.
             return True, now
         if not was_saved:
             urn = _settled_lineage_urn(doc)
@@ -666,10 +603,9 @@ def save_document_as_handler(name: str = "", project: str = "", project_id: str 
         return None, []
 
     def _landed_ok(file_id, how, same_name_now=()):
-        # doc.dataFile.id names this call's file ONLY for a document that was never saved. On an
-        # already-saved one it still reads the lineage that document was saved FROM - a different
-        # file, under a different name, in a different folder - which is why the urn branch of
-        # _landed_after_error is gated the same way. Unnameable publishes null, never a wrong URN.
+        # doc.dataFile.id names this call's file ONLY for a document that was never saved: on an
+        # already-saved one it still reads the lineage it was saved FROM, a different file entirely.
+        # Unnameable publishes null, never a wrong URN.
         resolved = (file_id if isinstance(file_id, str)
                     else (_settled_lineage_urn(doc) if not was_saved else None))
         payload = {
@@ -742,10 +678,8 @@ def save_document_as_handler(name: str = "", project: str = "", project_id: str 
         }
         note = (f"NAME COLLISION - see 'name_collision'. " + note)
     elif len(existing_files) > 1:
-        # The name was ALREADY shared before this save (only reachable with allow_duplicate_name):
-        # one 'existing_document_id' cannot state several, so every pre-existing lineage is listed.
-        # One entry per pre-existing file, null where the id would not read: a dropped entry shows
-        # N files under fewer URNs, which reads as though two of them shared one.
+        # The name was ALREADY shared before this save (only reachable with allow_duplicate_name), so
+        # every pre-existing lineage is listed - one entry per file, null where the id would not read.
         prior_ids = [safe(lambda f=f: f.id) for f in existing_files]
         result["name_collision"] = {
             "existing_document_ids": prior_ids,
@@ -775,10 +709,9 @@ def new_document_handler() -> dict:
     if not doc:
         return error("New-document creation returned nothing.")
 
-    # EQUALITY, never identity or name: Document wrappers are not identity-stable (`is` reads
-    # False even for the one active document - measured live on 2705.0.87), while `==` compares
-    # the underlying handle (measured: True across distinct wrappers of one doc, False between
-    # two docs, tracks activation). A NAME compare would false-positive on two 'Untitled' docs.
+    # EQUALITY, never identity or name: Document wrappers are not identity-stable (`is` reads False
+    # even for the one active document) while `==` compares the underlying handle, and a NAME
+    # compare would false-positive on two 'Untitled' docs.
     new_name = safe(lambda: doc.name)
     is_active = bool(safe(lambda: app.activeDocument == doc, False))
     info = {
@@ -805,52 +738,34 @@ def _lineage_key(urn):
 
 
 def _unique_lineages(ids):
-    """Per open-document id, whether a URN reaches THAT document and no other in this list.
-
-    False for an id that did not read - it answers to no lineage at all - and false for an id whose
-    lineage another candidate answers to as well: the same file open at two VERSIONS, where either
-    id retried lands back on the pair, since the '?version=N' suffix is dropped before matching.
-    Only a lineage held by exactly one candidate singles that candidate out."""
+    """Per open-document id, whether a URN reaches THAT document and no other in this list. False for
+    an id that did not read, and false for one whose lineage another candidate answers to as well -
+    the same file open at two VERSIONS, since the '?version=N' suffix is dropped before matching."""
     keys = [_lineage_key(i) for i in ids]
     return [bool(k) and keys.count(k) == 1 for k in keys]
 
 
 def _document_row(name, document_id, open_index, unique_urn=True):
-    """One open document as a disclosure row: its display name, the document id it answered, and -
-    where that id does NOT reach it alone - the 'open:N' index that does (doc_get publishes the same
-    index).
-
-    The id is what the row states, suffix and all: an id carrying '?version=N' is what THAT candidate
-    answered, and calling it a lineage URN would name a value the row does not hold. A document whose
-    id did not read says so and is addressed by its index instead - two unsaved 'Untitled' otherwise
-    render as byte-identical rows advising an 'open:N' neither of them states. Every candidate gets a
-    row, always: a dropped row shows N documents under fewer URNs, which reads as though two of them
-    shared one."""
+    """One open document as a disclosure row: its display name, the document id it answered (suffix
+    and all), and - where that id does NOT reach it alone - the 'open:N' index that does, which
+    doc_get publishes too. A document whose id did not read says so and carries the index instead."""
     address = document_id or "no lineage URN"
     if not (document_id and unique_urn):
         address += " - open:%d" % open_index
     return "%s (%s)" % (name or "(unnamed)", address)
 
 
-# The row a slot that answered NO DOCUMENT gets. documents.item(i) did not read, so the slot holds
-# its place in the open:N address space (every later document keeps its index) but has no document
-# behind it - and _find_open_document refuses the very 'open:N' that names it. So the row states the
-# hole and offers no address at all: this listing is the set the caller retries against, and an
-# index refused on arrival is not something to retry with. The row is still PUBLISHED rather than
-# dropped, so the listing counts what the session holds.
+# The row a slot that answered NO DOCUMENT gets: it holds its place in the open:N address space so
+# every later document keeps its index, but _find_open_document refuses that 'open:N', so the row
+# offers no address - and is still published, so the listing counts what the session holds.
 _UNREADABLE_SLOT_ROW = "(unreadable slot) (no handle - the document did not read)"
 
 
 def _document_rows(hits):
     """_document_row per (open_index, document, name, document_id) candidate, each carrying the
-    address that REACHES it: its document id where no other candidate answers to that lineage, else
-    the open index, which addresses one document whatever its id says. A candidate whose DOCUMENT
-    did not read gets _UNREADABLE_SLOT_ROW instead - a hole in the address space is named, never
-    offered as a handle.
-
-    Which address a row states is decided over the WHOLE list handed in, so a listing is built in
-    one call rather than a row at a time: a row written without its neighbours cannot know that a
-    second candidate answers to its lineage, and would offer an id that resolves back to the pair."""
+    address that REACHES it - its document id where no other candidate answers to that lineage, else
+    the open index; a candidate whose DOCUMENT did not read gets _UNREADABLE_SLOT_ROW. Decided over
+    the WHOLE list, so a listing is built in one call rather than a row at a time."""
     unique = _unique_lineages([did for _i, _d, _nm, did in hits])
     return [_document_row(nm, did, i, u) if d is not None else _UNREADABLE_SLOT_ROW
             for (i, d, nm, did), u in zip(hits, unique)]
@@ -858,63 +773,34 @@ def _document_rows(hits):
 
 def _open_candidates(open_docs):
     """Every open (document, name) pair as the (open_index, document, name, document_id) candidate
-    _document_rows is built from, its id read once here.
-
-    A LISTING is over every open document, not only the ones a query matched: the caller is being
-    handed the set to retry against, and a document left out of it is one the retry cannot name. A
-    slot whose document did not read is carried too - its document is None, which is what marks it
-    as a hole rather than a candidate to address - since a missing row would show the session
-    holding one document fewer than it does."""
+    _document_rows is built from, its id read once here. Every open document is carried, matched or
+    not, a slot whose document did not read included (its document is None)."""
     return [(i, d, nm, safe(lambda d=d: d.dataFile.id)) for i, (d, nm) in enumerate(open_docs)]
 
 
 def _tried_lineage(raw):
-    """What a by-URN resolve actually SEARCHED FOR, as ' (lineage <key>)', for a miss to name.
-
-    A '?version=N' suffix is dropped before matching and a web URL is decoded to the urn inside it,
-    so the value the caller typed is not always the value that was compared - a miss that echoed
-    only the input would leave the caller guessing which of the two missed. Empty when the value
-    carries no urn at all (a display name), and empty when it already IS that key, since the
-    refusal's own echo states it."""
+    """What a by-URN resolve actually SEARCHED FOR, as ' (lineage <key>)', for a miss to name - a
+    '?version=N' suffix is dropped before matching and a web URL is decoded to the urn inside it.
+    Empty when the value carries no urn at all, and when it already IS that key."""
     keys = sorted({_lineage_key(c) for c in _urn_candidates(raw) if c.startswith("urn:")})
     keys = [k for k in keys if k and k != (raw or "").strip()]
     return " (lineage %s)" % ", ".join(keys) if keys else ""
 
 
 def _find_open_document(name):
-    """Return the open Document identified by `name`, and the open-document listing for a refusal.
-
-    `name` may be a lineage URN or a Fusion web URL (the UNAMBIGUOUS identity - Fusion allows several
-    open docs to share a display name, e.g. two 'Untitled' or two files both named 'P1-Gimbal'); it is
-    matched against each open doc's dataFile.id first, by LINEAGE EQUALITY. Failing that, it is matched
-    as a display name by case-insensitive EXACT match. A value that matches MORE THAN ONE open doc is
-    REFUSED (returns None + an ambiguous flag) rather than silently acting on the wrong one - except
-    where the repeat is ONE document listed twice (_write_guard.one_open_document), which resolves on
-    BOTH match paths, since an assembly's dependency instance repeats the tab's name as well as its
-    URN. A shared display name is disambiguated by the URN, a lineage open at two VERSIONS only by
-    'open:N'.
-
-    `names` is what the caller LISTS: every refusal hands back a _document_row per candidate, since
-    a listing is what the retry is built out of and the row carries the address that reaches that
-    candidate - its document id, or the open index where no URN reaches it alone. That holds on
-    every miss path, NAME and 'open:N' as much as URN: the refusal advises a URN or an 'open:N', so
-    a listing of display names would name neither, and two documents sharing a name would render as
-    that name printed twice. A resolve that ANSWERS hands back the display names, which no caller
-    reads.
-    Operates on app.documents (all loaded docs - a superset of the user's visible tabs).
-
-    Returns (document_or_None, names, ambiguous_bool)."""
+    """The open Document identified by `name` - an 'open:N' index, a lineage URN or web URL matched
+    by LINEAGE EQUALITY, else a case-insensitive EXACT display name: (document, names, ambiguous).
+    More than one distinct match is REFUSED, and every refusal's `names` is a _document_row per
+    candidate carrying the address that reaches it. Walks app.documents, a superset of the tabs."""
     raw = (name or "").strip()
     docs = safe(lambda: app.documents)
     names = []
     if docs is None:
         return None, names, False
 
-    # A document's INDEX in app.documents is its address here ('open:N' below indexes open_docs, and
-    # doc_get publishes the same open_index), so this stays a positional walk: iter_collection drops
-    # an unreadable document, which would slide every later doc onto the wrong 'open:N'. item(i)
-    # itself is guarded too - a stale document proxy burns its slot (a None entry) instead of
-    # raising the whole resolve away.
+    # A document's INDEX in app.documents is its address here, so this stays a positional walk:
+    # iter_collection drops an unreadable document, sliding every later doc onto the wrong 'open:N'.
+    # item(i) is guarded too - a stale proxy burns its slot rather than raising the resolve away.
     open_docs = []
     for i in range(safe(lambda: docs.count, 0)):
         d = safe(lambda i=i: docs.item(i))
@@ -932,11 +818,8 @@ def _find_open_document(name):
         hit = open_docs[idx][0] if idx is not None and 0 <= idx < len(open_docs) else None
         if hit is not None:
             return hit, names, False
-        # All THREE ways an 'open:N' reaches nothing - an index that is not a number, one outside
-        # the open range, and one naming a slot whose document did not read - refuse with the same
-        # listing the name and URN misses return: a row per candidate carrying the address that
-        # reaches it. Bare display names here hand two unsaved 'Untitled' back as one name printed
-        # twice, which states neither of the indexes that do address them.
+        # All THREE ways an 'open:N' reaches nothing - not a number, outside the open range, or a
+        # slot whose document did not read - refuse with the same listing a name or URN miss returns.
         return None, _document_rows(_open_candidates(open_docs)), False
 
     # 1) URN / web-URL identity: resolve the raw value to candidate URNs, then match an open doc's
@@ -956,10 +839,8 @@ def _find_open_document(name):
             # beside its visible tab (_write_guard.one_open_document holds that measured fact). Both
             # handles address the same document, so the first is returned without disclosure.
             return hits[0][1], names, False
-        # A URN was supplied but no OPEN doc carries it - not a name; report a clean miss (not
-        # ambiguous), listing every open document WITH the address that reaches it: the caller
-        # addressed this call by URN, and a URN is what the retry has to be addressed by too -
-        # except where two open documents answer to one lineage, whose rows carry the index instead.
+        # A URN was supplied but no OPEN doc carries it: a clean miss (not ambiguous), listing every
+        # open document with the address that reaches it.
         return None, _document_rows(candidates), False
 
     # 2) Display-name EXACT match. Refuse if more than one DISTINCT open doc shares the name.
@@ -970,29 +851,21 @@ def _find_open_document(name):
         return matches[0][1], names, False
     if len(matches) > 1:
         if _write_guard.one_open_document([did for _i, _d, _nm, did in matches]):
-            # ONE document reached by its display NAME rather than its URN: an assembly loads its
-            # references as real Documents, so the visible tab and the dependency instance repeat
-            # the name AND the lineage URN. Both handles address that document, so the first
-            # resolves - only genuinely DISTINCT candidates refuse.
+            # ONE document reached by its display NAME: an assembly loads its references as real
+            # Documents, so the visible tab and the dependency instance repeat the name AND the URN.
+            # Both handles address that document; only genuinely DISTINCT candidates refuse.
             return matches[0][1], names, False
         # A name-twin: the display names cannot tell these apart, so the rows carry the URNs.
         return None, _document_rows(matches), True
     # A NAME matched nothing. The refusal that follows advises a lineage URN or an 'open:N', so the
-    # listing states them: display names alone name neither, and a session holding two documents
-    # under one name renders that name twice - one row for each, telling the caller nothing the
-    # count did not.
+    # listing states them rather than display names, which name neither.
     return None, _document_rows(_open_candidates(open_docs)), False
 
 
 def _resolve_open_document(name, verb):
     """The ONE by-name/by-URN open-document resolve doc_activate and doc_close share, refusals
-    already worded: (document, None) when exactly one document answers, else (None, refusal).
-
-    Both refusals list each candidate with the address that REACHES it, since a refusal that named
-    only the shared display name would ask for the value that just failed - and one that told every
-    caller to retry with a URN would ask for a value that cannot work where two candidates answer to
-    one lineage, or where a candidate answered no id at all. `verb` is the acting word, so one
-    wording serves both tools."""
+    already worded: (document, None) when exactly one document answers, else (None, refusal). Both
+    refusals list each candidate with the address that REACHES it; `verb` is the acting word."""
     d, listing, ambiguous = _find_open_document(name)
     if d is not None:
         return d, None
@@ -1001,10 +874,9 @@ def _resolve_open_document(name, verb):
         return None, error(
             f"'{name}' matches more than one OPEN document - refusing to guess which to {verb}. "
             f"Candidates, each with the document id it answered: {rows}. Retry with the address a "
-            "candidate carries: a document id standing ALONE reaches that one and no other. A row "
-            "carrying an 'open:N' index as well is one no URN reaches - it answered no id, or "
-            "another candidate answers to the same lineage (one file open at two VERSIONS) - so "
-            "that index, which doc_get publishes too, is its only handle.")
+            "candidate carries: a document id standing ALONE reaches that one and no other; a row "
+            "carrying an 'open:N' index as well is reachable only by that index, which doc_get "
+            "publishes too.")
     return None, error(
         f"No open document matched '{name}'{_tried_lineage(name)}. Open: {rows or '(none)'}. "
         "(A shared name needs a lineage URN or the 'open:N' index from doc_get.)")
@@ -1115,13 +987,8 @@ def close_document_handler(name: str = "", save_changes: bool = False,
     "note": note,
     }
     # The write guard stamps acted_on from the POST-call ACTIVE document, which a close never leaves
-    # pointing at the document it closed (measured live: closing an INACTIVE document names the
-    # untouched active one; closing the ACTIVE document names the fallback Fusion brought forward).
-    # This handler holds the true identity, so it publishes acted_on itself for a ONE-document close.
-    # A close that took SEVERAL documents - or NONE - publishes an explicit null: the single-identity
-    # acted_on shape cannot name several, and no document at all was acted on. The guard's stamp is
-    # fill-if-absent, so only an explicit None keeps it from filling in a document this call did not
-    # close.
+    # pointing at what it closed, so this handler publishes acted_on itself. Several documents - or
+    # none - publish an explicit null, which the guard's fill-if-absent stamp then leaves alone.
     if len(closed_identities) == 1:
         payload["acted_on"] = closed_identities[0]
     elif len(closed_identities) > 1:
@@ -1149,13 +1016,9 @@ def activate_document_handler(name: str = "") -> dict:
         did = d.activate()
     except Exception as e:
         return error(f"Activate failed for '{safe(lambda: d.name)}': {e}")
-    # Document.activate() returns whether the CALL was accepted, but the switch is ASYNC - the active
-    # document often hasn't propagated yet when we read it here. So report the VERIFIED state, not the
-    # intent: 'activated' is true only if it's actually active now; otherwise the switch is "pending"
-    # (the call took, the foreground hasn't caught up). Don't claim done when it isn't.
-    # EQUALITY, never identity: Document wrappers are not identity-stable (`is` reads False for
-    # the very document that IS active - measured live), which made every completed switch report
-    # "pending"; `==` compares the underlying handle.
+    # Document.activate() returns whether the CALL was accepted, but the switch is ASYNC, so the
+    # verified state is reported: 'activated' is "pending" while the foreground has not caught up.
+    # EQUALITY, never identity - `is` reads False for the very document that IS active.
     is_active = bool(safe(lambda: app.activeDocument == d, False))
     out = {
         "activated": True if is_active else ("pending" if did else False),
@@ -1174,30 +1037,25 @@ _copy_document_tool = (
     Tool.create_simple(
         name="doc_copy",
         description=(
-            "Copy an existing cloud document (a saved DataFile, identified by its lineage "
-            "'document_id' URN - preferred - or by 'name' within a 'source_project') INTO a "
-            "destination project/folder. Generic cloud-to-cloud copy: it does NOT touch the "
-            "active session (use a save-active-document tool for that). The copy PRESERVES the "
-            "document's external references: each referenced component keeps pointing at its "
-            "ORIGINAL source file (the references are not re-copied). The result lists those "
-            "external references so you can confirm they came along. 'folder' may be a nested "
-            "path; set create_path=true to create missing destination folders (mkdir -p). "
-            "NOTE: this does NOT share lineage, so Fusion will not auto-repair joints from "
-            "the copy."
+            "Copy an existing cloud document (a saved DataFile, by its lineage 'document_id' URN - "
+            "preferred - or by 'name' within a 'source_project') INTO a destination project/folder. "
+            "Cloud-to-cloud: it does NOT touch the active session. The copy PRESERVES external "
+            "references - each referenced component keeps pointing at its ORIGINAL source file. "
+            "'folder' may be nested; create_path=true creates missing destination folders."
         ),
     )
     # document_id is OPTIONAL, not required: the handler also accepts the by-name path
     # ('name' + 'source_project'). One of document_id / name must be given (guarded in the handler).
     .add_input_property("document_id", {"type": "string",
-        "description": "Lineage id (URN) of the document to copy (preferred; from data_get). Optional - omit to look up by 'name' + 'source_project'."})
+        "description": "Lineage URN of the document to copy (from data_get)."})
     .add_input_property("name", {"type": "string",
-        "description": "Document name (alt to document_id); requires source_project."})
+        "description": "Document name; requires source_project."})
     .add_input_property("source_project", {"type": "string",
         "description": "Source project name (for a 'name' lookup)."})
     .add_input_property("source_project_id", {"type": "string",
         "description": "Source project id (alt to source_project)."})
     .add_input_property("source_folder", {"type": "string",
-        "description": "Scope the 'name' lookup to this folder path (the by-name walk is budget-bounded; big projects need this or document_id)."})
+        "description": "Scope the 'name' lookup to this folder path."})
     .add_input_property("project", {"type": "string", "description": "Destination project name."})
     .add_input_property("project_id", {"type": "string", "description": "Destination project id (alt to name)."})
     .add_input_property("folder", {"type": "string",
@@ -1219,19 +1077,17 @@ _delete_document_tool = (
         name="data_delete_file",
         description=(
         "Delete a cloud document (a saved DataFile) by its lineage 'document_id' URN. "
-        "GUARDED and IRREVERSIBLE: you must also pass 'confirm_name' that EXACTLY matches "
-        "the file's current name - the tool refuses on mismatch so you cannot delete the "
-        "wrong file. It also refuses a file that is currently OPEN, or that is REFERENCED "
-        "by other files (deleting it would orphan them) unless force=true. Get the URN and "
-        "name from data_get or doc_get."
+        "GUARDED and IRREVERSIBLE: 'confirm_name' must EXACTLY match the file's current "
+        "name. Also refuses a file that is currently OPEN, or one REFERENCED by other "
+        "files, unless force=true. Get the URN and name from data_get or doc_get."
         ),
         input_param_name="document_id",
         input_param_description="Lineage id (URN) of the document to delete.",
     )
     .add_input_property("confirm_name", {"type": "string",
-        "description": "Exact current name of the file, case-sensitive (safety confirmation; must match)."})
+        "description": "Exact current name of the file, case-sensitive."})
     .add_input_property("force", {"type": "boolean",
-        "description": "Delete even if referenced by other files (default false). Use with care."})
+        "description": "Delete even if referenced by other files (default false)."})
     .strict_schema()
 )
 delete_document_item = Item.create_tool_item(
@@ -1247,16 +1103,12 @@ _save_document_as_tool = (
     Tool.create_with_string_input(
         name="doc_save_as",
         description=(
-            "Save the ACTIVE Fusion document into a project/folder under a given 'name', via "
-            "Document.saveAs. Captures the live session, including a design that has NEVER been "
-            "saved (no cloud id yet) - unlike data_upload_file (a LOCAL file) or doc_copy (a SAVED "
-            "cloud file). 'folder' may be nested; create_path=true makes missing folders. A "
-            "same-name file already in the target folder is REFUSED by default (identity is the "
-            "lineage URN, not the name): pass allow_duplicate_name=true to fork a second lineage, or "
-            "version the existing file by opening its URN and using doc_save. Result 'document_id' "
-            "is the new lineage URN (resolves asynchronously). A large assembly's saveAs can run "
-            "minutes and outlive a client timeout while still SUCCEEDING - on timeout verify "
-            "with doc_get before retrying (a retry forks a duplicate)."
+            "Save the ACTIVE Fusion document into a project/folder under 'name' (Document.saveAs) - "
+            "including a design NEVER saved before, unlike data_upload_file (a LOCAL file) or "
+            "doc_copy (a SAVED cloud file). 'folder' may be nested; create_path=true makes missing "
+            "folders. A same-name file there is REFUSED unless allow_duplicate_name=true. A large "
+            "assembly's saveAs can outlive a client timeout while still SUCCEEDING - verify with "
+            "doc_get before retrying, since a retry forks a duplicate."
         ),
         input_param_name="name",
         input_param_description="Name to save the active document as.",
@@ -1268,7 +1120,7 @@ _save_document_as_tool = (
     .add_input_property("create_path", {"type": "boolean",
         "description": "Create missing destination folders (default false)."})
     .add_input_property("description", {"type": "string",
-        "description": "Optional version description for the save."})
+        "description": "Version description for the save."})
     .add_input_property("allow_duplicate_name", {"type": "boolean",
         "description": "Permit a same-name fork in the target folder (default false = refuse)."})
     .strict_schema()
@@ -1286,10 +1138,8 @@ _new_document_tool = Tool.create_simple(
     name="doc_new",
     description=(
     "Create and open a new, empty Fusion design document; it becomes the active "
-    "document. The document is unsaved (no cloud id yet) until you save it with "
-    "doc_save_as. Use this to start fresh - e.g. then sketch_create and "
-    "sketch_add_geometry to model. Creates a session document (does not write to the "
-    "cloud until saved)."
+    "document. It is unsaved (no cloud id) until doc_save_as. Start modelling with "
+    "sketch_create."
     ),
 ).strict_schema()
 new_document_item = Item.create_tool_item(
@@ -1305,12 +1155,10 @@ _save_document_tool = (
         name="doc_save",
         description=(
             "Save the ACTIVE document in place - a new cloud version of the same file (the plain "
-            "'Save', vs doc_save_as which needs a name+folder for a never-saved doc). The "
-            "version 'description' is auto-prefixed with the AI-agent marker. The doc must already "
-            "exist in the cloud. WRITES a new cloud version."),
+            "'Save'; a never-saved doc needs doc_save_as, which takes a name+folder)."),
     )
     .add_input_property("description", {"type": "string",
-            "description": "Optional version description (the AI-agent marker is prepended automatically)."})
+            "description": "Version description (the AI-agent marker is prepended)."})
     .strict_schema()
 )
 save_document_item = Item.create_tool_item(
@@ -1321,15 +1169,13 @@ _close_document_tool = (
     Tool.create_simple(
         name="doc_close",
         description=(
-            "Close an open document, or all of them. 'name' = the doc to close (omit = the ACTIVE "
-            "doc; a display name, a lineage URN / web URL, or 'open:N' from doc_get when the name is "
-            "shared - a shared name is REFUSED, not guessed); 'close_all' = close every open document; 'save_changes' = save "
-            "unsaved edits first (default false = DISCARD them). NOTE: app.documents includes "
-            "referenced/dependency docs with no visible tab - close_all closes those too. Fusion "
-            "always keeps one doc open. Discarded edits are gone."),
+            "Close an open document, or every one of them (close_all). 'name' omitted = the ACTIVE "
+            "doc; a shared name is REFUSED, not guessed. save_changes=false (the default) DISCARDS "
+            "unsaved edits. app.documents includes referenced/dependency docs with no visible tab - "
+            "close_all closes those too."),
     )
     .add_input_property("name", {"type": "string",
-            "description": "Doc to close: a name, a URN / web URL, or 'open:N' (doc_get) for an unsaved same-name doc; omit = active."})
+            "description": "Doc to close: a name, a URN / web URL, or 'open:N' (doc_get); omit = active."})
     .add_input_property("save_changes", {"type": "boolean",
             "description": "Save unsaved edits before closing (default false = discard)."})
     .add_input_property("close_all", {"type": "boolean",
@@ -1348,12 +1194,11 @@ _activate_document_tool = (
     Tool.create_with_string_input(
         name="doc_activate",
         description=(
-            "Bring an open document to the foreground (make it the active document). 'name' = the "
-            "open document to activate: a display NAME, or - when several open docs share a name - its "
-            "lineage URN / web URL / 'open:N' index from doc_get (the unambiguous identity; a shared "
-            "name is REFUSED). 'open:N' reaches an UNSAVED same-name doc that has no URN."),
+            "Bring an open document to the foreground (make it the active document). A shared name "
+            "is REFUSED, not guessed - address it by lineage URN / web URL, or by the 'open:N' "
+            "index doc_get publishes, which is the only handle for an UNSAVED same-name doc."),
         input_param_name="name",
-        input_param_description="Doc to activate: a display name, a URN / web URL, or 'open:N' (doc_get) - the only handle for an unsaved same-name doc.",
+        input_param_description="Doc to activate: a display name, a URN / web URL, or 'open:N' (doc_get).",
     ).strict_schema()
 )
 activate_document_item = Item.create_tool_item(

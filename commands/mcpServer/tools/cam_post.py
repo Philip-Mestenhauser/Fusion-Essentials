@@ -1,13 +1,9 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Create-or-reuse an NC Program for the chosen scope, then post it to a G-code / NC file on disk
-(cam_post). The NC Program is the document's persistent post deliverable (what live_readiness health
-and cam_get(include=['nc_programs']) report), so posting goes through ncPrograms.add/postProcess, not
-a fire-and-forget direct post. Success is gated on the OUTPUT FILE landing on disk - postProcess
-returning true is not proof a file was written - so the handler diffs the output folder and reports
-the files that actually appeared. The output extension is decided by the post config (.cps), so files
-are matched by newness, not a fixed extension."""
+"""Create-or-reuse an NC Program for the chosen scope, then post it to a G-code / NC file on disk.
+Success is gated on the OUTPUT FILE landing - postProcess returning true is not proof one was
+written - and the post config decides the extension, so files are matched by newness."""
 
 import glob
 import os
@@ -25,15 +21,12 @@ from . import _assert
 from . import _inputs
 from . import _outputs
 from ._cam_common import (get_cam, library_assets, live_readiness, resolve_cam_node,
-                          setups as cam_setups, operations_under,
-                          # the CAM string-parameter codec, one home for every writer of one
+                          setups as cam_setups, operations_under, toolpath_present_tally,
                           quote_expression as _quote, unquote_expression as _unquote)
 from ._export import verify_written   # the file-landed proof (postProcess() true != a file)
 
 app = adsk.core.Application.get()
 
-# What cam_post RETURNS: the written NC file path(s) on disk - the deliverable the whole CAM job exists
-# to produce.
 RETURNS = [
     _outputs.ReturnsValue("file_path", "an NC/G-code file written to disk", in_list=True),
 ]
@@ -41,11 +34,9 @@ RETURNS = [
 _UNITS_CHOICE = _inputs.Choice("units", options=["document", "inch", "mm"], default="document",
                                description="Output units for the NC file (default: document units).")
 
-# NC-program output parameters live on the CAMParameters collection of the NCProgramInput/NCProgram
-# (the UI's Name / Comment / Output-folder fields), distinct from the .cps post OPTIONS on
-# .postParameters. Name and Comment are confirmed live; the folder/editor/unit names are the
-# established Fusion internal names, and every set is read back so the actual applied value is
-# reported rather than assumed.
+# NC-program output parameters live on the NCProgramInput/NCProgram CAMParameters collection - the
+# UI's Name / Comment / Output-folder fields - not on the .cps post OPTIONS in .postParameters.
+# Every set below is read back, so the applied value is reported rather than assumed.
 _P_NAME = "nc_program_name"
 _P_COMMENT = "nc_program_comment"
 _P_FOLDER = "nc_program_output_folder"
@@ -145,13 +136,8 @@ def _resolve_cloud_post(post, post_scope):
 
 
 def _resolve_post_config(cam, post, post_scope):
-    """Resolve 'post' to a READY PostConfiguration for the chosen scope, plus a human label. Returns
-    (post_config, label, None) or (None, None, error).
-    - local (default): a full .cps path or a bare name in the personal/installed post folder; the
-      file's CONTENT is loaded via PostConfiguration.createFromContent. label = the .cps path.
-    - cloud/hub: the team post library (network-slow); match the post NAME on the asset url leafName
-      and load via postConfigurationAtURL - no createFromContent round-trip. label = the post url.
-    The handler receives a PostConfiguration ready to assign to program.postConfiguration either way."""
+    """(post_config, label, None) or (None, None, error) - 'post' resolved for the chosen scope: a
+    .cps path or name in the local post folders, or a post NAME in the cloud/hub team library."""
     post = (post or "").strip()
     if not post:
         return None, None, ("Provide 'post' - the post processor: for post_scope=local a full .cps path "
@@ -240,16 +226,9 @@ def _set_value_param(params, name, value):
 
 
 def _set_unit_param(params, units_key):
-    """Set the NC-program output-unit ChoiceParameter to `units_key` and read it back. Returns
-    (applied_value, note): applied_value is _MISSING when the program has no unit parameter, the
-    read-back value on success, or an '<error: ...>' string on failure; note is None on success or a
-    human explanation when the units did NOT apply.
-
-    A ChoiceParameterValue rejects a bare int index (live: the set raises a std::string type error),
-    and it has NO '.choices' property - the legal values come from getChoices(), which returns
-    (ok, names, values) as SWIG out-params (live API doc). We pick the value whose NAME carries the
-    requested unit word (the closed 3-entry platform list), set it, and read back - so a failure
-    surfaces as a partial note instead of a silently-wrong-units file."""
+    """(applied_value, note) - set the NC-program output-unit ChoiceParameter to `units_key` and
+    read it back; a ChoiceParameterValue rejects a bare int index and exposes its legal values only
+    through getChoices(), so the value is picked by the unit word in its NAME."""
     p = safe(lambda: params.itemByName(_P_UNIT))
     if p is None:
         return _MISSING, None
@@ -348,19 +327,60 @@ def _post_log_errors(program_name, since):
     return lines
 
 
-def _operations_collection(cam, target):
-    """The list of things to post: the single resolved target, or every setup for the whole document.
-    NCProgramInput/NCProgram.operations is a vector<OperationBase> setter - it takes a plain Python
-    LIST of setups/folders/operations (NOT an ObjectCollection) and expands children."""
-    return [target] if target is not None else cam_setups(cam)
+# What a post's own log line calls the value it could not read a number out of. Nothing here decides
+# which posts need one - only a post that SAID so earns the clause below.
+_PROGRAM_NUMBER_MARK = "program number"
+
+
+def _program_number_clause(log_errors, prog_name):
+    """The clause a post-log line naming the PROGRAM NUMBER earns when the name passed was not a
+    number; '' otherwise."""
+    if prog_name.isdigit():
+        return ""
+    if not any(_PROGRAM_NUMBER_MARK in (line or "").lower() for line in log_errors):
+        return ""
+    return (f" The post's message names the PROGRAM NUMBER, and program_name '{prog_name}' is not a "
+            "number - retry with a numeric program_name such as '1001'.")
+
+
+def _operations_collection(cam, targets):
+    """The list of things to post - the resolved target(s), or every setup. NCProgram.operations is
+    a vector<OperationBase> setter: it takes a plain LIST, not an ObjectCollection, and expands
+    children."""
+    return list(targets) if targets else cam_setups(cam)
+
+
+def _setup_list(setups):
+    """(names, error) - the 'setups' request as a list of setup names, from a JSON array or an
+    'A, B' string; blank entries are dropped."""
+    if isinstance(setups, str):
+        raw = setups.split(",")
+    elif isinstance(setups, (list, tuple)):
+        raw = list(setups)
+    else:
+        return None, "Provide 'setups' as an array of setup names, or a 'SetupA, SetupB' string."
+    return [s for s in (str(x).strip() for x in raw) if s], None
+
+
+def _resolve_setups(cam, names):
+    """([Setup objects], error) for an explicit setups list, each resolved through the shared exact
+    resolver; a spelling listed twice is refused."""
+    seen, out = set(), []
+    for want in names:
+        key = want.lower()
+        if key in seen:
+            return None, f"'{want}' is listed twice in 'setups' - name each setup once."
+        seen.add(key)
+        node, err = resolve_cam_node(cam, want, kinds=("setup",), label="setup")
+        if err:
+            return None, err
+        out.append(node.obj)
+    return out, None
 
 
 def _expand_ops(items):
-    """Real terminal Operation objects for any item NCProgram.operations may hold: a Setup/CAMFolder/
-    CAMPattern (expanded through operations_under - the same expansion the setter itself applies) or
-    an already-bare Operation (included as-is). Lets the OVERWRITE GUARD compare the program's STORED
-    operations against a REQUESTED scope on the same flattened shape, regardless of which form each
-    side is in."""
+    """Terminal Operation objects for any item NCProgram.operations may hold, so a STORED scope and
+    a REQUESTED one compare on the same flattened shape."""
     out = []
     for it in (items or []):
         has_children = (safe(lambda it=it: it.operations) is not None
@@ -372,12 +392,75 @@ def _expand_ops(items):
     return out
 
 
+# The count semantics BOTH post arms publish - one sentence, since both arms publish the same keys
+# off _program_counts.
+_COUNTS_NOTE = ("program_operation_count is what the program HOLDS (filteredOperations), "
+                "posted_operations those reading hasToolpath True; "
+                "cam_get(include=['operations']) shows the ops left out.")
+
+
+# Held vs posted rests on ledger row FILTERED-1 (a SUPPRESSED op is excluded from
+# filteredOperations) and the sweep's cam_post act (1 <= posted_operations <=
+# program_operation_count); no script row can, since a setup-scoped NC program arms a modal dialog.
+def _program_counts(program) -> dict:
+    """{program_operation_count, program_item_count, posted_operations, toolpath_unread?} - the
+    operations the program HOLDS, the setups/folders it stores, and how many held rows read
+    hasToolpath True; a key is absent where its collection did not read."""
+    out = {}
+    held = safe(lambda: list(program.filteredOperations))
+    if held is not None:
+        out["program_operation_count"] = len(held)
+        posted, unread = toolpath_present_tally(held)
+        out["posted_operations"] = posted
+        if unread:
+            out["toolpath_unread"] = unread
+    items = safe(lambda: list(program.operations))
+    if items is not None:
+        out["program_item_count"] = len(items)
+    return out
+
+
+def _membership_facts(program, prog_name, requested_ops):
+    """(facts, error) - the program's OWN operations read back after the scope was assigned, against
+    what that scope resolved to. An EMPTY read-back beside a non-empty request is the one shape
+    reported as an error; every other disagreement is disclosed as counts."""
+    stored = safe(lambda: list(program.operations))
+    if stored is None:
+        return dict(_program_counts(program), membership_verified=None,
+                    membership_note=("the program's own operations did not read back, so its "
+                                     "membership was not compared with the scope.")), None
+    stored_ops = _expand_ops(stored)
+    if requested_ops and not stored_ops:
+        return None, (f"NC Program '{prog_name}' re-read ZERO operations after the requested scope "
+                      f"was assigned, while that scope resolves to {len(requested_ops)} - the "
+                      "assignment did not take, so nothing was posted.")
+    stored_ids, stored_unreadable = _op_id_set(stored_ops)
+    wanted_ids, wanted_unreadable = _op_id_set(requested_ops)
+    # The flatten above serves the id comparison only - counting it would publish more operations
+    # than the program holds.
+    facts = _program_counts(program)
+    if stored_unreadable or wanted_unreadable:
+        facts["membership_verified"] = None
+        facts["membership_note"] = (
+            f"{stored_unreadable} stored and {wanted_unreadable} requested operation(s) have no "
+            "readable operationId, so the program's membership was not compared with the scope.")
+    elif stored_ids == wanted_ids:
+        facts["membership_verified"] = True
+    else:
+        facts["membership_verified"] = False
+        # The two sides of the disagreement ride as counts, so the wire clause states the fact and
+        # points at the read that lists what the program holds.
+        facts["membership_missing"] = len(wanted_ids - stored_ids)
+        facts["membership_extra"] = len(stored_ids - wanted_ids)
+        facts["membership_note"] = (
+            f"the program holds {len(stored_ids)}, not the {len(wanted_ids)} the scope resolves "
+            "to - cam_get(include=['nc_programs']).")
+    return facts, None
+
+
 def _op_id_set(ops):
-    """(ids, unreadable): the per-operation identity for a stored-vs-requested comparison.
-    Operation/Setup/CAMFolder carry operationId; Operation has no entityToken. An operation whose id
-    cannot be read is COUNTED, never stood in for by id(): two independent fetches of the same
-    operation are different Python objects, so an id() stand-in makes every legitimate re-post look
-    like a different set and fires the overwrite guard on it."""
+    """(ids, unreadable) - the operationId identity for a stored-vs-requested comparison; an
+    unreadable id is COUNTED, since two fetches of one operation are different Python objects."""
     ids, unreadable = set(), 0
     for o in (ops or []):
         oid = safe(lambda o=o: o.operationId)
@@ -388,9 +471,30 @@ def _op_id_set(ops):
     return ids, unreadable
 
 
+def _rollback_program(cam, program, prog_name, reused):
+    """The rollback sentence for the program a failed post would leave behind - empty when the
+    program pre-existed (it is the caller's), else deleteMe()'s answer CONFIRMED by a re-read of
+    ncPrograms: removed, or still there with the way to remove it."""
+    if reused:
+        return ""
+    try:
+        removed = program.deleteMe()
+    except Exception as e:
+        return (f" The just-created NC Program '{prog_name}' was NOT removed - deleteMe raised "
+                f"({e}), so it remains in the document; remove it with cam_delete.")
+    if not removed:
+        return (f" The just-created NC Program '{prog_name}' was NOT removed - deleteMe returned "
+                "false, so it remains in the document; remove it with cam_delete.")
+    # cam_delete's shape: a true bool is not the effect, so the name is looked up again.
+    if safe(lambda: cam.ncPrograms.itemByName(prog_name)) is not None:
+        return (f" deleteMe returned true for the just-created NC Program '{prog_name}' but it "
+                "still resolves in ncPrograms - remove it with cam_delete.")
+    return f" The just-created NC Program '{prog_name}' was removed."
+
+
 def handler(scope: str = "", post: str = "", post_scope: str = "local", output_folder: str = "",
             program_name: str = "", units: str = "document", program_comment: str = "",
-            overwrite: bool = False) -> dict:
+            overwrite: bool = False, setups=None) -> dict:
     """See TOOL_DESCRIPTION."""
     cam, cerr = get_cam()
     if cerr:
@@ -400,12 +504,18 @@ def handler(scope: str = "", post: str = "", post_scope: str = "local", output_f
         return error("Provide 'program_name' - the NC Program name or number (some posts require a number).")
     prog_name = str(program_name).strip()
 
+    # Parsed before the reuse check: a 'setups' list IS a scope, so it decides as-is mode alongside
+    # 'scope'/'post'/'output_folder'.
+    setup_names, slerr = _setup_list(setups) if setups else ([], None)
+    if slerr:
+        return error(slerr)
+
     # Reuse-or-create. Looked up FIRST (before the configuration guards below) so as-is mode can skip
     # them entirely for an EXISTING program called with no configuration knobs.
     existing = safe(lambda: cam.ncPrograms.itemByName(prog_name))
     reused = existing is not None
     as_is = (reused and not (scope or "").strip() and not (post or "").strip()
-            and not (output_folder or "").strip())
+            and not (output_folder or "").strip() and not setup_names)
 
     units_key, uerr = _UNITS_CHOICE.resolve(units)
     if uerr:
@@ -419,15 +529,23 @@ def handler(scope: str = "", post: str = "", post_scope: str = "local", output_f
         return error("Provide 'output_folder' - the directory where the NC file(s) will be written.")
 
     # Resolve the scope up front so a bad name fails before we touch the NC Program. Stays None/
-    # "document" for as-is (scope is guaranteed blank by the as_is check above).
-    target, kind = (None, "document")
+    # "document" for as-is (scope and setups are guaranteed blank by the as_is check above).
+    targets, kind = (None, "document")
     want = (scope or "").strip()
-    if want and want.lower() not in ("all", "document", "*"):
+    if setup_names and want:
+        return error("Pass 'scope' or 'setups', not both - 'scope' names ONE setup/folder/operation "
+                     "and 'setups' names the several setups one program holds.")
+    if setup_names:
+        objs, sserr = _resolve_setups(cam, setup_names)
+        if sserr:
+            return error(sserr + " Omit both to post the whole document.")
+        targets, kind = objs, "setups"
+    elif want and want.lower() not in ("all", "document", "*"):
         node, serr = resolve_cam_node(cam, want, kinds=("setup", "folder", "operation"),
                                       label="setup/folder/operation")
         if serr:
             return error(serr + " Omit 'scope' to post the whole document.")
-        target, kind = node.obj, node.kind
+        targets, kind = [node.obj], node.kind
 
     # Up-front refusal: nothing valid to post. live_readiness is the one CAM health signal; the post
     # omits invalid/empty operations, so zero valid ops -> no file. Applies to as-is too - a stale
@@ -441,14 +559,13 @@ def handler(scope: str = "", post: str = "", post_scope: str = "local", output_f
                      "ungenerated. Run cam_generate (in the Manufacture workspace) first. "
                      f"({live.get('readiness', '')})")
 
-    # OVERWRITE GUARD: reconfiguring (scope/post/output_folder given) an EXISTING program whose STORED
-    # operations differ from the REQUESTED scope would silently clobber a program that may be
-    # machinist-curated. A program with no stored operations yet has nothing to protect. Identical sets
-    # (the common re-post case) proceed with no friction.
+    # OVERWRITE GUARD: reconfiguring an EXISTING program whose STORED operations differ from the
+    # REQUESTED scope would clobber a program that may be machinist-curated. Each refusal names
+    # every input that has to be omitted to reach as-is mode.
     if reused and not as_is and not overwrite:
         stored_ops = _expand_ops(safe(lambda: list(existing.operations)) or [])
         stored_ids, stored_unreadable = _op_id_set(stored_ops)
-        requested_ids, requested_unreadable = _op_id_set(_expand_ops(_operations_collection(cam, target)))
+        requested_ids, requested_unreadable = _op_id_set(_expand_ops(_operations_collection(cam, targets)))
         if stored_ops and (stored_unreadable or requested_unreadable):
             # No identity, no comparison: whether this reconfigure clobbers curated work is unknown,
             # and an unknown answer must not be published as "they match".
@@ -457,14 +574,14 @@ def handler(scope: str = "", post: str = "", post_scope: str = "local", output_f
                 f"compared with what 'scope' resolves to: {stored_unreadable} stored and "
                 f"{requested_unreadable} requested operation(s) have no readable operationId, so "
                 "whether reconfiguring would overwrite a machinist-curated program is unknown. Omit "
-                "'scope', 'post', and 'output_folder' to post it exactly as stored, or pass "
-                "overwrite=true to reconfigure it anyway.")
+                "'scope', 'setups', 'post', and 'output_folder' to post it exactly as stored, or "
+                "pass overwrite=true to reconfigure it anyway.")
         if stored_ids and stored_ids != requested_ids:
             return error(
                 f"NC Program '{prog_name}' already exists and its stored operations differ from what "
                 "'scope' resolves to - reconfiguring would overwrite a program that may be machinist-"
-                "curated. Omit 'scope', 'post', and 'output_folder' to post it exactly as stored, or "
-                "pass overwrite=true to reconfigure it.")
+                "curated. Omit 'scope', 'setups', 'post', and 'output_folder' to post it exactly as "
+                "stored, or pass overwrite=true to reconfigure it.")
 
     if as_is:
         # Post the program EXACTLY as stored: no operations/postConfiguration/parameter writes - just
@@ -476,7 +593,7 @@ def handler(scope: str = "", post: str = "", post_scope: str = "local", output_f
                          "as-is against - configure it once with 'output_folder' and 'post'.")
         post_label = (safe(lambda: program.postConfiguration.description)
                      if safe(lambda: program.postConfiguration) else None)
-        applied, unresolved, unit_note = {}, [], None
+        applied, unresolved, unit_note, membership = {}, [], None, {}
     else:
         # Resolve the post AFTER the cheap guards - a cloud/hub lookup is network-slow, so a bad
         # output_folder/program_name/scope or an empty document fails fast without touching the network.
@@ -486,20 +603,22 @@ def handler(scope: str = "", post: str = "", post_scope: str = "local", output_f
 
         out_dir = os.path.abspath(output_folder.strip())
 
-        # Prefer UPDATE IN PLACE over delete+recreate: NCProgram.operations, .postConfiguration and its
-        # output parameters are all settable, so an in-place update keeps the program's identity
-        # (operationId, attributes, browser position) and avoids ever orphaning it.
+        # UPDATE IN PLACE rather than delete+recreate: operations, postConfiguration and the output
+        # parameters are all settable, so the program keeps its identity. ONE resolve of the scope
+        # serves both the assignment and the membership read-back below.
+        scope_items = _operations_collection(cam, targets)
+        requested_ops = _expand_ops(scope_items)
         try:
             if reused:
                 program = existing
-                program.operations = _operations_collection(cam, target)
+                program.operations = scope_items
                 program.postConfiguration = post_config
                 applied, unresolved, unit_note = _apply_output_params(program.parameters, prog_name,
                                                                       out_dir, program_comment, units_key)
             else:
                 nc_input = cam.ncPrograms.createInput()
                 nc_input.displayName = prog_name
-                nc_input.operations = _operations_collection(cam, target)
+                nc_input.operations = scope_items
                 applied, unresolved, unit_note = _apply_output_params(nc_input.parameters, prog_name,
                                                                       out_dir, program_comment, units_key)
                 program = cam.ncPrograms.add(nc_input)
@@ -512,13 +631,17 @@ def handler(scope: str = "", post: str = "", post_scope: str = "local", output_f
             return error(f"NC Program '{prog_name}' was not {'updated' if reused else 'created'} "
                          "(the API returned null).")
 
+        # What the program's OWN operations read back as - the assignment is not taken on trust.
+        membership, merr = _membership_facts(program, prog_name, requested_ops)
+        if merr:
+            return error(merr + _rollback_program(cam, program, prog_name, reused))
+
         if unresolved and _P_FOLDER in unresolved:
             # Without the output-folder parameter the file lands at the program default, not out_dir, and
             # the file-landed gate below can't see it - fail loudly and name the missing parameter.
-            if not reused:
-                safe(lambda: program.deleteMe())
             return error(f"The NC Program has no '{_P_FOLDER}' parameter, so the output folder could not be "
-                         f"set to '{out_dir}'. Unresolved parameters: {', '.join(unresolved)}.")
+                         f"set to '{out_dir}'. Unresolved parameters: {', '.join(unresolved)}."
+                         + _rollback_program(cam, program, prog_name, reused))
 
     before = _dir_snapshot(out_dir)
     started = time.time()
@@ -529,10 +652,10 @@ def handler(scope: str = "", post: str = "", post_scope: str = "local", output_f
         options = adsk.cam.NCProgramPostProcessOptions.create()
         posted = program.postProcess(options)
     except Exception as e:
-        if not reused:
-            safe(lambda: program.deleteMe())        # do not leave a just-created program behind a failed post
+        # Do not leave a just-created program behind a failed post - and say which way that went.
         return error(f"Post processing raised: {e}. (Post config: {post_label}; check the post matches "
-                     "the machine/operations.)")
+                     "the machine/operations.)"
+                     + _rollback_program(cam, program, prog_name, reused))
 
     # Honesty gate: postProcess returning true is NOT proof a file landed - diff the folder. A '.failed'
     # stub is a failure marker, NOT a deliverable - keep the two apart so a failed post never lists a
@@ -551,14 +674,13 @@ def handler(scope: str = "", post: str = "", post_scope: str = "local", output_f
         # No deliverable NC file - a created program that produced nothing is an orphan, so roll it back
         # (a reused program pre-existed, leave it). Surface the post LOG's error lines - the real,
         # actionable reason (a '.failed' stub in the folder only says "see log").
-        if not reused:
-            safe(lambda: program.deleteMe())
+        rolled = _rollback_program(cam, program, prog_name, reused)
         log_errors = _post_log_errors(prog_name, started)
         msg = (f"NC Program '{prog_name}' did not post a usable NC file to '{out_dir}' "
-               f"(postProcess={bool(posted)}, failed_stub={bool(failed_markers)}). "
-               + ("The just-created program was removed. " if not reused else ""))
+               f"(postProcess={bool(posted)}, failed_stub={bool(failed_markers)})."
+               + rolled + " ")
         if log_errors:
-            msg += "Post log: " + " | ".join(log_errors)
+            msg += "Post log: " + " | ".join(log_errors) + _program_number_clause(log_errors, prog_name)
         else:
             msg += "Check the output folder path, the program number/name, and that the post matches the ops."
         return error(msg)
@@ -581,13 +703,24 @@ def handler(scope: str = "", post: str = "", post_scope: str = "local", output_f
         "file_count": len(files),
         "files": files,
         "elapsed_seconds": round(time.time() - started, 1),
+        # live_readiness's own sentence, which embeds an operation name and its warning text - a key
+        # of its own, since a note that inlined it could not be bounded.
+        "readiness": live.get("readiness", ""),
     }
-    if not as_is:
+    # The held/posted counts come off ONE builder on both arms, so what they mean cannot depend on
+    # which arm posted; as-is compared no scope, so it carries counts and no membership verdict.
+    if as_is:
+        result.update(_program_counts(program))
+    else:
         result.update({
             "post_scope": post_scope_key,
             "units": units_key,
             "params_applied": applied,
         })
+        result.update(membership)
+        if kind == "setups":
+            # The names the multi-setup scope was asked for, beside what the program read back.
+            result["scope_setups"] = setup_names
         if unresolved:
             # Non-fatal (the file landed); name what the program did not expose so a caller can confirm.
             result["params_unresolved"] = unresolved
@@ -611,14 +744,16 @@ def handler(scope: str = "", post: str = "", post_scope: str = "local", output_f
         return ok(result)
 
     if as_is:
-        result["note"] = (f"NC Program '{prog_name}' posted AS-IS from its stored configuration - "
-                          f"{len(files)} file(s). {live.get('readiness', '')} No operations/post/"
-                          "output-folder settings were changed.")
+        result["note"] = (f"Program '{prog_name}' posted AS-IS from its stored configuration - "
+                          f"{len(files)} file(s), nothing reconfigured. Read 'readiness' for the "
+                          "job's health. " + _COUNTS_NOTE)
     else:
-        result["note"] = (f"NC Program '{prog_name}' {program_verb}, posted {len(files)} file(s). "
-                          f"{live.get('readiness', '')} Only valid toolpaths were posted "
-                          "(out-of-date/errored ops are omitted); cam_get(include=['nc_programs']) shows the "
-                          "program, cam_get(include=['operations']) any ops that were skipped.")
+        result["note"] = (f"Program '{prog_name}' {program_verb}, posted {len(files)} file(s). "
+                          "Read 'readiness' for the job's health. " + _COUNTS_NOTE)
+        if membership.get("membership_note"):
+            # The program's own membership read disagreed with the scope, or could not be compared -
+            # stated beside the file rather than left in a key the note never mentions.
+            result["note"] += " Membership: " + membership["membership_note"]
     if unit_note:
         result["note"] += " " + unit_note
     return ok(result)
@@ -629,14 +764,12 @@ TOOL_DESCRIPTION = (
     "disk - the final CAM step. If an NC Program already named 'program_name' exists it is UPDATED "
     "and re-posted (not duplicated); "
     "otherwise a new one is created. 'scope': omit (or 'document') for the whole document, or a "
-    "setup/folder/operation NAME. 'post': the post processor. 'post_scope': local (a full .cps path or "
-    "a NAME in the personal/installed post folder - default) | cloud | hub (a NAME in the team post "
-    "library; cloud/hub reach deployed team posts and are network-slow). 'output_folder': where the NC file(s) land "
-    "(created if absent). 'program_name': the NC Program name / number (also its browser name; some "
-    "posts require a number). 'units': document/inch/mm. Only VALID toolpaths post (out-of-date/errored "
+    "setup/folder/operation NAME; 'setups' instead names SEVERAL setups for one program (the two "
+    "are exclusive). "
+    "Only VALID toolpaths post (out-of-date/errored "
     "ops are omitted) - run cam_generate first. Success is gated on the file actually landing on disk. "
-    "If 'program_name' names an EXISTING program and scope/post/output_folder are all omitted, it posts "
-    "AS-IS from the program's own stored configuration; passing any of those against a stored "
+    "If 'program_name' names an EXISTING program and scope/setups/post/output_folder are all omitted, "
+    "it posts AS-IS from the program's own stored configuration; passing any of those against a stored "
     "configuration that resolves differently is refused unless 'overwrite' is set. "
     "WRITES a persistent NC Program and a file.\n"
     + _outputs.produces_block(RETURNS)
@@ -657,7 +790,9 @@ tool = (
     .add_input_property("program_comment", {"type": "string",
             "description": "Optional comment embedded in the NC program header."})
     .add_input_property("overwrite", {"type": "boolean",
-            "description": "Required true to reconfigure (scope/post/output_folder) an existing program whose stored operations differ from the requested scope (default false)."})
+            "description": "Required true to reconfigure (scope/setups/post/output_folder) an existing program whose stored operations differ from the requested scope (default false)."})
+    .add_input_property("setups", {"type": "array", "items": {"type": "string"},
+            "description": "Setup NAMES this one program holds - the multi-setup form of 'scope'; pass one or the other, not both."})
     .strict_schema()
 )
 

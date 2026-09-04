@@ -1,13 +1,9 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building blocks: assembly_capture_position, joint_create_as_built, assembly_constrain.
-
-Capture/discard/revert/delete a jointed occurrence's transient pose in the timeline; joint two
-occurrences where they already are (rigidly, or with a motion anchored on a JointGeometry); or mate
-two occurrences' geometry via Constrain Components (flush/coincident/concentric/angle, inferred from
-the geometry). All three WRITE.
-"""
+"""assembly_capture_position, joint_create_as_built and assembly_constrain: manage a jointed
+occurrence's transient pose in the timeline, joint two occurrences where they already are, and mate
+two occurrences' geometry via Constrain Components. All three WRITE."""
 
 import adsk.core
 import adsk.fusion
@@ -19,17 +15,12 @@ from ._common import error, ok, safe, timeline_health
 from . import _common
 from . import _inputs
 from . import _assert
-# Reuse the joint tool's autonomous geometry resolver so assembly_constrain can snap to geometry
-# (face/top/bottom/left/right/front/back/cylinder/origin) without a human selection - same '<occurrence>:<snap>' grammar.
-# joint_create_as_built resolves its anchor through the SAME grammar one level up (_resolve_input:
-# handle -> JointGeometry, or '<occ>:<snap>'), and shares that tool's motion vocabulary and pin_slot
-# slide-axis rules rather than keeping a second copy of the seven motion names.
+# The joint tool's geometry resolver, so assembly_constrain and joint_create_as_built snap through
+# the same '<occurrence>:<snap>' grammar and share its motion vocabulary.
 from .joint_create_edit import (_JOINT_TYPES, _MOTIONS, _parse_snap, _resolve_input,
                                 _resolve_snap_entity, _slide_index, _slide_name)
-# The same before/after occurrence-position reader joint_at_geometry publishes its 'moved_by' from:
-# _occ_origin reads the WORLD translation (transform2, with the local-matrix fallback) and _move_delta
-# turns a pair of those into a distance/direction above one shared solver-noise tolerance. A constraint
-# locates parts, so it reports the reposition through that same reader rather than a second one.
+# The same before/after occurrence-position reader joint_at_geometry publishes 'moved_by' from,
+# over one shared solver-noise tolerance.
 from .joint_at_geometry import _MOVE_TOL_CM, _move_delta, _occ_origin
 from . import _joints
 from ._joints import (AXES as _AXES, DRIVES_ANY as _DRIVES_ANY, apply_motion as _apply_motion,
@@ -48,26 +39,23 @@ _CAPTURE_ACTION = _inputs.Choice(
 
 
 def _find_one(design, name):
-    """Resolve a SINGLE occurrence by entityToken handle (the exact identity) or fullPathName/name via
-    the shared OccurrenceRef logic - refuses an ambiguous path/name instead of grabbing the first
-    instance (the wrong-instance bug). Returns (occurrence, error_or_None)."""
+    """Resolve a SINGLE occurrence by entityToken handle or fullPathName/name through the shared
+    OccurrenceRef logic, which refuses an ambiguous name. Returns (occurrence, error)."""
     return _inputs._resolve_occurrence(name, name)
 
 
 # ------------------------------------------------------------- assembly_capture_position
 
 def _capture_markers(snaps):
-    """[{name, timeline_index}] for every captured position - bounded by nature (snapshot counts
-    stay small), so no truncation is needed. timeline_index is safe-guarded: a marker's
-    timelineObject.index is read defensively since the property can raise on a stale reference."""
+    """[{name, timeline_index}] for every captured position; timeline_index is guarded because the
+    property can raise on a stale reference."""
     return [{"name": safe(lambda s=s: s.name),
              "timeline_index": safe(lambda s=s: s.timelineObject.index)}
             for s in _common.iter_collection(snaps)]
 
 
 def _find_captured(snaps, want):
-    """Every captured marker whose name matches 'want' case-insensitively (exact, not substring) -
-    a list so the caller can refuse an unexpected duplicate instead of grabbing the first hit."""
+    """Every captured marker whose name matches 'want' case-insensitively (exact, not substring)."""
     hits = []
     for s in _common.iter_collection(snaps):
         nm = safe(lambda s=s: s.name)
@@ -77,11 +65,9 @@ def _find_captured(snaps, want):
 
 
 def _positionable_occurrences(design):
-    """{fullPathName: occurrence} for every occurrence in the design - the parts whose pose a capture
-    is supposed to LEAVE ALONE. Keyed by fullPathName (the unique key; a nested child's leaf .name is
-    shared by every instance of its component), falling back to .name only when the path will not
-    read. The same wrappers are held across the mutation and re-read after it, the way the constraint
-    path holds its targets, so the before/after pair describes one occurrence and not two lookups."""
+    """{fullPathName: occurrence} for every occurrence in the design, falling back to .name only
+    when the path will not read. The same wrappers are held across a mutation and re-read after
+    it, so a before/after pair describes one occurrence and not two lookups."""
     out = {}
     for occ in _common.all_occurrences(design):
         label = safe(lambda occ=occ: occ.fullPathName) or safe(lambda occ=occ: occ.name)
@@ -102,10 +88,8 @@ def capture_position_handler(action: str = "status", marker: str = "") -> dict:
     if snaps is None:
         return error("This design does not expose snapshots (capture position).")
 
-    # The shared flag read - the same one every joint CREATE gates on, so the tool that clears the
-    # pending move and the tools that refuse to run through it can never disagree about it. It is
-    # TRI-state: None means the flag could not be read, which is published as-is rather than
-    # coerced into a confident false. Only a real True satisfies the act preconditions below.
+    # The shared flag read every joint CREATE gates on. TRI-state: None means the flag could not be
+    # read and is published as-is; only a real True satisfies the preconditions below.
     pending_flag = _joints.pending_position(design)
     pending = pending_flag is True
     count = safe(lambda: snaps.count, 0)
@@ -128,12 +112,9 @@ def capture_position_handler(action: str = "status", marker: str = "") -> dict:
         if not pending:
             return error("Nothing to capture - there is no pending position change. Move a jointed "
     "component first (its pose is transient until captured).")
-        # The pose the capture is supposed to RECORD, sampled before the add. Measured: a capture can
-        # REVERT the pending move instead of baking it - snapshots.add() answers with a snapshot
-        # object AND an advanced count while every moved part snaps back to where it stood before the
-        # move, so the marker holds the PRE-move pose. Neither the object nor the count is evidence
-        # about the POSITION; only the parts' own transforms are. Sampled through the same reader
-        # (_occ_origin / _move_delta, one solver-noise tolerance) the constraint path reports with.
+        # The pose the capture is supposed to RECORD, sampled before the add: snapshots.add() can
+        # answer with a snapshot object and an advanced count while every moved part snaps back, so
+        # neither is evidence about the POSITION - only the parts' own transforms are.
         targets = _positionable_occurrences(design)
         before_pos = _constraint_positions(targets)
         try:
@@ -157,12 +138,10 @@ def capture_position_handler(action: str = "status", marker: str = "") -> dict:
             more = f" (+{len(moved) - 6} more)" if len(moved) > 6 else ""
             return error(
                 f"Capture reported success (Fusion named the marker '{snap_name}') but taking it "
-                f"MOVED {len(moved)} occurrence(s): {shown}{more}. The pending pose was REVERTED "
-                "rather than recorded, so the marker holds the PRE-move position - it is NOT the "
-                "pose you captured. The marker REMAINS: remove it with "
-                f"assembly_capture_position(action='delete', marker='{snap_name}'), then re-apply "
-                "the move. Read the positions back with assembly_get or model_inspect before and "
-                "after any retry - this call cannot tell you whether a retry will stick.")
+                f"MOVED {len(moved)} occurrence(s): {shown}{more}. The marker does NOT hold the "
+                "pose you captured, and it REMAINS: remove it with "
+                f"assembly_capture_position(action='delete', marker='{snap_name}'), re-apply the "
+                "move, and read the positions back with assembly_get before and after any retry.")
         note = "Current position captured into the timeline."
         if count_after is None:
             note += (" 'snapshot_count' is null - the snapshot count could not be re-read after the "
@@ -201,11 +180,8 @@ def capture_position_handler(action: str = "status", marker: str = "") -> dict:
         if still_pending:
             return error("Discard reported success but a pending position change is still "
                          "reported - the move was not thrown away.")
-        # Live-verified restore target: with a captured marker the assembly goes back to the last
-        # captured position; with nothing ever captured it goes back to the joint rest pose. The
-        # captured markers and their names survive the discard untouched.
         # The count the collection reports, never the pre-read echoed back: an unreadable re-read
-        # publishes null, so no caller reads a stale number back as a fresh measurement.
+        # publishes null, so no caller takes a stale number for a fresh measurement.
         count_after = _common.counted(lambda: snaps.count)
         note = ("Uncaptured move thrown away - the assembly is back at its last captured position "
                 "(or the joint-defined state when nothing was ever captured). Captured markers are "
@@ -263,15 +239,9 @@ def capture_position_handler(action: str = "status", marker: str = "") -> dict:
         return error(f"Revert failed: {e}")
     if not did:
         return error("Fusion declined to revert the latest captured position.")
-    # deleteMe() answering True is not a removal - the delete arm re-reads its own target for the
-    # same reason. This arm holds the object it deleted, so the collection is re-read for THAT
-    # object by IDENTITY: the latest marker is addressed by index and a name lookup would match a
-    # DIFFERENT marker wearing the same name (Fusion enforces no uniqueness on them). The count
-    # comparison stays as the second gate - a marker the collection no longer hands back while its
-    # count has not dropped is a removal that did not take either - and neither read alone covers
-    # the other: a survivor can arrive with a count that will not re-read, which is the state the
-    # count gate abstains on. An unreadable count (None) is no evidence either way and stays the
-    # null disclosure below.
+    # deleteMe() answering True is not a removal. This arm holds the object it deleted, so the
+    # collection is re-read for THAT object by IDENTITY - Fusion enforces no name uniqueness on
+    # markers - with the count comparison as an independent second gate.
     survived = any(s is latest for s in _common.iter_collection(snaps))
     # The count the collection reports, never the arithmetic the delete expected: an unreadable
     # re-read publishes null, so no caller reads a computed number back as a measurement.
@@ -350,12 +320,9 @@ def as_built_joint_handler(occurrence_one: str = "", occurrence_two: str = "", g
     o2, e2 = _find_one(design, occurrence_two)
     if not o2:
         return error(e2)
-    # Distinctness by fullPathName, not .name: a local name is only locally unique, so two DISTINCT
-    # instances of the same component (e.g. "Bolt:1" under different parents) share a .name but differ by
-    # fullPathName. Comparing .name would false-positive and reject a legitimate pair. Fall back to .name
-    # only if a fullPathName isn't available (then identity catches the same-object case). Two siblings
-    # CAN wear one path (Fusion enforces no name uniqueness), so this can still refuse a legitimate
-    # pair - it errors rather than joints the wrong instance, and each is addressable by its handle.
+    # Distinctness by fullPathName, not .name: two DISTINCT instances of one component share a
+    # .name. Two siblings CAN wear one path (Fusion enforces no name uniqueness), so this can still
+    # refuse a legitimate pair - it errors rather than jointing the wrong instance.
     id1 = safe(lambda: o1.fullPathName) or safe(lambda: o1.name)
     id2 = safe(lambda: o2.fullPathName) or safe(lambda: o2.name)
     if (id1 is not None and id1 == id2) or o1 is o2:
@@ -410,9 +377,8 @@ def as_built_joint_handler(occurrence_one: str = "", occurrence_two: str = "", g
         return error("As-built joint creation returned nothing.")
 
     # A motion that silently comes back rigid is a wrong result with a healthy feature, so read the
-    # motion class back off the created joint. On the rigid path the null geometry IS the proof (any
-    # other motion raises at add() with a null geometry), so a read that declines to answer there is
-    # not a failure; a requested MOTION must confirm itself.
+    # motion class back. On the rigid path the null geometry IS the proof - any other motion raises
+    # at add() with a null geometry - so only a requested MOTION must confirm itself.
     got = _current_joint_type(joint)
     if got and got != jtype:
         return error(f"The as-built joint was created as '{got}', not the requested '{jtype}'. It "
@@ -422,14 +388,9 @@ def as_built_joint_handler(occurrence_one: str = "", occurrence_two: str = "", g
                      f"'{jtype}' is unconfirmed. Check it with assembly_get before relying on the "
                      "degree of freedom.")
 
-    # AsBuiltJoints.createInput/add take no name, so the name is applied AFTER the joint exists, via
-    # the AsBuiltJoint.name setter, and confirmed by reading it back - a name the platform refuses
-    # (or silently keeps) is a refusal here rather than a payload echoing a name the browser does
-    # not show. The joint already exists at this point, so the refusal says so and names the joint
-    # Fusion gave it.
-    # The set-then-read-back is stated locally rather than through set_verified: its message tail
-    # ("the operation would run on its default settings") describes a pre-add input object, and this
-    # is a POST-creation rename - the joint is already in the design either way.
+    # AsBuiltJoints.createInput/add take no name, so the name is applied AFTER the joint exists and
+    # read back. set_verified is not used: its message tail describes a pre-add input object, and
+    # this is a POST-creation rename with the joint already in the design.
     want_name = (name or "").strip()
     if want_name:
         try:
@@ -481,11 +442,8 @@ def as_built_joint_handler(occurrence_one: str = "", occurrence_two: str = "", g
 # ------------------------------------------------------------ assembly_constrain
 
 # healthState on an assembly constraint: 2 = error, 1 = warning - the same pair assembly_get's
-# relations slice publishes as healthy:false (_health there), so a caller re-reading the constraint
-# sees the state this refusal named. The two DIVERGE on an UNREADABLE state: the READS treat it as
-# healthy (_assembly_detail._health, joint_at_geometry) because a read must describe a design it did not
-# change, while a CREATE that cannot confirm its own effect has nothing to stand on - so this refuses.
-# The create-side rule is the canonical one for a write: an unconfirmable mutation is an error.
+# relations slice publishes as healthy:false. The two DIVERGE on an UNREADABLE state: a READ treats
+# it as healthy, while this CREATE refuses, since an unconfirmable mutation is an error.
 _HS_ERROR, _HS_WARNING = 2, 1
 
 
@@ -535,10 +493,8 @@ def _constraint_positions(targets):
 
 def _constraint_moves(before, targets):
     """([{occurrence, distance_mm, direction, rotation_deg?}], measured) for the constrained
-    occurrences.
-
-    'measured' is False when no target could be sampled on BOTH sides of the add - then the verdict is
-    UNKNOWN and must not be published as "nothing moved"."""
+    occurrences. 'measured' is False when no target could be sampled on BOTH sides of the add, where
+    the verdict is UNKNOWN rather than "nothing moved"."""
     rows, measured = [], False
     for label, occ in targets.items():
         if occ is None or label not in before:
@@ -559,14 +515,10 @@ def _constraint_moves(before, targets):
 
 
 def _newly_unhealthy(before_errors, before_warnings, before_total, design):
-    """Timeline features that went unhealthy since the capture - adding a constraint recomputes the
-    assembly and can break an EXISTING joint or motion link. Measured: that damage reads as a compute
-    WARNING as readily as an error, so both deltas count.
-
-    The walk is bounded to `before_total` - the item count from the pre-add reading - because the
-    constraint's own fresh timeline entry is a POISON READ: its healthState RAISES '1 : Unknown
-    exception' right after the add (measured, Fusion 2705.0.87), and the same caught error inside a
-    script context rolled the whole transaction back. Nothing here wants that entry anyway."""
+    """Timeline features that went unhealthy since the capture - error and warning deltas both
+    count, over a walk bounded to `before_total`."""
+    # That bound excludes the constraint's own fresh timeline entry, whose healthState RAISES
+    # '1 : Unknown exception' right after the add - an error that rolls a script transaction back.
     errors, warnings, _total = timeline_health(design, limit=before_total)
     return ([n for n in errors if n not in before_errors]
             + [n for n in warnings if n not in before_warnings])
@@ -576,21 +528,10 @@ def assembly_constraint_handler(occurrence_one: str = "", occurrence_two: str = 
                                 snap_one: str = "", snap_two: str = "", relationships=None,
                                 offset: float = 0.0, angle_deg: float = 0.0,
                                 flipped: bool = False, units: str = "mm") -> dict:
-    """Constrain two occurrences' geometry (the Constrain Components relationship).
-
-    Fusion locates a part by a SET of relationships solved TOGETHER in one constraint - one face
-    pair rarely fully locates a part, so prefer 'relationships':
-
-      relationships=[ {snap_one, snap_two, flip?, offset?, angle_deg?}, ... ]  - each item is a
-      geometry pair ('<occurrence>:<snap>'); all are added to ONE constraint and solved together
-      (e.g. a part's bottom flush onto another's top + two side faces flush to fully fix it). Mating
-      faces 'rest on' each other when flip=true (their normals oppose).
-
-    Shorthand for a single relationship: pass 'snap_one'/'snap_two' (+ optional flip/offset/angle).
-    Or SELECTION (no snaps): pass 'occurrence_one'/'occurrence_two' and select one entity on each in
-    Fusion first. The relationship type (flush/coincident/concentric/angle) is INFERRED from the
-    geometry. WRITES.
-    """
+    """Constrain two occurrences' geometry: 'relationships' is a list of {snap_one, snap_two,
+    flip?, offset?, angle_deg?} geometry pairs added to ONE constraint and solved together;
+    snap_one/snap_two is the single-pair shorthand, and no snaps takes the Fusion selection. The
+    relationship type is INFERRED from the geometry. WRITES."""
     design = _common.design()
     if not design:
         return error("No active design with components.")
@@ -619,12 +560,9 @@ def assembly_constraint_handler(occurrence_one: str = "", occurrence_two: str = 
         cin = design.rootComponent.assemblyConstraints.createInput()
         rels = cin.geometricRelationships
         names = set()
-        # label -> occurrence for the parts this constraint locates, so the payload can report which
-        # of them the solve actually moved. A label whose occurrence could not be re-resolved maps to
-        # None and is reported as unmeasured rather than as "did not move". ONE labelling scheme feeds
-        # both 'occurrences' and the moved rows: the fullPathName (the unique key - a nested child's
-        # leaf .name is shared by every instance of its component), falling back to the caller's own
-        # string only when nothing resolved.
+        # label -> occurrence for the parts this constraint locates. A label whose occurrence could
+        # not be re-resolved maps to None and is reported as unmeasured, never as "did not move".
+        # The label is the fullPathName, falling back to the caller's string when nothing resolved.
         targets, labels = {}, {}
 
         if specs:
@@ -721,11 +659,9 @@ def assembly_constraint_handler(occurrence_one: str = "", occurrence_two: str = 
         return error((f"Constraint '{cname}' was created but {state}. " + msg).strip()
                      + f" {undo} Relax or remove one of its relationships.")
 
-    # The add solved - but it can still have broken what the parts already carried. The damaged
-    # relations are named here rather than left for a later read to discover. The constraint's OWN
-    # timeline entry carries its name (measured: 'Constraint 1' for constraint.name 'Constraint 1'), so
-    # the name is filtered as well as the index bounded - the index bound assumes the entry landed
-    # after the ones counted before the add, and a name match is what catches it wherever it landed.
+    # The add solved, but it can still have broken what the parts already carried. The
+    # constraint's OWN timeline entry carries its name, so that name is filtered out as well as the
+    # index bounded - the bound alone assumes the entry landed after the pre-add count.
     damaged = [n for n in _newly_unhealthy(errors_before, warnings_before, total_before, design)
                if n != name_read]
     if damaged:
@@ -739,10 +675,8 @@ def assembly_constraint_handler(occurrence_one: str = "", occurrence_two: str = 
     count = _common.counted(lambda: constraint.geometricRelationships.count)
     submitted = len(specs) or 1
     # A constraint holding FEWER relationships than were submitted did not land the request: the
-    # missing pairs constrain nothing, so the parts are not located the way the call describes.
-    # Refused for the same reason the sibling rigid group refuses a short member count
-    # (assembly_transform.rigid_group_handler) - a shortfall disclosed only in a note reads as
-    # created:true. An unreadable count (None) is not a shortfall; it stays the null disclosure below.
+    # missing pairs constrain nothing. An unreadable count (None) is not a shortfall and stays the
+    # null disclosure below.
     if count is not None and count < submitted:
         return error(f"Constraint '{cname}' was created but holds only {count} of the {submitted} "
                      f"relationship(s) submitted - the missing one(s) constrain nothing, so the "
@@ -781,12 +715,9 @@ def assembly_constraint_handler(occurrence_one: str = "", occurrence_two: str = 
 _CAPTURE_DESC = (
 "Capture / revert / delete / report the assembly's flexible POSITION in the timeline. Fusion keeps "
 "geometry history (timeline features) separate from assembly positions - a pose only enters the "
-"timeline as an explicit captured Position marker. When you move a jointed component - by hand or "
-"via joint_drive, both set the same pending-position flag - its pose is transient; 'capture' "
-"records it as a new marker (valid only when a move is pending), 'discard_pending' throws that "
-"uncaptured move away instead, 'delete' removes one captured marker by 'marker' name, 'revert' "
-"discards the latest captured marker, 'status' reports whether a move is pending and lists the "
-"captured markers."
+"timeline as an explicit captured Position marker, so a moved jointed component's pose (by hand or "
+"via joint_drive, both setting the same pending-position flag) is TRANSIENT until captured. See "
+"'action' for what each verb does."
 )
 capture_tool = (
     Tool.create_simple(name="assembly_capture_position", description=_CAPTURE_DESC)
@@ -803,27 +734,22 @@ capture_item = Item.create_tool_item(
                       "::test_phantom_capture_bites"))
 
 _ASBUILT_DESC = (
-                                     "Create an AS-BUILT joint between two occurrences WHERE THEY ALREADY ARE - no joint origins "
-                                     "needed and neither part moves (unlike joint_create). 'occurrence_one'/'occurrence_two' are "
-                                     "the occurrence names. joint_type defaults to rigid; EVERY other motion ALSO needs "
-                                     "'geometry' - the anchor it runs on - because Fusion refuses a non-rigid as-built joint "
-                                     "without one. 'axis' is the frame axis the motion runs on, for the types that use one "
-                                     "(ball uses none). An as-built joint exposes NO offset/angle ModelParameter, so its "
-                                     "position cannot be driven by a parameter - use joint_create when it must be "
-                                     "parametric. Pose a revolute/slider/cylindrical result with joint_drive, any other "
-                                     "with assembly_move."
+    "Create an AS-BUILT joint between two occurrences WHERE THEY ALREADY ARE - no joint origins "
+    "needed and neither part moves (unlike joint_create). An as-built joint exposes NO offset/angle "
+    "ModelParameter, so its position cannot be driven by a parameter or an expression - use "
+    "joint_create when it must be parametric."
 )
 asbuilt_tool = (
     Tool.create_simple(name="joint_create_as_built", description=_ASBUILT_DESC)
     .add_input_property("occurrence_one", {"type": "string", "description": "First occurrence name."})
     .add_input_property("occurrence_two", {"type": "string", "description": "Second occurrence name."})
-    .add_input_property("geometry", {"type": "string", "description": "Where a non-rigid motion anchors: a find_geometry handle, or '<occurrence>:<snap>' (snap = origin/center/top/bottom/left/right/front/back/cylinder). Omit for rigid."})
+    .add_input_property("geometry", {"type": "string", "description": "Where a non-rigid motion anchors: a find_geometry handle, or '<occurrence>:<snap>'. Omit for rigid."})
     .add_input_property(*_inputs.joint_motion(default="rigid", options=_MOTIONS,
-            description="Motion type; anything but rigid requires 'geometry'.").as_property())
+            description="Anything but rigid requires 'geometry'.").as_property())
     .add_input_property(*_inputs.frame_axis("axis", default="z",
-            description="Motion axis for types that need one (for pin_slot: the rotation axis).").as_property())
+            description="Motion axis for the types that need one (for pin_slot: the rotation axis).").as_property())
     .add_input_property(*_inputs.frame_axis("slide_axis", default="",
-            description="pin_slot only: the perpendicular SLIDE direction (default = the next frame axis; must differ from 'axis').").as_property())
+            description="pin_slot only: the perpendicular SLIDE direction.").as_property())
     .add_input_property("name", {"type": "string",
             "description": "Optional name, applied after creation and read back."})
     .strict_schema()
@@ -833,24 +759,20 @@ asbuilt_item = Item.create_tool_item(tool=asbuilt_tool, write="write", handler=a
                                      postconditions=[_assert.FeatureHealthy()])
 
 _CONSTRAINT_DESC = (
-                                     "Constrain component occurrences' geometry - Constrain Components (flush / coincident / "
-                                     "concentric / at an angle, INFERRED from the geometry). Fusion locates a part with a SET of "
-                                     "relationships solved TOGETHER, so prefer 'relationships' = a list of {snap_one, snap_two, "
-                                     "flip?, offset?} pairs (each '<occurrence>:<snap>', snap = center/top/bottom/left/right/front/"
-                                     "back/cylinder/origin) all added to ONE constraint - e.g. a part's bottom flush onto another's "
-                                     "top + two side faces flush to fully fix it. Mating faces 'rest on' each other with flip=true. "
-                                     "Shorthand: pass 'snap_one'/'snap_two' for a single relationship. Or selection mode: omit snaps, "
-                                     "pass 'occurrence_one'/'occurrence_two', select one entity on each in Fusion first. "
-                                     "REFUSES (naming the delete path) when the constraint does not solve, its state "
-                                     "cannot be read, or the add leaves other features unhealthy; 'moved' names each "
-                                     "part it repositioned."
+    "Constrain component occurrences' geometry - Constrain Components (flush / coincident / "
+    "concentric / at an angle, INFERRED from the geometry). Fusion locates a part with a SET of "
+    "relationships solved TOGETHER, so prefer 'relationships' = a list of {snap_one, snap_two, "
+    "flip?, offset?} pairs added to ONE constraint - e.g. a part's bottom flush onto another's top "
+    "plus two side faces flush to fully fix it. Mating faces 'rest on' each other with flip=true. "
+    "Or selection mode: omit the snaps, pass 'occurrence_one'/'occurrence_two', and select one "
+    "entity on each in Fusion first. 'moved' names each part it repositioned."
 )
 constraint_tool = (
     Tool.create_simple(name="assembly_constrain", description=_CONSTRAINT_DESC)
     .add_input_property("relationships", {"type": "array",
-            "description": "List of {snap_one, snap_two, flip?, offset?, angle_deg?} pairs added to ONE constraint, solved together (the way to fully locate a part).",
+            "description": "List of {snap_one, snap_two, flip?, offset?, angle_deg?} pairs added to ONE constraint, solved together.",
             "items": {"type": "object"}})
-    .add_input_property("snap_one", {"type": "string", "description": "Single-relationship shorthand: '<occurrence>:<snap>' (center/top/bottom/left/right/front/back/cylinder/origin)."})
+    .add_input_property("snap_one", {"type": "string", "description": "Single-relationship shorthand: '<occurrence>:<snap>'."})
     .add_input_property("snap_two", {"type": "string", "description": "Autonomous geometry: '<occurrence>:<snap>' for the second occurrence."})
     .add_input_property("occurrence_one", {"type": "string", "description": "First occurrence name (selection mode)."})
     .add_input_property("occurrence_two", {"type": "string", "description": "Second occurrence name (selection mode)."})

@@ -1,16 +1,11 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: refresh out-of-date external references in the active document.
-
-The API equivalent of "Get Latest" on a referenced component - one by name, or all that are out
-of date. Covers TWO link kinds: occurrence xrefs (Document.documentReferences) and derive links
-(a DeriveFeature's own documentReference) - Document.documentReferences can miss a derive's link
-entirely once its source document is no longer resolved in-session (confirmed live: count reads 0,
-"no external references", right after a cold reopen of a document with a genuinely stale derive),
-so derive links are walked off component.features.deriveFeatures directly, the persistent source
-of truth for a derive's link.
-"""
+"""MCP building block: refresh out-of-date external references in the active document - the API
+equivalent of "Get Latest", one by name or all that are stale. Covers occurrence xrefs
+(Document.documentReferences) and derive links, which are walked off component.features
+.deriveFeatures directly: documentReferences can read 0 for a derive whose source is no longer
+resolved in-session, while the feature's own documentReference persists."""
 
 import json
 
@@ -30,13 +25,10 @@ def _ref_name(ref):
 
 
 def _source_groups(rows):
-    """Group matched reference rows by the SOURCE FILE they point at: {key: [(kind, label)]}.
-
-    The key is the source DataFile's lineage id - the only thing that says two rows refresh the SAME
-    file, since one document can be referenced by several rows (an occurrence xref plus a derive off
-    the same source) while two DIFFERENT files may share a NAME. A row whose id does not read gets a
-    key of its own: two unreadable ids cannot be shown to be one file, so the caller is owed the
-    ambiguity refusal rather than a merge the reads do not support."""
+    """Group matched reference rows by the SOURCE FILE they point at: {key: [(kind, label)]}, keyed on
+    the source DataFile's lineage id - one document can be referenced by several rows while two
+    DIFFERENT files may share a NAME. A row whose id does not read gets a key of its own, since two
+    unreadable ids cannot be shown to be one file."""
     groups = {}
     for kind, label, ref in rows:
         fid = safe(lambda r=ref: r.dataFile.id)
@@ -70,20 +62,10 @@ def _derive_refs(doc):
 
 
 def _refresh_one(ref, label, only_out_of_date, use_setter=False):
-    """Attempt to refresh ONE reference - an occurrence xref's DocumentReference OR a DeriveFeature's
-    documentReference, same shape (dataFile/isOutOfDate/version) - to its latest version. Returns
-    ('updated'|'skipped'|'error', record): the shared leaf op both link kinds reduce to; each kind's
-    WALK (finding the refs) stays separate (unify the leaf, not the walk).
-
-    use_setter picks HOW the leaf advances the reference: ref.getLatestVersion() (occurrence xref) vs
-    the 'version' property SETTER (derive link) - confirmed live: calling getLatestVersion() on a
-    DeriveFeature's documentReference always raises InternalValidationError. The setter is the API's
-    documented alternative ("Gets and sets the version... setting this property will cause all
-    occurrences referencing this document to update") but ALSO raised the identical error live for a
-    whole-design derive - so unlike the occurrence path (where a getLatestVersion() raise propagates,
-    a genuine failure the caller must see), the setter attempt is caught: a derive link refusing the
-    API refresh is a KNOWN, reportable outcome, not grounds to crash the whole call when other
-    references may have refreshed fine."""
+    """Refresh ONE reference - an occurrence xref's DocumentReference or a DeriveFeature's, same
+    shape - to its latest version: ('updated'|'skipped'|'error', record). use_setter picks HOW:
+    getLatestVersion() raises InternalValidationError on a derive link, so that path assigns the
+    'version' property instead and CATCHES its refusal rather than sinking the whole call."""
     ood = bool(safe(lambda r=ref: r.isOutOfDate, False))
     if only_out_of_date and not ood:
         return "skipped", {"name": label, "reason": "already up to date"}
@@ -172,14 +154,11 @@ def handler(name: str = "", only_out_of_date: bool = True) -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Refresh the active document's external references (X-refs) to their latest cloud version - "
-    "the API equivalent of 'Get Latest' on a referenced component. Covers both occurrence xrefs and "
-    "DERIVE links (each result row's 'kind' says which). By default it updates every reference that "
-    "is OUT OF DATE; pass 'name' to target one reference by its source document name, or "
-    "only_out_of_date=false to force-refresh matched references regardless. Reports each "
-    "reference's version before/after. Use this when a referenced part was edited after it was "
-    "inserted and the host still shows an outdated version (or is missing a feature like a joint "
-    "origin added after insertion)."
+    "Refresh the active document's external references (X-refs) to their latest cloud version - the "
+    "API equivalent of 'Get Latest', for a host still showing an outdated part. Covers occurrence "
+    "xrefs and DERIVE links (each row's 'kind' says which). Updates every OUT-OF-DATE reference by "
+    "default; 'name' targets one by its source document name, only_out_of_date=false refreshes the "
+    "matched rows regardless. Reports each version before/after."
 )
 
 tool = (

@@ -3,11 +3,8 @@
 
 """MCP building block: ARRANGE (nest/pack) component occurrences within a sketch-profile boundary.
 
-  arrange -> create an Arrange feature that packs the given occurrences inside a 2D envelope
-             defined by a sketch profile. True-shape nesting fits actual outlines; rectangular
-             nests bounding boxes. WRITES.
-
-The API equivalent of the Manufacture/Design Arrange command.
+  arrange -> an Arrange feature packing the given occurrences inside a 2D envelope taken from a
+             sketch profile. WRITES.
 """
 
 import adsk.core
@@ -56,17 +53,17 @@ def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_sha
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")
 
-    # Whole-design resolve (every component, no preference among them) so the boundary sketch can live in an activated
-    # sub-component, not only the root component; a name SEVERAL sketches carry is refused naming
-    # each owning component rather than reported as missing. 'boundary_component' narrows that walk
-    # to one component's own sketches, and is the input the refusal names - the scope is spelled
-    # for the BOUNDARY because that is the only sketch this tool resolves by name.
     sketch, refusal = _sketch_detail.scoped_sketch(design, (boundary_sketch or "").strip(),
                                                    boundary_component, "boundary_component")
     if refusal:
         return error(refusal)
     if not sketch:
         return error(f"No sketch named '{boundary_sketch}' for the boundary. Use sketch_get.")
+    # profiles.item(0) below is a blind index off the sketch's own collection, so a deferred sketch
+    # would hand the envelope whichever region was first before the deferral.
+    stale = _inputs.deferred_sketch_refusal("boundary_sketch", sketch)
+    if stale:
+        return error(stale)
     profiles = safe(lambda: sketch.profiles)
     if not profiles or safe(lambda: profiles.count, 0) == 0:
         return error(f"Boundary sketch '{boundary_sketch}' has no closed profile to use as the "
@@ -86,10 +83,8 @@ def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_sha
     if af is None:
         return error("This design does not expose Arrange features.")
 
-    # Effect evidence, captured BEFORE the add: each input occurrence's translation, and the
-    # design-wide occurrence-path census. MEASURED: the solver can leave the named occurrences
-    # WHOLLY UNMOVED and mint envelope COPIES inside the boundary instead (a second identical run
-    # then stacks another coincident set) - without these reads that ships as a clean success.
+    # Effect evidence read BEFORE the add: the solver can leave the named occurrences unmoved and
+    # mint envelope copies instead, which only these two reads distinguish from a real nest.
     def _translation(o):
         t = safe(lambda: o.transform2.translation)
         return (safe(lambda: t.x), safe(lambda: t.y), safe(lambda: t.z)) if t is not None else None
@@ -164,12 +159,8 @@ def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_sha
 
 
 TOOL_DESCRIPTION = (
-"ARRANGE (nest/pack) component occurrences within a 2D boundary defined by a sketch profile - "
-"the Arrange command. 'boundary_sketch' = the sketch whose closed profile is the envelope to "
-"pack into; 'shapes' = the occurrence name(s) to lay out (comma-separated). "
-"'spacing' = minimum clearance between parts (in 'units'). True-shape nesting can need a Fusion "
-"extension on some accounts (the tool reports that and you can fall back to a rectangular "
-"solver). Pair with view_screenshot (top view) to see the layout."
+"ARRANGE (nest/pack) component occurrences within a 2D boundary taken from a sketch profile - "
+"the Arrange command. Pair with view_screenshot (top view) to see the layout."
 )
 
 tool = (
@@ -178,8 +169,8 @@ tool = (
             "description": "Name of the sketch whose profile is the boundary envelope."})
     .add_input_property("boundary_component", {"type": "string",
             "description": "The component holding 'boundary_sketch', when two components carry that "
-                           "name (Fusion numbers sketches per component from 1). A component name, "
-                           "or an occurrence fullPathName/handle from design_get(include=['tree'])."})
+                           "name. A component name, or an occurrence fullPathName/handle from "
+                           "design_get(include=['tree'])."})
     .add_input_property(*_SHAPES.as_property())
     .add_input_property(*_SOLVER.as_property())
     .add_input_property("spacing", {"type": "number",

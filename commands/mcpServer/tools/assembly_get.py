@@ -61,10 +61,9 @@ def _joint_record(design, j, inv_k):
                              if safe(lambda: j.occurrenceOne) else None)
     rec["occurrence_two"] = (safe(lambda: j.occurrenceTwo.name)
                              if safe(lambda: j.occurrenceTwo) else None)
-    # Suppression is DISCLOSED, not folded into healthy (a suppressed joint is inert, not broken;
-    # measured: it positioned nothing while every field read plain-healthy). BOTH flags OR'd
-    # (live-verified: Joint.isSuppressed keeps reading False when the suppression was set on the
-    # TIMELINE item). read_flag - two unreadable flags stay unstated rather than asserting active.
+    # Suppression is DISCLOSED, not folded into healthy - a suppressed joint is inert, not broken.
+    # BOTH flags OR'd: Joint.isSuppressed keeps reading False when the suppression was set on the
+    # TIMELINE item. read_flag, so two unreadable flags stay unstated.
     sup = (_common.read_flag(lambda: j.isSuppressed) or
            _common.read_flag(lambda: j.timelineObject.isSuppressed))
     if sup:
@@ -118,12 +117,9 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
         return error("No active design. Open or create a document first (see doc_new).")
     root = design.rootComponent
 
-    # The FULL joint walk (_joints.all_joints): root AND every sub-component, joints AND asBuiltJoints
-    # (both are separate collections, and a joint internal to a sub-component lives there) - so a broken
-    # sub-component/as-built joint is counted, not invisible. Indexed per occurrence below.
-    # ALWAYS walked: include_joints gates only what is EMITTED (the joints array + per-occurrence
-    # annotations) - joint_count and broken_joints must stay honest with it false (they read 0/[]
-    # while joints existed, live-observed).
+    # The FULL joint walk: root AND every sub-component, joints AND asBuiltJoints. ALWAYS walked -
+    # include_joints gates only what is EMITTED, so joint_count and broken_joints stay honest with
+    # it false.
     joints = []
     occ_joints = {}
     for j in _joints.all_joints(design):
@@ -173,21 +169,14 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
     for i, b in enumerate(_common.iter_collection(safe(lambda: root.bRepBodies))):
         root_bodies.append(safe(lambda b=b: b.name) or f"Body{i+1}")
 
-    # HEALTH ROLLUP - the thing a user sees FIRST (a yellow "Compute Failed" in the timeline)
-    # before any functional test. A joint can be created + wired correctly yet FAIL TO COMPUTE
-    # (e.g. its axis doesn't match the geometry, over-constraining the assembly). Surface that
-    # here so the probe doesn't report a broken assembly as fine. Also walk the timeline for any
-    # errored/warning feature (not just joints).
-    # `is False` / `.get("health_unknown")`, never truthiness: a row whose compute state NEITHER the
-    # entity nor its timeline item answered carries no healthy key at all, and reading that absence
-    # as broken would raise a false alarm exactly where the row declines to make a claim.
+    # HEALTH ROLLUP. `is False` / `.get("health_unknown")`, never truthiness: a row whose compute
+    # state NEITHER the entity nor its timeline item answered carries no healthy key at all, and
+    # reading that absence as broken raises a false alarm where the row makes no claim.
     broken_joints = [j["name"] for j in joints if j.get("healthy") is False]
     health_unknown_joints = [j["name"] for j in joints if j.get("health_unknown")]
     suppressed_joints = [j["name"] for j in joints if j.get("is_suppressed")]
-    # Relation health is folded into the HEADLINE flag, not just the opt-in relations slice -
-    # measured: a FAILED assembly constraint (healthy:false under include=['relations']) left
-    # is_healthy:true / broken_joints:[] / timeline_problems:[], so the tool's own "check
-    # is_healthy first" guidance missed it. The walk is the shared one; only unhealthy rows land.
+    # Relation health is folded into the HEADLINE flag, not just the opt-in relations slice: a
+    # failed assembly constraint reaches none of broken_joints/timeline_problems.
     broken_relations = []
     for kind in ("rigid_group", "motion_link", "constraint"):
         for rel, _owner in _relations.all_relations(design, kind):
@@ -207,10 +196,8 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
     marker_pos, marker_count = _common.timeline_marker(design)
     rolled_back = bool(marker_pos is not None and marker_count and marker_pos < marker_count)
 
-    # UNRESOLVED EXTERNAL REFERENCES are part of the headline verdict, not an opt-in slice: measured,
-    # a template holding an occurrence whose source component cannot be loaded read is_healthy:true
-    # under a note telling the agent to check that field FIRST. The census runs once here and feeds
-    # both the verdict and the all_occurrences slice below.
+    # UNRESOLVED EXTERNAL REFERENCES are part of the headline verdict, not an opt-in slice. The
+    # census runs once here and feeds both the verdict and the all_occurrences slice below.
     occ_walk = _common.occurrence_walk(design)
     unresolved_references = [{"name": b["name"], "parent_path": b["parent_path"],
                               "detail": b["detail"]} for b in occ_walk.broken]
@@ -218,10 +205,8 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
     is_healthy = (not broken_joints and not timeline_problems and not rolled_back
                   and not broken_relations and not unresolved_references)
 
-    # STALENESS RECONCILIATION: the per-joint healthState can LAG the timeline after an in-place edit
-    # (joint_edit/param change) that hasn't been recomputed - so broken_joints can disagree with the
-    # timeline feature health. When they disagree, the timeline is authoritative; flag it and point to
-    # design_recompute, instead of silently reporting unhealthy joints over a clean timeline.
+    # STALENESS RECONCILIATION: the per-joint healthState can LAG the timeline after an in-place
+    # edit that has not been recomputed. When they disagree the timeline is authoritative.
     tl_problem_names = {p["name"] for p in timeline_problems}
     joints_broke_but_timeline_clean = bool(broken_joints) and not timeline_problems
     out = {
@@ -242,12 +227,10 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
     "joints": joints_out if include_joints else None,
     "joints_truncated": joints_truncated,
     "note": "Structured kinematic state. CHECK is_healthy FIRST - false means a joint, relation or "
-    "feature FAILED TO COMPUTE (the 'Compute Failed' a user sees in the timeline before any "
-    "test; a wired-but-mis-axised joint over-constrains the assembly), or the design holds an "
-    "occurrence whose external reference does not resolve. broken_joints / broken_relations / "
-    "timeline_problems / unresolved_references name them. Then reason about "
-    "grounding/positions/joint-wiring from these NUMBERS rather than a cluttered screenshot; "
-    "pair with view_set(isolate).",
+    "feature FAILED TO COMPUTE, or the design holds an occurrence whose external reference does "
+    "not resolve; broken_joints / broken_relations / timeline_problems / unresolved_references "
+    "name them. Then reason about grounding/positions/joint-wiring from these NUMBERS; pair with "
+    "view_set(isolate).",
     }
     if unresolved_references:
         # The reference's own source document/project/hub is NOT readable: occ.component and
@@ -412,31 +395,23 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
 
 
 TOOL_DESCRIPTION = (
-    "Read the active assembly's kinematic state as JSON. For every top-level occurrence: its world "
-    "position (origin + bodies-only bbox center/size in 'units'), rotation as x_axis/y_axis/z_axis "
-    "basis vectors, ground flags (grounded/ground_to_parent), and its joints. "
-    "Plus a design-level joint list: type, degrees of freedom, the two occurrences each connects, "
-    "value_now (its CURRENT driven value: angle_deg / slide_mm) and frame (its WORLD origin + axes, "
-    "whose z_axis is the direction a joint OFFSET drives along). Verify grounding, joint wiring and "
-    "part positions from numbers, not a screenshot. include_joints=false for just positions/"
-    "grounding. include=['all_occurrences'] repeats that record for NESTED occurrences too (the "
-    "array above is top-level only), each with its full_path. "
-    "include=['joint_origins'] adds each Joint Origin (WCS frame): qualified name + handle (feed "
-    "joint_create / cam_edit_setup wcs), world position/axes, consuming joints. include=['relations'] "
-    "adds the non-joint relationships (rigid groups, motion links, constraints) by name, to edit with "
-    "assembly_edit_relations. include=['contacts'] adds the design's contact sets plus whether contact "
-    "analysis is on and what it is scoped to (assembly_edit_contacts). Every list is capped; a "
-    "*_truncated flag marks one that hit its cap."
+    "Read the active assembly's kinematic state as JSON. Per top-level occurrence: world position "
+    "(origin + bodies-only bbox center/size in 'units'), rotation as x_axis/y_axis/z_axis basis "
+    "vectors, ground flags, and its joints. Plus a design-level joint list: type, degrees of "
+    "freedom, the two occurrences each connects, value_now (angle_deg / slide_mm) and frame (WORLD "
+    "origin + axes, whose z_axis is the direction a joint OFFSET drives along). Check is_healthy "
+    "first. Each include= slice the call omits is described in the returned note. Every list is "
+    "capped, and *_truncated marks one that hit its cap."
 )
 
 tool = (
     Tool.create_simple(name="assembly_get", description=TOOL_DESCRIPTION)
     .add_input_property(*_inputs.units_property(description="Display units for positions/sizes."))
     .add_input_property("include", {"type": ["array", "string"],
-            "description": "Deeper slice: 'all_occurrences' (every occurrence, nested ones included, with its full path), 'joint_origins' (each Joint Origin WCS frame + handle), 'relations' (rigid groups / motion links / constraints), 'contacts' (contact sets + the contact-analysis flags). Omit for kinematic state only."})
+            "description": "Deeper slices: all_occurrences, joint_origins, relations, contacts. Omit for kinematic state only."})
     .add_input_property("include_joints", {"type": "boolean", "description": "List joints + annotate occurrences with their joints (default true)."})
-    .add_input_property("max_occurrences", {"type": "integer", "description": f"Cap on the 'occurrences' array returned (default {_MAX_OCCURRENCES_DEFAULT})."})
-    .add_input_property("max_joints", {"type": "integer", "description": f"Cap on the 'joints' array returned (default {_MAX_JOINTS_DEFAULT})."})
+    .add_input_property("max_occurrences", {"type": "integer", "description": f"Cap on the 'occurrences' array (default {_MAX_OCCURRENCES_DEFAULT})."})
+    .add_input_property("max_joints", {"type": "integer", "description": f"Cap on the 'joints' array (default {_MAX_JOINTS_DEFAULT})."})
     .add_input_property("max_joint_origins", {"type": "integer", "description": f"Cap on the 'joint_origins' array (default {_MAX_JOINT_ORIGINS_DEFAULT})."})
     .add_input_property("max_relations", {"type": "integer", "description": f"Cap on each 'relations' list (default {_MAX_RELATIONS_DEFAULT})."})
     .add_input_property("max_contacts", {"type": "integer", "description": f"Cap on the 'contacts' list (default {_MAX_CONTACTS_DEFAULT})."})

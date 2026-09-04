@@ -27,8 +27,9 @@ and the harness_leak / auth_failure auto-flags).
 Exit code reports HARNESS INTEGRITY, never the scenario's verdict: 0 = a run happened under the
 harness's guarantees; 2 = no executor ever ran (dead spawn through every retry); 3 = credentials
 stayed rejected after the one relaunch; 4 = a guarantee broke (blindness, or a denied tool in the
-transcript). A budget overrun and the executor's own PASS/FAIL are outcomes the orchestrator
-grades, so they leave the code at 0.
+transcript); 5 = the executor stopped progressing and the watchdog killed it (EVAL_STALL_S).
+A budget overrun and the executor's own PASS/FAIL are outcomes the orchestrator grades, so they
+leave the code at 0.
 """
 
 import argparse
@@ -250,12 +251,80 @@ def make_scratch(run_dir):
 # /health stays 200 - a CLI/API-side init failure, not the Fusion server.
 INIT_DEADLINE_S = 90       # no init event at all within this = dead spawn
 HEARTBEAT_S = 60           # progress line cadence while the executor runs
+STALL_S_DEFAULT = 600      # no tool call AND no thinking event for this long = a stalled executor
+
+# MEASURED in a transcript: the CLI emits {"type":"system","subtype":"thinking_tokens",
+# "estimated_tokens":N,...} while a turn thinks, and N RESTARTS at 50 on each new thinking block -
+# so the event COUNT is the monotonic progress signal and N is only the figure to print.
+_THINKING_EVENT = '"subtype":"thinking_tokens"'
+_THINKING_TOKENS = re.compile(r'"estimated_tokens":\s*(\d+)')
+
+
+def progress_counts(lines):
+    """(tool calls, thinking events, the last thinking event's estimated_tokens or None) over
+    transcript lines - the two counters that only grow while an executor works, plus the figure the
+    heartbeat prints beside them."""
+    calls = thinking = 0
+    latest = None
+    for line in lines:
+        calls += line.count('"type":"tool_use"')
+        if _THINKING_EVENT in line:
+            thinking += 1
+            m = _THINKING_TOKENS.search(line)
+            if m:
+                latest = int(m.group(1))
+    return calls, thinking, latest
+
+
+class Liveness:
+    """An executor's running progress: tool calls, thinking events, the latest estimated_tokens and
+    WHEN either counter last moved - the state the heartbeat prints and the stall watch judges."""
+
+    def __init__(self, now):
+        self.calls = self.thinking = 0
+        self.est_tokens = None
+        self.last_progress = now
+
+    def read(self, line, now):
+        """Fold one transcript line in. A new tool call OR a new thinking event resets the idle
+        clock, so a turn that only thinks still counts as progress."""
+        calls, thinks, est = progress_counts([line])
+        self.calls += calls
+        self.thinking += thinks
+        if est is not None:
+            self.est_tokens = est
+        if calls or thinks:
+            self.last_progress = now
+
+    def idle_s(self, now):
+        """Seconds since the last tool call or thinking event."""
+        return now - self.last_progress
+
+
+def stall_limit_s():
+    """The no-progress seconds an executor may sit at before the watchdog kills it (EVAL_STALL_S;
+    0 disables the watchdog)."""
+    try:
+        return max(0, int(os.environ.get("EVAL_STALL_S") or STALL_S_DEFAULT))
+    except ValueError:
+        return STALL_S_DEFAULT
+
+
+def stall_reason(idle_s, limit_s, calls, thinking_tokens):
+    """The kill line for an executor that made no tool call and emitted no thinking event for
+    `limit_s` seconds, or '' while it is still making progress."""
+    if limit_s <= 0 or idle_s < limit_s:
+        return ""
+    thinking = "no thinking event yet" if thinking_tokens is None \
+        else f"last thinking event {thinking_tokens} est. tokens"
+    return (f"NO PROGRESS for {int(idle_s)}s (EVAL_STALL_S={int(limit_s)}): no new tool call and no "
+            f"new thinking event after ~{calls} tool calls, {thinking}")
 
 
 def launch(prompt, run_dir, model, max_turns):
     """Spawn the executor and WATCH it: tail the transcript for the init event, kill the
-    process within seconds if it spawned tool-less (returns dead_spawn=True), and print a
-    heartbeat with the running tool-call count so a live run is visibly alive."""
+    process within seconds if it spawned tool-less (returns dead_spawn=True), kill it when it stops
+    progressing (returns stalled=True), and print a heartbeat so a live run is visibly alive."""
     cwd, config, mcp_config = make_scratch(run_dir)
     exe = shutil.which("claude")
     if not exe:
@@ -266,12 +335,13 @@ def launch(prompt, run_dir, model, max_turns):
            "--max-turns", str(max_turns)]
     env = dict(os.environ)
     env["CLAUDE_CONFIG_DIR"] = config
-    # THE DETERMINISTIC FIX for the tool-less-spawn coin flip: deferred MCP tool loading
-    # races the first model call in -p mode and loses stochastically (CLI issues
-    # #43298/#42148/#34131). Loading all tools UPFRONT removes the deferral and with it the
-    # race: live-verified 3/3 fresh-config spawns attach every tool vs ~30% before. Costs
-    # schema tokens per session - the price of a run that reliably exists.
-    env["ENABLE_TOOL_SEARCH"] = "false"
+    # Deferred MCP tool loading keeps the 473 KB tools/list (135k cached tokens, measured) out
+    # of every executor turn; the tool-less spawn it can race into is what the dead-spawn
+    # retries below exist for. EVAL_TOOL_SEARCH=false loads every schema upfront instead.
+    env["ENABLE_TOOL_SEARCH"] = os.environ.get("EVAL_TOOL_SEARCH", "true")
+    # An unbounded planning turn on a ~180k context never completes (measured: 60k thinking
+    # tokens and climbing with no call for 15 min); the cap keeps a turn inside the window.
+    env["MAX_THINKING_TOKENS"] = os.environ.get("EVAL_MAX_THINKING", "16000")
     env.setdefault("MCP_TIMEOUT", "60000")
     transcript = os.path.join(run_dir, "transcript.jsonl")
     with open(os.path.join(run_dir, "prompt.txt"), "w", encoding="utf-8", newline="\n") as fh:
@@ -293,9 +363,10 @@ def launch(prompt, run_dir, model, max_turns):
     except OSError:
         pass
 
-    dead_spawn = False
+    dead_spawn = stalled = False
     start = last_beat = time.time()
-    calls_seen = 0
+    live = Liveness(start)
+    limit = stall_limit_s()
     init_checked = False
     with open(transcript, "r", encoding="utf-8", errors="replace") as rf:
         while proc.poll() is None:
@@ -319,7 +390,7 @@ def launch(prompt, run_dir, model, max_turns):
                     else:
                         print(f"  init OK ({len(init.get('tools') or [])} harness tools) - "
                               "executor running", flush=True)
-                calls_seen += line.count('"type":"tool_use"')
+                live.read(line, time.time())
             now = time.time()
             if dead_spawn or (not init_checked and now - start > INIT_DEADLINE_S):
                 dead_spawn = True
@@ -327,9 +398,17 @@ def launch(prompt, run_dir, model, max_turns):
                 print(f"  DEAD SPAWN (zero tools at init) - killed after {int(now - start)}s",
                       flush=True)
                 break
+            reason = stall_reason(live.idle_s(now), limit, live.calls, live.est_tokens)
+            if reason:
+                stalled = True
+                proc.kill()
+                print("  " + reason + " - killed; the transcript so far is on disk", flush=True)
+                break
             if now - last_beat >= HEARTBEAT_S:
-                print(f"  [{int(now - start)}s] executor alive - ~{calls_seen} tool calls",
-                      flush=True)
+                est_text = "-" if live.est_tokens is None else str(live.est_tokens)
+                print(f"  [{int(now - start)}s] executor alive - ~{live.calls} tool calls, "
+                      f"{live.thinking} thinking events (latest {est_text} est. tokens), "
+                      f"idle {int(live.idle_s(now))}s", flush=True)
                 last_beat = now
     proc.wait()
     out.close()
@@ -338,9 +417,9 @@ def launch(prompt, run_dir, model, max_turns):
     # contents; recording it lets the auth-race relaunch trigger and preserves the honest record.
     with open(os.path.join(run_dir, "stderr.txt"), "w", encoding="utf-8", newline="\n") as fh:
         fh.write(stderr)
-    if proc.returncode != 0 and not dead_spawn:
+    if proc.returncode != 0 and not (dead_spawn or stalled):
         print(f"executor exited {proc.returncode}; stderr tail:\n{stderr[-2000:]}", flush=True)
-    return transcript, stderr, dead_spawn
+    return transcript, stderr, dead_spawn, stalled
 
 
 # Executors get a COPY of the API credentials; the main session rotates the single-use refresh
@@ -431,9 +510,10 @@ EXIT_OK = 0
 EXIT_DEAD_SPAWN = 2          # no executor ever ran
 EXIT_AUTH = 3                # credentials stayed rejected after the one relaunch
 EXIT_HARNESS_INTEGRITY = 4   # a run happened, but a harness guarantee broke
+EXIT_STALL = 5               # the executor stopped progressing and was killed
 
 
-def exit_status(report, dead_spawn_exhausted=False, auth_exhausted=False):
+def exit_status(report, dead_spawn_exhausted=False, auth_exhausted=False, stalled=False):
     """(code, reason) - the process's verdict on THE HARNESS, never on the scenario.
 
     Non-zero says this run cannot be graded as an experiment: nothing ran, credentials stayed
@@ -447,6 +527,10 @@ def exit_status(report, dead_spawn_exhausted=False, auth_exhausted=False):
     if auth_exhausted:
         return EXIT_AUTH, ("executor credentials were rejected again after the one relaunch - the "
                            "copied token is not being accepted")
+    if stalled:
+        return EXIT_STALL, ("the executor stopped progressing (no tool call and no thinking event "
+                            "inside EVAL_STALL_S) and was killed - the partial run is on disk, and "
+                            "what it did before the stall is in its transcript")
     if not report:
         return EXIT_DEAD_SPAWN, "no run record was produced"
     if not report.get("blind", True):
@@ -505,7 +589,7 @@ def main():
     # cheap (a lost flip self-terminates in under a minute), so grind a fair number of them.
     spawn_backoffs = [5, 5, 5, 10, 10, 20, 30]
     auth_retry_used = False
-    dead_spawn_exhausted = auth_exhausted = False
+    dead_spawn_exhausted = auth_exhausted = stalled = False
     while True:
         n = 1
         while os.path.exists(os.path.join(batch_dir, f"run_{stem}_{n:02d}")):
@@ -515,8 +599,12 @@ def main():
         print(f"run dir: {run_dir}\nmodel: {args.model}  budget: {budget_calls} calls / "
               f"{budget_tokens} output tokens  max_turns: {max_turns}  "
               f"cloud folder tag: {run_tag}  skill: {skill or 'none'}", flush=True)
-        transcript, stderr, dead_spawn = launch(prompt, run_dir, args.model, max_turns)
+        transcript, stderr, dead_spawn, stalled = launch(prompt, run_dir, args.model, max_turns)
         report, final = audit(transcript, run_dir, budget_calls, budget_tokens, stderr, skill)
+        # Before the retry branches: a stall is OUR kill, and its zero-or-few MCP calls would
+        # otherwise read as a spawn flake and replay the prompt over already-mutated live state.
+        if stalled:
+            break
         # AUTH is diagnosed BEFORE the dead-spawn branch, because a credential rejection kills the
         # executor before its first tool call and so also reads as zero MCP calls. The relaunch is
         # gated on that zero: an executor that already called tools has MUTATED the live document,
@@ -559,7 +647,7 @@ def main():
                        "auth_failure_suspected", "num_turns")}, indent=1))
     print(budget_line(report))
     print("\n== executor's final report ==\n" + (final or "(no final report)"))
-    code, reason = exit_status(report, dead_spawn_exhausted, auth_exhausted)
+    code, reason = exit_status(report, dead_spawn_exhausted, auth_exhausted, stalled)
     print(f"\nHARNESS: exit {code} - {reason}", flush=True)
     return code
 

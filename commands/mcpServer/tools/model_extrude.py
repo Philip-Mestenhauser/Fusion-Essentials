@@ -5,8 +5,7 @@
 
   extrude -> turn a closed sketch profile into a 3D body by extruding it a distance, or up to a
              face. Choose the operation, distance/taper, and optional surface (no end caps). WRITES.
-
-Companion to sketch_create / sketch_add_geometry.
+             Companion to sketch_create / sketch_add_geometry.
 """
 
 import adsk.core
@@ -26,16 +25,16 @@ app = adsk.core.Application.get()
 
 # to_object: extrude UP TO a face (handle) instead of a blind distance.
 _TO_OBJECT = _inputs.GeometryHandle("to_object", require="face", required=False,
-    description="Extrude up to THIS face (a find_geometry face handle) instead of by 'distance'.")
+    description="Extrude up to THIS face instead of by 'distance'.")
 # target_bodies: scope a cut/join/intersect to these bodies so it doesn't bleed through others.
 _TARGET_BODIES = _inputs.BodyRefList("target_bodies", required=False,
-    description="Bodies a cut/join/intersect may affect (prevents cut bleed-through into other bodies). Fusion names every component's first body 'Body1', so scope across components with the qualified form '<occurrence>/<body>' - e.g. 'RingOuter:1/Body1'.")
+    description="Bodies a cut/join/intersect may affect. Every component's first body is named 'Body1', so scope across components with '<occurrence>/<body>' - 'RingOuter:1/Body1'.")
 
 # extent: the depth STYLE. 'distance' is the legacy default (distance/symmetric/taper_deg); the other
-# three map to measured ExtrudeFeatureInput setters - see TOOL_DESCRIPTION for each mode's inputs.
+# three map to measured ExtrudeFeatureInput setters, each reading its own inputs below.
 _EXTENTS = ("distance", "through_all", "to_face", "two_side")
 _EXTENT = _inputs.Choice("extent", _EXTENTS, default="distance",
-    description="Extent style - see the tool description for each mode's inputs.")
+    description="Depth style; each reads its own inputs below.")
 
 # profile_index may carry a profile HANDLE (entityToken from sketch_get) - resolved via ProfileRef.
 # _inputs.is_handle distinguishes a handle from an int/list/'all' selector.
@@ -43,10 +42,8 @@ _PROFILE = _inputs.ProfileRef("profile_index", scope_input="component")
 _looks_like_handle = _inputs.is_handle
 
 # profile_index may instead carry a sketch TEXT address ('text:<i>'). ExtrudeFeatures.createInput
-# names "a single SketchText object" among what its profile argument takes, so the text is extruded
-# as itself - the only route from a nameplate sketch, which holds no closed profile at all, to a
-# raised solid. allow_text is enabled on THIS resolution alone: the handle/index path above still
-# refuses a text address.
+# takes "a single SketchText object" as a profile, so a nameplate sketch holding no closed profile
+# extrudes as itself. allow_text is on THIS resolution alone - the handle/index path refuses a text.
 _TEXT_PROFILE = _inputs.ProfileRef("profile_index", allow_text=True, scope_input="component")
 _is_text_ref = _inputs.is_text_ref
 
@@ -74,13 +71,8 @@ def _is_all_selector(profile_index) -> bool:
 
 
 def _resolve_profile_indices(profile_index, pcount, profiles=None):
-    """Normalise the profile_index selector to a sorted list of in-range indices, or (None, error).
-
-    Accepts an int (single), a list of ints, a comma-string '0,2,3', or 'all' (every closed profile -
-    N regions in ONE call). To pick a SPECIFIC region on a multi-profile sketch (e.g. one drawn on a
-    face, which yields the region + the surrounding ring), prefer a profile HANDLE: read the regions
-    with sketch_get and pass that profile's 'handle' (resolved via ProfileRef) - area/centroid let you
-    pick the right one, which a blind index can't. profiles/pcount bound-check the index path."""
+    """Normalise the profile_index selector (int, list, '0,2,3' or 'all') to a sorted list of
+    in-range indices, or (None, error)."""
     sel = profile_index
     if isinstance(sel, str):
         s = sel.strip().lower()
@@ -111,22 +103,16 @@ def _resolve_profile_indices(profile_index, pcount, profiles=None):
     return (idxs or [0]), None
 
 
-# A region 'all' selected is ENCLOSED when it fills a HOLE of another selected region: a frame
-# outline and its bays come out of ONE sketch as a profile carrying an inner loop per bay PLUS one
-# profile per bay, so the bay is not merely inside the frame's overall extent - it occupies the
-# frame's inner loop. A ProfileLoop carries no bounding box of its own, so a hole's extent is the
-# union of its curves' boxes. The comparison runs with a tolerance because a bay's extent and the
-# hole it fills are the same curves read twice.
+# A region 'all' selected is ENCLOSED when it fills a HOLE of another selected region: a frame and
+# its bays come out of ONE sketch as a profile with an inner loop per bay PLUS a profile per bay. A
+# ProfileLoop carries no bounding box, so a hole's extent is the union of its curves' boxes.
 _ENCLOSED_TOL_CM = 1e-6
 
 
 def _extent3(bbox):
     """(xmin, ymin, zmin, xmax, ymax, zmax) of a BoundingBox3D, or None unless all six read as real
-    numbers - an unreadable extent must produce NO verdict, never a false 'nothing is enclosed'.
-
-    All THREE axes are kept: a sketch on a vertical plane (XZ/YZ, or a face) holds one axis constant
-    for every region in it, so a comparison that drops an axis collapses to an interval overlap on
-    the others and calls a far-away region enclosed."""
+    numbers. All THREE axes are kept: a sketch on a vertical plane holds one axis constant for every
+    region in it, so dropping an axis would call a far-away region enclosed."""
     mn, mx = safe(lambda: bbox.minPoint), safe(lambda: bbox.maxPoint)
     if mn is None or mx is None:
         return None
@@ -146,11 +132,8 @@ def _union(a, b):
 
 def _hole_extents(profile):
     """The extent of each HOLE (a loop with isOuter false) of one profile - the openings another
-    selected profile can fill.
-
-    None when ANY read behind them fails: the loops, one loop's isOuter, its curves, or a curve's
-    box. A dropped or shrunk hole publishes a false 'nothing is enclosed' - so an unreadable profile
-    withdraws the verdict instead of answering with the holes that happened to read."""
+    selected profile can fill. None when ANY read behind them fails, since a dropped hole would
+    publish a false 'nothing is enclosed'."""
     loops = safe(lambda: profile.profileLoops)
     n = safe(lambda: loops.count) if loops is not None else None
     if not isinstance(n, int) or isinstance(n, bool):
@@ -224,12 +207,8 @@ def _through_all_direction_key(symmetric, distance):
 
 
 def _qualified_body_name(body):
-    """The body's name qualified with its owning component (or occurrence path), so two target
-    bodies sharing Fusion's ubiquitous default name ('Body1') are distinguishable in the
-    'scoped_to_bodies' echo - a cut mis-targeted onto the WRONG body's component still reads
-    distinctly from the intended one. Reuses _inputs._body_context, the same 'where this body
-    lives' idiom model_fillet_chamfer's own echo already reports (assemblyContext.fullPathName,
-    else the owning component name)."""
+    """The body's name qualified with its owning component or occurrence path, so two bodies sharing
+    Fusion's default 'Body1' read distinctly in the 'scoped_to_bodies' echo."""
     if body is None:
         return None
     name = safe(lambda: body.name)
@@ -249,11 +228,9 @@ def _solo_solid_body(comp):
 
 
 def _solid_bodies_snapshot(design):
-    """(body, name, component_name, volume) for EVERY solid body across the whole design - the pre-image
-    a cut/intersect reads back against to see which bodies, and whose components, actually lost material.
-    feature.bodies returns only the feature's OWN-component result body (confirmed live: a cut piercing
-    two co-located components reports a single body), so it cannot reveal a cut that bled through into a
-    co-located component - a per-body volume read-back can."""
+    """(body, name, component_name, volume) for EVERY solid body in the design - the pre-image a
+    cut/intersect reads back against. feature.bodies returns only the feature's OWN-component result
+    body, so it cannot reveal a cut that bled into a co-located component; this read can."""
     snap = []
     for comp in _common.all_components(design):
         cname = safe(lambda c=comp: c.name)
@@ -348,11 +325,9 @@ def _distance_missing(distance) -> bool:
 
 
 def _feature_parameters(feature) -> dict:
-    """The model parameters (dNN) this extrude created, so an agent can retarget the feature's
-    distance/taper with param_set WITHOUT fishing through param_get to guess which dNN is which. Keys
-    distance / distance2 / taper / taper2, each present only when that ModelParameter exists (a
-    through_all / to_face extent has no distance parameter). Read live off the extent definitions and
-    taperAngle parameters - never assumed."""
+    """The model parameters (dNN) this extrude created, keyed distance / distance2 / taper / taper2,
+    so param_set can retarget it. A key is present only when that ModelParameter exists - a
+    through_all / to_face extent has no distance parameter."""
     out = {}
 
     def pname(getter):
@@ -456,9 +431,14 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
         return error(f"as_surface is not used with the sketch text '{text_addr}' - a text extrudes "
                      "as a solid. Drop as_surface, or pass a closed profile / an open path.")
 
+    # `pcount` is read off the sketch, so a DEFERRED one can read 0 while holding regions - the AUTO
+    # clause below must not choose the feature type off that count. A forced as_surface still runs:
+    # it builds from the sketch's curves, which are current under a deferral.
+    stale = _inputs.deferred_sketch_refusal("profile_index", sketch)
+
     # SURFACE path: forced via as_surface, OR auto when there is no closed profile but the sketch has
     # open curves. Build an OPEN profile and set ExtrudeFeatureInput.isSolid = False (no end caps).
-    want_surface = bool(as_surface) or (pcount == 0 and not text_addr)
+    want_surface = bool(as_surface) or (pcount == 0 and not text_addr and not stale)
     open_surface = False
     indices = [0]
     took_all = False
@@ -499,6 +479,10 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
                 return error(perr)
             profile_arg, indices = prof, [None]
         else:
+            # BEFORE the count is trusted: an index reads straight off sketch.profiles here, never
+            # through ProfileRef, so a deferred sketch's pcount and item(i) are both pre-deferral.
+            if stale:
+                return error(stale)
             if pcount == 0:
                 return error(f"Sketch '{safe(lambda: sketch.name)}' has no closed profile to extrude. "
     "Draw a closed region (e.g. a rectangle or circle) first, or pass "
@@ -529,10 +513,9 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
     # extent: 'to_object'/'to_face' wins; then through_all/two_side; else a blind distance.
     taper = float(taper_deg or 0.0)
     through_all_dir = None
-    # The depth sides this extent carries, in the order their parameters live on the feature
-    # (index 0 = extentOne, index 1 = extentTwo). Each row is
-    # (what, requested cm, the raw request, is this side two-sided). Empty for an extent style with
-    # no distance parameter to read back (through_all, to_face), which withholds the comparison.
+    # The depth sides this extent carries, in the order their parameters live on the feature (index
+    # 0 = extentOne, 1 = extentTwo): (what, requested cm, raw request, is this side two-sided).
+    # Empty for an extent with no distance parameter (through_all, to_face).
     depth_request = []
     try:
         if use_to_object:
@@ -554,13 +537,9 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
             if taper:
                 return error("taper_deg is not supported with extent=through_all (a through-all "
                              "extent carries no taper).")
-            # ThroughAllExtentDefinition is the working through-all contract: the RETIRED
-            # setAllExtent(SymmetricExtentDirection) answers true while cutting ONE direction only
-            # (measured live - a mid-plane cut through a plate removed exactly half the material), so
-            # symmetric sets BOTH sides and a one-sided extent names its direction. Either can still
-            # fail AT add() ("body not found to extrude through") when the profile sits exactly on a
-            # body's own face and that direction is pure air; Fusion's own exception surfaces through
-            # the generic 'Extrude failed' handler below, never swallowed.
+            # setAllExtent(SymmetricExtentDirection) answers true while cutting ONE direction only,
+            # so symmetric sets BOTH sides through ThroughAllExtentDefinition and a one-sided extent
+            # names its direction. Either can still fail AT add() with "body not found".
             through_all_dir = _through_all_direction_key(symmetric, distance)
             all_extent = adsk.fusion.ThroughAllExtentDefinition
             if through_all_dir == "symmetric":
@@ -635,10 +614,9 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
         except Exception as e:
             return error(f"Could not scope to target_bodies: {e}")
 
-    # through_all CUT/INTERSECT: pre-capture the volume of the body(s) it will act on, so a silent
-    # no-op (through_all missed the body entirely - typically a direction sign mistake) is caught
-    # instead of a false ok. 'All' extends until it exits the geometry (no partial depth), so ANY
-    # volume drop on a targeted body proves the cut went all the way through it.
+    # through_all CUT/INTERSECT: pre-capture the volume of the bodies it will act on, so a silent
+    # no-op is caught instead of a false ok. 'All' extends until it exits the geometry, so ANY volume
+    # drop on a targeted body proves the cut went all the way through it.
     check_bodies = []
     if ext_key == "through_all" and op_key in ("cut", "intersect"):
         check_bodies = list(bodies_ents) if bodies_ents else _solo_solid_body(host)
@@ -654,10 +632,9 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
     try:
         feature = host.features.extrudeFeatures.add(ext_input)
     except Exception as e:
-        # If 'distance' was an expression, name it - a bad reference can slip past the pre-check and
-        # only fail here, so the agent still learns which expression to fix. If a through_all cut could
-        # not find a body, TEACH the direction trap (confirmed live: a sketch ON a body's face points
-        # its normal AWAY from the material, so the default - and symmetric - direction hits pure air).
+        # A bad expression reference can slip past the pre-check and only fail here, so it is named.
+        # A sketch ON a body's face points its normal AWAY from the material, so the default - and
+        # symmetric - through_all direction hits pure air; that trap is taught below.
         if _inputs.looks_like_expression(distance):
             hint = f" The distance expression '{distance.strip()}' may be unresolvable - check param_get."
         elif ext_key == "through_all" and "body not found" in str(e).lower():
@@ -682,11 +659,9 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
     if check_bodies:
         deltas, vol_after = {}, _geom.volumes(check_bodies)
         for b in check_bodies:
-            # The OCCURRENCE-QUALIFIED name, the same spelling 'scoped_to_bodies' echoes. Fusion
-            # auto-names every component's first body 'Body1', so keying by the bare name COLLAPSES a
-            # cut scoped across two components into one entry and silently overwrites the first
-            # (measured: a cut removing 3.0 cm3 from one component and 1.0 from another published
-            # {"Body1": 1.0}) - a receipt that cannot tell "cut both" from "cut one".
+            # The OCCURRENCE-QUALIFIED name, the same spelling 'scoped_to_bodies' echoes: Fusion
+            # auto-names every component's first body 'Body1', so a bare-name key collapses a cut
+            # scoped across two components into one entry and overwrites the first.
             nm = _qualified_body_name(b) or "?"
             before, after = vol_before.get(id(b)), vol_after.get(id(b))
             if isinstance(before, (int, float)) and isinstance(after, (int, float)):
@@ -699,12 +674,10 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
                 # a caller whose evidence stops at those bodies.
                 fname = safe(lambda: feature.name) or "the new extrude feature"
                 return error("Extrude reported success but extent=through_all removed no material "
-                             f"from {', '.join(deltas)} - the cut ran the wrong way. through_all "
-                             "follows the sketch-plane normal, which on an on-face sketch points away "
-                             "from the body: pass the opposite 'distance' sign to cut into it. The "
-                             f"failed feature '{fname}' remains in the timeline (this check reads "
-                             "only those bodies, so a design-wide effect is not ruled out) - remove "
-                             "it with design_delete_feature if unwanted.")
+                             f"from {', '.join(deltas)}. through_all follows the sketch-plane "
+                             "normal, which on an on-face sketch points away from the body - pass "
+                             f"the opposite 'distance' sign. '{fname}' remains in the timeline (this "
+                             "check read only those bodies); remove it with design_delete_feature.")
 
     # cut/intersect EFFECT evidence, read BEFORE any rollback below: which bodies lost material, and
     # whether the solid census moved at all. Both are needed to claim nothing happened - a consumed
@@ -714,14 +687,9 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
     nothing_changed = bool(solid_snap) and not affected and solid_delta == 0
     scoped_names = ", ".join(n for n in (scoped_to or []) if n)
 
-    # A feature Fusion marks as a FAILED compute is never an ok: add() hands back a truthy feature
-    # object for it, so the health state is the only signal at this point. It is removed ONLY where
-    # the evidence above shows nothing landed - a rollback with geometry measurably changed would
-    # delete a real effect, so that case names the effect and leaves the feature to be judged.
-    # The ExtrudeFeature AND its TimelineObject are both asked, feature first, through
-    # _assert.compute_state - the ONE home for that pairing. The measured failure (a cut scoped with
-    # 'target_bodies' whose profile reaches none of them, leaving a WARNING item saying 'No target
-    # body!') was read off the TIMELINE ITEM, so a healthy feature state does not end the check.
+    # add() hands back a truthy feature object for a FAILED compute, so the health state is the only
+    # signal here - and a scoped cut reaching none of its bodies leaves a healthy FEATURE with a
+    # WARNING timeline item, which is why compute_state asks both.
     _state, failed = _assert.compute_state(feature)
     if failed:
         state_label, detail = failed
@@ -763,21 +731,9 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
                      "(a negative 'distance' reverses it)."
                      + _roll_back(design, feature, fname))
 
-    # DEPTH read-back, one loop over every side this extent carries: what the feature reports for
-    # that side's own distance ModelParameter, against the number the units engine evaluated THAT
-    # side's request to - literal and expression alike, since length_value_input answers a cm value
-    # for both forms. Side one lands on extentOne and side two on extentTwo - no swap (measured) -
-    # so a side is judged against its OWN request, never against the other's and never against a
-    # total.
-    #
-    # A side this CANNOT judge is recorded rather than passed over in silence: a success that
-    # skipped a compare is otherwise byte-indistinguishable from one that passed it, while every
-    # other success here means the depth read back matched. Three things withhold a verdict, and
-    # each is disclosed in the note below with the reason that applies:
-    #   - the units engine answered no number for the request (nothing to judge it against);
-    #   - the feature reported no depth for that side;
-    #   - the side is TWO-SIDED and its request is not positive. The two-sided measurement covers
-    #     positive requests only, so judging a negative one would test an unread convention.
+    # DEPTH read-back per side: the feature's own distance ModelParameter against the cm number the
+    # units engine evaluated THAT side's request to. Side one lands on extentOne and side two on
+    # extentTwo, so a side is judged against its own request. A side this cannot judge is disclosed.
     unverified = []
     landed_side = (_common.landed_extent_cm, _common.landed_extent2_cm)
     for i, (what, want_cm, raw, two_sided) in enumerate(depth_request):
@@ -796,11 +752,9 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
 
     body_names = [f["name"] for f in _common.body_facts(_common.result_bodies(feature))]
 
-    # body-split: a cut/intersect that DISCONNECTS the target leaves it in several pieces. The
-    # extruded profile removes no bodies, so any NET increase in the design-wide solid-body count is
-    # split-off pieces (a plain multi-body cut adds none). Live-verified: a full-width slot cut takes
-    # a bar's solid count 1 -> 2. Counting solids (not feature.bodies, which for a cut reports only
-    # the own-component result) also catches a split in a co-located component.
+    # body-split: the extruded profile removes no bodies, so any NET increase in the design-wide
+    # solid count is split-off pieces. Counting solids - not feature.bodies, which for a cut reports
+    # only the own-component result - also catches a split in a co-located component.
     split_count = solid_delta if op_key in ("cut", "intersect") else 0
 
     # 'component' names where the cut landed - not merely where the sketch lives - from the same
@@ -833,10 +787,9 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
         adv = root_body_advisory(design, host)          # advise on where the body actually landed
         if adv:
             note += " " + adv
-    # 'all' takes every closed region, so a bay inside a frame extrudes into material and the
-    # payload cannot show it - the enclosed regions are COUNTED and named here instead (behind
-    # safe(): a containment read that misbehaves must not sink an extrude that landed). The sentence
-    # stays operation-neutral because what a bay does under cut/intersect differs.
+    # 'all' takes every closed region, so a bay inside a frame extrudes into material and the payload
+    # cannot show it - the enclosed regions are counted and named here instead, behind safe() so a
+    # misbehaving containment read cannot sink an extrude that landed.
     enclosed = None
     if took_all and len(indices) > 1:
         enclosed = safe(lambda: _enclosed_regions(profiles, indices))
@@ -904,12 +857,9 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
         result["through_all_volume_removed_cm3"] = through_all_removed
     if len(affected_comps) > 1:
         result["affected_components"] = affected_comps
-    # THE FOOTGUN: an UNSCOPED cut/intersect (no 'target_bodies') that removed material from a component
-    # other than the sketch's own. Confirmed live: an unscoped cut takes every body that is BOTH
-    # coincident with the cut shape AND visible; a hidden co-located body is spared (its volume is
-    # unchanged, so the volume-diff below never flags it). 'target_bodies' overrides visibility - a
-    # named body is cut even while hidden - so the two levers are: pass 'target_bodies', or hide the
-    # bodies that must survive.
+    # An UNSCOPED cut/intersect takes every body that is BOTH coincident with the cut shape AND
+    # visible; a hidden co-located body is spared. 'target_bodies' overrides visibility - a named
+    # body is cut even while hidden - so the two levers are that input, or hiding what must survive.
     if scoped_to is None and op_key in ("cut", "intersect"):
         foreign = [c for c in affected_comps if c != sketch_owner]
         if foreign:
@@ -928,14 +878,8 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
 
 
 TOOL_DESCRIPTION = (
-"Extrude a closed sketch profile into a 3D solid (via sketch_create / sketch_add_geometry). "
-"'sketch_name' selects the sketch (omit = most recent); 'profile_index' picks the region "
-"(index/list/'all', or a sketch_get profile HANDLE for a multi-profile / on-face sketch). "
-"'operation': new | join | cut | intersect (cut/intersect act on existing bodies). "
-"'extent': distance (default, negative reverses, + 'symmetric'/'taper_deg') | "
-"through_all ('distance' sign picks direction; no taper) | to_face (up to 'to_object', a face) "
-"| two_side ('distance' + 'distance2', one per side; no taper). 'component' = where "
-"material landed; an unscoped cut into co-located parts warns (pass 'target_bodies')."
+"Extrude a closed sketch profile into a 3D solid. Build the profile with sketch_create / "
+"sketch_add_geometry first; sketch_get returns the profile handles 'profile_index' takes."
 )
 
 extrude_tool = (
@@ -943,7 +887,7 @@ extrude_tool = (
     .add_input_property("sketch_name", {"type": "string",
             "description": "Sketch holding the profile (omit = most recent sketch)."})
     .add_input_property("profile_index", {"type": ["integer", "string", "array"],
-            "description": "Region(s): an index (default 0), a list [0,2,3], '0,2,3', 'all', or ONE sketch_get profile 'handle' - a LIST of handles is rejected (several regions = index list). A sketch TEXT extrudes as itself: 'text:<i>' (or '<sketch>/text:<i>'), alone, no closed profile needed."})
+            "description": "Region(s): an index (default 0), a list [0,2,3], '0,2,3', 'all', or ONE sketch_get profile 'handle' (a LIST of handles is rejected). A sketch TEXT extrudes as itself: 'text:<i>' or '<sketch>/text:<i>', alone."})
     .add_input_property("distance", {"type": ["number", "string"],
             "description": "Extrude depth in 'units' (negative reverses), OR a parameter EXPRESSION string ('StockZ/2', '25 mm'; carries its own units). Side one for two_side; sign-only direction for through_all."})
     .add_input_property("distance2", {"type": ["number", "string"],
@@ -952,14 +896,14 @@ extrude_tool = (
     .add_input_property(*_inputs.boolean_op(default="new").as_property())
     .add_input_property(*_EXTENT.as_property())
     .add_input_property("symmetric", {"type": "boolean",
-            "description": "Extrude both sides of the plane by 'distance' each (extent=distance), or both directions (extent=through_all). Default false."})
+            "description": "Extrude both sides of the plane by 'distance' each (extent=distance), or both directions (extent=through_all)."})
     .add_input_property("taper_deg", {"type": "number",
             "description": "Draft/taper angle in degrees - extent=distance only (one-sided or symmetric)."})
     .add_input_property("to_object", _TO_OBJECT.schema())
     .add_input_property("target_bodies", _TARGET_BODIES.schema())
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
     .add_input_property("as_surface", {"type": "boolean",
-            "description": "Extrude into a SURFACE wall (no end caps, isSolid=False) instead of a solid (default false). Auto-applied when the sketch has only an open path. Every result reports 'is_solid'."})
+            "description": "Extrude into a SURFACE wall (no end caps) instead of a solid; auto-applied when the sketch has only an open path. Every result reports 'is_solid'."})
     .strict_schema()
 )
 extrude_item = Item.create_tool_item(tool=extrude_tool, write="write", handler=handler, run_on_main_thread=True,

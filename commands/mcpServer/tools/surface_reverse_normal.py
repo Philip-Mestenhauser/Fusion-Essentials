@@ -30,7 +30,7 @@ RETURNS = [
 
 _BODIES = _inputs.SurfaceBodyRefList(
     "bodies", required=True,
-    description="The OPEN surface body/bodies whose normals to flip (ALL faces of each are reversed).")
+    description="The bodies to flip; ALL faces of each are reversed.")
 
 
 def _count_reversed(bodies):
@@ -114,10 +114,7 @@ def reverse_normal_handler(bodies=None) -> dict:
 
 _DESC = (
 "Reverse the normal direction of OPEN surface bodies - for a stitch/thicken/offset that solidified "
-"toward the wrong side. 'bodies' is one or more open surface bodies (a solid is rejected). "
-"ReverseNormalFeatures flips ALL faces of each body - it has no per-face option. Reports "
-"'reversed_confirmed', a BRepFace.isParamReversed read-back of whether every face actually flipped; a "
-"reversed normal looks identical in a screenshot, so trust that flag over appearance.\n"
+"toward the wrong side. A flip looks identical in a screenshot, so read 'reversed_confirmed'.\n"
 + _outputs.produces_block(RETURNS)
 )
 

@@ -199,6 +199,15 @@ def options_kind(monkeypatch):
                         SimpleNamespace(create=_fake_options), raising=False)
 
 
+def _refusing_point(x, y, z):
+    """A camera point whose distanceTo declines to answer - the only route to the standoff
+    fallback, since a distance that READS is used whatever it is."""
+    def _no_read(self, other):
+        raise RuntimeError("distanceTo unavailable")
+
+    return type("RefusingPoint", (FakePoint,), {"distanceTo": _no_read})(x, y, z)
+
+
 class TestApplyNamedView:
     def test_named_view_assigns_camera_and_fits(self):
         vp = _FakeViewport()
@@ -240,6 +249,49 @@ class TestApplyNamedView:
             vp = _FakeViewport()
             vc.apply_named_view(vp, name)
             assert vp.assigned_camera is None and vp.fit_called == 0
+
+    def test_a_standoff_that_will_not_read_reports_the_fallback_it_used(self, monkeypatch):
+        # The distance read RAISED, so the orient ran on a substituted standoff. Returning None
+        # here would leave the caller unable to tell a 100 cm camera from a fabricated one.
+        import adsk.core
+        monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: FakePoint(x, y, z))
+        cam = _FakeCam()
+        cam.eye = _refusing_point(5, 0, 0)
+        vp = _FakeViewport(cam=cam)
+        used = vc.apply_named_view(vp, "front")
+        assert used == vc.STANDOFF_FALLBACK_CM
+        eye, tgt = vp._cam.eye, vp._cam.target
+        assert math.isclose(math.dist((eye.x, eye.y, eye.z), (tgt.x, tgt.y, tgt.z)),
+                            vc.STANDOFF_FALLBACK_CM, rel_tol=1e-9)
+
+    def test_a_standoff_that_reads_zero_falls_back_instead_of_collapsing_the_eye(self, monkeypatch):
+        # 0.0 READS, but using it rebuilds the eye ON the target - a camera with no view direction
+        # at all. It is unusable, so it takes the fallback and SAYS so; only a positive standoff is
+        # used as read.
+        import adsk.core
+        monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: FakePoint(x, y, z))
+        cam = _FakeCam()
+        cam.target = FakePoint(2, -3, 4)
+        cam.eye = FakePoint(2, -3, 4)            # exactly on the target - a standoff of 0.0
+        vp = _FakeViewport(cam=cam)
+        assert vc.apply_named_view(vp, "front") == vc.STANDOFF_FALLBACK_CM
+        eye, tgt = vp._cam.eye, vp._cam.target
+        assert math.isclose(math.dist((eye.x, eye.y, eye.z), (tgt.x, tgt.y, tgt.z)),
+                            vc.STANDOFF_FALLBACK_CM, rel_tol=1e-9)
+
+    def test_a_positive_standoff_is_used_as_read_and_reports_no_fallback(self, monkeypatch):
+        # the boundary's other side: 13 cm is usable, so it survives the orient untouched and the
+        # fallback channel stays null.
+        import adsk.core
+        monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: FakePoint(x, y, z))
+        cam = _FakeCam()
+        cam.target = FakePoint(2, -3, 4)
+        cam.eye = FakePoint(5, 1, 16)            # (3, 4, 12) from it - a standoff of exactly 13
+        vp = _FakeViewport(cam=cam)
+        assert vc.apply_named_view(vp, "front") is None
+        eye, tgt = vp._cam.eye, vp._cam.target
+        assert math.isclose(math.dist((eye.x, eye.y, eye.z), (tgt.x, tgt.y, tgt.z)), 13.0,
+                            rel_tol=1e-9)
 
 
 class TestApplyNamedViewEyeSide:

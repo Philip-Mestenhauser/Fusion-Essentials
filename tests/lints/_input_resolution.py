@@ -3,11 +3,8 @@
 
 """Resolve, per tool module, which local variables hold a FeatureInput and of what class.
 
-Shared by the two lints that need it: test_input_property_names (is this property real?) and
-test_bool_returns_checked (was this setter's answer read?). One home, because both depend on the
-same tricky scoping - sibling handlers reuse the name 'inp', and the work happens in a nested
-closure that must still see the collection bound in its enclosing handler.
-"""
+input_scopes() is the entry point for test_input_property_names and test_bool_returns_checked.
+Scopes are per-function and carry enclosing bindings: sibling handlers reuse the name 'inp'."""
 
 import ast
 import os
@@ -33,13 +30,9 @@ def _factories_by_method():
     return out
 
 
-# The factory methods whose declarations ALL return the SAME input class. The receiver then adds
-# nothing, which is what resolves a collection reached through a PARAMETER - nothing in its own file
-# binds one. The filter reads RETURNED CLASSES, not declaring collections: a method several
-# collections declare still resolves as long as they agree on what it hands back, and only a method
-# whose declarations DISAGREE is dropped. `createInput` is the one that matters - its declarations
-# disagree on what they return, so it names no class, and a resolved name can never be a
-# same-named factory on some other one.
+# The factory methods whose declarations ALL return the SAME input class - what resolves a
+# collection reached through a PARAMETER, since nothing in its own file binds one. The filter reads
+# RETURNED CLASSES, so `createInput`, whose declarations disagree, names no class.
 _UNIQUE_FACTORIES = {m: next(iter(v)) for m, v in _factories_by_method().items() if len(v) == 1}
 
 
@@ -109,9 +102,7 @@ def _iter_tool_files():
 
 
 # The name-by-string forms: (callable, index of the object arg, index of the property-name arg).
-# set_verified is the repo's preferred way to assign an input property, and it passes the name as a
-# STRING - so a gate that only walked attribute assignments would be blind to exactly the code that
-# follows the convention.
+# set_verified passes the property name as a STRING, so an attribute-only walk would be blind to it.
 _STRING_FORMS = {"set_verified": (0, 1), "setattr": (0, 1)}
 
 
@@ -142,12 +133,8 @@ def _named_assignments_in(nodes):
 def _scopes(tree):
     """[(nodes, enclosing_nodes)] - one entry per function body plus the module's, each body
     EXCLUDING functions nested inside it (they become entries of their own) but carrying everything
-    lexically enclosing it.
-
-    Both halves are load-bearing. Sibling handlers in one file reuse the same local name ('inp',
-    'feats') for a DIFFERENT object, so a module-wide map checks against whichever class the walk
-    saw last. And a handler routinely binds the collection then does the work in a nested closure,
-    so a scope that could not see outward would resolve nothing at all."""
+    lexically enclosing it: sibling handlers reuse a local name ('inp', 'feats') for a DIFFERENT
+    object, and a handler routinely binds the collection then works in a nested closure."""
     scopes = []
 
     def collect(body, enclosing):
@@ -171,13 +158,9 @@ def _scopes(tree):
 
 def _builder_returns(tree):
     """function name -> {position: 'module.Class'} for every function in the module that BUILDS a
-    FeatureInput and hands it back. `position` is the index in a returned TUPLE, or None for a bare
-    return.
-
-    `return holes.createSimpleInput(d), None` is this repo's builder idiom - the input paired with
-    the error that would have replaced it - so the caller binds the input through a TUPLE target.
-    A walk that reads only the factory call site sees no input in the CALLER at all, and clears
-    every setter on it."""
+    FeatureInput and hands it back; `position` is the index in a returned TUPLE, None for a bare
+    return. `return holes.createSimpleInput(d), None` is this repo's builder idiom, so the caller
+    binds the input through a TUPLE target."""
     out = {}
     for fn in ast.walk(tree):
         if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -245,10 +228,8 @@ def _bindings(nodes, coll_vars, builders=None):
 
 
 def input_scopes(tree):
-    """(nodes, {var: 'module.Class'}) for every scope in ONE module that binds a FeatureInput.
-
-    The ONE place the two lints over this corpus decide what holds an input, so a shape one of them
-    learns to follow cannot stay invisible to the other."""
+    """(nodes, {var: 'module.Class'}) for every scope in ONE module that binds a FeatureInput - the
+    one place both lints over this corpus decide what holds an input."""
     builders = _builder_returns(tree)
     for nodes, enclosing in _scopes(tree):
         visible = enclosing + nodes
@@ -259,10 +240,7 @@ def input_scopes(tree):
 
 def _offenders_in(path):
     """[(line, var, prop, class)] for every property assigned onto a resolved input whose name is
-    not a real member of that input's class.
-
-    The tree comes from _corpus, shared with every other lint that parses the same file, and this
-    walk only READS it: the two dict writes below are keyed BY a node's value, never onto a node."""
+    not a real member of that input's class."""
     offenders = []
     for nodes, bound in input_scopes(_corpus.tree(path)):
         for lineno, var, prop in _named_assignments_in(nodes):

@@ -1,35 +1,24 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Lint: every public attribute a SHARED fake exposes exists on its live adsk counterpart.
-
-The shared fakes in conftest.py impersonate live types by name; a fake attribute the live type
-does not have teaches tool code an API that will AttributeError in Fusion, and a live rename or
-removal (a Fusion update) must surface as a red test, not a silently-wrong mock. SHAPES in the
-generated live_api_facts.py is the measured dir() membership of each type; this lint checks each
-mapped fake's public surface (class attrs, methods, and self.X assignments in __init__) against
-it. Bespoke per-test fakes are deliberately NOT swept - migrating them to the shared fakes is
-what makes them safer.
-
-The map is COMPLETE by construction: any conftest class whose stripped name (leading underscore
-and a Fake/Make prefix removed) matches a SHAPES key is mapped automatically, any other fake states
-its live type in its own ``@fusion_fake`` declaration, and a fake-shaped conftest class that maps to
-nothing FAILS - a new shared fake cannot dodge the sweep by simply not declaring.
-
-Those declarations are also the inventory this file publishes: ``declarations()`` and
-``_conftest_functions()`` are what test_api_fact_provenance.py runs its provenance rules over, so
-the fakes, the defs that construct them and the live types they stand for are enumerated ONCE.
-"""
+"""Lint: every public attribute a SHARED fake exposes exists on its live adsk counterpart, and
+every shared fake declares the live type it stands for plus the MEASURED rows behind it.
+A fake-shaped conftest class maps to a SHAPES key (by name or by its own @fusion_fake declaration)
+or fails; a mapped fake cites row ids that resolve against measure_api.ROWS."""
 
 import ast
 import os
+import sys
 
 import _corpus
 import conftest
 import live_api_facts
 
-_CONFTEST = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                         "conftest.py")
+TESTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_CONFTEST = os.path.join(TESTS_DIR, "conftest.py")
+
+sys.path.insert(0, os.path.join(TESTS_DIR, "live"))
+import measure_api  # noqa: E402  the claim-id registry - ROWS, one dict per row, keyed 'id'
 
 
 def _conftest_classes():
@@ -107,20 +96,17 @@ def _auto_mapped(class_names, shapes):
 
 
 def _is_fake_shaped(name, live_names):
-    """test_bespoke_fake_ratchet's fake-shape discriminator, mirrored (that file is owned
-    separately): Fake/_Fake-prefixed or the bare name of a live adsk type - plus the Make prefix
-    conftest's builder fakes use."""
+    """Fake/_Fake-prefixed, the Make prefix conftest's builder fakes use, or the bare name of a
+    live adsk type."""
     return (name.startswith("Fake") or name.startswith("_Fake") or name.startswith("Make")
             or name in live_names)
 
 
 def _live_type_names():
     """Every live adsk class name a bare conftest class could be standing in for: the MEASURED
-    SHAPES keys plus every class in the generated api_surface dump - the ratchet's widened
-    discriminator, mirrored. Without the api_surface half, a conftest fake named exactly like a
-    live type that has no shape dump YET is invisible to the completeness gate, which is the one
-    case that most needs it. Only the DISCRIMINATOR widens: the auto-map still keys on SHAPES,
-    since a fake can only be swept against a type that has been measured."""
+    SHAPES keys plus every class in the generated api_surface dump. Without the api_surface half a
+    fake named exactly like a live type that has no shape dump YET is invisible to the completeness
+    gate. Only the DISCRIMINATOR widens - the auto-map still keys on SHAPES."""
     import api_surface
     names = set(live_api_facts.SHAPES)
     for table in (api_surface.PROPERTIES, api_surface.FACTORIES):
@@ -198,8 +184,12 @@ class TestSharedFakeShapesExist:
         # mock - it must map (rename it so the stripped name hits a SHAPES key, declare its live
         # type, or measure the missing live type), never just be left out.
         classes = _conftest_classes()
+        live = _live_type_names()
+        # the discriminator's two name sources: narrow it to either half alone and a bare shadow of
+        # a live type drops out of this gate with nothing to report.
+        assert set(live_api_facts.SHAPES) <= live and "MeshRepairFeature" in live
         unmapped = _unmapped_fakes(classes, live_api_facts.SHAPES, _declared_map(), _UNMAPPED_OK,
-                                   live_names=_live_type_names())
+                                   live_names=live)
         assert not unmapped, (
             "fake-shaped conftest classes the shape sweep would silently skip - map each to a "
             "SHAPES key (auto: name it after the live type; or declare @fusion_fake(live_type=...) "
@@ -235,50 +225,6 @@ class TestSharedFakeShapesExist:
                 stale.append(f"{name}: declares a @fusion_fake live_type - remove the entry")
         assert not stale, "stale _UNMAPPED_OK entries:\n  " + "\n  ".join(stale)
 
-    def test_the_completeness_gate_bites(self):
-        shapes = {"Widget": ["name"], "BoundingBox3D": ["minPoint"]}
-        # a new Fake-prefixed class with no matching SHAPES key and no entry MUST be flagged...
-        assert _unmapped_fakes(["FakeGizmo"], shapes, {}, {}) == ["FakeGizmo"]
-        # ...auto-map catches the stripped-name matches (Fake/_Fake/Make prefixes, underscore)...
-        assert _unmapped_fakes(["FakeWidget", "_FakeWidget", "MakeWidget", "FakeBoundingBox3D"],
-                               shapes, {}, {}) == []
-        assert _auto_mapped(["FakeBoundingBox3D"], shapes) == {"FakeBoundingBox3D": "BoundingBox3D"}
-        # ...a declared live type (the map's manual half) or an allowlist entry excuses, an
-        # unrelated helper never trips.
-        assert _unmapped_fakes(["FakeGizmo"], shapes, {"FakeGizmo": "Widget"}, {}) == []
-        assert _unmapped_fakes(["FakeGizmo"], shapes, {}, {"FakeGizmo": "reason"}) == []
-        assert _unmapped_fakes(["WidgetHelper"], shapes, {}, {}) == []
-        # a bare live-type shadow (the ratchet's third shape) is fake-shaped too - and auto-maps.
-        assert _is_fake_shaped("Widget", shapes) and _unmapped_fakes(["Widget"], shapes, {}, {}) == []
-        # ...and a bare shadow of a live type with NO shape dump is caught by the widened
-        # discriminator while the auto-map (SHAPES only) correctly refuses to map it.
-        assert _unmapped_fakes(["Gadget"], shapes, {}, {}) == []
-        assert _unmapped_fakes(["Gadget"], shapes, {}, {},
-                               live_names=set(shapes) | {"Gadget"}) == ["Gadget"]
-        # the real name set carries both halves: measured shapes and api_surface-only classes
-        live = _live_type_names()
-        assert set(live_api_facts.SHAPES) <= live and "MeshRepairFeature" in live
-
-    def test_a_declaration_is_never_inherited(self, monkeypatch):
-        # The reader's load-bearing choice, driven through declarations() itself. A subclass that
-        # declares nothing must be ABSENT from the inventory: reading the attribute with a getattr
-        # would answer the BASE's declaration for it, and the subclass would then be swept against
-        # the base's live type, on provenance it never stated, while reading green.
-        import test_fake_shapes_exist as this_module
-
-        class _UndeclaredChild(conftest.FakeSetup):
-            pass
-
-        monkeypatch.setattr(conftest, "_UndeclaredChild", _UndeclaredChild, raising=False)
-        classes = dict(_conftest_classes())
-        classes["_UndeclaredChild"] = classes["FakeSetup"]   # the reader's AST half, stood in for
-        monkeypatch.setattr(this_module, "_conftest_classes", lambda: classes)
-        decls = declarations()
-        assert decls["FakeSetup"]["live_type"] == "Setup", "the declaring base must still be read"
-        assert "_UndeclaredChild" not in decls, (
-            "declarations() answered a subclass with its BASE's declaration - it must read the "
-            "declaration an object carries ITSELF, never an inherited one")
-
     def test_allowlist_entries_still_trip(self):
         classes = _conftest_classes()
         stale = []
@@ -290,3 +236,120 @@ class TestSharedFakeShapesExist:
             elif attr in live_api_facts.SHAPES.get(_effective_map(classes).get(fake, ""), ()):
                 stale.append(f"{key}: the attribute exists live - remove the entry")
         assert not stale, "stale allowlist entries:\n  " + "\n  ".join(stale)
+
+
+# The provenance arm, over the same inventory: a declaration is STRUCTURED DATA on the fake
+# (@fusion_fake(live_type=..., facts=(...))), never prose. It states exactly one kind, its facts
+# resolve against measure_api.ROWS, a mapped fake declares a live type and at least one row, and a
+# def that CONSTRUCTS a declared fake says which one.
+
+_KINDS = ("live_type", "factory_for", "scenario_double")
+
+
+def claim_ids():
+    """Every claim id the live measurement registry defines."""
+    return {row["id"] for row in measure_api.ROWS}
+
+
+def _kind_problems(decls):
+    out = []
+    for name, declaration in sorted(decls.items()):
+        # a blank string is not a classification: the scenario_double kind IS its reason
+        kinds = [k for k in _KINDS if str(declaration.get(k) or "").strip()]
+        if len(kinds) != 1:
+            out.append(f"{name}: a declaration is exactly one of {'/'.join(_KINDS)} - this one is "
+                       f"{kinds or 'none of them'} (a scenario_double needs its reason string)")
+            continue
+        if declaration.get("scenario_double") and declaration.get("facts"):
+            out.append(f"{name}: classified as standing for no live type, so it can cite no "
+                       "measurement row - put the facts on the fake they measure")
+        target = declaration.get("factory_for")
+        if target and target not in decls:
+            out.append(f"{name}: factory_for names '{target}', which carries no @fusion_fake "
+                       "declaration of its own - it names the declared fake this def constructs")
+    return out
+
+
+def _unresolved_facts(decls, known):
+    """An id that never entered the registry and one whose row was renamed read the same here."""
+    return [f"{name}: '{fact}' is no row id in measure_api.ROWS"
+            for name, declaration in sorted(decls.items())
+            for fact in declaration.get("facts", ()) if fact not in known]
+
+
+def _unbacked_mapped(mapping, auto, decls):
+    """A mapped fake that declares nothing, declares a live type its own auto-mapped NAME
+    contradicts, or names no measurement row. A declaration wins the merge, so the contradiction
+    is judged against `auto`, not against `mapping`."""
+    out = []
+    for fake, live in sorted(mapping.items()):
+        declaration = decls.get(fake)
+        if declaration is None:
+            out.append(f"{fake}: the shape sweep maps it onto live {live}, but it declares no "
+                       "@fusion_fake - name the live type and the row(s) that measured it")
+        elif declaration.get("live_type") != auto.get(fake, declaration.get("live_type")):
+            out.append(f"{fake}: declares live_type {declaration.get('live_type')!r} while its "
+                       f"NAME maps it onto {auto[fake]!r} - one of the two is wrong")
+        elif not declaration.get("facts"):
+            out.append(f"{fake}: declares live {live} and no measurement row - cite the row that "
+                       "measured what it encodes")
+    return out
+
+
+def _constructed(node, names):
+    return {call.func.id for call in ast.walk(node)
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+            and call.func.id in names}
+
+
+def _undeclared_factories(functions, decls):
+    fakes = {n for n, d in decls.items() if d.get("live_type") or d.get("scenario_double")}
+    out = []
+    for name, node in sorted(functions.items()):
+        built = _constructed(node, fakes)
+        if built and name not in decls:
+            out.append(f"{name}: constructs {', '.join(sorted(built))} - declare "
+                       "@fusion_fake(factory_for=...) naming the fake it constructs")
+    return out
+
+
+class TestApiFactProvenance:
+    def test_every_declaration_is_well_formed(self):
+        bad = _kind_problems(declarations())
+        assert not bad, (
+            "@fusion_fake declarations in conftest.py that state no single classification:\n  "
+            + "\n  ".join(bad))
+
+    def test_every_declared_fact_resolves_against_the_registry(self):
+        bad = _unresolved_facts(declarations(), claim_ids())
+        assert not bad, (
+            "conftest.py fakes cite claim ids measure_api.py does not carry, so nothing fails when "
+            "the claim outlives the measurement. Cite the row that backs it "
+            "(VERIFIED_API_FACTS.md's 'encoded in' column usually names the fake) - or, when no row "
+            "carries the claim, add a measurement row and measure it live (py -3 "
+            "tests/live/measure_api.py with Fusion up):\n  " + "\n  ".join(bad))
+
+    def test_every_mapped_fake_declares_its_live_type_and_a_row(self):
+        classes = _conftest_classes()
+        bad = _unbacked_mapped(_effective_map(classes),
+                               _auto_mapped(classes, live_api_facts.SHAPES),
+                               declarations())
+        assert not bad, (
+            "shared fakes the shape sweep maps onto a live type without saying what measured "
+            "them:\n  " + "\n  ".join(bad))
+
+    def test_every_factory_of_a_declared_fake_is_declared(self):
+        bad = _undeclared_factories(_conftest_functions(), declarations())
+        assert not bad, (
+            "conftest.py defs construct a declared fake without naming it, so they sit outside the "
+            "inventory the shape sweep and the rules above run on:\n  " + "\n  ".join(bad))
+
+    def test_the_declarations_read_the_real_conftest_fakes(self):
+        # a reader that found nothing, or read some other attribute, would pass every rule above
+        # green over any conftest at all.
+        decls = declarations()
+        assert decls, "no conftest.py fake carries a @fusion_fake declaration - the reader is dead"
+        assert decls["FakeOccurrence"]["live_type"] == "Occurrence"
+        assert "shape-dump-design-world" in decls["FakeOccurrence"]["facts"]
+        assert decls["body_proxy"]["factory_for"] == "_OccurrenceProxy"
+        assert decls["_EntityProxy"]["scenario_double"].strip()

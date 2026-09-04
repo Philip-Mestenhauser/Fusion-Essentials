@@ -1,8 +1,7 @@
 """Wire format: the JSON-RPC tools/list response includes annotations and strict schemas.
 
-SimpleMCPServer._handle_tools_list must emit every tool entry via to_dict(), which
-includes annotations (readOnlyHint/destructiveHint) and strict-schema additionalProperties=false.
-"""
+SimpleMCPServer._handle_tools_list emits every tool entry via to_dict(), so each carries
+annotations (readOnlyHint/destructiveHint) and strict-schema additionalProperties=false."""
 
 import pytest
 
@@ -22,7 +21,6 @@ def server():
 
 class TestToolsListWireFormat:
     def test_tools_list_sends_annotations_on_the_wire(self, server):
-        """Every entry in tools/list response includes annotations."""
         result = server._handle_tools_list(request_id="test-id")
         assert result["jsonrpc"] == "2.0"
         assert result["id"] == "test-id"
@@ -32,7 +30,6 @@ class TestToolsListWireFormat:
             assert "annotations" in entry, f"{entry.get('name')} missing annotations on wire"
 
     def test_all_entries_have_required_keys(self, server):
-        """Every entry has name, description, inputSchema, annotations keys."""
         result = server._handle_tools_list(request_id="test-1")
         tools = result["result"]["tools"]
         for entry in tools:
@@ -42,7 +39,6 @@ class TestToolsListWireFormat:
             assert "annotations" in entry, f"Entry {entry.get('name')} missing annotations"
 
     def test_read_only_tools_have_correct_annotations(self, server):
-        """Read-only tools: readOnlyHint=true, no destructiveHint true."""
         result = server._handle_tools_list(request_id="test-2")
         tools = result["result"]["tools"]
         for entry in tools:
@@ -54,8 +50,6 @@ class TestToolsListWireFormat:
                 )
 
     def test_no_audience_priority_lastmodified_in_annotations(self, server):
-        """Annotations must not include audience, priority, or lastModified (tool-level annotations
-        carry only readOnlyHint and destructiveHint on the wire)."""
         result = server._handle_tools_list(request_id="test-4")
         tools = result["result"]["tools"]
         for entry in tools:
@@ -65,10 +59,6 @@ class TestToolsListWireFormat:
             assert "lastModified" not in ann, f"{entry['name']}: lastModified should not be in annotations"
 
     def test_strict_schema_tool_has_additional_properties_false(self, server):
-        """At least one known strict-schema tool (e.g. assembly_ground from assembly_transform.py)
-        has inputSchema.additionalProperties == false on the wire. Strictness (.strict_schema() on
-        the Tool builder) is a per-tool OPT-IN, not a blanket property of every registered tool - so
-        this checks known adopters rather than sweeping every entry."""
         result = server._handle_tools_list(request_id="test-5")
         tools = result["result"]["tools"]
         strict_schema_tools = [
@@ -87,8 +77,6 @@ class TestToolsListWireFormat:
         ), f"No known strict-schema tool found. Found: {tool_names}"
 
     def test_destructive_tools_marked_on_the_wire(self, server):
-        """At least one destructive tool crosses the wire with destructiveHint=true, and every
-        destructive entry is also readOnlyHint=false (a destructive read is a contradiction)."""
         result = server._handle_tools_list(request_id="test-9")
         tools = result["result"]["tools"]
         destructive = [
@@ -101,7 +89,6 @@ class TestToolsListWireFormat:
             )
 
     def test_all_descriptions_non_empty(self, server):
-        """Every entry's description is non-empty."""
         result = server._handle_tools_list(request_id="test-6")
         tools = result["result"]["tools"]
         for entry in tools:
@@ -109,7 +96,6 @@ class TestToolsListWireFormat:
             assert desc, f"Tool {entry['name']} has empty description"
 
     def test_read_only_hint_is_bool(self, server):
-        """readOnlyHint in annotations must be a boolean."""
         result = server._handle_tools_list(request_id="test-7")
         tools = result["result"]["tools"]
         for entry in tools:
@@ -120,7 +106,6 @@ class TestToolsListWireFormat:
                 )
 
     def test_destructive_hint_when_present_is_bool(self, server):
-        """destructiveHint in annotations, when present, must be a boolean."""
         result = server._handle_tools_list(request_id="test-8")
         tools = result["result"]["tools"]
         for entry in tools:

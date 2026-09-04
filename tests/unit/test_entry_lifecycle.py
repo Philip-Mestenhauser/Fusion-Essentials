@@ -44,8 +44,7 @@ ENTRY_PACKAGE = "mcpServer"
 
 class _FakeTaskManager:
     """Counts start/stop. It stands in for the add-in's own TaskManager, not for any adsk type, so
-    conftest's shared adsk fakes have nothing to reuse here (the _RAISED entry in
-    test_bespoke_fake_ratchet.py records the same fact for the lint)."""
+    conftest's shared adsk fakes have nothing to reuse here."""
 
     def __init__(self):
         self.started = 0

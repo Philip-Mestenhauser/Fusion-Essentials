@@ -525,10 +525,11 @@ class TestEdgeTargets:
         assert seen[0][0] is edge
         assert out["a"] == "edge 'Edge1'"
 
-    def test_the_description_names_the_edge_handle_it_accepts(self):
-        # the claim and the kind agree: a description offering an edge handle is backed by the
-        # allow= above, which is what refuses every kind it does not list
-        assert "face/edge/body" in mb.TOOL_DESCRIPTION
+    def test_the_wire_names_the_edge_handle_it_accepts(self):
+        # the claim and the kind agree: the target inputs offer an edge handle, and the allow= above
+        # is what refuses every kind it does not list
+        props = mb.tool.to_dict()["inputSchema"]["properties"]
+        assert "edge" in props["a"]["description"] and "edge" in props["b"]["description"]
 
     def test_a_kind_outside_the_allow_set_is_still_refused(self):
         # the allow= widening is exactly one kind wide - a mesh handle stays refused

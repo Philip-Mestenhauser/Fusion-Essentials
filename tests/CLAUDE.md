@@ -71,9 +71,9 @@ still passes under `-p randomly` despite the leak surface.
 
 **Do not copy the bespoke pattern for a new test.** Migrating an existing bespoke fake onto the
 matching shared fake is welcome — and for a fake of a type that has a live SHAPES dump it is the
-green-lit direction: `test_bespoke_fake_ratchet.py`'s per-file baseline records each migration by
-falling. A type with no measured shape has no shared fake to migrate onto, so leave its bespoke fake
-alone. Either way, don't block unrelated work on it.
+green-lit direction: the shared fake is swept against that dump by `test_fake_shapes_exist.py`,
+which a bespoke copy never is. A type with no measured shape has no shared fake to migrate onto, so
+leave its bespoke fake alone. Either way, don't block unrelated work on it.
 
 ## The dual-seam trap
 

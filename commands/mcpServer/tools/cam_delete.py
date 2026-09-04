@@ -38,10 +38,8 @@ def handler(entity: str = "") -> dict:
         return error(f"Fusion declined to delete '{want}' (deleteMe returned false). It may be locked, "
                      "referenced, or not deletable in its current state.")
 
-    # Verify the effect: re-resolve the name over the tree. MEASURED (2705.0.87): a
-    # same-transaction read of a deleted node RAISES InternalValidationError - itemByName never
-    # returns None for it - so the safe()-wrapped walk reporting a MISS is the delete-confirmed
-    # signal, and a node that still resolves cleanly means deleteMe's true was a lie.
+    # A same-transaction read of a deleted node RAISES rather than returning None, so the
+    # safe()-wrapped walk reporting a MISS is the delete-confirmed signal.
     node2, rerr2 = resolve_cam_node(cam, want, kinds=("setup", "operation", "folder", "pattern"),
                                     label="CAM entity")
     if node2 is not None and rerr2 is None:

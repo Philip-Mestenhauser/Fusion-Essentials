@@ -6,9 +6,6 @@
   model_revolve -> spin a closed sketch profile around an axis to make a solid of revolution
                    (shafts, pistons, pulleys, bottles, anything turned). Choose the feature
                    operation, the angle (full 360 or partial), and symmetry. WRITES.
-
-The companion to model_extrude - revolve sweeps a profile around an axis instead of extruding it
-straight.
 """
 
 import math
@@ -33,28 +30,17 @@ _PROFILE = _inputs.ProfileRef("profile_index", scope_input="component")
 
 _VEC_TO_KEY = {(1, 0, 0): "x", (0, 1, 0): "y", (0, 0, 1): "z"}
 
-# The revolve axis. RevolveFeatures.createInput's axis takes the entity that DEFINES the axis - "a
-# sketch line, construction axis, linear edge or a face that defines an axis (cylinder, cone, torus,
-# etc.)" (the installed API's own doc) - so face_entity hands the FACE itself through. A face resolved
-# to a direction VECTOR drops the axis POSITION: a cylinder face at x=30 would revolve about the world
-# axis through the ORIGIN, which is silent wrong geometry.
+# face_entity hands an axis-defining FACE through: createInput's axis takes the entity that DEFINES
+# the axis, and a face resolved to a direction vector would drop the axis POSITION - a cylinder at
+# x=30 would revolve about the world axis through the origin.
 _AXIS = _inputs.AxisRef("axis", face_entity=True, default="z")
 
 
 def _in_context(ent, comp, design):
-    """(entity, error) - the axis entity in a form the revolve's component can consume. Mirrors
-    model_pattern._in_context, the sibling running the same face_entity AxisRef.
-
-    MEASURED: a NATIVE entity (assemblyContext None) owned by ANOTHER component kills the call
-    outright - the cross-component face took the whole script host down, not a catchable raise -
-    while the same face proxied into the occurrence that carries it is accepted and revolves about
-    the correct off-origin axis. An entity that already has an assembly context, or one owned by
-    `comp` itself, passes untouched.
-
-    The walk itself - and its refusal of a component placed SEVERAL times, which for a revolve means
-    a healthy-looking body turning about the wrong line - is _inputs.single_placement; the leaf op
-    here is the proxy revolveFeatures.createInput takes, worded to complete the caller's "Could not
-    resolve axis '<x>': ..." sentence."""
+    """(entity, error) - the axis entity in a form the revolve's component can consume."""
+    # A NATIVE entity (assemblyContext None) owned by ANOTHER component takes the whole script host
+    # down, not a catchable raise; the same entity proxied into the occurrence that carries it is
+    # accepted. The refusal wording completes the caller's "Could not resolve axis '<x>': ..."
     occ, err = _inputs.single_placement("it", ent, comp, design)
     if err:
         return None, err
@@ -70,21 +56,14 @@ def _in_context(ent, comp, design):
 
 def _cut_check_bodies(comp):
     """The solid bodies a cut/intersect revolve can act on: every solid directly in the feature's
-    host component. A revolve takes no participant-body scoping, so there is no narrower sample.
-
-    Resolved ONCE, before the mutation, and the same objects re-read afterwards - that is the id()
-    keying precondition _geom.volumes documents."""
+    host component, resolved once so the same objects are re-read afterwards."""
     return [b for b in _common.iter_collection(safe(lambda: comp.bRepBodies))
             if safe(lambda b=b: b.isSolid)]
 
 
 def _axis_entity(design, comp, sketch, axis):
-    """Resolve the revolve axis to an entity: world x/y/z -> that origin ConstructionAxis; a
-    find_geometry/sketch 'handle' -> the resolved straight edge / sketch line / construction axis, or
-    the axis-defining FACE itself (via the shared AxisRef kind); or 'line:<index>' -> a line by
-    position in the profile's OWN sketch - the one selector AxisRef can't express generically, since
-    it has no notion of "this profile's sketch".
-    Returns (axis_entity, label) on success, or (None, error_detail) on failure."""
+    """(axis entity, label), or (None, error detail): world x/y/z, a handle, or 'line:<index>' for
+    a line by position in the profile's own sketch."""
     a = (axis or "z").strip().lower()
     if a.startswith("line:"):
         try:
@@ -105,11 +84,8 @@ def _axis_entity(design, comp, sketch, axis):
         key = _VEC_TO_KEY.get(val)
         ent = _inputs.world_construction_axis(comp, key) if key else None
         return ent, f"{key}-axis"
-    # kind == "edge": the resolved axis ENTITY - a straight BRepEdge, sketch line, construction axis
-    # or, on this face_entity input, the axis-defining face - brought into `comp`'s assembly context
-    # when it is native to another component. Labelled as model_pattern._direction_label labels one:
-    # the entity's own NAME when it has one (a construction axis does), else its type (no BRepEdge or
-    # BRepFace carries a name) - never a world key the revolve did not use.
+    # The label is the entity's own name where it has one (a construction axis does), else its type
+    # - neither a BRepEdge nor a BRepFace carries a name.
     ent, cerr = _in_context(val, comp, design)
     if cerr:
         return None, cerr
@@ -157,6 +133,11 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
             return error(perr)
         idx = "handle"
     else:
+        # The index path reads sketch.profiles directly, never through ProfileRef, so a deferred
+        # sketch's pcount and item(idx) are both the pre-deferral ones.
+        stale = _inputs.deferred_sketch_refusal("profile_index", sketch)
+        if stale:
+            return error(stale)
         if pcount == 0:
             return error(f"Sketch '{safe(lambda: sketch.name)}' has no closed profile to revolve.")
         try:
@@ -249,24 +230,18 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
         "note": ("Profile revolved into a solid. Pair with view_screenshot (iso) to view it."
                  + ((" " + _adv) if (op_key == "new" and (_adv := root_body_advisory(design, host))) else "")),
     }
-    # Published only where the before/after pair was READABLE: a null here would read as "no material
-    # moved" rather than "the measurement could not be taken", so the key is simply absent instead.
+    # Absent, never null: a null would read as "no material moved".
     if volume_delta_cm3 is not None:
         payload["volume_delta_cm3"] = volume_delta_cm3
     return ok(payload)
 
 
 TOOL_DESCRIPTION = (
-"Revolve a closed sketch profile about an axis into a 3D solid (a turned/lathe part). The companion "
-"to model_extrude. 'sketch_name' selects the sketch "
-"(omit = most recent); 'profile_index' picks the region (0-based index, OR a sketch_get profile "
-"'handle' for a multi-profile sketch). A find_geometry handle at a CYLINDRICAL, conical or toroidal "
-"face turns about that face's OWN axis line, so an off-origin axis works. "
-"The profile must NOT CROSS the axis - a full-width section self-intersects and is refused; sketch "
-"one half and revolve that. 'angle_deg' is "
-"the sweep (360 = full revolve). 'operation': new | join | cut | "
-"intersect. 'symmetric' splits the angle both ways. The feature/body land in "
-"the sketch's OWNING component (reported as 'component'). Returns the resulting body names."
+"Revolve a closed sketch profile about an axis into a 3D solid (a turned/lathe part) - the "
+"companion to model_extrude. The profile must NOT CROSS the axis: a full-width section "
+"self-intersects and is refused, so sketch one half and revolve that. An 'axis' handle at a "
+"CYLINDRICAL, conical or toroidal face turns about that face's OWN axis line, so an off-origin "
+"axis works."
 )
 
 revolve_tool = (

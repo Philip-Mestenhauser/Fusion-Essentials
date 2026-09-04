@@ -3,17 +3,9 @@
 
 """MCP building block: ASSERT a named geometric relation between two entities, with the evidence.
 
-  model_measure_relation -> pass/fail for one named predicate (coaxial / concentric / parallel /
-                            perpendicular / flush / clearance / touching) over two targets, WITH the measured numbers
-                            (angle, axis offset, min distance) and the tolerance it judged against.
-                            Turns "call model_measure_between twice and eyeball the numbers" into one
-                            verified verdict. Read-only.
-
-The coaxial trap this exists to catch: two axes at angle 0 are PARALLEL, not COAXIAL - coaxial also
-needs the axis lines to coincide (zero perpendicular offset). This checks BOTH.
-
-Geometry sources: measureMinimumDistance/measureAngle plus adsk.core Cylinder.axis/origin and
-Plane.normal/origin.
+  model_measure_relation -> pass/fail for one predicate (coaxial / concentric / parallel /
+      perpendicular / flush / clearance / touching) over two targets, with the measured numbers and
+      the tolerance. Two axes at angle 0 are PARALLEL, not COAXIAL: coaxial needs a zero offset too.
 """
 
 import math
@@ -50,18 +42,14 @@ _A = _inputs.TargetRef("entity_a", required=True, allow=("body", "face", "edge",
 _B = _inputs.TargetRef("entity_b", required=True, allow=("body", "face", "edge", "occurrence", "component"))
 _REL = _inputs.Choice("relation", list(_RELATIONS), required=True, description=(
     "The relation to assert. "
-    "coaxial: two axes (cylindrical faces) parallel within tolerance_deg AND their axis lines within "
-    "'tolerance' apart (angle=0 alone is only parallel, NOT coaxial). "
-    "parallel: the two directions (a cylinder axis or a planar-face normal) parallel within tolerance_deg. "
-    "perpendicular: those directions within tolerance_deg of 90 deg. "
-    "flush: two planar faces coplanar - normals parallel within tolerance_deg AND plane offset <= 'tolerance'. "
-    "clearance: minimum distance between the two entities >= 'tolerance' (they clear). "
-    "touching: minimum distance <= 'tolerance' (a 0 distance is touching OR overlapping - see note). "
-    "concentric: two CIRCULAR entities (a circular/arc edge, or a cylindrical face) whose CENTER POINTS "
-    "coincide within 'tolerance'. Unlike coaxial (which compares the infinite axis LINES), two circles "
-    "offset ALONG a shared axis are coaxial but NOT concentric. A cylindrical FACE's center is where "
-    "its PROFILE plane crosses the axis (measured) - faces from different sketch planes read offset "
-    "centers; compare circular EDGES, or coaxial for axis agreement."))
+    "coaxial: axes parallel within tolerance_deg AND their axis lines within 'tolerance' apart "
+    "(angle=0 alone is only parallel, NOT coaxial). "
+    "parallel / perpendicular: the two directions (a cylinder axis or a planar-face normal) within "
+    "tolerance_deg of 0 / 90 deg. "
+    "flush: two planar faces coplanar. "
+    "clearance: minimum distance >= 'tolerance'. touching: minimum distance <= 'tolerance'. "
+    "concentric: two CIRCULAR entities (a circular/arc edge, or a cylindrical face) whose CENTER "
+    "POINTS coincide within 'tolerance' - unlike coaxial, which compares the infinite axis LINES."))
 _TOL = _inputs.Distance("tolerance", allow_zero=True, allow_negative=False, description=(
     "Linear tolerance for the offset/gap part (coaxial/flush offset, clearance/touching distance). "
     "Omit for a per-relation default of 0.1 mm."))
@@ -176,16 +164,7 @@ def _axis(ent, kind):
 
 
 def _circle_center(ent, kind):
-    """(center_cm, label) for a CIRCULAR entity - a circular/arc edge (its center) or a cylindrical/
-    conical face (its axis base point) - else (None, None). Reads Circle3D/Arc3D.center +
-    Cylinder/Cone.origin.
-
-    LIVE-MEASURED: Cylinder.origin is where the face's PROFILE plane crosses the axis, not an
-    extent point - a symmetric extrude spanning z -1..+1 cm read origin z=0 (the sketch plane),
-    and two stacked coaxial faces each read their own profile plane (z=0 and z=2). So two faces
-    from ONE sketch (a washer's bore and rim) compare concentric correctly, while coaxial faces
-    built from different planes read offset centers - which the wire contract states, steering
-    those callers to circular EDGES or 'coaxial'."""
+    """(center_cm, label) for a circular/arc edge or a cylindrical/conical face, else (None, None)."""
     if kind == "edge":
         g = safe(lambda: ent.geometry)
         ct = safe(lambda: g.curveType)
@@ -396,12 +375,9 @@ def _distance_evidence(mr, inv, units):
 
 def _plane_bound(ea, ka, eb, kb, d_cm, inv, units, measured):
     """(the distance in cm to judge the relation on, the sentence to append to the note) for a pair
-    that may be two PARALLEL PLANAR faces, folding that pair's evidence into `measured`.
-
-    Two parallel planar faces are the pair whose measured distance can be the separation between
-    their PLANES rather than the gap between the bounded faces: a clearance judged on it reads
-    tighter than the parts are, and a touching verdict on it is not proven. _geom.parallel_plane_facts
-    owns both the proof and the sentence; anything else is left exactly as measured."""
+    that may be two PARALLEL PLANAR faces, folding that pair's evidence into `measured`. Their
+    measured distance can be the separation of the PLANES rather than the gap between the bounded
+    faces, which _geom.parallel_plane_facts proves and words; anything else is left as measured."""
     if ka != "face" or kb != "face":
         return d_cm, ""
     facts = _geom.parallel_plane_facts(ea, eb, d_cm, inv, units)
@@ -421,15 +397,9 @@ def _plane_bound(ea, ka, eb, kb, d_cm, inv, units, measured):
 
 def _subtree_tail(ea, ka, eb, kb, measured, inv, units):
     """The sentence to append to the note for a pair where either target holds child occurrences,
-    folding what was read about them into `measured` - and "" for a pair with nothing nested.
-
-    The two DISTANCE relations are where this can arrive: an occurrence is measured on its OWN
-    bodies (measured - a parent 90 mm away holding a child at 40 answers 90), so a clearance verdict
-    on a parent PASSES on a subtree that does not clear, and _geom.subtree_facts measures each child
-    on its own to say so. The axis/plane/center relations refuse a whole occurrence before they
-    measure anything, so a target with children never reaches one of their verdicts.
-    _geom.subtree_facts owns the read and the wording, exactly as _plane_bound leaves the
-    parallel-plane pair to _geom."""
+    folding what was read about them into `measured` - and "" for a pair with nothing nested. An
+    occurrence is measured on its OWN bodies, so a clearance verdict on a parent PASSES on a subtree
+    that does not clear; _geom.subtree_facts measures each child on its own to say so."""
     facts = _geom.subtree_facts((("entity_a", ea, ka), ("entity_b", eb, kb)), inv, units)
     if facts is None:
         return ""
@@ -455,6 +425,10 @@ def _rel_concentric(ea, ka, eb, kb, tol_cm, tol_deg, inv, units):
     else:
         note += (" The centers do not coincide. NOTE: two circles offset ALONG a shared axis are "
                  "coaxial, not concentric - try relation='coaxial' for a shared axis LINE.")
+        if "face center" in la and "face center" in lb:
+            note += (" Both centers came off a FACE, whose center is where its profile plane "
+                     "crosses the axis - faces built on different sketch planes read offset "
+                     "centers. Compare circular EDGES instead.")
     return ok({
         "relation": "concentric",
         "passed": passed,
@@ -567,14 +541,11 @@ def handler(entity_a: str = "", entity_b: str = "", relation: str = "",
 
 
 TOOL_DESCRIPTION = (
-    "Assert a named geometric RELATION between two entities and get pass/fail WITH the evidence - the "
-    "measured angle / axis offset / min distance and the tolerance it judged against, never a bare "
-    "boolean (see 'relation' for the option meanings). Each entity is a find_geometry handle (a "
-    "cylindrical face gives an axis; a planar face gives a plane/normal; a circular edge gives a "
-    "center for concentric) or a body/occurrence/component name. 'tolerance' is the linear "
-    "tolerance in 'units' (default 0.1 mm); 'tolerance_deg' the angular one (default 0.5 deg). "
-    "coaxial checks BOTH parallel AND zero axis offset - the trap model_measure_between alone "
-    "can't catch. For the raw distance or angle, use model_measure_between.\n"
+    "Assert a named geometric RELATION between two entities and get pass/fail WITH the evidence - "
+    "the measured angle / axis offset / min distance and the tolerance it judged against, never a "
+    "bare boolean. Each entity is a find_geometry handle (a cylindrical face gives an axis, a "
+    "planar face a normal, a circular edge a center) or a body/occurrence/component name. For the "
+    "raw distance or angle instead, use model_measure_between.\n"
     + _outputs.produces_block(RETURNS)
 )
 

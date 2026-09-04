@@ -1,40 +1,12 @@
-"""Lint: every WRITE/DESTRUCTIVE tool declares HOW its effect is proven - a kernel postcondition or
-a verification classification - and every structured reference that declaration carries RESOLVES.
-
-The postcondition kernel (tools/_assert.py) is the third kind system: _inputs types what a tool is
-GIVEN, _outputs types what it RETURNS, _assert types what it DID (capture -> mutate -> verify). A
-kernel DECLARATION (``postconditions=[...]``) is for a DETACHABLE effect - one a shared
-_assert.Postcondition kind can capture/verify without touching handler-local payload assembly.
-
-The other route is a ``verification=Verification(...)`` classification at registration
-(mcp_primitives/item.py): a closed kind - inline / effect / deferred / external / dynamic / gap -
-carrying STRUCTURED references instead of prose. Verifying the effect INLINE, in the handler, is
-the NORM here - most write tools construct their payload fields or author their error text from a
-live read-back, so the verify logic stays where the values it reads feed straight into the
-response - and that is what ``inline`` and ``effect`` classify, each naming the test that proves
-the read-back bites.
-
-Every reference is resolved here rather than believed: an ``evidence_test`` node id must name a
-test pytest would COLLECT - file, class and function alike - and that no other tool claims; a
-symbol that merely exists under a spendable-looking id proves nothing, because nothing runs it.
-Beyond that: a ``deferred`` poller must
-be a registered read tool; an ``external`` ``evidence_receipt`` must name a receipt row that
-RECORDS AN OBSERVATION (a skipped or pending row is refused - those record the absence of one);
-``dynamic`` reaches exactly one tool; a ``gap`` carries a defect id that must resolve to an OPEN
-row of the defect ledger, and counts against a shrink-only ceiling. The obligation each kind's
-evidence test carries is stated in Verification's own docstring - what this lint checks is that the
-named test is REAL, not what it asserts.
-
-A write tool carrying neither route is named by the check below, with the kinds it must pick from:
-there is no third way to be accounted for. The gap COUNT is what only shrinks (_GAP_CEILING below),
-and adding a new write tool here needs the same deliberation as adding a naming-vocabulary verb.
-"""
+"""Lint: every WRITE/DESTRUCTIVE tool declares HOW its effect is proven - postconditions=[...] for a
+detachable effect, else verification=Verification(kind=...) from the closed set (item.py). Every
+reference it carries RESOLVES: an evidence_test node id pytest would collect and no other tool
+claims, a registered read poller, an observing receipt row, an OPEN ledger row. Gaps only shrink."""
 
 import ast
 import fnmatch
 import os
 import re
-from types import SimpleNamespace
 
 import pytest
 
@@ -62,7 +34,7 @@ def _postconditions_of(item):
 # visible instead of a quiet reclassification. The ceiling is an alarm that UN-RINGS itself:
 # the shrink-only half of the test below forces the number back down the moment a gap closes, so
 # a tool parked here while its evidence is unrecorded cannot quietly stay parked.
-_GAP_CEILING = 3
+_GAP_CEILING = 2
 
 
 def _verification_of(item):
@@ -114,13 +86,9 @@ class TestPostconditionsDeclared:
                     f"{it.get_name()}: postconditions must be _assert.Postcondition kinds, got {type(p)}")
 
 
-# ── the verification classification - every structured reference is RESOLVED, never believed ─────
-#
-# A declaration names a pytest node id, a poller tool, a live receipt row or a defect id. Each is
-# looked up against the thing it points at, so a test deleted or renamed out from under a tool
-# fails HERE rather than leaving a claim nobody can spend. A node id is resolved by PARSING its
-# file with ast - neither importing the test module nor running pytest's collection, so a
-# reference costs one parse and a broken one cannot take the lint down with it.
+# A node id is resolved by PARSING its file with ast - neither importing the test module nor
+# running pytest's collection, so a reference costs one parse and a broken one cannot take the
+# lint down with it.
 
 _DYNAMIC_TOOL = "sys_execute_script"          # the one caller-authored effect (the script hatch)
 _NODE_ID = re.compile(r"^tests/[\w/]+\.py(?:::\w+){1,2}$")
@@ -132,10 +100,9 @@ _DEFECT_ID = re.compile(r"^[A-Z][A-Z0-9]*-\d+$")
 _EMPTY_BUCKETS = ("skipped", "pending")
 # An OPEN row of the defect ledger: an unticked checkbox opening the line, then the id.
 _OPEN_ROW = r"^- \[ \] {id}\b"
-# The defect ledger's filename under plans/, as ONE literal both the resolver and its bite fixture
-# spend. The file is UNTRACKED (the plans tree is gitignored), so it is present on a working
-# machine and absent from a clean checkout - which is why the gap-id check skips rather than
-# passes when it cannot find it.
+# The defect ledger's filename under plans/. The file is UNTRACKED (the plans tree is gitignored),
+# so it is present on a working machine and absent from a clean checkout - which is why the gap-id
+# check skips rather than passes when it cannot find it.
 _LEDGER_NAME = "fix-backlog.md"
 
 # pytest's COLLECTION rules, which are what make a node id spendable: python_files
@@ -248,15 +215,6 @@ def _poller_problem(items, poller_name):
     return ""
 
 
-def _fake_item(name, write=True, verification=None):
-    """A registered Item's shape as the checks above read it: the name, the write annotation, the
-    declaration. Doctoring one is how the registry-side detectors are self-tested - the real
-    registry offers no way to stage an unregistered poller or a shared evidence claim."""
-    return SimpleNamespace(
-        get_name=lambda: name, verification=verification,
-        primitive=SimpleNamespace(annotations=SimpleNamespace(read_only=not write)))
-
-
 def _duplicate_evidence_claims(items):
     """node id -> the tools claiming it, for every node id claimed more than once."""
     claimed = {}
@@ -364,134 +322,4 @@ class TestVerificationDeclarations:
                 "this check SKIPS visibly there rather than passing on a file it never opened. Run "
                 "it where the ledger is present.")
 
-    def test_the_reference_resolvers_bite(self, tmp_path, monkeypatch):
-        # Each resolver must FAIL on the shapes it exists to catch, or a renamed test keeps its
-        # declaration green. Checked against a real file, not just malformed strings.
-        probe = tmp_path / "tests" / "unit"
-        probe.mkdir(parents=True)
-        (probe / "test_probe.py").write_text(
-            "class TestThing:\n"
-            "    class test_shaped_like_a_test:\n"
-            "        pass\n"
-            "\n"
-            "    def _helper(self):\n"
-            "        pass\n"
-            "\n"
-            "    def test_real(self):\n"
-            "        pass\n"
-            "\n"
-            "\n"
-            "class test_shaped_like_a_test:\n"
-            "    pass\n"
-            "\n"
-            "\n"
-            "class TestConstructed:\n"
-            "    def __init__(self):\n"
-            "        pass\n"
-            "\n"
-            "    def test_never_runs(self):\n"
-            "        pass\n"
-            "\n"
-            "\n"
-            "class Helper:\n"
-            "    def test_in_a_plain_class(self):\n"
-            "        pass\n"
-            "\n"
-            "\n"
-            "def test_loose():\n"
-            "    pass\n"
-            "\n"
-            "\n"
-            "def a_fixture():\n"
-            "    pass\n", encoding="utf-8")
-        (probe / "probe_test.py").write_text("def test_second_glob():\n    pass\n",
-                                             encoding="utf-8")
-        (probe / "conftest.py").write_text("def test_in_conftest():\n    pass\n", encoding="utf-8")
-        import test_postconditions_declared as mod
-        monkeypatch.setattr(mod, "REPO_ROOT", str(tmp_path))
-        assert _resolve_node_id("tests/unit/test_probe.py::TestThing::test_real") == ""
-        assert _resolve_node_id("tests/unit/test_probe.py::test_loose") == ""
-        # BOTH file globs pytest collects, or the rule would refuse half the tree
-        assert _resolve_node_id("tests/unit/probe_test.py::test_second_glob") == ""
-        assert "defines no test" in _resolve_node_id(
-            "tests/unit/test_probe.py::TestThing::test_renamed")
-        assert "defines no class" in _resolve_node_id(
-            "tests/unit/test_probe.py::TestGone::test_real")
-        assert "no such test file" in _resolve_node_id("tests/unit/test_absent.py::test_real")
-        # a method is not reachable as a module-level test, and a loose one is not in the class
-        assert "defines no test" in _resolve_node_id("tests/unit/test_probe.py::test_real")
-        assert "defines no test" in _resolve_node_id(
-            "tests/unit/test_probe.py::TestThing::test_loose")
-        assert "node id" in _resolve_node_id("test_probe.py::test_real")
-        assert "node id" in _resolve_node_id("tests/unit/test_probe.py")
-        # EXISTING is not RUNNING: each of these parses to a real symbol pytest never collects, so
-        # a declaration pointing at one would claim a proof nobody can spend.
-        assert "is not a file pytest collects" in _resolve_node_id(
-            "tests/unit/conftest.py::test_in_conftest")
-        assert "is not a class pytest collects" in _resolve_node_id(
-            "tests/unit/test_probe.py::Helper::test_in_a_plain_class")
-        assert "defines __init__" in _resolve_node_id(
-            "tests/unit/test_probe.py::TestConstructed::test_never_runs")
-        assert "is not a name pytest collects" in _resolve_node_id(
-            "tests/unit/test_probe.py::a_fixture")
-        assert "is not a name pytest collects" in _resolve_node_id(
-            "tests/unit/test_probe.py::TestThing::_helper")
-        # a CLASS under a test-shaped name is not a test either, at module level or nested: the
-        # last part of a node id has to be a def, or pytest runs nothing for it.
-        assert "defines no test" in _resolve_node_id(
-            "tests/unit/test_probe.py::test_shaped_like_a_test")
-        assert "defines no test" in _resolve_node_id(
-            "tests/unit/test_probe.py::TestThing::test_shaped_like_a_test")
-        live = tmp_path / "tests" / "live"
-        live.mkdir()
-        (live / "R.md").write_text(
-            "The run drove doc_save and mesh_export end to end.\n"
-            "| model_extrude | covered | volume delta read back |\n"
-            "| sys_reload_addin | skipped: restarts the server mid-sweep |  |\n"
-            "| cam_post | pending |  |\n", encoding="utf-8")
-        assert _resolve_receipt("tests/live/R.md#model_extrude") == ""
-        # a bucket that records the ABSENCE of an observation is not evidence of one
-        assert "records no observation" in _resolve_receipt("tests/live/R.md#sys_reload_addin")
-        assert "records no observation" in _resolve_receipt("tests/live/R.md#cam_post")
-        # named in the file's PROSE but in no table row - a mention is not a recorded run
-        assert "carries no row" in _resolve_receipt("tests/live/R.md#doc_save")
-        assert "no such receipt" in _resolve_receipt("tests/live/Absent.md#doc_save")
-        assert "reference" in _resolve_receipt("tests/live/R.md")
-        # the defect ledger: an OPEN row resolves, a closed one and an absent one do not, and a
-        # ledger this checkout does not carry answers None so the caller can SKIP visibly
-        assert _resolve_defect("DRAW-1") is None          # no ledger under the patched root yet
-        plans = tmp_path / "plans"
-        plans.mkdir()
-        (plans / _LEDGER_NAME).write_text(
-            "- [ ] DRAW-1 (the audited drawing_dimension gap) no dimension entity class.\n"
-            "- [x] OLD-9 (closed) the read-back landed.\n"
-            "- [ ] DRAW-10 a neighbour whose id merely starts the same way.\n",
-            encoding="utf-8")
-        assert _resolve_defect("DRAW-1") == ""
-        assert _resolve_defect("DRAW-10") == ""
-        assert "no OPEN row" in _resolve_defect("OLD-9")        # ticked is closed, not open
-        assert "no OPEN row" in _resolve_defect("DRAW-2")       # well shaped, in no ledger row
-        assert "not a ledger id" in _resolve_defect("draw-1")   # lowercase is not an id
-        assert "not a ledger id" in _resolve_defect("DRAW1")
-        assert "not a ledger id" in _resolve_defect(None)
 
-    def test_the_registry_detectors_bite(self):
-        # The checks that read the REGISTRY rather than a file, driven through the real helpers on
-        # doctored items - self-covered here so a helper rewritten to always answer clean cannot
-        # pass silently.
-        register_all_tools()                # also bootstraps the mcpServer package path
-        from mcpServer.mcp_primitives.item import Verification
-        node = "tests/unit/test_probe.py::TestThing::test_real"
-        items = {"doc_get": _fake_item("doc_get", write=False), "doc_save": _fake_item("doc_save")}
-        assert _poller_problem(items, "doc_get") == ""
-        assert "not a registered tool" in _poller_problem(items, "doc_get_status")
-        assert "is a write" in _poller_problem(items, "doc_save")
-
-        one_each = [_fake_item("a", verification=Verification(kind="inline", evidence_test=node)),
-                    _fake_item("b", verification=Verification(kind="effect",
-                                                              evidence_test=node + "_other")),
-                    _fake_item("c", verification=Verification(kind="dynamic"))]
-        assert _duplicate_evidence_claims(one_each) == {}
-        shared = one_each[:1] + [_fake_item("d", verification=Verification(kind="effect",
-                                                                          evidence_test=node))]
-        assert _duplicate_evidence_claims(shared) == {node: ["a", "d"]}

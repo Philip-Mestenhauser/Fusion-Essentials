@@ -1,13 +1,8 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""RICH READ: sys_get_preferences - the APPLICATION's preferences (app.preferences) by group.
-
-Default: the settings that change how other tools behave (versioning, modelling orientation,
-units, display precision); include=[...] pulls one group at a time. Some members RAISE on read on
-a given build, so every member is read through safe() and an unreadable one is published null +
-counted. This module also owns the TIER table sys_set_preferences enforces.
-"""
+"""RICH READ: sys_get_preferences - the APPLICATION's preferences (app.preferences) by group, with
+include=[...] for one group at a time. Also owns the TIER table sys_set_preferences enforces."""
 
 from collections import namedtuple
 
@@ -22,7 +17,6 @@ from . import _outputs
 
 app = adsk.core.Application.get()
 
-# What this tool RETURNS (declared once; drives the PRODUCES: prose + the assert-present contract test).
 RETURNS = [
     _outputs.ReturnsValue("preferences", "each group's members as {value, tier}",
                           consumers=["sys_set_preferences"]),
@@ -32,20 +26,15 @@ RETURNS = [
 TIER_REFUSED = "R"
 TIER_WRITABLE = "W"
 
-# name    the API property on the group object
-# tier    R (sys_set_preferences refuses it) or W
-# reason  why an R member is refused - quoted verbatim in the refusal
-# enum    the adsk enum family an int member decodes through (None for bool/int/float/str)
-# by_name the member holds an OBJECT, published by its .name (there is no scalar to publish)
-# minimum the smallest legal value the binding states for this member (None = unconstrained)
+# tier: R (sys_set_preferences refuses it, quoting `reason`) or W. `enum` decodes an int member;
+# `by_name` publishes an object member by its .name; `minimum` is the binding's floor (None = none).
 Member = namedtuple("Member", "name tier reason enum by_name minimum")
 Member.__new__.__defaults__ = (TIER_WRITABLE, "", None, False, None)
 
 
 def _family(name):
-    """The enum family by name from adsk.core or adsk.fusion, or None when this build carries
-    neither. Resolved defensively: a family this build lacks degrades to the raw int, rather than
-    raising at import and taking the whole module's registration down with it."""
+    """The enum family by name from adsk.core or adsk.fusion, or None when this build has neither -
+    a missing family degrades to the raw int rather than raising at import."""
     return getattr(adsk.core, name, None) or getattr(adsk.fusion, name, None)
 
 
@@ -55,15 +44,8 @@ _DRIVER = ("a rendering driver this machine rejects can leave Fusion unrenderabl
            "advertises drivers this machine rejects - the API cannot enumerate the legal subset")
 _TRANSFER = ("it reroutes the cloud upload/download path the whole data_* and doc_* surface runs on")
 
-# The app.preferences census behind this table is a dir() walk of every group with each member read
-# once. What its committed record (the live census, in git history) holds is the group list - eleven
-# groups, of which this table addresses ten - plus the three members that RAISE on read and the
-# three that read non-scalar; the full member map stayed in that probe's script output. So the rows
-# below are not backed one-by-one by a committed artifact, and the read does not rely on them being:
-# a member this build does not carry is published as unknown_member (see read_member), never as an
-# unreadable platform member, so a wrong row here can never masquerade as a fact about Fusion. The
-# table is still the read's whole surface AND the write's tier authority, so both tools agree by
-# construction.
+# This table is the read's whole surface AND the write's tier authority, so both tools agree by
+# construction. A member this build does not carry publishes as unknown_member, never as unreadable.
 FLAT_GROUPS = (
     ("general", "generalPreferences", (
         Member("isAutomaticVersioningEnabled"),
@@ -252,11 +234,7 @@ def enum_member_name(enum_cls, value):
 
 def collection_items(prefs, key):
     """[(item name, item object)] for a COLLECTION group - the ONE walk both tools address an item
-    through (the read publishes every item; the write resolves the one it was given).
-
-    The name must be a non-empty STR: it becomes a JSON object KEY in the payload and part of the
-    '<group>.<product>.<member>' address the write resolves, and json.dumps rejects a key that is
-    not a str/int/float/bool/None - one object-valued name would sink the whole read."""
+    through. The name must be a non-empty str: it becomes a JSON object key in the payload."""
     coll = safe(lambda: getattr(prefs, GROUP_ATTR[key]))
     out = []
     if coll is None:
@@ -272,9 +250,8 @@ _SCALARS = (bool, int, float, str)
 
 
 def _wire_value(value):
-    """(published value, non_scalar) for one member read. The payload is JSON-encoded whole, so an
-    OBJECT-valued member would raise inside ok() and sink the read of every other member with it: a
-    non-scalar is published by its .name, or by its type name when it reports none."""
+    """(published value, non_scalar) for one member read - a non-scalar is published by its .name,
+    or by its type name when it reports none, since the payload is JSON-encoded whole."""
     if value is None or isinstance(value, _SCALARS):
         return value, False
     name = safe(lambda: value.name)
@@ -283,14 +260,7 @@ def _wire_value(value):
 
 def _carries(group_obj, member_name):
     """True when this build's group object CARRIES the member, False when it does not, None when the
-    question could not be asked.
-
-    Read off dir(): it answers PRESENCE without invoking the getter, so asking costs nothing on a
-    member that raises, and it is the same walk the census behind the table above was taken with -
-    one reader, one notion of 'present'. (safe(hasattr) routes to the same answer on this build for
-    all three cases - present-and-readable, present-and-raising, absent - so this is a choice of
-    reader, not the thing that makes the split work. What makes the split work is that the raw READ
-    already happened above: this is only asked once that read failed.)"""
+    question could not be asked - read off dir(), which answers presence without invoking a getter."""
     names = safe(lambda: dir(group_obj))
     if not names:
         return None
@@ -299,10 +269,7 @@ def _carries(group_obj, member_name):
 
 def read_member(group_obj, member):
     """One member as {value, tier}, plus 'enum' (the decoded member name), 'unreadable' /
-    'unknown_member' and 'non_scalar' when they apply. A member that did not read reports null -
-    never a guessed False/0, which would publish a measurement the read never took - and a member
-    this build does not carry is flagged separately, so a typo in the table above is never published
-    as a platform member that happens to raise."""
+    'unknown_member' and 'non_scalar' when they apply; a member that did not read reports null."""
     raw = safe(lambda: getattr(group_obj, member.name), _UNREAD)
     if raw is _UNREAD:
         if _carries(group_obj, member.name) is False:
@@ -413,14 +380,12 @@ def handler(include=None) -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Read the APPLICATION's preferences (app.preferences - settings that belong to no document: "
-    "versioning, modelling orientation, default units, number display, graphics, compatibility, "
-    "paths). Default: the few that change how OTHER tools behave. 'include' pulls one group at a "
-    "time (see the 'include' property for the group names); 'products' and 'units_defaults' nest "
-    "by product name. Every key carries its tier - 'W' means sys_set_preferences can set it, 'R' "
-    "means that tool refuses it and says why. A member whose getter raises on this build reports "
-    "value null with unreadable true, never a guessed 0/false; a member this build does not carry "
-    "at all reports unknown_member true instead - a different thing from a member that raises.\n"
+    "Read the APPLICATION's preferences (app.preferences - settings that belong to no document). "
+    "Default: the few that change how OTHER tools behave; 'include' pulls a group in full, and "
+    "'products'/'units_defaults' nest by product name. Every key carries its tier - 'W' means "
+    "sys_set_preferences can set it, 'R' means that tool refuses it and says why. A member that "
+    "will not read reports value null with unreadable true; one this build does not carry reports "
+    "unknown_member true.\n"
     + _outputs.produces_block(RETURNS)
 )
 

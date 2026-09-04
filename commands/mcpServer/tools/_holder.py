@@ -2,9 +2,7 @@
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
 """Reduces a solid tool-holder body to a CAM library holder profile (height/diameter segments along
-an axis of revolution) - the headless core behind the "Add Tool Holder" command and
-model_compute_holder. Import-light (adsk.* + stdlib + the shared CAM substrate) so it loads in the
-test harness without circularity."""
+an axis of revolution) - the headless core behind model_compute_holder."""
 
 import json
 import math
@@ -19,17 +17,12 @@ import adsk.cam
 from ._common import safe
 from ._cam_common import library_assets   # the ONE bounded CAM library folder walk
 
-# One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
 MAP_BLURB = "holder geometry: get_axis, get_tool_profile, build_holder_data, get_tooling_libraries"
 
 
-# ── axis + end-datum resolution (from a face/edge/construction axis, and a normal datum) ──────────
-
 def get_axis(axis_base):
-    """An InfiniteLine3D for the holder's axis of rotation, from a cylindrical/conical/toroidal FACE,
-    a linear EDGE, or a construction axis. None if the entity can't define an axis.
-
-    (Verbatim from the Add Holder command - the same cast-by-surface/curve-type logic.)"""
+    """An InfiniteLine3D axis of rotation from a cylindrical/conical/toroidal FACE, a linear EDGE, or
+    a construction axis; None if the entity can't define one."""
     if isinstance(axis_base, adsk.fusion.BRepFace):
         face_type = axis_base.geometry.surfaceType
         if face_type == adsk.core.SurfaceTypes.ConeSurfaceType:
@@ -52,11 +45,8 @@ def get_axis(axis_base):
 
 
 def is_valid_axial_datum(surface, axis):
-    """The Point3D where the end datum meets the axis - for a planar face NORMAL to the axis, a linear
-    edge perpendicular to it, or a vertex (projected onto the axis). None if the datum isn't valid for
-    this axis. This is the 'end face' input: it pins where z=0 sits along the axis.
-
-    (Verbatim from the Add Holder command.)"""
+    """The Point3D where the end datum (planar face normal to the axis, perpendicular linear edge, or
+    vertex) meets `axis` and pins z=0; None if the datum isn't valid for this axis."""
     if isinstance(surface, adsk.fusion.BRepFace):
         face_type = surface.geometry.surfaceType
         if face_type == adsk.core.SurfaceTypes.PlaneSurfaceType:
@@ -103,16 +93,9 @@ def is_valid_axial_datum(surface, axis):
     return None
 
 
-# ── the profile reduction (body of revolution -> (height, r_lower, r_upper) segments) ─────────────
-
 def get_tool_profile(body, axis, plane_intersect):
-    """Reduce a holder body to a turned PROFILE: a list of [z0, z1, r0, r1] segments along the axis.
-
-    Collects the body's faces that are coaxial with `axis` (cones/cylinders/tori - a torus is treated
-    as a chamfer/cone), expresses their edges in cylindrical (r, z) coordinates about the axis with z=0
-    at `plane_intersect`, de-duplicates and removes faces occluded by a larger coaxial face, and
-    returns the ordered radial profile. (Verbatim from the Add Holder command - the load-bearing
-    geometry; do not 'tidy' it without re-validating against real holders.)"""
+    """Reduce a holder body to a turned PROFILE: [z0, z1, r0, r1] segments along the axis, z=0 at
+    `plane_intersect`, occluded and duplicate segments removed."""
     plane = adsk.core.Plane.create(plane_intersect, axis.direction)
     points = []
     for edge in body.edges:
@@ -195,10 +178,8 @@ def get_tool_profile(body, axis, plane_intersect):
 
 
 def filter_points(points):
-    """Group profile points by z (within 1e-8) and keep the two largest-radius per z (one at the
-    lowest z), so coincident-z points collapse to a single radial pair. (Verbatim.)"""
-    # A body with NO coaxial faces reduces to zero points; min() over the empty grouping would
-    # raise, so the empty profile answers [] instead of crashing the reduction.
+    """Group profile points by z (within 1e-8), keeping the two largest-radius per z."""
+    # min() over the empty grouping below raises, and a body with no coaxial faces reaches here empty.
     if not points:
         return []
     grouped_points = {}
@@ -221,7 +202,7 @@ def filter_points(points):
 
 
 def get_cylindrical_coordinates_edge(edge, axis, plane):
-    """(radius, z) of a circular/arc edge whose normal is coaxial with `axis`, else None. (Verbatim.)"""
+    """(radius, z) of a circular/arc edge whose normal is coaxial with `axis`, else None."""
     if edge.geometry is None:
         return None
     edge_type = edge.geometry.curveType
@@ -239,7 +220,7 @@ def get_cylindrical_coordinates_edge(edge, axis, plane):
 
 
 def get_cylindrical_coordinates_point(point, axis, plane):
-    """(radius from axis, z along axis from `plane`) for a world point. (Verbatim.)"""
+    """(radius from axis, z along axis from `plane`) for a world point."""
     line = adsk.core.InfiniteLine3D.create(point, axis.direction)
     intersect = plane.intersectWithLine(line)
     z = point.distanceTo(intersect)
@@ -247,15 +228,9 @@ def get_cylindrical_coordinates_point(point, axis, plane):
     return (r, z)
 
 
-# ── holder JSON / library Tool ────────────────────────────────────────────────────────────────────
-
 def build_holder_data(profile, desc, prodid="", prodlink="", prodvendor=""):
-    """The holder library JSON dict (type='holder', millimeters) for a profile. Profile lengths are in
-    cm (the API unit); segment heights/diameters are emitted in MM (x10 / x20 for diameter), matching
-    the original command. Returned as a dict so a tool can surface it without minting a Tool object.
-
-    A fresh random guid/reference_guid + last_modified timestamp are generated (same as the command).
-    Diameter = radius x 2; both rounded to 3 dp. Segment height = z1 - z0."""
+    """The holder library JSON dict for a profile: profile lengths are cm (the API unit), segment
+    heights and diameters are emitted in mm, and a fresh guid + timestamp are minted per call."""
     guid = "00000000-0000-0000-0000-" + str(random.randint(100000000000, 999999999999))
     data = {
         "description": desc,
@@ -280,23 +255,16 @@ def build_holder_data(profile, desc, prodid="", prodlink="", prodvendor=""):
 
 
 def generate_tool(profile, desc, prodid="", prodlink="", prodvendor=""):
-    """An adsk.cam.Tool (type='holder') built from a profile + metadata, via Tool.createFromJson.
-    (Verbatim behaviour from the command; delegates the JSON to build_holder_data so a tool can return
-    the same dict without a live CAM Tool.)"""
+    """An adsk.cam.Tool (type='holder') built from a profile + metadata, via Tool.createFromJson."""
     data = build_holder_data(profile, desc, prodid, prodlink, prodvendor)
     return adsk.cam.Tool.createFromJson(json.dumps(data))
 
-
-# ── tool-library enumeration (READ only; library WRITES belong to the future library tool family) ──
 
 _LIBRARY_LOCATIONS = ("CloudLibraryLocation", "LocalLibraryLocation", "ExternalLibraryLocation")
 
 
 def get_tooling_libraries() -> List:
-    """URLs of every cloud + local + external tool library (read-only enumeration), through the
-    shared bounded library walk. The eventual library building-block family will own WRITES - note a
-    tool brought into a document is a hard FORK of the library data, not a live link, so library
-    writes need their own correct semantics."""
+    """URLs of every cloud + local + external tool library, through the shared bounded walk."""
     toolLibraries = adsk.cam.CAMManager.get().libraryManager.toolLibraries
     urls = []
     for location in _LIBRARY_LOCATIONS:

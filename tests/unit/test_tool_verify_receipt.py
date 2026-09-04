@@ -16,6 +16,8 @@ import os
 import sys
 import urllib.request
 
+import pytest
+
 TESTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(TESTS_DIR, "live"))
 import tool_verify  # noqa: E402
@@ -322,6 +324,256 @@ class TestParkedSteps:
         assert [r[1] for r in rows] == ["pass", "FAIL"]
 
 
+class TestCapabilityProbe:
+    """The machining_extension probe reads workspace_orient's own entitlement block. Entitled means
+    every sentinel flag answered TRUE; anything it could not read is None, which routes as unmet."""
+
+    @staticmethod
+    def _wire(monkeypatch, answer):
+        monkeypatch.setattr(tool_verify, "call", lambda tool, args: answer)
+
+    def test_all_four_sentinels_true_is_entitled(self, monkeypatch):
+        self._wire(monkeypatch, (False, {"machining_capabilities": {"observed_generation": {
+            "steep_and_shallow": True, "multiaxis_finishing": True,
+            "swarf": True, "probe_geometry": True}}}))
+        assert tool_verify._machining_extension_probe() is True
+
+    def test_one_sentinel_false_is_not_entitled(self, monkeypatch):
+        self._wire(monkeypatch, (False, {"machining_capabilities": {"observed_generation": {
+            "steep_and_shallow": True, "multiaxis_finishing": True,
+            "swarf": False, "probe_geometry": True}}}))
+        assert tool_verify._machining_extension_probe() is False
+
+    def test_a_null_flag_is_unreadable_not_entitled(self, monkeypatch):
+        # null is 'the probe could not read it'. Reading it as False would report an entitlement
+        # verdict nothing measured; reading it as True would run rows this licence cannot generate.
+        self._wire(monkeypatch, (False, {"machining_capabilities": {"observed_generation": {
+            "steep_and_shallow": True, "multiaxis_finishing": None,
+            "swarf": True, "probe_geometry": True}}}))
+        assert tool_verify._machining_extension_probe() is None
+
+    def test_a_missing_block_and_a_failed_read_are_both_unreadable(self, monkeypatch):
+        self._wire(monkeypatch, (False, {"document": {"name": "X"}}))
+        assert tool_verify._machining_extension_probe() is None
+        self._wire(monkeypatch, (True, "no active document"))
+        assert tool_verify._machining_extension_probe() is None
+
+
+class TestCapabilityTier:
+    """The tier itself: what a declaration means, and which receipt bucket an unmet one lands in."""
+
+    _FAKE = {"yes": lambda: True, "no": lambda: False, "dunno": lambda: None}
+
+    def test_each_declared_capability_is_probed_once(self):
+        calls = []
+        probes = {"yes": lambda: calls.append("yes") or True}
+        assert tool_verify.probe_capabilities(["yes", "yes"], probes) == {"yes": True}
+        assert calls == ["yes"]
+
+    def test_an_unregistered_capability_answers_unreadable(self):
+        # a typo in a declaration must not read as entitled - there is no probe to say it is.
+        assert tool_verify.probe_capabilities(["nosuch"], self._FAKE) == {"nosuch": None}
+
+    def test_only_a_true_probe_is_met(self):
+        ent = tool_verify.probe_capabilities(["yes", "no", "dunno"], self._FAKE)
+        assert tool_verify.capability_met(ent, "yes") is True
+        assert tool_verify.capability_met(ent, "no") is False
+        assert tool_verify.capability_met(ent, "dunno") is False
+        assert tool_verify.capability_met(ent, None) is True
+
+    def test_the_skip_reason_separates_not_entitled_from_unreadable(self):
+        ent = {"no": False, "dunno": None}
+        assert tool_verify.capability_skip_reason("no", ent) == "no not entitled"
+        assert "probe did not read" in tool_verify.capability_skip_reason("dunno", ent)
+
+    def test_the_declaration_is_read_through_both_wrappers(self):
+        needs = tool_verify._needs("yes", lambda p: p.get("n"))
+        assert tool_verify.step_capability(needs) == "yes"
+        assert tool_verify.step_capability(tool_verify.Parked("held", needs)) == "yes"
+        assert tool_verify.step_capability(tool_verify.Parked("held")) is None
+        assert tool_verify.step_capability("ok") is None
+
+    def test_a_gate_changes_the_bucket_and_never_the_judgement(self):
+        # Needs carries ledger routing only: the expectation inside is what judges the step, so the
+        # covered/called/refusal split must read straight through it.
+        assert tool_verify.predicate_kind(tool_verify._needs("yes")) == "call"
+        assert tool_verify.predicate_kind(tool_verify._needs("yes", lambda p: p["n"])) == "value"
+        assert tool_verify.predicate_kind(tool_verify._needs("yes", "refused")) == "refusal"
+        assert tool_verify.predicate_kind(
+            tool_verify._needs("yes", tool_verify.Parked("held", lambda p: p["n"]))) == "value"
+
+    def test_a_parked_reason_survives_a_gate_around_it(self):
+        assert tool_verify.parked_reason(
+            tool_verify._needs("yes", tool_verify.Parked("held at a bare ok"))) == "held at a bare ok"
+        assert tool_verify.parked_reason("ok") is None
+
+    @staticmethod
+    def _run(monkeypatch, acts, act_needs, entitled, tools, poll_after=None):
+        """run() over a stubbed wire, returning (ledger, the tools the wire was actually called
+        with, the act modes)."""
+        out = {}
+        seen = []
+
+        def fake_write(rows, version, date, src_hash, notes=None, act_modes=None):
+            out["ledger"] = dict(rows)
+            out["act_modes"] = list(act_modes or [])
+            return "VERIFIED_TOOLS.md"
+
+        def call(tool, args):
+            seen.append(tool)
+            if tool == "workspace_orient":
+                flags = {n: entitled for n in ("steep_and_shallow", "multiaxis_finishing",
+                                               "swarf", "probe_geometry")}
+                return False, {"machining_capabilities": {"observed_generation": flags}}
+            return False, {"n": 1}
+
+        monkeypatch.setattr(tool_verify, "call", call)
+        monkeypatch.setattr(tool_verify.time, "sleep", lambda s: None)
+        monkeypatch.setattr(tool_verify, "health_gate", lambda: {"server": "ok", "version": "t"})
+        monkeypatch.setattr(tool_verify, "registered_tools", lambda: sorted(tools))
+        monkeypatch.setattr(tool_verify, "source_hash", lambda *a, **k: "0" * 64)
+        monkeypatch.setattr(tool_verify, "write_verified", fake_write)
+        # the post-run reload beat is another act's business; stubbed so 'seen' is this tier's
+        monkeypatch.setattr(tool_verify, "reload_smoke",
+                            lambda rows, notes, valued=None, **kw: None)
+        monkeypatch.setattr(tool_verify, "POLL_AFTER", poll_after or {})
+        monkeypatch.setattr(tool_verify, "EXCLUDED", {})
+        monkeypatch.setattr(tool_verify, "STORY", {})
+        monkeypatch.setattr(tool_verify, "ACT_NEEDS", act_needs)
+        monkeypatch.setattr(tool_verify, "ACTS", acts)
+        assert tool_verify.run(write_json=False) == 0
+        return out["ledger"], seen, out["act_modes"]
+
+    def test_a_gated_act_runs_nothing_and_banks_the_capability_bucket(self, monkeypatch):
+        # BOTH lanes bank the bucket: neither ran, so a tool the fallback alone drives is skipped
+        # for the same reason - reported PENDING, it would read as never scripted.
+        acts = [("ACT E", ("pre_get", {}), [("a_get", {}, lambda p: p["n"] == 1, None)],
+                 [("fb_get", {}, "ok", None)])]
+        ledger, seen, modes = self._run(
+            monkeypatch, acts, {"ACT E": "machining_extension"}, entitled=False,
+            tools=["a_get", "fb_get", "pre_get"])
+        assert ledger["a_get"] == "skipped: machining_extension not entitled"
+        assert ledger["fb_get"] == "skipped: machining_extension not entitled"
+        # not even the act's PRECONDITION read fires - it decides between two lanes neither of
+        # which may run, and a wire call for that is a call for nothing.
+        assert seen == ["workspace_orient"]
+        assert modes == [("ACT E", "skipped(machining_extension not entitled)")]
+
+    def test_the_same_act_runs_where_the_capability_is_entitled(self, monkeypatch):
+        acts = [("ACT E", None, [("a_get", {}, lambda p: p["n"] == 1, None)], [])]
+        ledger, seen, modes = self._run(
+            monkeypatch, acts, {"ACT E": "machining_extension"}, entitled=True, tools=["a_get"])
+        assert ledger["a_get"] == "covered"
+        assert seen == ["workspace_orient", "a_get"]
+        assert modes == [("ACT E", "narrative")]
+
+    def test_a_gated_step_is_dropped_without_shifting_the_rows_after_it(self, monkeypatch):
+        # The bug this exists to catch is silent and green: a gated step that still yielded a row
+        # would pair every later expectation with the wrong tool, so a bare "ok" would read as
+        # covered and a value predicate would be lost.
+        acts = [("ACT T", None, [
+            ("a_get", {}, "ok", None),
+            ("gated_get", {}, tool_verify._needs("machining_extension", lambda p: p["n"] == 1), None),
+            ("c_get", {}, lambda p: p["n"] == 1, None),
+        ], [])]
+        ledger, seen, _modes = self._run(
+            monkeypatch, acts, {}, entitled=False, tools=["a_get", "gated_get", "c_get"])
+        assert ledger == {"a_get": "called",
+                          "gated_get": "skipped: machining_extension not entitled",
+                          "c_get": "covered"}
+        assert seen == ["workspace_orient", "a_get", "c_get"]
+
+    def test_the_probe_waits_for_the_first_act_that_declares_a_capability(self, monkeypatch):
+        # workspace_orient errors with no document open, so a probe taken before the opening act
+        # reads unreadable and skips every gated row on an ENTITLED machine. The first act declares
+        # nothing: its steps run first, and the probe lands between them and the gated act's.
+        acts = [("ACT OPEN", None, [("doc_new", {}, "ok", None)], []),
+                ("ACT E", None, [("a_get", {}, lambda p: p["n"] == 1, None)], [])]
+        ledger, seen, _modes = self._run(
+            monkeypatch, acts, {"ACT E": "machining_extension"}, entitled=True,
+            tools=["a_get", "doc_new"])
+        assert seen == ["doc_new", "workspace_orient", "a_get"]
+        assert ledger["a_get"] == "covered"
+
+    def test_a_gated_act_polls_nothing(self, monkeypatch):
+        # the boundary poll certifies a generation the act launched; a held-back act launched none,
+        # and polling for one would fail the run on an act that deliberately did not happen.
+        polled = []
+        monkeypatch.setattr(tool_verify, "poll_generation",
+                            lambda rows, notes, setup, valued=None: polled.append(setup))
+        acts = [("ACT E", None, [("a_get", {}, "ok", None)], [])]
+        self._run(monkeypatch, acts, {"ACT E": "machining_extension"}, entitled=False,
+                  tools=["a_get", "workspace_orient"],
+                  poll_after={"ACT E": {"narrative": "SwarfSetup", "fallback": "SwarfSetup"}})
+        assert polled == []
+
+    def test_a_poll_target_list_certifies_each_setup_in_turn(self, monkeypatch):
+        # one act can leave SEVERAL setups generating; a list that only polled its first element
+        # would leave the rest uncertified while the run still read green.
+        polled = []
+        monkeypatch.setattr(tool_verify, "poll_generation",
+                            lambda rows, notes, setup, valued=None: polled.append(setup))
+        acts = [("ACT G", None, [("a_get", {}, "ok", None)], [])]
+        self._run(monkeypatch, acts, {}, entitled=True, tools=["a_get", "workspace_orient"],
+                  poll_after={"ACT G": {"narrative": ["One", "Two"], "fallback": ["One", "Two"]}})
+        assert polled == ["One", "Two"]
+
+    def test_an_unreadable_probe_holds_the_steps_back_and_says_so(self, monkeypatch):
+        def call(tool, args):
+            return (False, {}) if tool == "workspace_orient" else (False, {"n": 1})
+        monkeypatch.setattr(tool_verify, "call", call)
+        monkeypatch.setattr(tool_verify.time, "sleep", lambda s: None)
+        monkeypatch.setattr(tool_verify, "health_gate", lambda: {"server": "ok", "version": "t"})
+        monkeypatch.setattr(tool_verify, "registered_tools", lambda: ["a_get", "workspace_orient"])
+        monkeypatch.setattr(tool_verify, "source_hash", lambda *a, **k: "0" * 64)
+        ledger = {}
+        monkeypatch.setattr(tool_verify, "write_verified",
+                            lambda rows, v, d, h, notes=None, act_modes=None: ledger.update(rows))
+        monkeypatch.setattr(tool_verify, "POLL_AFTER", {})
+        monkeypatch.setattr(tool_verify, "EXCLUDED", {})
+        monkeypatch.setattr(tool_verify, "STORY", {})
+        monkeypatch.setattr(tool_verify, "ACT_NEEDS", {"ACT E": "machining_extension"})
+        monkeypatch.setattr(tool_verify, "ACTS",
+                            [("ACT E", None, [("a_get", {}, "ok", None)], [])])
+        assert tool_verify.run(write_json=False) == 0
+        assert ledger["a_get"] == ("skipped: machining_extension not entitled - the capability "
+                                   "probe did not read")
+
+    def test_every_declared_capability_in_the_real_program_has_a_probe(self):
+        # a declaration with no probe routes as unmet forever, so the acts it gates would never run
+        # again on any installation - and nothing else in the harness would say why.
+        declared = set(tool_verify.ACT_NEEDS.values()) | {
+            cap for step in tool_verify.STEPS
+            for cap in [tool_verify.step_capability(step[2])] if cap}
+        assert declared, "no capability is declared - the tier has no consumer"
+        assert declared <= set(tool_verify.CAPABILITY_PROBES), (
+            "capabilities declared with no probe registered: "
+            + ", ".join(sorted(declared - set(tool_verify.CAPABILITY_PROBES))))
+
+    def test_every_gated_act_name_is_a_real_act(self):
+        names = {name for name, _p, _n, _f in tool_verify.ACTS}
+        assert set(tool_verify.ACT_NEEDS) <= names, (
+            "ACT_NEEDS names acts the program does not run: "
+            + ", ".join(sorted(set(tool_verify.ACT_NEEDS) - names)))
+
+    def test_every_extension_only_act_keeps_a_base_licence_variant(self):
+        # the tier's whole point: a gated act may not take a TOOL's only step with it. Every tool
+        # the gated acts and steps drive must also be driven by a step no capability gates, or an
+        # unentitled installation loses that tool's coverage rather than one strategy's.
+        gated_acts = set(tool_verify.ACT_NEEDS)
+        held, free = set(), set()
+        for name, _pre, narr, fb in tool_verify.ACTS:
+            for step in (list(narr) + list(fb or [])):
+                if step[0] == tool_verify._DWELL:
+                    continue
+                if name in gated_acts or tool_verify.step_capability(step[2]):
+                    held.add(step[0])
+                else:
+                    free.add(step[0])
+        assert not (held - free), (
+            "tools whose every step rides the capability tier: " + ", ".join(sorted(held - free)))
+
+
 class TestFacadeLateBinding:
     """The call-time facade() sites with no other offline pin: each must see what a consumer
     stubs ON tool_verify at CALL time. An import-time binding of its own copy leaves the stub
@@ -571,3 +823,97 @@ class TestReloadBeat:
 
         assert tool_verify.run(write_json=False) == 0
         assert ledger == {"a_get": "covered", "sys_reload_addin": "skipped: not confirmed"}
+
+
+class TestActSelection:
+    """--acts walks a SLICE of the story against the document a prior --keep-open run left open."""
+
+    _ACTS = [("ACT 0 - OVERTURE", None, [], []),
+             ("ACT 10a - CAM: JOB", None, [], []),
+             ("ACT 10b - CAM: DELIVERABLES", None, [], []),
+             ("ACT 10b2 - CAM: COMPONENT SCOPE", None, [], []),
+             ("FINALE", None, [], [])]
+
+    def test_one_selector_picks_exactly_its_act(self):
+        assert tool_verify.select_acts(self._ACTS, "ACT 10a") == ["ACT 10a - CAM: JOB"]
+        # a selector is a name prefix ending at a WORD BREAK, so 10b is not also 10b2 - a plain
+        # startswith would select both and silently run an act nobody asked for.
+        assert tool_verify.select_acts(self._ACTS, "ACT 10b") == ["ACT 10b - CAM: DELIVERABLES"]
+
+    def test_a_comma_list_comes_back_in_acts_order(self):
+        assert tool_verify.select_acts(self._ACTS, "FINALE, ACT 0") == ["ACT 0 - OVERTURE", "FINALE"]
+
+    def test_a_range_spans_every_act_between_its_ends(self):
+        assert tool_verify.select_acts(self._ACTS, "ACT 10a..ACT 10b2") == [
+            "ACT 10a - CAM: JOB", "ACT 10b - CAM: DELIVERABLES", "ACT 10b2 - CAM: COMPONENT SCOPE"]
+
+    def test_an_unknown_selector_and_an_empty_selection_are_refused_naming_the_acts(self):
+        with pytest.raises(ValueError) as unknown:
+            tool_verify.select_acts(self._ACTS, "ACT 99")
+        assert "ACT 99" in str(unknown.value) and "ACT 10b2 - CAM: COMPONENT SCOPE" in str(unknown.value)
+        with pytest.raises(ValueError) as empty:
+            tool_verify.select_acts(self._ACTS, " ")
+        assert "selects no act" in str(empty.value)
+
+    # ACT 0 saves the ctx key ACT 10b's arguments recall, so a slice that skips it lands blocked.
+    _WALK = [("ACT 0 - OVERTURE", None, [("a_get", {}, "ok", ("k", lambda p: p["n"]))], []),
+             ("ACT 10a - CAM: JOB", None, [("b_get", {}, "ok", None)], []),
+             ("ACT 10b - CAM: DELIVERABLES", None,
+              [("c_get", lambda ctx: {"x": ctx["k"]}, "ok", None)], []),
+             ("FINALE", None, [("doc_close", {}, "ok", None)], [])]
+
+    @staticmethod
+    def _run(monkeypatch, tools, **kw):
+        """run() over the _WALK program on a stubbed wire -> (tools the wire saw, receipt written?,
+        exit code)."""
+        seen, wrote = [], []
+        monkeypatch.setattr(tool_verify, "call",
+                            lambda tool, args: (seen.append(tool), (False, {"n": 1}))[1])
+        monkeypatch.setattr(tool_verify.time, "sleep", lambda s: None)
+        monkeypatch.setattr(tool_verify, "health_gate", lambda: {"server": "ok", "version": "t"})
+        monkeypatch.setattr(tool_verify, "registered_tools", lambda: sorted(tools))
+        monkeypatch.setattr(tool_verify, "source_hash", lambda *a, **k: "0" * 64)
+        monkeypatch.setattr(tool_verify, "write_verified",
+                            lambda *a, **k: wrote.append(True) or "VERIFIED_TOOLS.md")
+        monkeypatch.setattr(tool_verify, "reload_smoke",
+                            lambda rows, notes, valued=None, **kw2: None)
+        monkeypatch.setattr(tool_verify, "POLL_AFTER", {})
+        monkeypatch.setattr(tool_verify, "EXCLUDED", {})
+        monkeypatch.setattr(tool_verify, "STORY", {})
+        monkeypatch.setattr(tool_verify, "ACT_NEEDS", {})
+        monkeypatch.setattr(tool_verify, "ACTS", TestActSelection._WALK)
+        return seen, wrote, tool_verify.run(write_json=False, **kw)
+
+    def test_the_runner_walks_only_the_selected_acts(self, monkeypatch, capsys):
+        seen, _wrote, code = self._run(monkeypatch, ["a_get", "b_get", "c_get", "doc_close"],
+                                       acts_spec="ACT 10a")
+        assert seen == ["b_get"] and code == 0
+        # the acts that did not run are named once, up front
+        out = capsys.readouterr().out
+        assert "3 act(s) not run - ACT 0 - OVERTURE, ACT 10b - CAM: DELIVERABLES, FINALE" in out
+
+    def test_a_recall_an_unrun_act_would_have_saved_lands_the_step_blocked(self, monkeypatch,
+                                                                          capsys):
+        seen, _wrote, code = self._run(monkeypatch, ["c_get"], acts_spec="ACT 10b")
+        assert seen == [] and code == 1
+        assert "blocked" in capsys.readouterr().out
+
+    def test_a_partial_run_writes_no_receipt_and_says_so_in_its_last_line(self, monkeypatch,
+                                                                         capsys):
+        _seen, wrote, code = self._run(monkeypatch, ["b_get"], acts_spec="ACT 10a")
+        assert not wrote and code == 0
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        assert lines[-1] == ("partial run (--acts ACT 10a): receipt not written; the story "
+                             "document is left open")
+
+    def test_the_document_is_left_open_unless_the_finale_is_selected_and_free_to_close_it(
+            self, monkeypatch, capsys):
+        _seen, _wrote, _code = self._run(monkeypatch, ["b_get", "doc_close"],
+                                         acts_spec="ACT 10a,FINALE")
+        assert capsys.readouterr().out.splitlines()[-1] == (
+            "partial run (--acts ACT 10a,FINALE): receipt not written")
+        # --keep-open drops the FINALE's doc_close in a partial run exactly as in a full one
+        seen, _wrote, _code = self._run(monkeypatch, ["doc_close"], acts_spec="FINALE",
+                                        keep_open=True)
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        assert seen == [] and lines[-1].endswith("; the story document is left open")

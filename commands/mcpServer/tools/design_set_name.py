@@ -16,10 +16,8 @@ from . import _common
 from . import _inputs
 from . import _outputs
 
-# The renameable kinds. A FACE has no name, and '' (the whole design) is refused - there is nothing
-# to rename - so both are left out of allow=. MeshBody.name is settable and STICKS: the assigned name
-# reads back both off the wrapper it was set on and off a fresh meshBodies.item() fetch, so a mesh is
-# a first-class target here, not a best-effort one.
+# The renameable kinds: a FACE has no name and '' (the whole design) has nothing to rename, so both
+# are out of allow=. MeshBody.name is settable and reads back off a fresh meshBodies.item() fetch.
 _TARGET = _inputs.TargetRef("target", allow=("body", "mesh", "occurrence", "component"))
 
 RETURNS = [
@@ -63,22 +61,18 @@ def handler(target: str = "", new_name: str = "") -> dict:
     addressed = _label(entity, kind)
     occurrence = None
     if kind == "occurrence":
-        # An occurrence has no name of its own: the browser name is its COMPONENT's name plus the
-        # instance number (measured - setting Component.name makes the occurrence read 'BasePlate:1'
-        # and its fullPathName follow). So an occurrence target renames the component behind it, and
-        # every other instance of that component follows too.
+        # An occurrence has no name of its own - its browser name is the COMPONENT's name plus the
+        # instance number - so an occurrence target renames the component behind it, and every other
+        # instance of that component follows.
         occurrence = entity
         entity = safe(lambda: occurrence.component)
         if entity is None:
             return error(f"Could not reach the component behind {addressed} to rename it.")
         kind = "component"
 
-    # The ROOT component is reachable by name (its name IS the document name) but its rename is
-    # REFUSED by the platform - 'RuntimeError: 3 : root component name cannot be changed', measured
-    # live. The guard is up front because that raise aborts the enclosing transaction even when it is
-    # caught, so it must never be attempted. same_component, never `is`: component identity is
-    # measured NEVER stable (root is design.rootComponent reads False), so an identity check would
-    # silently never fire.
+    # Renaming the ROOT component raises '3 : root component name cannot be changed', and that raise
+    # aborts the enclosing transaction even when caught, so it must never be attempted. The check is
+    # same_component, never `is`: component identity is not stable across reads.
     if kind == "component":
         is_root = _common.same_component(entity, safe(lambda: design.rootComponent))
         if is_root is True:
@@ -159,12 +153,10 @@ def handler(target: str = "", new_name: str = "") -> dict:
 
 
 _DESC = (
-"Rename a body, mesh body, or component - the browser name every other tool refers to it by (so a "
-"build stops shipping Body1..BodyN). 'target' takes a find_geometry handle or a body/occurrence/"
-"component name; an OCCURRENCE target renames its COMPONENT, which is what the browser shows, and "
-"every instance of that component follows. Fusion DEDUPES a name a sibling already holds ('Plate' "
-"lands as 'Plate (1)'), so the result publishes the name that landed, read back off the model - use "
-"'name', not what you asked for. Renaming to the name it already has is a no-op ('changed' false).\n"
+"Rename a body, mesh body, or component - the browser name every other tool refers to it by. An "
+"OCCURRENCE target renames its COMPONENT, and every instance of that component follows. Fusion "
+"DEDUPES a name a sibling already holds ('Plate' lands as 'Plate (1)'), so use the 'name' the "
+"result publishes, not what you asked for.\n"
 + _outputs.produces_block(RETURNS)
 )
 

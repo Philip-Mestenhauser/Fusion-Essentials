@@ -2,11 +2,10 @@
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
 """MCP building block: add construction geometry (points / axes / planes) in the active component,
-across the API's real datum-creation modes (see TOOL_DESCRIPTION for the full mode -> inputs map).
+across the API's real datum-creation modes (_MODES_BY_KIND is the mode vocabulary per kind).
 
-A bare coordinate point or a world-axis-through-a-point needs DIRECT modeling (setByPoint(Point3D)/
-setByLine(InfiniteLine3D) are direct-edit-only, confirmed live); every geometry-based mode (an edge/
-face/plane/vertex reference) is parametric-legal per the installed API's own docstrings.
+A bare coordinate point or a world-axis-through-a-point needs DIRECT modeling; every geometry-based
+mode (an edge/face/plane/vertex reference) is parametric-legal.
 """
 
 import math
@@ -34,18 +33,14 @@ _LEGACY_MODE = {"plane": "offset", "axis": "edge", "point": "coordinate"}
 # de-duplicated, order-preserving (two_edges/on_path are legal for two kinds - listed once).
 _MODE_OPTIONS = list(dict.fromkeys(_PLANE_MODES + _AXIS_MODES + _POINT_MODES))
 
-# The effect gates below normalize at full double precision. _geom.unit_vector's DEFAULT 6-decimal
-# rounding is DISPLAY precision: a 5e-7 error per component becomes 5e-7 * the lever arm once a gate
-# projects a point onto the normal, which manufactures a "miss" on geometry that is exactly on the
-# plane. The payload keeps the rounded vector; only the gates read at this precision.
+# _geom.unit_vector's default 6-decimal rounding is DISPLAY precision: a 5e-7 error per component
+# times the lever arm manufactures a "miss" on geometry that is exactly on the plane. The payload
+# keeps the rounded vector; only the gates read at this precision.
 _GATE_DECIMALS = 15
 
 # A gate compares a projected distance against zero. Fusion lands a datum on its defining point
-# exactly (measured), so the only slack needed is the float noise the two coordinate reads
-# accumulate - which grows with the distance between them, hence RELATIVE to that lever arm rather
-# than a flat cm figure. Also used bare for a unit-vector dot, which carries no lever arm. It sits
-# two orders under the error display rounding alone would inject (6e-7 relative on a skew normal)
-# and seven above what full-precision reads accumulate.
+# exactly, so the only slack needed is the float noise the two coordinate reads accumulate - which
+# grows with the distance between them, hence RELATIVE to that lever arm, not a flat cm figure.
 _COINCIDENT_REL_TOL = 1e-8
 
 # ── shared typed inputs (reused across modes; each mode uses the subset it needs) ────────────────
@@ -57,17 +52,16 @@ _EDGES = _inputs.GeometryHandleList("edges", require="edge", description="Count 
 _POINTS = _inputs.GeometryHandleList("points", require="vertex", description="Count depends on 'mode'.")
 _FACE = _inputs.GeometryHandle("face", require="face", description="Cylindrical/conical; any face for perpendicular_at_point.")
 _MODE = _inputs.Choice("mode", _MODE_OPTIONS, default="",
-    description="Build method within 'kind'; the tool description lists each mode's inputs.")
+    description="Build method within 'kind'.")
 # mode='on_path' reads 'at' through this: a unitless 0-1 ratio, or a length from the path start.
 _DISTANCE_TYPE = _inputs.Choice("distance_type", ["proportional", "absolute"], default="proportional",
     description="How 'at' is read (mode=on_path).")
 _TO_OBJECT = _inputs.GeometryHandle("to_object", require="vertex",
     description="mode=on_path (plane only): land at this point, shifted by 'offset'.")
 
-# MODE GUARD: setByPoint(Point3D) / setByLine(InfiniteLine3D) are DIRECT-edit-only (they fail in
-# parametric, the default). Declaring the guard generates the error FROM MODE_DIRECT, so the remedy
-# is derived from the requirement and can't point the wrong way. Every OTHER mode (offset, and every
-# new edge/face/plane/vertex-based mode) resolves real geometry and is parametric-valid -> no guard.
+# MODE GUARD: setByPoint(Point3D) / setByLine(InfiniteLine3D) are DIRECT-edit-only and fail in
+# parametric, the default. Every other mode resolves real geometry and is parametric-valid, so it
+# gets no guard. Declaring the guard derives the error from MODE_DIRECT, so the remedy cannot invert.
 _DIRECT_GUARD = _inputs.ModeGuard(
     _inputs.MODE_DIRECT,
     why="setByPoint(Point3D)/setByLine(InfiniteLine3D) are direct-edit-only.",
@@ -100,7 +94,7 @@ def _env_error(e):
         return error("Could not add construction geometry: this datum mode isn't supported in the "
             "current modeling mode. Only a bare coordinate point or a world-axis-through-a-point "
             "needs DIRECT-modeling; every geometry-based mode (edge axis, offset plane, and all "
-            "edge/face/plane/vertex-based modes) works in Parametric. See the tool description.")
+            "edge/face/plane/vertex-based modes) works in Parametric.")
     return error(f"Could not add construction geometry: {e}")
 
 
@@ -168,20 +162,10 @@ def _require_circular_edge(edge_ent, m):
 
 
 def _datum_geometry(design, obj):
-    """An entity's geometry in the SAME space the resolved input geometry reads in. A NATIVE datum
-    created while an occurrence is active reads component-LOCAL off .geometry while a proxy-resolved
-    vertex/face reads WORLD - measured: the two disagree by exactly the occurrence offset, which
-    would false-error every gate below on a correct call into a transformed component.
-    createForAssemblyContext(activeOccurrence) restores world space (measured exact, and measured
-    class-independent: a ConstructionAxis reads local origin z=0.0 and its proxy z=3.0, same as the
-    plane class).
-
-    An entity that ALREADY carries an assemblyContext needs no lift and must not be given one:
-    measured, such a proxy already reads WORLD (centroid.z=4.0) and createForAssemblyContext on it
-    RAISES '3 : object is not a native object' (same probe). None when the lift is refused on a
-    native entity - an unreadable space proves nothing, so the gate must not claim either way rather
-    than compare across two spaces, and the payload must not publish coordinates whose space it
-    cannot name."""
+    """An entity's geometry in the SAME space the resolved input geometry reads in, or None."""
+    # A NATIVE datum reads component-LOCAL off .geometry while a proxy-resolved vertex/face reads
+    # WORLD; createForAssemblyContext(activeOccurrence) restores world space. An entity that ALREADY
+    # carries an assemblyContext reads world and RAISES '3 : object is not a native object' if lifted.
     occ = safe(lambda: design.activeOccurrence)
     if occ is None or safe(lambda: obj.assemblyContext) is not None:
         return safe(lambda: obj.geometry)
@@ -218,10 +202,8 @@ _UNREAD_SPACE_NOTE = (" A null field above was NOT measured: an occurrence is ac
 
 
 # distance_type='absolute' measures from the path START and is not clamped at EITHER end: a negative
-# distance lands the datum before the start and one past the length lands it beyond the end, both
-# along the tangent and both with a healthy feature. The platform accepts that placement, so the
-# tool reports it with the measured numbers instead of refusing it. The generic warning is the
-# fallback for when the path's own length could not be measured.
+# distance lands the datum before the start and one past the length beyond the end, both along the
+# tangent and both healthy. The second note is the fallback when the path's length cannot be read.
 _OFF_PATH_NOTE = (" This datum landed OFF the path: 'along_path' vs 'path_length', in 'units'. An "
                   "absolute distance is not clamped at either end - Fusion extrapolates along the "
                   "tangent and reports the feature healthy.")
@@ -274,15 +256,8 @@ def _at_fraction(raw, m):
 
 
 def _on_path_distance(comp, design, k, path_raw, at_raw, dtype_raw, m):
-    """(path, PathDistanceTypes member, distance ValueInput, payload extra, error) - the plane and
-    point kinds drive setByPath with the same (path, distanceType, distance) triple.
-
-    distance_type='absolute' reads 'at' as a length in 'units' (or a parameter expression) measured
-    from the path start; 'proportional' reads it as a unitless ratio. An absolute distance is not
-    clamped at EITHER end - a negative one places the datum before the path start and one past the
-    length places it beyond the end, both along the tangent and both healthy (measured live
-    "ON_PATH ROUND-2") - so both are legal placements, reported against the measured path extent
-    rather than refused. Proportional is the one that must be range-guarded: it RAISES."""
+    """(path, PathDistanceTypes member, distance ValueInput, payload extra, error) for setByPath -
+    'absolute' reads 'at' as a length in 'units', 'proportional' as a unitless ratio."""
     dtype, derr = _DISTANCE_TYPE.resolve(dtype_raw)
     if derr:
         return None, None, None, None, derr
@@ -311,10 +286,7 @@ def _on_path_distance(comp, design, k, path_raw, at_raw, dtype_raw, m):
 
 def _path_length_cm(path):
     """A Path's total length in cm, or None if any part of it cannot be read. adsk.fusion.Path
-    carries no length member, so each entity's curve is measured through its evaluator
-    (getParameterExtents, then getLengthAtParameter over that span) and the entities are summed
-    (measured live). The evaluator answers are the binding's leading-flag result
-    tuples; anything else reads as unavailable, so a caller gets no number rather than a wrong one."""
+    carries no length member, so each entity's curve is measured through its evaluator."""
     n = safe(lambda: path.count, 0) or 0
     if not n:
         return None
@@ -336,18 +308,9 @@ def _path_length_cm(path):
 
 
 def _path_extent_report(obj, path, inv_k, with_offset=False):
-    """Where a PHYSICAL placement landed along 'path', against the path's own total length - both in
-    display units, so the comparison runs in one unit system. The landed position is read off the
-    definition's ModelParameters, whose .value is internal cm, so an expression placement is
-    measured the same as a literal one; a to-object plane's position is the target's along-path
-    distance PLUS its signed offset, two separate parameters (measured live:
-    measured live).
-
-    Every number comes through _common.measured: an unreadable property must yield NO verdict, and
-    the confident-zero a safe(read, 0.0) would hand back reads as "sits exactly at the path start,
-    on the path" - the one wrong answer this report can give. Empty when any part is unreadable;
-    'beyond_path' is the honest verdict on a placement the platform accepts (healthy, off the
-    curve) rather than refuses."""
+    """Where a PHYSICAL placement landed along 'path' against the path's own length, both in display
+    units - {} when any part is unreadable. A to-object plane's position is the target's along-path
+    distance PLUS its signed offset, which the definition carries as two separate parameters."""
     defn = safe(lambda: obj.definition)
     length = _common.measured(lambda: _path_length_cm(path), inv_k)
     along = _common.measured(lambda: defn.distance.value, inv_k)
@@ -361,12 +324,9 @@ def _path_extent_report(obj, path, inv_k, with_offset=False):
 
 
 def _landed_path_report(obj):
-    """The on-path placement read back off the CREATED datum: the along-path distance - and, for a
-    to-object plane, the separate offset - as the expressions of the ModelParameters that carry them,
-    plus those parameters' names so the placement is retargetable with param_set. Both distance types
-    read back: an absolute one as a length ('30.00 mm'), a proportional one as the bare unitless
-    ratio ('0.5'). A key is absent when the property is not readable (a point's path definition
-    carries no offset, measured)."""
+    """The on-path placement read back off the CREATED datum: the distance (and a to-object plane's
+    separate offset) as ModelParameter expressions, plus those parameters' names for param_set. A
+    key is absent when the property does not read - a point's path definition carries no offset."""
     defn = safe(lambda: obj.definition)
     if defn is None:
         return {}
@@ -399,12 +359,9 @@ def _offset_parameter(obj):
 
 
 def _offset_value_cm(obj):
-    """The offset an OFFSET construction plane REPORTS, in internal cm - or None when no number
-    reads, which withholds a comparison rather than judging the datum against a zero it never said.
-
-    MEASURED: a ConstructionPlaneOffsetDefinition's offset ModelParameter .value reads the requested
-    offset in SIGNED internal cm (a -12 mm request reads -1.2), so the sign is part of the answer
-    and a magnitude-only compare would pass a plane built on the wrong side of its base."""
+    """The offset an OFFSET construction plane REPORTS in internal cm, or None. The offset
+    ModelParameter reads SIGNED, so the sign is part of the answer and a magnitude-only compare
+    would pass a plane built on the wrong side of its base."""
     defn = safe(lambda: obj.definition)
     if defn is None:
         return None
@@ -415,13 +372,9 @@ def _offset_value_cm(obj):
 
 
 def _geometry_readback(knd, design, obj, inv_k):
-    """A cheap post-creation read of the CREATED datum's real geometry (not an echo of the input) -
-    construction geometry has no healthState to poll, so this is the closest rung-3 style check: the
-    object exists AND has the shape/position the mode implies.
-
-    Read through _datum_geometry, so the published origin/normal/direction sit in the SAME space as
-    the handles the caller passed in and as the gates that verified them - a plain .geometry read
-    publishes component-LOCAL coordinates whenever an occurrence is active."""
+    """The CREATED datum's real geometry (not an echo of the input), read through _datum_geometry so
+    it sits in the same space as the caller's handles. Construction geometry carries no healthState,
+    so this read is the effect check. {} when the geometry cannot be read."""
     g = _datum_geometry(design, obj)
     if g is None:
         return {}
@@ -451,13 +404,8 @@ def _plane_datum(m, comp, design, k, units, plane_raw, plane2_raw, offset, edges
                                 "false).")
         obj = comp.constructionPlanes.add(cpi)
         # OFFSET read-back: the definition's own offset parameter is the only thing that can
-        # contradict a plane the API reported as created - the geometry read-back below publishes
-        # where the datum sits but never compares it to what was asked for. Literal and expression
-        # requests alike, since length_value_input answers a cm value for both. Withheld when either
-        # number is unreadable: judging a correct plane against a missing value would refuse it.
-        # SCOPED TO mode='offset'. The on_path forms store their placement as a 'distance' parameter
-        # with the offset as a SEPARATE one, and no measurement here backs comparing those against
-        # this request, so they are read and published (see _landed_path_report) rather than judged.
+        # contradict a plane the API reported as created, and it is withheld when either number is
+        # unreadable. The on_path forms store a separate 'distance' parameter and are not judged here.
         landed_cm = _offset_value_cm(obj)
         if (offset_cm is not None and landed_cm is not None
                 and abs(landed_cm - offset_cm) > _common.EXTENT_MATCH_TOL_CM):
@@ -493,10 +441,9 @@ def _plane_datum(m, comp, design, k, units, plane_raw, plane2_raw, offset, edges
                                 "false).")
         obj = comp.constructionPlanes.add(cpi)
         extra = {"angle_deg": float(angle)}
-        # Both normals through _datum_geometry: 'plane' resolves to the active component's own
-        # construction plane (NATIVE, component-LOCAL, lifted here) or to a proxy-resolved planar
-        # face (already WORLD, returned as-is), so both land in the active occurrence's space and
-        # the dot compares one space against itself.
+        # Both normals through _datum_geometry: 'plane' resolves either to a NATIVE construction
+        # plane (component-local, lifted here) or to a proxy-resolved face (already world), so the
+        # dot compares one space against itself.
         base_normal = _geom.unit_vector(safe(lambda: _datum_geometry(design, base).normal))
         new_normal = _geom.unit_vector(safe(lambda: _datum_geometry(design, obj).normal)) if obj else None
         dot = _dot3(base_normal, new_normal)
@@ -528,11 +475,9 @@ def _plane_datum(m, comp, design, k, units, plane_raw, plane2_raw, offset, edges
                 face, adsk.core.ValueInput.createByReal(math.radians(float(angle))), base):
             return None, None, ("mode='at_angle_on_face': Fusion rejected these inputs "
                                 "(setByAngleOnCurvedFace returned false).")
-        # A 'plane' whose NORMAL is parallel to the inferred axis leaves the angle undefined; the
-        # platform refuses it HERE, at add(), with '3 : reference planarEntity must not be
-        # perpendicular with axis input' (measured - setByAngleOnCurvedFace itself returned true
-        # first). The handler needs no pre-guard: that message names its own offender and passes
-        # through _env_error unadorned, and no datum lands.
+        # A 'plane' whose NORMAL is parallel to the inferred axis leaves the angle undefined:
+        # setByAngleOnCurvedFace returns true and add() then raises '3 : reference planarEntity must
+        # not be perpendicular with axis input', which names its own offender, so no pre-guard.
         obj = comp.constructionPlanes.add(cpi)
         extra = {"angle_deg": float(angle), "angle_from": _inputs.surface_ref_label(base)}
         g = _datum_geometry(design, obj)
@@ -968,10 +913,8 @@ def handler(kind: str = "point", mode: str = "", x: float = 0.0, y: float = 0.0,
     # apply_rename, not a swallowed setattr: a declined/deduped datum rename is disclosed.
     datum_name, rename_warning = _common.apply_rename(obj, name)
 
-    # The datum's own entityToken, so the next call can point AT what was just created. Measured:
-    # a ConstructionAxis carries one and design.findEntityByToken returns the same axis back
-    # (measured live) - which is how AxisRef/PlaneRef resolve a datum handle. Published null
-    # rather than omitted when it cannot be read, and the note then promises nothing.
+    # The datum's own entityToken, so the next call can point AT what was just created - it is what
+    # AxisRef/PlaneRef resolve a datum handle through. Published null, never omitted, when unread.
     handle = safe(lambda: obj.entityToken) or None
     out = {
     "created": True,
@@ -1009,16 +952,9 @@ def handler(kind: str = "point", mode: str = "", x: float = 0.0, y: float = 0.0,
 
 
 TOOL_DESCRIPTION = (
-    "Add a construction point, axis, or plane in the active component. 'mode' picks the build "
-    "method (defaults: offset/edge/coordinate). Mode -> extra inputs:\n"
-    "plane: offset (plane, offset) | at_angle (edge, angle, plane) | at_angle_on_face (face, "
-    "angle, plane) | three_points (3 points) | midplane (plane, plane2) | tangent_at_point (face, "
-    "point) | offset_through_point (plane, point) | on_path (path, at + distance_type, or "
-    "to_object + offset) | two_edges (2 edges).\n"
-    "axis: edge/world (axis) | circular_face (face) | two_points (2 points) | "
-    "two_planes (plane, plane2) | perpendicular_at_point (face, point).\n"
-    "point: coordinate (x/y/z) | circle_center (edge) | two_edges (2 edges) | three_planes "
-    "(3 planes) | edge_plane (edge, plane) | on_path (path, at, distance_type)."
+    "Add a construction point, axis, or plane in the active component. 'mode' is the build method "
+    "within 'kind' (defaults: point=coordinate, axis=edge, plane=offset), and each mode reads its "
+    "own subset of the inputs below."
 )
 
 construction_tool = (
@@ -1031,14 +967,14 @@ construction_tool = (
     .add_input_property("z", {"type": "number", "description": "Z in 'units'."})
     .add_input_property(*_AXIS.as_property())
     .add_input_property(*_PLANE.as_property())
-    .add_input_property(*_PLANE2.as_property())
-    .add_input_property(*_PLANE3.as_property())
+    .add_input_property(*_PLANE2.as_property(brief=True))
+    .add_input_property(*_PLANE3.as_property(brief=True))
     .add_input_property(*_EDGES.as_property())
     .add_input_property(*_POINTS.as_property())
     .add_input_property(*_FACE.as_property())
     .add_input_property("angle", {"type": "number", "description": "Degrees (mode=at_angle/at_angle_on_face)."})
     .add_input_property("path", {"type": ["string", "array"], "items": {"type": "string"},
-            "description": "The curve: one find_geometry edge 'handle' (chains across TANGENT connections; a sharp corner stops the chain - the 'path' count is the truth), a JSON list (used exactly), or 'sketch:<name>'."})
+            "description": "One find_geometry edge 'handle' (chains across TANGENT connections; a sharp corner stops the chain - the 'path' count is the truth), a JSON list (used exactly), or 'sketch:<name>'."})
     .add_input_property("at", {"type": ["number", "string"],
             "description": "Position along 'path' (mode=on_path): a 0-1 ratio or a length in 'units', per 'distance_type'."})
     .add_input_property(*_DISTANCE_TYPE.as_property())

@@ -5,7 +5,7 @@ from these values, so the mocks carry measured data, not hand-typed claims. Each
 owned by the measurement row of the same name in tests/live/VERIFIED_API_FACTS.md."""
 
 FUSION_VERSION = "2705.1.4"
-VERIFIED_ON = "2026-08-31"
+VERIFIED_ON = "2026-09-03"
 
 # '<adsk namespace>.<Class>' -> {member: int} - seeded onto the mock adsk modules.
 ENUMS = {

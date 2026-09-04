@@ -26,7 +26,7 @@ from types import SimpleNamespace
 import adsk.cam
 import pytest
 
-from conftest import load_tool, make_cam, wcs_params
+from conftest import _Strategy, load_tool, make_cam, strategy_factory, wcs_params
 from conftest import FakeSetup, FakeCAMFolder, FakeOperation
 
 cc = load_tool("_cam_common")
@@ -54,8 +54,10 @@ class _Coll:
 
 
 class FakeCAM:
-    def __init__(self, setups):
+    def __init__(self, setups, machining_times=None):
         self.setups = _Coll(setups)
+        # The EMPTY class's second signal, borrowed from the shared fake rather than re-rolled.
+        self.getMachiningTime = make_cam(machining_times=machining_times).getMachiningTime
 
 
 @pytest.fixture
@@ -273,6 +275,22 @@ class TestOperationSummaryStateNaming:
         install(FakeCAM([s]))
         out = _payload(cr.get_cam_operations_handler())
         assert out["setups"][0]["operations"][0]["state"] == "out_of_date"
+
+    def test_a_state_that_did_not_read_is_unread_and_blocks(self, install,
+                                                            operation_cast_passthrough):
+        # the row an agent reads before posting: 'valid' here would publish a lifecycle nothing
+        # answered, and the blocker is what keeps the summary's exception list honest about it.
+        install(FakeCAM([FakeSetup("S1", ops=[_unread_state_op()])]))
+        out = _payload(cr.get_cam_operations_handler())
+        row = out["setups"][0]["operations"][0]
+        assert row["state"] == "unread"
+        assert "state_unread" in row["blocked_by"]
+        # the remedy has to match the CAUSE: a state that raised is not stale work, so the row
+        # points at another READ, never at cam_generate - and the note says so too.
+        assert row["requires"] == {"tool": "cam_get", "workspace": "Manufacture"}
+        assert "'unread'" in out["note"] and "not cam_generate" in out["note"]
+        assert out["setups"][0]["summary"]["states"] == {"unread": 1}
+        assert [e["name"] for e in out["setups"][0]["summary"]["exceptions"]] == ["Contour1"]
 
 
 # ── the two op-state aggregations agree by construction ─────────────────────────────────────────
@@ -531,25 +549,200 @@ class TestIsEmptyToolpath:
 
     def test_a_suppressed_state_whose_flag_did_not_read_is_not_empty(self):
         # the shape where only the STATE half answers suppression - isSuppressed raised and
-        # op_state_facts coerced it to False, so the bucket alone reads 'valid'. Suppressed (2) is
-        # not the IsValid the empty claim rests on.
+        # op_state_facts coerced it to False. Suppressed (2) is not the IsValid the empty claim
+        # rests on.
         assert cc.is_empty_toolpath(self._facts(
             operation_state=adsk.cam.OperationStates.SuppressedOperationState)) is False
 
+    def test_the_suppressed_state_buckets_suppressed_and_refuses_the_empty_class(self):
+        # the distinction the two predicates draw over ONE facts dict, with the empty class's own
+        # toolpath pair riding on it: Suppressed (2) is a PARKED op, never 'generated and cut
+        # nothing'. Reading 2 as the empty/failed class would answer both the wrong way round.
+        facts = self._facts(
+            operation_state=adsk.cam.OperationStates.SuppressedOperationState)
+        assert cc.op_primary_state(facts) == "suppressed"
+        assert cc.is_empty_toolpath(facts) is False
+
     def test_an_unreadable_operation_state_is_not_empty(self):
-        # None is the state that RAISED: op_primary_state falls through to 'valid' on it, and
-        # publishing EMPTY off that fall-through states a lifecycle nothing read
+        # None is the state that RAISED: it buckets 'unread', and publishing EMPTY off it would
+        # state a lifecycle nothing read
         assert cc.is_empty_toolpath(self._facts(operation_state=None)) is False
+
+
+class TestIsEmptyToolpathTimeShape:
+    """The second measured shape of the EMPTY class: an operation whose toolpath generated EMPTY
+    reads hasToolpath TRUE, so the flags read it as a clean valid and only its own machining time
+    separates it from one that cut - 0.0 s for the empty toolpath, 4.193 s for the same operation
+    once it really cut."""
+
+    def _facts(self, **over):
+        base = {"name": "Swarf1", "has_error": False, "has_warning": True, "is_suppressed": False,
+                "is_generating": False,
+                "operation_state": adsk.cam.OperationStates.IsValidOperationState,
+                "generating_progress": None, "has_toolpath": True, "is_toolpath_valid": True,
+                "machining_time": 0.0}
+        base.update(over)
+        return base
+
+    def test_a_generated_toolpath_reading_zero_seconds_is_empty(self):
+        assert cc.is_empty_toolpath(self._facts()) is True
+
+    def test_an_operation_that_cut_is_not_empty(self):
+        assert cc.is_empty_toolpath(self._facts(machining_time=4.193083)) is False
+
+    def test_the_zero_boundary_bites_on_the_smallest_time_above_it(self):
+        # the ON/OFF pair of the only comparison here: a time is a measurement, so anything the
+        # read answered ABOVE zero leaves the operation out of the class
+        assert cc.is_empty_toolpath(self._facts(machining_time=0.000001)) is False
+        assert cc.is_empty_toolpath(self._facts(machining_time=0.0)) is True
+
+    def test_a_negative_time_is_not_empty(self):
+        # a negative figure is no measurement of nothing - only an answered 0.0 is
+        assert cc.is_empty_toolpath(self._facts(machining_time=-0.000001)) is False
+
+    def test_an_unread_time_is_not_empty(self):
+        # the read raised (or answered a non-number): None never equals 0.0, so the operation keeps
+        # the clean-valid reading rather than gaining a state nothing measured
+        assert cc.is_empty_toolpath(self._facts(machining_time=None)) is False
+
+    def test_facts_carrying_no_time_key_at_all_are_not_empty(self):
+        # the shape a caller that never asked for the signal hands over (op_state_facts with no cam)
+        facts = self._facts()
+        del facts["machining_time"]
+        assert cc.is_empty_toolpath(facts) is False
+
+    def test_the_time_shape_still_needs_the_state_to_have_answered_is_valid(self):
+        assert cc.is_empty_toolpath(self._facts(
+            operation_state=adsk.cam.OperationStates.IsInvalidOperationState)) is False
+        assert cc.is_empty_toolpath(self._facts(operation_state=None)) is False
+
+    def test_the_time_shape_still_needs_toolpath_valid(self):
+        assert cc.is_empty_toolpath(self._facts(is_toolpath_valid=False)) is False
+        assert cc.is_empty_toolpath(self._facts(is_toolpath_valid=None)) is False
+
+    def test_a_suppressed_operation_reading_zero_is_not_empty(self):
+        assert cc.is_empty_toolpath(self._facts(is_suppressed=True)) is False
+
+    def test_an_errored_operation_reading_zero_is_not_empty(self):
+        assert cc.is_empty_toolpath(self._facts(has_error=True)) is False
+
+    def test_an_unreadable_toolpath_flag_reading_zero_is_not_empty(self):
+        # hasToolpath None answers neither shape: the flags arm needs False, this arm needs True
+        assert cc.is_empty_toolpath(self._facts(has_toolpath=None)) is False
+
+    def test_the_flags_shape_needs_no_time_at_all(self):
+        # the two arms are disjoint on hasToolpath, so the older shape still answers with the time
+        # unread - which is what keeps every caller that does not pay for the signal working
+        assert cc.is_empty_toolpath(
+            self._facts(has_toolpath=False, machining_time=None)) is True
+
+    def test_a_manual_nc_operation_is_never_empty(self):
+        # a Manual NC op emits canned G-code and carries no toolpath by construction, reading state
+        # IsValid (0) with hasToolpath False - the flags' empty shape. Calling it 'cuts nothing'
+        # describes a pass-through operation as a failed one.
+        facts = self._facts(strategy="manual", has_toolpath=False, machining_time=None)
+        assert cc.is_empty_toolpath(facts) is False
+        # the same flags WITHOUT the manual strategy are the empty class - so the strategy is what
+        # this test moves, not the shape around it
+        assert cc.is_empty_toolpath(dict(facts, strategy="contour2d")) is True
+
+    def test_a_manual_nc_operation_reading_zero_seconds_is_also_excluded(self):
+        assert cc.is_empty_toolpath(self._facts(strategy="manual")) is False
+
+    def test_a_cutting_operation_carrying_a_warning_is_not_empty(self):
+        # a warning is no signal either way: an operation that really cut carried 'Tool was
+        # lifted.' beside 4.193 s, and warning text is what this predicate deliberately never reads
+        assert cc.is_empty_toolpath(self._facts(has_warning=True, machining_time=4.193083)) is False
+
+
+class TestOpStateFactsMachiningTime:
+    """op_state_facts reads the time signal only where it can decide, and only when asked: it is
+    the one fact there that costs a platform computation."""
+
+    def _op(self, name="Swarf1", has_toolpath=True, state=0, **over):
+        return FakeOperation(name, has_toolpath=has_toolpath, operation_state=state, **over)
+
+    def test_without_a_cam_no_time_is_read(self):
+        assert cc.op_state_facts(self._op())["machining_time"] is None
+
+    def test_with_a_cam_a_generated_valid_op_carries_its_time(self):
+        cam = make_cam(machining_times={"Swarf1": 4.193083})
+        assert cc.op_state_facts(self._op(), cam)["machining_time"] == 4.193083
+
+    def test_a_zero_time_reads_as_zero_not_as_unread(self):
+        # the trap the whole signal turns on: a falsy 0.0 coerced to None would read as 'not
+        # measured' and the empty operation would go on publishing as a clean valid
+        cam = make_cam(machining_times={"Swarf1": 0.0})
+        facts = cc.op_state_facts(self._op(), cam)
+        assert facts["machining_time"] == 0.0
+        assert cc.is_empty_toolpath(facts) is True
+
+    def test_no_call_is_made_for_an_operation_holding_no_toolpath(self):
+        # the flags already answer the empty question there, and the call RAISES on such an op
+        cam = make_cam(machining_times={"Swarf1": 0.0})
+        facts = cc.op_state_facts(self._op(has_toolpath=False), cam)
+        assert facts["machining_time"] is None and cam.machining_time_calls == []
+        assert cc.is_empty_toolpath(facts) is True      # the flags shape, unaffected
+
+    def test_no_call_is_made_for_an_out_of_date_operation(self):
+        cam = make_cam(machining_times={"Swarf1": 0.0})
+        state = adsk.cam.OperationStates.IsInvalidOperationState
+        assert cc.op_state_facts(self._op(state=state), cam)["machining_time"] is None
+        assert cam.machining_time_calls == []
+
+    def test_no_call_is_made_for_a_suppressed_operation(self):
+        cam = make_cam(machining_times={"Swarf1": 0.0})
+        state = adsk.cam.OperationStates.SuppressedOperationState
+        cc.op_state_facts(self._op(state=state, suppressed=True), cam)
+        assert cam.machining_time_calls == []
+
+    def test_no_call_is_made_when_the_toolpath_flag_did_not_read(self):
+        cam = make_cam(machining_times={"Op": 0.0})
+        assert cc.op_state_facts(_RaisingFlagOp(), cam)["machining_time"] is None
+        assert cam.machining_time_calls == []
+
+    def test_no_call_is_made_when_the_state_did_not_read(self):
+        cam = make_cam(machining_times={"Swarf1": 0.0})
+        cc.op_state_facts(self._op(state=0, state_readable=False), cam)
+        assert cam.machining_time_calls == []
+
+    def test_a_raising_time_read_answers_none_rather_than_a_number(self):
+        cam = make_cam(machining_times={})       # every operation raises
+        facts = cc.op_state_facts(self._op(), cam)
+        assert facts["machining_time"] is None and len(cam.machining_time_calls) == 1
+        assert cc.is_empty_toolpath(facts) is False
+
+    def test_the_strategy_is_read_onto_the_facts(self):
+        # the member the Manual NC exclusion keys on - unread it is None, which is not 'manual'
+        assert cc.op_state_facts(self._op(strategy="manual"))["strategy"] == "manual"
+        assert cc.op_state_facts(SimpleNamespace(name="Op"))["strategy"] is None
+
+    def test_a_generated_manual_nc_operation_is_not_named_empty(self):
+        # end to end through the flags arm: state IsValid, hasToolpath False, no time - the shape
+        # that reached the empty class before the strategy was read
+        facts = cc.op_state_facts(self._op(strategy="manual", has_toolpath=False))
+        assert facts["has_toolpath"] is False and facts["operation_state"] == 0
+        assert cc.is_empty_toolpath(facts) is False
+
+    def test_the_call_carries_the_pinned_knob_values(self):
+        # ONE spelling of the three knobs, shared with the estimate slice
+        cam = make_cam(machining_times={"Swarf1": 0.0})
+        cc.op_state_facts(self._op(), cam)
+        assert cam.machining_time_calls[0][1] == (100.0, 10.58, 1.5)
 
 
 class _UnreadableSuppressionFlagOp:
     """A warned operation whose isSuppressed read RAISES while operationState reads Suppressed.
     op_state_facts reads that flag through safe(read, False), so the facts it hands on carry
-    is_suppressed False beside operation_state 2 - the one shape only the state half answers for."""
+    is_suppressed False beside operation_state 2 - the one shape only the state half answers for.
 
-    def __init__(self):
+    has_error=True is that shape with a fault beside it, where the bucket answers 'error' and the
+    Suppressed state must not reach any other field on the row."""
+
+    def __init__(self, has_error=False):
         self.name = "Chamfer1"
-        self.hasError = False
+        self.hasError = has_error
+        self.error = "Drive Surfaces: No valid drive surfaces selected." if has_error else ""
         self.hasWarning = True
         self.isGenerating = False
         self.operationState = adsk.cam.OperationStates.SuppressedOperationState
@@ -560,6 +753,35 @@ class _UnreadableSuppressionFlagOp:
     @property
     def isSuppressed(self):
         raise RuntimeError("isSuppressed cannot be read on this operation")
+
+
+class TestOpIsSuppressed:
+    """The ONE suppression read every classifier and cam_get gate shares. Either half answers,
+    because either can be the only one that reads."""
+
+    def test_the_flag_half_answers_on_its_own(self):
+        assert cc.op_is_suppressed({"is_suppressed": True}) is True
+
+    def test_the_state_half_answers_on_its_own(self):
+        assert cc.op_is_suppressed(
+            {"is_suppressed": False,
+             "operation_state": adsk.cam.OperationStates.SuppressedOperationState}) is True
+
+    def test_neither_half_answering_is_not_suppression(self):
+        assert cc.op_is_suppressed(
+            {"is_suppressed": False,
+             "operation_state": adsk.cam.OperationStates.IsValidOperationState}) is False
+
+    @pytest.mark.parametrize("state", [adsk.cam.OperationStates.IsInvalidOperationState,
+                                       adsk.cam.OperationStates.NoToolpathOperationState])
+    def test_the_neighbouring_states_are_not_suppression(self, state):
+        # the exact boundary of the == comparison: IsInvalid (1) and NoToolpath (3) sit either side
+        # of Suppressed (2) and are ordinary lifecycle states
+        assert cc.op_is_suppressed({"is_suppressed": False, "operation_state": state}) is False
+
+    def test_a_dict_carrying_neither_key_answers_false(self):
+        # read BY KEY: cam_get's per-op record reaches this with no raw state at all
+        assert cc.op_is_suppressed({}) is False
 
 
 class TestCountsAsWarningSuppressionHalves:
@@ -641,12 +863,22 @@ class TestOpStateFactsUnreadableState:
         assert cc.op_primary_state(self._facts()) != "suppressed"
 
     def test_the_empty_class_is_not_claimed_off_a_state_that_did_not_read(self):
-        # 'generated and cut nothing' rests on IsValid having been OBSERVED. op_primary_state falls
-        # through to 'valid' for a state that never answered, so the toolpath pair alone must not
-        # carry the claim - the fall-through this predicate reads BESIDE, not through.
+        # 'generated and cut nothing' rests on IsValid having been OBSERVED: a state that never
+        # answered buckets 'unread', so the toolpath pair alone cannot carry the claim.
         facts = cc.op_state_facts(_unread_state_op(has_toolpath=False, is_toolpath_valid=True))
         assert facts["operation_state"] is None
         assert cc.is_empty_toolpath(facts) is False
+
+    def test_the_state_that_never_answered_is_its_own_bucket(self):
+        # the bucket the whole row rests on: 'valid' is the answer to operationState IsValid, and a
+        # read that raised must not borrow it.
+        assert cc.op_primary_state(self._facts()) == "unread"
+
+    def test_an_unread_op_stays_on_the_entitlement_blocked_list(self, monkeypatch):
+        # entitlement_blocked_names skips the FINISHED buckets; 'unread' is not one, so a
+        # generation-blocked op whose state never read is still named as work left to do.
+        monkeypatch.setattr(cc, "strategy_generation_allowed", lambda name: False)
+        assert cc.entitlement_blocked_names([_unread_state_op()]) == ["Contour1"]
 
     def test_the_tally_counts_the_warning_and_claims_no_lifecycle_bucket(
             self, operation_cast_passthrough):
@@ -685,6 +917,39 @@ class TestOpPrimaryState:
     def test_state_0_is_valid(self):
         assert cc.op_primary_state(self._facts(operationState=0)) == "valid"
 
+    def test_state_2_is_suppressed(self):
+        # Suppressed (2) sits between IsInvalid (1) and NoToolpath (3), and the two tests above pin
+        # those neighbours: a comparison that widened either way would relabel one of them.
+        assert cc.op_primary_state(self._facts(operationState=2)) == "suppressed"
+
+    def test_the_state_half_answers_where_the_suppression_flag_did_not_read(self):
+        # op_state_facts reads isSuppressed through safe(read, False), so a raising flag arrives as
+        # False beside operationState Suppressed - the shape where the state is the only half left
+        # to answer. Reading the flag alone publishes 'valid' for an op Fusion answered SUPPRESSED.
+        facts = cc.op_state_facts(_UnreadableSuppressionFlagOp())
+        assert facts["is_suppressed"] is False
+        assert facts["operation_state"] == adsk.cam.OperationStates.SuppressedOperationState
+        assert cc.op_primary_state(facts) == "suppressed"
+
+    def test_an_errored_op_at_the_suppressed_state_stays_errored(self):
+        # the state half is read AFTER the error and generating checks, so admitting it cannot
+        # relabel a reported fault as a parked op
+        assert cc.op_primary_state(self._facts(hasError=True, operationState=2)) == "error"
+
+    def test_a_generating_op_at_the_suppressed_state_stays_generating(self):
+        assert cc.op_primary_state(self._facts(isGenerating=True, operationState=2)) == "generating"
+
+    def test_the_bucket_and_the_tally_answer_one_facts_dict_alike(
+            self, operation_cast_passthrough):
+        # the two rollups reading these facts must not disagree: op_state_tally already counts
+        # state 2 as suppressed, so a bucket that called the same op valid would have cam_get's
+        # per-setup op_states and cam_get_status's live_states describe one op two ways.
+        op = _UnreadableSuppressionFlagOp()
+        facts = cc.op_state_facts(op)
+        tally = cc.op_state_tally([op])
+        assert cc.op_primary_state(facts) == "suppressed"
+        assert (tally["suppressed"], tally["valid"], tally["out_of_date"]) == (1, 0, 0)
+
 
 # ── _operations_summary: readiness derives from the per-op error state it ships beside ──────────
 # The summary must NOT read "ready to post" while an op carries has_error - a toolpath can read valid
@@ -716,8 +981,9 @@ class TestOperationsSummaryErrorGate:
         monkeypatch.setattr(cr, "validity_basis", lambda: "manufacture_verified")
         summary = cr._operations_summary([self._rec("Face1"),
                                           self._rec("Drill1", has_error=True)])
-        assert summary["readiness"] == ("1 of 2 active ops have valid toolpaths - resolve the "
-                                        "exceptions (run cam_generate) before posting.")
+        assert summary["readiness"] == (
+            "1 of 2 active ops have valid toolpaths - resolve the exceptions "
+            "(cam_get(include=['operations']) has the error text) before posting.")
         assert summary["active_count"] == 2          # the errored op is still ACTIVE, just not valid
 
     def test_all_valid_no_errors_is_ready(self, monkeypatch):
@@ -727,6 +993,60 @@ class TestOperationsSummaryErrorGate:
         # inside "'ready to post' is NOT established", so a substring check asserts nothing.
         assert summary["readiness"] == "2 of 2 active ops have valid toolpaths - ready to post."
         assert summary["exceptions"] == []
+
+
+class TestReadinessRemedyIsWordedFromTheExceptionKinds:
+    """The parenthetical names the remedy for the codes PRESENT: a scope whose only exception is a
+    state that never read is not sent to cam_generate, which would regenerate nothing."""
+
+    def _rec(self, name, **kw):
+        base = {"name": name, "state": "valid", "toolpath_valid": True, "is_suppressed": False,
+                "has_error": False, "blocked_by": []}
+        base.update(kw)
+        return base
+
+    def _readiness(self, monkeypatch, records, setup_blocked=None):
+        monkeypatch.setattr(cr, "validity_basis", lambda: "manufacture_verified")
+        return cr._operations_summary(records, setup_blocked)["readiness"]
+
+    def test_an_unread_state_alone_asks_for_a_re_read_not_a_generate(self, monkeypatch):
+        # THE BITE: a generate over a scope whose state never READ regenerates nothing - the state
+        # is unread because op validity is not trustworthy outside Manufacture.
+        line = self._readiness(monkeypatch, [
+            self._rec("Ghost", state="unread", toolpath_valid=False, blocked_by=["state_unread"])])
+        assert "(re-read with cam_get in the Manufacture workspace)" in line
+        assert "cam_generate" not in line
+
+    def test_an_out_of_date_toolpath_still_asks_for_a_generate(self, monkeypatch):
+        line = self._readiness(monkeypatch, [
+            self._rec("Bore", state="out_of_date", toolpath_valid=False,
+                      blocked_by=["toolpath_out_of_date"])])
+        assert "(run cam_generate)" in line
+
+    def test_mixed_kinds_name_every_remedy_once_in_first_seen_order(self, monkeypatch):
+        line = self._readiness(monkeypatch, [
+            self._rec("Bore", state="out_of_date", toolpath_valid=False,
+                      blocked_by=["toolpath_out_of_date"]),
+            self._rec("Slot", state="out_of_date", toolpath_valid=False,
+                      blocked_by=["toolpath_out_of_date"]),
+            self._rec("Ghost", state="unread", toolpath_valid=False,
+                      blocked_by=["state_unread"])])
+        assert ("(run cam_generate; re-read with cam_get in the Manufacture workspace)") in line
+
+    def test_a_blocked_setup_names_the_tool_that_clears_it(self, monkeypatch):
+        # the setup-level vocabulary has ONE home (_cam_common._SETUP_BLOCKER_REMEDY) and this
+        # parenthetical reads it there rather than re-rolling the sentence.
+        line = self._readiness(monkeypatch,
+                               [self._rec("Ghost", state="unread", toolpath_valid=False,
+                                          blocked_by=["state_unread"])],
+                               [{"name": "S1", "blocked_by": ["no_machine_selected"]}])
+        assert cc._SETUP_BLOCKER_REMEDY["no_machine_selected"] in line
+
+    def test_a_code_with_no_known_remedy_adds_no_parenthetical(self, monkeypatch):
+        # a remedy nobody measured is not invented: the sentence still names the exceptions.
+        line = self._readiness(monkeypatch, [
+            self._rec("Odd", toolpath_valid=False, blocked_by=["something_new"])])
+        assert line == "0 of 1 active ops have valid toolpaths - resolve the exceptions before posting."
 
 
 # ── _hms: seconds -> h:m:s ─────────────────────────────────────────────────────────────────────
@@ -778,16 +1098,20 @@ class _MTSetup:
 
 
 class _MTCam:
-    def __init__(self, setups, seconds=120.0, per_op=60.0):
+    def __init__(self, setups, seconds=120.0, per_op=60.0, per_op_by_name=None):
         self.setups = _Coll(list(setups))
         self.calls = []
         self._seconds = seconds
         self._per_op = per_op
+        # per-operation seconds for a NAMED operation - 0.0 is the EMPTY class's second shape,
+        # an operation that generated a toolpath and cuts nothing
+        self._per_op_by_name = dict(per_op_by_name or {})
 
     def getMachiningTime(self, obj, feed_scale, rapid_feed, tool_change):
         self.calls.append((obj, feed_scale, rapid_feed, tool_change))
         if isinstance(obj, _MTOp):                    # a per-OPERATION call
-            return _MTResult(self._per_op, feed_distance=100.0, rapid_distance=25.0)
+            secs = self._per_op_by_name.get(obj.name, self._per_op)
+            return _MTResult(secs, feed_distance=100.0, rapid_distance=25.0)
         return _MTResult(self._seconds, feed_distance=1000.0, rapid_distance=250.0,
                          tool_changes=17)
 
@@ -2393,6 +2717,13 @@ class TestSetupInvalidationRollup:
         assert rec["op_states"] == {"valid": 2}
         assert "invalidation_reasons" not in rec and "machine_out_of_date" not in rec
 
+    def test_an_op_whose_state_did_not_read_gets_its_own_bucket(self, install,
+                                                                operation_cast_passthrough):
+        # the per-setup rollup counts the same buckets the rows do: an unread op added to 'valid'
+        # is how a setup reads "ready" while one of its operations answered nothing.
+        rec = self._rec(install, [_rollup_op("A"), _rollup_op("B", state=None)])
+        assert rec["op_states"] == {"valid": 1, "unread": 1}
+
     def test_a_setup_with_no_operations_carries_no_tally_at_all(self, install,
                                                                 operation_cast_passthrough):
         install(FakeCAM([FakeSetup("S1")]))
@@ -2528,15 +2859,31 @@ class TestInvalidationReasonsBlankLines:
 class TestOpBlockedBy:
     def test_a_suppressed_op_blocks_nothing_even_with_no_tool_and_a_stale_path(self):
         blocked, requires = cr._op_blocked_by(
-            None, {"is_suppressed": True, "tool": None, "is_out_of_date": True})
+            {"state": "suppressed", "is_suppressed": True, "tool": None, "is_out_of_date": True})
         assert blocked == [] and requires is None
 
+    def test_the_bucket_answers_where_the_suppression_flag_did_not_read(self):
+        # the flag RAISED, so the row's own is_suppressed key is null; the bucket carries the
+        # Suppressed state, and a parked op is not reported as blocked on a tool it will never need
+        blocked, requires = cr._op_blocked_by(
+            {"state": "suppressed", "is_suppressed": None, "tool": None, "is_out_of_date": True})
+        assert blocked == [] and requires is None
+
+    def test_an_errored_row_is_still_read_for_blockers_whatever_state_rode_under_it(self):
+        # the bucket is the ONE signal: while it says 'error', the suppressed short-circuit stays
+        # shut, so a fault's own prerequisites are still reported
+        blocked, requires = cr._op_blocked_by(
+            {"state": "error", "is_suppressed": None, "tool": None, "is_out_of_date": False})
+        assert blocked == ["tool_unselected"] and requires is None
+
     def test_an_op_with_no_tool_is_blocked_on_that(self):
-        blocked, requires = cr._op_blocked_by(None, {"tool": None, "is_out_of_date": False})
+        blocked, requires = cr._op_blocked_by(
+            {"state": "valid", "tool": None, "is_out_of_date": False})
         assert blocked == ["tool_unselected"] and requires is None
 
     def test_a_stale_op_names_the_tool_and_workspace_that_unblock_it(self):
-        blocked, requires = cr._op_blocked_by(None, {"tool": "flat 10mm", "is_out_of_date": True})
+        blocked, requires = cr._op_blocked_by(
+            {"state": "out_of_date", "tool": "flat 10mm", "is_out_of_date": True})
         assert blocked == ["toolpath_out_of_date"]
         assert requires == {"tool": "cam_generate", "workspace": "Manufacture"}
 
@@ -2553,6 +2900,50 @@ class TestOperationsSummarySuppressed:
         assert summary["active_count"] == 1          # the suppressed op is excluded from posting
         assert summary["exceptions"] == []
         assert summary["readiness"] == ("1 of 1 active ops have valid toolpaths - ready to post.")
+
+
+class TestOperationsPayloadAgreesOnOneParkedOp:
+    """A parked op whose isSuppressed flag RAISES - the Suppressed state is the only half that
+    answers it. Every surface of the operations payload has to answer alike: the state tally, the
+    active census, and the row's own comparison."""
+
+    def test_the_suppressed_bucket_and_the_active_census_never_both_count_one_op(
+            self, install, operation_cast_passthrough):
+        install(FakeCAM([_OpSetup("S1", [_UnreadableSuppressionFlagOp()])]))
+        summary = _payload(cr.get_cam_operations_handler())["setups"][0]["summary"]
+        assert summary["states"] == {"suppressed": 1}
+        assert summary["active_count"] == 0
+        # the partition: every counted row lands in exactly one of the two
+        assert sum(summary["states"].values()) == (summary["active_count"]
+                                                   + summary["states"].get("suppressed", 0))
+
+    def test_the_row_withholds_the_spindle_comparison_rather_than_computing_one(
+            self, install, operation_cast_passthrough):
+        # a parked op is excluded from posting, so its comparison is WITHHELD - the marker the
+        # operations note promises, never a computed flag
+        install(FakeCAM([_OpSetup("S1", [_UnreadableSuppressionFlagOp()])]))
+        row = _payload(cr.get_cam_operations_handler())["setups"][0]["operations"][0]
+        assert row["state"] == "suppressed"
+        assert row["spindle_check"] == "suppressed_not_compared"
+        assert "spindle_over_machine_max" not in row
+        assert row["blocked_by"] == []
+
+    def test_a_withheld_spindle_comparison_only_ever_rides_a_suppressed_row(
+            self, install, operation_cast_passthrough):
+        # The coherence invariant every row surface holds to: _OPERATIONS_NOTE teaches
+        # 'suppressed_not_compared' as excluded-from-posting, so no row may carry it while its own
+        # state and is_suppressed deny suppression. This shape - the Suppressed state under a flag
+        # that RAISED, with a fault beside it - is REPRESENTABLE rather than live-manufacturable:
+        # measured, an op reading hasError True with state NoToolpath and a drive-surface error,
+        # then suppressed, reads isSuppressed True, state Suppressed, hasError False and error '' -
+        # the platform clears the fault channel on suppression, so the direct route never lands
+        # here. The guard defends the representable shape.
+        install(FakeCAM([_OpSetup("S1", [_UnreadableSuppressionFlagOp(has_error=True)])]))
+        row = _payload(cr.get_cam_operations_handler())["setups"][0]["operations"][0]
+        assert row["state"] == "error"               # the fault outranks the state half
+        assert row["is_suppressed"] is None          # the flag raised; nothing read it
+        assert row.get("spindle_check") != "suppressed_not_compared"
+        assert row["blocked_by"] == ["tool_unselected"]     # read for blockers, not short-circuited
 
 
 # --- _operation_summary: the per-op disclosure a machinist reads (text, not just bools) ---
@@ -2606,9 +2997,10 @@ class TestOperationSummaryDisclosure:
                                        adsk.cam.OperationStates.NoToolpathOperationState])
     def test_a_suppressed_op_is_never_out_of_date_whichever_state_it_reads(
             self, install, operation_cast_passthrough, state):
-        # The row's suppression answer comes off the isSuppressed flag alone: op_primary_state
-        # buckets a suppressed op before it reads operationState, and this conjunct is what keeps
-        # the two reads from disagreeing on one row. Suppressing DISCARDS the toolpath (measured,
+        # This op's operationState is IsInvalid or NoToolpath, so the isSuppressed flag is the only
+        # half that can answer suppression here: op_primary_state reads that flag before it reads
+        # the state, and this conjunct is what keeps the two reads from disagreeing on one row.
+        # Suppressing DISCARDS the toolpath (measured,
         # measure_api cam-suppress-discards-toolpath), and a parked op is not work
         # cam_generate(skip_valid=true) redoes: the row must not call it out of date, nor hang the
         # invalidation diagnostic that answer gates off it.
@@ -2654,11 +3046,41 @@ def _row_op(name, rpm=None, preset=None, suppressed=False):
 
 
 class TestOperationRowContext:
-    def _rows(self, install, setup, machine=None):
+    def _rows(self, install, setup, machine=None, machining_times=None):
         setup.machine = machine
-        install(FakeCAM([setup]))
+        install(FakeCAM([setup], machining_times=machining_times))
         out = _payload(cr.get_cam_operations_handler())
         return out["setups"][0]
+
+    def test_an_empty_toolpath_row_is_marked_while_its_state_stays_valid(
+            self, install, operation_cast_passthrough):
+        # the reading this key exists to correct: state 'valid' beside has_toolpath true is what an
+        # agent takes for a finished pass, and on an operation that generated EMPTY it is not one
+        setup = FakeSetup("Op1", ops=[_row_op("Swarf1"), _row_op("Cut")])
+        out = self._rows(install, setup,
+                         machining_times={"Swarf1": 0.0, "Cut": 4.193083})
+        rows = {r["name"]: r for r in out["operations"]}
+        assert rows["Swarf1"]["empty_toolpath"] is True
+        assert rows["Swarf1"]["state"] == "valid" and rows["Swarf1"]["has_toolpath"] is True
+        assert "empty_toolpath" not in rows["Cut"]
+        assert out["summary"]["empty_toolpath_count"] == 1
+
+    def test_a_job_with_nothing_empty_carries_no_count(self, install,
+                                                       operation_cast_passthrough):
+        setup = FakeSetup("Op1", ops=[_row_op("Cut")])
+        out = self._rows(install, setup, machining_times={"Cut": 4.193083})
+        assert "empty_toolpath" not in out["operations"][0]
+        assert "empty_toolpath_count" not in out["summary"]
+
+    def test_the_count_reads_the_rows_own_key(self, install, operation_cast_passthrough):
+        # two empties and one cutter: the count is the rows carrying the key, never a second
+        # derivation that could select a different set
+        setup = FakeSetup("Op1", ops=[_row_op("Swarf1"), _row_op("Swarf2"), _row_op("Cut")])
+        out = self._rows(install, setup,
+                         machining_times={"Swarf1": 0.0, "Swarf2": 0.0, "Cut": 4.193083})
+        marked = [r["name"] for r in out["operations"] if r.get("empty_toolpath")]
+        assert marked == ["Swarf1", "Swarf2"]
+        assert out["summary"]["empty_toolpath_count"] == len(marked)
 
     def test_a_folder_nested_op_carries_its_breadcrumb_and_folder_name(
             self, install, operation_cast_passthrough):
@@ -3057,7 +3479,9 @@ class TestNcPrograms:
         entry = out["nc_programs"][0]
         assert entry["name"] == "Main" and entry["machine"] == "Haas VF-2"
         assert entry["post"] == "haas next generation"
-        assert entry["operation_count"] == 3
+        # NCProgram.operations holds the setups/folders assigned - an ITEM count; the operations
+        # figure is the filtered read, which this program does not answer at all.
+        assert entry["item_count"] == 3 and entry["operation_count"] is None
         assert entry["post_parameters"] == [
             {"name": "metric", "title": "Use metric", "expression": "true"}]
 
@@ -3078,7 +3502,7 @@ class TestNcPrograms:
         assert out["nc_program_count"] == 1
         assert out["nc_programs"][0]["name"] == "Main"
         assert out["nc_programs"][0]["post_parameters"] == []
-        assert out["nc_programs"][0]["operation_count"] == 0
+        assert out["nc_programs"][0]["item_count"] == 0
 
     def test_a_gated_programs_collection_is_an_error_not_an_empty_list(self, install):
         install(make_gated_cam(member="ncPrograms", text="programs unavailable"))
@@ -3089,8 +3513,8 @@ class TestNcPrograms:
 
 
 class TestNcProgramPostedOperations:
-    """What a program POSTS is filteredOperations, not the single-entry 'operations' list - and an
-    operation whose toolpath is empty is in it, so it would post with nothing to cut."""
+    """What a program HOLDS is filteredOperations, not the single-entry 'operations' list - and it
+    holds operations with no toolpath, which the posted NC file does not carry."""
 
     def _program(self, posted, **kw):
         return SimpleNamespace(name="Main", machine=None, postConfiguration=None,
@@ -3102,12 +3526,33 @@ class TestNcProgramPostedOperations:
         posted = [_row_op("Cut"), _row_op("Rough")]
         install(SimpleNamespace(ncPrograms=_Coll([self._program(posted)])))
         entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
-        assert entry["operation_count"] == 1          # NCProgram.operations - the setup
-        assert entry["posted_operations"] == 2        # what actually posts
+        # MEASURED: NCProgram.operations holds the setups/folders - so it is the ITEM count, and
+        # the operations figure is the filtered read that says what the program holds.
+        assert entry["item_count"] == 1
+        assert entry["operation_count"] == 2 and entry["posted_operations"] == 2
         assert entry["empty_toolpath_count"] == 0
         assert "empty_toolpaths" not in entry
 
-    def test_an_empty_toolpath_operation_is_named_as_one_that_would_post(
+    def test_a_held_operation_with_no_toolpath_is_not_counted_as_posted(
+            self, install, operation_cast_passthrough):
+        # the partition this slice exists to publish: four operations in the program's scope, one
+        # operation block in the file it posts.
+        held = [_row_op("FaceLeg")] + [self._empty(n) for n in ("Chamfer1", "Drill1", "Drill2")]
+        install(SimpleNamespace(ncPrograms=_Coll([self._program(held)])))
+        entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
+        assert entry["operation_count"] == 4 and entry["posted_operations"] == 1
+        assert "toolpath_unread" not in entry
+
+    def test_a_row_whose_toolpath_flag_does_not_read_is_disclosed_not_counted(
+            self, install, operation_cast_passthrough):
+        mystery = _row_op("Mystery")
+        del mystery.hasToolpath
+        install(SimpleNamespace(ncPrograms=_Coll([self._program([_row_op("Cut"), mystery])])))
+        entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
+        assert entry["operation_count"] == 2
+        assert entry["posted_operations"] == 1 and entry["toolpath_unread"] == 1
+
+    def test_an_empty_toolpath_operation_is_named_among_the_held(
             self, install, operation_cast_passthrough):
         empty = _row_op("Rest Wall Finishing 1")
         empty.hasToolpath = False
@@ -3115,6 +3560,20 @@ class TestNcProgramPostedOperations:
         entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
         assert entry["empty_toolpath_count"] == 1
         assert entry["empty_toolpaths"] == ["Rest Wall Finishing 1"]
+
+    def test_an_operation_whose_toolpath_generated_empty_is_named_too(
+            self, install, operation_cast_passthrough):
+        # the EMPTY class's second shape reaching the posted list: hasToolpath TRUE, state IsValid,
+        # 0.0 s. It would post with nothing to cut exactly as the flags shape does, and the flags
+        # alone read it as the cutting operation beside it.
+        posted = [_row_op("Cut"), _row_op("Swarf1")]
+        install(SimpleNamespace(
+            ncPrograms=_Coll([self._program(posted)]),
+            getMachiningTime=make_cam(
+                machining_times={"Cut": 4.193083, "Swarf1": 0.0}).getMachiningTime))
+        entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
+        assert entry["empty_toolpath_count"] == 1
+        assert entry["empty_toolpaths"] == ["Swarf1"]
 
     def test_the_named_empties_are_capped_while_the_count_is_not(self, install, monkeypatch,
                                                                  operation_cast_passthrough):
@@ -3134,7 +3593,9 @@ class TestNcProgramPostedOperations:
         install(SimpleNamespace(ncPrograms=_Coll([
             self._program([SimpleNamespace(name="folder"), _row_op("Cut")])])))
         entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
-        assert entry["posted_operations"] == 2 and entry["empty_toolpath_count"] == 0
+        assert entry["operation_count"] == 2 and entry["empty_toolpath_count"] == 0
+        # the skipped row carries no hasToolpath either, so it is disclosed rather than counted
+        assert entry["posted_operations"] == 1 and entry["toolpath_unread"] == 1
 
     def test_an_unreadable_posted_list_claims_nothing(self, install):
         # no filteredOperations at all: the keys are absent rather than reported as zero
@@ -3154,19 +3615,19 @@ class TestNcProgramPostedOperations:
         op.hasToolpath = False
         return op
 
-    def test_a_name_two_posted_operations_share_is_told_apart_by_its_position(
+    def test_a_name_two_held_operations_share_is_told_apart_by_its_position(
             self, install, operation_cast_passthrough):
-        # A program's posted list can draw operations from several setups and an operation name is
+        # A program's held list can draw operations from several setups and an operation name is
         # unique only within one, so a bare name printed twice addresses two operations and
         # separates neither. The position is the fact this read holds.
         install(SimpleNamespace(ncPrograms=_Coll([self._program(
             [self._empty("Rough"), _row_op("Cut"), self._empty("Rough")])])))
         entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
-        assert entry["empty_toolpaths"] == ["Rough (posted operation 1)",
-                                            "Rough (posted operation 3)"]
+        assert entry["empty_toolpaths"] == ["Rough (operation 1)",
+                                            "Rough (operation 3)"]
         assert entry["empty_toolpath_count"] == 2
 
-    def test_a_name_only_one_posted_operation_carries_stays_the_bare_name(
+    def test_a_name_only_one_held_operation_carries_stays_the_bare_name(
             self, install, operation_cast_passthrough):
         # The spelling a caller passes to cam_get/cam_generate crosses unchanged where it already
         # identifies one row - a position there separates nothing that was not already separate.
@@ -3175,16 +3636,16 @@ class TestNcProgramPostedOperations:
         entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
         assert entry["empty_toolpaths"] == ["Bore", "Face"]
 
-    def test_the_position_counts_over_the_posted_list_not_the_empty_rows(
+    def test_the_position_counts_over_the_held_list_not_the_empty_rows(
             self, install, operation_cast_passthrough):
-        # The discriminator has to address the POSTED list, which is what a reader is looking at;
-        # numbering the empty rows instead would print '2' for the fourth posted operation.
+        # The discriminator has to address the HELD list, which is what a reader is looking at;
+        # numbering the empty rows instead would print '2' for the fourth held operation.
         install(SimpleNamespace(ncPrograms=_Coll([self._program(
             [self._empty("Rough"), _row_op("Cut"), _row_op("Drill"),
              self._empty("Rough")])])))
         entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
-        assert entry["empty_toolpaths"] == ["Rough (posted operation 1)",
-                                            "Rough (posted operation 4)"]
+        assert entry["empty_toolpaths"] == ["Rough (operation 1)",
+                                            "Rough (operation 4)"]
 
     def test_a_skipped_non_operation_entry_still_holds_its_position(
             self, install, monkeypatch):
@@ -3196,8 +3657,8 @@ class TestNcProgramPostedOperations:
             [self._empty("Rough"), SimpleNamespace(name="folder"),
              self._empty("Rough")])])))
         entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
-        assert entry["empty_toolpaths"] == ["Rough (posted operation 1)",
-                                            "Rough (posted operation 3)"]
+        assert entry["empty_toolpaths"] == ["Rough (operation 1)",
+                                            "Rough (operation 3)"]
 
     def test_the_substitution_is_judged_over_every_empty_row_not_the_capped_head(
             self, install, monkeypatch, operation_cast_passthrough):
@@ -3207,7 +3668,7 @@ class TestNcProgramPostedOperations:
         install(SimpleNamespace(ncPrograms=_Coll([self._program(
             [self._empty("Dup"), self._empty("Solo"), self._empty("Dup")])])))
         entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
-        assert entry["empty_toolpaths"] == ["Dup (posted operation 1)", "Solo"]
+        assert entry["empty_toolpaths"] == ["Dup (operation 1)", "Solo"]
         assert entry["empty_toolpath_count"] == 3
 
     def test_an_empty_operation_whose_name_does_not_read_keeps_it(
@@ -3229,7 +3690,7 @@ class TestNcProgramPostedOperations:
         out = _payload(cr.get_nc_programs_handler())
         rows = out["nc_programs"][0]["empty_toolpaths"]
         assert all(r.startswith("Rough (") for r in rows)     # the name is KEPT, not replaced
-        assert "with its POSITION in the posted list beside it" in out["note"]
+        assert "carries its position in that list" in out["note"]
 
 
 # --- get_machining_time_handler: the setup scope + the getMachiningTime precondition ---
@@ -3292,10 +3753,26 @@ class TestMachiningTimeExcludesSuppressed:
     changes no number, keeps excluded_suppressed honest, and stays robust on a collection whose
     other members' states this handler never reads."""
 
-    def _cam(self, install, ops):
-        cam = _MTCam([_MTSetup("S1", ops=ops)])
+    def _cam(self, install, ops, per_op_by_name=None):
+        cam = _MTCam([_MTSetup("S1", ops=ops)], per_op_by_name=per_op_by_name)
         install(cam)
         return cam
+
+    def test_an_op_whose_toolpath_generated_empty_is_named_not_timed(
+            self, install, object_collection, operation_cast_passthrough):
+        # the EMPTY class's second shape: hasToolpath TRUE, state IsValid, and the operation's own
+        # call answering 0.0 s. Nothing in the flags separates it from the operation beside it, so
+        # the call this row was going to make anyway is what settles it - and it is made ONCE.
+        cam = self._cam(install, [_MTOp("Cut", valid=True), _MTOp("Swarf1", valid=True)],
+                        per_op_by_name={"Swarf1": 0.0})
+        out = _payload(cr.get_machining_time_handler())
+        rows = {r["operation"]: r for r in out["setups"][0]["operations"]}
+        assert rows["Swarf1"] == {"operation": "Swarf1", "empty_toolpath": True}
+        assert rows["Cut"]["machining_time_seconds"] == 60.0
+        assert [c[0].name for c in cam.calls if isinstance(c[0], _MTOp)] == ["Cut", "Swarf1"]
+        # the empty row carries no figure, so it is out of the summed count
+        assert out["setups"][0]["operations_time_summed"] == 1
+        assert out["setups"][0]["operations_time_sum_seconds"] == 60.0
 
     def test_suppressed_ops_are_kept_out_of_the_timed_collection(self, install, object_collection,
                                                                  operation_cast_passthrough):
@@ -3384,7 +3861,7 @@ class TestMachiningTimeExcludesSuppressed:
                                                              operation_cast_passthrough):
         self._cam(install, [_MTOp("Cut", valid=True)])
         out = _payload(cr.get_machining_time_handler())
-        assert "do NOT sum" in out["note"] and "SUPPRESSED" in out["note"]
+        assert "do not sum" in out["note"] and "Suppressed operations are left out" in out["note"]
 
     # --- CAM-18: BOTH totals ship, and the note says what each covers ---
 
@@ -3447,8 +3924,8 @@ class TestMachiningTimeExcludesSuppressed:
         self._cam(install, [_MTOp("Cut", valid=True)])
         note = _payload(cr.get_machining_time_handler())["note"]
         assert "operations_time_sum_seconds" in note and "operations_time_summed" in note
-        assert "not as a decomposition of the setup total" in note
-        assert "operations_truncated" in note
+        assert "machining_time_seconds is ONE call over the whole collection" in note
+        assert "do not sum to their setup total" in note
 
     def test_per_op_rows_are_capped(self, install, object_collection, operation_cast_passthrough,
                                     monkeypatch):
@@ -3820,6 +4297,279 @@ class TestResolveMachineLibraryFailure:
         assert machine is None and label is None
         assert "Could not access the machine library" in err
         assert "library manager unavailable" in err
+
+
+class TestResolveMachineByDescription:
+    """The library query keys on the MODEL field, so a machine whose selectable name is carried by
+    its DESCRIPTION alone matches no query - the catalog walk reaches it. The pool here is the
+    measured shape of the bundled generic 5-axis machines: one model, three descriptions. Every
+    name the ambiguity refusal advertises has to resolve on its own."""
+
+    _MODEL = "Generic 5-axis (AC Table-Table)"
+    _DESCRIPTIONS = (
+        "This machine has AC axis on the Table and XYZ axis on the Head",
+        "This machine has AC axis on the Table and YXZ axis on the Head",
+        "This machine has YXAC axis on the Table and Z axis on the Head",
+    )
+
+    def _pools(self):
+        # Local is NOT empty: a description walk that stops at the first location holding anything
+        # never reaches the bundled machines.
+        return {_LOC_LOCAL: [_machine_stub("Haas", "VF-2", "Haas VF-2")],
+                _LOC_F360: [_machine_stub("Autodesk", self._MODEL, d) for d in self._DESCRIPTIONS]}
+
+    def _advertised_lines(self):
+        """The lines the ambiguity refusal tells the caller to pass back."""
+        _m, _label, err = cc.resolve_machine(self._MODEL)
+        listed = err.partition("matches: ")[2].partition(". Pass the full line")[0]
+        return [s.strip() for s in listed.split(", ")]
+
+    def test_the_shared_model_still_refuses_listing_the_three(self, install_library):
+        install_library(_machine_lib(self._pools()))
+        m, label, err = cc.resolve_machine(self._MODEL)
+        assert m is None and label is None
+        assert "3 matches" in err and "Pass the full line as shown" in err
+        assert self._advertised_lines() == [f"{d} [Autodesk|{self._MODEL}]"
+                                            for d in self._DESCRIPTIONS]
+
+    def test_every_advertised_line_resolves_to_its_own_machine(self, install_library):
+        install_library(_machine_lib(self._pools()))
+        lines = self._advertised_lines()
+        assert len(lines) == 3
+        for line in lines:
+            m, label, err = cc.resolve_machine(line)
+            assert err is None, line
+            assert m.description == label and line.startswith(label)
+
+    def test_the_description_alone_still_resolves_where_it_is_unique(self, install_library):
+        install_library(_machine_lib(self._pools()))
+        for d in self._DESCRIPTIONS:
+            m, label, err = cc.resolve_machine(d)
+            assert err is None, d
+            assert label == d and m.description == d
+
+    def test_the_vendor_qualified_label_resolves_too(self, install_library):
+        install_library(_machine_lib(self._pools()))
+        m, label, err = cc.resolve_machine("Autodesk|" + self._DESCRIPTIONS[1])
+        assert err is None and label == self._DESCRIPTIONS[1]
+        m2, label2, err2 = cc.resolve_machine("Autodesk/" + self._DESCRIPTIONS[1])
+        assert err2 is None and label2 == self._DESCRIPTIONS[1]
+
+    def test_a_local_label_and_a_vendor_model_still_resolve(self, install_library):
+        # The decoy is a bundled machine DESCRIBED 'VF-2': the (vendor, model) query answers
+        # 'Haas|VF-2' with the Local Haas, so a description match may never outrank it.
+        pools = self._pools()
+        pools[_LOC_F360] = pools[_LOC_F360] + [_machine_stub("Autodesk", "Generic mill", "VF-2")]
+        install_library(_machine_lib(pools))
+        m, label, err = cc.resolve_machine("Haas VF-2")
+        assert err is None and label == "Haas VF-2" and m.model == "VF-2"
+        m2, label2, err2 = cc.resolve_machine("Haas|VF-2")
+        assert err2 is None and label2 == "Haas VF-2" and m2.vendor == "Haas"
+
+    def test_a_description_no_machine_carries_still_misses(self, install_library):
+        install_library(_machine_lib(self._pools()))
+        m, label, err = cc.resolve_machine("This machine has BC axis on the Table")
+        assert m is None and label is None
+        assert "No machine matches" in err
+        assert "Use the machine name (its description)" in err
+
+    def test_a_failing_location_does_not_sink_the_description_walk(self, install_library):
+        install_library(_machine_lib(self._pools(), raises=(_LOC_LOCAL,)))
+        m, label, err = cc.resolve_machine(self._DESCRIPTIONS[0])
+        assert err is None and label == self._DESCRIPTIONS[0]
+
+    def test_one_description_in_both_locations_resolves_local_first(self, install_library):
+        # Deduped by label, Local before Fusion360 - a user's copy of a bundled machine is one
+        # selectable name, not an ambiguity.
+        pools = self._pools()
+        pools[_LOC_LOCAL] = [_machine_stub("Shop", "Mill-1", self._DESCRIPTIONS[0])]
+        install_library(_machine_lib(pools))
+        m, label, err = cc.resolve_machine(self._DESCRIPTIONS[0])
+        assert err is None and label == self._DESCRIPTIONS[0] and m.vendor == "Shop"
+
+    def test_the_whole_request_outranks_the_half_after_the_separator(self, install_library):
+        # Both halves of 'vendor|description' are matched against the label, so both can hit -
+        # the label equal to the WHOLE request is the more specific one and wins.
+        install_library(_machine_lib({_LOC_LOCAL: [_machine_stub("Shop", "Mill-1", "Sweep")],
+                                      _LOC_F360: [_machine_stub("Autodesk", "Generic mill",
+                                                                "Autodesk|Sweep")]}))
+        m, label, err = cc.resolve_machine("Autodesk|Sweep")
+        assert err is None and label == "Autodesk|Sweep" and m.vendor == "Autodesk"
+
+    def test_a_location_this_build_does_not_carry_is_skipped(self, install_library,
+                                                             drop_local_location):
+        install_library(_machine_lib(self._pools()))
+        m, label, err = cc.resolve_machine(self._DESCRIPTIONS[2])
+        assert err is None and label == self._DESCRIPTIONS[2]
+
+    def test_case_varied_requests_resolve(self, install_library):
+        # The name is matched case-insensitively on BOTH halves - the description and, when one is
+        # given, the vendor - so the case a caller retypes a listed name in decides nothing.
+        install_library(_machine_lib(self._pools()))
+        m, label, err = cc.resolve_machine(self._DESCRIPTIONS[0].upper())
+        assert err is None and label == self._DESCRIPTIONS[0]
+        m2, label2, err2 = cc.resolve_machine("aUtOdEsK|" + self._DESCRIPTIONS[1].upper())
+        assert err2 is None and label2 == self._DESCRIPTIONS[1]
+
+    def test_the_walk_stops_at_the_location_that_carries_the_name(self, install_library):
+        # The catalog walk is unfiltered, so it ends at the location that answered every name it
+        # was looking for: a Local hit leaves the bundled location unenumerated.
+        pools = self._pools()
+        pools[_LOC_LOCAL] = [_machine_stub("Shop", "Mill-1", self._DESCRIPTIONS[0])]
+        lib, queried = _machine_lib(pools), []
+        inner = lib.createQuery
+        lib.createQuery = lambda loc, v, mo: (queried.append(loc), inner(loc, v, mo))[1]
+        install_library(lib)
+        m, _label, err = cc.resolve_machine(self._DESCRIPTIONS[0])
+        assert err is None and m.vendor == "Shop"
+        assert queried[-1] == _LOC_LOCAL
+
+
+class TestResolveMachineSharedDescription:
+    """MEASURED in the bundled library: SIX machines carry the model 'Generic 3-axis' with
+    different descriptions, and the description 'This machine has XYZ axis on the Head' is carried
+    by two machines (Generic 3-axis and Generic 3-axis Router). Neither half addresses one machine,
+    so the refusal prints the whole identity per row - and that line is a request."""
+
+    _SHARED = "This machine has XYZ axis on the Head"
+    _OTHERS = ("This machine has YXZ axis on the Head",
+               "This machine has X axis on the Table and YZ axis on the Head",
+               "This machine has Y axis on the Table and XZ axis on the Head",
+               "This machine has XY axis on the Table and Z axis on the Head",
+               "This machine has YX axis on the Table and Z axis on the Head")
+
+    def _family(self):
+        """The six 'Generic 3-axis' machines plus the Router that shares one of their names."""
+        return ([_machine_stub("Autodesk", "Generic 3-axis", self._SHARED)]
+                + [_machine_stub("Autodesk", "Generic 3-axis", d) for d in self._OTHERS]
+                + [_machine_stub("Autodesk", "Generic 3-axis Router", self._SHARED)])
+
+    def _listed(self, err):
+        return [s.strip() for s in
+                err.partition("matches: ")[2].partition(". Pass the full line")[0].split(", ")]
+
+    def test_one_description_on_two_machines_is_refused_not_collapsed(self, install_library):
+        install_library(_machine_lib({_LOC_LOCAL: self._family()}))
+        m, label, err = cc.resolve_machine(self._SHARED)
+        assert m is None and label is None
+        assert f"Ambiguous machine '{self._SHARED}' - 2 matches" in err
+        assert self._listed(err) == [f"{self._SHARED} [Autodesk|Generic 3-axis]",
+                                     f"{self._SHARED} [Autodesk|Generic 3-axis Router]"]
+
+    def test_a_shared_vendor_model_is_refused_with_lines_that_resolve(self, install_library):
+        # The bracket alone is NOT a key: six machines answer 'Autodesk|Generic 3-axis'. Every line
+        # the refusal prints has to resolve to exactly one machine when handed straight back.
+        install_library(_machine_lib({_LOC_LOCAL: self._family()}))
+        _m, _label, err = cc.resolve_machine("Autodesk|Generic 3-axis")
+        assert "Ambiguous machine 'Autodesk|Generic 3-axis'" in err
+        assert "Pass the full line as shown." in err
+        listed = self._listed(err)
+        assert len(listed) >= 6
+        seen = []
+        for line in listed:
+            m, label, e = cc.resolve_machine(line)
+            assert e is None, line
+            assert f"{label} [{m.vendor}|{m.model}]" == line
+            assert m not in seen                      # one line, one machine - never a repeat pick
+            seen.append(m)
+
+    def test_the_line_tells_the_two_shared_description_machines_apart(self, install_library):
+        install_library(_machine_lib({_LOC_LOCAL: self._family()}))
+        m, _label, err = cc.resolve_machine(f"{self._SHARED} [Autodesk|Generic 3-axis Router]")
+        assert err is None and m.model == "Generic 3-axis Router"
+        m2, _l2, err2 = cc.resolve_machine(f"{self._SHARED} [Autodesk|Generic 3-axis]")
+        assert err2 is None and m2.model == "Generic 3-axis"
+
+    def test_a_line_naming_no_machine_misses_naming_the_description_and_the_pair(
+            self, install_library):
+        # The line is ONE request: splitting it on the '|' inside its own bracket would report a
+        # vendor made of half the description, which names nothing the caller typed.
+        install_library(_machine_lib({_LOC_LOCAL: self._family()}))
+        m, label, err = cc.resolve_machine(f"{self._SHARED} [Haas|Generic 3-axis]")
+        assert m is None and label is None
+        assert f"No machine matches description '{self._SHARED}'" in err
+        assert "with vendor|model 'Haas|Generic 3-axis'" in err
+        assert f"vendor='{self._SHARED} [Haas'" not in err
+
+    def test_a_unique_vendor_model_still_resolves(self, install_library):
+        install_library(_machine_lib({_LOC_LOCAL: self._family()
+                                      + [_machine_stub("Haas", "VF-2", "Haas VF-2")]}))
+        m, label, err = cc.resolve_machine("Haas|VF-2")
+        assert err is None and label == "Haas VF-2"
+
+    def test_two_machines_of_one_identity_are_refused_naming_the_reason(self, install_library):
+        # Nothing read tells these apart, so no line could address one of them.
+        install_library(_machine_lib({_LOC_LOCAL: [_machine_stub("Autodesk", "Gen-5", "Twin"),
+                                                   _machine_stub("Autodesk", "Gen-5", "Twin")]}))
+        m, label, err = cc.resolve_machine("Twin [Autodesk|Gen-5]")
+        assert m is None and label is None
+        assert "2 machines carry that exact description, vendor and model" in err
+        assert "Nothing read tells them apart" in err
+
+    def test_two_vendors_sharing_a_description_are_told_apart_too(self, install_library):
+        install_library(_machine_lib({_LOC_LOCAL: [_machine_stub("Haas", "GX-1", "Shop 5-axis"),
+                                                   _machine_stub("DMG", "GY-2", "Shop 5-axis")]}))
+        _m, _label, err = cc.resolve_machine("Shop 5-axis")
+        assert "Shop 5-axis [Haas|GX-1]" in err and "Shop 5-axis [DMG|GY-2]" in err
+
+    def test_the_same_description_in_both_locations_is_one_machine(self, install_library):
+        # Local first, and the bundled namesake collapses onto it - the collapse query_machines
+        # makes. MEASURED: 'Haas VF-2' is in the Local library AND the bundled one.
+        install_library(_machine_lib({_LOC_LOCAL: [_machine_stub("Shop", "Mill-1", "Shop 5-axis")],
+                                      _LOC_F360: [_machine_stub("Autodesk", "Gen-5", "Shop 5-axis")]}))
+        m, label, err = cc.resolve_machine("Shop 5-axis")
+        assert err is None and label == "Shop 5-axis" and m.vendor == "Shop"
+
+    def test_a_description_local_answered_is_not_matched_again_in_the_bundled_library(
+            self, install_library):
+        # The cross-location collapse on a walk that has to keep going: the vendor-qualified
+        # request leaves its other name unanswered by Local, so the bundled location is read too -
+        # and the description Local already answered is not taken there a second time.
+        install_library(_machine_lib({_LOC_LOCAL: [_machine_stub("Autodesk", "Mill-1", "Shop 5-axis")],
+                                      _LOC_F360: [_machine_stub("Autodesk", "Gen-5", "Shop 5-axis")]}))
+        m, label, err = cc.resolve_machine("Autodesk|Shop 5-axis")
+        assert err is None and label == "Shop 5-axis" and m.model == "Mill-1"
+
+    def test_the_vendor_half_picks_between_two_machines_of_one_description(self, install_library):
+        # 'vendor|description' STATES the vendor, so the machine it resolves to has to carry it -
+        # the Local namesake is passed over for the Autodesk machine the request named.
+        install_library(_machine_lib({_LOC_LOCAL: [_machine_stub("Shop", "Mill-1", "Shop 5-axis")],
+                                      _LOC_F360: [_machine_stub("Autodesk", "Gen-5", "Shop 5-axis")]}))
+        m, label, err = cc.resolve_machine("Autodesk|Shop 5-axis")
+        assert err is None and label == "Shop 5-axis" and m.vendor == "Autodesk"
+
+    def test_a_vendor_no_machine_of_that_description_carries_is_a_miss(self, install_library):
+        install_library(_machine_lib({_LOC_LOCAL: [_machine_stub("Shop", "Mill-1", "Shop 5-axis")]}))
+        m, label, err = cc.resolve_machine("Autodesk|Shop 5-axis")
+        assert m is None and label is None and "No machine matches" in err
+
+
+class TestResolveMachineWalkBudget:
+    """The description walk enumerates both locations unfiltered, and every request the query
+    misses reaches it - a machine create's freeness pre-check included. It runs on a clock, and a
+    walk that spends it answers that, because a catalog read that stopped early proves nothing
+    about what the catalog holds."""
+
+    def _pools(self):
+        return {_LOC_LOCAL: [_machine_stub("Haas", "VF-2", "Haas VF-2")],
+                _LOC_F360: [_machine_stub("Autodesk", "Gen-5", "Shop 5-axis")]}
+
+    def test_a_spent_clock_refuses_and_is_not_worded_as_a_miss(self, install_library, monkeypatch):
+        # cam_create_machine reads the 'No machine matches' opening as PROOF that a name is free
+        # (its _NAME_FREE_PREFIX), so a walk that never finished may not answer with it.
+        monkeypatch.setattr(cc, "_MACHINE_WALK_BUDGET_S", -1.0)
+        install_library(_machine_lib(self._pools()))
+        m, label, err = cc.resolve_machine("Shop 5-axis")
+        assert m is None and label is None
+        assert "Timed out" in err and "UNKNOWN" in err
+        assert not err.startswith("No machine matches")
+
+    def test_the_clock_does_not_reach_a_name_the_query_answers(self, install_library, monkeypatch):
+        # The walk runs only where the query missed, so its budget can never refuse a queried name.
+        monkeypatch.setattr(cc, "_MACHINE_WALK_BUDGET_S", -1.0)
+        install_library(_machine_lib(self._pools()))
+        m, label, err = cc.resolve_machine("Haas|VF-2")
+        assert err is None and label == "Haas VF-2"
 
 
 # ── partial reads: a walk that dies mid-iteration is INCOMPLETE, never complete ──
@@ -4363,3 +5113,146 @@ class TestSpindleCheck:
 
     def test_an_op_without_parameters_reads_no_speed(self):
         assert cc.op_spindle_speed(SimpleNamespace(name="Op")) is None
+
+
+# --- strategy entitlement: the read cam_generate's pre-flight and the readiness verdict share ---
+#
+# A strategy this installation will not generate reads isGenerationAllowed False on the
+# document-independent OperationStrategy factory. False is an observed answer; a flag that would not
+# read is None, and no exclusion may be made from that.
+
+class TestStrategyGenerationAllowed:
+    def test_the_three_answers_stay_apart(self, monkeypatch):
+        monkeypatch.setattr(cc, "_create_strategy",
+                            strategy_factory({"face": True, "chamfer": False, "swarf": None}))
+        assert cc.strategy_generation_allowed("face") is True
+        assert cc.strategy_generation_allowed("chamfer") is False
+        # the strategy built but the flag would not read: unknown, never a confident False
+        assert cc.strategy_generation_allowed("swarf") is None
+
+    def test_an_unknown_strategy_name_reads_null_rather_than_blocked(self, monkeypatch):
+        # createFromString RAISES '3 : Unknown strategy' for a renamed one - degrading that to False
+        # would exclude a healthy operation from every launch.
+        monkeypatch.setattr(cc, "_create_strategy", strategy_factory({"face": True}))
+        assert cc.strategy_generation_allowed("renamed_strategy") is None
+
+    def test_an_operation_with_no_readable_strategy_is_never_blocked(self, monkeypatch):
+        monkeypatch.setattr(cc, "_create_strategy", strategy_factory({}))
+        assert cc.strategy_generation_allowed("") is None
+        assert cc.entitlement_flags([SimpleNamespace(name="NoStrategy")]) == [None]
+
+    def test_each_distinct_strategy_is_probed_exactly_once(self, monkeypatch):
+        # the whole-document walk asks per OPERATION; a probe per operation would multiply a live
+        # API call by the job size for one answer per strategy.
+        seen = {}
+        monkeypatch.setattr(cc, "_create_strategy",
+                            strategy_factory({"face": True, "chamfer": False}, seen))
+        ops = [SimpleNamespace(name=f"Op{i}", strategy=s)
+               for i, s in enumerate(("face", "face", "chamfer", "face"))]
+        assert cc.entitlement_flags(ops) == [True, True, False, True]
+        assert seen == {"face": 1, "chamfer": 1}
+
+    def test_create_strategy_calls_the_document_independent_factory(self, monkeypatch):
+        made = _Strategy(True)
+
+        class _OS:
+            @staticmethod
+            def createFromString(name):
+                _OS.asked = name
+                return made
+
+        monkeypatch.setattr(adsk.cam, "OperationStrategy", _OS)
+        assert cc._create_strategy("swarf") is made and _OS.asked == "swarf"
+
+    def test_the_probe_reads_only_measured_OperationStrategy_members(self):
+        # a typo in either member reads nothing on a SWIG proxy and every flag publishes null
+        # silently; api_surface.py is generated from the installed bindings.
+        from api_surface import PROPERTIES
+        assert {"createFromString", "isGenerationAllowed"} <= set(PROPERTIES["cam.OperationStrategy"])
+
+
+class TestUnfinishedVerdictNamesTheBlockedOps:
+    """The verdict for a scope with ops left to generate. 'run cam_generate to finish the rest' is
+    circular advice over an operation cam_generate EXCLUDES, so those are named instead."""
+
+    def _ops(self):
+        # both still OUT OF DATE (state 1): the verdict only names a blocked op the scope is still
+        # waiting on, so an under-specified fake would pass this test for the wrong reason.
+        ops = [_tally_op("Cham", state=1), _tally_op("Face1", state=1)]
+        ops[0].strategy, ops[1].strategy = "chamfer", "face"
+        return ops
+
+    def test_no_blocked_op_keeps_the_plain_pointer(self, monkeypatch):
+        monkeypatch.setattr(cc, "_create_strategy",
+                            strategy_factory({"chamfer": True, "face": True}))
+        assert cc.unfinished_verdict("1 of 2 active ops valid", self._ops()) == \
+            "1 of 2 active ops valid - run cam_generate to finish the rest."
+
+    def test_a_blocked_op_is_named_and_the_circular_pointer_is_dropped(self, monkeypatch):
+        monkeypatch.setattr(cc, "_create_strategy",
+                            strategy_factory({"chamfer": False, "face": True}))
+        verdict = cc.unfinished_verdict("1 of 2 active ops valid", self._ops())
+        assert "Cham" in verdict and "isGenerationAllowed false" in verdict
+        assert "run cam_generate to finish the rest" not in verdict
+
+    def test_an_operation_whose_name_did_not_read_is_still_counted(self, monkeypatch):
+        monkeypatch.setattr(cc, "_create_strategy", strategy_factory({"chamfer": False}))
+        op = SimpleNamespace(strategy="chamfer", operationState=1, hasError=False,  # no .name
+                             isGenerating=False, isSuppressed=False)
+        assert cc._UNREAD_SEGMENT in cc.unfinished_verdict("0 of 1 active ops valid", [op])
+
+    def test_a_blocked_op_that_already_generated_or_is_parked_is_not_named(self, monkeypatch):
+        # the verdict answers "what is this scope waiting on": a blocked op reading VALID (generated
+        # while the entitlement was there) or SUPPRESSED is not it, and naming those points the
+        # caller away from the one that is actually stuck.
+        monkeypatch.setattr(cc, "_create_strategy", strategy_factory({"chamfer": False}))
+        done = _tally_op("ChamDone", state=0)
+        parked = _tally_op("ChamParked", state=2, suppressed=True)
+        stuck = _tally_op("ChamStuck", state=1)
+        for op in (done, parked, stuck):
+            op.strategy = "chamfer"
+        verdict = cc.unfinished_verdict("1 of 3 active ops valid", [done, parked, stuck])
+        assert "ChamStuck" in verdict
+        assert "ChamDone" not in verdict and "ChamParked" not in verdict
+        assert "1 operation(s) in scope" in verdict          # counted from the named ones only
+
+    def test_the_document_readiness_names_them_through_this_verdict(self, monkeypatch,
+                                                                    operation_cast_passthrough):
+        # the consumer's own branch: live_readiness reaches the verdict only with ops left over.
+        monkeypatch.setattr(cc, "_create_strategy",
+                            strategy_factory({"chamfer": False, "face": True}))
+        ops = [_tally_op("Cham", state=1), _tally_op("Face1")]
+        ops[0].strategy, ops[1].strategy = "chamfer", "face"
+        cam = SimpleNamespace(setups=_Coll([_machined_setup(ops)]), ncPrograms=_Coll([]))
+        monkeypatch.setattr(cc, "get_cam", lambda: (cam, None))
+        sig, err = cc.live_readiness()
+        assert err is None and sig["out_of_date"] == 1
+        assert "Cham" in sig["readiness"] and "EXCLUDES" in sig["readiness"]
+
+
+class TestFuturesCount:
+    """One handle can cover several Futures (a launch split around a blocked op), so its progress is
+    the SUM of them - and an unread member on any one is unknown, never a smaller job."""
+
+    def _future(self, ops, done):
+        return SimpleNamespace(numberOfOperations=ops, numberOfCompleted=done)
+
+    def test_the_counts_are_summed_over_every_future(self):
+        futures = [self._future(2, 1), self._future(3, 3)]
+        assert cc.futures_count(futures, "numberOfOperations") == 5
+        assert cc.futures_count(futures, "numberOfCompleted") == 4
+
+    def test_one_unread_member_makes_the_whole_count_unknown(self):
+        # numberOfOperations raises "Generation not started" until generation spins up; summing the
+        # readable ones alone would publish a job smaller than the handle covers.
+        class _NoCount:
+            numberOfCompleted = 0
+
+            @property
+            def numberOfOperations(self):
+                raise RuntimeError("Generation not started")
+
+        assert cc.futures_count([self._future(2, 1), _NoCount()], "numberOfOperations") is None
+
+    def test_a_single_future_still_reads_its_own_count(self):
+        assert cc.futures_count([self._future(4, 2)], "numberOfOperations") == 4

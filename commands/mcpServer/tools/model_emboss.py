@@ -1,16 +1,11 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: stamp a closed sketch profile - or a sketch TEXT - onto the faces of a body,
-raised or engraved.
+"""MCP building block: stamp a closed sketch profile - or a sketch TEXT - onto the faces of a body.
 
-  model_emboss -> part marking, nameplates, logos, ribs and recesses on an existing face, without
-                  the extrude-and-position dance. WRITES.
-
-EmbossFeatures.createInput takes PLAIN PYTHON LISTS for both collection arguments. MEASURED both
-ways: list/list is accepted and add() hands back a real EmbossFeature, while an ObjectCollection in
-EITHER position raises TypeError "argument 2/3 of type 'std::vector< adsk::core::Ptr< ... > > const
-&'" - the binding wants a vector, which a list marshals to and an ObjectCollection does not.
+  model_emboss -> part marking, nameplates, logos, ribs and recesses on a face; the SIGN of 'depth'
+                  raises or engraves. createInput takes PLAIN PYTHON LISTS for both collection
+                  arguments - an ObjectCollection in either position raises TypeError. WRITES.
 """
 
 import adsk.core
@@ -34,20 +29,16 @@ RETURNS = [
                          absent_when="no_timeline_feature"),
 ]
 
-# allow_text: EmbossFeatures.createInput documents its profiles array as "Profile and SketchText
-# objects", so a sketch text is stamped as itself - the route a nameplate needs, since a SketchText
-# carries no Profile of its own.
-# scope_input: the {sketch, profile_index} and '<sketch>/text:<i>' forms address a sketch BY NAME,
-# and Fusion numbers sketches per component from 1 - so the name two components carry is refused,
-# with the remedy spelled as this tool's own 'component' input, which the schema below declares.
+# allow_text: createInput's profiles array takes Profile AND SketchText objects, so a nameplate's
+# text - which carries no Profile of its own - is stamped as itself. scope_input names this tool's
+# 'component' input, the remedy when two components carry one sketch name.
 _PROFILES = _inputs.ProfileRefList("profiles", required=True, allow_text=True,
     scope_input="component",
     description="The closed profile(s) or sketch text(s) to stamp.")
 _FACES = _inputs.GeometryHandleList("faces", require="face", required=True,
     description="The face(s) to stamp onto - all on ONE body.")
 # EmbossFeatureInput carries NO operation property and createInput takes no operation argument, so
-# the SIGN of depth is the whole raise-vs-engrave surface (stated once, in TOOL_DESCRIPTION).
-# MEASURED: depth +0.3 took a 12 cm3 box to 15.364 cm3 - a positive depth ADDS material. The
+# the SIGN of depth is the whole raise-vs-engrave surface: a positive depth ADDS material. The
 # volume-direction gate below refuses any call whose effect disagrees with the sign asked for.
 _DEPTH = _inputs.Distance("depth", allow_zero=False, required=True)
 
@@ -197,9 +188,7 @@ def handler(profiles=None, faces=None, depth: float = 0.0, units: str = "mm",
 
 TOOL_DESCRIPTION = (
     "Stamp sketch profile(s) or sketch text(s) onto solid face(s): nameplates, part marking, "
-    "logos, ribs. 'depth' is "
-    "signed: positive raises, negative engraves. WRITES; the returned 'mode' echoes that sign, and "
-    "the call is REFUSED unless the volume moved that way.\n"
+    "logos, ribs. 'depth' is signed - positive raises, negative engraves.\n"
     + _outputs.produces_block(RETURNS)
 )
 

@@ -1,29 +1,7 @@
 """Lint: the generated docs (TOOL_MANIFEST/TOOL_POINTER_MAP/PERMISSION_POSTURE + the CLAUDE.md map) match the live tree.
-
-Five scripts derive documentation from the registry/source instead of being hand-maintained:
-``gen_manifest.py`` (TOOL_MANIFEST.md + the CLAUDE.md map from the registry), ``gen_wiring.py``
-(tests/generated/TOOL_POINTER_MAP.md from the tool source), ``gen_posture.py`` (PERMISSION_POSTURE.md
-from the registry's write-status truth), ``gen_api_surface.py`` (tests/api_surface.py from the
-installed Fusion bindings), ``gen_guidance.py`` (.claude/skills/parametric-cad-design/SKILL.md from
-the canonical guidance JSON). ``gen_all.py`` fronts all five in one process and its ``--check`` exits
-non-zero if any output would differ from what is committed. Since agents run pytest constantly but
-rarely remember to re-run a generator, this test shells that ``--check`` so a stale doc shows up as a
-normal test failure instead of silently rotting.
-
-That check costs ~6.5s (measured; almost all of it real work - a bare interpreter start is 0.03s), so
-it runs only when something it reads or writes has CHANGED since a check last passed. The gate is a
-content FINGERPRINT over both halves at once: every INPUT the generators read (the whole
-commands/mcpServer tree plus the scripts under tests/) and every OUTPUT they write. A run whose
-fingerprint matches one a passing check already saw cannot be looking at a stale artifact - staleness
-means a byte differs somewhere in that set. Everything else misses and pays the full check: no
-cached fingerprint yet, an edited tool, a regenerated doc, a HAND-EDITED generated doc (which is why
-the outputs are in the fingerprint, not just the inputs), and a Fusion update that moves the
-bindings.
-
-The failure surface is unchanged - only the subprocess can report a verdict, and it reports the same
-one with the same regen command. Adding a generator that reads something OUTSIDE those two sets means
-adding it to ``_fingerprinted_paths`` in the same change, or its input goes unwatched.
-"""
+This shells ``gen_all.py --check`` so a stale artifact fails as a normal test - skipped only when a
+content FINGERPRINT over every generator INPUT and OUTPUT matches one a passing check already saw.
+A generator reading something outside those two sets joins ``_fingerprinted_paths`` in the same change."""
 
 import glob
 import hashlib
@@ -129,55 +107,14 @@ class TestGeneratedDocsAreCurrent:
             cache.set(_CACHE_KEY, fingerprint)
 
 
-class TestTheFingerprintCannotGreenOverAChange:
-    """The fingerprint is what decides the expensive check may be skipped, so it has to move for
-    every change that could make an artifact stale. A digest that did not would silently turn this
-    lint off."""
-
-    def _files(self, tmp_path, contents):
-        out = []
-        for name, body in contents:
-            p = tmp_path / name
-            p.write_bytes(body)
-            out.append(str(p))
-        return out
-
-    def test_one_changed_byte_changes_the_digest(self, tmp_path):
-        paths = self._files(tmp_path, [("a.md", b"generated\n"), ("b.py", b"x = 1\n")])
-        before = _digest(paths)
-        (tmp_path / "a.md").write_bytes(b"generated!\n")
-        assert _digest(paths) != before
-
-    def test_identical_bytes_give_the_same_digest(self, tmp_path):
-        paths = self._files(tmp_path, [("a.md", b"generated\n")])
-        assert _digest(paths) == _digest(paths)
-
-    def test_the_same_content_under_a_different_name_is_a_different_digest(self, tmp_path):
-        one = self._files(tmp_path, [("a.md", b"same\n")])
-        two = self._files(tmp_path, [("b.md", b"same\n")])
-        assert _digest(one) != _digest(two)
-
-    def test_swapping_two_files_contents_changes_the_digest(self, tmp_path):
-        # a length-only or order-blind digest would hash the pair identically either way round
-        paths = self._files(tmp_path, [("a.md", b"alpha\n"), ("b.md", b"bravo\n")])
-        before = _digest(paths)
-        (tmp_path / "a.md").write_bytes(b"bravo\n")
-        (tmp_path / "b.md").write_bytes(b"alpha\n")
-        assert _digest(paths) != before
-
-    def test_the_bindings_identity_is_part_of_the_digest(self, tmp_path):
-        # a Fusion update changes nothing in the repo, so only the salt can carry it
-        paths = self._files(tmp_path, [("a.md", b"same\n")])
-        assert _digest(paths, salt="build-A") != _digest(paths, salt="build-B")
-
-    def test_the_bindings_identity_names_the_installed_build(self):
-        ident = _bindings_identity()
-        assert ident == "bindings:absent" or ident.count("|") == 4, ident
-
-
 class TestTheFingerprintCoversEveryArtifact:
     """A path missing from the set is a hole the cache would sit in permanently: that artifact could
     be hand-edited, or its source changed, and the check would never be asked again."""
+
+    def test_the_bindings_identity_names_the_installed_build(self):
+        # a Fusion update changes nothing in the repo, so only the salt can carry it into the digest
+        ident = _bindings_identity()
+        assert ident == "bindings:absent" or ident.count("|") == 4, ident
 
     def test_every_generated_artifact_is_fingerprinted(self):
         watched = set(_fingerprinted_paths())

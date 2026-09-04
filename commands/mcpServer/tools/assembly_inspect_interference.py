@@ -23,23 +23,11 @@ RETURNS = [_outputs.ReturnsVerdict(relations=("interference_free",))]
 
 
 def _native_body_owners(occurrences):
-    """{_common.native_identity(native body) -> [occurrence fullPathName, ...]} for the analysis set.
-
-    LIVE-VERIFIED: analyzeInterference hands back NATIVE bodies - `assemblyContext` reads None on
-    both result entities even when the input was a set of occurrences - so the interfering INSTANCE
-    cannot be read off the result. Mapping each occurrence's component-native bodies back to that
-    occurrence's fullPathName is how the instance gets named here. A component instanced twice maps
-    one native body to several occurrences, which is reported as the genuine ambiguity it is.
-
-    Keyed on `_common.native_identity` - the (native token, source-document lineage urn) pair - and
-    NOT on the bare entityToken: a token is DOCUMENT-LOCAL (MEASURED: the 7 ROOT COMPONENTS of a CAM
-    job assembled from 7 source documents read one byte-identical token between them, and distinct
-    BODIES reached through two x-refs do the same). Keyed on the token alone, two bodies living in
-    two different x-ref'd documents write ONE owner list, and every path in it is then published as
-    an owner of the other document's body. The urn half is what separates them.
-
-    A body whose identity does not read is skipped rather than stored under a key that would collide
-    with every other unidentifiable one; `_owning_occurrence_name` names it from its component."""
+    """{_common.native_identity(native body) -> [occurrence fullPathName, ...]} for the analysis
+    set. A body whose identity does not read is skipped."""
+    # analyzeInterference hands back NATIVE bodies - assemblyContext reads None on both result
+    # entities even for an occurrence input - so this map is how the instance gets named. Keyed on
+    # native_identity: a bare entityToken is DOCUMENT-LOCAL and merges bodies across x-refs.
     owners = {}
     for occ in occurrences:
         path = safe(lambda o=occ: o.fullPathName)
@@ -59,19 +47,10 @@ _CANDIDATE_CAP = 8
 
 
 def _owning_occurrence_name(body, owners):
-    """The INSTANCE that owns this body, for an actionable report - the key OccurrenceRef and
-    assembly_move consume. Returns (label, candidates): candidates is None when the instance is
-    exact, and the FULL path list when one native body serves several instances - the platform
-    cannot say WHICH instance collided (see _native_body_owners), so every suspect is named
-    instead of one being silently picked (the handler caps what a row publishes). Falls back to
-    the COMPONENT name (shared by every instance) only when the body maps to no occurrence.
-
-    Looked up by `_common.native_identity`, the key `_native_body_owners` stores under - the same
-    reader on both sides, so a body and the map entry built from it agree by construction.
-
-    The multi-path LABEL states what the map was built from and nothing more: these paths are the
-    occurrences whose component owns this one native body. It does NOT assert they are instances of
-    one component - nothing here reads a component identity."""
+    """The INSTANCE that owns this body, as (label, candidates) - candidates is None when the
+    instance is exact and the FULL path list when one native body serves several, since the
+    platform cannot say WHICH instance collided. Falls back to the COMPONENT name when the body
+    maps to no occurrence."""
     ident = _common.native_identity(body)
     paths = owners.get(ident) if ident is not None else None
     if paths:
@@ -101,14 +80,9 @@ def handler(include_coincident_faces: bool = False) -> dict:
     if not root:
         return error("No root component.")
 
-    # The analysis set is EVERY occurrence at every depth (allOccurrences), plus any solid body the
-    # root owns directly. root.occurrences is the TOP LEVEL only: an assembly wrapped in a single
-    # occurrence - the ordinary shape for an imported or grouped design - presents there as one
-    # entity, leaving nothing to compare.
-    # The shared census, not a bare root.allOccurrences: that property RAISES on a design holding an
-    # unresolved external reference, and `safe(read) or []` there hands this tool an EMPTY analysis
-    # set - from which it would report a clean pass over nothing. The walk survives that raise; when
-    # even it cannot enumerate, the refusal below fires on the honest count.
+    # The analysis set is EVERY occurrence at every depth plus any solid body the root owns
+    # directly; root.occurrences is TOP LEVEL only. The shared census, not a bare
+    # root.allOccurrences: that property RAISES on an unresolved external reference.
     walk = _common.occurrence_walk(design)
     occs = adsk.core.ObjectCollection.create()
     occ_list = []
@@ -169,9 +143,8 @@ def handler(include_coincident_faces: bool = False) -> dict:
 
     clear = len(items) == 0
     # A CLEAN verdict is a claim about everything; a positive finding is not. So an incomplete
-    # analysis set refuses only when it would otherwise report a pass - one interfering pair that WAS
-    # found stays true whatever the walk missed. An unresolved reference contributes no readable
-    # geometry, so it was never in the set that produced this verdict.
+    # analysis set refuses only when it would otherwise report a pass - one interfering pair that
+    # WAS found stays true whatever the walk missed.
     if clear and (walk.broken or not walk.complete):
         if walk.broken:
             missing = (f"{len(walk.broken)} occurrence(s) hold an unresolved external reference "
@@ -219,10 +192,7 @@ TOOL_DESCRIPTION = (
     "Check the active assembly for interference - parts overlapping in solid space - and report each "
     "interfering pair by occurrence name with its overlap volume (cm^3), in measured.interferences. "
     "Complements assembly_get, which checks joint wiring rather than physical overlap. Coincident/flush "
-    "faces are excluded by default (set include_coincident_faces=true to include intended mates). "
-    "passed=true when nothing interferes. A side belonging to a multi-instance component lists the "
-    "candidate instance paths, capped with a truncated flag (the platform returns native bodies, so "
-    "the exact instance is not readable off the result).\n"
+    "faces are excluded by default. passed=true when nothing interferes.\n"
     + _outputs.produces_block(RETURNS)
 )
 

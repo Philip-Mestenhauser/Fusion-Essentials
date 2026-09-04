@@ -444,6 +444,68 @@ class TestExportTarget:
         assert out["redirected_from_mesh"] is True
         assert out["file_exists"] is True
 
+    def test_the_redirect_note_names_the_brep_bodies_and_the_children_the_file_carries(self, tmp_path):
+        # The component export writes the component's BRep bodies AND the bodies of the occurrences
+        # below it into the mesh file, so the note may not promise its mesh bodies alone.
+        _wire_adsk()
+        comp = FakeComp("Root", bodies=[BRepBody("LegBox")], occurrences=[FakeOcc("ChildBox:1")])
+        m = MeshBody("LegMesh")
+        m.parentComponent = comp
+        comp.meshBodies = FakeMeshBodyColl([m])
+        des = _install(FakeDesign(comp), handle_map={"H": m})
+        out = _payload(mx.export_handler(format="stl", target="H",
+                                         file_path=str(tmp_path / "p.stl")))
+        assert des.exportManager.calls[-1].geom is comp
+        note = out["note"]
+        assert "EVERY body" in note and "BRep" in note and "tessellated" in note, note
+        assert "occurrences below it" in note, note
+
+    def test_the_redirect_census_counts_the_bodies_and_the_child_occurrences(self, tmp_path):
+        _wire_adsk()
+        comp = FakeComp("Root", bodies=[BRepBody("LegBox"), BRepBody("Plate")],
+                        occurrences=[FakeOcc("ChildBox:1"), FakeOcc("ChildBox:2"),
+                                     FakeOcc("ChildBox:3")])
+        m = MeshBody("LegMesh")
+        m.parentComponent = comp
+        comp.meshBodies = FakeMeshBodyColl([m])
+        _install(FakeDesign(comp), handle_map={"H": m})
+        out = _payload(mx.export_handler(format="stl", target="H",
+                                         file_path=str(tmp_path / "p.stl")))
+        # the three counts differ, so reading any census key off another collection goes red
+        assert out["component_census"] == {"mesh_bodies": 1, "brep_bodies": 2,
+                                           "child_occurrences": 3}
+
+    def test_a_count_that_does_not_read_is_published_null_not_zero(self, tmp_path):
+        # A census 0 says "the file carries none of those"; an unreadable count says nothing.
+        _wire_adsk()
+
+        class _BlindBodyColl(FakeBodyColl):
+            @property
+            def count(self):
+                raise RuntimeError("bRepBodies.count unreadable")
+
+        comp = FakeComp("Root", bodies=[BRepBody("LegBox")],
+                        occurrences=[FakeOcc("ChildBox:1"), FakeOcc("ChildBox:2")])
+        comp.bRepBodies = _BlindBodyColl([BRepBody("LegBox")])
+        m = MeshBody("LegMesh")
+        m.parentComponent = comp
+        comp.meshBodies = FakeMeshBodyColl([m])
+        _install(FakeDesign(comp), handle_map={"H": m})
+        out = _payload(mx.export_handler(format="stl", target="H",
+                                         file_path=str(tmp_path / "p.stl")))
+        assert out["component_census"] == {"mesh_bodies": 1, "brep_bodies": None,
+                                           "child_occurrences": 2}
+
+    def test_a_target_that_was_not_redirected_publishes_no_census(self, tmp_path):
+        # The census describes what the REDIRECT widened the file to; a body export wrote one body.
+        _wire_adsk()
+        comp = FakeComp("Root", bodies=[BRepBody("LegBox")])
+        _install(FakeDesign(comp))
+        out = _payload(mx.export_handler(format="stl", target="LegBox",
+                                         file_path=str(tmp_path / "p.stl")))
+        assert out["redirected_from_mesh"] is False
+        assert "component_census" not in out
+
     def test_false_success_when_no_file_written_is_error(self, tmp_path):
         # execute() returns True but NO file lands -> tool must ERROR, not report
         # exported:true. Force the no-write by exporting a BARE mesh whose parent ALSO writes nothing
@@ -635,14 +697,13 @@ class TestExportRefinement:
         assert out["refinement_requested"] == "high"
 
     def test_a_refinement_that_did_not_land_says_so_on_the_wire(self, tmp_path):
-        # The note states the fact the code OBSERVED - the read-back disagreed - and stops there: the
-        # density the writer then used was never read, so the note calls it unconfirmed.
+        # The note states the fact the code OBSERVED - the read-back disagreed - and names the key
+        # that carries it. The density the writer then used was never read, so nothing else is said.
         _wire_adsk()
         des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
         note = self._no_refine_export(des, tmp_path)["note"]
         assert "did NOT land" in note
-        assert "did not read back the value that was set" in note
-        assert "unconfirmed" in note
+        assert "'refinement' is null" in note
 
     def test_the_unlanded_refinement_note_attributes_no_cause(self, tmp_path):
         # WHY the set did not stick is not readable from the handler, so the note must not name a
@@ -833,6 +894,15 @@ class TestExportStlUnits:
         assert "'mm'" in res["message"] and "format=obj" in res["message"]
         assert des.exportManager.calls == []               # nothing was written
 
+    def test_the_schema_declares_the_scope_the_handler_refuses_outside(self, tmp_path):
+        # The description and the guard are one promise: a description that dropped 'format=stl
+        # only' would advertise a knob every non-stl call is then refused for.
+        assert "format=stl only" in mx._EXPORT_UNITS.schema()["description"]
+        _wire_adsk()
+        _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
+        res = mx.export_handler(format="3mf", stl_units="mm", file_path=str(tmp_path / "p.3mf"))
+        assert res["isError"] is True and "format=stl only" in res["message"]
+
     def test_an_omitted_unit_on_a_non_stl_format_is_not_refused(self, tmp_path):
         # the refusal keys on what the CALLER asked for, not on the Choice's default - an OBJ export
         # that never mentioned a unit must still run.
@@ -851,7 +921,7 @@ class TestExportStlUnits:
         assert out["options_applied"]["stl_units"] is None
         assert out["options_requested"]["stl_units"] == "mm"
         assert out["options_verified"]["stl_units"] is False   # no landed value to be backed
-        assert "did NOT land" in out["note"] and "unconfirmed" in out["note"]
+        assert "did NOT land" in out["note"] and "'options_applied' is null" in out["note"]
         assert "read back units" not in out["note"]        # never both sentences
 
     def test_an_unlanded_unit_note_attributes_no_cause(self, tmp_path):
@@ -882,7 +952,8 @@ class TestExportStlUnits:
                                          file_path=str(tmp_path / "p.stl")))
         assert out["options_applied"]["stl_units"] == "mm"
         assert out["options_verified"]["stl_units"] is False
-        assert "already read 'mm' BEFORE it was set" in out["note"]
+        assert "stl_units 'mm' UNVERIFIED for this file" in out["note"]
+        assert "'options_verified' is false" in out["note"]
         assert "read back units" not in out["note"]     # the verified sentence must NOT appear
 
     def test_a_unit_the_options_did_not_already_read_is_published_verified(self, tmp_path):
@@ -923,7 +994,7 @@ class TestExportStlUnits:
         for guess in ("the file is in", "written in mm", "the file was written", "the writer used",
                       "landed"):
             assert guess not in note, guess
-        assert "the unit that was asked for" in note
+        assert "re-import with mesh_insert units='mm'" in note
 
     def test_a_split_publishes_the_unverified_unit_per_file_and_counts_it(self, tmp_path):
         # per FILE, like options_applied: each file got its own options object, so each carries its
@@ -937,7 +1008,7 @@ class TestExportStlUnits:
                                                                 {"stl_units": "mm"}]
         assert [f["options_verified"] for f in out["files"]] == [{"stl_units": False},
                                                                  {"stl_units": False}]
-        assert "UNVERIFIED for 2 of the 2 exported file(s)" in out["note"]
+        assert "UNVERIFIED for 2 of 2 file(s)" in out["note"]
         assert "read back units" not in out["note"]
 
     def test_a_build_without_the_distance_units_member_publishes_null(self, tmp_path, monkeypatch):
@@ -978,7 +1049,7 @@ class TestExportStlUnits:
         assert by_occ == {"A:1": "mm", "B:1": None}
         assert {f["occurrence"]: f["options_verified"]["stl_units"] for f in out["files"]} == {
             "A:1": True, "B:1": False}
-        assert "stl_units 'mm' did NOT land for 1 of the 2 exported file(s)" in out["note"]
+        assert "stl_units 'mm' did NOT land for 1 of 2 file(s)" in out["note"]
         # ...and the landed-unit sentence must NOT also appear. Both at once would tell a caller
         # its files re-import at 'in' while one of them has no confirmed unit at all.
         assert "read back units" not in out["note"]
@@ -1016,6 +1087,30 @@ class TestExportSplitByComponent:
         paths = [f["file_path"] for f in out["files"]]
         assert len(set(paths)) == 2
         assert any(p.endswith("Wheel.stl") for p in paths) and any(p.endswith("Wheel_2.stl") for p in paths)
+
+    def test_a_target_with_split_by_component_is_refused_naming_it(self, tmp_path):
+        # The split walk exports EVERY top-level occurrence off its own census and never consults
+        # 'target', so a dropped one hands back a directory of parts the caller did not ask for.
+        # Refused by name, the shape the sibling design_export and this tool's stl_units guard set.
+        _wire_adsk()
+        des = _install(FakeDesign(FakeComp("Root", occurrences=[FakeOcc("Body:1"),
+                                                                FakeOcc("Wheels:1")])))
+        res = mx.export_handler(format="stl", file_path=str(tmp_path), split_by_component=True,
+                                target="Wheels:1")
+        assert res["isError"] is True
+        assert "'target' ('Wheels:1')" in res["message"]
+        assert "split_by_component" in res["message"]
+        assert des.exportManager.calls == []                 # nothing built, nothing written
+        assert list(tmp_path.iterdir()) == []
+
+    def test_an_omitted_target_still_splits(self, tmp_path):
+        # THE BOUNDARY: "" is the default every split call carries, so a guard keyed on the input
+        # existing rather than on what was PASSED would refuse the ordinary split outright.
+        _wire_adsk()
+        _install(FakeDesign(FakeComp("Root", occurrences=[FakeOcc("Body:1")])))
+        out = _payload(mx.export_handler(format="stl", file_path=str(tmp_path),
+                                         split_by_component=True, target=""))
+        assert out["file_count"] == 1
 
     def test_no_occurrences_errors(self, tmp_path):
         _wire_adsk()
@@ -1115,7 +1210,7 @@ class TestExportSplitByComponent:
                                          split_by_component=True))
         assert out["files"][0]["refinement"] is None
         assert out["refinement_requested"] == "high"
-        assert "did NOT land" in out["note"] and "unconfirmed" in out["note"]
+        assert "did NOT land" in out["note"] and "'refinement' is null" in out["note"]
 
     def test_a_split_counts_only_the_files_the_refinement_missed(self, tmp_path):
         # The MIXED case is the boundary: one file landed the density and one did not, so the
@@ -1127,7 +1222,7 @@ class TestExportSplitByComponent:
                                          split_by_component=True))
         by_occ = {f["occurrence"]: f["refinement"] for f in out["files"]}
         assert by_occ == {"A:1": "medium", "B:1": None}
-        assert "1 of the 2 exported file(s)" in out["note"]
+        assert "1 of 2 file(s)" in out["note"]
 
     def test_a_split_where_every_refinement_landed_adds_no_did_not_land_note(self, tmp_path):
         # the disclosure is conditional - a fully successful split must not warn about itself
@@ -1148,6 +1243,70 @@ class TestExportSplitByComponent:
         assert "wrote NO files" in res["message"]
         assert "A:1" in res["message"] and "B:1" in res["message"]
         assert "nope" in res["message"]
+
+
+class TestExportNoteBudget:
+    """Both export paths hand ok() a note COMPOSED at run time, so test_prose_budget's _note_sites
+    sees a bare Name and measures nothing - these two drive the worst composition instead."""
+
+    def _worst_options(self, des, no_unit=()):
+        """STL options that drop the refinement write, and for the occurrences named in 'no_unit'
+        drop the unit write off a foreign factory value (nothing lands) while the rest pre-read the
+        requested unit and drop it (it lands unverifiably) - every clause rides at once."""
+        drop = set(no_unit)
+
+        class _Opts(FakeExportOptions):
+            def __init__(self, k, geom, path):
+                super().__init__(k, geom, path)
+                object.__setattr__(self, "unitType",
+                                   "FACTORY_DEFAULT" if getattr(geom, "name", "") in drop
+                                   else mx.adsk.fusion.DistanceUnits.MillimeterDistanceUnits)
+
+            def __setattr__(self, k, v):
+                if k in ("meshRefinement", "unitType"):
+                    return
+                object.__setattr__(self, k, v)
+
+        def _opt(geom, path):
+            rec = _Opts("stl", geom, path)
+            des.exportManager.calls.append(rec)
+            return rec
+        des.exportManager.createSTLExportOptions = _opt
+
+    def test_the_worst_composed_single_target_note_fits_the_wire_budget(self, tmp_path):
+        _wire_adsk()
+        comp = FakeComp("Root", bodies=[BRepBody("LegBox")], occurrences=[FakeOcc("Child:1")])
+        m = MeshBody("LegMesh")
+        m.parentComponent = comp
+        comp.meshBodies = FakeMeshBodyColl([m])
+        des = _install(FakeDesign(comp), handle_map={"H": m})
+        self._worst_options(des)
+        out = _payload(mx.export_handler(format="stl", stl_units="mm", target="H",
+                                         file_path=str(tmp_path / "p.stl")))
+        assert out["redirected_from_mesh"] is True and out["refinement"] is None
+        assert out["options_verified"]["stl_units"] is False
+        note = out["note"]
+        assert "redirected" in note and "did NOT land" in note and "UNVERIFIED" in note
+        assert len(note) <= 400, len(note)          # test_prose_budget.NOTE_BUDGET_CHARS
+
+    def test_the_worst_composed_split_note_fits_the_wire_budget(self, tmp_path):
+        _wire_adsk()
+        des = _install(FakeDesign(FakeComp("Root", occurrences=[
+            FakeOcc("A:1"), FakeOcc("NoUnit:1"), FakeOcc("Bad:1")])))
+        self._worst_options(des, no_unit=["NoUnit:1"])
+        real_execute = des.exportManager.execute
+
+        def _selective(opts):
+            if getattr(opts.geom, "name", "") == "Bad:1":
+                raise RuntimeError("write blew up")
+            return real_execute(opts)
+        des.exportManager.execute = _selective
+        out = _payload(mx.export_handler(format="stl", stl_units="mm", file_path=str(tmp_path),
+                                         split_by_component=True))
+        assert out["partial"] is True
+        note = out["note"]
+        assert "PARTIAL" in note and "did NOT land" in note and "UNVERIFIED" in note
+        assert len(note) <= 400, len(note)          # test_prose_budget.NOTE_BUDGET_CHARS
 
 
 # â”€â”€ save_as_mesh: tessellate + add a mesh body + route through run_in_base_feature â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

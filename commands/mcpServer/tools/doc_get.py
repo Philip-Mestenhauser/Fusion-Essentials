@@ -20,6 +20,10 @@ from . import _outputs
 
 app = adsk.core.Application.get()
 
+# The session projection's name in include=: an opt-in slice omits that projection unless 'default'
+# rides beside it, so a slice read carries what was asked for and not the session list again.
+_DEFAULT_NAMES = ("default",)
+
 # doc_get PRODUCES the active document's lineage URN, consumed by the doc_*/data_* tools.
 RETURNS = [
     _outputs.ReturnsUrn("document_id", consumers=["doc_open", "doc_copy", "data_delete_file",
@@ -32,15 +36,10 @@ _DOC_NOISE = {"is_active": False, "is_visible": True, "is_saved": True, "is_modi
 
 
 def _doc_save_facts(doc):
-    """Authoritative save state, read from the DATA FILE - never from doc.isSaved.
-
-    doc.isSaved can read False on a document that carries a real cloud DataFile (URN, version,
-    unmodified) - live-observed - so deriving is_saved / never_saved from it makes the payload
-    contradict its own URN/version. The DataFile IS the ground truth: never-saved == no DataFile;
-    unsaved == in-session modifications. Returns (data_file_or_none, is_modified, is_saved) - the
-    DataFile is fetched ONCE here and handed back so a caller reuses it instead of re-reading
-    doc.dataFile (every doc.dataFile access is a cloud round-trip on the main thread). One
-    consistent source both the active block and the open-doc rows read, so they cannot disagree."""
+    """Save state read from the DATA FILE, never from doc.isSaved (which can read False on a document
+    carrying a real cloud DataFile): (data_file_or_none, is_modified, is_saved), never-saved being no
+    DataFile and unsaved being in-session modifications. The DataFile is fetched ONCE and handed back
+    - every doc.dataFile access is a cloud round-trip on the main thread."""
     df = safe(lambda: doc.dataFile)
     is_modified = safe(lambda: doc.isModified)
     is_saved = (df is not None) and (is_modified is not True)
@@ -48,18 +47,14 @@ def _doc_save_facts(doc):
 
 
 def _active_document_facts():
-    """The active document's name, save state, and data-model identity (URN/version/web URL).
-
-    A RECORD, not the (name, urn) pair `_write_guard._active_identity` hands the write guard: the
-    version/web-URL fields need the DataFile OBJECT, which this fetches exactly once and reuses -
-    calling that pair-read as well would fetch it a second time (each fetch is a main-thread cloud
-    round-trip). Both read the same active document, so the two never disagree on which one it is.
-    """
+    """The active document's name, save state, and data-model identity (URN/version/web URL) as a
+    RECORD - the version/web-URL fields need the DataFile OBJECT, which _write_guard's (name, urn)
+    pair-read does not carry."""
     doc = safe(lambda: app.activeDocument)
     if not doc:
         return None
-    # is_saved / has_data_file / never-saved all derive from the DataFile (see _doc_save_facts),
-    # which is fetched ONCE here and reused below - the field reads never re-fetch doc.dataFile.
+    # is_saved / has_data_file / never-saved all derive from the DataFile, fetched ONCE here and
+    # reused below - the field reads never re-fetch doc.dataFile.
     df, is_modified, is_saved = _doc_save_facts(doc)
     has_df = df is not None
     info = {
@@ -118,12 +113,8 @@ def _open_documents(max_results=_OPEN_DOCS_CAP):
     cap = max(1, int(max_results))
     for i in range(total):
         # item(i) guarded: a stale document proxy answers NO document. The slot keeps its place in
-        # the 'open:N' numbering (indices come from the count, so no later document slides), but its
-        # row carries no open_index: doc_activate/doc_close resolve 'open:N' through
-        # _find_open_document, which refuses the index naming such a slot and lists it as carrying no
-        # handle - so an index published here would be an address those consumers reject on arrival.
-        # The row is still PUBLISHED, so the listing counts what the session holds, and it states
-        # nothing about a save state nothing was read from.
+        # the 'open:N' numbering but its row carries no open_index - doc_activate/doc_close refuse
+        # the index naming such a slot - and is still published, so the listing counts every slot.
         d = safe(lambda i=i: docs.item(i))
         if d is None:
             if i < cap:
@@ -174,17 +165,10 @@ def _classify_ext(ext):
 
 
 def _milestone_names(df, max_walk):
-    """version number -> milestone NAME, from the DataFile's Milestones collection.
-
-    The NAME lives only in that collection (a version's own isMilestone flag carries none), and the
-    join key is real: Milestone.version.versionNumber reads the milestoned version's own number, so
-    the join needs no ordering assumption. A Milestone itself exposes ONLY isValid/name/version -
-    its own versionNumber/description/id RAISE (measured live), which is why the hop
-    through .version is not avoidable. Each hop is a cloud read of unmeasured cost, so the walk is
-    BOUNDED by max_walk - the same cap that bounds the published rows.
-
-    Returns (map, readable, walked_all): readable is False when the collection could not be read at
-    all, which must never be published as 'this document has no milestones'."""
+    """version number -> milestone NAME from the DataFile's Milestones collection, joined on
+    Milestone.version.versionNumber: (map, readable, walked_all), readable False when the collection
+    could not be read at all - never publishable as 'this document has no milestones'. A Milestone
+    exposes ONLY isValid/name/version; its own versionNumber/description/id RAISE."""
     coll = safe(lambda: df.milestones)
     count = safe(lambda: coll.count) if coll is not None else None
     if count is None:
@@ -202,11 +186,9 @@ def _milestone_names(df, max_walk):
 
 
 def _slice_versions(versions_max=_VERSIONS_CAP):
-    """CLOUD version history of the active document's DataFile, newest-first, capped.
-
-    The active DataFile is one version; df.versions holds the OTHER versions, so both are merged and
-    de-duplicated by version number. Sorted by version number descending here (not trusting native
-    order) so 'newest-first' is a guarantee, not an assumption. Bounded by versions_max (truncated flag)."""
+    """CLOUD version history of the active document's DataFile, newest-first, bounded by versions_max
+    (truncated flag). The active DataFile is one version and df.versions holds the others, so the two
+    are merged, de-duplicated by version number, and sorted descending rather than trusting order."""
     doc = safe(lambda: app.activeDocument)
     df = safe(lambda: doc.dataFile) if doc else None
     if not df:
@@ -220,9 +202,8 @@ def _slice_versions(versions_max=_VERSIONS_CAP):
     seen = {}
 
     def add(v):
-        """True when this version is accounted for (added, or already seen); False when it could
-        not be read at all - the caller counts those, since a version silently dropped here is a
-        hole in a history the payload would otherwise present as complete."""
+        """True when this version is accounted for (added, or already seen); False when it could not
+        be read at all - the caller counts those as holes in the history."""
         if v is None:
             return False
         n = safe(lambda v=v: v.versionNumber)
@@ -232,10 +213,8 @@ def _slice_versions(versions_max=_VERSIONS_CAP):
             return True
         epoch = safe(lambda v=v: v.dateCreated)
         # After doc_save_milestone a version's own isMilestone flag reads FALSE (not null) for a
-        # while, and neither this flag nor the Milestones collection is known to lead the other. The
-        # precedence here is therefore a DEFENSIVE RULE, not a measured window: where the collection
-        # lists a version, the row reports it a milestone and publishes flag_lagging, so a
-        # disagreement is visible rather than silently resolved.
+        # while, so where the Milestones collection lists a version the row reports it a milestone
+        # and publishes flag_lagging - a disagreement stays visible rather than silently resolved.
         flag = safe(lambda v=v: v.isMilestone)
         in_collection = milestones_readable and n in milestone_names
         row = {
@@ -257,9 +236,7 @@ def _slice_versions(versions_max=_VERSIONS_CAP):
     add(df)
     coll = safe(lambda: df.versions)
     # counted, never safe(..., 0): df.versions is a cloud read, and an enumeration that fails is not
-    # a lineage holding one version. Published as 0 it would hand back version_count=1 with
-    # truncated=false - a history that looks COMPLETE - so the walk's readability is a marker,
-    # exactly as the xref_tree and used_in slices gate on their own complete walk.
+    # a lineage holding one version - published as 0 it hands back a history that looks COMPLETE.
     total = counted(lambda: coll.count) if coll is not None else None
     unreadable = 0
     for i in range(total or 0):
@@ -287,27 +264,19 @@ def _slice_versions(versions_max=_VERSIONS_CAP):
         "milestone_walk_truncated": not walked_all,
         "versions": rows[:cap],
         "truncated": truncated,
-        "note": ("Version metadata LAGS a just-completed save: measured, a fresh read shows the new "
-                 "tip at 2.9-4.4s, and after doc_save_milestone the milestone flag and the "
-                 "Milestones collection arrive TOGETHER at 15.7-19.9s (three timed runs) - so "
-                 "re-read after that window rather than concluding from one read. A row the "
-                 "Milestones collection lists while its flag still reads false is published "
-                 "is_milestone=true with flag_lagging=true. is_milestone null, "
-                 "milestone_names_readable=false and milestone_walk_truncated=true each mean the "
-                 "answer is UNKNOWN - none is evidence a version is not a milestone. "
-                 "history_readable=false (df.versions would not enumerate) or unreadable_count>0 "
-                 "means versions are MISSING from this list: only history_complete=true says the "
-                 "rows are the whole lineage."),
+        "note": ("Version metadata LAGS a just-completed save by up to ~20 s - re-read before "
+                 "concluding. A row the Milestones collection lists while its flag still reads false "
+                 "is is_milestone=true with flag_lagging=true. is_milestone null, "
+                 "milestone_names_readable=false and milestone_walk_truncated=true each mean "
+                 "UNKNOWN, never 'not a milestone'; only history_complete=true says these rows are "
+                 "the lineage."),
     }
 
 
 def _dref_freshness(dref, counters):
-    """A DocumentReference -> the freshness fields shared by EVERY xref_tree row, whatever kind of
-    link produced it (an occurrence's documentReference, or a DeriveFeature's): readable/
+    """A DocumentReference -> the freshness fields every xref_tree row shares: readable/
     source_document/current_version/latest_version/out_of_date. Increments counters['stale']/
-    ['unreadable'] so the rollup reflects the ACTUAL walk - a ref whose freshness can't be read is
-    unreadable, never assumed current. The one leaf op both xref-tree walks (occurrences, derive
-    features) reduce to; each walk stays separate (house rule: unify the leaf, not the walk)."""
+    ['unreadable'], so a ref whose freshness cannot be read is unreadable, never assumed current."""
     if dref is None:
         counters["unreadable"] += 1
         return {"readable": False,
@@ -341,13 +310,9 @@ def _xref_row(occ, depth, counters):
 
 def _unresolved_row(occ, parent_path, depth, detail, counters):
     """One UNRESOLVED-reference record (kind 'unresolved'): an occurrence whose referenced component
-    will not load. It counts as unreadable, so it flows into the existing unreadable_count /
-    all_current machinery rather than needing a channel of its own.
-
-    Neither freshness field exists for it: occ.documentReference raises with the SAME text an
-    ordinary local occurrence gives, and the reference is absent from Document.documentReferences
-    entirely - so no source document, version or out_of_date flag can be published. fullPathName also
-    raises, hence the path is built from the parent's."""
+    will not load, counted as unreadable. It publishes no freshness fields - occ.documentReference
+    raises and the reference is absent from Document.documentReferences - and fullPathName raises
+    too, so the path is built from the parent's."""
     counters["unreadable"] += 1
     name = safe(lambda: occ.name)
     return {"path": (f"{parent_path}+{name}" if parent_path and name else (name or "(unreadable name)")),
@@ -360,11 +325,8 @@ def _unresolved_row(occ, parent_path, depth, detail, counters):
 
 def _unresolved_children(occ, parent_path, depth, refs, cap, counters, state):
     """Append a row for each unresolved reference among `occ`'s COMPONENT-LOCAL children.
-
-    The freshness walk descends childOccurrences, which silently DROPS an occurrence whose reference
-    is broken (its assembly path is invalid); component.occurrences still holds it. Measured: the
-    walk's own gate misses it twice over - isReferencedComponent reads FALSE on a broken reference,
-    so even reaching the occurrence would not have produced a row."""
+    childOccurrences silently DROPS an occurrence whose reference is broken while
+    component.occurrences still holds it, and isReferencedComponent reads FALSE on one."""
     comp = safe(lambda: occ.component)
     for child in iter_collection(safe(lambda: comp.occurrences) if comp else None):
         is_broken, detail = _common.broken_reference(child)
@@ -409,16 +371,10 @@ def _walk_derive_rows(d, refs, cap, counters, state):
 
 
 def _slice_xref_tree(xref_max=_XREF_CAP, max_depth=None):
-    """Freshness rollup over BOTH external-link kinds: referenced occurrences (root.occurrences ->
-    childOccurrences, kind 'xref') AND derive links (every component's features.deriveFeatures, kind
-    'derive' - a derive's occurrence reports isReferencedComponent=false, confirmed live, so it is
-    invisible to the occurrence walk; its DocumentReference lives on the FEATURE instead). Each ref's
-    source doc + current-vs-latest version + out_of_date flag, with an all_current rollup over both.
-
-    Honesty: all_current is True ONLY on a COMPLETE walk with zero stale and zero unreadable refs. A cap
-    hit (truncated), a depth cap (depth_capped), or any unreadable ref all make the walk partial, so
-    all_current cannot be claimed True on partial knowledge. Bounded by xref_max (shared across both
-    kinds) and optional max_depth (the occurrence walk only - a derive has no assembly depth)."""
+    """Freshness rollup over BOTH external-link kinds - referenced occurrences (kind 'xref') and
+    derive links (kind 'derive') - each with its source doc, current-vs-latest version and
+    out_of_date flag. all_current is True ONLY on a COMPLETE walk with zero stale and zero unreadable
+    refs. Bounded by xref_max, and by max_depth on the occurrence walk."""
     d = design()
     if not d:
         return {"available": False,
@@ -524,12 +480,9 @@ def _used_in_row(df, counters):
 
 def _slice_used_in(used_in_max=_USED_IN_CAP):
     """CLOUD reverse references (where-used) of the active document's DataFile: every document that
-    REFERENCES this one - a drawing made from it, a parent assembly that inserts it. The mirror of
-    xref_tree, which walks what this design CONSUMES.
-
-    Honesty: query_complete is True ONLY on a full walk with zero unreadable refs and no cap hit; when
-    the walk is partial (parentReferences unreadable, a truncated list, or any unresolvable parent) an
-    empty/short list must NEVER be read as 'nothing uses this'. Bounded by used_in_max (truncated flag)."""
+    REFERENCES this one, the mirror of xref_tree. query_complete is True ONLY on a full walk with
+    zero unreadable refs and no cap hit - on a partial walk an empty or short list must NEVER be read
+    as 'nothing uses this'. Bounded by used_in_max (truncated flag)."""
     doc = safe(lambda: app.activeDocument)
     df = safe(lambda: doc.dataFile) if doc else None
     if not df:
@@ -589,11 +542,33 @@ def _slice_used_in(used_in_max=_USED_IN_CAP):
 def handler(max_results: int = _OPEN_DOCS_CAP, include=None, versions_max: int = _VERSIONS_CAP,
             xref_max: int = _XREF_CAP, max_depth=None, used_in_max: int = _USED_IN_CAP) -> dict:
     """See TOOL_DESCRIPTION."""
+    # ONE read of the active document's record, for the guard AND the projection built from it: a
+    # slice read answers for the SAME document, so a missing one is refused here rather than
+    # reported by a slice as "never saved to the cloud".
     active = _active_document_facts()
     if active is None:
         return error("No active document. Open or create one first (doc_open / doc_new).")
-    rows, summary, truncated = _open_documents(max_results)
     inc = {s.strip().lower() for s in (include or [])}
+    deep = inc - set(_DEFAULT_NAMES)
+    want_default = not deep or bool(inc & set(_DEFAULT_NAMES))
+    payload, note = {}, ""
+    if want_default:
+        payload, note = _session_projection(active, max_results)
+    if "versions" in inc:
+        payload["versions"] = _slice_versions(versions_max)
+    if "xref_tree" in inc:
+        payload["xref_tree"] = _slice_xref_tree(xref_max, max_depth)
+    if "used_in" in inc:
+        payload["used_in"] = _slice_used_in(used_in_max)
+    if note:
+        payload["note"] = note
+    return ok(payload)
+
+
+def _session_projection(active, max_results):
+    """(payload, note) for the DEFAULT projection: the `active` record the handler resolved plus the
+    session's open-document list. Read from memory - the include= slices are the cloud reads."""
+    rows, summary, truncated = _open_documents(max_results)
     note = ("active = the focused document (document_id is its lineage URN, for doc_copy/doc_open). "
                  "open_documents is a SUPERSET of visible tabs - referenced/dependency docs load as real "
                  "Documents (is_visible=true means loaded, not tabbed). Healthy docs show just their name "
@@ -619,52 +594,34 @@ def handler(max_results: int = _OPEN_DOCS_CAP, include=None, versions_max: int =
                  "index shifted, but doc_activate/doc_close refuse the 'open:N' that names it - "
                  "their own listing calls it a slot with no handle - so there is nothing there to "
                  "retry.")
-    payload = {
+    return {
         "active": active,
         "document_id": active["document_id"],     # surfaced at top level for the URN consumers
         "summary": summary,                       # exception-first: open_count + the unsaved docs
         "open_count": summary["open_count"],
         "open_documents": rows,
         "truncated": truncated,
-    }
-    if "versions" in inc:
-        payload["versions"] = _slice_versions(versions_max)
-    if "xref_tree" in inc:
-        payload["xref_tree"] = _slice_xref_tree(xref_max, max_depth)
-    if "used_in" in inc:
-        payload["used_in"] = _slice_used_in(used_in_max)
-    payload["note"] = note
-    return ok(payload)
+    }, note
 
 
 TOOL_DESCRIPTION = (
-    "Read the SESSION's documents in one call: the ACTIVE document - name, save state, and lineage id "
-    "(URN, the 'document_id' doc_copy/doc_open use) - plus the list of all open documents (name + "
-    "is_active/is_visible/is_saved/is_modified). app.documents is a SUPERSET of visible tabs (an "
-    "assembly loads its references as real Documents). The default projection is in-memory (cheap); for "
-    "the CLOUD data model (hubs/projects/files) use data_get. Opt-in cloud slices via include=[...]: "
-    "'versions' = the active doc's version history (number/date/description/id + is_milestone/"
-    "milestone_name, newest-first, capped); "
-    "'xref_tree' = recursive freshness walk of referenced components, derive links and refs that "
-    "will not load (kind='xref'/'derive'/'unresolved'), with current-vs-latest version and an "
-    "all_current/stale/unresolved rollup; 'used_in' = the "
-    "REVERSE view (where-used) - documents "
-    "that reference THIS one (a drawing made from it, a parent assembly that inserts it), each with "
-    f"name/type/version/URN and a by-type rollup. open_documents is capped (max_results, default {_OPEN_DOCS_CAP}) and "
-    "each slice is capped too; 'truncated' flags when a cap was hit. Roll a version back with "
-    "doc_restore_version.\n"
+    "Read the SESSION's documents in one call: the ACTIVE document and every open one, with save "
+    "state and lineage URNs. app.documents is a SUPERSET of visible tabs. In-memory; for the CLOUD "
+    "data model use data_get. include=[...] adds cloud slices: 'versions' (with milestones), "
+    "'xref_tree' (freshness of referenced components, derive links, and refs that will not load), "
+    "'used_in' (documents that reference THIS one). Roll a version back with doc_restore_version.\n"
     + _outputs.produces_block(RETURNS)
 )
 
 tool = (
     Tool.create_simple(name="doc_get", description=TOOL_DESCRIPTION)
-    .add_input_property("max_results", {"type": "integer", "description": f"Cap on the 'open_documents' array returned (default {_OPEN_DOCS_CAP})."})
-    .add_input_property("include", {"type": "array", "items": {"type": "string", "enum": ["versions", "xref_tree", "used_in"]},
-            "description": "Opt-in cloud slices: 'versions' (version history + milestones), 'xref_tree' (referenced-component and derive-link freshness), and/or 'used_in' (where-used - documents that reference this one)."})
-    .add_input_property("versions_max", {"type": "integer", "description": f"Cap on the 'versions' slice list (default {_VERSIONS_CAP})."})
-    .add_input_property("xref_max", {"type": "integer", "description": f"Cap on the 'xref_tree' references walked/returned (default {_XREF_CAP})."})
-    .add_input_property("max_depth", {"type": "integer", "description": "Optional max assembly depth for the 'xref_tree' walk (1 = top-level refs only)."})
-    .add_input_property("used_in_max", {"type": "integer", "description": f"Cap on the 'used_in' referencing-documents list (default {_USED_IN_CAP})."})
+    .add_input_property("max_results", {"type": "integer", "description": f"Cap on 'open_documents' (default {_OPEN_DOCS_CAP})."})
+    .add_input_property("include", {"type": "array", "items": {"type": "string", "enum": ["versions", "xref_tree", "used_in", "default"]},
+            "description": "Cloud slices to add; 'default' keeps the session list beside them."})
+    .add_input_property("versions_max", {"type": "integer", "description": f"Cap on the 'versions' list (default {_VERSIONS_CAP})."})
+    .add_input_property("xref_max", {"type": "integer", "description": f"Cap on the 'xref_tree' references walked (default {_XREF_CAP})."})
+    .add_input_property("max_depth", {"type": "integer", "description": "Max assembly depth for the 'xref_tree' walk."})
+    .add_input_property("used_in_max", {"type": "integer", "description": f"Cap on the 'used_in' list (default {_USED_IN_CAP})."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)

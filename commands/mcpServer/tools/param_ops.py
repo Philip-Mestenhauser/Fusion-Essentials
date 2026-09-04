@@ -25,14 +25,8 @@ _MAX_PARAMS = 2000
 
 
 def _owner_facts(p) -> dict:
-    """The maker of a MODEL parameter, as the row's own keys - {} when the parameter has none.
-
-    A ModelParameter carries .createdBy (the Feature / Joint / JointOrigin / sketch dimension that
-    made it) and .role (the slot it fills on that owner - 'Distance', 'alignAngle', ...). A
-    UserParameter has NO createdBy and the read raises, so the missing attribute IS the guard and no
-    type test is needed. Only a key that actually read is emitted: an owner whose name will not read
-    is absent from the row, never a stand-in string. The owner's Python class name is the same
-    identity design_get's timeline pairing reads it under; it is the one key that cannot fail."""
+    """The maker of a MODEL parameter as the row's own keys, each omitted when it did not read."""
+    # A UserParameter has no .createdBy and the read raises, which is the guard.
     owner = safe(lambda: p.createdBy)
     if owner is None:
         return {}
@@ -41,8 +35,7 @@ def _owner_facts(p) -> dict:
     if isinstance(name, str) and name:
         out["owner"] = name
     out["owner_type"] = type(owner).__name__
-    # An owner that lives in a sketch (a dimension) carries parentSketch; a feature has no such
-    # attribute and the read raises, which is what leaves the key off a feature's row.
+    # A dimension carries parentSketch; a feature has no such attribute and the read raises.
     sketch = safe(lambda: owner.parentSketch.name)
     if isinstance(sketch, str) and sketch:
         out["owner_sketch"] = sketch
@@ -64,28 +57,22 @@ def _param_summary(p, units_manager=None) -> dict:
     unit = safe(lambda: p.unit)
     out = {
     "name": safe(lambda: p.name),
-    # A model parameter's expression is readable but not INTERPRETABLE without the feature/sketch
-    # it drives, and a design with no user parameters has this list as its only parameter view.
     **_owner_facts(p),
     "expression": safe(lambda: p.expression),
     "unit": unit,
     "comment": safe(lambda: p.comment),
-    # round-trippable with param_set_favorite / param_add(favorite=) - None when the parameter
-    # kind carries no favorite flag (model parameters).
+    # None when the parameter kind carries no favorite flag (model parameters).
     "favorite": safe(lambda: p.isFavorite),
     "value": None,
     }
-    # Parameter.value is in DATABASE units (cm / radians), which is NOT the parameter's own 'unit':
-    # a "50 mm" length reads 5.0 and a "90 deg" angle reads 1.5708. Reporting that raw number beside
-    # unit='mm' is a 10x (or 57x) error for any caller that does arithmetic on it, so it is converted
-    # into the parameter's own unit and the raw value kept under its own key.
+    # Parameter.value is in DATABASE units (cm / radians), not the parameter's own 'unit': a "50 mm"
+    # length reads 5.0 and a "90 deg" angle 1.5708, so it is converted below.
     v = safe(lambda: p.value)
     if v is None:
         out["value"] = safe(lambda: p.textValue)     # text parameters have no numeric value
         return out
     out["value_internal"] = v
     if not unit:
-        # A unitless parameter (a count, a ratio) has no conversion to make - the number IS the value.
         out["value"] = v
         out["value_units"] = ""
         return out
@@ -363,12 +350,10 @@ def favorite_handler(name: str = "", favorite: bool = True) -> dict:
 
 
 TOOL_DESCRIPTION = (
-"Read the active design's parameters: each parameter's name, expression, value, "
-"unit, and comment. 'value' is in the parameter's own 'unit' (mm, deg, ...) - "
-"'value_units' names it, and 'value_internal' is the raw cm/radians figure. Returns "
-"user parameters by default; pass include_model_parameters=true to also include "
-"feature/model parameters, or 'name' to fetch a single parameter. (Use param_set to "
-"change one.)"
+"Read the active design's parameters - name, expression, value, unit, comment. 'value' is in the "
+"parameter's own 'unit'; 'value_units' names it and 'value_internal' is the raw cm/radians figure. "
+"User parameters by default; include_model_parameters=true adds feature/model ones, or 'name' "
+"fetches a single parameter. Change one with param_set."
 )
 
 tool = (
@@ -383,15 +368,11 @@ tool = (
 item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)
 
 _SET_DESCRIPTION = (
-"Set a design parameter's expression (value). Parameters drive geometry, stock, and "
-"suppression downstream. 'expression' is interpreted like the "
-"Parameters dialog: a number/expression ('2 in', '6.25', 'StockX/2', a reference to "
-"other parameters), or a quoted text value for text parameters (\"'Roughing'\"). "
-"Function ARGUMENTS separate with ';' not ',' - if(StockX>=2 in; 10 mm; 5 mm), max(a; b) "
-"- conditionals nest and units mix freely within one expression. "
-"Returns the before/after so you can confirm the change. Works for user and model "
-"parameters; model/feature parameters may reject the edit (reported as an error). Use "
-"param_get to discover names first."
+"Set a design parameter's expression (value), returning the before/after. 'expression' is "
+"interpreted like the Parameters dialog: a number/expression ('2 in', 'StockX/2', a reference to "
+"other parameters), or a quoted text value for text parameters (\"'Roughing'\"). Function "
+"ARGUMENTS separate with ';' not ',' - if(StockX>=2 in; 10 mm; 5 mm) - and conditionals nest "
+"while units mix freely within one expression. Use param_get to discover names first."
 )
 
 set_tool = (
@@ -404,9 +385,9 @@ set_tool = (
     .add_input_property("expression", {"type": "string",
             "description": "New value/expression (e.g. '2 in', 'StockX/2', \"'text'\")."})
     .add_input_property("create", {"type": "boolean",
-            "description": "If the parameter doesn't exist, create it as a USER parameter (create-or-update). Default false."})
+            "description": "Create it as a USER parameter if it does not exist."})
     .add_input_property("unit", {"type": "string",
-            "description": "Unit for a created parameter (mm default; '' for unitless). Only used with create=true."})
+            "description": "Unit for a created parameter (mm default; '' for unitless); create=true only."})
     .strict_schema()
 )
 
@@ -423,12 +404,11 @@ _add_tool = (
     Tool.create_simple(
         name="param_add",
         description=(
-            "Add ONE or MANY user parameters. Single: name + expression (+ unit/comment/"
-            "favorite). BATCH: pass 'params' = a list of {name, expression, unit?, comment?, "
-            "favorite?} dicts to add many in ONE call (prefer this over many calls; 'name' is then "
-            "omitted). 'unit' = mm/cm/in/deg or '' for unitless (default mm). GUARDED: each add that "
-            "introduces a NEW timeline error is rolled back; in a batch the first failure stops, "
-            "keeping earlier adds. Use param_set to change an existing one."),
+            "Add ONE or MANY user parameters. Single: name + expression (+ unit/comment/favorite). "
+            "BATCH: 'params' = a list of {name, expression, unit?, comment?, favorite?} dicts to "
+            "add many in ONE call (prefer this over many calls; 'name' is then omitted). Each add "
+            "that introduces a NEW timeline error is rolled back. Use param_set to change an "
+            "existing one."),
     )
     .add_input_property("name", {"type": "string",
             "description": "New parameter name (single add; omit when using 'params')."})
@@ -440,7 +420,7 @@ _add_tool = (
     .add_input_property("favorite", {"type": "boolean",
             "description": "Show in the favorites list (default false)."})
     .add_input_property("params", {"type": "array",
-            "description": "BATCH: list of {name, expression, unit?, comment?, favorite?} dicts to add many parameters in one call.",
+            "description": "BATCH: list of {name, expression, unit?, comment?, favorite?} dicts.",
             "items": {"type": "object"}})
     .strict_schema()
 )

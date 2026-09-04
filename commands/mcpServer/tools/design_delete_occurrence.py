@@ -36,15 +36,8 @@ def _joint_names(occ):
 
 
 def handler(occurrence: str = "") -> dict:
-    """Delete one occurrence (component instance) from the active design. WRITES (destructive).
-
-    occurrence: the instance to delete, by handle (its entityToken, from design_get(include=['tree']) -
-    the exact identity) or by fullPathName/name (either is refused, not guessed, when several instances
-    answer to it - the refusal hands back their handles). The result names any joints the
-    delete removed and reports timeline health before/after. A refused delete (deleteMe returns
-    false, with no reason of its own) is reported with a pointer to the timeline read that names
-    the feature which built the instance.
-    """
+    """Delete one occurrence (component instance) - by handle, fullPathName, or name - naming the
+    joints that went with it and the timeline health before/after. WRITES (destructive)."""
     design = _common.design()
     if not design:
         return error("No active design with components.")
@@ -118,11 +111,8 @@ def handler(occurrence: str = "") -> dict:
 
 _DESC = (
 "Delete one component occurrence from the active design (e.g. a stray/duplicate from a botched "
-"pattern). 'occurrence' is a handle (the entityToken design_get(include=['tree']) emits - the exact "
-"identity) or a fullPathName/name (refused when several instances answer to it). The result names "
-"any joints the delete removed; if it was the last instance of its "
-"component, the component goes too. A pattern/mirror child can't be deleted individually - delete its "
-"owning feature with design_delete_feature instead. Undo in Fusion if unintended."
+"pattern). The result names any joints the delete removed; if it was the last instance of its "
+"component, the component goes too. Undo in Fusion if unintended."
 )
 
 tool = (

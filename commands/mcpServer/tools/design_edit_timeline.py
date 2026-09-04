@@ -24,9 +24,8 @@ _PREVIEW_MAX = 12                        # cap the discard preview; the count ca
 _ATTR_MAX_CHARS = 10000
 _CLIP = 60                               # how much of a value an error message quotes
 # Design.findAttributes reads a leading lowercase 're:' as a regular expression rather than a
-# literal name, and it runs that expression case-SENSITIVELY over names - a bare pattern with no
-# prefix is matched literally (measured live). So the check that refuses the prefix
-# matches that exact lower-case spelling: 'RE:shop' is an ordinary literal group name.
+# literal name, so the check that refuses the prefix matches that exact lower-case spelling -
+# 'RE:shop' is an ordinary literal group name.
 _REGEX_PREFIX = "re:"
 
 _UNREADABLE = object()      # a read-back that RAISED - distinct from one that reads None
@@ -92,11 +91,8 @@ def _member_count(obj):
 
 
 def _resolve_object(timeline, want, role):
-    """(TimelineObject, error_text) for ONE object named `want`, through the shared timeline by-name
-    resolver - so this tool and the FeatureRef kind answer the same input with the same refusal.
-    `role` is this call's own noun for the target ('the first item of the group'), which prefixes it.
-    The one thing only this tool can say rides in as the miss hint: a COLLAPSED group hides its
-    members from timeline.item() entirely, so a real feature reads as absent."""
+    """(TimelineObject, error_text) for ONE object named `want`, through the shared by-name resolver;
+    `role` is this call's noun for the target, and the miss hint names a collapsed group."""
     def collapsed_group_hint(name):
         holder = _group_holding(timeline, name.lower())
         if not holder:
@@ -487,10 +483,8 @@ def _do_delete_attribute(design, feature, group, name):
         return error(aerr)
     attr = safe(lambda: attrs.itemByName(group, name), _UNREADABLE)
     if attr is _UNREADABLE:
-        # Sentinelled like the read-back below, and for the same reason: swallowed into None this
-        # lookup would answer "carries no attribute" - the absent verdict - for a collection that
-        # answered nothing at all, which is also the answer the read-back's advice sends the caller
-        # back here to read.
+        # Sentinelled, not swallowed into None: None here is the ABSENT verdict, and a collection
+        # that answered nothing at all has not delivered it.
         return error(f"Reading attribute '{group}/{name}' on '{label}' raised, so whether it is "
                      "there cannot be told and nothing was deleted.")
     if attr is None:
@@ -503,10 +497,9 @@ def _do_delete_attribute(design, feature, group, name):
         did = attr.deleteMe()
     except Exception as e:
         return error(f"Deleting attribute '{group}/{name}' from '{label}' failed: {e}")
-    # The delete lands inside this call: after deleteMe, itemByName reads None and findAttributes
-    # reports the drop in the same transaction, so both read-backs below are ground truth here - as
-    # long as the read-back RAN. An itemByName that raises tells nothing apart: gone and unreadable
-    # look the same through safe(), so the sentinel keeps a failed read out of the gone claim.
+    # After deleteMe, itemByName reads None and findAttributes reports the drop in the same
+    # transaction, so the read-backs below are ground truth - as long as the read-back RAN, which
+    # the sentinel is what distinguishes.
     back = safe(lambda: attrs.itemByName(group, name), _UNREADABLE)
     if back is _UNREADABLE:
         return error(f"Deleting attribute '{group}/{name}' from '{label}' returned {bool(did)} but "
@@ -566,16 +559,13 @@ def handler(action: str = "roll", feature: str = "", to: str = "before", end_fea
 
 
 TOOL_DESCRIPTION = (
-    "Drive the parametric timeline. action='roll' moves the marker: to='before'/'after' a named "
-    "'feature', or to='beginning'/'end'/'next'/'previous' with none - items after the marker are "
-    "rolled back and not computed, so roll to='end' when done. 'suppress' sets 'suppressed' on "
-    "'feature' and reports what it breaks. 'group' groups 'feature'..'end_feature' under an optional "
-    "'name'; 'ungroup' drops the group named by 'feature', keeping its items. 'delete_after_marker' "
-    "IRREVERSIBLY discards everything after the marker: it previews and refuses unless "
-    "confirm_delete_after_marker=true. 'set_attribute' / 'delete_attribute' tag 'feature' with "
-    "'attribute_group'+'attribute_name'(+'attribute_value') and read it back. "
-    "Names come from design_get(include=['timeline']); a repeated "
-    "name is refused - re-issue it as 'name@index'. Delete one feature with design_delete_feature."
+    "Drive the parametric timeline. 'roll' moves the marker before/after a named 'feature', or to "
+    "the beginning/end/next/previous step with none - items after the marker are rolled back and "
+    "not computed, so roll to='end' when done. 'suppress' suppresses or restores one item and "
+    "reports what it breaks. 'group' groups a range, 'ungroup' drops a group and keeps its items. "
+    "'delete_after_marker' IRREVERSIBLY discards everything after the marker. 'set_attribute' / "
+    "'delete_attribute' tag one item. Names come from design_get(include=['timeline']); delete one "
+    "feature with design_delete_feature."
 )
 
 tool = (

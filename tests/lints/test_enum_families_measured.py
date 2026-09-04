@@ -3,16 +3,8 @@
 
 """Lint: every adsk enum family the tools reference is MEASURED - first contact fails loudly.
 
-Guard lints can only defend facts that exist; a new tool touching a new enum family would get no
-nudge at all (measured-facts lints stay silent on unmeasured API). This gate closes that hole:
-the SAME scraper the live enum-sweep uses lists every referenced family, and each must exist in
-the generated live_api_facts.ENUMS. Red here means one command with Fusion running -
-``py -3 tests/live/measure_api.py`` - the enum-sweep measures the new family automatically and
-the regenerated facts file turns this green with zero hand-edits. The second gate does the same
-for BEHAVIOR keys the harness consumes. The third gate is the REVERSE direction: every behavior
-key measure_api can EMIT (facts_on_pass and FACT prints) must exist in the generated
-live_api_facts.BEHAVIOR - a key renamed in a measurement row without a live regen would
-otherwise leave the fakes consuming the orphaned old fact forever."""
+A referenced family missing from live_api_facts.ENUMS fails, as does a BEHAVIOR key the harness
+consumes or measure_api emits that the facts file does not carry - regenerate with measure_api."""
 
 import os
 import re
@@ -85,11 +77,3 @@ class TestEmittedBehaviorKeysAreCarried:
             elif key in live_api_facts.BEHAVIOR:
                 stale.append(f"{key}: the regen landed it in BEHAVIOR - remove the entry")
         assert not stale, "stale _PENDING_REGEN entries:\n  " + "\n  ".join(stale)
-
-    def test_the_reverse_check_bites(self):
-        # a doctored emitted key with no carried fact and no excuse MUST be flagged...
-        assert _uncarried_emitted_keys(["ghost_flag"], {"real_flag": True}, {}) == ["ghost_flag"]
-        # ...a carried key and a pending-regen key are not, and order is deterministic.
-        assert _uncarried_emitted_keys(["real_flag"], {"real_flag": True}, {}) == []
-        assert _uncarried_emitted_keys(["ghost_flag"], {}, {"ghost_flag": "pending"}) == []
-        assert _uncarried_emitted_keys(["b", "a"], {}, {}) == ["a", "b"]

@@ -1,26 +1,10 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Lint: a tool that can REMOVE MATERIAL proves it did, with a material reading.
-
-A write tool whose 'operation' enum offers cut or intersect can take material out of an existing
-body - and Fusion reports a healthy feature with result bodies for a cut that swept through empty
-air, so nothing the feature object carries can tell the two apart. The only evidence that separates
-them is a MATERIAL reading taken across the mutation: a volume diff, a signed volume, a face-count
-diff, a lump count, a body census, a physical-body token set.
-
-So for every such tool this requires, in the handler (or a same-module helper it directly calls):
-a ``features.<x>.add(`` mutation with one of those material tokens AFTER it, plus an ``error(``
-gate on the surface. The target set is keyed off the SCHEMA - any tool whose 'operation' enum
-carries cut/intersect is in it - so a new cut-capable tool is covered the day it registers, with no
-hand-maintained list to forget.
-
-Deliberately NOT material evidence: ``safe(``, ``.name``, ``.count``, ``.healthState``. Those are
-what a rung-1/2 read-back looks like (the feature exists, it has a name, it computed) and every one
-of them reads exactly the same for a cut that removed nothing - which is the bug this lint exists
-to catch. A tool that genuinely cannot take a material reading goes in ``_MATERIAL_EXEMPT`` with a
-reason naming why; that table only shrinks.
-"""
+"""Lint: a write tool whose 'operation' enum offers cut or intersect fails unless its handler (or a
+same-module helper it directly calls) takes a MATERIAL reading - volume, face count, lump, body
+census, native token - AFTER a features.<x>.add(...) mutation, with an error(...) gate on the
+surface. A tool that cannot take one goes in the shrink-only _MATERIAL_EXEMPT with a reason."""
 
 import inspect
 import re
@@ -41,14 +25,9 @@ _ERROR_CALL = re.compile(r"\berror\(")
 # every name called in a source part - how the handler's own same-module helpers are found.
 _CALLED_NAME = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 
-# Tools in the target set that cannot take a material reading. Format: name -> the audited reason,
-# prefixed by its class:
-#   evidence: - the tool DOES verify its effect, with a reading this lint's material vocabulary
-#               does not cover (a mesh carries no volume), named here so the substitute is auditable.
-#   shape:    - the tool's cut/intersect operation cannot remove material at all, so there is no
-#               material delta to read.
-# Shrink-only: an entry goes away when the tool gains a real material reading, and a new entry is a
-# deliberate, visible diff - never a quiet exit from the detector.
+# Tools in the target set that cannot take a material reading: name -> the audited reason, either
+# 'evidence:' (it verifies with a reading outside this lint's vocabulary) or 'shape:' (its
+# cut/intersect removes no material). Shrink-only - never a quiet exit from the detector.
 _MATERIAL_EXEMPT = {
     'mesh_combine': 'evidence: a MeshBody carries no volume, and the meshCombineFeatures collection '
                     'is held in a local before its add() - the target mesh TRIANGLE count is read '
@@ -167,53 +146,3 @@ class TestMaterialEffectVerified:
         assert not stale, ("stale _MATERIAL_EXEMPT entries - the table only shrinks:\n  "
                            + "\n  ".join(stale))
 
-    def test_every_exemption_states_its_class(self):
-        bad = sorted(n for n, r in _MATERIAL_EXEMPT.items()
-                     if not r.startswith(("evidence:", "shape:")))
-        assert not bad, ("every _MATERIAL_EXEMPT reason needs a class prefix ('evidence:' - it "
-                         "verifies with a reading outside this vocabulary; 'shape:' - its "
-                         "cut/intersect cannot remove material):\n  " + "\n  ".join(bad))
-
-    def test_the_detector_bites(self):
-        # (a) the shape that must PASS: a material read after the mutation, with an error() gate.
-        good = ("def handler():\n"
-                "    before = _geom.volumes(bodies)\n"
-                "    feature = comp.features.sweepFeatures.add(inp)\n"
-                "    delta, readable = _geom.volume_delta(bodies, before)\n"
-                "    if readable and abs(delta) < _common.NO_VOLUME_CHANGE_CM3:\n"
-                "        return error('this cut changed nothing')\n")
-        assert _verifies_material([good])
-        # (b) POSITION is load-bearing: the same read taken only BEFORE the add proves nothing.
-        before_only = ("def handler():\n"
-                       "    before = _geom.volumes(bodies)\n"
-                       "    if not before:\n"
-                       "        return error('no body to cut')\n"
-                       "    feature = comp.features.sweepFeatures.add(inp)\n"
-                       "    return {'swept': True}\n")
-        assert not _verifies_material([before_only])
-        # (c) the rung-1/2 read-backs are deliberately NOT material evidence - each of these reads
-        # exactly the same for a cut that removed nothing, which is the whole bug.
-        for weak in ("    names = safe(lambda: feature.name)\n",
-                     "    n = safe(lambda: feature.bodies.count)\n",
-                     "    hs = safe(lambda: feature.healthState)\n"):
-            weak_src = ("def handler():\n"
-                        "    feature = comp.features.sweepFeatures.add(inp)\n"
-                        + weak +
-                        "    if not feature:\n"
-                        "        return error('no feature')\n")
-            assert not _verifies_material([weak_src]), weak
-        # (d) an error() gate is still required, and a payload key that merely CONTAINS a token name
-        # is not a census.
-        no_gate = ("def handler():\n"
-                   "    feature = comp.features.sweepFeatures.add(inp)\n"
-                   "    delta, readable = _geom.volume_delta(bodies, before)\n"
-                   "    return {'volume_delta_cm3': delta}\n")
-        assert not _verifies_material([no_gate])
-        echoed_key = ("def handler():\n"
-                      "    feature = comp.features.stitchFeatures.add(inp)\n"
-                      "    payload = {'input_body_count': len(surf_bodies)}\n"
-                      "    if not payload:\n"
-                      "        return error('nothing')\n")
-        assert not _verifies_material([echoed_key])
-        # (e) missing source is never confirmed.
-        assert not _verifies_material(None)

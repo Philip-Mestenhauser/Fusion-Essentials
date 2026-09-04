@@ -115,10 +115,10 @@ _CONTENT = _inputs.Choice("content", ["full", "visible"], default="full",
 _SHEET_SIZE = _inputs.Choice("sheet_size",
                              ["default", "a4", "a3", "a2", "a1", "a0", "a", "b", "c", "d", "e", "custom"],
                              default="default",
-                             description="Preset (must match standard) or 'custom' + custom_width_mm/"
+                             description="Sheet size preset, or 'custom' with custom_width_mm/"
                                          "custom_height_mm.")
 _ORIENTATION = _inputs.Choice("orientation", ["landscape", "portrait"], default="landscape",
-                              description="No portrait on A0 ISO / E ASME.")
+                              description="Sheet orientation.")
 _SHEET_SCOPE = _inputs.Choice("sheet_scope", ["all_levels", "first_level"], default="all_levels",
                               description="All levels, or first-level only.")
 _AUTO_DIMENSION = _inputs.Choice("auto_dimension",
@@ -170,13 +170,12 @@ _MANUAL_GATE = "Manual drawing creation requires a template with view placeholde
 
 # The bare sentence Fusion raises while the source design's cloud DataFile is still processing: a
 # design saved seconds earlier fails with exactly this, and the identical call succeeds about a
-# minute later. The failure is the one place that can teach it - the handler never sleeps or retries
-# (it runs on the main thread).
+# minute later. The handler never sleeps or retries - it runs on the main thread.
 _PROCESSING_LAG_SENTENCE = "Failed to create drawing document"
 
 
 def _processing_lag_hint(ex):
-    """The measured cause behind Fusion's bare create refusal, or '' for any other failure."""
+    """The processing-lag remedy for Fusion's bare create refusal, or '' for any other failure."""
     if _PROCESSING_LAG_SENTENCE not in str(ex):
         return ""
     return (" Nothing was created. A source design saved seconds ago fails with exactly this "
@@ -194,12 +193,9 @@ _TIMEOUT_IS_NOT_A_VERDICT = (
     "drawing.")
 
 
-# CreateDrawingInput.customSize hands out a DEFAULT CustomSheetSize object that takes effect only
-# when it is assigned BACK through the setter, its width/height are unitless numbers in the
-# drawing's own document unit (millimetres under ISO, inches under ASME), and its two zone counts
-# must each be at least 2. Set this to False to refuse sheet_size='custom' outright - the one switch
-# to throw if a live create stops landing the requested extents, since a drawing emitted at some
-# other size while the payload says 'custom' is the failure this path exists to prevent.
+# CreateDrawingInput.customSize hands out a DEFAULT CustomSheetSize that takes effect only when it
+# is assigned BACK through the setter; its width/height are unitless numbers in the drawing's own
+# document unit, and its two zone counts must each be at least 2. False refuses 'custom' outright.
 _CUSTOM_SIZE_ENABLED = True
 _CUSTOM_ZONES = 2
 
@@ -211,12 +207,10 @@ _CUSTOM_DISABLED_REFUSAL = (
 
 
 def _apply_custom_size(di, cfg):
-    """Write the requested custom sheet size onto the input and assign it BACK through the setter.
-    Returns '' or the refusal text (nothing is created on a refusal).
-
-    The object the getter returns is a copy: mutating it alone changes nothing, which is why the
-    assignment back is the load-bearing line here. width/height are unitless numbers in the
-    document unit cfg carries, and both zone counts must be at least 2 at creation."""
+    """Write the requested custom sheet size onto the input and assign it BACK through the setter:
+    '' or the refusal text (nothing is created on a refusal). The getter returns a COPY, so mutating
+    it alone changes nothing; width/height are unitless numbers in cfg's document unit, and both
+    zone counts must be at least 2 at creation."""
     spec = cfg["custom_size"]
     cs = safe(lambda: di.customSize)
     if cs is None:
@@ -278,12 +272,10 @@ def _resolve_members(cfg):
 
 
 def _apply_input_settings(di, cfg, members, template_data_file=None):
-    """Best-effort configuration of the CreateDrawingInput + its automationPreferences tree, returning
-    '' or the ONE refusal that is not best-effort (the custom sheet size, which decides how big the
-    drawing is). Every other setter is wrapped in safe() (a property missing on this Fusion version
-    must not sink the create); the requested values are echoed to the caller as 'settings_requested'
-    rather than read back. 'members' is _resolve_members' {input name: enum member} and
-    'template_data_file' a resolved DataFile - neither is JSON-safe, so both stay out of cfg."""
+    """Best-effort configuration of the CreateDrawingInput and its automationPreferences tree: '' or
+    the ONE refusal that is not best-effort, the custom sheet size. Every other setter is wrapped in
+    safe() and echoed as 'settings_requested' rather than read back. 'members' and
+    'template_data_file' stay out of cfg - neither is JSON-safe."""
     safe(lambda: setattr(di, "standard", members["standard"]))
     safe(lambda: setattr(di, "units", members["units"]))
     safe(lambda: setattr(di, "content", members["content"]))
@@ -591,13 +583,11 @@ def handler(standard: str = "iso", units: str = "mm", content: str = "full", iso
 
 
 TOOL_DESCRIPTION = (
-    "Create a 2D drawing from the active design via Fusion's automatic generator. Configures the "
-    "generator's sheet, annotation and view-display preferences. Source design must be "
-    "cloud-saved. Result is a CLOUD "
-    "file, NOT opened - file_id (lineage URN) returned; doc_open then drawing_export runs it to PDF "
-    "with no Fusion UI step first (measured on current builds). "
-    "Per-view placement/scale is not API-controllable. A client TIMEOUT is not a verdict here - the "
-    "create can still land; re-check with data_get before retrying, or a retry mints a second drawing."
+    "Create a 2D drawing from the active design via Fusion's automatic generator. The source design "
+    "must be cloud-saved. The result is a CLOUD file, NOT opened - doc_open the returned file_id, "
+    "then drawing_export for the PDF, with no Fusion UI step first. Per-view placement/scale is not "
+    "API-controllable. A client TIMEOUT is not a verdict here - the create can still land; re-check "
+    "with data_get before retrying, or a retry mints a second drawing."
 )
 
 FULL_DESCRIPTION = TOOL_DESCRIPTION + "\n" + _outputs.produces_block(RETURNS)
@@ -642,10 +632,9 @@ tool = (
     .strict_schema()
 )
 
-# enforce_timeout=False: createDrawing is a blocking, uninterruptible main-thread call that generates
-# views and commits a cloud DataFile - it can run past the server's call timeout even for a small
-# design. Timing it out would report a false failure for a drawing that WAS created, so this tool waits
-# for it (like sys_execute_script) rather than false-failing.
+# enforce_timeout=False: createDrawing is a blocking, uninterruptible main-thread call that can run
+# past the server's call timeout even for a small design, and timing it out would report a false
+# failure for a drawing that WAS created.
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True, enforce_timeout=False,
     # drawing_name / file_id / version_id / file_extension are read off the DataFile createDrawing

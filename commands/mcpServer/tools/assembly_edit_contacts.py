@@ -27,16 +27,14 @@ _MEMBER_ACTIONS = ("create", "set_members")
 
 _ACTION = _inputs.Choice(
     "action", list(_ACTIONS), required=True,
-    description="What to do. The set actions need 'name' (create needs 'members' instead); the "
-                "analysis actions switch contact analysis for the WHOLE design and take no name.")
+    description="The set actions need 'name' (create needs 'members' instead); the analysis "
+                "actions switch contact analysis for the WHOLE design and take no name.")
 _MEMBERS = _inputs.TargetRefList(
     "members", with_kinds=True,
-    contract="create/set_members: 2 or more DISTINCT occurrences and/or BRep bodies to relate. A "
-             "mesh body is refused - a contact set holds occurrences and BRep bodies.")
+    contract="create/set_members: 2 or more DISTINCT occurrences and/or BRep bodies to relate.")
 _SCOPE = _inputs.Choice(
     "scope", ["contact_sets", "all_bodies"],
-    description="set_analysis_scope: what contact analysis runs over - enable analysis first, the "
-                "platform refuses a scope write while it is off.")
+    description="set_analysis_scope: what contact analysis runs over.")
 
 
 def _flags(design):
@@ -386,13 +384,10 @@ def handler(action: str = "", name: str = "", members=None, new_name: str = "",
 TOOL_DESCRIPTION = (
     "Maintain the design's contact sets - the named groups of occurrences/bodies Fusion checks for "
     "contact. 'create' relates 2 or more DISTINCT members and reports the name Fusion assigned; "
-    "'set_members' replaces a set's membership; 'rename' reports the name that LANDED (a name "
-    "already in use is auto-deduped to 'Name (1)'); 'suppress'/'unsuppress' park a set; 'delete' "
-    "removes it IRREVERSIBLY and re-lists to confirm. A set only takes part when contact analysis "
-    "is on AND scoped to the sets: 'enable_analysis'/'disable_analysis' switch analysis for the "
-    "whole design (off = no contact analysis at all), and 'set_analysis_scope' picks "
-    "scope='contact_sets' (analysis uses the sets) or 'all_bodies' (analysis ignores them). List "
-    "the sets and both flags with assembly_get(include=['contacts'])."
+    "'rename' reports the name that LANDED (a name already in use is auto-deduped to 'Name (1)'); "
+    "'delete' removes it IRREVERSIBLY and re-lists to confirm. A set only takes part while contact "
+    "analysis is ON and scoped to the sets - 'enable_analysis' and 'set_analysis_scope' switch that "
+    "for the whole design. List the sets and both flags with assembly_get(include=['contacts'])."
 )
 
 tool = (

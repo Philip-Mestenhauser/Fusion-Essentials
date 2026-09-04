@@ -3,11 +3,8 @@
 
 """Lint: every test must be able to fail for the RIGHT reason.
 
-A test whose only assertion is a bare isError flag check passes even when the tool fails for a
-completely different reason than the one under test - a typo'd argument produces isError=True as
-readily as the guard being exercised does. Such a test must also pin the error MESSAGE (or another
-payload fact). A test with no assertion at all (and no pytest.raises) cannot fail, period.
-"""
+A test whose only assertion is a bare isError flag check must also pin the error MESSAGE or another
+payload fact; a test with no assertion at all (and no pytest.raises) cannot fail, so it fails here."""
 
 import ast
 from pathlib import Path

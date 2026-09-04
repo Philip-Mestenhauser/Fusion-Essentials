@@ -3,13 +3,9 @@
 
 """MCP building block: mirror solid bodies or timeline features across a plane.
 
-  model_mirror -> reflect one or more BODIES, or one or more timeline FEATURES, across a plane to
-                  make the symmetric half - the other side of a V-bank, a left/right bracket, a
-                  symmetric housing. WRITES.
-
-MEASURED: MirrorFeature.resultFeatures.count reads None even for a feature mirror that minted
-geometry, so the effect is verified by the BODY/VOLUME census of the components the mirror lands in,
-never by that read-back.
+  model_mirror -> reflect BODIES or timeline FEATURES across a plane to make the symmetric half.
+                  WRITES. MirrorFeature.resultFeatures.count reads None even for a feature mirror
+                  that minted geometry, so the effect is verified by a BODY/VOLUME census instead.
 """
 
 import adsk.core
@@ -35,11 +31,9 @@ app = adsk.core.Application.get()
 
 
 def _build_collection(entities, labels):
-    """(ObjectCollection, error) - the mirror's inputEntities.
-
-    ObjectCollection.add() ANSWERS whether the collection took the object. A refusal that is not
-    read leaves an EMPTY collection for createInput to run on, so it is reported here, naming the
-    object and its class, instead of surfacing later as an unrelated failure."""
+    """(ObjectCollection, error) - the mirror's inputEntities. ObjectCollection.add() ANSWERS
+    whether the collection took the object, and an unread refusal leaves an EMPTY collection for
+    createInput to run on."""
     coll = adsk.core.ObjectCollection.create()
     for ent, label in zip(entities, labels):
         if not coll.add(ent):
@@ -53,14 +47,9 @@ def _build_collection(entities, labels):
 
 def _census_hosts(entity, comp):
     """The components a mirror's new geometry can land in: the source object's OWN component and the
-    component the feature is built in. Resolved ONCE before the mutation and counted twice - a census
-    re-derived afterwards compares two different collections (see _common.census_host).
-
-    A component whose identity does not read against the census (same_component answers None) is
-    recorded as an UNKNOWN host - a None entry, which makes _body_total answer None. Neither
-    alternative is defensible from a comparison that was not made: de-duplicating it drops a
-    component the mirror can land in, and appending it counts one component twice, doubling the
-    before/after delta the effect check reads."""
+    component the feature is built in, resolved ONCE before the mutation and counted twice. A
+    component whose identity does not read (same_component answers None) is recorded as an UNKNOWN
+    host - a None entry, which makes _body_total answer None."""
     host = _common.census_host(entity, comp)
     hosts = [host] if host is not None else []
     if comp is None:
@@ -85,16 +74,9 @@ def _body_total(hosts):
 
 def _volume_sample(entities, feature_mode):
     """The bodies whose VOLUME the mirror starts from: the bodies being mirrored, or - for a feature
-    mirror - the bodies the source features act on. Read BEFORE the mutation; the after-total is read
-    off the feature's own bodies, never off these references again.
-
-    De-duplicated by _common.native_identity, the physical-body key. Python identity SPLITS one body
-    - the measured body accessors (face.body, edge.body) hand back a FRESH proxy on every read - and
-    counts its volume into the starting total twice. The WRAPPER's own entityToken MERGES two bodies
-    instead: a token is DOCUMENT-LOCAL (measured - two bodies reached through two x-refs of one
-    design read byte-identical tokens), so a source body drops out and the starting total is short by
-    its volume. The `or id(b)` last resort keys an identity-less body apart from every other one - it
-    over-counts, never merges."""
+    mirror - the bodies the source features act on, read BEFORE the mutation. De-duplicated by
+    _common.native_identity: Python identity SPLITS one body (a fresh proxy per read) and a bare
+    entityToken MERGES two, since a token is document-local. `or id(b)` over-counts, never merges."""
     if not feature_mode:
         return list(entities)
     out, seen = [], set()
@@ -245,9 +227,8 @@ def handler(bodies=None, features=None, plane: str = "yz", join: bool = False) -
 
 
 TOOL_DESCRIPTION = (
-    "Mirror solid BODIES or timeline FEATURES across a plane - make the symmetric half (a V-bank's "
-    "other side, a left/right part, a symmetric housing). Give 'bodies' or 'features', not both. "
-    "Returns the result bodies and the body/volume change the mirror made."
+    "Mirror solid BODIES or timeline FEATURES across a plane to make the symmetric half. Give "
+    "'bodies' or 'features', not both."
 )
 
 mirror_tool = (

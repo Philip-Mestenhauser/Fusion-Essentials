@@ -6,13 +6,6 @@ direct edit).
 
   model_offset_face -> nudge a face along its normal without redrawing the sketch that created it (a
                         very common "make this wall 2mm thicker" edit). WRITES.
-
-OffsetFacesFeatures.createInput takes a Python LIST of BRepFace plus the distance ValueInput, NOT an
-ObjectCollection - live-verified: an ObjectCollection raises "argument 2 of type 'std::vector<
-adsk::core::Ptr< adsk::fusion::BRepFace > ...'" (the SWIG binding wants a vector, which a list marshals
-to and ObjectCollection does not). OffsetFacesFeatureInput also exposes .faces/.distance as properties
-afterward. Unlike Shell, the sign of the volume change here depends on which side of the body each face
-sits on, so the honesty gate checks the body's volume CHANGED, not which direction.
 """
 
 import adsk.core
@@ -29,13 +22,11 @@ from . import _inputs
 from . import _outputs
 
 
-# What this tool RETURNS (declared once; drives the PRODUCES: prose + the assert-present contract test).
 RETURNS = [
     _outputs.ReturnsName("feature", of="feature", consumers=["design_delete_feature"],
                          absent_when="no_timeline_feature"),
 ]
 
-# faces to offset (any BRep face; need not be one body - offsetFacesFeatures accepts a mixed set).
 _FACES = _inputs.GeometryHandleList("faces", require="face", required=True,
     description="The faces to push/pull (from find_geometry).")
 _DISTANCE = _inputs.Distance("distance", allow_zero=False, required=True,
@@ -58,8 +49,6 @@ def handler(faces=None, distance: float = 0.0, units: str = "mm") -> dict:
         return error("No active design. Create or open a document first (see doc_new).")
     comp = target_component(design)
 
-    # faces is a GeometryHandleList(require='face') - resolves+validates in the kind, so this handler
-    # never hand-rolls a name/index or re-checks the entity type.
     face_ents, ferr = _FACES.resolve(faces)
     if ferr:
         return error(ferr)
@@ -67,14 +56,13 @@ def handler(faces=None, distance: float = 0.0, units: str = "mm") -> dict:
     bodies = _geom.owning_bodies(face_ents)
     if not bodies:
         return error("'faces' resolved to face(s) with no readable owning body - cannot offset.")
-    # Pre-mutation read-back: the offset must move SOME body's volume, whichever direction the
-    # selected faces face. Names too - a post-mutation proxy can stop answering .name, and a payload
-    # must not publish a null for a body it resolved.
+    # Read before the mutation: a post-mutation proxy can stop answering .name, and the offset's
+    # only evidence is the volume delta over these bodies.
     vol_before = _geom.volumes(bodies)
     body_names = [safe(lambda b=b: b.name) for b in bodies]
 
-    # createInput wants a Python list of BRepFace (a SWIG vector), NOT an ObjectCollection - live-
-    # verified: an ObjectCollection raises a vector-type argument error.
+    # createInput wants a Python list of BRepFace (a SWIG vector): an ObjectCollection raises a
+    # vector-type argument error.
     face_list = list(face_ents)
     dist_val = adsk.core.ValueInput.createByReal(dist_cm)
 
@@ -85,27 +73,21 @@ def handler(faces=None, distance: float = 0.0, units: str = "mm") -> dict:
         return error(f"Offset face failed: {e}. (The distance may be too large for the geometry, or "
                      "the faces may not support a uniform offset together - try a smaller distance or "
                      "fewer faces.)")
-    # MEASURED: offsetFacesFeatures.add returns None in a DIRECT design while the offset LANDS - a
-    # 3.0/1.5-radius loft frustum 6 tall (~99 cm3 unoffset) read 117.248 after a +0.2 side-face
-    # offset. The verdict below is the volume delta on the OWNING BODIES, which needs no feature
-    # object, so in direct mode fall through to it; in parametric a None feature is unmeasured as a
-    # success and stays an honest error.
+    # offsetFacesFeatures.add returns None in a DIRECT design while the offset lands; the volume
+    # delta below needs no feature object. In parametric a None feature stays an error.
     direct_no_feature = _common.direct_feature_absence(design, feature)
     if not feature and not direct_no_feature:
         return error(_common.no_feature_error(design, "Offset face"))
 
-    # A feature can be ADDED yet fail to compute; report that as failure, not a false ok.
+    # A feature can be ADDED yet fail to compute.
     if safe(lambda: feature.healthState) == adsk.fusion.FeatureHealthStates.ErrorFeatureHealthState:
         msg = safe(lambda: feature.errorOrWarningMessage) or "no detail"
         return error(f"Offset face was created but failed to compute: {msg}. Try a smaller distance "
                      "or a different face selection. "
                      + _common.failed_effect_remedy(design, feature))
 
-    # Post-mutation read-back: prove the body actually moved rather than trust the API's success.
     delta_total, any_readable = _geom.volume_delta(bodies, vol_before)
     if direct_no_feature and not any_readable:
-        # With no feature object the volume delta is the ONLY evidence - unreadable means the offset
-        # is unverified, which is not a success.
         return error("Offset face ran in a DIRECT design, which returns no feature object, and no "
                      "affected body's volume could be read back - so whether the faces moved is "
                      "UNVERIFIED. Re-read the body with model_inspect.")
@@ -123,8 +105,6 @@ def handler(faces=None, distance: float = 0.0, units: str = "mm") -> dict:
         "note": "Face(s) pushed/pulled along their normal. Positive extends outward (adds "
                 "material); negative pushes inward (removes material).",
     }
-    # Direct mode: no feature object, so no name - publish the flag RETURNS declares the omission
-    # against. Every other key here is measured off the BODIES, so it survives the missing feature.
     if direct_no_feature:
         payload["no_timeline_feature"] = True
         payload["note"] += " " + _common.DIRECT_FEATURE_NOTE
@@ -136,11 +116,9 @@ def handler(faces=None, distance: float = 0.0, units: str = "mm") -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Push or pull one or more faces along their normal by a signed distance, without redrawing the "
-    "sketch that created them. 'faces' is a list of face handles from find_geometry (need not be one "
-    "body); 'distance' in 'units' is positive to extend outward (adds material), negative to push "
-    "inward (removes material). WRITES; verifies the feature computed and the affected body's volume "
-    "changed.\n"
+    "Push or pull faces along their normal by a signed distance, without redrawing the sketch that "
+    "created them: positive extends outward (adds material), negative pushes inward. The 'faces' "
+    "need not be on one body.\n"
     + _outputs.produces_block(RETURNS)
 )
 

@@ -29,28 +29,23 @@ RETURNS = [
 ]
 
 # Both cloud facts lag the call: a FRESH findFileById reports the new tip within seconds, and the
-# MILESTONE mark becomes readable later still. The version pump waits for the tip. The milestone is
-# deliberately NOT pumped for - holding the main thread that long freezes Fusion and eats the
-# server's task budget - so it is reported pending and the caller re-reads.
+# MILESTONE mark becomes readable later still. Only the tip is pumped for - holding the main thread
+# until the milestone reads freezes Fusion - so the milestone is reported pending for a re-read.
 _VERSION_DEADLINE_S = 8.0
 _POLL_SLEEP = 0.5
 _MILESTONE_WALK_CAP = 200          # this tool's bound on the milestone census, not a platform limit
 
 
 def _refetch(lineage):
-    """A FRESH DataFile for the lineage URN, or None.
-
-    The handle the save was issued on is never re-read: measured, its versionNumber / isMilestone /
-    milestones.count keep their PRE-save values while a fresh fetch already reports the new tip."""
+    """A FRESH DataFile for the lineage URN, or None. The handle the save was issued on is never
+    re-read - its versionNumber / isMilestone / milestones.count keep their PRE-save values."""
     return safe(lambda: app.data.findFileById(lineage)) if lineage else None
 
 
 def _confirm_new_version(lineage, latest_before):
     """Re-fetch by lineage URN until the tip version passes latest_before, bounded by
-    _VERSION_DEADLINE_S. Returns (fresh_datafile_or_None, latest_after_or_None) - the LAST reading
-    either way, so a tip that never advanced is reported as read, not as a failure to read.
-
-    The bounded pump loop is _export.pump_until; the tip-advanced signal is this tool's own."""
+    _VERSION_DEADLINE_S: (fresh_datafile_or_None, latest_after_or_None), the LAST reading either way,
+    so a tip that never advanced is reported as read rather than as a failure to read."""
     def probe():
         fresh = _refetch(lineage)
         latest_after = safe(lambda: fresh.latestVersionNumber) if fresh is not None else None
@@ -63,19 +58,10 @@ def _confirm_new_version(lineage, latest_before):
 
 
 def _milestone_facts(fresh, name):
-    """Milestone state off a FRESH DataFile: (is_milestone, milestone_count, name_present).
-
-    Measured: on the handle the save was issued on these never change, and on a fresh fetch the
-    milestone mark lags the new version. So a False flag read right after the save is 'not visible
-    yet', and a field is None only when it could not be read at all.
-
-    The name is matched over the ENUMERATION, never Milestones.itemByName: a name the collection does
-    not hold RAISES '3 : invalid argument name' (measured live) instead of returning
-    null as the binding documents, and safe() would flatten that raise into the same None an
-    unreadable collection gives - so itemByName cannot tell a miss from an unreadable read. Walking
-    the entries never provokes the raise. The walk is BOUNDED: it runs on the main thread against a
-    cloud collection with no known ceiling, so name_present is only decided over the entries actually
-    read - past the cap a miss is reported as unknown (None), never as absent."""
+    """Milestone state off a FRESH DataFile: (is_milestone, milestone_count, name_present), each None
+    only when it could not be read - the mark lags the new version, so a False flag right after the
+    save means 'not visible yet'. The name is matched over the ENUMERATION: Milestones.itemByName
+    RAISES on a name the collection does not hold. Bounded, so past the cap a miss is None."""
     if fresh is None:
         return None, None, None
     is_milestone = safe(lambda: fresh.isMilestone)
@@ -152,10 +138,9 @@ def handler(milestone_name: str = "", description: str = "") -> dict:
         return error(f"saveMilestone returned false for milestone '{name}'; no version and no "
                      "milestone were created.")
 
-    # A save can move the document onto a NEW lineage URN (measured: the first save after a
-    # configured-design conversion forks the file, restarting its versions at 1). Confirming
-    # against the pre-save lineage then watches the WRONG version stream, so the check re-anchors
-    # on the lineage the document actually holds now.
+    # A save can move the document onto a NEW lineage URN, restarting its versions at 1. Confirming
+    # against the pre-save lineage then watches the WRONG version stream, so the check re-anchors on
+    # the lineage the document holds now.
     lineage_now = safe(lambda: doc.dataFile.id)
     forked = (isinstance(lineage, str) and isinstance(lineage_now, str)
               and lineage.startswith("urn:") and lineage_now.startswith("urn:")
@@ -168,10 +153,9 @@ def handler(milestone_name: str = "", description: str = "") -> dict:
     fresh, latest_after = _confirm_new_version(confirm_lineage,
                                                latest_before if comparable else None)
     is_milestone, count_after, name_present = _milestone_facts(fresh, name)
-    # The verdict needs the comparison to have RUN. A fork restarts the version stream, so the
-    # pre-save number is no baseline for the new lineage's - with no comparable baseline the version
-    # is simply NOT confirmed (and the note below says the check could not be made). Reading "some
-    # tip number came back on the new lineage" as confirmation claims a check that never happened.
+    # The verdict needs the comparison to have RUN: with no comparable baseline the version is NOT
+    # confirmed, since reading "some tip number came back on the new lineage" as confirmation would
+    # claim a check that never happened.
     cloud_tip_advanced = bool(comparable and latest_after is not None
                              and latest_after > latest_before)
     milestone_confirmed = (is_milestone is True) and (name_present is True)
@@ -198,10 +182,8 @@ def handler(milestone_name: str = "", description: str = "") -> dict:
         seen = latest_after if latest_after is not None else "unreadable"
         result["pending"] = True
         if not comparable:
-            # With no usable BASELINE the wait has nothing to settle against and returns on its
-            # first read: no duration was spent and non-advancement was never observed. Report the
-            # missing baseline and the tip that was read - a "versioned nothing" verdict here would
-            # diagnose a comparison that did not happen.
+            # With no usable BASELINE the wait returns on its first read, so non-advancement was
+            # never observed: the missing baseline and the tip that was read are what get reported.
             why = ("the save moved the document onto a NEW lineage, whose version stream does not "
                    f"continue the pre-save number ({latest_before})" if forked else
                    "the document's latestVersionNumber could not be read BEFORE the save")
@@ -243,20 +225,18 @@ def handler(milestone_name: str = "", description: str = "") -> dict:
 TOOL_DESCRIPTION = (
     "Save the ACTIVE document as a NAMED MILESTONE - a version marked in the data panel and the "
     "Fusion web client, findable by name later. It is a real save: it creates a NEW cloud version "
-    "and that version IS the milestone (it does not tag an existing one), so the document must have "
-    "unsaved changes - an unmodified one is REFUSED, because Fusion reports success on it while "
-    "creating nothing. The doc must already exist in the cloud (doc_save_as first). The new version "
-    "is confirmed before returning; the milestone MARK lags it by several seconds more, so the "
-    "result usually reports 'pending' - re-read with doc_get include=['versions'].\n"
+    "and that version IS the milestone, so the document must have unsaved changes - an unmodified "
+    "one is REFUSED. The milestone MARK lags the new version by several seconds, so the result "
+    "usually reports 'pending' - re-read with doc_get include=['versions'].\n"
     + _outputs.produces_block(RETURNS)
 )
 
 tool = (
     Tool.create_simple(name="doc_save_milestone", description=TOOL_DESCRIPTION)
     .add_input_property("milestone_name", {"type": "string",
-            "description": "Milestone name as shown in the data panel (required, non-empty)."})
+            "description": "Milestone name as shown in the data panel."})
     .add_input_property("description", {"type": "string",
-            "description": "Optional version description (the AI-agent marker is prepended)."})
+            "description": "Version description (the AI-agent marker is prepended)."})
     .add_required_input("milestone_name")
     .strict_schema()
 )

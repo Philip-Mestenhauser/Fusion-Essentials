@@ -5,8 +5,10 @@
 
 `run_steps` is the ONE (tool, args, expect, save) engine every live harness judges its steps
 through, so the status vocabulary cannot fork; `judged_steps` is the list that pairs positionally
-with its rows. `run` walks the acts, takes each one's narrative or fallback lane, fires the reload
-beat once every act has run, and turns the rows into the per-tool ledger.
+with its rows. `run` probes each declared capability once - at the first act or step declaring it -
+walks the acts, takes each one's narrative or fallback lane - or holds it back where its capability
+is unmet - fires the reload beat once every act has run, and turns the rows into the per-tool
+ledger.
 `source_hash`/`write_verified`/`check` are the receipt: a green run stamps VERIFIED_TOOLS.md with
 a hash of the tool source AND this harness, and `--check` recomputes it offline.
 
@@ -19,12 +21,18 @@ import hashlib
 import json
 import os
 import re
+import sys
 import time
 
+# Fusion payloads carry non-ASCII (PMI symbols); the Windows console default cannot encode them.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 from verify_core import (
-    NOTE_MAX, Parked, REFUSAL_NOTE_MAX, SRC_ROOT, STEP_SLEEP_S, VERIFIED, _HERE,
-    _RUNTIME_BUDGET_S, _Refusal, _SHELL_TIMEOUT_S, _leaves_no_row, _unparked, facade,
-    predicate_kind)
+    NOTE_MAX, REFUSAL_NOTE_MAX, SRC_ROOT, STEP_SLEEP_S, VERIFIED, _HERE,
+    _RUNTIME_BUDGET_S, _Refusal, _SHELL_TIMEOUT_S, _leaves_no_row, _unparked, capability_met,
+    capability_skip_reason, facade, parked_reason, predicate_kind, probe_capabilities,
+    step_capability)
 
 
 def source_hash(root=None):
@@ -94,7 +102,9 @@ def write_verified(ledger, fusion_version, stamp_date, src_hash, path=None, note
         "  proven, but NO effect was produced or read back. Not covered; the create/act path",
         "  still needs a real step or a recorded gate reason.",
         "- skipped(reason): deliberately NOT driven unattended (cloud / interactive / irreversible",
-        "  tier), each row naming why. Not verified - excused.",
+        "  tier), or held back by the CAPABILITY tier - a step or act declaring an entitlement this",
+        "  installation's capability probe did not read as granted. Each row names why. Not",
+        "  verified - excused.",
         "- pending: no step drives it yet. UNVERIFIED, not known-good - it has never run in this",
         "  sweep. Shrinking this bucket means scripting a real step, not relabelling it.",
         "",
@@ -181,8 +191,8 @@ def run_steps(steps, ctx, trace=False, sleep_s=STEP_SLEEP_S, on_result=None, tim
             time.sleep(step[1]["seconds"])
             continue
         tool, args, expect, save = step
-        # A Parked wrapper carries a ledger reason, never a judgement: the step is judged by the
-        # expectation inside it exactly as if that expectation had been passed bare.
+        # A Parked or Needs wrapper carries ledger routing, never a judgement: the step is judged
+        # by the expectation inside it exactly as if that expectation had been passed bare.
         expect = _unparked(expect)
         try:
             arguments = args(ctx) if callable(args) else dict(args)
@@ -260,7 +270,39 @@ def _precondition_holds(pre):
     return not is_error
 
 
-def run(write_json, keep_open=False, trace=False, shots_dir=None):
+def _one_act(names, selector):
+    """The ONE act `selector` names: the act whose name IS it, or whose name continues it at a word
+    break - so 'ACT 10b' is not 'ACT 10b2'. Anything else raises, naming every act."""
+    hits = [n for n in names if n == selector or n.startswith(selector + " ")]
+    if len(hits) != 1:
+        raise ValueError("--acts selector {0!r} names {1} acts, not one - the acts are: {2}".format(
+            selector, len(hits), ", ".join(names)))
+    return hits[0]
+
+
+def select_acts(acts, spec):
+    """The act names `--acts <spec>` selects, in ACTS order: a comma list of selectors, each an act
+    name as printed in the log or a 'FIRST..LAST' range spanning two of them (either way round).
+    Raises ValueError naming every act when a selector names other than one act, or when the whole
+    spec selects none."""
+    names = [act[0] for act in acts]
+    chosen = set()
+    for item in (part.strip() for part in spec.split(",")):
+        if not item:
+            continue
+        if ".." in item:
+            lo, hi = [_one_act(names, s.strip()) for s in item.split("..", 1)]
+            a, b = names.index(lo), names.index(hi)
+            chosen.update(names[min(a, b):max(a, b) + 1])
+        else:
+            chosen.add(_one_act(names, item))
+    if not chosen:
+        raise ValueError("--acts {0!r} selects no act - the acts are: {1}".format(
+            spec, ", ".join(names)))
+    return [name for name in names if name in chosen]
+
+
+def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None):
     # The wire reads, the act program and the ledger tables as the FACADE holds them at the moment
     # the run starts - see verify_core.facade for why they are not this module's own globals.
     health_gate, registered_tools = facade("health_gate"), facade("registered_tools")
@@ -268,11 +310,44 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None):
     poll_generation, reload_smoke = facade("poll_generation"), facade("reload_smoke")
     ACTS, POLL_AFTER, STORY, EXCLUDED = (facade("ACTS"), facade("POLL_AFTER"), facade("STORY"),
                                          facade("EXCLUDED"))
+    ACT_NEEDS = facade("ACT_NEEDS")
+
+    # --acts: a SLICE of the story, walked against the document a prior --keep-open run left open.
+    # Selected before the first wire call, so an unknown selector costs nothing.
+    selected = None
+    if acts_spec is not None:
+        try:
+            selected = select_acts(ACTS, acts_spec)
+        except ValueError as e:
+            print(str(e))
+            return 1
+        skipped = [act[0] for act in ACTS if act[0] not in set(selected)]
+        print("partial run (--acts {0}): {1} act(s) not run - {2}. The ctx values they save are "
+              "absent, so a step whose arguments need one lands blocked.".format(
+                  acts_spec, len(skipped), ", ".join(skipped) or "(none)"))
     health = health_gate()
     print(f"server ok: {health.get('server')} v{health.get('version', '?')}")
     all_tools = registered_tools()
 
+    # THE CAPABILITY TIER: every capability an act or a step declares, answered True/False/None by
+    # its own probe. An unmet capability routes its acts and steps to the receipt's
+    # skipped(<capability> not entitled) bucket rather than running them into the refusal an
+    # unentitled installation would answer with.
+    entitlements = {}
+
+    def met(capability):
+        """capability_met, taking the capability's own probe the first time it is asked for - workspace_orient errors with no document open."""
+        if capability is not None and capability not in entitlements:
+            entitlements.update(probe_capabilities([capability]))
+            state = entitlements[capability]
+            print("capability {0}: {1}".format(
+                capability, "entitled" if state is True
+                else ("NOT entitled" if state is False else "unreadable (routed as not entitled)")))
+        return capability_met(entitlements, capability)
+
     ctx, rows, notes, act_modes = {}, [], {}, []
+    # tool -> the capability reason the tier held its every step back with, for the ledger.
+    gated = {}
     timings, act_seconds, run_started = {}, [], time.time()
     # the tools whose PASSING step read a value off the payload - run_steps returns exactly one row
     # per step, in order, so a row is paired back with the expectation that judged it.
@@ -280,6 +355,20 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None):
     # tool -> the reason a Parked step held it at a bare "ok", for the ledger's status column.
     parked = {}
     for name, pre, narrative, fallback in ACTS:
+        if selected is not None and name not in selected:
+            continue
+        # An act the tier holds back runs NOTHING - not even its precondition read, which would
+        # cost a wire call to decide between two lanes neither of which may run.
+        act_cap = ACT_NEEDS.get(name)
+        if not met(act_cap):
+            reason = capability_skip_reason(act_cap, entitlements)
+            act_modes.append((name, "skipped(" + reason + ")"))
+            print(f"\n-- {name} [skipped: {reason}] --")
+            # BOTH lanes: neither ran, and a tool driven only by the fallback belongs in the
+            # capability bucket too - left out, it reads as PENDING, which is a different claim.
+            for step in judged_steps(list(narrative) + list(fallback or [])):
+                gated.setdefault(step[0], reason)
+            continue
         mode, steps = "narrative", narrative
         if pre is not None and fallback is not None and not _precondition_holds(pre):
             mode, steps = "fallback", fallback
@@ -288,6 +377,13 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None):
         act_started = time.time()
         if keep_open and name == "FINALE":
             steps = [s for s in steps if s[0] != "doc_close"]
+        # ...then the per-STEP half of the same tier: the unmet rows are dropped BEFORE the step
+        # engine, so the by-position pairing between judged_steps and its rows is untouched.
+        for step in judged_steps(steps):
+            cap = step_capability(step[2])
+            if not met(cap):
+                gated.setdefault(step[0], capability_skip_reason(cap, entitlements))
+        steps = [s for s in steps if met(step_capability(s[2]))]
         # judged_steps, not the act's raw list, is what pairs with the rows below - see its
         # docstring for what a dwell does to the pairing.
         for step, (tool, status, note) in zip(judged_steps(steps),
@@ -296,13 +392,17 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None):
             rows.append((tool, status, note))
             if status in ("pass", "pass*") and predicate_kind(step[2]) == "value":
                 valued.add(tool)
-            if status in ("pass", "pass*") and isinstance(step[2], Parked):
-                parked[tool] = step[2].reason
+            if status in ("pass", "pass*") and parked_reason(step[2]) is not None:
+                parked[tool] = parked_reason(step[2])
             if status in ("pass", "pass*", "expected-refusal"):
                 story = STORY.get(tool, "")
                 notes[tool] = (story + " (fallback fixture)").strip() if mode == "fallback" else story
         if name in POLL_AFTER:
-            poll_generation(rows, notes, POLL_AFTER[name][mode], valued=valued)
+            # one act can leave SEVERAL setups generating, so the boundary poll takes a list as
+            # readily as a name and certifies each in turn.
+            targets = POLL_AFTER[name][mode]
+            for setup in ([targets] if isinstance(targets, str) else targets):
+                poll_generation(rows, notes, setup, valued=valued)
         act_seconds.append((name, time.time() - act_started))
     # THE RELOAD BEAT, after every act: it restarts the server, so no step can be dispatched
     # afterwards and no act can hold it. It appends its own row rather than running through the
@@ -331,6 +431,10 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None):
                                  "produced or read back this run"))
         elif tool in EXCLUDED:
             ledger.append((tool, f"skipped: {EXCLUDED[tool]}"))
+        elif tool in gated:
+            # the CAPABILITY tier's own bucket: every step driving this tool declared an
+            # entitlement the capability probe did not read as granted, so none of them ran.
+            ledger.append((tool, f"skipped: {gated[tool]}"))
         else:
             ledger.append((tool, "PENDING (no step yet)"))
 
@@ -379,16 +483,19 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None):
     # pass* blocks the receipt: the payload did not carry a key the step contract expected - a
     # payload-shape mismatch is a real signal, not a pass.
     fails = [r for r in rows if r[1] in ("FAIL", "blocked", "pass*")]
-    if fails or over_budget:
-        print("\nVERIFIED_TOOLS.md NOT rewritten - resolve the FAIL/blocked/pass* steps first.")
-    else:
-        src_hash = source_hash()
-        stamp_date = time.strftime("%Y-%m-%d")
-        fusion_version = ctx.get("fusion_version", "?")
-        print("\nwrote {0} (stamp: source {1}..., Fusion {2}, {3})".format(
-            write_verified(ledger, fusion_version, stamp_date, src_hash, notes=notes,
-                           act_modes=act_modes),
-            src_hash[:12], fusion_version, stamp_date))
+    # A partial run judges the SLICE it walked: its ledger reads PENDING for every tool the unrun
+    # acts drive, and the receipt would publish that as the tool surface's coverage.
+    if selected is None:
+        if fails or over_budget:
+            print("\nVERIFIED_TOOLS.md NOT rewritten - resolve the FAIL/blocked/pass* steps first.")
+        else:
+            src_hash = source_hash()
+            stamp_date = time.strftime("%Y-%m-%d")
+            fusion_version = ctx.get("fusion_version", "?")
+            print("\nwrote {0} (stamp: source {1}..., Fusion {2}, {3})".format(
+                write_verified(ledger, fusion_version, stamp_date, src_hash, notes=notes,
+                               act_modes=act_modes),
+                src_hash[:12], fusion_version, stamp_date))
     if write_json:
         results_dir = os.path.join(_HERE, "results")
         os.makedirs(results_dir, exist_ok=True)
@@ -396,4 +503,9 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None):
         with open(path, "w", encoding="utf-8") as fh:
             json.dump({"steps": rows, "ledger": ledger, "acts": act_modes, "server": health}, fh, indent=2)
         print(f"\nwrote {path}")
+    if selected is not None:
+        # nothing closes the document unless the FINALE was selected AND allowed to close it.
+        print("\npartial run (--acts {0}): receipt not written{1}".format(
+            acts_spec, "" if ("FINALE" in selected and not keep_open)
+            else "; the story document is left open"))
     return 1 if (fails or over_budget) else 0

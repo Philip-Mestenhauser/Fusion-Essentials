@@ -5,7 +5,7 @@ Fusion** against a mocked `adsk` layer, so the whole suite finishes in seconds
 and needs no live Fusion session. See [CLAUDE.md](CLAUDE.md) for the short,
 mandatory-for-new-tests version of "which pattern to copy."
 
-Layout — the tree splits by KIND, and `test_layout.py` enforces it:
+Layout — the tree splits by KIND:
 
 - `tests/unit/` — tests that EXERCISE behavior (per-tool handlers, the shared framework, the server).
 - `tests/lints/` — tests that READ the codebase to enforce a CONVENTION (naming, wire-ASCII, dead

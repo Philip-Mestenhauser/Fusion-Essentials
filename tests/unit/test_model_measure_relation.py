@@ -484,6 +484,17 @@ class TestConcentric:
                     _face(_cyl((0, 0, 0), (0, 0, 1))), "face")
         assert _payload(mr.handler(relation="concentric"))["passed"] is True
 
+    def test_a_failed_face_pair_is_told_where_a_face_center_comes_from(self):
+        # The profile-plane caveat is read off BOTH sources being face centers - two circular EDGES
+        # have real centers, so the same failure must not carry it.
+        _resolve_ab(_face(_cyl((0, 0, 0), (0, 0, 1))), "face",
+                    _face(_cyl((0, 0, 0.5), (0, 0, 1))), "face")
+        faces = _payload(mr.handler(relation="concentric"))
+        assert faces["passed"] is False
+        assert "profile plane" in faces["note"]
+        _edges((0, 0, 0), (0.5, 0, 0))
+        assert "profile plane" not in _payload(mr.handler(relation="concentric"))["note"]
+
     def test_straight_edge_is_refused_as_non_circular(self):
         ct = mr.adsk.core.Curve3DTypes.Line3DCurveType
         straight = type("E", (), {"geometry": type("G", (), {"curveType": ct})()})()

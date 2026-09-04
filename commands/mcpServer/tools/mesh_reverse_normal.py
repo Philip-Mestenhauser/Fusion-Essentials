@@ -132,11 +132,7 @@ def handler(mesh: str = "") -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Flip the normals of a MESH body with the MeshReverseNormal feature - what an inside-out "
-    "imported mesh needs. No options: the feature takes the body and nothing else. The flip shows "
-    "up as the body's signed volume changing sign and its per-node normals negating; is_closed and "
-    "is_oriented do not move, so they are not evidence - a reverse that moved neither of the first "
-    "two is an error."
+    "Flip the normals of a MESH body - what an inside-out imported mesh needs."
 )
 
 tool = _inputs.apply_to_tool(

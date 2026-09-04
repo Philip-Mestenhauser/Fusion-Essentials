@@ -35,7 +35,10 @@ class FakeProfiles:
 
 
 class FakeSketch:
-    def __init__(self, name, profile_count=1):
+    def __init__(self, name, profile_count=1, compute_deferred=False):
+        # A live sketch always answers isComputeDeferred; True is the state whose `profiles` and
+        # `profiles.count` are both the pre-deferral ones.
+        self.isComputeDeferred = compute_deferred
         self.name = name
         self.profiles = FakeProfiles(profile_count)
 
@@ -187,6 +190,15 @@ class TestBoundary:
         _, af = _install([FakeSketch("Boundary")], ["A:1"])
         _payload(ar.handler(boundary_sketch="Boundary", shapes="A:1"))
         assert af.last_input.envelope.profiles == [("profile", 0)]
+
+    def test_a_deferred_boundary_sketch_is_refused(self):
+        # profiles.item(0) is a blind index off the sketch's own collection, so a deferred sketch
+        # would hand the envelope whichever region was first before the deferral.
+        _install([FakeSketch("Boundary", profile_count=2, compute_deferred=True)], ["A:1"])
+        res = ar.handler(boundary_sketch="Boundary", shapes="A:1")
+        assert res["isError"] is True
+        assert "isComputeDeferred=true" in res["message"] and "'Boundary'" in res["message"]
+        assert "'boundary_sketch'" in res["message"]
 
     def test_missing_boundary_errors(self):
         _install([FakeSketch("Other")], ["A:1"])

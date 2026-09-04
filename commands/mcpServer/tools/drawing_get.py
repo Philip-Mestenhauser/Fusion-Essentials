@@ -56,10 +56,8 @@ def _custom_size_facts(sheet):
 
 def _views_rows(sheet, cap):
     """Per-view rows for one sheet: {index, type}. Type is the only readable fact a drawing View
-    carries that a caller can act on: it has no name, scale or position, and its populated
-    viewCurves collection hands back ViewCurve instances with no readable geometry (measured). The
-    row is small because the API is, and the note says so rather than letting the caller assume a
-    richer read exists."""
+    carries - it has no name, scale or position, and its populated viewCurves collection hands back
+    ViewCurve instances with no readable geometry."""
     views = safe(lambda: sheet.views)
     count = safe(lambda: views.count, 0) or 0
     rows = []
@@ -90,10 +88,9 @@ def handler(include=None, sheet: str = "") -> dict:
 
     doc_name = safe(lambda: adsk.core.Application.get().activeDocument.name)
     standard = _drawing_common.standard_label(dwg)
-    # ONE activeSheet read for the whole payload: the property was measured returning DIFFERENT
-    # sheets across close-together reads, so a per-row re-read can disagree with the header and
-    # with itself mid-walk. One read makes active_sheet and every is_active flag one consistent
-    # snapshot.
+    # ONE activeSheet read for the whole payload: the property can return DIFFERENT sheets across
+    # close-together reads, so one read is what makes active_sheet and every is_active flag a
+    # consistent snapshot.
     active_name = safe(lambda: dwg.activeSheet.name)
     payload = {
         "drawing": doc_name,
@@ -138,25 +135,20 @@ def handler(include=None, sheet: str = "") -> dict:
     payload["sheets"] = rows
 
     payload["note"] = (
-        "The drawing family's READ. export_index is 1-based - the address drawing_export's "
+        "export_index is 1-based - the address drawing_export's "
         "sheet_range and drawing_edit_sheet take. Sheet width/height are ALWAYS mm; a custom-size "
-        "sheet reads sheet_size null (custom_size carries its extents when the build exposes "
-        "them). include=['views'] adds per-view rows: index + type. A view also carries a "
-        "populated viewCurves collection, but its ViewCurve items expose no readable geometry; "
-        "view names, scales, positions, and placed DIMENSIONS have no read API, so what this "
-        "does not list cannot be read, not even by script. References/staleness: drawing_update. "
-        "Export evidence: drawing_export's own payload.")
+        "sheet reads sheet_size null. include=['views'] adds per-view rows: index + type. A view's "
+        "viewCurves collection is populated but its items expose no readable geometry, and view "
+        "names, scales, positions and placed DIMENSIONS have no read API.")
     return ok(payload)
 
 
 TOOL_DESCRIPTION = (
-    "Read the ACTIVE 2D drawing: standard (iso/asme), units, sheet listing with 1-based "
-    "export_index (the address drawing_export/drawing_edit_sheet take), per-sheet facts (size, "
-    "orientation, width/height in mm, view/sketch/table/image counts, is_active, custom_size "
-    "when present), and with include=['views'] each sheet's view rows (index + type; a view's "
-    "viewCurves are populated but expose no readable geometry, and placed dimensions have no "
-    "read API on this platform). 'sheet' scopes to one "
-    "sheet by name. The document must be the active one (doc_activate first)."
+    "Read the ACTIVE 2D drawing: standard, units, and a sheet listing with per-sheet facts and a "
+    "1-based export_index (the address drawing_export and drawing_edit_sheet take). "
+    "include=['views'] adds each sheet's view rows (index + type); a view's viewCurves are "
+    "populated but expose no readable geometry, and placed dimensions have no read API. 'sheet' "
+    "scopes to one sheet by name. The document must be the active one (doc_activate first)."
 )
 
 tool = (

@@ -1,155 +1,204 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""ACT rows: the solids, the details that cut them, the parametric resize, and the reduce.
+"""ACT rows: the solids, the details that cut them, and the parametric resize.
 
-The modelling spine of the story: the skeleton turns solid, the rings are filleted, chamfered,
-patterned and drafted, the parameters are driven again with the whole mechanism assembled, and the
-gyroscope is stripped to the one machinable part the CAM acts run on.
+The modelling spine of the story: the sketches turn into the bracket, its edges are broken, the
+cameo bodies carry the feature verbs the part has no home for, and the one driving length is
+re-driven so every feature follows it.
 """
 
 from verify_core import (
     _box, _chamfered, _ctx_get, _datum, _datum_plane, _drafted, _drilled, _extent_measured,
-    _extruded, _fg, _fgn, _filleted, _gap_measured, _joined, _joint_origins_listed, _lofted,
-    _made_component, _made_component_inactive, _material_assigned, _measured, _mirrored, _moved,
-    _near, _offset_faces, _param_added, _param_deleted, _param_read, _param_set_to, _path_count,
-    _patterned, _piped, _prof, _refused, _relation_measured, _relation_passes, _relation_read,
-    _revolved, _shelled, _swept, _watch)
+    _extruded, _fg, _fgn, _filleted, _gap_measured, _interference_measured, _joined,
+    _joint_origin_at, _joint_origins_listed, _lofted, _made_component, _made_component_inactive,
+    _face_up_at, _material_assigned, _matched, _measured, _mirrored, _moved, _near, _offset_faces,
+    _param_added, _param_deleted, _param_read, _param_set_to, _path_count, _patterned, _piped,
+    _prof, _refused, _relation_measured, _relation_passes, _relation_read, _revolved, _shelled,
+    _swept, _watch)
 from verify_layout import _px, _py
 
 
 # --- ACT 2: SOLIDS - the parts turn solid, each part its own color (mirrors scenario S2) -------
 # The hero solids ride on ACT 1's parametric sketches; the multi-body feature tools that have no
-# single natural gyroscope home (draft/mirror/patterns/hole/combine) ride cameo bodies in the SAME
+# natural home on the part (draft/mirror/patterns/combine) ride cameo bodies in the SAME
 # document, so every one is exercised without contorting the mechanism.
 _SOLIDS = [
     # The sketch acts have already drawn the whole scratch field by now, so a whole-model fit is a
-    # metre of scenery with the gyroscope a speck in it. Frame the ring sketches the extrudes below
-    # consume, and the rings appear inside the shot instead of off the edge of one.
-    _watch(["OuterRingSketch", "InnerRingSketch", "FrameSketch"]),
-    # ring bands: extrude the ANNULUS profile (smallest-area region) symmetric about the ring plane.
-    ("sketch_get", {"sketch_name": "OuterRingSketch"}, "ok", ("or_ring", lambda p: p["profiles"][-1]["handle"])),
-    ("model_extrude", lambda c: {"sketch_name": "OuterRingSketch", "profile_index": _ctx_get(c, "or_ring", "outer ring annulus"), "distance": 4, "symmetric": True}, _extruded, None),
-    ("sketch_get", {"sketch_name": "InnerRingSketch"}, "ok", ("ir_ring", lambda p: p["profiles"][-1]["handle"])),
-    ("model_extrude", lambda c: {"sketch_name": "InnerRingSketch", "profile_index": _ctx_get(c, "ir_ring", "inner ring annulus"), "distance": 4, "symmetric": True}, _extruded, None),
-    ("sketch_get", {"sketch_name": "FrameSketch"}, "ok", ("fr_ring", lambda p: p["profiles"][-1]["handle"])),
-    ("model_extrude", lambda c: {"sketch_name": "FrameSketch", "profile_index": _ctx_get(c, "fr_ring", "frame plate ring"), "distance": 4, "symmetric": True}, _extruded, None),
-    # EDGE TREATMENT ON THE RINGS. A gimbal ring is handled, and a band left with four square rims
-    # reads as a washer however well it is jointed. Each ring is broken on the rim a hand reaches
-    # first: the outer ring's OD, the inner ring's, and the frame's opening - a radius scaled from
-    # the band so it stays proportionate when the driver moves, floored well under half the band so
-    # it can never eat the section. find_geometry picks the rim by RADIUS, the one query that keeps
-    # naming the same edge after the driver changes.
-    ("param_add", {"name": "RingBreak", "expression": "RingBand / 6",
-                   "comment": "Rim break on a gimbal ring - proportional to the band it cuts"},
-     _param_added("RingBreak", 1), None),
-    # the rim radii come from the PARAMETERS that drove them, not from the numbers they happen to
-    # hold - the same three expressions the rings were built from, so the query cannot go stale.
-    ("param_get", {"name": "OuterOD"}, _param_read("OuterOD", 48),
-     ("outer_od", lambda p: p["parameter"]["value"])),
-    ("param_get", {"name": "InnerOD"}, _param_read("InnerOD", 36),
-     ("inner_od", lambda p: p["parameter"]["value"])),
-    ("param_get", {"name": "FrameOpenR"}, _param_read("FrameOpenR", 54),
-     ("frame_open", lambda p: p["parameter"]["value"])),
-    # model_fillet/model_chamfer take a NUMBER, not an expression, so the break is READ from the
-    # parameter that defines it rather than written twice - the parameter still states the rule and
-    # the feature still gets the value that rule produced.
-    ("param_get", {"name": "RingBreak"}, _param_read("RingBreak", 1),
-     ("ring_break", lambda p: p["parameter"]["value"])),
-    ("find_geometry", lambda c: {"target": "OuterRing", "kind": "circular_edge",
-                                 "radius": _ctx_get(c, "outer_od", "outer ring OD"),
-                                 "max_results": 2}, "ok", _fgn("or_rim")),
-    ("model_fillet", lambda c: {"edges": _ctx_get(c, "or_rim", "outer ring rim"),
-                                "radius": _ctx_get(c, "ring_break", "the ring rim break")},
-     _filleted, None),
-    ("find_geometry", lambda c: {"target": "InnerRing", "kind": "circular_edge",
-                                 "radius": _ctx_get(c, "inner_od", "inner ring OD"),
-                                 "max_results": 2}, "ok", _fgn("ir_rim")),
-    ("model_fillet", lambda c: {"edges": _ctx_get(c, "ir_rim", "inner ring rim"),
-                                "radius": _ctx_get(c, "ring_break", "the ring rim break")},
-     _filleted, None),
-    ("find_geometry", lambda c: {"target": "Frame", "kind": "circular_edge",
-                                 "radius": _ctx_get(c, "frame_open", "frame opening"),
-                                 "max_results": 2}, "ok", _fgn("fr_rim")),
-    ("model_chamfer", lambda c: {"edges": _ctx_get(c, "fr_rim", "frame opening rim"),
-                                 "distance": _ctx_get(c, "ring_break", "the ring rim break")},
+    # metre of scenery with the part a speck in it. Frame the profiles the features below consume,
+    # and the bracket appears inside the shot instead of off the edge of one.
+    _watch(["BracketBody", "BracketStep", "BracketPocket"]),
+    ("design_activate_component", {"occurrence": "Bracket:1"}, "ok", None),
+    # THE BLOCK, THE STEP AND THE BOSS - three extrudes off the three parametric profiles, each
+    # taking its depth from the parameter that states it, so the resize walks the solid as well as
+    # the sketches.
+    ("model_extrude", {"sketch_name": "BracketBody", "profile_index": 0,
+                       "distance": "PartHt - StepDrop"}, _extruded, None),
+    # THE BLOCK MEASURED WHERE IT IS BUILT: the two span dimensions are the only thing standing
+    # between the driver and the solid, and a dimension that anchored the wrong point leaves a
+    # block of the wrong size that nothing downstream would name until the resize act.
+    ("model_inspect", {"target": "Bracket:1"},
+     lambda p: _measured("the block is PartLen x PartWid x (PartHt - StepDrop)",
+                         {"x": p.get("x"), "y": p.get("y"), "z": p.get("z")},
+                         _near(p.get("x"), 120.0, 0.1) and _near(p.get("y"), 80.0, 0.1)
+                         and _near(p.get("z"), 30.0, 0.1)), None),
+    ("model_extrude", {"sketch_name": "BracketStep", "profile_index": 0, "distance": "StepDrop",
+                       "operation": "join"}, _extruded, None),
+    ("model_extrude", {"sketch_name": "BracketBoss", "profile_index": 0, "distance": "PartHt / 8",
+                       "operation": "join"}, _extruded, None),
+    # THE POCKET, cut UP from its own floor and out through the step top - the direction with a
+    # body in it. It runs one edge break PAST that face so the cut opens the pocket instead of
+    # ending coincident with it.
+    ("model_extrude", {"sketch_name": "BracketPocket", "profile_index": 0,
+                       "distance": "PocketDepth + EdgeBreak", "operation": "cut"}, _extruded, None),
+    # A MATERIAL-REMOVAL FEATURE IS JUDGED BY THE MATERIAL: the cut opened a floor 16 mm under the
+    # step top, so the pocket floor is a planar face at z=14 that did not exist a step ago. A cut
+    # that ran the wrong way, or found no body, leaves no such face.
+    ("find_geometry", {"target": "Bracket", "kind": "planar_face", "nearest_to": [-35, 0, 14],
+                       "max_results": 1}, _face_up_at(-35, 0, 14, tol=2.0), None),
+    # THE POCKET'S CORNER RADII, at the parameter itself: model_fillet takes a radius EXPRESSION,
+    # so the created feature holds 'PocketRad' rather than the number that expression evaluates to -
+    # which is what lets the recompute in the resize act carry it.
+    ("find_geometry", {"target": "Bracket", "kind": "line_edge", "nearest_to": [-50, -22, 22],
+                       "max_results": 1}, _matched(1, "line_edge"), _fg("pk_c1")),
+    ("find_geometry", {"target": "Bracket", "kind": "line_edge", "nearest_to": [-20, -22, 22],
+                       "max_results": 1}, _matched(1, "line_edge"), _fg("pk_c2")),
+    ("find_geometry", {"target": "Bracket", "kind": "line_edge", "nearest_to": [-20, 22, 22],
+                       "max_results": 1}, _matched(1, "line_edge"), _fg("pk_c3")),
+    ("find_geometry", {"target": "Bracket", "kind": "line_edge", "nearest_to": [-50, 22, 22],
+                       "max_results": 1}, _matched(1, "line_edge"), _fg("pk_c4")),
+    ("model_fillet", lambda c: {"edges": [_ctx_get(c, "pk_c1", "pocket corner one"),
+                                          _ctx_get(c, "pk_c2", "pocket corner two"),
+                                          _ctx_get(c, "pk_c3", "pocket corner three"),
+                                          _ctx_get(c, "pk_c4", "pocket corner four")],
+                                "radius": "PocketRad"}, _filleted, None),
+    # THE TWO THROUGH BORES, one of them up the boss. model_hole's diameter is an EXPRESSION, so
+    # these follow the part's own section where a fillet radius cannot.
+    # EVERY hole below places its points in WORLD space. The default 'sketch' frame is the frame of
+    # the placement sketch model_hole lays on the chosen face, and that frame is the face's, not the
+    # world's; the tool converts a world point through the sketch's own converter and REFUSES one
+    # that does not lie on the face, so the z coordinate is the face's own height.
+    # Each face is MEASURED before it is drilled: a hole through the wrong face is a hole every
+    # read after it still calls a hole. 'nearest_to' ranks by distance to each face's own CENTROID,
+    # not to the nearest point on it - measured: a probe sitting ON this top face but off toward
+    # its edge lost to the block's L-shaped +Y side wall, whose centroid was nearer - so every
+    # probe below is aimed at the centroid the face it wants will have.
+    # The raised half spans x[-10,60] and its middle is x=25; the boss standing on it takes a
+    # circular bite that pulls the centroid about 1.2 mm back along -x, which the band absorbs.
+    ("find_geometry", {"target": "Bracket", "kind": "planar_face", "nearest_to": [25, 0, 40],
+                       "max_results": 1}, _face_up_at(25, 0, 40, tol=2.0), _fg("step_top")),
+    ("model_hole", lambda c: {"face": _ctx_get(c, "step_top", "the high half of the top"),
+                              "hole_type": "simple", "diameter": "BoreDia", "extent": "through",
+                              "points_space": "world", "points": [[20, 0, 40]]}, _drilled(1), None),
+    ("find_geometry", {"target": "Bracket", "kind": "planar_face", "nearest_to": [45, 0, 45],
+                       "max_results": 1}, _face_up_at(45, 0, 45, tol=0.5), _fg("boss_top")),
+    ("model_hole", lambda c: {"face": _ctx_get(c, "boss_top", "the boss top"),
+                              "hole_type": "simple", "diameter": "BoreDia", "extent": "through",
+                              "points_space": "world", "points": [[45, 0, 45]]}, _drilled(1), None),
+    # THE MOUNTING PATTERN: four COUNTERBORED holes through the low half of the top in one call -
+    # 'holes_verified' counts the drill axes off the created feature, so four here is four.
+    # the low half spans x[-60,-10]: its middle is x=-35, and the pocket it lost is centred there
+    # too, so removing that opening leaves the centroid where it was.
+    ("find_geometry", {"target": "Bracket", "kind": "planar_face", "nearest_to": [-35, 0, 30],
+                       "max_results": 1}, _face_up_at(-35, 0, 30, tol=2.0), _fg("low_top")),
+    ("model_hole", lambda c: {"face": _ctx_get(c, "low_top", "the low half of the top"),
+                              "hole_type": "counterbore", "diameter": "MountDia",
+                              "cbore_diameter": "MountDia * 1.8", "cbore_depth": "EdgeBreak",
+                              "extent": "through", "points_space": "world",
+                              "points": [[-45, 30, 30], [-25, 30, 30],
+                                         [-45, -30, 30], [-25, -30, 30]]},
+     _drilled(4), None),
+    # THE HANDLED EDGES, and the split between the two tools: a fillet RADIUS may be a parameter
+    # expression, so the rounded edge carries 'EdgeBreak' itself; a chamfer DISTANCE is judged
+    # against the number it was given, so it stays a literal READ from that same parameter.
+    ("param_get", {"name": "EdgeBreak"}, _param_read("EdgeBreak", 3),
+     ("edge_break", lambda p: p["parameter"]["value"])),
+    ("find_geometry", {"target": "Bracket", "kind": "line_edge", "nearest_to": [-10, 0, 40],
+                       "max_results": 1}, _matched(1, "line_edge"), _fg("step_lead")),
+    ("model_fillet", lambda c: {"edges": [_ctx_get(c, "step_lead", "the step's leading edge")],
+                                "radius": "EdgeBreak"}, _filleted, None),
+    ("find_geometry", {"target": "Bracket", "kind": "line_edge", "nearest_to": [60, 0, 40],
+                       "max_results": 1}, _matched(1, "line_edge"), _fg("step_out")),
+    ("model_chamfer", lambda c: {"edges": [_ctx_get(c, "step_out", "the step's outboard edge")],
+                                 "distance": _ctx_get(c, "edge_break", "the edge break")},
      _chamfered, None),
-    # the rotor disc, REVOLVED about the spin axis; the shaft and carrier extruded.
-    ("model_revolve", {"sketch_name": "RotorSketch", "profile_index": 0, "axis": "x", "angle_deg": 360},
-     _revolved, None),
-    # symmetric extrudes 'distance' EACH WAY, so this is a 56 mm shaft reaching |x| = 28. It must
-    # stop SHORT of InnerBoreR (30): a 3 mm-radius shaft ending exactly on the bore reaches
-    # sqrt(30^2 + 3^2) at its corners and bites 2.1 mm3 into the inner ring - a journal that
-    # interferes with the ring it is meant to turn inside.
-    ("model_extrude", {"sketch_name": "ShaftSketch", "profile_index": 0, "distance": 28, "symmetric": True},
-     _extruded, None),
-    # the carrier: bar + hub in one extrude (all regions), then the machinable detail cut
-    # through - a 5mm center bore, a 6x 3mm bolt circle on R9, and 4mm pivot bores at the ends.
-    ("design_activate_component", {"occurrence": "Carrier:1"}, "ok", None),
-    ("model_extrude", {"sketch_name": "CarrierSketch", "profile_index": "all", "distance": 6},
-     _extruded, None),
-    ("sketch_create", {"plane": "CarrierPlane", "name": "CarrierHoles"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 2.5, "sketch_name": "CarrierHoles"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "circle", "cx": 9, "cy": 0, "radius": 1.5, "sketch_name": "CarrierHoles"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "circle", "cx": 4.5, "cy": 7.794, "radius": 1.5, "sketch_name": "CarrierHoles"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "circle", "cx": -4.5, "cy": 7.794, "radius": 1.5, "sketch_name": "CarrierHoles"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "circle", "cx": -9, "cy": 0, "radius": 1.5, "sketch_name": "CarrierHoles"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "circle", "cx": -4.5, "cy": -7.794, "radius": 1.5, "sketch_name": "CarrierHoles"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "circle", "cx": 4.5, "cy": -7.794, "radius": 1.5, "sketch_name": "CarrierHoles"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "circle", "cx": 45, "cy": 0, "radius": 2, "sketch_name": "CarrierHoles"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "circle", "cx": -45, "cy": 0, "radius": 2, "sketch_name": "CarrierHoles"}, "ok", None),
-    ("model_extrude", {"sketch_name": "CarrierHoles", "profile_index": "all", "distance": 6, "operation": "cut"},
-     _extruded, None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    # the pedestal base-to-post transition, LOFTED between the two profiles - built INTO the
-    # Pedestal component (the loft lands in the ACTIVE component, not the profiles' owner).
-    ("design_activate_component", {"occurrence": "Pedestal:1"}, "ok", None),
-    ("sketch_get", {"sketch_name": "PedBase"}, "ok", ("ped_base", lambda p: p["profiles"][0]["handle"])),
-    ("sketch_get", {"sketch_name": "PedTop"}, "ok", ("ped_top", lambda p: p["profiles"][0]["handle"])),
-    ("model_loft", lambda c: {"profiles": [_ctx_get(c, "ped_base", "pedestal base"), _ctx_get(c, "ped_top", "pedestal top")]}, _lofted, None),
-    # the crank handle, SWEPT along its path - into the Crank component for the same reason.
-    ("design_activate_component", {"occurrence": "Crank:1"}, "ok", None),
-    ("model_sweep", {"profile": {"sketch": "CrankProf", "profile_index": 0}, "path": "sketch:CrankPath"},
-     _swept, None),
+    # The WCS anchor the CAM setup binds to, at the part's own origin: parametric, so it holds
+    # position through the recompute the resize act drives.
+    ("joint_create_origin", {"anchor": "coordinates", "target": "origin", "name": "StockCenter"},
+     _joint_origin_at("StockCenter", 0, 0, 0), None),
+    # THE TWO SOLID BUILDERS THE BRACKET HAS NO HOME FOR, each on a cameo of its own out on the
+    # field: a base-to-post loft and a swept boss.
+    ("model_create_component", {"name": "LoftCameo", "activate": True}, _made_component, None),
+    ("sketch_create", {"plane": "xy", "name": "LoftBase"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": 250, "cy": 0, "radius": 16,
+                             "sketch_name": "LoftBase"}, "ok", None),
+    ("sketch_get", {"sketch_name": "LoftBase"}, "ok", _prof("loft_base")),
+    ("model_construction", {"kind": "plane", "plane": "xy", "offset": 40, "name": "LoftTopPlane"},
+     _datum_plane("xy"), None),
+    ("sketch_create", {"plane": "LoftTopPlane", "name": "LoftTop"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": 250, "cy": 0, "radius": 8,
+                             "sketch_name": "LoftTop"}, "ok", None),
+    ("sketch_get", {"sketch_name": "LoftTop"}, "ok", _prof("loft_top")),
+    ("model_loft", lambda c: {"profiles": [_ctx_get(c, "loft_base", "the loft's base profile"),
+                                           _ctx_get(c, "loft_top", "the loft's top profile")]},
+     _lofted, None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    # the machine is whole: frame IT for the colouring beats, not the metre-wide cameo grid.
-    _watch("Frame:1"),
-    # EACH PART ITS OWN COLOR - the recording's signature look - and a physical material on the rotor.
-    ("appearance_set", {"target": "Frame", "color": "#5E6AD2"}, "ok", None),
-    ("appearance_set", {"target": "Pedestal", "color": "#8A94A6"}, "ok", None),
-    ("appearance_set", {"target": "Carrier", "color": "#1E88E5"}, "ok", None),
-    ("appearance_set", {"target": "OuterRing", "color": "#E5533C"}, "ok", None),
-    ("appearance_set", {"target": "InnerRing", "color": "#F5A623"}, "ok", None),
-    ("appearance_set", {"target": "Rotor:1", "color": "#2FB170"}, "ok", None),
-    ("appearance_set", {"target": "RotorShaft:1", "color": "#B0BEC5"}, "ok", None),
-    ("appearance_set", {"target": "Crank:1", "color": "#9C27B0"}, "ok", None),
-    ("model_set_material", {"target": "Rotor:1", "material": "Steel"}, _material_assigned, None),
-    # honest reads on the real mechanism: ring-to-ring gap, rotor/shaft coaxiality, rotor volume.
-    ("find_geometry", {"target": "OuterRing", "kind": "cylinder_face", "max_results": 1}, "ok", _fg("or_cyl")),
-    ("model_measure_between", lambda c: {"a": _ctx_get(c, "or_cyl", "outer ring face"), "b": "InnerRing"}, _gap_measured, None),
-    ("find_geometry", {"target": "Rotor:1", "kind": "cylinder_face", "max_results": 1}, "ok", _fg("rotor_cyl")),
-    ("find_geometry", {"target": "RotorShaft", "kind": "cylinder_face", "max_results": 1}, "ok", _fg("shaft_cyl")),
-    ("model_measure_relation", lambda c: {"relation": "coaxial", "entity_a": _ctx_get(c, "rotor_cyl", "rotor face"), "entity_b": _ctx_get(c, "shaft_cyl", "shaft face")}, _relation_measured("coaxial"), None),
-    ("model_inspect", {"target": "Rotor:1"}, _extent_measured, None),
-    # PMI: authoring is EXTENSION-GATED on this build - pmi_create raises "Manufacturing or Design
-    # Extension is required" on a session without one, so the two create beats assert THAT refusal
-    # (the deterministic live behavior) on the real geometry a note would carry: the frame's flat
-    # plate face and a carrier bolt-circle bore. The read still runs for real, and with no PMI
-    # authored the edit/delete beats assert the honest name lookup instead of a fixture - it lists
-    # what IS available ("none") rather than acting on something else.
-    ("find_geometry", {"target": "Frame", "kind": "planar_face", "max_results": 1}, "ok", _fg("frame_flat")),
-    ("pmi_create", lambda c: {"kind": "note", "geometry": [_ctx_get(c, "frame_flat", "frame flat face")], "text": "{flatness}0.05", "name": "PmiFlat"}, "refused", None),
-    ("find_geometry", {"target": "Carrier", "kind": "cylinder_face", "radius": 1.5, "max_results": 1}, "ok", _fg("carrier_bore")),
-    ("pmi_create", lambda c: {"kind": "hole_note", "geometry": [_ctx_get(c, "carrier_bore", "carrier bolt-circle bore")]}, "refused", None),
+    ("model_create_component", {"name": "SweepCameo", "activate": True}, _made_component, None),
+    ("sketch_create", {"plane": "xz", "name": "SweepPath"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 250, "y1": 0, "x2": 250, "y2": -50,
+                             "sketch_name": "SweepPath"}, "ok", None),
+    ("sketch_create", {"plane": "xy", "name": "SweepProf"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": 250, "cy": 0, "radius": 5,
+                             "sketch_name": "SweepProf"}, "ok", None),
+    ("model_sweep", {"profile": {"sketch": "SweepProf", "profile_index": 0},
+                     "path": "sketch:SweepPath"}, _swept, None),
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    # the part is whole: frame IT for the colouring beats, not the metre-wide cameo grid.
+    _watch("Bracket:1"),
+    ("appearance_set", {"target": "Bracket", "color": "#5E6AD2"}, "ok", None),
+    ("appearance_set", {"target": "LoftCameo", "color": "#8A94A6"}, "ok", None),
+    ("appearance_set", {"target": "SweepCameo", "color": "#F5A623"}, "ok", None),
+    ("model_set_material", {"target": "Bracket:1", "material": "Steel"}, _material_assigned, None),
+    # honest reads on the real part: the boss wall to its own bore, the two of them coaxial, and
+    # the part's measured extent.
+    ("find_geometry", {"target": "Bracket", "kind": "cylinder_face", "radius": 10,
+                       "max_results": 1}, _matched(1, "cylinder_face"), _fg("boss_wall")),
+    # the bore INSIDE that boss, pinned by position: the part carries two of this diameter, and the
+    # coaxial read below is only a claim about the boss if it picked the boss's own.
+    ("find_geometry", {"target": "Bracket", "kind": "cylinder_face", "radius": 6,
+                       "nearest_to": [45, 0, 42], "max_results": 1},
+     _matched(1, "cylinder_face"), _fg("bore_wall")),
+    ("model_measure_between", lambda c: {"a": _ctx_get(c, "boss_wall", "the boss wall"),
+                                         "b": _ctx_get(c, "bore_wall", "the bore wall")},
+     _gap_measured, None),
+    ("model_measure_relation", lambda c: {"relation": "coaxial",
+                                          "entity_a": _ctx_get(c, "boss_wall", "the boss wall"),
+                                          "entity_b": _ctx_get(c, "bore_wall", "the bore wall")},
+     _relation_measured("coaxial"), None),
+    ("model_inspect", {"target": "Bracket:1"}, _extent_measured, None),
+    # PMI authoring is entitled on this build, so the four rows assert the created/edited/deleted
+    # values read back off the annotations - on the real geometry a note would carry: the pocket
+    # floor and a mounting bore.
+    ("find_geometry", {"target": "Bracket", "kind": "planar_face", "nearest_to": [-35, 0, 14],
+                       "max_results": 1}, _face_up_at(-35, 0, 14, tol=2.0), _fg("pmi_floor")),
+    ("pmi_create", lambda c: {"kind": "note", "geometry": [_ctx_get(c, "pmi_floor", "the pocket floor")], "text": "{flatness}0.05", "name": "PmiFlat"},
+     lambda p: p.get("annotation") == "PmiFlat" and p.get("markup") == "{flatness}0.05" and p.get("kind") == "note", None),
+    ("find_geometry", {"target": "Bracket", "kind": "cylinder_face", "radius": 3, "max_results": 1},
+     _matched(1, "cylinder_face"), _fg("mount_bore")),
+    ("pmi_create", lambda c: {"kind": "hole_note", "geometry": [_ctx_get(c, "mount_bore", "a mounting bore")]},
+     lambda p: p.get("kind") == "hole_note" and bool(p.get("annotation")) and "<HDIA>" in str(p.get("markup")), None),
     ("pmi_get", {"include": ["segments", "detail"]}, "ok", None),
     # an over-cap 'max_results' is CLAMPED, not refused - pmi_get's own contract, since every record
     # it returns crosses the wire whole. The answer still comes back with its census keys.
     ("pmi_get", {"max_results": 99999},
      lambda p: isinstance(p.get("annotations"), list) and "total" in p, None),
-    ("pmi_edit", {"action": "set_text", "annotation": "PmiFlat", "text": "{perpendicularity}0.03"}, "refused", None),
+    ("pmi_edit", {"action": "set_text", "annotation": "PmiFlat", "text": "{perpendicularity}0.03"},
+     lambda p: p.get("name") == "PmiFlat" and p.get("markup") == "{perpendicularity}0.03", None),
     # the blank name is its own guard, ahead of any lookup.
     ("pmi_edit", {"action": "hide", "annotation": ""}, "refused", None),
-    ("pmi_delete", {"annotation": "PmiFlat"}, "refused", None),
+    ("pmi_delete", {"annotation": "PmiFlat"},
+     lambda p: p.get("deleted") == "PmiFlat" and isinstance(p.get("remaining_pmi"), int), None),
     # THE DATUM BENCH: one bored block, and every way the API knows of hanging a plane, an axis or a
     # point off it. The modes divide by what they READ, so the bench has to carry all of it - six
     # faces, the linear edges where they meet, the vertices where those meet, and a bore for the
@@ -283,7 +332,7 @@ _SOLIDS = [
                                           "entity_a": _ctx_get(c, "db_top2", "bench top face"),
                                           "entity_b": _ctx_get(c, "db_floor", "bench floor")},
      _relation_read("clearance", "min_distance"), None),
-    # feature cameos on same-doc scratch bodies (no single natural gyroscope home for these verbs).
+    # feature cameos on same-doc scratch bodies (no natural home on the part for these verbs).
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     ("model_create_component", {"name": "FeatureCameo", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "FCPad"}, "ok", None),
@@ -356,7 +405,7 @@ _SOLIDS = [
     # An axis OUTSIDE the part, so the pattern reads as an orbit rather than a body spun in place:
     # two origin planes offset to cross 30 mm clear of the pad's -X edge, and their INTERSECTION is
     # the axis. The world z axis would do the same job 200 mm away, swinging the copies across the
-    # whole scene and through the gyroscope.
+    # whole scene and through the machined part.
     ("model_construction", {"kind": "plane", "plane": "yz", "offset": 170, "name": "OrbitYZ"},
      _datum_plane("yz"), None),
     ("model_construction", {"kind": "plane", "plane": "xz", "offset": 20, "name": "OrbitXZ"},
@@ -427,7 +476,7 @@ _SOLIDS = [
     # A face mapped to a direction VECTOR keeps the direction and DROPS the location, so the ring is
     # turned about the world axis through the ORIGIN and reported as success: the label is checked
     # AND the geometry measured. Live: a cylinder at x=30, a 2x3 mm profile at x 36-38 on the XZ
-    # plane, ring bbox x 22..38. The cameo sits at z=100, clear of the gyroscope and the other cameos.
+    # plane, ring bbox x 22..38. The cameo sits at z=100, clear of the part and the other cameos.
     ("model_create_component", {"name": "RevolveCameo", "activate": True}, _made_component, None),
     ("model_construction", {"kind": "plane", "plane": "xy", "offset": 100, "name": "RevAxisPlane"},
      _datum_plane("xy"), None),
@@ -473,26 +522,27 @@ _SOLIDS = [
 
 
 _DETAILS = [
-    # 1 mm fillets and chamfers on the rings - invisible at anything but ring scale.
-    # The BORE rim, asked for by the parameter that defines it. The OD rims took their break back in
-    # ACT 2, and a fillet's own tangent circle is not a corner - handing one back to model_fillet
-    # answers FILLET_NO_EDGE_FOUND - so an unfiltered 'first circular edge' on this ring now lands on
-    # geometry that cannot be filleted at all.
-    ("param_get", {"name": "OuterBoreR"}, _param_read("OuterBoreR", 42),
-     ("outer_bore", lambda p: p["parameter"]["value"])),
-    ("find_geometry", lambda c: {"target": "OuterRing", "kind": "circular_edge",
-                                 "radius": _ctx_get(c, "outer_bore", "the outer ring bore"),
-                                 "max_results": 1}, "ok", _fg("or_edge")),
-    ("model_fillet", lambda c: {"edges": [_ctx_get(c, "or_edge", "outer ring bore edge")],
-                                "radius": 1}, _filleted, None),
-    ("find_geometry", {"target": "Frame", "kind": "circular_edge", "max_results": 1}, "ok", _fg("fr_edge")),
-    ("model_chamfer", lambda c: {"edges": [_ctx_get(c, "fr_edge", "frame edge")], "distance": 1}, _chamfered, None),
+    # The rims the part is handled by, each asked for by RADIUS - the one query that keeps naming
+    # the same edge after the driver changes. A fillet's own tangent circle is not a corner, and
+    # handing one back to model_fillet answers FILLET_NO_EDGE_FOUND, so every beat below picks a
+    # rim no earlier feature has already rounded.
+    # Every one of these queries FEEDS the next step, so each asserts the count it found: a radius
+    # filter that matches nothing still returns ok, and the ledger then reports a bare pass on a
+    # query whose handle the following row cannot take.
+    ("find_geometry", {"target": "Bracket", "kind": "circular_edge", "radius": 10,
+                       "max_results": 1}, _matched(1, "circular_edge"), _fg("boss_rim")),
+    ("model_fillet", lambda c: {"edges": [_ctx_get(c, "boss_rim", "the boss rim")],
+                                "radius": 1.5}, _filleted, None),
+    ("find_geometry", {"target": "Bracket", "kind": "circular_edge", "radius": 6,
+                       "max_results": 1}, _matched(1, "circular_edge"), _fg("bore_rim")),
+    ("model_chamfer", lambda c: {"edges": [_ctx_get(c, "bore_rim", "a through-bore rim")], "distance": 1}, _chamfered, None),
     # the distance-and-angle definition with an explicit corner type. Both assertions are on values
     # READ BACK off the created feature - a corner type the platform silently ignored builds an
     # identical face count, so an echoed payload would sail through this predicate.
-    ("find_geometry", {"target": "Frame", "kind": "circular_edge", "max_results": 4}, "ok",
-     ("fr_edge2", lambda p: p["matches"][-1]["handle"])),
-    ("model_chamfer", lambda c: {"edges": [_ctx_get(c, "fr_edge2", "second frame edge")],
+    ("find_geometry", {"target": "Bracket", "kind": "circular_edge", "radius": 3,
+                       "max_results": 4}, _matched(4, "circular_edge"),
+     ("mount_rim", lambda p: p["matches"][-1]["handle"])),
+    ("model_chamfer", lambda c: {"edges": [_ctx_get(c, "mount_rim", "a mounting-bore rim")],
                                  "distance": 1, "angle_deg": 30, "corner_type": "miter"},
      lambda p: p.get("corner_type") == "miter" and abs((p.get("angle_deg") or 0) - 30) < 1e-6
      and not p.get("corner_type_unverified") and not p.get("angle_deg_unverified") and not p.get("chamfer_type_unverified"), None),
@@ -539,10 +589,14 @@ _DETAILS = [
     # failure on the string alone means the FAKE is what is wrong, never the tool.
     ("model_construction", {"kind": "plane", "plane": "xy", "offset": 12, "name": "WartPlane"},
      lambda p: p.get("offset_from") == "XY", None),
-    ("design_delete_feature", {"feature": "WartPlane"}, "ok", None),
+    # 'deleted' is true only where the timeline name census read on BOTH sides of the delete; null is
+    # an absence nothing could prove, and a delete that broke a downstream feature says so.
+    ("design_delete_feature", {"feature": "WartPlane"},
+     lambda p: (p["deleted"] is True and p["feature"] == "WartPlane"
+                and "timeline_warning" not in p), None),
     # the three datum modes with no other route in the API: a plane rotated about a curved face's
     # own inferred axis, a plane pinned through a vertex, and a plane/point at a ratio along a path.
-    # The angled plane is built on the DATUM BENCH's bore, not on the gyroscope's shaft. A datum
+    # The angled plane is built on the DATUM BENCH's bore, not on the machined part. A datum
     # plane is an infinite visual object and the shaft sits at the world origin - which is where the
     # vise is later built around the machined part, so a plane hung there leans across the fixture
     # for the rest of the run. The bench is out on the field with its own cell and its own frame.
@@ -715,7 +769,11 @@ _DETAILS = [
                                   "source_sketch": "ShellS", "curve_refs": ["line:0"],
                                   "project_type": "along_vector"}, "refused", None),
     ("model_create_component", {"name": "ScratchOcc", "activate": False}, _made_component_inactive, None),
-    ("design_delete_occurrence", {"occurrence": "ScratchOcc:1"}, "ok", None),
+    # 'deleted' is true only where the assembly path census carried this occurrence BEFORE the delete
+    # and not after; null is an unverified absence the payload publishes as a successful call.
+    ("design_delete_occurrence", {"occurrence": "ScratchOcc:1"},
+     lambda p: (p["deleted"] is True and p["occurrence"] == "ScratchOcc:1"
+                and "timeline_warning" not in p), None),
     # scale + offset-face beats on a scratch block: push a face and read the volume move, then the
     # scale contract - uniform f^3, per-axis x*y*z, the three refusal shapes (unresolvable /
     # length-carrying / angle-carrying expression), a bare unitless parameter accepted, and a
@@ -1128,12 +1186,18 @@ _DETAILS = [
                          _path_count(p.get("path"), 1) == 8
                          and p.get("path_closed") is True), None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    # Section view: cut through the gimbal center, then clear.
+    # Section view: cut along the bore axis line, then clear.
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    _watch("Frame:1"),
-    ("view_section", {"action": "cut", "plane": "yz", "offset": 0}, "ok", None),
+    _watch("Bracket:1"),
+    # 'section' is the created analysis's own name, read back off the object the add returned.
+    ("view_section", {"action": "cut", "plane": "xz", "offset": 0},
+     lambda p: bool(p["section"]), None),
     ("view_screenshot", {"width": 500, "height": 400}, "ok", None),
-    ("view_section", {"action": "clear"}, "ok", None),
+    # the clear removed every section it counted and the collection re-read empty; a count that would
+    # not read back publishes a caveat note and the same ok.
+    ("view_section", {"action": "clear"},
+     lambda p: (p["removed_count"] == p["sections_before"] >= 1
+                and p["sections_after"] == 0), None),
     ("view_screenshot_multi", {"views": ["front", "top"], "width": 400, "height": 300}, "ok", None),
     # THE RASTER WRITER (NEW-13): file_path also writes the rendered PNG to disk - the extension is
     # appended, the landed file is verified non-zero, and path + size are published beside the
@@ -1224,32 +1288,69 @@ _DETAILS = [
                                     "sketch_name": "W3Pt"}, "refused", None),
 ]
 
+def _fillet_expression_followed(expression, mm):
+    """design_get(include=['timeline'], timeline_params=True): the row whose Radius parameter is
+    the EXPRESSION the fillet was built with, and the value that expression now evaluates to.
+
+    A radius passed as a parameter name is stored as that name, so the recompute re-evaluates it -
+    a radius baked to a number would read back as the number it was built at. Rows carry their
+    value in internal cm, and the feature is found by its own expression rather than by a
+    'Fillet<n>' name the platform picks."""
+    def check(p):
+        rows = (p.get("timeline") or {}).get("timeline") or []
+        hit = next(((r, q) for r in rows for q in (r.get("params") or [])
+                    if q.get("expression") == expression), (None, None))
+        row, param = hit
+        return _measured(f"the fillet built at '{expression}' now measures {mm} mm",
+                         {"feature": row and row.get("name"), "param": param},
+                         param is not None and _near(param.get("value"), mm / 10.0, 1e-3))
+    return check
+
+
 # --- ACT 6: THE RESIZE - the parametric resize check (mirrors scenario S6) ---------------------
-# Bump the one driving diameter; the whole gyroscope grows. Read the rings back before and after.
+# Bump the one driving length; the whole bracket grows. It runs BEFORE the billet and the vise are
+# built, which is the order a shop works in: the part is settled, then the stock is sized from it
+# and the jaws close on that.
 _RESIZE = [
-    # the resize walks the whole mechanism - frame it so the parts are seen to move.
-    _watch("Frame:1"),
+    # the resize walks the whole part - frame it so the features are seen to move.
+    _watch("Bracket:1"),
     ("view_screenshot", {"width": 400, "height": 300}, "ok", None),
-    ("sketch_get", {"sketch_name": "OuterRingSketch"}, "ok", None),   # before
-    ("param_set", {"name": "GimbalDia", "expression": "160 mm"},
-     _param_set_to("GimbalDia", 160), None),
-    ("design_recompute", {}, "ok", None),
-    ("sketch_get", {"sketch_name": "OuterRingSketch"}, "ok", None),   # after - rings grew
-    ("sketch_get", {"sketch_name": "InnerRingSketch"}, "ok", None),
-    # the StockCenter JO (ACT 3, the CAM WCS anchor) read back after the resize: parametrically
-    # anchored at the shared center, it HOLDS position through the recompute - the anchor CAM binds.
-    # Either ACT 3 path (narrative or scratch fallback) builds a JO by that name.
+    ("sketch_get", {"sketch_name": "BracketBody"}, "ok", None),   # before
+    ("param_set", {"name": "PartLen", "expression": "160 mm"},
+     _param_set_to("PartLen", 160), None),
+    # 'new_errors' names the features that came back broken from THIS rebuild (the walk before it is
+    # what makes that a difference) - a resize that breaks a downstream feature returns ok.
+    ("design_recompute", {},
+     lambda p: (p["recomputed"] is True and isinstance(p["error_count"], int)
+                and "new_errors" not in p), None),
+    ("sketch_get", {"sketch_name": "BracketBody"}, "ok", None),   # after - the block grew
+    ("sketch_get", {"sketch_name": "BracketPocket"}, "ok", None),
+    # THE MEASURED PROOF, on all three axes: the driver is the part's LENGTH, so x follows it a
+    # third longer while the width and the height - their own parameters - hold exactly where they
+    # were. A resize that moved every axis is a sketch anchored on the wrong point, and only
+    # reading the two that must NOT move says so.
+    ("model_inspect", {"target": "Bracket:1"},
+     lambda p: _measured("only the length followed the driver (want x 160, y 80, z 45)",
+                         {"x": p.get("x"), "y": p.get("y"), "z": p.get("z")},
+                         _near(p.get("x"), 160.0, 0.1) and _near(p.get("y"), 80.0, 0.1)
+                         and _near(p.get("z"), 45.0, 0.1)), None),
+    # ...and the FEATURE side of the same recompute: the pocket's corner fillet was built at the
+    # expression 'PocketRad', so the timeline row holds that name and the value it evaluates to now
+    # (PartLen/15 at the driven 160 mm), not the 8 mm the feature was created at.
+    ("design_get", {"include": ["timeline"], "timeline_params": True},
+     _fillet_expression_followed("PocketRad", 160.0 / 15.0), None),
+    # the StockCenter JO (the CAM WCS anchor) read back after the resize: parametrically anchored at
+    # the part's own origin, it HOLDS position through the recompute.
     ("assembly_get", {"include": ["joint_origins"]}, _joint_origins_listed("StockCenter"), None),
     ("view_screenshot", {"width": 400, "height": 300}, "ok", None),
-    ("param_set", {"name": "GimbalDia", "expression": "120 mm"},
-     _param_set_to("GimbalDia", 120), None),   # restore
+    ("param_set", {"name": "PartLen", "expression": "120 mm"},
+     _param_set_to("PartLen", 120), None),   # restore
     ("design_recompute", {}, "ok", None),
-    ("sketch_get", {"sketch_name": "OuterRingSketch"}, "ok", None),   # restored
+    ("sketch_get", {"sketch_name": "BracketBody"}, "ok", None),   # restored
     ("param_add", {"name": "ScratchDim", "expression": "5 mm"}, _param_added("ScratchDim", 5), None),
     ("param_delete", {"name": "ScratchDim"}, _param_deleted("ScratchDim"), None),
-    # REST-POSE HONESTY over the gyroscope parts: only the intended shaft-in-rotor press fit may
-    # overlap; any other gyro-pair collision fails the story (cameo snap-fits are out of scope).
-    ("assembly_inspect_interference", {}, lambda p: _gyro_rest_clean(p), None),
+    # the design at rest after the rebuild: the census the check ran, with the rows it found.
+    ("assembly_inspect_interference", {}, _interference_measured, None),
     # TIMELINE: roll back over the assembly, group a range, suppress and restore, then return the
     # marker to the end. Every beat reads the marker back, and the blast-radius refusal is exercised
     # WITHOUT the confirmation so nothing is discarded from the story.
@@ -1261,36 +1362,36 @@ _RESIZE = [
     ("design_edit_timeline", {"action": "roll", "feature": "NoSuchFeature"}, "refused", None),
     ("design_edit_timeline", {"action": "group", "feature": "ScratchDim",
                               "end_feature": "ScratchDim"}, "refused", None),
-    # ATTRIBUTES: tag a real timeline feature (the carrier hub plane the skeleton built), re-tag it,
+    # ATTRIBUTES: tag a real timeline feature (the part's own step floor), re-tag it,
     # then remove the tag. An attribute reached through the timeline lives on the ENTITY the item
     # wraps, and every beat reads back both the value on that entity and the design-wide census of
     # the group/name pair - which is what turns the delete into a verdict instead of a claim.
-    ("design_edit_timeline", {"action": "set_attribute", "feature": "CarrierHubPlane",
+    ("design_edit_timeline", {"action": "set_attribute", "feature": "StepFloor",
                               "attribute_group": "sweep_w11_8", "attribute_name": "note",
                               "attribute_value": "beat-1"},
      lambda p: p.get("value") == "beat-1" and p.get("design_matches", 0) >= 1
      and "previous_value" not in p, None),
     # add() on an existing group/name UPDATES in place, so the value it replaced is readable only
     # before the call - and it is disclosed rather than lost.
-    ("design_edit_timeline", {"action": "set_attribute", "feature": "CarrierHubPlane",
+    ("design_edit_timeline", {"action": "set_attribute", "feature": "StepFloor",
                               "attribute_group": "sweep_w11_8", "attribute_name": "note",
                               "attribute_value": "beat-2"},
      lambda p: p.get("previous_value") == "beat-1" and p.get("value") == "beat-2", None),
     # this tool's own wire bound on the value, refused with the length that broke it.
-    ("design_edit_timeline", {"action": "set_attribute", "feature": "CarrierHubPlane",
+    ("design_edit_timeline", {"action": "set_attribute", "feature": "StepFloor",
                               "attribute_group": "sweep_w11_8", "attribute_name": "note",
                               "attribute_value": "x" * 10001}, "refused", None),
     # a leading 're:' turns the attribute search into a REGULAR EXPRESSION instead of naming this
     # literal group, so it is refused rather than silently matching something else.
-    ("design_edit_timeline", {"action": "set_attribute", "feature": "CarrierHubPlane",
+    ("design_edit_timeline", {"action": "set_attribute", "feature": "StepFloor",
                               "attribute_group": "re:sweep", "attribute_name": "note",
                               "attribute_value": "beat-3"}, "refused", None),
-    ("design_edit_timeline", {"action": "delete_attribute", "feature": "CarrierHubPlane",
+    ("design_edit_timeline", {"action": "delete_attribute", "feature": "StepFloor",
                               "attribute_group": "sweep_w11_8", "attribute_name": "note"},
      lambda p: p.get("attribute_deleted") is True and p.get("deleted_value") == "beat-2"
      and p.get("design_matches") == 0, None),
     # the same delete again has nothing to remove, and says so naming the group/name pair.
-    ("design_edit_timeline", {"action": "delete_attribute", "feature": "CarrierHubPlane",
+    ("design_edit_timeline", {"action": "delete_attribute", "feature": "StepFloor",
                               "attribute_group": "sweep_w11_8", "attribute_name": "note"},
      "refused", None),
     # THE 'name@index' FORM, the one a FeatureRef refusal hands back when a name is ambiguous. It is
@@ -1299,25 +1400,25 @@ _RESIZE = [
     # the slice is a DICT (marker_position / count / summary / groups / timeline) and the ordered
     # rows sit under its own 'timeline' key - each a terse {index, name, type}.
     ("design_get", {"include": ["timeline"]},
-     lambda p: any(r.get("name") == "CarrierHubPlane" for r in p["timeline"]["timeline"]),
+     lambda p: any(r.get("name") == "StepFloor" for r in p["timeline"]["timeline"]),
      ("hub_index", lambda p: next(r["index"] for r in p["timeline"]["timeline"]
-                                  if r["name"] == "CarrierHubPlane"))),
+                                  if r["name"] == "StepFloor"))),
     ("design_edit_timeline", lambda c: {
         "action": "set_attribute",
-        "feature": "CarrierHubPlane@{0}".format(_ctx_get(c, "hub_index", "the hub plane's index")),
+        "feature": "StepFloor@{0}".format(_ctx_get(c, "hub_index", "the step floor's index")),
         "attribute_group": "sweep_w1d", "attribute_name": "at", "attribute_value": "by-index"},
-     lambda p: p.get("value") == "by-index" and p.get("feature") == "CarrierHubPlane", None),
+     lambda p: p.get("value") == "by-index" and p.get("feature") == "StepFloor", None),
     ("design_edit_timeline", lambda c: {
         "action": "delete_attribute",
-        "feature": "CarrierHubPlane@{0}".format(_ctx_get(c, "hub_index", "the hub plane's index")),
+        "feature": "StepFloor@{0}".format(_ctx_get(c, "hub_index", "the step floor's index")),
         "attribute_group": "sweep_w1d", "attribute_name": "at"},
      lambda p: p.get("attribute_deleted") is True, None),
     # the NEIGHBOURING index carries the same name and misses: the pair must agree, so an off-by-one
     # is a refusal naming the miss rather than the feature next door.
     ("design_edit_timeline", lambda c: {
         "action": "set_attribute",
-        "feature": "CarrierHubPlane@{0}".format(_ctx_get(c, "hub_index",
-                                                         "the hub plane's index") + 1),
+        "feature": "StepFloor@{0}".format(_ctx_get(c, "hub_index",
+                                                         "the step floor's index") + 1),
         "attribute_group": "sweep_w1d", "attribute_name": "at", "attribute_value": "x"},
      _refused("no timeline feature named"), None),
 ]
@@ -1376,6 +1477,10 @@ _SOLIDS_FB = (
         ("find_geometry", {"target": "FbCmb", "kind": "planar_face", "nearest_to": [45, 45, 10], "max_results": 1}, "ok", _fg("fb_c2")),
         ("model_combine", lambda c: {"target": _ctx_get(c, "fb_c1", "combine target"), "tools": [_ctx_get(c, "fb_c2", "combine tool")], "operation": "join"}, _joined, None),
         ("design_activate_component", {"occurrence": "root"}, "ok", None),
+        # the WCS anchor by the name the CAM acts bind to, so a fallback world still carries one.
+        ("joint_create_origin", {"anchor": "coordinates", "target": "origin",
+                                 "name": "StockCenter"},
+         _joint_origin_at("StockCenter", 0, 0, 0), None),
     ]
 )
 
@@ -1391,13 +1496,21 @@ _DETAILS_FB = (
         ("model_shell", lambda c: {"body_name": "FbDet", "remove_faces": [_ctx_get(c, "fd_top", "top")], "thickness": 2}, _shelled, None),
         ("model_construction", {"kind": "plane", "plane": "xy", "offset": 5, "name": "FbWart"},
          _datum_plane("xy"), None),
-        ("design_delete_feature", {"feature": "FbWart"}, "ok", None),
+        ("design_delete_feature", {"feature": "FbWart"},
+         lambda p: (p["deleted"] is True and p["feature"] == "FbWart"
+                    and "timeline_warning" not in p), None),
         ("model_create_component", {"name": "FbJunk", "activate": False}, _made_component_inactive, None),
-        ("design_delete_occurrence", {"occurrence": "FbJunk:1"}, "ok", None),
+        ("design_delete_occurrence", {"occurrence": "FbJunk:1"},
+         lambda p: (p["deleted"] is True and p["occurrence"] == "FbJunk:1"
+                    and "timeline_warning" not in p), None),
         ("design_activate_component", {"occurrence": "root"}, "ok", None),
-        ("view_section", {"action": "cut", "plane": "xy", "offset": 5}, "ok", None),
+        # 'section' is the created analysis's own name, read back off the object the add returned.
+        ("view_section", {"action": "cut", "plane": "xy", "offset": 5},
+         lambda p: bool(p["section"]), None),
         ("view_screenshot", {"width": 400, "height": 300}, "ok", None),
-        ("view_section", {"action": "clear"}, "ok", None),
+        ("view_section", {"action": "clear"},
+         lambda p: (p["removed_count"] == p["sections_before"] >= 1
+                    and p["sections_after"] == 0), None),
         ("view_screenshot_multi", {"views": ["front", "top"], "width": 300, "height": 250}, "ok", None),
     ]
 )
@@ -1406,52 +1519,9 @@ _DETAILS_FB = (
 _RESIZE_FB = [
     ("param_add", {"name": "FbParam", "expression": "12 mm"}, _param_added("FbParam", 12), None),
     ("param_set", {"name": "FbParam", "expression": "14 mm"}, _param_set_to("FbParam", 14), None),
-    ("design_recompute", {}, "ok", None),
+    ("design_recompute", {},
+     lambda p: (p["recomputed"] is True and isinstance(p["error_count"], int)
+                and "new_errors" not in p), None),
     ("param_delete", {"name": "FbParam"}, _param_deleted("FbParam"), None),
 ]
 
-# Rest-pose interference gate over the GYROSCOPE parts (the _RESIZE predicate): only the intended
-# shaft-in-rotor press-fit pair may overlap. Cameo pairs (a pin seated in its bore, the constrained
-# boxes) are joint-snapped fits by design and are out of scope.
-_GYRO_PARTS = {"Frame:1", "Pedestal:1", "Carrier:1", "OuterRing:1", "InnerRing:1",
-               "Rotor:1", "RotorShaft:1", "Crank:1"}
-
-
-def _gyro_rest_clean(p):
-    # Fusion writes a nested path with '+' ("OuterRing:1+InnerRing:1"), so the leaf is what the
-    # membership test wants - splitting on '/' alone leaves every nested part unmatched and quietly
-    # exempts it from the gate.
-    for i in p.get("measured", {}).get("interferences", []):
-        a = (i.get("occurrence_one") or "").replace("/", "+").split("+")[-1]
-        b = (i.get("occurrence_two") or "").replace("/", "+").split("+")[-1]
-        if a in _GYRO_PARTS and b in _GYRO_PARTS and sorted([a, b]) != ["Rotor:1", "RotorShaft:1"]:
-            return False
-    return True
-
-
-# ACT 8: REDUCE - the gyroscope is stripped to its ONE machinable part (the Carrier bar). The
-# mechanism and the near-origin cameos go; the survivor stays parametric. The far-grid cameo
-# fixtures (surface/mesh families) are out of frame and stay.
-_REDUCE = [
-    ("view_switch_workspace", {"workspace": "design"}, "ok", None),
-    ("design_activate_component", {"occurrence": "root"}, "ok", None),
-] + [
-    # ONLY what the vise would be built THROUGH. The vise occupies x[-70,70] y[-52,52] around the
-    # Carrier, so the mechanism sharing that ground has to go; every other cameo sits in a cell of
-    # its own out on the field (the layout pass guarantees it, and the layout lint enforces it), so
-    # deleting those cleared nothing and only made the run spend a second each on them.
-    ("design_delete_occurrence", {"occurrence": occ}, "ok", None)
-    for occ in ("Crank:1",
-                "InnerRing:1",       # takes the nested RotorShaft and Rotor with it
-                "OuterRing:1",
-                "Frame:1",           # takes the nested Pedestal with it
-                "FeatureCameo:1")
-] + [
-    # the root Skeleton sketch (the construction axis crosses) goes too - the fixture scene
-    # shows the PART, not the build scaffolding.
-    ("design_delete_feature", {"feature": "Skeleton"}, "ok", None),
-    # the survivor, alone and still parametric.
-    ("model_inspect", {"target": "Carrier:1"}, _extent_measured, None),
-    ("workspace_orient", {}, "ok", None),
-    _watch("Carrier:1"),
-]

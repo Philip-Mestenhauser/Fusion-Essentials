@@ -62,10 +62,8 @@ _JOINT_TYPES = {
 _MOTIONS = list(_inputs.JOINT_MOTIONS) + ["pin_slot"]
 
 
-# The one honest note appended whenever a rest limit is set. A rest value is the joint LIMIT's
-# equilibrium setpoint (used by motion study); setting it does NOT move the static model - the part
-# stays at the joint's home value (0), live-verified on a bare slider (rest_mm 20/50/0 moved nothing).
-# So a caller must not read "rest_mm applied" as "the slider is now posed".
+# The one honest note appended whenever a rest limit is set: a rest value is the joint LIMIT's
+# equilibrium setpoint and does NOT move the static model, which stays at the joint's home value.
 _REST_LIMIT_NOTE = (
     " NOTE: rest_mm/rest_deg set the joint LIMIT'S rest value (a motion-study equilibrium), which does "
     "NOT reposition the static model - it stays at the joint's home value. To POSE the mechanism use "
@@ -79,16 +77,14 @@ def _fmt_num(v):
 
 
 def _find_occurrence(design, name):
-    """Resolve a SINGLE occurrence by entityToken handle (the exact identity) or fullPathName/name via
-    the shared OccurrenceRef logic - refuses an ambiguous path/name instead of grabbing the first
-    instance. Returns (occurrence, error_or_None)."""
+    """Resolve a SINGLE occurrence by entityToken handle or fullPathName/name through the shared
+    OccurrenceRef logic, which refuses an ambiguous name. Returns (occurrence, error)."""
     return _inputs._resolve_occurrence(name, name)
 
 
 def _available_joint_origins(design, limit=8):
-    """List the design's joint-origin names with where each lives - so a resolve failure can be
-    corrected from the error alone instead of the agent guessing or dropping to a raw script. The
-    collect-names leaf over the ONE JO walk (_joints.all_joint_origins). Returns (listed, overflow)."""
+    """The design's joint-origin names with where each lives, as (listed, overflow) - the
+    self-correction data a resolve failure reports."""
     root_name = safe(lambda: design.rootComponent.name)
     found = []
     for jo, comp in _all_joint_origins(design):
@@ -102,12 +98,8 @@ def _available_joint_origins(design, limit=8):
 
 
 def _resolve_snap_entity(design, occ_name, snap):
-    """Resolve an occurrence's geometry to a single PROXIED BRep entity (no human selection),
-    in the occurrence's assembly context. snap: origin | center | top | bottom | cylinder.
-    Returns (entity_or_None, kind, error) where kind is 'point' | 'planar' | 'cylinder'.
-
-    This is the shared geometry resolver used both to build joint inputs (wrapped in a
-    JointGeometry) and to build assembly-constraint relationships (the raw entity)."""
+    """Resolve an occurrence's geometry to a single PROXIED BRep entity in the occurrence's
+    assembly context. Returns (entity, kind, error), kind being 'point' | 'planar' | 'cylinder'."""
     occ, occ_err = _find_occurrence(design, occ_name)
     if not occ:
         return None, None, occ_err
@@ -127,10 +119,8 @@ def _resolve_snap_entity(design, occ_name, snap):
         return None, None, f"'{occ_name}' body has no faces."
 
     if snap == "cylinder":
-        # The enum MEMBER, never its integer: CylinderSurfaceType is 1 and 3 is SphereSurfaceType,
-        # so a hand-typed 3 here matches spheres and silently reports that a cylinder has no
-        # cylindrical face. Cones count too - a tapered pin is round and seats the same way, which
-        # is the pair joint_at_geometry already accepts.
+        # The enum MEMBER, never its integer: CylinderSurfaceType is 1 while 3 is
+        # SphereSurfaceType, so a hand-typed 3 matches spheres. Cones count too.
         want = (adsk.core.SurfaceTypes.CylinderSurfaceType, adsk.core.SurfaceTypes.ConeSurfaceType)
         cyl = None
         for f in faces:
@@ -151,9 +141,8 @@ def _resolve_snap_entity(design, occ_name, snap):
 
 
 def _resolve_snap_input(design, occ_name, snap):
-    """Build a JointGeometry from an occurrence's geometry (no human selection), proxied into the
-    occurrence's assembly context. snap: origin | center | top | bottom | cylinder.
-    Returns (jointGeometry_or_None, error_or_None)."""
+    """Build a JointGeometry from an occurrence's geometry, proxied into its assembly context.
+    Returns (jointGeometry, error)."""
     entity, _kind, err = _resolve_snap_entity(design, occ_name, snap)
     if not entity:
         return None, err
@@ -162,15 +151,10 @@ def _resolve_snap_input(design, occ_name, snap):
 
 
 def _resolve_input(design, spec):
-    """Resolve one joint input, in order: (1) a find_geometry 'handle' -> a JointGeometry AT that real
-    geometry, OR - when the handle points at a JOINT ORIGIN (assembly_get mints those) - the JO itself;
-    (2) a geometry snap '<occ>:<snap>'; (3) a Joint Origin by name (bare when unique, else qualified
-    '<occ>:<JO name>'; an ambiguous name is refused with candidates). On failure the error lists the
-    design's JOs. Returns (input_object_or_None, label, error_or_None)."""
-    # (1) handle first: a find_geometry / assembly_get token resolves to a live entity. A JOINT ORIGIN
-    # handle is a first-class joint input; a face/edge/vertex handle becomes a JointGeometry AT the
-    # geometry (joint at the geometry, not at a collapsed origin). A JO NAME is never a valid token, so
-    # it falls through to the name path below.
+    """Resolve one joint input as (input_object, label, error), in order: a find_geometry handle
+    (a JOINT ORIGIN handle is used directly, any other becomes a JointGeometry AT that geometry),
+    a geometry snap '<occ>:<snap>', then a Joint Origin by name (bare or '<occ>:<JO name>')."""
+    # A JO NAME is never a valid token, so it falls through to the name path below.
     ent, herr = _HANDLE.resolve(spec)
     if ent is not None:
         if _is_joint_origin(ent):
@@ -207,11 +191,8 @@ _SNAP_KEYWORDS = ("origin", "center", "top", "bottom", "left", "right", "front",
 
 def _parse_snap(spec):
     """Split '<occurrence>:<snap>' into (occurrence_name, snap) when the trailing token is a known
-    snap keyword; otherwise return (None, None) so the input is treated as a joint-origin name.
-
-    Note an occurrence name itself contains a ':<instance>' (e.g. 'Boom:1'), so ONLY a final token
-    matching a snap keyword counts as a snap - 'Boom:1' is a plain name, 'Boom:1:top' is a snap.
-    """
+    snap keyword, else (None, None). An occurrence name itself carries a ':<instance>', so only a
+    FINAL snap keyword counts: 'Boom:1' is a plain name, 'Boom:1:top' is a snap."""
     s = (spec or "").strip()
     if ":" not in s:
         return None, None
@@ -246,20 +227,14 @@ _FACE_DIRECTIONS = {
 
 
 def _pick_face(faces, snap):
-    """Choose a PLANAR face from a body by snap.
-
-    Directional snaps (top/bottom/left/right/front/back) pick the extreme planar face along the
-    corresponding world axis - e.g. 'right' = greatest +X, 'front' = least Y. 'center' = the
-    largest-area planar face. Only PLANAR faces are considered: a snap targets a face center via
-    createByPlanarFace, which rejects non-planar faces - and a cylinder's curved wall would
-    otherwise win on raw extent (the cable-cap bug). Returns the face or None."""
+    """Choose a PLANAR face from a body by snap: a directional snap takes the extreme planar face
+    along that world axis, 'center' the largest-area one. Only PLANAR faces are considered, since
+    createByPlanarFace rejects the rest. Returns the face or None."""
     if snap in _FACE_DIRECTIONS:
         axis, want_max = _FACE_DIRECTIONS[snap]
-        # The extreme face LIES IN the extreme plane (e.g. the top cap has min==max==zmax of the
-        # body). A side wall merely REACHES that plane (its max == zmax) but also spans inward
-        # (its min is far lower). So rank by the face's NEAR coordinate: for 'max' pick the face
-        # whose MIN is greatest (sits highest as a whole); for 'min' pick the face whose MAX is
-        # least. This selects the cap, not a side wall that happens to touch the extreme.
+        # Rank by the face's NEAR coordinate: the extreme face LIES IN the extreme plane, while a
+        # side wall merely REACHES it and spans inward. For 'max' the face whose MIN is greatest;
+        # for 'min' the face whose MAX is least - the cap, not a wall touching the extreme.
         best, best_v = None, None
         for f in faces:
             if not _is_planar(f):
@@ -281,20 +256,16 @@ def _pick_face(faces, snap):
 
 
 def _world_axis_entity(design, axis_idx):
-    """Return the root component's world construction axis (x/y/z) for use as a CUSTOM joint
-    direction. CRITICAL: the XAxis/YAxis/ZAxisJointDirection enums are relative to the JOINT
-    GEOMETRY's local frame, NOT the world - a snap whose local Z points along world Y will pivot
-    about world Y when you ask for 'Z'. Passing a world construction axis as the custom direction
-    makes the motion about a TRUE world axis regardless of the snap frame."""
+    """The root component's world construction axis (x/y/z), for use as a CUSTOM joint direction."""
+    # The XAxis/YAxis/ZAxisJointDirection enums are relative to the JOINT GEOMETRY's local frame,
+    # not world: a snap whose local Z points along world Y pivots about world Y when asked for 'Z'.
     root = design.rootComponent
     return _inputs.world_construction_axis(root, "xyz"[axis_idx])
 
 
-# The band a read-back may differ from the request by, expressed in the REQUEST'S OWN units
-# (degrees, or the caller's length unit). A limit and a joint offset/angle each make a units round
-# trip in each direction - degrees to radians, display length to cm - so the read-back is converted
-# back and compared there, against the same display-unit band joint_drive's value_now gate holds its
-# own round trip to.
+# The band a read-back may differ from the request by, in the REQUEST'S OWN units. A limit and a
+# joint offset/angle each make a units round trip in each direction, so the read-back is converted
+# back and compared there.
 _LIMIT_BAND = 1e-3
 
 # native -> degrees, for the radians a rotation limit stores.
@@ -310,8 +281,7 @@ _LIN_LIMITS = (("min_mm", "isMinimumValueEnabled", "minimumValue"),
 
 
 def _unverified_limits_note(keys):
-    """The one sentence a payload appends for limits whose read-back could not be taken - the ONE
-    home for that wording, shared by joint_create and joint_edit."""
+    """The one sentence a payload appends for limits whose read-back could not be taken."""
     return (f" Limits published null ({', '.join(keys)}) - each was assigned but could not be read "
             "back off the joint, so whether it TOOK is UNKNOWN here (it is not a 'yes'). Read the "
             "joint's limits with assembly_get before relying on them.")
@@ -331,17 +301,9 @@ def _applied_so_far(changed):
 
 
 def _set_one_limit(limits, flag_prop, value_prop, key, wanted, native, unit_scale):
-    """Enable and assign ONE joint limit, then read BOTH back off the live JointLimits.
-
-    A JointLimits is a LIVE object, not a FeatureInput, so this is a direct re-read rather than
-    _common.set_verified (whose exact-equality compare suits a FeatureInput enum, not a float that
-    makes a units round trip). `native` is the value assigned in the API's own units (radians / cm)
-    and `unit_scale` converts a native read back into the caller's units, where the comparison
-    happens within _LIMIT_BAND.
-
-    Returns (published, error): `published` is the read-back in the caller's units, or None when the
-    re-read could not be taken - never the request echoed back; `error` names the limit that did not
-    take."""
+    """Enable and assign ONE joint limit, then read BOTH back off the live JointLimits. `native` is
+    the value in the API's own units and `unit_scale` converts a read back into the caller's, where
+    the compare happens within _LIMIT_BAND. Returns (published read-back or None, error)."""
     try:
         setattr(limits, flag_prop, True)
         setattr(limits, value_prop, native)
@@ -361,15 +323,11 @@ def _set_one_limit(limits, flag_prop, value_prop, key, wanted, native, unit_scal
 
 
 def _set_flip(joint, wanted):
-    """Set Joint.isFlipped, then read the flag BACK off the live joint - the same set-then-re-read
-    _set_one_limit holds a JointLimits to, over the joint's own flag.
-
-    Returns (published, error): `published` is the flag as the JOINT reads it, or None when the
-    re-read could not be taken - never the request echoed back; `error` names the value asked for
-    and the one the joint answers with."""
+    """Set Joint.isFlipped, then read the flag BACK off the live joint. Returns (the flag as the
+    JOINT reads it or None when the re-read could not be taken, error)."""
     before = _common.read_flag(lambda: joint.isFlipped)
-    # NOT safe()-wrapped: this is the mutation the tool was ASKED to do - let a failure raise into
-    # the handler's try/except so it is reported, not swallowed into a false success.
+    # NOT safe()-wrapped: this is the mutation the tool was ASKED to do, so a failure raises into
+    # the handler's try/except rather than being swallowed into a false success.
     joint.isFlipped = bool(wanted)
     after = _common.read_flag(lambda: joint.isFlipped)
     if after is None:
@@ -381,15 +339,9 @@ def _set_flip(joint, wanted):
 
 
 def _set_one_parameter(param, key, wanted, expression, unit_scale):
-    """Assign ONE of the joint's own ModelParameters (offset / angle) by EXPRESSION, then read its
-    VALUE back - the same set-then-re-read _set_one_limit holds a JointLimits to.
-
-    The expression carries the caller's unit; a Parameter's `value` reads in Fusion's DATABASE units
-    (cm / radians, never the parameter's own unit), which `unit_scale` converts back so the compare
-    happens in the units the request was made in, within _LIMIT_BAND.
-
-    Returns (published, error): `published` is the read-back in the caller's units, or None when the
-    re-read could not be taken - never the request echoed back; `error` names both values."""
+    """Assign ONE of the joint's own ModelParameters by EXPRESSION, then read its VALUE back.
+    A Parameter's `value` reads in Fusion's DATABASE units, never the parameter's own, so
+    `unit_scale` converts it into the caller's. Returns (read-back or None, error)."""
     before = _common.measured(lambda: param.value, scale=unit_scale, places=9)
     # NOT safe()-wrapped: the mutation the tool was ASKED to do (see _set_flip).
     param.expression = expression
@@ -404,23 +356,13 @@ def _set_one_parameter(param, key, wanted, expression, unit_scale):
 
 def _apply_limits(motion, *, min_deg=None, max_deg=None, rest_deg=None,
                   min_mm=None, max_mm=None, rest_mm=None, cm_scale=0.1):
-    """Apply rotation and/or linear (slide) limits to a JointMotion, reading each one BACK off the
-    joint. Returns (changed, unverified, error).
-
-    Angular limits go on motion.rotationLimits (radians); linear go on motion.slideLimits
-    (centimeters). A revolute motion has no slideLimits and a slider has no rotationLimits, so
-    asking for the wrong kind errors clearly instead of silently no-op'ing. 'rest' is the resting
-    value. cm_scale converts the caller's length units to cm.
-
-    `changed` carries each limit as the JOINT READS IT BACK, never the request; `unverified` names
-    the limits whose read-back could not be taken (published null in `changed`); `error` names the
-    first limit whose value or enabled flag did not take, leaving `changed` holding the ones that
-    landed before it."""
+    """Apply rotation and/or slide limits to a JointMotion, reading each one BACK off the joint.
+    Returns (changed as the JOINT reads it, the limits whose read-back could not be taken, error);
+    an error leaves `changed` holding the limits that landed before it."""
     changed, unverified = {}, []
 
-    # Inverted-pair guard (the ONE home - joint_create and joint_edit both apply limits here): a
-    # min above its max creates an EMPTY feasible range that silently makes the joint undrivable
-    # while every health field keeps reading healthy (measured) - refuse it instead.
+    # Inverted-pair guard: a min above its max creates an EMPTY feasible range that makes the joint
+    # undrivable while every health field keeps reading healthy.
     if min_deg is not None and max_deg is not None and float(min_deg) > float(max_deg):
         return changed, unverified, (
             f"Rotation limits are INVERTED: min_deg ({min_deg}) > max_deg ({max_deg}) "
@@ -594,9 +536,7 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str 
             min_mm=min_mm, max_mm=max_mm, rest_mm=rest_mm, cm_scale=scale)
         if lim_err:
             # PARTIAL SUCCESS disclosed: the joint EXISTS in the timeline and any limits applied
-            # before the failing one HAVE been written (measured: a bad max_mm after a good
-            # min_deg left the joint created with the rotation minimum set) - a bare error would
-            # hide both, inviting a duplicate re-create.
+            # before the failing one HAVE been written, so a bare error invites a duplicate create.
             applied_txt = (", ".join(f"{k}={v}" for k, v in lim_changed.items())
                            if lim_changed else "none")
             return error(
@@ -607,13 +547,8 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str 
         limits_out = lim_changed
 
     # A joint can be ADDED yet fail to COMPUTE: joints.add() hands back a truthy Joint while Fusion
-    # marks it 'Compute Failed', and every design-wide rollup then counts it BROKEN (assembly_get's
-    # broken_joints, _common.timeline_health). Measured: jointing the child of a ground_to_parent
-    # occurrence returned a joint whose healthState read WARNING with "conflicts with assembly
-    # relationships", moved NOTHING, and still published created:true. So the state is read back here
-    # and a create that did not solve is a refusal, never a plain success. Both the joint and its
-    # timeline item are asked - the measured failure showed on both - through _assert.compute_state,
-    # the ONE home for that pairing, which assembly_get's rows and workspace_orient's rollup share.
+    # marks it 'Compute Failed'. So the state is read back here through _assert.compute_state, and
+    # a create that did not solve is a refusal rather than a plain success.
     state, failure = _assert.compute_state(joint)
     if failure:
         state_label, detail = failure
@@ -621,10 +556,10 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str 
             f"Joint '{joint_name_final}' WAS CREATED but FAILED to compute (health state: "
             f"{state_label})" + (f": {detail}" if detail else " (it reports no message)")
             + f" - it does not position the parts. It REMAINS in the timeline: remove it with "
-              f"design_delete_feature(name='{joint_name_final}'), or fix its inputs with joint_edit. "
-              "A part locked by assembly_ground(ground_to_parent=true) - the part itself or an "
-              "ancestor of it - conflicts with a joint that would move it; read the current state "
-              "with assembly_get (is_healthy, broken_joints, ground_to_parent per occurrence).")
+              f"design_delete_feature(name='{joint_name_final}'), or fix its inputs with "
+              "joint_edit. A part locked by assembly_ground(ground_to_parent=true), itself or an "
+              "ancestor, conflicts with a joint that would move it - read the state back with "
+              "assembly_get.")
 
     # No failure found - but that verdict rests on a state that must actually have been READ. When
     # neither the joint nor its timeline item answers healthState, 'healthy' is null (unknown), never
@@ -751,11 +686,9 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
         if not new2:
             return error(err2 or f"Could not resolve input_two '{input_two}'.")
 
-    # A joint can only reference geometry/origins that exist BEFORE it in the timeline: editing rolls
-    # the marker to just before the joint, where a feature CREATED AFTER the joint does not exist yet -
-    # the platform raises a bare 'InternalValidationError: findObjectPath' (live-verified: rewiring a
-    # slider to a JO made after it fails; rewiring a joint to a JO made before it succeeds). Catch a
-    # later Joint-Origin input here and refuse with an actionable message, before rolling the timeline.
+    # A joint can only reference geometry/origins that exist BEFORE it in the timeline: an edit
+    # rolls the marker to just before the joint, and a later feature raises a bare
+    # 'InternalValidationError: findObjectPath'. Refuse here, before rolling the timeline.
     joint_tl = safe(lambda: joint.timelineObject.index)
     for lbl, newx in (("input_one", new1), ("input_two", new2)):
         if newx is not None and _is_joint_origin(newx) and joint_tl is not None:
@@ -882,10 +815,9 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
         return error(msg)
     finally:
         if rolled:
-            # Roll the marker to the TRUE END of the timeline, not just past THIS joint. rollTo(False)
-            # stops immediately AFTER the edited joint, leaving downstream features (patterns, later
-            # joints) rolled OUT - they silently revert to home while still reading healthy. Setting
-            # markerPosition = timeline.count restores the full model so the recompute below settles it.
+            # Roll the marker to the TRUE END of the timeline: rollTo(False) stops immediately after
+            # the edited joint, leaving downstream features rolled OUT, where they silently revert
+            # to home while still reading healthy.
             tl = safe(lambda: design.timeline)
             n = safe(lambda: tl.count, 0) or 0
             if tl is not None and n:
@@ -893,11 +825,9 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
             else:
                 safe(lambda: joint.timelineObject.rollTo(False))
 
-    # Editing a joint rolls the timeline marker, which can leave DOWNSTREAM features (patterns, later
-    # joints) in a stale compute-failed state until a full recompute. Do it here so the caller gets a
-    # settled, accurate model without a separate design_recompute call. A computeAll that RAISES is
-    # not a failure of the edit (which already landed), but it must not be reported as a recompute
-    # that happened - 'recomputed' publishes what actually ran.
+    # Editing a joint rolls the timeline marker, which can leave DOWNSTREAM features in a stale
+    # compute-failed state until a full recompute. A computeAll that RAISES is not a failure of the
+    # edit, which already landed, so 'recomputed' publishes what actually ran.
     recompute_errors = None
     recomputed = False
     try:
@@ -941,12 +871,9 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
     if mp:
         out["model_parameters"] = mp
         out["note"] += _OFFSET_PARAM_NOTE
-    # Suppressed-joint disclosure: the edit is REAL (a limits write lands) but the joint is
-    # INERT while suppressed - measured, an edited suppressed joint left its part 47mm from the
-    # jointed placement with no mention. BOTH flags are consulted and OR'd (live-verified on
-    # 2705.0.87: Joint.isSuppressed keeps reading False when the suppression was set on the
-    # TIMELINE item, so the entity flag alone under-reports). read_flag, not a coerced False: two
-    # unreadable flags stay undisclosed rather than asserting active.
+    # Suppressed-joint disclosure: the edit is REAL but the joint is INERT while suppressed. BOTH
+    # flags are OR'd - Joint.isSuppressed keeps reading False when the suppression was set on the
+    # TIMELINE item. read_flag, so two unreadable flags stay undisclosed.
     sup = (_common.read_flag(lambda: joint.isSuppressed) or
            _common.read_flag(lambda: joint.timelineObject.isSuppressed))
     if sup:
@@ -958,20 +885,13 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
 
 
 TOOL_DESCRIPTION = (
-    "Create a Joint between two inputs. Each input ('occurrence_one'/'occurrence_two'), most precise "
-    "first: a find_geometry handle (joints AT that exact face/edge - a real offset); a Joint Origin "
-    "name - bare ('Center of Model') or scoped '<occurrence>:<JO name>' for a JO inside an inserted/"
-    "referenced part (the tool proxies it into assembly context; do NOT script this yourself); or a "
-    "snap-string '<occurrence>:<snap>' where snap = origin | center (largest planar face) | top | "
-    "bottom | cylinder (cyl-face axis), e.g. 'Boom:1:top'. ':origin' collapses to the part origin AND "
-    "aligns its FULL local frame (un-rotating a pre-rotated part) - use a handle for a real offset. "
-    "Creating a joint MOVES the free (ungrounded) part so its snap/JO point lands on the other "
-    "input's location - do not pre-place it. 'joint_type' = rigid (default)/revolute/slider/"
-    "cylindrical/planar/ball/pin_slot; 'axis' is FRAME-relative - an axis of the joint geometry's "
-    "frame, not a world one - so re-point a joint that pivots the wrong way with "
-    "joint_edit(world_axis=...). For pin_slot it is the rotation axis, with 'slide_axis' the "
-    "perpendicular slide. "
-    "Optional 'offset' ('units'=mm/cm/in), 'angle' (deg), 'flip'."
+    "Create a Joint between two inputs. Each of 'occurrence_one'/'occurrence_two' is a "
+    "find_geometry handle (joints AT that exact face/edge), a Joint Origin name (bare or scoped "
+    "'<occurrence>:<JO name>'), or a snap-string such as 'Boom:1:top'. ':origin' collapses to the "
+    "part origin AND aligns its FULL local frame - use a handle for a real offset. Creating a "
+    "joint MOVES the free part so its snap/JO point lands on the other input's location - do not "
+    "pre-place it. 'axis' is FRAME-relative, an axis of the joint geometry's frame - "
+    "joint_edit(world_axis=...) re-points one that pivots wrong."
 )
 
 tool = (
@@ -979,26 +899,26 @@ tool = (
         name="joint_create",
         description=TOOL_DESCRIPTION,
         input_param_name="occurrence_one",
-        input_param_description="First input: a find_geometry handle, a Joint Origin name (bare or '<occurrence>:<JO name>'), or a snap '<occurrence>:<snap>' - see the tool description for the accepted forms.",
+        input_param_description="First input: a find_geometry handle, a Joint Origin name, or a snap '<occurrence>:<snap>'.",
     )
     .add_input_property("occurrence_two", {"type": "string",
             "description": "Second input: same forms as occurrence_one."})
     .add_input_property(*_inputs.joint_motion(default="rigid", options=_MOTIONS).as_property())
     .add_input_property(*_inputs.frame_axis("axis", default="z",
-            description="Motion axis for types that need one (FRAME-relative; for pin_slot: the rotation axis).").as_property())
+            description="Motion axis for the types that need one (FRAME-relative; for pin_slot: the rotation axis).").as_property())
     .add_input_property(*_inputs.frame_axis("slide_axis", default="",
-            description="pin_slot only: the perpendicular SLIDE direction (default = the next frame axis; must differ from 'axis').").as_property())
-    .add_input_property("offset", {"type": "number", "description": "Offset distance (in 'units'; default 0)."})
-    .add_input_property("angle", {"type": "number", "description": "Angle in degrees (default 0)."})
+            description="pin_slot only: the perpendicular SLIDE direction.").as_property())
+    .add_input_property("offset", {"type": "number", "description": "Offset distance in 'units'."})
+    .add_input_property("angle", {"type": "number", "description": "Angle in degrees."})
     .add_input_property(*_inputs.UNITS.as_property())
-    .add_input_property("flip", {"type": "boolean", "description": "Reverse the joint direction (default false)."})
-    .add_input_property("name", {"type": "string", "description": "Optional name for the joint."})
-    .add_input_property("min_deg", {"type": "number", "description": "Rotation limit min (degrees) - revolute/cylindrical."})
-    .add_input_property("max_deg", {"type": "number", "description": "Rotation limit max (degrees) - revolute/cylindrical."})
-    .add_input_property("rest_deg", {"type": "number", "description": "Rotation rest value (degrees) - revolute/cylindrical."})
-    .add_input_property("min_mm", {"type": "number", "description": "Linear/slide limit min (in 'units') - slider/cylindrical."})
-    .add_input_property("max_mm", {"type": "number", "description": "Linear/slide limit max (in 'units') - slider/cylindrical."})
-    .add_input_property("rest_mm", {"type": "number", "description": "Linear/slide rest value (in 'units') - slider/cylindrical."})
+    .add_input_property("flip", {"type": "boolean", "description": "Reverse the joint direction."})
+    .add_input_property("name", {"type": "string", "description": "Name for the joint."})
+    .add_input_property("min_deg", {"type": "number", "description": "Rotation limit min (degrees)."})
+    .add_input_property("max_deg", {"type": "number", "description": "Rotation limit max (degrees)."})
+    .add_input_property("rest_deg", {"type": "number", "description": "Rotation rest value (degrees)."})
+    .add_input_property("min_mm", {"type": "number", "description": "Slide limit min (in 'units')."})
+    .add_input_property("max_mm", {"type": "number", "description": "Slide limit max (in 'units')."})
+    .add_input_property("rest_mm", {"type": "number", "description": "Slide rest value (in 'units')."})
     .strict_schema()
 )
 
@@ -1007,14 +927,8 @@ item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_m
 
 
 EDIT_DESCRIPTION = (
-"Edit an existing joint in place. 'joint_name' selects it; pass any subset to change: 'input_one'/"
-"'input_two' re-select the snap inputs (a Joint Origin name or '<occurrence>:<snap>' = origin/center/"
-"top/bottom/cylinder); 'joint_type' (rigid/revolute/slider/cylindrical/planar/ball/pin_slot) + 'axis' "
-"(+ 'slide_axis' for pin_slot) redefine the motion; 'world_axis' re-points rotation/slide to a TRUE world axis (fixes a "
-"joint pivoting about the wrong axis when the snap frame isn't world-aligned); 'flip'; 'offset' "
-"('units') + 'angle' (deg); rotation limits 'min_deg'/'max_deg'/'rest_deg' (revolute/cylindrical) and "
-"linear limits 'min_mm'/'max_mm'/'rest_mm' (slider/cylindrical). To DRIVE a joint to a pose use "
-"joint_drive, not this."
+"Edit an existing joint's DEFINITION in place: 'joint_name' selects it, and any subset of the "
+"other inputs changes it. To DRIVE a joint to a pose use joint_drive, not this."
 )
 edit_tool = (
     Tool.create_simple(name="joint_edit", description=EDIT_DESCRIPTION)
@@ -1023,34 +937,32 @@ edit_tool = (
             "description": "New first input: Joint Origin name OR '<occurrence>:<snap>'."})
     .add_input_property("input_two", {"type": "string",
             "description": "New second input: Joint Origin name OR '<occurrence>:<snap>'."})
-    .add_input_property(*_inputs.joint_motion(default="rigid", options=_MOTIONS, description="Redefine the joint motion type.").as_property())
+    .add_input_property(*_inputs.joint_motion(default="rigid", options=_MOTIONS).as_property())
     .add_input_property(*_inputs.frame_axis("axis", default="z",
-            description="Motion axis for types that need one (FRAME-relative; for pin_slot: the rotation axis).").as_property())
+            description="Motion axis for the types that need one (FRAME-relative; for pin_slot: the rotation axis).").as_property())
     .add_input_property(*_inputs.frame_axis("slide_axis", default="",
-            description="pin_slot only: the perpendicular SLIDE direction (default = the next frame axis; must differ from 'axis').").as_property())
+            description="pin_slot only: the perpendicular SLIDE direction.").as_property())
     .add_input_property(*_inputs.frame_axis("world_axis", default="",
-            description="Re-point the motion to a TRUE WORLD axis via a construction axis - fixes a joint that pivots about the wrong world axis because the snap frame isn't world-aligned. Re-applies the current motion type if joint_type is omitted.").as_property())
+            description="Re-point the motion to a TRUE WORLD axis - fixes a joint pivoting about the wrong world axis because the snap frame isn't world-aligned. Re-applies the current motion type when joint_type is omitted.").as_property())
     .add_input_property("flip", {"type": "boolean", "description": "Toggle the joint direction."})
-    .add_input_property("offset", {"type": "number", "description": "Set the joint ANCHOR offset (the offset ModelParameter, in 'units') - along the joint FRAME'S Z axis; NOT a slider's slide value (joint_drive poses that)."})
-    .add_input_property("angle", {"type": "number", "description": "Set the joint angle between the inputs (degrees)."})
+    .add_input_property("offset", {"type": "number", "description": "The joint ANCHOR offset (the offset ModelParameter, in 'units') along the joint FRAME'S Z axis - NOT a slider's slide value (joint_drive poses that)."})
+    .add_input_property("angle", {"type": "number", "description": "Joint angle between the inputs (degrees)."})
     .add_input_property(*_inputs.units_property(description="Units for 'offset'."))
     # rotation_deg is intentionally NOT exposed: the handler still accepts the kwarg and returns a
     # helpful redirect if passed, but advertising a parameter whose only behavior is to error wastes
     # context. To pose a joint, use joint_drive.
-    .add_input_property("min_deg", {"type": "number", "description": "Rotation limit min (degrees) - revolute/cylindrical."})
-    .add_input_property("max_deg", {"type": "number", "description": "Rotation limit max (degrees) - revolute/cylindrical."})
-    .add_input_property("rest_deg", {"type": "number", "description": "Rotation rest value (degrees) - revolute/cylindrical."})
-    .add_input_property("min_mm", {"type": "number", "description": "Linear/slide limit min (in 'units') - slider/cylindrical."})
-    .add_input_property("max_mm", {"type": "number", "description": "Linear/slide limit max (in 'units') - slider/cylindrical."})
-    .add_input_property("rest_mm", {"type": "number", "description": "Linear/slide rest value (in 'units') - slider/cylindrical."})
+    .add_input_property("min_deg", {"type": "number", "description": "Rotation limit min (deg)."})
+    .add_input_property("max_deg", {"type": "number", "description": "Rotation limit max (deg)."})
+    .add_input_property("rest_deg", {"type": "number", "description": "Rotation rest value (deg)."})
+    .add_input_property("min_mm", {"type": "number", "description": "Slide limit min ('units')."})
+    .add_input_property("max_mm", {"type": "number", "description": "Slide limit max ('units')."})
+    .add_input_property("rest_mm", {"type": "number", "description": "Slide rest value ('units')."})
     .strict_schema()
 )
 edit_item = Item.create_tool_item(
     tool=edit_tool, write="write", handler=edit_handler, run_on_main_thread=True,
-    # Every VALUE the tool sets is re-read off the joint and published as that read-back: the limits
-    # through _set_one_limit, flip through _set_flip, offset/angle through _set_one_parameter - each
-    # erroring when the joint keeps its own value. The motion arm gates on the platform's own setter
-    # bool (_apply_motion), and re-selecting an input publishes the label the resolver resolved.
+    # Every VALUE the tool sets is re-read off the joint and published as that read-back, erroring
+    # when the joint keeps its own value; the motion arm gates on the platform's own setter bool.
     verification=Verification(
         kind="inline",
         evidence_test="tests/unit/test_edit_joint.py::TestSwallowedSets::"

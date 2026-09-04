@@ -1414,6 +1414,60 @@ def _cylindrical_quantized_angle_frozen_slide(at_deg=-11.6, step_deg=0.1):
     return CylindricalJointMotion()
 
 
+def _revolute_offset_by(offset_deg, at_deg=0.0):
+    """A revolute that stores the command displaced by `offset_deg` - the rig for the edge of the
+    angle band, where the residual IS the number under test."""
+    class RevoluteJointMotion:                      # the NAME is what current_joint_type keys on
+        def __init__(self):
+            self.rotationLimits = FakeLimits()
+            self._v = math.radians(at_deg)
+
+        @property
+        def rotationValue(self):
+            return self._v
+
+        @rotationValue.setter
+        def rotationValue(self, v):
+            self._v = math.radians(round(math.degrees(v) + offset_deg, 4))
+    return RevoluteJointMotion()
+
+
+class TestTheAngleBandIsHalfTheStoreGrid:
+    """rotationValue lands on a 0.1 deg grid, so an off-grid command reads back up to half a step
+    away. That is a drive that LANDED, and the note names the grid it landed on."""
+
+    def test_an_off_grid_command_lands_and_the_note_names_the_grid(self, monkeypatch):
+        j = FakeJoint("Vane", _quantizing_revolute(0.0, step_deg=0.1))
+        _install(monkeypatch, j)
+        out = _payload(jd.handler(joint_name="Vane", angle_deg=-20.103))
+        assert out["value_now"]["angle_deg"] == -20.1
+        assert "-20.103 deg is off the 0.1 deg grid" in out["note"]
+        assert "value_now reads -20.1 deg" in out["note"]
+
+    def test_a_half_step_residual_still_lands(self, monkeypatch):
+        # the widest a 0.1 deg store grid can miss by - the boundary the band is set at.
+        j = FakeJoint("Vane", _quantizing_revolute(0.0, step_deg=0.1))
+        _install(monkeypatch, j)
+        out = _payload(jd.handler(joint_name="Vane", angle_deg=-20.15))
+        assert abs(out["value_now"]["angle_deg"] + 20.15) <= jd._ANGLE_BAND_DEG
+
+    def test_a_residual_past_the_band_is_still_a_failed_drive(self, monkeypatch):
+        # just past the half-step: the receipt must still refuse, or the wider band swallows a
+        # genuine no-take.
+        j = FakeJoint("Vane", _revolute_offset_by(0.06))
+        _install(monkeypatch, j)
+        res = jd.handler(joint_name="Vane", angle_deg=25)
+        assert res["isError"] is True and "did NOT land the command" in res["message"]
+
+    def test_an_on_grid_command_carries_no_grid_note(self, monkeypatch):
+        # the discriminating twin: the grid sentence is for a command that could not be stored
+        # verbatim, not for every drive.
+        j = FakeJoint("Vane", _quantizing_revolute(0.0, step_deg=0.1))
+        _install(monkeypatch, j)
+        out = _payload(jd.handler(joint_name="Vane", angle_deg=-20.1))
+        assert "grid" not in out["note"]
+
+
 class TestValueMove:
     """_value_move over the two published numbers - the tri-state the verdict's wording branches on."""
 
@@ -1445,16 +1499,17 @@ class TestValueMove:
 
 class TestNearLandingIsNotAFrozenChain:
     def test_a_quantized_landing_reports_the_move_and_is_not_called_a_no_take(self, monkeypatch):
-        # the joint turns 8.5 deg and settles 0.003 deg off the command: a failed drive (the
-        # commanded value is not what reads back), but not a mechanism that never moved.
-        j = FakeJoint("Vane", _quantizing_revolute(-11.6))
+        # the joint turns 8.4 deg and settles 0.103 deg off the command - past the half-grid band,
+        # so a failed drive (the commanded value is not what reads back), but not a mechanism that
+        # never moved.
+        j = FakeJoint("Vane", _quantizing_revolute(-11.6, step_deg=5))
         _install(monkeypatch, j)
         res = jd.handler(joint_name="Vane", angle_deg=-20.103)
         assert res["isError"] is True                       # the command did not land
         assert "DID NOT TAKE" not in res["message"]
         assert "MOVED the joint but did NOT land the command" in res["message"]
-        assert "angle -20.1 deg vs commanded -20.103 deg (a residual of 0.003 deg)" in res["message"]
-        assert ("the angle moved from -11.6 deg to -20.1 deg (a change of -8.5 deg)"
+        assert "angle -20.0 deg vs commanded -20.103 deg (a residual of 0.103 deg)" in res["message"]
+        assert ("the angle moved from -11.6 deg to -20.0 deg (a change of -8.4 deg)"
                 in res["message"])
 
     def test_a_chain_that_never_moved_still_reads_as_a_no_take_and_says_it_stood_still(
@@ -1517,7 +1572,7 @@ class TestNearLandingIsNotAFrozenChain:
         # the lock is still OBSERVED, but a value that moved across the drive is not the frozen
         # chain that candidate describes - electing it sends the caller to release a lock the
         # observed move already rules out.
-        j = FakeJoint("Vane", _quantizing_revolute(-11.6))
+        j = FakeJoint("Vane", _quantizing_revolute(-11.6, step_deg=5))
         design = _install(monkeypatch, j)
         _census(design, [_census_occ("Rotor:1", locked=True)])
         res = jd.handler(joint_name="Vane", angle_deg=-20.103)
@@ -1554,13 +1609,13 @@ class TestNearLandingIsNotAFrozenChain:
         # value that moved is enough to rule out the frozen chain 'DID NOT TAKE' describes, and each
         # value publishes its own clause - reading the two the other way round would print a
         # frozen-chain headline beside a clause reporting 8.5 deg of motion.
-        j = FakeJoint("Cyl", _cylindrical_quantized_angle_frozen_slide())
+        j = FakeJoint("Cyl", _cylindrical_quantized_angle_frozen_slide(step_deg=5))
         _install(monkeypatch, j)
         res = jd.handler(joint_name="Cyl", angle_deg=-20.103, distance=50, units="mm")
         assert res["isError"] is True
         assert "MOVED the joint but did NOT land the command" in res["message"]
         assert "DID NOT TAKE" not in res["message"]
-        assert ("the angle moved from -11.6 deg to -20.1 deg (a change of -8.5 deg)"
+        assert ("the angle moved from -11.6 deg to -20.0 deg (a change of -8.4 deg)"
                 in res["message"])
         assert "the slide did not move at all (before and after both read 0.0 mm)" in res["message"]
 
@@ -1568,7 +1623,7 @@ class TestNearLandingIsNotAFrozenChain:
         # the same two-value rig with a parent-locked member: the frozen-chain candidate is off the
         # table as soon as ANY commanded value moved. Aggregating the two answers the other way
         # would send the caller to release a lock the angle's own 8.5 deg already rules out.
-        j = FakeJoint("Cyl", _cylindrical_quantized_angle_frozen_slide())
+        j = FakeJoint("Cyl", _cylindrical_quantized_angle_frozen_slide(step_deg=5))
         design = _install(monkeypatch, j)
         _census(design, [_census_occ("Rotor:1", locked=True)])
         res = jd.handler(joint_name="Cyl", angle_deg=-20.103, distance=50, units="mm")
@@ -1596,10 +1651,10 @@ class TestTheMissedCommandPathClaimsNothingAboutThePartner:
         monkeypatch.setattr(jd, "_driven_this_session", set())
 
     def test_a_moved_no_take_on_a_suppressed_link_claims_no_partner_motion(self, monkeypatch):
-        # the joint turned 8.5 deg and missed, so the MOVED headline runs - and the same message
+        # the joint turned 8.4 deg and missed, so the MOVED headline runs - and the same message
         # reports the link SUPPRESSED a few clauses later. A headline claiming the partner came
         # along contradicts the observation printed beside it.
-        self._linked(monkeypatch, _quantizing_revolute(-11.6))
+        self._linked(monkeypatch, _quantizing_revolute(-11.6, step_deg=5))
         res = jd.handler(joint_name="Driven", angle_deg=-20.103)
         assert res["isError"] is True
         assert "MOVED the joint but did NOT land the command" in res["message"]

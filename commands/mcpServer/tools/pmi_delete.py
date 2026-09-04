@@ -40,9 +40,8 @@ def handler(annotation="", component="") -> dict:
     if not deleted:
         return error(f"deleteMe() declined for '{name}' ({kind}) - the annotation was NOT deleted.")
     # The hit COUNT, not find_annotation's None: that resolver answers None for a miss AND for an
-    # ambiguity, so "it did not resolve" is not "it is gone". read_flag, not safe(read, False): an
-    # isValid that will not read is unknown, and coercing it to False manufactures the very proof
-    # this check is looking for.
+    # ambiguity. read_flag, not safe(read, False): an isValid that will not read is unknown, and
+    # coercing it to False manufactures the very proof this check looks for.
     holes = {}
     hits, _available = _pmi.annotation_hits(d, name or "", comp_name or "", stats=holes)
     still_valid = _common.read_flag(lambda: ann.isValid)
@@ -54,10 +53,8 @@ def handler(annotation="", component="") -> dict:
                      "annotation object still reports isValid - treat the delete as failed.")
     comps_bad = holes.get("components_unreadable", 0)
     items_bad = holes.get("items_unreadable", 0)
-    # Two INDEPENDENT proofs of absence; either one settles it. (1) a COMPLETE walk for a KNOWN
-    # name finding no hit - an incomplete walk, or a name that never read, matches nothing for
-    # reasons that have nothing to do with the annotation being gone; (2) the object's own isValid
-    # reading false. With neither, the delete is reported unverified, never as confirmed.
+    # Two INDEPENDENT proofs of absence, either settling it: a COMPLETE walk for a KNOWN name
+    # finding no hit, or isValid reading false. With neither, the delete is reported unverified.
     walk_proves = bool(name) and not (comps_bad or items_bad)
     if not walk_proves and still_valid is not False:
         why = ("the annotation's name did not read, so the re-walk had nothing to look for"
@@ -88,9 +85,8 @@ def handler(annotation="", component="") -> dict:
 
 TOOL_DESCRIPTION = (
 "Delete ONE PMI annotation by its name from pmi_get (component= disambiguates a name that exists "
-"in several components). The deletion is verified: deleteMe()'s decline is reported as an error, "
-"and the name is re-resolved afterwards to confirm the annotation is gone. Imported PMI deletes "
-"remove that imported record permanently for this design."
+"in several components). The deletion is verified: the name is re-resolved afterwards to confirm "
+"the annotation is gone. Deleting imported PMI removes that record permanently for this design."
 )
 
 tool = (

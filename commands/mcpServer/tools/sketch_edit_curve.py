@@ -97,13 +97,9 @@ def _single_curve_edit(action, curve, p1):
     return curve.split(p1)
 
 
-# trim and split report "nothing matched" by returning an EMPTY ObjectCollection. breakCurve does
-# NOT: on a curve nothing crosses it RAISES "Break is not available for this segment point", so its
-# requirement rides the raised-error path instead. extend returns an empty collection either way -
-# it lengthens the curve in place - so its effect is read off the curve's own length.
-# What each action needs, appended AFTER the observation - reference, not a diagnosis: neither an
-# empty collection nor Fusion's own message says WHICH condition was unmet, and a pick point off the
-# curve produces the same result as a curve that had nothing to act on.
+# trim and split report "nothing matched" with an EMPTY ObjectCollection; breakCurve instead RAISES
+# "Break is not available for this segment point", and extend returns an empty collection either
+# way since it lengthens the curve in place. What each action needs, appended after the observation.
 _NEEDS = {
     "trim": "a pick point on a segment bounded by a crossing curve",
     "break": "a curve that crosses another curve in the sketch",
@@ -286,13 +282,13 @@ def handler(action: str = "", sketch_name: str = "", entity_one: str = "", entit
 
 
 TOOL_DESCRIPTION = (
-    "Edit an EXISTING sketch curve in place instead of deleting and redrawing it. trim removes the "
+    "Edit an EXISTING sketch curve in place. trim removes the "
     "segment nearest the pick point; extend lengthens the end nearest it; break cuts at the "
     "crossings either side of it; split cuts at it; fillet arcs between two OPEN curves; chamfer "
     "joins two LINES; offset copies the end-connected chain. 'entity_one'/'entity_two' are "
-    "'<type>:<index>' ids from sketch_get(include_entities=true). x1,y1 (and x2,y2 on the second "
-    "curve) is the pick point, in 'units' and in the sketch's own local frame - the one sketch_get "
-    "reports. Returns each resulting curve's NEW id and names any feature the edit broke."
+    "'<type>:<index>' ids from sketch_get. x1,y1 (and x2,y2) is the pick point, in 'units' and in "
+    "the sketch's own local frame. Returns each resulting curve's NEW id and names any feature the "
+    "edit broke."
 )
 
 tool = (

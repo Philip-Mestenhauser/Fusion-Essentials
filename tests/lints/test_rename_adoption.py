@@ -3,16 +3,8 @@
 
 """Gate: no tool renames an entity through a swallowed setattr - apply_rename is the one home.
 
-The platform declines renames SILENTLY (a duplicate name no-ops, an invalid one raises) and can
-land a DEDUPED variant ('Foo' -> 'Foo(1)'). ``_common.apply_rename`` is the one create-flow rename:
-set, read back, disclose. The re-roll shape this bans - ``setattr(<entity>, "name", ...)`` inside a
-tool module - swallows the decline and publishes the REQUESTED name as though it took (the shape
-every pre-adoption site shared). test_helper_duplication guards apply_rename's DEFINITION; this
-guards the bypass.
-
-A direct ``entity.name = value`` assignment stays legal where the module wants the raise (the
-dedicated rename tool design_set_name errors on a miss; apply_rename itself sets that way).
-"""
+The platform declines a rename SILENTLY and can land a DEDUPED variant ('Foo' -> 'Foo(1)'), so the
+banned ``setattr(<entity>, "name", ...)`` publishes the REQUESTED name; ``entity.name = v`` raises."""
 
 import re
 from pathlib import Path

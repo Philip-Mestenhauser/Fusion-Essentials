@@ -14,7 +14,7 @@ import json
 
 import adsk.cam
 
-from conftest import FakeOperation, load_tool
+from conftest import FakeOperation, load_tool, make_cam, strategy_factory
 
 wo = load_tool("workspace_orient")
 
@@ -236,8 +236,13 @@ class FakeOp:
 
 
 class FakeCAM:
-    def __init__(self, setups):
+    def __init__(self, setups, machining_times=None):
         self.setups = _Coll(setups)
+        # The EMPTY class reads a second signal off the product - an operation whose toolpath
+        # generated empty reads hasToolpath True and only its machining time answers. The answer
+        # itself is the SHARED one (conftest.make_cam), borrowed rather than re-rolled, so this
+        # file cannot teach a different getMachiningTime contract than the other CAM tests read.
+        self.getMachiningTime = make_cam(machining_times=machining_times).getMachiningTime
 
 
 class FakeProducts:
@@ -568,11 +573,11 @@ class TestCam:
 
     _STATES = adsk.cam.OperationStates
 
-    def _orient(self, monkeypatch, ops):
-        return self._orient_setups(monkeypatch, [FakeSetup(ops)])
+    def _orient(self, monkeypatch, ops, machining_times=None):
+        return self._orient_setups(monkeypatch, [FakeSetup(ops)], machining_times)
 
-    def _orient_setups(self, monkeypatch, setups):
-        cam = FakeCAM(setups)
+    def _orient_setups(self, monkeypatch, setups, machining_times=None):
+        cam = FakeCAM(setups, machining_times)
         root = FakeRoot(top_occs=[FakeOcc("A:1")])
         des = FakeDesign(root, timeline=[FakeTL(0)])
         _install(active_product=des, doc=FakeDoc(design=des, cam=cam))
@@ -602,6 +607,36 @@ class TestCam:
         assert cam["suppressed_operations"] == 65
         assert cam["empty_toolpath_operations"] == 13
 
+    def test_an_op_whose_toolpath_generated_empty_is_counted_and_named(self, monkeypatch):
+        # the shape the flags read as a clean valid: hasToolpath TRUE, state IsValid, and 0.0 s of
+        # machining time. Without the time signal this operation lands in no count at all and the
+        # pointer reports the job as generated.
+        out = self._orient(monkeypatch, [FakeOp(True, name="Swarf1"), FakeOp(True, name="Cut")],
+                           machining_times={"Swarf1": 0.0, "Cut": 4.193083})
+        cam = out["cam"]
+        assert cam["total_operations"] == 2
+        assert cam["empty_toolpath_operations"] == 1
+        assert cam["empty_toolpaths"] == ["Swarf1"]
+        assert "Swarf1" in out["pointers"]["cam"] and "Cut" not in out["pointers"]["cam"]
+
+    def test_an_operation_whose_time_did_not_read_stays_out_of_the_empty_count(self, monkeypatch):
+        # the whole op set holds a toolpath and NO time answers (every call raises) - an unread
+        # signal is not a measurement of zero, so nothing is named empty
+        out = self._orient(monkeypatch, [FakeOp(True, name="Swarf1"), FakeOp(True, name="Cut")])
+        cam = out["cam"]
+        assert cam["empty_toolpath_operations"] == 0 and "empty_toolpaths" not in cam
+        assert cam["ungenerated_operations"] == 0
+
+    def test_the_two_empty_shapes_are_counted_together(self, monkeypatch):
+        # one operation of each shape - hasToolpath False (the flags) and hasToolpath True with
+        # 0.0 s (the time) - land in ONE count, and the cutting operation beside them does not
+        out = self._orient(monkeypatch, [FakeOp(False, name="NoPath"), FakeOp(True, name="Swarf1"),
+                                         FakeOp(True, name="Cut")],
+                           machining_times={"Swarf1": 0.0, "Cut": 9.66})
+        cam = out["cam"]
+        assert cam["empty_toolpath_operations"] == 2
+        assert sorted(cam["empty_toolpaths"]) == ["NoPath", "Swarf1"]
+
     def test_an_op_whose_state_did_not_read_is_not_named_an_empty_toolpath(self, monkeypatch):
         # both the count and the named row gate on _cam_common.is_empty_toolpath, and this op's
         # operationState RAISED - it has no lifecycle to publish, so the row that says it cut
@@ -615,6 +650,14 @@ class TestCam:
         assert cam["total_operations"] == 2
         assert cam["empty_toolpath_operations"] == 1
         assert cam["empty_toolpaths"] == ["Empty1"]
+        # and it is not silently absorbed into the census either - it gets the bucket its state
+        # earned, so the counts above cannot read as a job whose every op answered.
+        assert cam["unread_state_operations"] == 1
+
+    def test_a_job_whose_states_all_read_carries_no_unread_bucket(self, monkeypatch):
+        # the other side: a zero here on every healthy job would read as a checked-and-clean claim
+        out = self._orient(monkeypatch, [FakeOp(True, name="Cut")], machining_times={"Cut": 9.66})
+        assert "unread_state_operations" not in out["cam"]
 
     def test_the_pointer_names_the_empty_toolpaths(self, monkeypatch):
         out = self._orient(monkeypatch, [FakeOp(True, name="Cut"),
@@ -801,6 +844,16 @@ class TestCam:
         assert out["cam"]["ungenerated_operations"] == 0
         assert "toolpaths look generated" in out["pointers"]["cam"]
         assert "empty_toolpaths" not in out["cam"]
+
+    def test_a_job_whose_only_anomaly_is_an_unread_state_is_not_a_clean_bill(self, monkeypatch):
+        # nothing else fires for this job - no error, nothing ungenerated, nothing empty - so the
+        # pointer would report it generated while one operation answered no state at all.
+        out = self._orient(monkeypatch, [FakeOp(True, name="Cut"),
+                                         FakeOperation("Unread", state_readable=False)])
+        assert out["cam"]["unread_state_operations"] == 1
+        pointer = out["pointers"]["cam"]
+        assert "toolpaths look generated" not in pointer
+        assert "census is incomplete" in pointer
 
     def test_the_pointer_names_the_parked_operations_beside_the_verdict(self, monkeypatch):
         parked = FakeOp(False, name="Parked", toolpath_valid=False, suppressed=True,
@@ -1462,3 +1515,131 @@ class TestHealthReadOffTheTimelineItem:
                 "(relations_health_unknown) published NO compute state") in out["note"]
         # a withheld state is not a fault, so the clean verdict still leads
         assert out["note"].startswith("No compute errors")
+
+
+# ── entitlement / capability block (LICENSE-CTX-1) ───────────────────────────────────────────────
+#
+# The block probes a SMALL sentinel set of strategy names document-independently through
+# adsk.cam.OperationStrategy.createFromString(name).isGenerationAllowed and reports the OBSERVED
+# generation flag per strategy - never a claimed license name/tier/SKU (Fusion exposes no license
+# API). The flag is read through _cam_common.strategy_generation_allowed - the one seam cam_generate's
+# launch pre-flight also excludes on - so these tests fake that module's _create_strategy to return
+# allowed / blocked / unreadable / raising, and one guards the sentinel vocabulary offline.
+
+class TestCapabilityBlock:
+    def _small_design(self):
+        return FakeDesign(FakeRoot(top_occs=[FakeOcc("A:1")], all_count=1), timeline=[FakeTL(0)])
+
+    def _all(self, value):
+        return {name: value for name in wo._CAPABILITY_SENTINELS}
+
+    def test_every_sentinel_reads_true_when_generation_is_allowed(self, monkeypatch):
+        des = self._small_design()
+        _install(active_product=des, doc=FakeDoc(design=des))
+        monkeypatch.setattr(wo._cam_common, "_create_strategy", strategy_factory(self._all(True)))
+        og = _payload(wo.handler())["machining_capabilities"]["observed_generation"]
+        assert og == {name: True for name in wo._CAPABILITY_SENTINELS}
+
+    def test_blocked_strategies_read_false_not_null(self, monkeypatch):
+        # false is an OBSERVED answer (the base license declines it), distinct from an unread probe's
+        # null - so a blocked strategy must publish False, never fold into the unknown case.
+        des = self._small_design()
+        _install(active_product=des, doc=FakeDoc(design=des))
+        monkeypatch.setattr(wo._cam_common, "_create_strategy", strategy_factory(self._all(False)))
+        og = _payload(wo.handler())["machining_capabilities"]["observed_generation"]
+        assert all(v is False for v in og.values())
+        assert not any(v is None for v in og.values())
+
+    def test_an_unknown_or_renamed_strategy_reads_null_and_does_not_crash_the_orient(self, monkeypatch):
+        # createFromString RAISES '3 : Unknown strategy' for a renamed sentinel; the probe must
+        # degrade it to null and the orient must still return ok, with the readable sentinels intact.
+        des = self._small_design()
+        _install(active_product=des, doc=FakeDoc(design=des))
+        table = self._all(True)
+        table.pop("probe_geometry")
+        monkeypatch.setattr(wo._cam_common, "_create_strategy", strategy_factory(table))
+        res = wo.handler()
+        assert res["isError"] is False
+        og = _payload(res)["machining_capabilities"]["observed_generation"]
+        assert og["probe_geometry"] is None
+        assert og["steep_and_shallow"] is True
+
+    def test_an_unreadable_flag_reads_null_not_false(self, monkeypatch):
+        # the strategy built but isGenerationAllowed itself would not read: unknown, never a confident
+        # False that an agent would read as 'this capability is blocked'.
+        des = self._small_design()
+        _install(active_product=des, doc=FakeDoc(design=des))
+        table = self._all(True)
+        table["swarf"] = None
+        monkeypatch.setattr(wo._cam_common, "_create_strategy", strategy_factory(table))
+        og = _payload(wo.handler())["machining_capabilities"]["observed_generation"]
+        assert og["swarf"] is None
+        assert og["multiaxis_finishing"] is True
+
+    def test_the_block_keys_are_exactly_the_sentinels(self, monkeypatch):
+        des = self._small_design()
+        _install(active_product=des, doc=FakeDoc(design=des))
+        monkeypatch.setattr(wo._cam_common, "_create_strategy", strategy_factory(self._all(True)))
+        og = _payload(wo.handler())["machining_capabilities"]["observed_generation"]
+        assert set(og) == set(wo._CAPABILITY_SENTINELS)
+        assert len(og) == 4                         # compact - a few keys, not the 54-row dump
+
+    def test_the_note_cites_the_flag_and_asserts_no_license_tier(self, monkeypatch):
+        des = self._small_design()
+        _install(active_product=des, doc=FakeDoc(design=des))
+        monkeypatch.setattr(wo._cam_common, "_create_strategy", strategy_factory(self._all(True)))
+        note = _payload(wo.handler())["machining_capabilities"]["note"]
+        assert "isGenerationAllowed" in note                       # cited to the read that backs it
+        assert "cam_get(include=['strategies'])" in note           # pointer kept: empty test registry
+        assert "No license tier or SKU is asserted" in note        # the honesty line
+        assert "you have" not in note.lower()                      # never claims a named license/tier
+        # the flag is an ENTITLEMENT read, not a generation promise - the note must not say a
+        # true-reading strategy 'generates' (tool/geometry/machine can still fail it).
+        assert "true = it generates" not in note
+        assert "INSTALLATION, not the open document" in note
+
+    def test_the_cam_get_pointer_is_dropped_when_the_cam_family_is_gated_off(self, monkeypatch):
+        # cam is a gateable family: on a server with cam_get unregistered the note must not name a
+        # tool that 404s. A NON-empty registry without cam_get is that server; the empty registry
+        # (this test context, patched non-empty here) keeps the pointer via the escape hatch.
+        des = self._small_design()
+        _install(active_product=des, doc=FakeDoc(design=des))
+        monkeypatch.setattr(wo._cam_common, "_create_strategy", strategy_factory(self._all(True)))
+        monkeypatch.setattr(wo.registry, "get_tools", lambda: {"workspace_orient": object()})
+        monkeypatch.setattr(wo.registry, "has_tool", lambda name: name == "workspace_orient")
+        note = _payload(wo.handler())["machining_capabilities"]["note"]
+        assert "cam_get" not in note
+        assert "isGenerationAllowed" in note                       # the note itself still ships
+
+    def test_the_block_rides_a_non_design_document_too(self, monkeypatch):
+        # createFromString needs no document/CAM, so the capability is ambient even on a drawing doc
+        # where has_design is false - the whole point of a document-INDEPENDENT signal.
+        doc = FakeDoc(name="Drawing1", design=None, cam=None)
+        _install(active_product=None, doc=doc, design_for_cast=None)
+        monkeypatch.setattr(wo._cam_common, "_create_strategy", strategy_factory(self._all(True)))
+        out = _payload(wo.handler())
+        assert out["has_design"] is False
+        assert out["machining_capabilities"]["observed_generation"]["swarf"] is True
+
+    def test_every_sentinel_is_a_measured_extension_unblocked_strategy(self):
+        # THE VOCABULARY GUARD: a renamed/typo'd sentinel is caught HERE, offline, not in production -
+        # where createFromString would raise Unknown forever and the capability would silently read
+        # null. Ground truth is the measured extension A/B: a base license generates 33 of 54 milling
+        # strategies, the Machining Extension 50, and these 17 are the ones it unblocks.
+        extension_unblocked = {
+            "advanced_swarf", "corner", "deburr", "feature_construction", "hole_recognition",
+            "inspect_surface", "multi_axis_contour", "multi_axis_morph", "multiaxis_finishing",
+            "multiaxis_roughing", "probe_geometry", "rotary_contour", "rotary_finishing",
+            "rotary_pocket", "steep_and_shallow", "swarf", "three_plus_two"}
+        assert len(extension_unblocked) == 17
+        stray = set(wo._CAPABILITY_SENTINELS) - extension_unblocked
+        assert not stray, f"sentinel(s) not in the measured extension-unblocked set: {sorted(stray)}"
+
+    def test_the_block_reads_the_flag_through_the_shared_seam(self, monkeypatch):
+        # the block owns no probe of its own: cam_generate's launch pre-flight excludes on the same
+        # read, and a second copy is how the two answer differently about one strategy.
+        monkeypatch.setattr(wo._cam_common, "strategy_generation_allowed", lambda name: name == "swarf")
+        des = self._small_design()
+        _install(active_product=des, doc=FakeDoc(design=des))
+        og = _payload(wo.handler())["machining_capabilities"]["observed_generation"]
+        assert og["swarf"] is True and og["probe_geometry"] is False

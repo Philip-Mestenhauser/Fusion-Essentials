@@ -95,10 +95,9 @@ def handler(query: str = "", include_kinds: bool = True) -> dict:
 
 TOOL_DESCRIPTION = (
     "SEARCH this server's tools by keyword when you do not know which tool does a job. 'query' "
-    "matches tool names, descriptions, and input names (e.g. 'profile', 'cam geometry', "
-    "'reference a body'). Returns ranked matches (name + inputs + one-line summary) plus the "
-    "reusable input reference types, read live from the running server - never stale. For the "
-    "BREADTH view (what tool families exist) see sys_capability_map."
+    "matches tool names, descriptions, and input names. Returns ranked matches (name + inputs + "
+    "one-line summary) plus the reusable input reference types. For the BREADTH view (what tool "
+    "families exist) see sys_capability_map."
 )
 
 tool = (

@@ -53,7 +53,7 @@ _FORMAT = _inputs.Choice("format", ["step", "iges", "sat", "smt", "f3d", "dxf", 
                          description="Taken from the file extension when omitted.")
 _INTO_COMPONENT = _inputs.OccurrenceRef(
     "into_component",
-    description="Occurrence whose component receives a solid/DXF import (default: active component).")
+    description="Occurrence receiving a solid/DXF import (default: active component).")
 _PLANE = _inputs.PlaneRef("plane", default="xy",
                           description="DXF only: plane the sketches are created on.")
 
@@ -144,7 +144,48 @@ def _target_of(design, into_component):
     return comp, f"component '{safe(lambda: comp.name)}'", None
 
 
-def _import_solid(mgr, design, path, fmt, into_component):
+def _active_workspace():
+    """(id, name) of the workspace the UI reports active - (None, None) when neither reads."""
+    ui = safe(lambda: app.userInterface)
+    if ui is None:
+        return None, None
+    return safe(lambda: ui.activeWorkspace.id), safe(lambda: ui.activeWorkspace.name)
+
+
+def _reactivate(ws_id):
+    """True when the workspace carrying this id reads back active after activate()."""
+    ui = safe(lambda: app.userInterface)
+    ws = safe(lambda: ui.workspaces.itemById(ws_id)) if ui is not None else None
+    if ws is None:
+        return False
+    try:
+        if not ws.activate():
+            return False
+    except Exception:
+        return False
+    return _active_workspace()[0] == ws_id
+
+
+def _workspace_disclosure(before):
+    """(payload keys, note sentence) for what the import did to the ACTIVE workspace."""
+    # importManager activates Design: a STEP import with Manufacture active reads back Design, so
+    # the workspace read before the import is re-activated by the id that read.
+    before_id, before_name = before
+    if before_id is None:
+        return {}, ""
+    after_id, after_name = _active_workspace()
+    if after_id is None or after_id == before_id:
+        return {}, ""
+    back = before_name or before_id
+    if _reactivate(before_id):
+        return {"workspace_restored": back}, ""
+    left = after_name or after_id
+    return ({"workspace_changed": {"from": back, "to": left}},
+            f" The import left '{left}' active and '{back}' did not read back active again - "
+            "switch back with view_switch_workspace.")
+
+
+def _import_solid(mgr, design, path, fmt, into_component, before_ws=(None, None)):
     comp, label, terr = _target_of(design, into_component)
     if terr:
         return error(terr)
@@ -164,6 +205,7 @@ def _import_solid(mgr, design, path, fmt, into_component):
                      "occurrence. The file may hold no geometry, or the geometry went somewhere "
                      "else - check design_get(include=['tree']).")
 
+    ws_keys, ws_note = _workspace_disclosure(before_ws)
     return ok({
         "imported": True,
         "format": fmt,
@@ -175,11 +217,12 @@ def _import_solid(mgr, design, path, fmt, into_component):
         "created": _describe(objects),
         "note": ("Imported as solid/surface geometry. An assembly file lands as sub-occurrences, a "
                  "single part as bodies. Inspect it with design_get(include=['tree']) and pick "
-                 "faces/edges for the model tools with find_geometry."),
+                 "faces/edges for the model tools with find_geometry.") + ws_note,
+        **ws_keys,
     })
 
 
-def _import_dxf(mgr, design, path, into_component, plane):
+def _import_dxf(mgr, design, path, into_component, plane, before_ws=(None, None)):
     comp, label, terr = _target_of(design, into_component)
     if terr:
         return error(terr)
@@ -206,6 +249,7 @@ def _import_dxf(mgr, design, path, into_component, plane):
                      "the component gained no sketch. A DXF holding only 3D geometry imports "
                      "nothing - a 2D import ignores it.")
 
+    ws_keys, ws_note = _workspace_disclosure(before_ws)
     return ok({
         "imported": True,
         "format": "dxf",
@@ -215,11 +259,12 @@ def _import_dxf(mgr, design, path, into_component, plane):
         "sketches_added": gained["sketches"],
         "created": _describe(landed),
         "note": ("One sketch per DXF layer that carries 2D geometry, named after the layer. Read "
-                 "the curves with sketch_get, then extrude a profile with model_extrude."),
+                 "the curves with sketch_get, then extrude a profile with model_extrude.") + ws_note,
+        **ws_keys,
     })
 
 
-def _import_svg(mgr, design, path, sketch, sketch_component=""):
+def _import_svg(mgr, design, path, sketch, sketch_component="", before_ws=(None, None)):
     # The scope is 'sketch_component', NOT 'into_component': into_component names the component a
     # DXF's new sketches or a solid's occurrence LAND in, while an SVG lands in a sketch that
     # already exists. Two different components, so the two inputs stay two inputs.
@@ -252,6 +297,7 @@ def _import_svg(mgr, design, path, sketch, sketch_component=""):
                      f"curves (still {after}) and importToTarget2 returned no objects. The file may "
                      "hold no path geometry.")
 
+    ws_keys, ws_note = _workspace_disclosure(before_ws)
     return ok({
         "imported": True,
         "format": "svg",
@@ -262,7 +308,8 @@ def _import_svg(mgr, design, path, sketch, sketch_component=""):
         "note": ("SVG curves landed in the sketch at 1/96 inch per SVG unit (measured: a 96-unit "
                  "square lands 25.4 mm), with SVG's y-down axis landing as NEGATIVE sketch y. "
                  "Measure one curve with model_measure_between and scale the sketch if the size "
-                 "is wrong."),
+                 "is wrong.") + ws_note,
+        **ws_keys,
     })
 
 
@@ -334,21 +381,21 @@ def handler(file_path: str = "", format: str = "", into_component: str = "", ske
     if not design:
         return error("No active design to import into. Open or create a document first (see "
                      "doc_new), or pass new_document=true.")
+    before_ws = _active_workspace()
     if fmt == "svg":
-        return _import_svg(mgr, design, path, sketch, sketch_component)
+        return _import_svg(mgr, design, path, sketch, sketch_component, before_ws)
     if fmt == "dxf":
-        return _import_dxf(mgr, design, path, into_component, plane)
-    return _import_solid(mgr, design, path, fmt, into_component)
+        return _import_dxf(mgr, design, path, into_component, plane, before_ws)
+    return _import_solid(mgr, design, path, fmt, into_component, before_ws)
 
 
 TOOL_DESCRIPTION = (
     "Import a CAD file from LOCAL DISK: STEP/IGES/SAT/SMT/F3D as solid geometry into a component, "
     "DXF as one sketch per 2D layer on a plane, SVG curves into an EXISTING sketch. 'format' comes "
     "from the file extension; an explicit one contradicting it is refused. new_document=true "
-    "imports to a fresh unsaved document - solid formats only, since DXF and SVG need a target in "
-    "the open design. For SVG placed at an (x,y) with a scale use sketch_insert_svg - this tool has "
-    "no offset or scale to pass, on the same 1/96-inch convention. For a cloud upload use "
-    "data_upload_file; for a linked cloud reference use doc_insert_occurrence."
+    "imports to a fresh unsaved document - solid formats only. For SVG at an (x,y) with a scale use "
+    "sketch_insert_svg; for a cloud upload data_upload_file; for a linked cloud reference "
+    "doc_insert_occurrence."
 )
 
 tool = (
@@ -362,19 +409,15 @@ tool = (
     .add_input_property(*_sketch_detail.component_scope("sketch_component", narrows="sketch"))
     .add_input_property(*_PLANE.as_property())
     .add_input_property("new_document", {"type": "boolean",
-            "description": "Import to a new unsaved document instead of the open design (solid formats only)."})
+            "description": "Import to a new unsaved document (solid formats only)."})
     .add_required_input("file_path")
     .strict_schema()
 )
 
 class _FeatureHealthyHere(_assert.FeatureHealthy):
-    """FeatureHealthy, declared SKIPPED when the import lands in a NEW document.
-
-    The kind captures the active design's timeline count before the handler and walks the items past
-    it afterwards. With new_document=True the handler activates a DIFFERENT document, so those two
-    reads describe two different timelines: the slice walked is meaningless - it can skip a feature
-    that failed to compute, or gate items this call never added. Nothing can bridge that switch here,
-    so the payload says the health gate did not run instead of running it on the wrong design."""
+    """FeatureHealthy, declared SKIPPED when the import lands in a NEW document: the kind walks the
+    timeline items past a before-count, and with new_document=True those two reads describe two
+    different timelines, so the payload says the health gate did not run."""
 
     input_keys = ("new_document",)
 

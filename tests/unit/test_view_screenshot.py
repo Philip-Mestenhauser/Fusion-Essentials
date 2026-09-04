@@ -310,8 +310,10 @@ class TestFitToRestoreDisclosure:
         assert "capture failed" in result["message"] and "Sub:1+Gear:1" in result["message"]
 
     def test_the_description_discloses_the_hide_and_restore(self):
-        assert "hides the others" in gs.TOOL_DESCRIPTION
-        assert "restores them" in gs.TOOL_DESCRIPTION
+        # disclosed on 'fit_to' itself - the input whose value triggers the visibility change
+        desc = gs.tool.to_dict()["inputSchema"]["properties"]["fit_to"]["description"]
+        assert "hides the others" in desc
+        assert "restores them" in desc
 
 
 class TestCameraRestore:
@@ -419,6 +421,51 @@ class TestCameraRestore:
         assert result["isError"] is False
         text = result["content"][0]["text"]
         assert "zoom=0.5 could NOT be applied" in text and "extents locked" in text
+
+
+class TestStandoffFallbackDisclosure:
+    """apply_named_view answers the standoff it fell back to when the camera's eye-target distance
+    did not read as a positive number: the eye is placed at that standoff before the fit. The shot
+    says so, since silence means the camera's own distance was the one used."""
+
+    @pytest.fixture
+    def rig(self, monkeypatch):
+        vp = SimpleNamespace(camera=SimpleNamespace(viewExtents=1.0), fit=lambda: None)
+        monkeypatch.setattr(gs, "app", SimpleNamespace(activeViewport=vp))
+        monkeypatch.setattr(gs._common, "design", lambda: None)
+        monkeypatch.setattr(gs._view_common, "capture_png_b64", lambda *a, **k: ("B64DATA", None))
+        return monkeypatch
+
+    def test_a_used_fallback_rides_on_the_shot(self, rig):
+        rig.setattr(gs._view_common, "apply_named_view", lambda v, name: 100.0)
+        result = gs.handler(view="top")
+        assert result["isError"] is False
+        text = result["content"][0]["text"]
+        # ONE rendering of the number, in both places it is spelled
+        assert "standoff_fallback_cm=100:" in text and "100 cm from the target" in text
+        assert "100.0" not in text
+        assert [c["type"] for c in result["content"]] == ["text", "image"]
+
+    def test_a_capture_that_failed_claims_no_eye_placement(self, rig):
+        # the orient placed an eye, but there is no picture the placement produced - saying so on
+        # the failure describes a shot that does not exist
+        rig.setattr(gs._view_common, "apply_named_view", lambda v, name: 100.0)
+        rig.setattr(gs._view_common, "capture_png_b64",
+                    lambda *a, **k: (None, "Viewport capture failed."))
+        result = gs.handler(view="top")
+        assert result["isError"] is True
+        assert "standoff_fallback_cm" not in result["message"]
+
+    def test_a_camera_that_framed_the_shot_itself_publishes_nothing(self, rig):
+        rig.setattr(gs._view_common, "apply_named_view", lambda v, name: None)
+        result = gs.handler(view="top")
+        assert [c["type"] for c in result["content"]] == ["image"]
+
+    def test_the_current_view_never_claims_a_fallback(self, rig):
+        # view='current' does not orient at all, so no eye was placed at a fallback standoff
+        rig.setattr(gs._view_common, "apply_named_view", lambda v, name: 100.0)
+        result = gs.handler(view="current")
+        assert all("standoff_fallback_cm" not in c.get("text", "") for c in result["content"])
 
 
 class TestFilePathWrite:

@@ -274,7 +274,7 @@ class TestMoveIsJudgedByCoordinates:
         assert "line:0 read the same coordinates afterwards" in msg
         # the cause is not guessed: both reachable explanations are named, and the remedy points at
         # a target sketch_delete_entity actually accepts
-        assert "symmetric under" in msg and "respects any constraints" in msg
+        assert "symmetric under" in msg and "a constraint refused it" in msg
         assert "target='constraint:<index>'" in msg
 
     def test_a_false_return_is_reported_as_a_declined_move(self, mod, sketches):

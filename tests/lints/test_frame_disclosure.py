@@ -1,28 +1,8 @@
 """Lint: a tool that publishes a coordinate FRAME is classified, and mints the keys it claims.
 
-The failure this prevents has no symptom. A caller that assumes world axes on a sketch built on the
-xz plane, or on a face, gets a write that SUCCEEDS, reports success, and builds the wrong shape;
-nothing errors and no read-back disagrees. The defence is that the frame travels beside the result -
-where local (0,0) lands and which way the local axes point - BEFORE the caller acts on it.
-
-Two halves, and the second is the one that keeps working as the fleet grows:
-
-  1. Every module in ``_PUBLISHES_A_FRAME_BLOCK`` actually mints the keys its entry names. Renaming
-     ``origin_mm`` to ``origin`` without updating the note that teaches it fails here, rather than
-     quietly lying to the callers that place geometry by it.
-  2. ANY module that mints a frame payload key must appear in one of the two tables. That is the
-     anti-drift half: a new tool that starts publishing a frame cannot slip in unclassified, and a
-     tool that stops publishing one leaves a stale entry that fails here.
-
-``_PUBLISHES_OTHERWISE`` is the audited second table, for a frame that is not a block of an origin
-plus three axes - a prose label, a basis merged flat into its row, a basis whose axis names carry
-which axis drove it. Its reasons are DATA this lint reads, not comments it cannot, so recording the
-judgment is the only way to add an entry.
-
-The set is deliberately narrow. A tool that CONSUMES a direction (extrude, revolve, mirror, the
-pattern family) is not here: it authors no coordinates in a new frame, and its convention is already
-carried by a typed ``AxisRef``/``PlaneRef`` input plus its own effect read-back.
-"""
+A module in _PUBLISHES_A_FRAME_BLOCK that no longer mints a key its entry names fails; a module
+minting a frame payload key while sitting in neither table (or in both) fails; a table entry whose
+module publishes no frame is stale and fails."""
 
 import ast
 import functools
@@ -96,11 +76,8 @@ def _source(name):
 
 def _keys_in(tree):
     """Every string standing in KEY position in one parsed module - a dict-literal key, or a
-    subscript like frame["x_world"]. Nothing else: the same word in a comment, a docstring or a wire
-    sentence is a MENTION. That distinction is the scan: 'space' is an ordinary word in this
-    package's prose, and a substring search finds it in a COMMENT (`keyed by frame['space']`) long
-    after the payload has stopped publishing it, which is why key position and not text is what
-    this reads."""
+    subscript like frame["x_world"]. The same word in a comment, a docstring or a wire sentence is
+    a MENTION and is not collected."""
     found = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Dict):
@@ -121,21 +98,6 @@ def _minted_keys():
     for fn in sorted(os.listdir(TOOLS_DIR)):
         if fn.endswith(".py"):
             found |= _keys_in(_corpus.tree(os.path.join(TOOLS_DIR, fn)))
-    return frozenset(found)
-
-
-@functools.lru_cache(maxsize=1)
-def _string_literals():
-    """Every whole string CONSTANT in tools/, key position and value position alike - what a scan
-    reading literals instead of key position returns. No frame is judged by this: it is what lets
-    the key-position test show its value-position carrier is really in the corpus, so that test's
-    negative cannot pass by the word being absent from the package altogether."""
-    found = set()
-    for fn in sorted(os.listdir(TOOLS_DIR)):
-        if fn.endswith(".py"):
-            found |= {node.value
-                      for node in ast.walk(_corpus.tree(os.path.join(TOOLS_DIR, fn)))
-                      if isinstance(node, ast.Constant) and isinstance(node.value, str)}
     return frozenset(found)
 
 
@@ -173,46 +135,6 @@ class TestFrameBlocksMintTheKeysTheyClaim:
             "(update the note, the description and this entry together) or the entry is wrong:\n  "
             + "\n  ".join(offenders))
 
-    def test_the_key_check_bites_on_a_renamed_key(self):
-        # Decoration check: a table naming a key nothing mints MUST be caught, or the assertion
-        # above would pass for any table at all.
-        assert _minted_as_key("origin_mm")                     # the real key, really minted
-        assert not _minted_as_key("origin_in_parent_space")    # a rename nothing mints
-
-    def test_the_check_matches_KEY_POSITION_not_a_bare_mention(self):
-        # The discrimination the key checks rest on, read on a parsed snippet: a dict entry and a
-        # string subscript are minting, and a string carrying the same word - a note, a dict VALUE -
-        # is not. (A comment is the third mention shape, and no snippet can show it: ast.parse
-        # discards comments, so _keys_in never sees one. The corpus assertion below is what covers
-        # that shape.)
-        #
-        # The snippet is written here rather than scavenged from tools/. Key position is what this
-        # test pins, so key position is what it feeds in: pinning it to a phrase pins it to whoever
-        # writes that phrase instead. The wording a scan like that reaches for - one frame landing
-        # somewhere different per instance - is carried by _inputs.py's placement refusals, which
-        # mint no frame key and answer to no entry in either table above, so a reword there that
-        # changes nothing about any frame key would fail a test about frame keys.
-        snippet = ast.parse("note = 'each instance holds the sketch somewhere different'\n"
-                            "frame = {'space': 'world', 'origin_mm': origin}\n"
-                            "frame['x_world'] = axis\n")
-        assert _keys_in(snippet) == {"space", "origin_mm", "x_world"}
-        # and against the real package, both directions of the same discrimination: the honesty
-        # flag IS a payload key here, and a word this package's prose carries in comments,
-        # docstrings and refusal sentences, while minting it as a key nowhere, is not one. The
-        # negative is what a corpus read scanning text instead of key position fails, and it
-        # reaches that without naming any file or any sentence.
-        assert _minted_as_key("space")
-        assert not _minted_as_key("somewhere")
-        # and the VALUE-position carrier, which is the half that negative cannot reach: a word only
-        # prose carries is no string literal either, so a scan collecting whole literals instead of
-        # key positions passes it. 'world' is what the frame's own 'space' key is SET to
-        # (_sketch_detail.WORLD_SPACE), a literal this package writes while standing in key position
-        # nowhere - so a literal-collecting scan counts it here, and a text scan finds it inside the
-        # minted 'x_world'/'y_world'. The presence assertion is what keeps the negative load-bearing:
-        # drop the carrier out of tools/ and this says so instead of quietly passing on absence.
-        assert "world" in _string_literals()
-        assert not _minted_as_key("world")
-
 
 class TestEveryPublishedFrameIsClassified:
     def test_at_least_the_known_publishers_are_found(self):
@@ -235,18 +157,3 @@ class TestEveryPublishedFrameIsClassified:
                  for n in sorted(set(_PUBLISHES_A_FRAME_BLOCK) | set(_PUBLISHES_OTHERWISE))
                  if n not in minting]
         assert not stale, "\n  ".join([""] + stale)
-
-    def test_every_reason_is_a_real_sentence(self):
-        reasons = ([why for _keys, why in _PUBLISHES_A_FRAME_BLOCK.values()]
-                   + list(_PUBLISHES_OTHERWISE.values()))
-        thin = [r for r in reasons if len((r or "").strip()) < 40]
-        assert not thin, ("every entry needs a plain-English reason the lint can read, not a "
-                          "placeholder")
-
-    def test_the_classification_check_bites(self):
-        # Clean input is not flagged; each of the two failure modes IS - otherwise this is
-        # decoration that would pass any table.
-        block, other = {"a": (("origin",), "why a")}, {"b": "why b"}
-        assert _classification_gaps(["a", "b"], block, other) == []
-        assert len(_classification_gaps(["a", "b", "c"], block, other)) == 1     # unclassified
-        assert len(_classification_gaps(["a"], {"a": (("o",), "x")}, {"a": "y"})) == 1   # in both

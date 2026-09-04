@@ -1,13 +1,8 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""sys_get_guidance - the server's packaged CAD design guidance, one section per call.
-
-Static packaged content read through ``..guidance.loader``: no arguments gives the section index,
-``section`` gives that one section's rules as the records the document carries, and every payload
-names the resource URI where the same document is served whole as Markdown. Nothing here touches
-the Fusion API, so the tool runs off the main thread.
-"""
+"""sys_get_guidance - the server's packaged CAD design guidance, one section per call. Static
+content read through ``..guidance.loader``; nothing here touches the Fusion API."""
 
 from ._common import ok, error
 from . import _inputs
@@ -25,19 +20,15 @@ INDEX_NOTE = (
     "The one design-guidance document this server packages. Call again with section=<id> for that "
     "section's rules - one section per call. 'sha256' is the content hash of the document served, "
     "and each rule declares which of 'scenarios' it applies to. 'resource_uri' is where the same "
-    "guidance is served as one Markdown document over MCP's resource channel, for a client that "
-    "reads resources rather than calling tools.")
+    "guidance is served as one Markdown document over MCP's resource channel.")
 
 SECTION_NOTE = (
     "Each rule is a record: 'when' the condition it applies under, 'do' the practice, 'except' "
     "where it does not apply, 'prove' the tool call to read the result back through and what to "
     "observe in it, 'scenarios' the cases it declares itself for. 'kind' is carried only by a "
-    "safety invariant - the one declared kind, rendered as '(safety invariant)' in the document "
-    "text; a rule without it is strategy. 'next_sections' names what is left to ask for.")
+    "safety invariant; a rule without it is strategy. 'next_sections' names what is left to ask "
+    "for.")
 
-# Appended to SECTION_NOTE only when rules were dropped, so the escape is named exactly where it is
-# needed: the resource channel serves the document whole (render.body renders every rule of every
-# section), while this tool answers at most loader.MAX_SECTION_RULES per call.
 TRUNCATED_NOTE = (
     " This section holds more rules than one call returns: 'rule_count' of 'rule_total' are in "
     "'rules' and the rest are not here. Read the document at 'resource_uri' over the resource "
@@ -56,8 +47,6 @@ def handler(section=None) -> dict:
         return error(str(exc))
 
     ids = loader.section_ids(doc)
-    # The same address the resource catalog publishes, built from the document's own id by the one
-    # function that builds it - so the tool cannot name a document the resource channel does not.
     result = {"guidance_id": doc.get("guidance_id"), "title": doc.get("title"), "sha256": sha256,
               "resource_uri": resources.uri_for(doc.get("guidance_id"))}
 
@@ -71,16 +60,10 @@ def handler(section=None) -> dict:
 
     sec = loader.find_section(doc, wanted)
     if sec is None:
-        # Only reachable when the shipped document disagrees with the declared section list - a
-        # defect in the packaged data, reported as what the document DOES carry.
         return error(f"The packaged guidance document carries no section '{wanted}'. It carries: "
                      + ", ".join(str(i) for i in ids) + ".")
 
     rules = list(sec.get("rules") or [])
-    # The most rules one response carries, so a section that grows can never make one call answer
-    # with the whole document. The number lives in the guidance package because
-    # gen_guidance.validate refuses a section authored past it: one cap, read by the tool that
-    # truncates and by the gate that decides what may ship.
     shown = rules[:loader.MAX_SECTION_RULES]
     result.update({"section": wanted,
                    "section_title": sec.get("title"),
@@ -98,11 +81,10 @@ def handler(section=None) -> dict:
 TOOL_DESCRIPTION = (
     "Read this server's packaged CAD DESIGN GUIDANCE: task-agnostic practice for building a part "
     "or an assembly - what to settle before the first feature, how design intent is carried in "
-    "parameters and sketches, how an assembly's degrees of freedom are structured, and the read "
-    "that proves each one. No arguments: the section index, with the document's id and content "
-    "hash. 'section': that one section's rules, each a structured record - when it applies, what "
-    "to do, where it does not, and the tool to read the result back through. One section per "
-    "call; the payload names the sections left to ask for."
+    "parameters and sketches, how an assembly's degrees of freedom are structured. No arguments: "
+    "the section index. 'section': that one section's rules, each saying when it applies, what to "
+    "do, and the tool to read the result back through. One section per call; the payload names "
+    "the sections left to ask for."
 )
 
 tool = (

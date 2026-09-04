@@ -43,7 +43,11 @@ class FakeSketchCurves:
 
 
 class FakeSketch:
-    def __init__(self, name, profile_count=1, curve_count=0, profiles=None, text_count=0):
+    def __init__(self, name, profile_count=1, curve_count=0, profiles=None, text_count=0,
+                 compute_deferred=False):
+        # A live sketch always answers isComputeDeferred; True is the state whose `profiles` and
+        # `profiles.count` are both the pre-deferral ones.
+        self.isComputeDeferred = compute_deferred
         self.name = name
         self.profiles = FakeProfiles(profile_count, profiles)
         self.sketchCurves = FakeSketchCurves(curve_count)
@@ -279,6 +283,38 @@ class TestGuards:
         _install([FakeSketch("S", profile_count=0)])
         res = ex.handler(sketch_name="S", distance=5)
         assert res["isError"] is True and "no curves" in res["message"]
+
+    def test_an_index_into_a_deferred_sketch_is_refused(self):
+        # The bare-integer path indexes sketch.profiles directly and never reaches ProfileRef, so
+        # the refusal has to be raised here or the cut lands on a pre-deferral region in silence.
+        _install([FakeSketch("S", profile_count=3, compute_deferred=True)])
+        res = ex.handler(sketch_name="S", distance=5, profile_index=0)
+        assert res["isError"] is True
+        assert "isComputeDeferred=true" in res["message"] and "'S'" in res["message"]
+        assert "'profile_index'" in res["message"]
+        assert "sketch_add_geometry" in res["message"]
+
+    def test_an_index_into_a_sketch_computing_normally_still_extrudes(self):
+        _install([FakeSketch("S", profile_count=3)])
+        out = _payload(ex.handler(sketch_name="S", distance=5, profile_index=0))
+        assert out["sketch"] == "S"
+
+    def test_a_deferred_sketch_reading_zero_profiles_is_refused_not_auto_surfaced(self):
+        # The AUTO surface clause picks the FEATURE TYPE off pcount, and a sketch deferred while
+        # empty then drawn into reads 0 with curves present - so the caller would get an open
+        # SURFACE where a region was asked for, reported as a clean ok.
+        _install([FakeSketch("S", profile_count=0, curve_count=2, compute_deferred=True)])
+        res = ex.handler(sketch_name="S", distance=5, profile_index=0)
+        assert res["isError"] is True
+        assert "isComputeDeferred=true" in res["message"] and "'S'" in res["message"]
+        assert "surface" not in json.dumps(res).lower()
+
+    def test_a_forced_as_surface_still_runs_on_a_deferred_sketch(self):
+        # The other side: as_surface builds from the sketch's CURVES, which a deferral leaves
+        # current - so the explicit request is honoured rather than refused off the profile flag.
+        _install([FakeSketch("S", profile_count=0, curve_count=2, compute_deferred=True)])
+        out = _payload(ex.handler(sketch_name="S", distance=5, as_surface=True))
+        assert out["as_surface"] is True and out["is_solid"] is False
 
 
 # ── multi-profile selection (one extrude over N profiles, not N calls) ──

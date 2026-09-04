@@ -6,10 +6,6 @@ optional hollow wall.
 
   model_pipe -> drive a circular/square/triangular section along a path (model edges or a path
                 sketch) into a solid or HOLLOW tube: plumbing, conduit, tube frames. WRITES.
-
-PipeFeatureInput.isHollow and .sectionThickness set each other (isHollow=true defaults the thickness
-to 0.1 cm; a thickness turns isHollow on), so the two are set hollow-first, thickness-last and the
-result is read back off the created feature.
 """
 
 import adsk.core
@@ -27,9 +23,7 @@ from . import _outputs
 
 app = adsk.core.Application.get()
 
-# section keyword -> adsk.fusion.PipeSectionTypes attribute. The member is looked up through
-# set_verified, so a name this Fusion version does not carry is reported rather than silently kept
-# at the default section.
+# section keyword -> adsk.fusion.PipeSectionTypes attribute.
 _SECTION_TYPES = {
     "circular": "CircularPipeSectionType",
     "square": "SquarePipeSectionType",
@@ -47,13 +41,9 @@ _SECTION_SIZE = _inputs.Distance("section_size", allow_zero=False, allow_negativ
 _WALL_THICKNESS = _inputs.Distance("wall_thickness", allow_zero=False, allow_negative=False,
     required=False, description="Wall thickness; giving it makes the pipe hollow. Omit it with "
                                 "hollow=true to take the API's own wall, reported back measured.")
-# path model-edge handles resolve inside the shared build_path; a path SKETCH is named by the
-# 'sketch:<name>' form instead (sketch curves are not find_geometry handles).
 _TARGET_BODIES = _inputs.BodyRefList("target_bodies", required=False,
     description="Bodies a cut/intersect may affect (prevents cut bleed-through into other bodies).")
 
-# What this tool RETURNS: the resulting body names (a consumer key), the HOLLOW verdict read back off
-# the feature (never the request), and the timeline feature name a delete keys off.
 RETURNS = [
     _outputs.ReturnsName("feature", of="feature", consumers=["design_delete_feature"],
                          absent_when="no_timeline_feature"),
@@ -64,10 +54,8 @@ RETURNS = [
 
 
 def _fraction(raw, label):
-    """(fraction of the path, error) for a distanceOne/distanceTwo input. 0 < v <= 1, where 1 (the
-    API's own default) is the whole path; None when not given. These are RATIOS of the path length,
-    not lengths - 0.5 on a 10 cm path is measured to make exactly 5 cm of pipe - so 'units' does not
-    apply to them."""
+    """(fraction of the path, error) for a distanceOne/distanceTwo input: a ratio over 0 and at most
+    1, None when not given."""
     if raw is None or raw == "":
         return None, None
     try:
@@ -81,22 +69,11 @@ def _fraction(raw, label):
 
 
 def _watched_bodies(host, participants=()):
-    """(bodies, {id: volume}, count) captured BEFORE the mutation - the census a cut/join/intersect is
-    judged by, and the count a direct-mode 'new' body has to raise. Resolved once here so the same
-    objects are read at both ends.
-
-    The PARTICIPANTS are unioned in: a target body can live in another component, and a census scoped
-    to the host's own collection would miss its volume change entirely - reporting a successful cut as
-    'no volume changed'.
-
-    De-duplicated by _common.native_identity, the physical-body key. One physical body reached
-    through two collection paths hands back two wrappers whose OWN tokens differ (measured - a body
-    and its occurrence proxy), and counting it twice doubles the delta. Keyed on the wrapper token
-    instead, two DISTINCT bodies merge: a token is DOCUMENT-LOCAL (measured - two bodies reached
-    through two x-refs of one design read byte-identical tokens), so the body that drops out is never
-    watched at all and a cut that moved its material reports as 'no volume changed'. The `or id(b)`
-    last resort keys an identity-less body apart from every other one - it over-counts, never
-    merges."""
+    """(bodies, {id: volume}, count) captured BEFORE the mutation, the host's bodies unioned with
+    the participants - a target body can live in another component."""
+    # native_identity, not the wrapper token: one physical body reached through two collection
+    # paths hands back wrappers whose own tokens differ, and a token is DOCUMENT-LOCAL, so keying
+    # on it merges distinct bodies across x-refs. `or id(b)` over-counts rather than merging.
     bodies, seen = [], set()
     for b in list(_common.iter_collection(safe(lambda: host.bRepBodies))) + list(participants or []):
         key = _common.native_identity(b) or id(b)
@@ -108,14 +85,9 @@ def _watched_bodies(host, participants=()):
 
 
 def _hollow_verdict(feature, want_hollow, wall_cm):
-    """The hollow read-back check, off the CREATED feature. Returns (is_hollow, thickness_cm, error).
-
-    MEASURED (live sweep): a SOLID-requested pipe reads back isHollow TRUE with sectionThickness
-    0.0 - the platform reports a solid section as a ZERO-WALL hollow one. So the wall carries the
-    verdict and isHollow alone cannot: solid is a zero (or absent) wall, hollow needs a wall above
-    zero that isHollow does not deny. A request that disagrees with what the feature reports is an
-    error - the input-side isHollow/sectionThickness pair overwrite each other, so a wrong wall is a
-    plausible outcome that must never be reported as success."""
+    """(is_hollow, thickness_cm, error) read back off the CREATED feature."""
+    # A solid pipe reads back isHollow TRUE with sectionThickness 0.0, so the WALL carries the
+    # verdict: solid is a zero or absent wall, hollow a wall above zero that isHollow does not deny.
     raw_hollow = safe(lambda: feature.isHollow)
     thickness_cm = _common.measured(lambda: feature.sectionThickness.value)
     has_wall = thickness_cm is not None and thickness_cm > _WALL_EPS
@@ -203,8 +175,8 @@ def handler(path=None, section_size=None, section_type: str = "circular", operat
         participants, berr = _TARGET_BODIES.resolve(target_bodies)
         if berr:
             return error(berr)
-    # The census is counted on the TARGET's own component when there is one - a participant in another
-    # component is where the volume actually moves - and on the pipe's component otherwise.
+    # The census is counted on the TARGET's own component when there is one - that is where the
+    # volume moves - and on the pipe's component otherwise.
     census = _common.census_host(participants[0], comp) if participants else comp
     watched, vol_before, count_before = _watched_bodies(census, participants)
 
@@ -254,11 +226,8 @@ def handler(path=None, section_size=None, section_type: str = "circular", operat
             return error(f"Could not set {label}: {e}")
 
     if participants is not None:
-        # The scope is ASSIGNED but UNVERIFIABLE. MEASURED: participantBodies is write-only - the
-        # assignment succeeds and reading the property back raises AttributeError - so no read-back
-        # of any kind (set_verified, token comparison) is possible. Nor does the volume gate below
-        # stand in for one: it sums ONE total delta over the whole watched set, and a scope the
-        # platform dropped moves that total MORE, not less. 'scoped_to' is what was requested.
+        # participantBodies is write-only: the assignment succeeds and reading the property back
+        # raises AttributeError, so the scope cannot be verified. 'scoped_to' is the request.
         try:
             pin.participantBodies = list(participants)  # a Python list, not an ObjectCollection
             scoped_to = [safe(lambda b=b: b.name) for b in participants]
@@ -274,7 +243,7 @@ def handler(path=None, section_size=None, section_type: str = "circular", operat
     if not feature and not direct_no_feature:
         return error(_common.no_feature_error(design, "Pipe"))
 
-    # ── the effect gate: a body landed with volume, or some body's volume moved ──
+    # The effect gate: a body landed with volume, or some body's volume moved.
     result = _common.result_bodies(feature) if feature else []
     body_names = [f["name"] for f in _common.body_facts(result)]
     volume_new = None
@@ -343,16 +312,12 @@ def handler(path=None, section_size=None, section_type: str = "circular", operat
             return error(herr + " " + _common.failed_effect_remedy(design, feature))
         payload["feature"] = safe(lambda: feature.name)
         payload["hollow"] = bool(is_hollow)
-        # A solid pipe's feature reads a 0.0 wall (measured), which is not a wall - publish the key
-        # only when the pipe is actually hollow, so nobody reads a zero as a measurement.
+        # A solid pipe's feature reads a 0.0 wall, which is not a wall.
         if is_hollow:
             payload["wall_thickness"] = round(thickness_cm * inv, 6)
         payload["section_size_measured"] = _common.measured(lambda: feature.sectionSize.value, inv)
-        # No cap read-back is published. MEASURED on a freshly added hollow solid pipe:
-        # startFaces, endFaces AND sideFaces all read as an EMPTY BRepFaces collection (count 0) -
-        # never None, and never populated - so on this Fusion build those collections cannot tell a
-        # capped end from an uncapped one, and any capped/uncapped number derived from them would be
-        # a fabricated reading. Section the body with view_section to see the ends.
+        # No cap read-back is published: on a freshly added pipe startFaces, endFaces and sideFaces
+        # all read as EMPTY BRepFaces collections, so they cannot tell a capped end from an open one.
     else:
         # Direct mode: path/distanceOne/distanceTwo/sectionThickness all read null off a
         # non-parametric feature, so the hollow wall genuinely cannot be verified here.
@@ -366,18 +331,15 @@ def handler(path=None, section_size=None, section_type: str = "circular", operat
 
 
 TOOL_DESCRIPTION = (
-"Build a pipe/tube along a path in one feature: a circular, square, or triangular section, solid or "
-"HOLLOW with a wall thickness - model_sweep is the drawn-profile version. 'operation': new | join | "
-"cut | intersect; cut/intersect act on existing bodies. The two path_fraction inputs are FRACTIONS "
-"of the path, not lengths. A parametric result reports the hollow verdict and the wall read back off "
-"the created pipe; a DIRECT-mode design has no feature to read them from, and the result says so.\n\n"
+"Build a pipe/tube along a path in one feature - solid, or HOLLOW with a wall thickness. "
+"model_sweep is the drawn-profile version.\n\n"
 + _outputs.produces_block(RETURNS)
 )
 
 pipe_tool = (
     Tool.create_simple(name="model_pipe", description=TOOL_DESCRIPTION)
     .add_input_property("path", {"type": ["string", "array"], "items": {"type": "string"},
-            "description": "The curve to follow: a find_geometry edge 'handle' (a single handle chains across TANGENT connections; a sharp corner stops the chain - the 'path' count is the truth), a JSON list of edge handles (used exactly - they must connect into one path), OR 'sketch:<name>' for a path sketch."})
+            "description": "The path: a find_geometry edge handle (chains across TANGENT connections; a sharp corner stops the chain - the 'path' count is the truth), a JSON list of connected edge handles (used exactly), or 'sketch:<name>'."})
     .add_input_property(*_SECTION_SIZE.as_property())
     .add_input_property(*_SECTION_TYPE.as_property())
     .add_input_property(*_OPERATION.as_property())

@@ -2,13 +2,9 @@
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
 """MCP building block: derive another saved document's design (whole, or a named subset) into a
-component of the active design - a one-way linked COPY (never an instance): it updates FROM the
-source, but edits made here never travel back. Component.features.deriveFeatures -> createInput ->
-populate -> add(). Requires a PARAMETRIC destination design (Insert > Derive has no Direct-modeling
-equivalent). Derives from an ALREADY-OPEN source: Fusion opens documents asynchronously, so a source
-that is not open yet cannot be loaded within one call and createInput returns None (live-verified) -
-the tool requires the source open (doc_open) rather than failing cryptically mid-derive.
-"""
+component of the active design - a one-way linked COPY that updates FROM the source while edits here
+never travel back. Requires a PARAMETRIC destination design and an ALREADY-OPEN source: Fusion opens
+documents asynchronously, so createInput returns None for a source that is not open yet."""
 
 import adsk.core
 import adsk.fusion
@@ -252,11 +248,9 @@ def handler(document_id: str = "", into_component: str = "",
         return error(f"Could not resolve '{raw}' to a saved document. Tried: {tried}. Pass a "
     "lineage URN or web URL (from data_get). The document must be SAVED to the cloud.")
 
-    # Derive needs the source design LOADED. Fusion opens documents ASYNCHRONOUSLY (the load
-    # completes on a later main-thread cycle, and this handler holds the main thread until it
-    # returns), so a source that is not already open cannot be loaded within this one call -
-    # createInput returns None on the half-loaded design (live-verified). Require it open; the
-    # natural workflow already has it open (an agent inspects the source to learn its part names).
+    # Derive needs the source design LOADED. Fusion opens documents ASYNCHRONOUSLY and this handler
+    # holds the main thread until it returns, so a source that is not already open cannot load
+    # within the call - createInput returns None on the half-loaded design.
     source_doc = _find_open_document(data_file)
     if source_doc is None:
         return error(f"The source document '{safe(lambda: data_file.name) or resolved}' is not "
@@ -315,26 +309,23 @@ def handler(document_id: str = "", into_component: str = "",
         return error(f"Could not configure the derive: {e}")
 
     before_params = safe(lambda: design.userParameters.count, 0) or 0
-    # A source value can land as a read-only MODEL parameter, which the userParameters delta never
-    # sees. Those land at the DESIGN level, not on the derived component (measured: a derived
-    # component's own modelParameters held only its LOCAL feature's parameters while every imported
-    # one sat in design.allParameters), so the honest count is a design-wide before/after delta.
+    # A source value can land as a read-only MODEL parameter the userParameters delta never sees,
+    # and it lands at DESIGN level rather than on the derived component - so the count that sees it
+    # is a design-wide before/after delta.
     before_all_params = _common.counted(lambda: design.allParameters.count)
     before_bodies, _ = _common.design_wide_counts(design)
     before_occ_tokens = _occurrence_tokens(comp)
     root = safe(lambda: design.rootComponent)
     # same_component, not `is`: component wrappers are never identity-stable, so `comp is not root`
-    # reads True even at the root and this would re-walk the same collection. The branch is an
-    # optimisation only - re-walking root yields the same census - so an unproven answer takes the
-    # walk, which is right whichever component `comp` turns out to be.
+    # reads True even at the root. The branch is an optimisation only, so an unproven answer takes
+    # the walk, which is right whichever component `comp` turns out to be.
     target_is_root = _common.same_component(comp, root)
     before_root_tokens = (before_occ_tokens if target_is_root is True
                           else _occurrence_tokens(root))
 
-    # The platform routes a derive into the ACTIVE component (the UI Insert>Derive behavior),
-    # IGNORING which component's deriveFeatures collection built the input - without activation
-    # a derive "into" a non-active component lands as a ROOT sibling (live-verified). So nesting
-    # = activate the target, add, restore; the landing read-back below verifies where it went.
+    # The platform routes a derive into the ACTIVE component, IGNORING which component's
+    # deriveFeatures collection built the input: without activation a derive "into" a non-active
+    # component lands as a ROOT sibling. So nesting = activate the target, add, restore.
     prev_active = safe(lambda: design.activeComponent.name)
     if into_occ is not None:
         if not safe(lambda: into_occ.activate(), False):
@@ -373,18 +364,15 @@ def handler(document_id: str = "", into_component: str = "",
         return error("Derive was created but its documentReference reads isOutOfDate=true "
                       "immediately at creation - the link did not land against the resolved version.")
 
-    # What actually landed. feature.bodies holds DIRECT top-level bodies (a body-level or
-    # single-body-at-root derive); an occurrence-tree derive lands them nested under a derived
-    # occurrence instead, where feature.bodies reads empty - so count BOTH, plus the authoritative
-    # design-wide body delta.
+    # feature.bodies holds DIRECT top-level bodies only: an occurrence-tree derive lands them nested
+    # under a derived occurrence and reads empty here, so both are counted plus the design-wide delta.
     direct_bodies = [{"name": safe(lambda b=b: b.name),
                       "is_derived": bool(safe(lambda b=b: b.isDerived, False))}
                      for b in _common.result_bodies(feature)]
     derived_components = _new_derived_occurrences(comp, before_occ_tokens)
-    # `is False` only. The net's error tells the caller the nesting FAILED and to delete the feature;
-    # run against a target that may itself be the root, a successful root derive answers that net
-    # positively and the call would report its own success as a failure. An unproven answer skips the
-    # net and DISCLOSES that the landing was not checked - see landing_note below.
+    # `is False` only: the net's error says the nesting FAILED, and run against a target that may
+    # itself be the root a successful root derive would trip it. An unproven answer skips the net and
+    # DISCLOSES that the landing was not checked.
     landing_note = None
     if not derived_components and target_is_root is None:
         landing_note = ("Whether the derive's target component is this design's root could not be "
@@ -470,20 +458,17 @@ RETURNS = [
     _outputs.ReturnsName("feature_name", of="derive feature", consumers=["design_delete_feature"]),
     _outputs.ReturnsUrn("document_id", consumers=["doc_open", "doc_update_xref"]),
     _outputs.ReturnsName("derived_occurrence", of="derived body or occurrence",
-                          consumers=["model_fillet", "joint_create", "joint_at_geometry"]),
+                          consumers=["model_fillet", "joint_create"]),
 ]
 
 
 TOOL_DESCRIPTION = (
     "Insert a DERIVE of another document's design into a component of the active document - a "
-    "one-way linked copy: it updates from the source; edits made here never travel back. Derives "
-    "the whole source by default; scope with source_components / source_bodies (source-side "
-    "names), and exclude_components / exclude_bodies to omit some. For a linked INSTANCE instead, "
-    "use doc_insert_occurrence. Requires a parametric design and the source document already OPEN "
-    "(doc_open - Fusion loads documents asynchronously, so it can't open within the same call). "
-    "Derives the source's last SAVED cloud version (unsaved source edits aren't included - save "
-    "first). Freshness: doc_get(include=['xref_tree']) shows kind='derive' rows; doc_update_xref "
-    "refreshes, else delete and re-derive.\n"
+    "one-way linked copy: it updates from the source; edits here never travel back. Whole source by "
+    "default; scope with source_components / source_bodies (source-side names) and omit parts with "
+    "exclude_components / exclude_bodies. Needs a parametric design and the source document already "
+    "OPEN (doc_open), and derives its last SAVED cloud version. For a linked INSTANCE use "
+    "doc_insert_occurrence; refresh with doc_update_xref.\n"
     + _outputs.produces_block(RETURNS)
 )
 
@@ -496,20 +481,19 @@ tool = (
     )
     .add_input_property(*_INTO_COMPONENT.as_property())
     .add_input_property("source_components", {"type": "array", "items": {"type": "string"},
-            "description": "Component names in the SOURCE to derive (each -> its occurrence(s)); omit for the "
-            "whole source. Exact case-insensitive match; ambiguous/unknown is refused with the available names."})
+            "description": "Component names in the SOURCE to derive; omit for the whole source."})
     .add_input_property("source_bodies", {"type": "array", "items": {"type": "string"},
-            "description": "Body names in the SOURCE to derive - a name, or 'Component/Body' to disambiguate."})
+            "description": "Body names in the SOURCE - a name, or 'Component/Body'."})
     .add_input_property("exclude_components", {"type": "array", "items": {"type": "string"},
-            "description": "Source component names to EXCLUDE (excludedEntities)."})
+            "description": "Source component names to EXCLUDE."})
     .add_input_property("exclude_bodies", {"type": "array", "items": {"type": "string"},
-            "description": "Source body names to EXCLUDE - a name, or 'Component/Body'."})
+            "description": "Source body names to EXCLUDE."})
     .add_input_property("include_parameters", {"type": "boolean",
-            "description": "Import the source's component user parameters (isIncludeComponentParameters). Default true."})
+            "description": "Import the source's component user parameters. Default true."})
     .add_input_property("include_favorite_parameters", {"type": "boolean",
-            "description": "Import the source's FAVORITE user parameters (isIncludeFavoriteParameters). Default true."})
+            "description": "Import the source's FAVORITE user parameters. Default true."})
     .add_input_property("place_at_origin", {"type": "boolean",
-            "description": "Place all derived objects at the destination component's origin (isPlaceObjectsAtOrigin). Default true."})
+            "description": "Place derived objects at the destination origin. Default true."})
     .strict_schema()
 )
 

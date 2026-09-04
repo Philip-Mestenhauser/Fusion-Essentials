@@ -3,21 +3,8 @@
 
 """Read each corpus file once, parse it once - the shared I/O behind the lints in this directory.
 
-Most lints here scan the SAME corpus (commands/mcpServer/ + tests/), and several parse every one of
-its ~420 modules with ast.parse. That reading and parsing is identical work whoever asks for it, so
-it lives here memoized; the rules, the tables and the assertions stay in each lint.
-
-The cache is keyed by path and lives for ONE pytest process. That is sound because the lints only
-READ the corpus - nothing rewrites a file mid-run, so a cached text or tree cannot go stale against
-its file. Two consequences to respect:
-
-  - Never reuse this from a watch-mode or otherwise long-lived process that outlives an edit.
-  - A test that WRITES a file and then scans it must write a path it scans once (a fresh tmp_path
-    file per case), never rewrite one it already scanned through here.
-
-``tree()`` hands out ONE AST object per file, shared by every caller, so a consumer must walk it
-READ-ONLY: a mutated node would be seen by every later reader.
-"""
+Memoized per path for ONE pytest process, so a test that writes a file then scans it must use a
+fresh path; tree() hands every caller the SAME AST object, which they walk read-only."""
 
 import ast
 import os

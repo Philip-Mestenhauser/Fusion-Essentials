@@ -1,57 +1,10 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Lint: every file a doc or comment cites exists, every tool name a doc cites is registered, every
-symbol a dotted citation points at is defined by the module it names, and prose cites bare basenames.
-
-The constitution docs and source comments point at files as the enforcement behind a convention
-("enforced by test_tool_naming.py", "copy test_model_mirror.py", "see _inputs.py"), they name tools
-to teach the surface ("data_get reads the Data API", "convert with mesh_to_brep"), and they point
-INTO a module at one symbol ("resolve via _inputs.resolve_inputs"). All three kinds of pointer rot
-silently when a file is renamed or moved, a tool is renamed or folded away, or a symbol is renamed
-inside a file that survives: the reader is sent somewhere that no longer exists. Four rules keep
-them honest, over ONE membership of scanned prose - so a doc can never be checked for dangling FILE
-citations while its dangling TOOL citations go unchecked (or the reverse):
-
-  1. EXISTS - every cited `<name>.py` / `<name>.md` resolves by BASENAME anywhere under the repo, so a
-     citation survives the file moving between directories and only fails when the file truly stops
-     existing. This is what lets the docs LEAN on the code: once a citation can't dangle, prose can
-     shrink to a rule plus a verified pointer instead of re-explaining what the lint enforces.
-  2. REGISTERED - every tool-SHAPED token cited in the docs resolves against the LIVE registry.
-     Together with rule 1 this is the in-house, dependency-free equivalent of a doc-build
-     cross-reference check, but against runtime truth instead of symbols a doc tool happens to know.
-  3. BARE - an inline-code file citation in the constitution docs is a bare basename, never a path
-     (`test_tool_naming.py`, not `tests/lints/test_tool_naming.py`): a path breaks on every move, a
-     basename survives it. Clickable markdown links `[text](path)` may keep their path - only inline
-     `code` citations are checked - and a command example (`py -3 tests/gen_wiring.py`) is not a bare
-     file citation, so it is left alone.
-  4. SYMBOL - a dotted `<module>.<symbol>` citation names something that module still defines. Rule
-     1 cannot see this one: `_cam_common.find_operation` keeps resolving as a FILE for as long as
-     _cam_common.py exists, however the symbol inside it is renamed. The answer is the module's own
-     AST - a module-level def/class/assignment target, or an import binding (`from . import
-     _common` makes `_common` an attribute of the importing module too). A module half that names
-     nothing under commands/mcpServer/ or tests/ (`adsk.core`, `json.dumps`, a result-dict key) is
-     SKIPPED, never flagged: with no module to read there is no claim to check.
-
-The EXISTS rule and the REGISTERED rule scan different SURFACES, and the difference is not
-arbitrary. EXISTS also reads the server source: a docstring/comment that cites a file rots the same
-way a doc does. REGISTERED is docs-only, because in source a tool-shaped token can't be told apart
-from a result-dict key or a
-param name (`sketch_name`, `joint_count`, `saved_to_cloud` are all family_word snake_case), so a
-source scan is all false positives - a cross-tool redirect in a wire string is verified by code
-review, not here. In docs, tool names are what get cited, so the signal is clean.
-
-SYMBOL takes the EXISTS membership - the same docs, the same server source - but inside a source
-module reads only the hand-written PROSE: its comments and docstrings. The rest of a module writes
-the same dotted shape about things no module AST can answer for. Code walks instances whose local
-name matches a module basename (`item.primitive` reads the registry item a dispatch is handling,
-`joints.add` calls the Fusion API), and wire text names another TOOL's payload key the same way
-(design_get's description sends a reader to `workspace_orient.is_healthy`, a result field). Prose is
-where a module citation is written, so prose is where it is checked - the same cut rule 2 makes.
-
-A template placeholder (`test_<tool>.py`) is not a real reference - the `<` stops the regex - so it is
-skipped, not flagged.
-"""
+"""Lint: every file a doc or comment cites exists, every tool name a doc cites is registered, and
+every symbol a dotted citation points at is defined by the module it names.
+A file resolves by BASENAME anywhere under the repo; a tool resolves against the LIVE registry; a
+`<module>.<symbol>` resolves against that module's AST, and an unknown module half is skipped."""
 
 import ast
 import io
@@ -60,8 +13,6 @@ import tokenize
 from collections import Counter
 from functools import lru_cache
 from pathlib import Path
-
-import pytest
 
 import _corpus
 from conftest import register_all_tools
@@ -92,11 +43,13 @@ _RUNTIME_LOGS = {"futil.log", "app.log"}
 
 @lru_cache(maxsize=None)
 def _present():
-    # basename -> how many files carry it, over the whole repo. Both tests below ask for it, and
-    # the three walks are the expensive half of this lint, so the census is built once per process.
+    # basename -> how many files carry it, over the whole repo. .claude/worktrees/ holds agent
+    # checkouts of this same repo, so counting them would answer "that file exists" for a file
+    # deleted here and still present in an abandoned worktree.
     counts = Counter()
+    worktrees = REPO / ".claude" / "worktrees"
     for ext in ("*.py", "*.md", "*.log"):
-        counts.update(p.name for p in REPO.rglob(ext))
+        counts.update(p.name for p in REPO.rglob(ext) if worktrees not in p.parents)
     counts.update(_RUNTIME_LOGS)
     return counts
 
@@ -132,34 +85,9 @@ class TestDocCitations:
             "A doc or source comment cites a file that doesn't exist (renamed/removed? cite the "
             "current name):\n  " + "\n  ".join(offenders))
 
-    def test_prose_cites_bare_basenames(self):
-        # Only flag a path whose BASENAME is unique in the repo - then the bare name resolves
-        # unambiguously and survives a move. When the basename is ambiguous (entry.py, __init__.py),
-        # the path is doing disambiguation work, not a location hint, so it is left alone.
-        present = _present()
-        offenders = []
-        for doc in CONSTITUTION_DOCS:
-            if not doc.exists():
-                continue
-            for m in _INLINE_CODE.finditer(_corpus.text(doc)):
-                content = m.group(1).strip()
-                if not (_FILE.fullmatch(content) and ("/" in content or "\\" in content)):
-                    continue
-                base = _basename(content)
-                if present[base] == 1:
-                    offenders.append(f"{doc.relative_to(REPO)} cites `{content}` - use the bare "
-                                     f"basename `{base}` (a path breaks when the file moves)")
-        assert not offenders, (
-            "An inline-code file citation uses a path, not a bare basename (clickable [text](path) "
-            "links may keep a path; inline `code` citations may not):\n  " + "\n  ".join(offenders))
 
-
-# ── the tool-name resolver ─────────────────────────────────────────────────────
-#
 # A token counts as a tool citation when it is snake_case AND either its first segment is a known
-# tool family or it is a converter shaped X_to_Y. `known` (registered tools + every tool/helper
-# MODULE basename) and the shrink-only _NOT_A_TOOL table (a helper function or an action value a doc
-# names on purpose) keep legitimate non-tool references from flagging.
+# tool family or it is a converter shaped X_to_Y.
 
 _SNAKE = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+")
 
@@ -224,14 +152,10 @@ class TestToolCitations:
         assert not stale, "stale _NOT_A_TOOL entries:\n  " + "\n  ".join(stale)
 
 
-# ── the module-symbol resolver ─────────────────────────────────────────────────
-#
-# A citation is `<module>.<symbol>` read off the PROSE (a doc whole; a source module's comments and
-# docstrings), judged on its first two segments - `_inputs._common.design` is a claim about
-# `_common` in _inputs.py, and where that leads next is _common's own business. The head must open
-# the dotted path (a tail like the `version` of `Milestone.version.versionNumber` is a claim about a
-# class, not a module) and must be spelled as the module is: `_cam_common`, not `cam_common`, so an
-# API call on a `joints` collection is not read as a citation of _joints.py.
+# A citation is `<module>.<symbol>` judged on its first two segments. The head must OPEN the dotted
+# path (a tail like the `version` of `Milestone.version.versionNumber` is a claim about a class) and
+# must be spelled as the module is - `_cam_common`, not `cam_common` - so an API call on a `joints`
+# collection is not read as a citation of _joints.py.
 
 _DOTTED = re.compile(r"(?<![\w.])(_?[a-z][a-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)")
 # tails rule 1 owns: `_inputs.py` is a FILE citation, checked there and skipped here.
@@ -243,8 +167,6 @@ _NOT_A_MODULE_SYMBOL = {
     "tool.add_input_property": "a Tool INSTANCE's wiring method - tool.py holds the class the "
                                "method is on, and every tool builds through an instance of it",
     "item.primitive": "a field of the registry Item a dispatch is handling, not of item.py",
-    "joint_at_geometry.motion": "the joint_at_geometry TOOL's 'motion' input, not a symbol in its "
-                                "module",
 }
 
 
@@ -319,73 +241,26 @@ class TestSymbolCitations:
             "(renamed/removed? cite the current name, or name a genuine non-module reference in "
             "_NOT_A_MODULE_SYMBOL with a reason):\n  " + "\n  ".join(offenders))
 
-    def test_the_symbol_check_bites(self, monkeypatch):
-        # the detection itself, off a synthetic citation list: a symbol its module does not define
-        # is reported even though the MODULE resolves (rule 1 sees only the file and stays quiet),
-        # a symbol it does define is not, and a head that is no module of ours is skipped.
-        import test_doc_citations as tdc
-        src = MCP / "tools" / "_inputs.py"
-        monkeypatch.setattr(tdc, "_symbol_citations",
-                            lambda: ((src, "_inputs", "resolve_inputs"),
-                                     (src, "_inputs", "no_such_helper"),
-                                     (src, "adsk", "core")))
-        with pytest.raises(AssertionError) as caught:
-            tdc.TestSymbolCitations().test_cited_symbols_are_defined()
-        reported = str(caught.value)
-        assert "_inputs.no_such_helper" in reported, reported
-        assert "resolve_inputs" not in reported and "adsk" not in reported, reported
-
-    def test_docs_are_a_scanned_symbol_surface(self):
-        # the collection's DOC half, over the real corpus: a citation that is never COLLECTED is
-        # never checked, and no other test here notices - the self-bite drives a synthetic list,
-        # and the exemption table resolves through source prose. So pin the citations a doc makes
-        # ALONE: for those, the doc surface is the only reader, and dropping it takes them with it.
-        judged = [(src, mod, sym) for src, mod, sym in _symbol_citations() if mod in _modules()]
+    def test_the_symbol_surface_still_collects_every_half(self):
+        # A citation that is never COLLECTED, or whose module never RESOLVES, is skipped rather
+        # than flagged - so each half can be narrowed away with nothing to report and the rule
+        # above still green. Three pins over the real corpus, one per way that happens.
+        mods = _modules()
+        judged = [(src, mod, sym) for src, mod, sym in _symbol_citations() if mod in mods]
         in_source = {(mod, sym) for src, mod, sym in judged if src not in CONSTITUTION_DOCS}
         doc_only = {(mod, sym) for src, mod, sym in judged if src in CONSTITUTION_DOCS} - in_source
         assert doc_only, (
-            "no module citation is collected from the constitution docs alone - either the docs "
-            "dropped out of the SYMBOL surface (_scanned_files/_symbol_citations) and their "
-            "citations are now unchecked, or every one of them is repeated in source prose, or "
-            "the last doc-only one was reworded away (a doc that still writes a module.symbol "
-            "pointer says it is the surface that broke, not the prose)")
-        # and the margin this pin keeps over the underscore-head pin below: a doc-only citation of
-        # an UNDERSCORE-spelled module leaves the surface WITH that head group, so a set holding
-        # only those empties for a regex reason while reporting a doc-surface one. The plain-spelled
-        # member is what lets this pin fail for its own reason alone, so its loss is reported here
-        # rather than left to shrink this test into a second copy of that one.
-        plain = {mod for mod, _sym in doc_only if not mod.startswith("_")}
-        assert plain, (
-            "every doc-only module citation names an underscore-spelled module, so this pin holds "
-            "nothing the underscore-head pin below does not already hold: a head group that stops "
-            "opening on an underscore empties this set too, and reports itself here as 'the docs "
-            "dropped out of the SYMBOL surface'. Give a constitution doc a <module>.<symbol> "
-            "pointer at a plain-spelled module that no source comment or docstring repeats, or "
-            "re-derive this pin from something that head group cannot take with it")
-
-    def test_underscore_spelled_modules_are_collected(self):
-        # the COLLECTION's regex-head half, over the real corpus: this repo spells its shared
-        # modules with a leading underscore, so `_inputs.resolve_inputs` is the dominant citation
-        # form. A head group that does not take that underscore IN matches none of them - left
-        # outside the group it is a word character, and the lookbehind refuses to open the match
-        # after it - and a citation that is never collected is never judged, silently.
-        underscored = {(mod, sym) for _, mod, sym in _symbol_citations()
-                       if mod.startswith("_") and mod in _modules()}
+            "no module citation is collected from the constitution docs alone - the docs dropped "
+            "out of the SYMBOL surface (_scanned_files/_symbol_citations) and their citations are "
+            "now unchecked")
+        underscored = {(mod, sym) for _, mod, sym in judged if mod.startswith("_")}
         assert underscored, (
             "no citation of an underscore-spelled module is collected - _DOTTED's head group no "
-            "longer opens on a leading underscore (`_?[a-z]...`), so `_inputs.resolve_inputs`, "
-            "`_cam_common.find_operation` and every pointer like them left the SYMBOL surface")
-
-    def test_tests_tree_resolves_cited_modules(self):
-        # the RESOLUTION's tests-tree half, over the real corpus: a citation whose module half does
-        # not resolve is SKIPPED as "no module of ours", never flagged - so narrowing _modules() to
-        # the server tree alone weakens the rule with nothing to report and every other test green.
-        # Pin that a module living only under tests/ (conftest.py, live_api_facts.py) still answers.
-        mods = _modules()
+            "longer opens on a leading underscore (`_?[a-z]...`), so `_inputs.resolve_inputs` and "
+            "every pointer like it left the SYMBOL surface")
         tests_tree = REPO / "tests"
-        checked = {(mod, sym) for _, mod, sym in _symbol_citations()
-                   if mod in mods
-                   and all(tests_tree in path.parents for path in mods[mod])
+        checked = {(mod, sym) for _, mod, sym in judged
+                   if all(tests_tree in path.parents for path in mods[mod])
                    and any(sym in _top_level(path) for path in mods[mod])}
         assert checked, (
             "no cited symbol resolves through a module under tests/ - the tests tree dropped out "

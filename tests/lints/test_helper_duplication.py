@@ -1,19 +1,9 @@
 """Lint: a shared helper lives in exactly ONE module - its home (CLAUDE.md "Reuse before you write").
+A denylisted symbol (one optional leading underscore allowed) is defined in its home module and
+nowhere else under tools/; a same-named definition doing a different job takes an _ALLOWLIST entry.
+Two shared VALUE shapes are matched by shape below, since a renamed copy slips a name denylist."""
 
-Fusion-Essentials keeps its shared conventions in a handful of ``_``-prefixed modules
-(``_common``, ``_cam_common``, ``_data_common``, ``_export``, ...). A helper re-implemented locally
-inside a tool file instead of imported from its home diverges silently the next time the home module
-is fixed or extended - the local copy keeps stale (or wrong) behavior forever. This is a DENYLIST
-lint: for each known shared symbol, its definition must appear in its home module and NOWHERE else
-under ``tools/``. Growing this list is how a future consolidation locks itself in.
-
-The pattern accepts one optional leading underscore on the symbol: a private re-roll
-(``def _target_sketch(...)`` of ``_common.target_sketch``) is the same duplication wearing a
-module-private name. A same-named definition that is genuinely a DIFFERENT job (a legal-values
-tuple named like a name->enum map) is named in ``_ALLOWLIST`` with a reason; the staleness test
-keeps each entry real (still defined there, still different from the home definition).
-"""
-
+import ast
 import os
 import re
 
@@ -41,7 +31,22 @@ _DENYLIST = {
     "setup_names": ("_cam_common", "def"),
     "op_state_tally": ("_cam_common", "def"),
     "op_state_facts": ("_cam_common", "def"),
+    # The ONE hasToolpath tally over a program's held operations, keeping the unreadable flag apart
+    # from a False one; a second copy is how cam_post's posted_operations and cam_get's come to
+    # count an operation the other one does not.
+    "toolpath_present_tally": ("_cam_common", "def"),
     "op_primary_state": ("_cam_common", "def"),
+    "op_is_suppressed": ("_cam_common", "def"),
+    # The rail-PAIR drive parameter's NAME and the read over it. cam_select_geometry feeds a rail
+    # pair into it and cam_get_status keys its rail triage on carrying it, so a second copy is how
+    # renaming the parameter leaves one of them promising a triage the other never offers.
+    "SWARF_CONTOURS_PARAM": ("_cam_common", "assign"),
+    "is_rail_driven": ("_cam_common", "def"),
+    # The ONE document-independent OperationStrategy.createFromString seam and the tri-state
+    # entitlement read over it; a second copy is how the orient's capability block and cam_generate's
+    # launch pre-flight come to disagree about one strategy.
+    "create_strategy": ("_cam_common", "def"),
+    "strategy_generation_allowed": ("_cam_common", "def"),
     "validity_basis": ("_cam_common", "def"),
     # The ONE 'max_results' clamp every capped read runs under (CAM and non-CAM alike): one home so
     # the not-a-number fallback and the 1..ceiling hold cannot be right in one read and stale in the
@@ -87,6 +92,13 @@ _DENYLIST = {
     # and setup parameter editors validate the SAME two wire forms, so a second copy is how one of
     # them starts accepting a form the other refuses.
     "parse_parameters": ("_cam_common", "def"),
+    # The ONE "does this parameter store its value QUOTED" decision on a CAM write path (the
+    # operation editor, the setup editor, the geometry-mode writer). A second copy is how one of
+    # them starts sending a bare enumeration value Fusion refuses while its sibling wraps it.
+    "matched_quoting": ("_cam_common", "def"),
+    # The ONE wrap-in-single-quotes-and-escape-the-apostrophes codec. A re-roll is how one writer
+    # starts escaping a character its sibling sends through, on a store nothing measured.
+    "quote_expression": ("_cam_common", "def"),
     # The ONE CAM library folder-tree walk (tool / post / template libraries all nest folders under
     # a LibraryLocations root) plus its collect-the-asset-urls projection and its raise-tolerant
     # child read. A local re-roll is how one library read loses the depth/folder bound - an
@@ -410,6 +422,11 @@ _DENYLIST = {
     # The orient + refresh-then-grab capture mechanics both screenshot tools share.
     "apply_named_view": ("_view_common", "def"),
     "capture_png_b64": ("_view_common", "def"),
+    # The standoff an orient rebuilds the eye at, and the distance that stands in when the camera's
+    # own will not read. view_set carried a re-rolled `... or 10.0`, ten times nearer than
+    # apply_named_view's 100 and disclosing nothing - one orient silently framing unlike the other.
+    "standoff_distance": ("_view_common", "def"),
+    "STANDOFF_FALLBACK_CM": ("_view_common", "assign"),
 }
 
 
@@ -536,3 +553,66 @@ class TestHelperDefinedOnlyInItsHomeModule:
                 stale.append(f"({mod_name}, {symbol}): now identical to {home}'s definition - "
                              f"a true duplicate; collapse it onto {home} and remove the entry")
         assert not stale, "stale allowlist entries:\n  " + "\n  ".join(stale)
+
+
+# The value-shape arm: two shared maps a local copy re-rolls under a NAME the denylist above cannot
+# match (`_OPERATIONS`, `_SURFACE_OPS`, `_AXES`), so they are matched on the literal's shape instead.
+
+def _names_a_feature_operation(node):
+    return (isinstance(node, ast.Constant) and isinstance(node.value, str)
+            and node.value.endswith("FeatureOperation"))
+
+
+def _is_feature_operations_map(node):
+    return isinstance(node, ast.Dict) and any(_names_a_feature_operation(v) for v in node.values)
+
+
+def _is_unit_axis_vector(node):
+    """True for a (1,0,0)/(0,1,0)/(0,0,1)-shaped literal: 3 numeric elements, one 1 and two 0s."""
+    if not isinstance(node, (ast.Tuple, ast.List)) or len(node.elts) != 3:
+        return False
+    vals = []
+    for e in node.elts:
+        if isinstance(e, ast.Constant) and isinstance(e.value, (int, float)) and not isinstance(e.value, bool):
+            vals.append(e.value)
+        else:
+            return False
+    return sorted(vals) == [0, 0, 1]
+
+
+def _is_xyz_vector_map(node):
+    """True for a dict literal mapping the keys 'x', 'y' AND 'z' to unit-axis vectors."""
+    if not isinstance(node, ast.Dict):
+        return False
+    keyed = set()
+    for k, v in zip(node.keys, node.values):
+        if isinstance(k, ast.Constant) and isinstance(k.value, str) and _is_unit_axis_vector(v):
+            keyed.add(k.value.lower())
+    return {"x", "y", "z"}.issubset(keyed)
+
+
+def _shape_offenders(home_file, matches):
+    offenders = []
+    for fn in _all_tool_files():
+        if fn == home_file:
+            continue
+        for node in ast.walk(_corpus.tree(os.path.join(TOOLS_DIR, fn))):
+            if matches(node):
+                offenders.append(f"{fn}:{getattr(node, 'lineno', '?')}")
+    return offenders
+
+
+class TestSharedValueMapsAreNotReRolled:
+    def test_no_local_feature_operations_map(self):
+        offenders = _shape_offenders("_common.py", _is_feature_operations_map)
+        assert not offenders, (
+            "a local operation->FeatureOperations map diverges from _common.OPERATIONS - import and "
+            "use it (`getattr(adsk.fusion.FeatureOperations, _common.OPERATIONS[op_key])`):\n  "
+            + "\n  ".join(offenders))
+
+    def test_no_local_world_axis_vector_map(self):
+        offenders = _shape_offenders("_inputs.py", _is_xyz_vector_map)
+        assert not offenders, (
+            "a local world-axis x/y/z -> unit-vector map re-rolls _inputs._AXIS_VECS - import and "
+            "use it (or the AxisRef kind, which also accepts an edge/face handle):\n  "
+            + "\n  ".join(offenders))

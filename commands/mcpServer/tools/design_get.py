@@ -27,11 +27,14 @@ app = adsk.core.Application.get()
 # The deeper slices an agent can opt into (the default returns NONE of these in full - only summaries).
 _SLICES = ("mode", "tree", "timeline", "configurations", "materials", "appearances", "attributes")
 
+# The orientation slice's name in include=: any deep include omits that slice unless 'default' rides
+# beside it, so a deep read carries what was asked for and not the default again.
+_DEFAULT_NAMES = ("default",)
 
-# ── slice helpers - each builds one slice's payload, independently testable ─────────────────────────
-#
-# mode/health delegate to the shared get_mode_handler/health_handler (design_mode.py / design_ops.py);
-# tree/timeline/configurations read directly. _unwrap decodes a handler's ok() result.
+
+# ── slice helpers - each builds one slice's payload ────────────────────────────────────────────────
+# mode/health delegate to get_mode_handler/health_handler; tree/timeline/configurations read
+# directly. _unwrap decodes a handler's ok() result.
 
 def _unwrap(result):
     """Decode a handler's result -> (payload_dict, None) on ok, or (None, error_result) on error
@@ -111,11 +114,8 @@ def _find_occurrence_by_name(root, want):
 
 
 def _unresolved_node(occ, detail):
-    """The tree row for an occurrence whose referenced component will not load. Every other read on it
-    RAISES (fullPathName, isVisible, childOccurrences.count included), so the row carries the name -
-    the one identity that still reads - and the raise text, instead of a full node built from
-    swallowed defaults. Its PRESENCE is the point: the row was absent from this tree entirely, so a
-    container holding one read child_count 4 with four healthy children listed."""
+    """The tree row for an occurrence whose referenced component will not load: every other read on
+    it RAISES, so the row carries the name - the one identity that still reads - and the detail."""
     name = safe(lambda: occ.name)
     return {"name": name if name else "(unreadable name)",
             "unresolved": True,
@@ -144,10 +144,9 @@ def _walk_occurrence(occ, depth, max_depth, counter, with_bodies=False):
         return _unresolved_node(occ, broken_detail)
     node = {
         "name": safe(lambda: occ.name),
-        # The entityToken is the EXACT instance identity, and the only one that always is: Fusion
-        # enforces no name uniqueness, so a name repeats under every sub-assembly ("Bolt:1") and two
-        # siblings can even wear one fullPathName (measured). Every occurrence-taking tool accepts this
-        # handle; the path is the convenience form, which refuses rather than guess when it collides.
+        # The entityToken is the EXACT instance identity: Fusion enforces no name uniqueness, so a
+        # name repeats under every sub-assembly ("Bolt:1") and two siblings can even wear one
+        # fullPathName. The path is the convenience form, which refuses when it collides.
         "handle": safe(lambda: occ.entityToken),
         "full_path": safe(lambda: occ.fullPathName),
         "component": safe(lambda: occ.component.name),
@@ -155,10 +154,9 @@ def _walk_occurrence(occ, depth, max_depth, counter, with_bodies=False):
         # _body_rows holds for is_solid/visible), and the freshness gate below treats None as
         # "try it" rather than as "local".
         "is_reference": _common.read_flag(lambda: occ.isReferencedComponent),
-        # counted, not safe(..., 0): these two counts are the caller's evidence of what this node
-        # HOLDS, and a coerced 0 says "no bodies / no children" about a collection nothing was read
-        # from - which is also what stops the walk below descending. null is the only honest answer
-        # for an unreadable count, and it takes the same (do not descend) branch without claiming it.
+        # counted, not safe(..., 0): a coerced 0 would say "no bodies / no children" about a
+        # collection nothing was read from. null takes the same (do not descend) branch below
+        # without claiming it.
         "body_count": _common.counted(lambda: occ.bRepBodies.count),
         "child_count": _common.counted(lambda: occ.childOccurrences.count),
     }
@@ -297,10 +295,9 @@ def _object_summary(obj):
         "index": safe(lambda: obj.index),
         "name": safe(lambda: obj.name),
         "type": _entity_type(obj),
-        # read_flag: an unreadable row flag publishes null, and null does NOT equal the False in
-        # _TIMELINE_NOISE, so terse KEEPS it - the row stands out as unknown instead of being
-        # dropped as routine. The include_suppressed filter below keys on True only, so a row whose
-        # is_suppressed did not read is always listed rather than hidden by a flag nobody read.
+        # read_flag: an unreadable row flag publishes null, which does not equal the False in
+        # _TIMELINE_NOISE, so terse KEEPS the row - and the include_suppressed filter keys on True
+        # only, so a row whose is_suppressed did not read is listed rather than hidden.
         "is_group": _common.read_flag(lambda: obj.isGroup),
         "is_suppressed": _common.read_flag(lambda: obj.isSuppressed),
         "is_rolled_back": _common.read_flag(lambda: obj.isRolledBack),
@@ -314,11 +311,8 @@ def _object_summary(obj):
 
 
 # ── the model parameters a timeline feature owns (include=['timeline'], timeline_params=true) ──────
-#
-# A timeline row carries type+name only, so a fillet's radius is unreadable from it. The honest route
-# to that number is the feature's own ModelParameters: each carries .createdBy (the Feature / Joint /
-# JointOrigin that made it) and .role (its slot on that owner - 'OffsetZ', 'alignAngle', ...). This is
-# ONE pass over design.allParameters grouped by owner, not a per-feature probe.
+# A timeline row carries type+name only, so a fillet's radius comes from the feature's own
+# ModelParameters: each carries .createdBy (the owner) and .role (its slot on that owner).
 _PARAMS_PER_ROW = 16
 
 
@@ -336,13 +330,9 @@ def _owner_keys(entity):
 
 
 def _model_parameters_by_owner(design):
-    """{owner key -> {rows, tokens}} from ONE pass over design.allParameters.
-
-    A ModelParameter exposes .createdBy and .role; a UserParameter has NO createdBy and the read
-    raises - safe() turns that into None and the parameter is skipped, so the guard is the missing
-    attribute itself, not a type test. Each owner is indexed under every key it can be matched by;
-    the tokens collected under a key are what tells a name+type collision (two owners) apart from
-    one owner, so a colliding key can be refused instead of mixing two features' parameters."""
+    """{owner key -> {rows, tokens}} from ONE pass over design.allParameters. A UserParameter has no
+    .createdBy and is skipped; the tokens under a key are what tells a name+type collision (two
+    owners) from one owner, so a colliding key is refused rather than mixed."""
     index = {}
     for p in _common.iter_collection(safe(lambda: design.allParameters)):
         owner = safe(lambda p=p: p.createdBy)
@@ -355,14 +345,9 @@ def _model_parameters_by_owner(design):
                "role": safe(lambda p=p: p.role),
                "expression": safe(lambda p=p: p.expression),
                "value": _common.measured(lambda p=p: p.value)}
-        # A tokenless owner still needs a DISTINCT identity in the collision guard: two different
-        # tokenless features wearing one name+type must not collapse and answer a row with the
-        # UNION of two features' parameters. id(owner) is NOT that identity (measured live:
-        # .createdBy mints a fresh proxy per read, and two proxies of DIFFERENT owners reused one
-        # address in a single pass). The owner's timeline index is stable per feature; when even
-        # that does not read, a per-PARAMETER sentinel refuses the collision - which may also
-        # drop a multi-parameter tokenless feature's rows, the safe direction (an absent answer,
-        # never two features' parameters merged as one).
+        # A tokenless owner needs a DISTINCT identity, and id(owner) is not one: .createdBy mints a
+        # fresh proxy per read and two proxies of different owners can reuse one address. The
+        # timeline index is stable per feature; failing that, a per-parameter sentinel is the key.
         if keys[0][0] == "token":
             token = keys[0][1]
         else:
@@ -571,14 +556,9 @@ def _slice_appearances(design, library, name_filter, max_results):
 
 
 def _fingerprint(design):
-    """The cheap 'what IS this model' digest for the default: counts of bodies / sketches / components /
-    occurrences / joints / parameters, so an agent learns the model's SHAPE without include=tree. The
-    field the thin mode+health summary was missing.
-
-    bodies/sketches are DESIGN-WIDE (every component, not just root) via the shared
-    _common.design_wide_counts - the same count workspace_orient reports, so the two agree on one
-    design instead of this fingerprint under-reporting a multi-component doc whose geometry lives in
-    sub-components."""
+    """The cheap 'what IS this model' digest for the default: DESIGN-WIDE counts of bodies /
+    sketches / components / occurrences / joints / parameters, so an agent learns the model's SHAPE
+    without include=tree."""
     root = safe(lambda: design.rootComponent)
     if root is None:
         return None
@@ -601,20 +581,15 @@ def _fingerprint(design):
         "parameters": safe(lambda: design.userParameters.count, 0),
     }
     out = {k: v for k, v in fp.items() if v}   # omit zero counts (single-component, no joints, ...)
-    # The truthy filter drops 'occurrences' for TWO different reads - a design that holds no placed
-    # instance (total 0) and one whose census could not be taken at all (total None) - and a missing
-    # key cannot tell them apart. So the walk that answered is published beside them: 'unreadable'
-    # is the hole (NEITHER root.allOccurrences nor the component.occurrences fallback enumerated,
-    # so the absent count is UNKNOWN, not zero), and the other two values say a census was really
-    # taken. Same key and same vocabulary as find_geometry / assembly_get / workspace_orient.
+    # The truthy filter drops 'occurrences' both for a design holding no instance (0) and for one
+    # whose census could not be taken (None), so the walk that answered is published beside them:
+    # 'unreadable' means neither walk enumerated, and the count is UNKNOWN rather than zero.
     out["occurrences_walk"] = walk.method
     return out
 
 
-# The action tools for each content class the fingerprint can report. Only classes that are PRESENT and
-# not already-obvious get a pointer (bodies/sketches are omitted - every agent knows model_*/sketch_*).
-# The param family in particular is a closed clique nothing else points into, so this is its one inbound
-# breadcrumb from a read an agent actually starts with.
+# The action tools for each content class the fingerprint can report. Only classes that are PRESENT
+# and not already-obvious get a pointer - bodies/sketches are omitted.
 _CONTENT_TOOLS = {
     "parameters": "param_get (list/read), param_set / param_add (change or create)",
     "joints": "assembly_get (wiring + health), joint_drive (pose by value)",
@@ -649,43 +624,49 @@ def handler(include=None, max_depth: int = 3, component: str = "", tree_bodies: 
         return error("No active design. Open or create a document first (see doc_new).")
 
     inc = _normalize_include(include)
-    bad = [s for s in inc if s not in _SLICES]
+    bad = [s for s in inc if s not in _SLICES and s not in _DEFAULT_NAMES]
     if bad:
-        return error(f"Unknown include {bad}. Valid: {', '.join(_SLICES)}.")
+        return error(f"Unknown include {bad}. Valid: {', '.join(_SLICES + _DEFAULT_NAMES)}.")
 
-    # ── default ORIENTATION slice - always present, always BOUNDED + DENSE ──
-    mode_full, merr = _slice_mode(design)
-    if merr:
-        return merr
-    health, _herr = _slice_health(design)          # cheap rollup; degrades to None on a direct design
+    deep = [s for s in inc if s in _SLICES]
+    want_default = not deep or any(s in _DEFAULT_NAMES for s in inc)
+    # the mode read serves both the orientation headline and include=['mode'], so it runs when
+    # either needs it - and not at all on a deep read that asks for neither.
+    mode_full = None
+    if want_default or "mode" in inc:
+        mode_full, merr = _slice_mode(design)
+        if merr:
+            return merr
 
-    out = {
-        # the headline: what kind of design, how big the build, what's in it. design_type lives ONCE
-        # here (not restated in a sub-dict). in_base_feature_edit only when TRUE (omit it when false).
-        "design_type": safe(lambda: mode_full.get("design_type")),
-        "feature_count": safe(lambda: mode_full.get("timeline_feature_count")),
-        # SCOPE: timeline-only (errored/warned features). It does NOT cover stale references - those show
-        # as is_out_of_date on tree nodes, and the doc-wide verdict (timeline + refs + joints) is
-        # workspace_orient's is_healthy. The qualified name stops an agent reading a green timeline as a
-        # whole-document all-clear when a reference is out of date.
-        "timeline_healthy": safe(lambda: (health or {}).get("healthy")),
-        "contents": _fingerprint(design),          # bodies/sketches/components/joints/parameters
-    }
-    # for each PRESENT + non-obvious content class, name the tool that acts on it - the inbound
-    # breadcrumb to families (param_*, joint_*) that a read-first agent would otherwise never find.
-    ptrs = _content_pointers(out["contents"])
-    # a CAM document's machining state is invisible to this design read - point at cam_get so an agent
-    # drilling via design_get learns the Manufacture half exists.
-    if _has_cam(design):
-        ptrs["cam"] = "cam_get for the machining setups/operations (this document has CAM data)"
-    if ptrs:
-        out["pointers"] = ptrs
-    if mode_full.get("in_base_feature_edit"):
-        out["in_base_feature_edit"] = True
-    # surface health DETAIL only when there's something wrong (else 'healthy' above says it all).
-    if health and (health.get("error_count") or health.get("warning_count")):
-        out["health"] = {k: v for k, v in health.items()
-                         if k in ("errors", "warnings", "error_count", "warning_count") and v}
+    # ── default ORIENTATION slice - BOUNDED + DENSE; omitted when include= asks past it ──
+    out = {}
+    if want_default:
+        health, _herr = _slice_health(design)      # cheap rollup; degrades to None on a direct design
+        out = {
+            # the headline: what kind of design, how big the build, what's in it. design_type lives
+            # ONCE here (not restated in a sub-dict). in_base_feature_edit only when TRUE.
+            "design_type": safe(lambda: mode_full.get("design_type")),
+            "feature_count": safe(lambda: mode_full.get("timeline_feature_count")),
+            # SCOPE: timeline-only (errored/warned features). Stale references show as is_out_of_date
+            # on tree nodes, and the doc-wide verdict is workspace_orient's is_healthy.
+            "timeline_healthy": safe(lambda: (health or {}).get("healthy")),
+            "contents": _fingerprint(design),      # bodies/sketches/components/joints/parameters
+        }
+        # for each PRESENT + non-obvious content class, name the tool that acts on it - the inbound
+        # breadcrumb to families (param_*, joint_*) a read-first agent would otherwise never find.
+        ptrs = _content_pointers(out["contents"])
+        # a CAM document's machining state is invisible to this design read - point at cam_get so an
+        # agent drilling via design_get learns the Manufacture half exists.
+        if _has_cam(design):
+            ptrs["cam"] = "cam_get for the machining setups/operations (this document has CAM data)"
+        if ptrs:
+            out["pointers"] = ptrs
+        if mode_full.get("in_base_feature_edit"):
+            out["in_base_feature_edit"] = True
+        # surface health DETAIL only when there's something wrong (else 'healthy' above says it all).
+        if health and (health.get("error_count") or health.get("warning_count")):
+            out["health"] = {k: v for k, v in health.items()
+                             if k in ("errors", "warnings", "error_count", "warning_count") and v}
 
     # ── deeper slices (opt-in) ──
     if "mode" in inc:
@@ -722,17 +703,12 @@ def handler(include=None, max_depth: int = 3, component: str = "", tree_bodies: 
 
     # advertise the slices NOT yet pulled (load-bearing: an un-named flag is invisible to the agent).
     remaining = [s for s in _SLICES if s not in inc]
-    if remaining:
+    if want_default and remaining:
         out["note"] = ("Orientation slice. Pull deeper with include=" + str(remaining) +
-                       " (e.g. include=['tree'] for the full component tree, ['timeline'] for the "
-                       "feature list, ['mode'] for the capability map, ['configurations'] for configs, "
-                       "['materials'] or ['appearances'] for the assignable catalog, ['attributes'] "
-                       "for entity attributes in one group). "
-                       "'max_depth'/'component' scope the tree and 'tree_bodies' adds each node's "
-                       "body records (name/handle/solid/visible); 'group'/'include_suppressed' the "
-                       "timeline and 'timeline_params' adds each feature's own parameters (a "
-                       "fillet's radius); 'library'/'name_filter'/'max_results' the catalog; "
-                       "'attribute_group' (required) / 'attribute_key' the attributes.")
+                       ". 'max_depth'/'component'/'tree_bodies' scope the tree; "
+                       "'group'/'include_suppressed'/'timeline_params' the timeline; "
+                       "'library'/'name_filter'/'max_results' the catalog; 'attribute_group' "
+                       "(required)/'attribute_key' the attributes.")
     # A census nothing could be read from leaves 'occurrences' out of contents entirely, which reads
     # exactly like a design holding no placed instance. The marker beside it is what tells the two
     # apart, so the unreadable one is stated in words as well.
@@ -754,39 +730,28 @@ def _normalize_include(include):
 
 
 TOOL_DESCRIPTION = (
-    "Read the active DESIGN by zoom level (one call for mode + tree + timeline + health + "
-    "configs). Default (no 'include'): modelling mode, a shallow component-tree "
-    "summary, and timeline_healthy (timeline errors/warnings ONLY - NOT stale references, which appear "
-    "as is_out_of_date on tree nodes; the whole-document verdict is workspace_orient.is_healthy). "
-    "'include' pulls deeper: 'tree' (full component/occurrence tree; "
-    "'max_depth'/'component' scope it, 'tree_bodies' adds each node's body records - name, a handle "
-    "any body-taking tool accepts, solid/visible - and upgrades root_bodies from names to the same "
-    "records), 'timeline' (the feature list; 'group'/'include_suppressed' "
-    "scope it, and 'timeline_params' adds each row's own model parameters with their roles - a "
-    "fillet's radius, an extrude's distance), 'mode' (full capability map), "
-    "'configurations' (the config table), 'materials' / "
-    "'appearances' (the catalog to assign FROM: the document's entries plus a count-only census of "
-    "each loaded library; 'library' lists one, 'name_filter'/'max_results' page it), 'attributes' "
-    "(entity attributes and what each is attached to; 'attribute_group' required, empty "
-    "'attribute_key' = every key in it). The default is "
-    "safe to call blind and names its deeper slices."
+    "Read the active DESIGN by zoom level. Default (no 'include'): modelling mode, a content "
+    "fingerprint, and timeline_healthy - which covers TIMELINE errors/warnings ONLY; stale "
+    "references show as is_out_of_date on tree nodes, and the whole-document verdict is "
+    "workspace_orient.is_healthy. 'include' pulls one deeper slice - each node of 'tree' carries a "
+    "handle any body-taking tool accepts, 'mode' is the full capability map, and 'materials' / "
+    "'appearances' are the catalog to assign FROM. The inputs below scope a slice."
 )
 
 tool = (
     Tool.create_simple(name="design_get", description=TOOL_DESCRIPTION)
     .add_input_property("include", {"type": ["array", "string"],
-            "description": "Deeper slices to include: any of tree | timeline | mode | configurations "
-                           "| materials | appearances | attributes (a list or comma-string). Omit "
-                           "for the orientation slice."})
+            "description": "Deeper slices (a list or comma-string): tree | timeline | mode | "
+                           "configurations | materials | appearances | attributes. Omit for the "
+                           "orientation slice; add 'default' to keep it beside a deeper one."})
     .add_input_property("max_depth", {"type": "integer",
             "description": f"Tree depth when include=tree (default {_TREE_DEFAULT_DEPTH}, "
                            f"max {_TREE_MAX_DEPTH})."})
     .add_input_property("component", {"type": "string",
             "description": "Start the tree at this component/occurrence name (include=tree)."})
     .add_input_property("tree_bodies", {"type": "boolean",
-            "description": "Add each tree node's body records (name, handle, is_solid, visible; "
-                           "capped per node) when include=tree; root_bodies also upgrades from "
-                           "bare names to the same records. Default false."})
+            "description": "Add each tree node's body records (name, handle, is_solid, visible) "
+                           "when include=tree; root_bodies upgrades to the same records."})
     .add_input_property("include_suppressed", {"type": "boolean",
             "description": "Include suppressed timeline objects when include=timeline (default true)."})
     .add_input_property("group", {"type": "string",

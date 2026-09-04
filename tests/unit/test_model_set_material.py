@@ -72,8 +72,12 @@ class _Design:
 def wired(monkeypatch):
     """Build a fake design + material catalog and patch both design seams + the module ``app`` (whose
     ``materialLibraries`` the search reads). Returns the design."""
-    def _make(bodies, doc_materials=(), libraries=()):
+    def _make(bodies, doc_materials=(), libraries=(), child_components=()):
         design = _Design(bodies, doc_materials, libraries)
+        if child_components:
+            # design.allComponents carries the ROOT plus every child - the shape _common
+            # .all_components reads; a design without it degrades to root-only, as live.
+            design.allComponents = _Coll([design.rootComponent] + list(child_components))
         monkeypatch.setattr(mm._common, "design", lambda: design)
         monkeypatch.setattr(mm._inputs._common, "design", lambda: design)
         monkeypatch.setattr(mm, "app", SimpleNamespace(materialLibraries=_Coll(libraries)))
@@ -105,6 +109,56 @@ class TestHappyPath:
         out = _payload(mm.handler(target="", material="Steel"))
         for r in mm.RETURNS:
             assert r.assert_present(out) == "", r.key
+
+
+class TestWholeDesignTarget:
+    def test_an_empty_target_reaches_a_child_components_bodies(self, wired):
+        # The only body here belongs to a CHILD component: a root-only walk assigns nothing and
+        # leaves model_inspect's mass wrong for the one part that has a body.
+        child_body = _Body("Child1", density=0.00785)
+        child = SimpleNamespace(name="Child", bRepBodies=_Coll([child_body]), meshBodies=_Coll())
+        wired([], libraries=[_Lib("Lib", [_material("Steel")])], child_components=[child])
+        out = _payload(mm.handler(target="", material="Steel"))
+        assert [a["body"] for a in out["applied_to"]] == ["Child1"]
+        assert child_body.material.name == "Steel"
+        assert out["components_covered"] == 2
+        assert "all 2 component(s) the design listed" in out["note"]
+        assert "component_walk_complete" not in out
+
+    def test_every_row_names_the_component_that_owns_the_body(self, wired):
+        # Two components each holding a 'Body1': rows keyed on the body name alone are two
+        # identical rows, and a failed one names nothing the caller can act on.
+        twin = _Body("Body1", density=0.00785)
+        child = SimpleNamespace(name="Child", bRepBodies=_Coll([twin]), meshBodies=_Coll())
+        wired([_Body("Body1", density=0.00785)],
+              libraries=[_Lib("Lib", [_material("Steel")])], child_components=[child])
+        out = _payload(mm.handler(target="", material="Steel"))
+        assert [(a["component"], a["body"]) for a in out["applied_to"]] == [
+            ("Root", "Body1"), ("Child", "Body1")]
+
+    def test_a_degraded_walk_is_not_reported_as_a_one_component_design(self, wired):
+        # all_components falls back to [root] when the design's collection will not read. Saying
+        # "all 1 component(s)" there claims a design-wide census nothing performed.
+        root_body = _Body("Root1", density=0.00785)
+        design = wired([root_body], libraries=[_Lib("Lib", [_material("Steel")])])
+        assert not hasattr(design, "allComponents")     # the unreadable-collection case
+        out = _payload(mm.handler(target="", material="Steel"))
+        assert out["component_walk_complete"] is False
+        assert "component list did not read" in out["note"]
+        assert "all 1 component(s)" not in out["note"]
+
+    def test_a_named_component_target_stays_that_component(self, monkeypatch, wired):
+        # Only the EMPTY target means the whole design. A named component assigns to its own
+        # bodies and publishes no design-wide count.
+        root_body = _Body("Root1", density=0.00785)
+        child_body = _Body("Child1", density=0.00785)
+        child = SimpleNamespace(name="Child", bRepBodies=_Coll([child_body]), meshBodies=_Coll())
+        wired([root_body], libraries=[_Lib("Lib", [_material("Steel")])], child_components=[child])
+        monkeypatch.setattr(mm._TARGET, "resolve", lambda raw: ((child, "component"), None))
+        out = _payload(mm.handler(target="Child", material="Steel"))
+        assert [a["body"] for a in out["applied_to"]] == ["Child1"]
+        assert root_body.material is None
+        assert "components_covered" not in out
 
 
 class TestSearchGuards:

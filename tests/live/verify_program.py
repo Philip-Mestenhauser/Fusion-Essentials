@@ -10,12 +10,15 @@ completeness lint reads, `STORY` the per-tool shot-list note the receipt carries
 tools deliberately not driven unattended, `PENDING` the honest todo.
 """
 
-from verify_acts_cam import _CAM, _CAM_DELIVER, _CAM_FB_DELIVER, _CAM_STORY
-from verify_acts_doc import _FINALE, _OVERTURE
+from verify_acts_cam import (
+    CAM_SETUP, FLIP_SETUP, MACHINING_EXTENSION, _CAM, _CAM_DELIVER, _CAM_EXTENSION,
+    _CAM_FB_DELIVER, _CAM_MULTI_POST, _CAM_SCOPE, _CAM_SECOND_SETUP, _CAM_STORY, _SW_SETUP,
+    _SW_SETUP2, _SWARF_RIG)
+from verify_acts_doc import _FINALE, _OVERTURE, _SHOWCASE
 from verify_acts_mesh import _MACHINING, _MESH, _NESTING
 from verify_acts_model import (
-    _DETAILS, _DETAILS_FB, _REDUCE, _RESIZE, _RESIZE_FB, _SOLIDS, _SOLIDS_FB)
-from verify_acts_motion import _MOTION, _MOTION_FB, _VISE
+    _DETAILS, _DETAILS_FB, _RESIZE, _RESIZE_FB, _SOLIDS, _SOLIDS_FB)
+from verify_acts_motion import _MOTION, _VISE
 from verify_acts_sketch import _SKELETON, _SKETCHWORK
 from verify_core import _DWELL, _PLANE_VIEW, _SKETCH_PLANE
 from verify_layout import (
@@ -23,16 +26,17 @@ from verify_layout import (
     _place_walk, _placed, _sketch_reading_order, _sketches_first)
 
 
-# --- the build, as ACTS: one recognizable gyroscope, end to end, in one unsaved document -------
-# The sweep is a STORY, not a scratch pile: a three-axis gyroscope is cast (skeleton + parameters),
-# turned solid (rings, rotor, frame, crank), jointed and DRIVEN on every axis, detailed, machined,
-# resized parametrically, and discarded. Every covered tool's receipt step is woven into that story
+# --- the build, as ACTS: one machinable part, end to end, in one unsaved document --------------
+# The sweep is a STORY, not a scratch pile: a bracket is drawn from one driving length, turned
+# solid (stepped top, radiused pocket, through bores, a counterbored pattern, a boss, broken
+# edges), detailed, re-driven parametrically, sized into a billet, clamped in a modelled vise,
+# photographed, machined and discarded. Every covered tool's receipt step is woven into that story
 # where it fits; where it does not, a CAMEO fixture rides inside the SAME document.
 #
 # Each ACT is a dict: name, precondition, narrative, fallback.
 #   precondition: (tool, args) - a live read gating the narrative (the geometry it consumes exists),
 #                 or None (an opening act with nothing upstream to depend on).
-#   narrative:    the steps weaving the act's tools into the gyroscope story.
+#   narrative:    the steps weaving the act's tools into that story.
 #   fallback:     self-contained SCRATCH steps covering the SAME tools if the precondition read
 #                 fails (a cascade from an upstream act that could not build) - or None for a
 #                 same-doc cameo that depends on nothing. A fallback row is marked "(fallback
@@ -46,33 +50,58 @@ from verify_layout import (
 # opening/cameo act that always runs its narrative.
 _ACT_PROGRAM = [
     ("ACT 0 - OVERTURE", None, _OVERTURE, None),
-    # SKETCH. The parametric skeleton and every sketch the story builds on, then the sketch TOOLS -
-    # trim, offset, pattern, dimension, constrain, text, the slot kinds - on scratch sketches of
-    # their own. Both run before anything is solid, which is the order the work is done in.
+    # SKETCH. The part's parametric profiles and the shared skeleton, then the sketch TOOLS - trim,
+    # offset, pattern, dimension, constrain, text, the slot kinds - on scratch sketches of their
+    # own. Both run before anything is solid, which is the order the work is done in.
     ("ACT 1 - SKETCH + PARAMETERS", None, _SKELETON, None),
     ("ACT 1b - SKETCH TOOLS", None, _SKETCHWORK, []),
-    # CREATE. Material appears: solids from the skeleton, then surface bodies, then mesh bodies.
-    ("ACT 2 - SOLIDS", ("sketch_get", {"sketch_name": "OuterRingSketch"}), _SOLIDS, _SOLIDS_FB),
+    # CREATE. Material appears: the bracket off its own profiles, then surfaces, then mesh bodies.
+    ("ACT 2 - SOLIDS", ("sketch_get", {"sketch_name": "BracketBody"}), _SOLIDS, _SOLIDS_FB),
     ("ACT 3 - SURFACES", None, _MACHINING, None),
     ("ACT 4 - MESH", None, _MESH, None),
-    # MODIFY. Existing material is cut, rounded, patterned and drafted.
-    ("ACT 5 - DETAILS", ("find_geometry", {"target": "OuterRing", "kind": "circular_edge", "max_results": 1}), _DETAILS, _DETAILS_FB),
-    # ASSEMBLE. The parts are jointed, grounded, related and driven.
-    ("ACT 6 - MOTION", ("find_geometry", {"target": "OuterRing", "kind": "cylinder_face", "max_results": 1}), _MOTION, _MOTION_FB),
-    # RE-DRIVE. The parametric resize walks the WHOLE assembled mechanism, so it reads state only
-    # assembly produces: the StockCenter joint origin holding position through the recompute, and a
-    # rest pose whose only overlap is the intended press fit. It runs after MOTION for that reason.
-    ("ACT 7 - RESIZE", ("sketch_get", {"sketch_name": "OuterRingSketch"}), _RESIZE, _RESIZE_FB),
-    # NEST. Last, because the arrange solver restructures what it nests under Envelope occurrences.
-    ("ACT 7b - NESTING", None, _NESTING, []),
-    # MACHINE. Strip to the machinable part, model the vise around it, and machine the REAL part in
-    # the REAL fixture. Each act's precondition routes to a fallback (empty when the act's tools are
-    # all covered by earlier acts) so a broken story world still yields a complete per-tool ledger -
-    # on the scratch-stock fixtures.
-    ("ACT 8 - REDUCE TO THE PART", ("model_inspect", {"target": "Carrier:1"}), _REDUCE, []),
-    ("ACT 9 - VISE FIXTURE", ("model_inspect", {"target": "Carrier:1"}), _VISE, []),
+    # MODIFY. Existing material is broken, rounded, patterned and drafted.
+    ("ACT 5 - DETAILS", ("find_geometry", {"target": "Bracket", "kind": "circular_edge", "max_results": 1}), _DETAILS, _DETAILS_FB),
+    # RE-DRIVE, while the part is still alone: the billet is sized from the part it ENDS UP as, so
+    # the resize runs before the fixture rather than inside it.
+    ("ACT 6 - RESIZE", ("model_inspect", {"target": "Bracket:1"}), _RESIZE, _RESIZE_FB),
+    # NEST. Away from the acts that recompute the part, because the arrange solver restructures
+    # what it nests under Envelope occurrences.
+    ("ACT 6b - NESTING", None, _NESTING, []),
+    # ASSEMBLE. The billet the part is cut from, and the vise that closes on it - the story's one
+    # real mechanism, driven on camera. Its fallback is empty: every tool it drives is also driven
+    # on the bench act below, which builds its own rigs and so always runs.
+    ("ACT 7 - THE VISE", ("model_inspect", {"target": "Bracket:1"}), _VISE, []),
+    ("ACT 7b - MOTION BENCH", None, _MOTION, []),
+    # The drafted cameo the extension strategies are machined on, built here rather than beside
+    # them: it is modelling work, and the acts below it run in the Manufacture workspace.
+    ("ACT 8 - SWARF CAMEO", None, _SWARF_RIG, []),
+    # SHOW. Beauty shots, the whole view vocabulary, the renames and the export/import round trips.
+    # It runs BEFORE the machining so the sweep ends on the job and its post, and it touches
+    # neither the part's name nor its geometry, so the CAM acts address what the model acts built.
+    ("ACT 9 - THE SHOWCASE", None, _SHOWCASE, None),
+    # MACHINE, last: the REAL part in the REAL fixture, ending with the posted NC. Each act's
+    # precondition routes to a fallback (empty when the act's tools are all covered by earlier
+    # acts) so a broken story world still yields a complete per-tool ledger - on the scratch-stock
+    # fixtures.
     ("ACT 10a - CAM: JOB + GENERATE", ("model_inspect", {"target": "STOCK:1"}), _CAM_STORY, _CAM),
-    ("ACT 10b - CAM: DELIVERABLES", ("cam_get", {"include": ["operations"], "setup": "DemoSetup"}), _CAM_DELIVER, _CAM_FB_DELIVER),
+    ("ACT 10b - CAM: DELIVERABLES", ("cam_get", {"include": ["operations"], "setup": CAM_SETUP}), _CAM_DELIVER, _CAM_FB_DELIVER),
+    # The cameo's plain milling setup and the component-scope beats: a base-licence job on the same
+    # drafted block, so it runs where the extension act below does not. It depends on nothing the
+    # story built, hence no precondition and no fallback.
+    ("ACT 10b2 - CAM: COMPONENT SCOPE", None, _CAM_SCOPE, []),
+    # The Machining Extension's strategies, on the drafted cameo rather than on the bracket - rails
+    # and drive surfaces need a wall that leans, and the machined part has none. They ride the same
+    # document and depend on nothing the story built, so the act runs its narrative always - where
+    # the entitlement is there to run it (ACT_NEEDS below).
+    ("ACT 10c - CAM: EXTENSION STRATEGIES", None, _CAM_EXTENSION, []),
+    # The last two acts machine the PART - the flip setup and the program that spans it and the
+    # first - so each is gated on the job ACT 10a built, and falls back to nothing rather than to a
+    # scratch world: every tool they drive is driven again by the scratch-stock fallbacks above, so
+    # a story world that could not build costs the ledger no row.
+    ("ACT 10d - CAM: THE SECOND SETUP",
+     ("cam_get", {"include": ["operations"], "setup": CAM_SETUP}), _CAM_SECOND_SETUP, []),
+    ("ACT 10e - CAM: MULTI-SETUP POST",
+     ("cam_get", {"include": ["operations"], "setup": FLIP_SETUP}), _CAM_MULTI_POST, []),
     ("FINALE", None, _FINALE, None),
 ]
 
@@ -82,7 +111,7 @@ _ACT_PROGRAM = [
 # profile on a datum plane derived from the part it is being built around.
 _SKETCH_PHASE, _ACT_PROGRAM = _sketches_first(
     _ACT_PROGRAM, after=("ACT 0 - OVERTURE", "ACT 1 - SKETCH + PARAMETERS", "ACT 1b - SKETCH TOOLS",
-                         "ACT 9 - VISE FIXTURE"))
+                         "ACT 7 - THE VISE"))
 _ACT_PROGRAM = (_ACT_PROGRAM[:3]
                 + [("ACT 1c - EVERY OTHER SKETCH", None, _SKETCH_PHASE, [])]
                 + _ACT_PROGRAM[3:])
@@ -133,10 +162,29 @@ _SKETCH_PLANE.update({s[1]["name"]: s[1].get("plane") for _n, _p, narr, _f in _A
 ACTS = [(name, pre, _framed(_placed(narr, _SLOTS)), _framed(fb) if fb is not None else fb)
         for name, pre, narr, fb in _ACT_PROGRAM]
 
-# Post-act hook run() fires after an act completes: the bounded generation poll between the CAM
-# job act and its deliverables.
+# The CAPABILITY each act declares. An act whose capability the start-of-run probe did not read as
+# ENTITLED is not run at all: its steps land in the receipt's skipped(<capability> not entitled)
+# bucket beside the cloud and user-present tiers, rather than reddening the sweep on the entitlement
+# refusal an unlicensed installation answers a rail/surface strategy with. Steps declare the same
+# thing one row at a time through verify_core.Needs; the probe per capability name lives in
+# verify_core.CAPABILITY_PROBES.
+ACT_NEEDS = {
+    "ACT 10c - CAM: EXTENSION STRATEGIES": MACHINING_EXTENSION,
+}
+
+# Post-act hook run() fires after an act completes: the bounded generation poll between a CAM job
+# act and the reads that stand on it. A value may be one setup or a LIST of them - an act that
+# leaves several generating gets each certified in turn. An act the capability tier held back polls
+# nothing, because nothing in it launched.
 POLL_AFTER = {
-    "ACT 10a - CAM: JOB + GENERATE": {"narrative": "DemoSetup", "fallback": "Setup1"},
+    "ACT 10a - CAM: JOB + GENERATE": {"narrative": CAM_SETUP, "fallback": "Setup1"},
+    # The two cameo acts route to their narrative always (no precondition), so both modes name the
+    # same setup - the poll has to answer whichever key run() looks up.
+    "ACT 10b2 - CAM: COMPONENT SCOPE": {"narrative": _SW_SETUP2, "fallback": _SW_SETUP2},
+    "ACT 10c - CAM: EXTENSION STRATEGIES": {"narrative": _SW_SETUP, "fallback": _SW_SETUP},
+    # the flip act's fallback is EMPTY, so it launches nothing and there is nothing to certify -
+    # an empty target list polls nothing rather than reading a setup that was never created.
+    "ACT 10d - CAM: THE SECOND SETUP": {"narrative": FLIP_SETUP, "fallback": []},
 }
 
 # STEPS: the flat union of every act's narrative + fallback steps - the coverage ledger the
@@ -147,8 +195,13 @@ STEPS = [s for _, _, narr, fb in ACTS for s in (list(narr) + list(fb or []))
 
 # STORY: each covered tool's ledger shot-list note - the receipt doubles as the demo's shot list.
 STORY = {
-    "doc_new": "open the one document the whole gyroscope lives in",
-    "workspace_orient": "orient: read the empty design before building",
+    "doc_new": "open the one document the whole story lives in",
+    "workspace_orient": ("orient: read the empty design before building; and the entitlement block "
+                         "as the CAM job opens - exactly the four sentinel strategies, each "
+                         "answering its own isGenerationAllowed flag rather than reading null. It "
+                         "is the same read the run's capability probe takes, which is what routes "
+                         "the extension acts to skipped(machining_extension not entitled) instead "
+                         "of into the refusal an unlicensed installation answers them with"),
     "sys_capability_map": "survey the server's tool families at cold start",
     "sys_find_tool": ("search the surface for the revolve verb - a registry read, so it carries no "
                       "'active_document' stamp (design_get's final read is the other half)"),
@@ -174,13 +227,16 @@ STORY = {
                             "does not carry"),
     "sys_set_preferences": ("round-trip one invisible preference and restore it in the same act; "
                             "the below-minimum value and a tier-R member refused"),
-    "param_add": "add GimbalDia and the derived ring/rotor radii",
-    "param_set_favorite": "mark GimbalDia the favorite driving dimension",
-    "param_get": "read the parameter table; a fresh GimbalDia read sizes the CAM stock",
-    "model_create_component": "cast the eight parts, Pedestal nested in Frame",
+    "param_add": ("add PartLen (the driving length), PartWid and PartHt (independent extents), and "
+                  "the feature parameters derived from them - step, bore, pocket depth and corner "
+                  "radius, boss, mounting bore, edge break"),
+    "param_set_favorite": "mark PartLen the favorite driving dimension",
+    "param_get": ("read the parameter table; then the pocket radius and the edge break the fillet "
+                  "and chamfer features are built at, and a fresh driver read sizes the CAM stock"),
+    "model_create_component": "cast the part, the billet, the three vise parts and the lead screw",
     "design_activate_component": "step into each part to build its sketch",
     "sketch_create": "draw each part's sketch on its plane",
-    "sketch_add_geometry": ("draw the concentric rings and part footprints; then the SLOT family, "
+    "sketch_add_geometry": ("draw the part's footprint, its step, its pocket and its boss; then the SLOT family, "
                             "one scratch sketch per shape - a three-point arc slot with its five "
                             "arcs and its profile, the centre-point arc slot in both its short and "
                             "its full ladder with each dimension flag gated independently, an "
@@ -194,7 +250,7 @@ STORY = {
                             "lines, the 1 construction line and the 2 arc caps behind a "
                             "'curves_added' of 3, and sketch_get finds exactly that); plus the "
                             "line/rectangle/polygon floors the composite counts are read against"),
-    "sketch_add_3d_line": "draw the yaw axis as the skeleton's 3D line",
+    "sketch_add_3d_line": "draw the vertical axis as the skeleton's 3D line",
     "sketch_constrain": ("constrain the skeleton's X axis horizontal; then autoConstrain a loose "
                          "rectangle to fully constrained and re-run it as a no-op, lay a "
                          "rectangular pattern by total EXTENT with the landed centre measured, "
@@ -220,17 +276,17 @@ STORY = {
                           "square at scale 1 whose measured extent pins BOTH halves of that "
                           "landing - one inch square, and Y-DOWN from the sketch origin (min y "
                           "-25.4 mm); the missing file refused"),
-    "sketch_dimension": ("drive ring/rotor radii by parameter expression; the wedge angle facing "
+    "sketch_dimension": ("drive the part's length, width and boss diameter by parameter expression; the wedge angle facing "
                          "the sketch origin; offset against a non-parallel line (rotated, and the "
                          "note says so) with linear_diameter refusing the same shape; line and "
                          "point measured to a model face; then the dimension bench - a slanted "
                          "line's horizontal span, a diameter, the gap between two circles on one "
                          "centre, a line to a circle's near tangent, and an ellipse's two radii - "
                          "each read back as a measured number, not a call that returned ok"),
-    "sketch_get": "read the skeleton and ring profiles back",
+    "sketch_get": "read the skeleton and the part's own profiles back",
     "sketch_delete_entity": ("delete a helper constraint; count drops - then a sketch text by its "
                              "index, the deleted string reported back, and the empty index refused"),
-    "model_construction": ("offset the carrier hub plane below the rotor sweep; an AXIS on a cameo bore whose published handle the circular pattern turns about; a plane at 30 deg about the shaft's own axis (origin pinned to the axis) and a plane through a cap vertex; then the ON-PATH surface on one measured 30 mm cap edge - a proportional plane and point reading their ratio back with no extent published, an absolute placement inside the path, one before the start and one far past the end (both accepted, both disclosed against the measured length), the boundary exactly at the length, an expression placement whose model parameter is named for param_set, a to-object plane carrying distance AND offset off the path and a second one landing inside a two-edge chained path, and the summed length of that chain; the out-of-range proportional value and to_object on the point kind refused. Then the datum bench - one bored block carrying every reference the remaining modes read: a plane swung 30 deg about a top edge, one spanning three corners, one splitting the block at mid-height, one spanning two coplanar edges and one resting tangent on the bore wall; an axis on an edge, one spanning two corners and one along the top face's own normal; and points at the bore centre, at a corner where two edges meet, at the three world planes' shared origin and where an edge pierces XY. The world axis and the coordinate point are refused up front - both are setByLine/setByPoint, direct-edit-only, and this design is parametric"),
+    "model_construction": ("offset the step floor the pocket is cut from and the top the boss stands on; an AXIS on a cameo bore whose published handle the circular pattern turns about; a plane at 30 deg about a bench bore's own axis (origin pinned to the axis) and a plane through a cap vertex; then the ON-PATH surface on one measured 30 mm cap edge - a proportional plane and point reading their ratio back with no extent published, an absolute placement inside the path, one before the start and one far past the end (both accepted, both disclosed against the measured length), the boundary exactly at the length, an expression placement whose model parameter is named for param_set, a to-object plane carrying distance AND offset off the path and a second one landing inside a two-edge chained path, and the summed length of that chain; the out-of-range proportional value and to_object on the point kind refused. Then the datum bench - one bored block carrying every reference the remaining modes read: a plane swung 30 deg about a top edge, one spanning three corners, one splitting the block at mid-height, one spanning two coplanar edges and one resting tangent on the bore wall; an axis on an edge, one spanning two corners and one along the top face's own normal; and points at the bore centre, at a corner where two edges meet, at the three world planes' shared origin and where an edge pierces XY. The world axis and the coordinate point are refused up front - both are setByLine/setByPoint, direct-edit-only, and this design is parametric"),
     "sketch_set_text": ("engrave the FUSION ESSENTIALS nameplate; then the path layouts - text "
                         "along a line and wrapped around a closed circle, and fitted to a line - "
                         "each checked against the created text's own definition objectType; a model "
@@ -241,15 +297,16 @@ STORY = {
                         "with the text count proving nothing landed, the same name refused on an "
                         "edit with the following read showing the string untouched, and a call "
                         "with no font_name publishing no font key at all"),
-    "model_extrude": ("extrude the ring bands symmetric about the ring plane, then a three-bay "
-                      "frame with 'all' whose payload NAMES the regions enclosed by another "
-                      "selected one - the bays that filled with material"),
-    "model_revolve": ("revolve the rotor disc about the spin axis, then about an off-origin "
+    "model_extrude": ("extrude the block, JOIN the stepped half and the boss onto it and CUT the "
+                      "pocket down from the step floor, each depth an expression off the driver; "
+                      "then a three-bay frame with 'all' whose payload NAMES the regions enclosed "
+                      "by another selected one - the bays that filled with material"),
+    "model_revolve": ("revolve a torus ring about the world z axis, then a ring about an off-origin "
                       "cylinder FACE - the resolved label reads BRepFace and the ring's measured "
                       "bounding box stands around x=30, not around the origin; a planar face as "
                       "the axis refused"),
-    "model_loft": "loft the pedestal base-to-post transition",
-    "model_sweep": "sweep the crank handle along its path",
+    "model_loft": "loft a base-to-post cameo between two profiles on stacked planes",
+    "model_sweep": "sweep a round section along its own path",
     "model_draft": "draft a cameo face",
     "model_mirror": ("mirror a cameo body, then the emboss block's own timeline FEATURE with the "
                      "body/volume census read back, then a join whose isCombine is read off the "
@@ -278,44 +335,52 @@ STORY = {
                            "off the feature's own patternElements, then along TWO connected edge "
                            "handles - a list is used EXACTLY, with no chaining, and the label says "
                            "which of the two path rules ran"),
-    "assembly_edit_relations": ("suppress/unsuppress the frame lock, re-value the crank link with was_reversed disclosed, and meet the measured set_occurrences refusal in the words that make it a fact - the build it was measured on and the platform sentence it would raise - with the group's members re-read unchanged afterwards"),
+    "assembly_edit_relations": ("suppress/unsuppress a scratch rigid group, re-value the bench link with was_reversed disclosed, and meet the measured set_occurrences refusal in the words that make it a fact - the build it was measured on and the platform sentence it would raise - with the group's members re-read unchanged afterwards"),
     "assembly_edit_contacts": ("build a contact set from two story parts, meet the single-member refusal, re-member it, rename it reading the landed name back, suppress round-trip, switch contact analysis on and back off, then delete it"),
     "model_hole": ("drill a cameo mounting hole, then the three additive placements - centred on "
                    "its rim, on an edge at middle and at start, and by plane offsets; a circular "
                    "offset edge refused"),
     "model_combine": "join two overlapping cameo pads",
-    "appearance_set": ("give each gyroscope part its own color; then the occurrence FAN-OUT in the "
+    "appearance_set": ("give the part, the billet and each vise component its own colour, with the "
+                       "billet half translucent so the part inside it stays visible; then the occurrence FAN-OUT in the "
                        "shape that discriminates - one body coloured directly, then the occurrence "
                        "written in a DIFFERENT colour, so the body holding its own override comes "
                        "back under 'bodies_not_reached' and not under applied_to (both colours are "
                        "minted from one base asset and share an Appearance.id, so only comparing "
                        "the id AND the name separates reached from kept); and the same shape where "
                        "that body is the occurrence's only one, refused naming it"),
-    "model_set_material": "assign the rotor a physical steel material",
+    "model_set_material": "assign the bracket a physical steel material",
     "find_geometry": "acquire the face/edge/body handles the build consumes",
-    "model_measure_between": "measure the outer-ring-to-inner-ring gap",
-    "model_measure_relation": ("read rotor/shaft coaxiality; then the rest of the vocabulary on "
+    "model_measure_between": ("measure the boss wall to the bore inside it; then each jaw's grip "
+                              "face to the billet, which is what says the vise is closed"),
+    "model_measure_relation": ("read the boss and its own bore coaxial; then the rest of the vocabulary on "
                                "the datum bench, each reporting its OWN measurement - the top face "
                                "perpendicular to a wall it meets and touching it along that edge, "
                                "flush with itself, the bore concentric with itself, and 20 mm "
                                "clear of the floor below"),
-    "model_inspect": "read the rotor's volume back",
-    "pmi_create": ("aim a flatness note at the frame plate and a hole note at a carrier bore, and "
-                   "meet the extension gate PMI authoring sits behind on this build"),
+    "model_inspect": ("read the part's own extent back, and the billet's against the allowance it "
+                      "was sized with; and a MESH addressed as "
+                      "'<occurrence>:<mesh>' inside a singly-placed component, answering with its "
+                      "own triangle count and volume rather than the solid it was cast from"),
+    "pmi_create": ("author a flatness note on the pocket floor and a hole note on a mounting bore, "
+                   "each read back by name and markup"),
     "pmi_get": ("read the PMI back with segments and detail, and again with an over-cap "
                 "max_results - pmi_get's own contract CLAMPS it rather than refusing, since every "
                 "record it returns crosses the wire whole. SKIPPED(rig): the imported-row beats "
                 "(no 'text' key on an imported annotation, no 'is_hole' when isHoleAnnotation will "
                 "not read) need a PMI-BEARING import; the STEP this sweep round-trips carries none"),
-    "pmi_edit": ("meet the name lookup on a design holding no PMI - it lists what exists instead of "
-                 "editing something else - and the blank-name guard. SKIPPED(gate): the "
-                 "ambiguous-name unsuppress refusal needs AUTHORED PMI, which is extension-gated on "
-                 "this build (pmi_create's own beats are that gate)"),
-    "pmi_delete": "meet the same lookup refusal for the delete",
-    "assembly_ground": "ground the frame so the mechanism has a base",
-    "assembly_rigid_group": "rigid-group the frame and carrier base",
-    "joint_create_origin": "place the crank mount and the stock-center WCS",
-    "joint_create": "revolute the yaw, ring pivots, spin, and crank",
+    "pmi_edit": ("rewrite the flatness note to a perpendicularity callout and read the markup back; "
+                 "the blank-name guard refuses"),
+    "pmi_delete": "delete the note and read the remaining PMI count",
+    "assembly_ground": ("ground the vise base the jaw slides on, and the bench base every station's "
+                        "motion is read against"),
+    "assembly_rigid_group": ("rigid-group the vise base with its fixed jaw - one body as far as the "
+                             "machine is concerned - and a scratch pair for the relations lifecycle"),
+    "joint_create_origin": ("place the stock-center WCS at the part's origin, a station per bench "
+                            "motion, the setup's own WCS at the billet's measured centre, and the "
+                            "flip setup's at the part's"),
+    "joint_create": ("slide the moving jaw on the vise base and turn the lead screw on it; then a "
+                     "station joint per bench motion, and the link's own fresh revolute"),
     "joint_at_geometry": ("joint a pin in its bore via cylinder faces; then the motion vocabulary on "
                           "its own cameo tree - a BALL on a real sphere face (the centre key point "
                           "named in the payload, no axis and no axis sentence), a revolute on an "
@@ -327,17 +392,23 @@ STORY = {
                           "guard (a torus inside a base feature hands back its component origin "
                           "with no error) need a torus built INSIDE a base feature, and no tool on "
                           "this surface builds one unattended"),
-    "joint_create_as_built": ("seat the rotor shaft in the inner ring as-built; then a REVOLUTE "
+    "joint_create_as_built": ("seat the part inside the billet it is cut from, then the billet in "
+                              "the jaw that closed on it - both as-built, both where they stand; then a REVOLUTE "
                               "as-built pair anchored on their shared face, read back through "
                               "assembly_get and driven to prove the DOF, with the missing-anchor "
                               "and rigid-plus-anchor refusals"),
-    "joint_edit": ("set rotation limits on the yaw; then walk one scratch joint through every "
+    "joint_edit": ("set travel limits on the vise's jaw slide and rotation limits on the bench's "
+                   "revolute station; then walk one scratch joint through every "
                    "motion the tool offers - rigid to revolute, slider, cylindrical, planar, ball "
                    "and pin_slot - each retype witnessed by the design's own joint walk rather "
                    "than by the writer, the mismatched pin_slot axis pair refused, and the bench "
                    "left on a revolute that actually drives"),
-    "joint_motion_link": "couple the crank to the rotor spin at 2:1; the vise jaws at -1 (self-centering)",
-    "joint_drive": "drive every axis, the crank -> rotor 2:1, then ONE vise jaw (the link closes the other)",
+    "joint_motion_link": ("couple the vise's lead screw to its jaw at 45 deg of handle per mm of "
+                          "travel (6 mm of closing reads 270 deg - a full turn would read as no "
+                          "turn); and a bench revolute pair at 2:1"),
+    "joint_drive": ("drive the vise jaw OPEN and then closed onto the billet, the screw turning "
+                    "with it through the link; then the bench's revolute and slider stations, and "
+                    "every station that has a degree of freedom, home again afterwards"),
     "assembly_get": "read the joint wiring, driven angles, and the StockCenter anchor back",
     "assembly_move": "pose a scratch cameo occurrence",
     "assembly_capture_position": "status, discard the pending pose, re-arm and capture",
@@ -348,7 +419,7 @@ STORY = {
                            "which is how Fusion's own Constrain dialog locates a part. The count "
                            "read off the CREATED constraint is what says both rows live in the one "
                            "feature - the tool refuses a constraint holding fewer than submitted"),
-    "design_add_instance": ("place two more crank instances and read the landed paths back, the "
+    "design_add_instance": ("place two more pin-cameo instances and read the landed paths back, the "
                             "second naming the component while two of it already stand; the "
                             "self-nesting target refused"),
     "design_move_occurrence": ("re-parent one of those instances under the frame, the new path and "
@@ -356,11 +427,13 @@ STORY = {
                                "self-nesting target refused"),
     "assembly_inspect_interference": "check interference at rest and driven",
     "design_recompute": "recompute the assembly after motion",
-    "model_fillet": ("fillet the outer ring edge; then the two path fixtures - one box corner "
+    "model_fillet": ("round the pocket's four corners at the radius the parameter states, break "
+                     "the step's leading edge, blend the boss rim; then the two path fixtures - one box corner "
                      "rounded into an OPEN tangent run, and all four rounded into a CLOSED tangent "
                      "loop - that the chaining beats read their edge counts off"),
-    "model_chamfer": ("chamfer the frame edge, then a second one by distance-and-angle with a "
-                      "miter corner, both read back off the created feature"),
+    "model_chamfer": ("break the step's outboard edge and a through-bore rim, then a mounting-bore "
+                      "rim by distance-and-angle with a miter corner, each read back off the "
+                      "created feature"),
     "model_shell": "shell a scratch cap cameo",
     "model_offset_face": "push a scratch block's top face outward",
     "model_thread": ("thread a scratch post M10x1.5 over part of its length with the extent read "
@@ -386,8 +459,8 @@ STORY = {
     "design_delete_feature": "add a wart feature then delete it; health diff",
     "design_remove_feature": "remove a scratch body and its occurrence; deleting each Remove brings them back",
     "design_delete_occurrence": "delete a scratch occurrence",
-    "view_section": "section cut through the gimbal center",
-    "view_screenshot": ("capture the sectioned mechanism; write the same path twice to show the "
+    "view_section": "section cut along the part's bore axis",
+    "view_screenshot": ("capture the sectioned part, and the vise open before it closes; write the same path twice to show the "
                         "overwrite, and refuse a write against a document that is not active; and "
                         "shoot view='current' - the no-move capture, the only way to keep a frame "
                         "the camera already holds, since a NAMED view refits the whole model"),
@@ -403,7 +476,7 @@ STORY = {
     "surface_thicken": ("thicken the prep sheet, then a four-walled sheet with 'rounded' corners "
                         "read back off the input"),
     "surface_extrude": "extrude prep sheets",
-    "surface_offset": "offset a ring face zero and nonzero",
+    "surface_offset": "offset a sheet face zero and nonzero",
     "surface_extend": ("extend a sheet edge with no alignment given (the payload carries no key, so "
                        "nothing was written), then a second sheet extended with 'align_edges' read "
                        "back"),
@@ -412,7 +485,7 @@ STORY = {
     "surface_patch": ("close the opened bore with a patch, then the same rim at 'tangent' "
                       "continuity and again through one interior RAIL whose landed count is read "
                       "off the input; rails paired with the multi-loop form refused"),
-    "sketch_project": ("project the machining boundary; then section the cap on a datum plane with per-source attribution naming the parallel face that contributed nothing, project the cap sketch's line onto the top face reading the reference linkage back, and meet the same-sketch and missing-direction refusals"),
+    "sketch_project": ("project the machining boundary; then section the cap on a datum plane with per-source attribution naming the parallel face that contributed nothing, project the cap sketch's line onto the top face reading the reference linkage back, and meet the same-sketch and missing-direction refusals. SKIPPED(rig): the cross-document to_surface beat - a 'source_sketch' in a SECOND document carrying the same entityToken as a local one - needs that second document, and every tool that opens or references one (doc_open, doc_insert_derive, doc_insert_occurrence, doc_copy) is excluded here as cloud tier; this sweep runs one unsaved document"),
     "surface_trim": "trim a sheet with a cylinder cutter",
     "surface_untrim": "untrim the internal hole loop",
     "surface_create_ruled": ("rule off a sheet's top rim - tangent, normal, along a direction "
@@ -427,7 +500,9 @@ STORY = {
                       "is the arrangement being a function of the boundary rather than a one-time "
                       "placement"),
     "model_compute_holder": "compute a CAM tool holder (read)",
-    "save_as_mesh": "mesh a scratch solid (one per destructive op)",
+    "save_as_mesh": ("mesh a scratch solid (one per destructive op); then the same solid reached "
+                     "through the qualified '<occurrence>:<body>' address, with the bare 'Body1' "
+                     "refused as ambiguous and the refusal offering that very spelling"),
     "mesh_get": "read the mesh back",
     "mesh_generate_face_groups": "group the mesh faces",
     "mesh_to_brep": "convert a mesh to a base-feature BRep",
@@ -466,13 +541,29 @@ STORY = {
                              "SKIPPED(rig): the AMBIGUOUS-name refusal itself needs two same-named "
                              "timeline features, and no tool on this surface renames a feature, so "
                              "the sweep cannot mint the pair"),
-    "param_set": "bump GimbalDia +33%, then restore it",
+    "param_set": "bump PartLen +33%, measure the part grew with it, then restore it",
     "param_delete": "delete a scratch parameter",
     "view_switch_workspace": "switch to Manufacture, then back to Design",
     "cam_get": ("read the CAM job structure, and the recorded-probing slice on a job nothing has "
                 "probed: the empty state with its reason named, a scope that invents no measure, "
-                "and the units refusal"),
-    "cam_edit_tools": ("add mill/drill/turning/center-drill tools; preset add/remove round-trip "
+                "and the units refusal. Then the three reads the machining acts stand on - the "
+                "strategy slice, read on every setup before a single operation is created (its "
+                "allowed/blocked/unreadable tallies PARTITION the setup's own vocabulary, and each "
+                "strategy the act goes on to create is named in it reading allowed, so a spelling "
+                "this build does not carry reds on the read rather than inside a create); the time "
+                "slice as the non-empty oracle, taken over the WHOLE job - every operation's own "
+                "machining time above zero, which is the one read that tells a cutting toolpath "
+                "from an empty one with hasToolpath reading true on both; and the operations "
+                "census where the states tally and active_count partition one row set across a "
+                "suppression. Plus the templates slice at the SHIPPED location, where the url the "
+                "hole-drilling bundle is applied by comes from, with url_basis naming how it "
+                "addresses the asset"),
+    "cam_edit_tools": ("stock the document library with the shop set this part is cut with - a "
+                       "50 mm face mill, a 10 mm flat mill (10, not 12, because it has to fit "
+                       "inside the 12 mm bore it finishes), a 6 mm ball, a 6 mm drill and a "
+                       "chamfer mill, each given its own tool number because two sample clones "
+                       "that share one make the post refuse - then the turning and center-drill "
+                       "pair the from_type census stands on; preset add/remove round-trip "
                        "with unit, refusal, and rollback gates; the summary census and the same "
                        "census narrowed by tool type, one tool's full parameter list, and the "
                        "LOCAL scope answering with libraries instead of tools; a fifth tool added "
@@ -480,36 +571,89 @@ STORY = {
                        "where_used naming the operations that cut with the mill and reporting NONE "
                        "for the turning tool nothing selected. The document library refuses to "
                        "host a new library and where_used refuses a shared scope - a shared "
-                       "library has no operations, so an empty list there would read as 'none'"),
-    "cam_create_setup": "create the milling setup on the Carrier in the vise",
-    "cam_create_operation": "create the face, adaptive, silhouette, and drill operations",
-    "cam_select_geometry": ("select the stock-top face, both silhouette branches (setup models and "
-                            "named bodies), a whole scratch sketch and the bolt-circle holes; "
-                            "refusals for a knob on the wrong kind, geometry through the wrong "
+                       "library has no operations, so an empty list there would read as 'none'. "
+                       "Then the two tools the extension acts cut with - a 12 mm flat mill "
+                       "carrying its own preset and a 6 mm ball, added at the index the library's "
+                       "own count named - and the flute LENGTHENED on the mill with the "
+                       "expression read back off the tool, which is where a cutting-tool dimension "
+                       "is edited (the operation refuses that write)"),
+    "cam_create_setup": ("create the milling setup on the bracket in the vise, and the FLIP setup "
+                         "that turns it over on its own WCS - the pair one NC program ends the "
+                         "sweep on; then the two setups on the drafted cameo"),
+    "cam_create_operation": ("build the job a shop would run on the bracket: face the top, rough it "
+                             "with the 3D adaptive, open the pocket with 2D offset roughing, "
+                             "contour the boss, break the stepped top's edges with a 2D chamfer, "
+                             "then the hole making - spot the two through bores, drill the "
+                             "counterbored mounting pattern, and bore the through holes to size - "
+                             "then face the underside and contour the "
+                             "counterbore backsides in the flip setup. The extension's own "
+                             "steep-and-shallow pass cuts the boss beside the 2D one where the "
+                             "licence allows it and is skipped where it does not, so the job reads "
+                             "the same either way. Then the three extension strategies on the "
+                             "drafted cameo - swarf, deburr and geodesic - and the refusal for a "
+                             "strategy the setup offers that this installation reads "
+                             "isGenerationAllowed false on, which creates nothing rather than "
+                             "minting an operation that never generates"),
+    "cam_select_geometry": ("aim every operation at the feature it cuts: the stock-top face, the "
+                            "boss top and the stepped top through the FACE kind (which takes the "
+                            "loops that bound the face), the pocket FLOOR through the POCKET kind "
+                            "made for it, both silhouette branches (setup models and named "
+                            "bodies), a whole scratch sketch, and the holes three ways - the "
+                            "counterbored mounting bores through the diameter filter, the two "
+                            "through bores with no filter at all (the branch that machines exactly "
+                            "what it was given), and those same two faces again to the BORE, where "
+                            "one selection input reaches 'circularFaces' instead of the drill's "
+                            "'holeFaces'; refusals for a knob on the wrong kind, geometry through the wrong "
                             "input, and an edge where a face belongs. The pocket-recognition "
                             "selection is NOT driven unattended (running it coincides with the "
                             "Fusion process terminating); its 'pocket_filter_applied' publishes the "
                             "diameter/depth bounds in the CALLER'S own units, with "
-                            "'pocket_filter_units' naming them beside the numbers"),
+                            "'pocket_filter_units' naming them beside the numbers. Then the two "
+                            "routes a 'chain' takes on the drafted cameo: a swarf RAIL PAIR (one "
+                            "selection per rail, the open state read off the collection the "
+                            "operation hands back, the drive mode engaged in the same call and the "
+                            "rail order published, with a single contour refused as a pair) and a "
+                            "deburr edge whose payload carries none of those keys; plus the "
+                            "'surfaces' selection with its face count read back off the named "
+                            "surface set, a role the operation does not carry refused naming the "
+                            "ones it does, and an omitted role refused where there is no drive set "
+                            "to default to. Then the COMPONENT SCOPE, on the scratch job's own "
+                            "silhouette: 'Body1' unscoped refused with the candidates and with the "
+                            "input that narrows them, then scoped to one component, where "
+                            "'selected' is the qualified name of the body that reached "
+                            "inputGeometry"),
     "cam_edit_operation": ("edit the face operation's feed; then park the drill operation and "
                            "restore it - the suppression WRITE, with hasToolpath read back on both "
-                           "sides of the set so the discarded toolpath is reported, not implied"),
+                           "sides of the set so the discarded toolpath is reported, not implied. "
+                           "Then on the swarf operation: the PRESET arm, with the name read back "
+                           "off Operation.toolPreset beside the preset it ran before and a miss "
+                           "refused listing the tool's own; the cutting side written and read back "
+                           "off its parameter; and the isEditable pre-guard refusing a cutting-TOOL "
+                           "dimension by name before anything is applied"),
     "cam_create_machine": ("build a run-stamped 3-axis machine into the Local library, find it in "
                            "the catalog, assign it to the setup, and refuse the duplicate name"),
     "cam_delete_machine": ("take the run's own machine back out of the Local library: the "
                            "confirm_name mismatch refused while it still exists, then the delete "
                            "proved by the library walk, the name re-resolve, and the catalog read "
                            "that listed it when it arrived"),
-    "cam_edit_setup": "real stock + vise fixture bodies; WCS bound to the stock-center JO (bound read back); Haas VF-2 assigned",
-    "cam_edit_folders": "organize the job into Milling and Drilling folders",
+    "cam_edit_setup": ("real stock + vise fixture bodies; WCS bound to the stock-center JO (bound "
+                       "read back); Haas VF-2 assigned - then the same three on the FLIP setup, "
+                       "whose WCS binds a Joint Origin of its own rather than sharing the first "
+                       "setup's, which would be the same fixture twice"),
+    "cam_edit_folders": ("organize the job the way a shop sheet reads - the six milling passes "
+                         "into Milling and the three hole-making cycles into Drilling, each move "
+                         "counted by the destination folder's own re-read"),
     "cam_reorder": "reorder the adaptive before the face op",
     "cam_activate_setup": "activate the setup",
     "cam_compare_operations": "compare the two operations",
-    "cam_show_toolpath": "leave the toolpath visible on camera",
+    "cam_show_toolpath": ("hide every path, then reveal one of each family alone long enough to "
+                          "watch, and leave the whole job on camera"),
     "cam_generate": ("generate the toolpaths against the real part in the real fixture. The tool "
                      "takes no 'pump_seconds': CAM-7 confirms the kernel refuses to be pumped while "
                      "a generation runs, so completion is certified by the bounded cam_get_status "
-                     "poll after this act, never by a sleep inside the call"),
+                     "poll after this act, never by a sleep inside the call. Then one launch per "
+                     "extension setup - three operations of different strategies generated "
+                     "together, with the resolved node's KIND read back beside the name asked for"),
     "cam_inspect_toolpaths": ("verdict false with named ops before generation, scoped check, "
                               "bogus-scope refusal, an over-cap max_results clamped to the tool's "
                               "own row ceiling, verdict true after generation, include_suppressed "
@@ -518,14 +662,27 @@ STORY = {
                               "and the FILTERING measured against a real suppression - the tally "
                               "one operation shorter with the excluded count naming what it left "
                               "out, then the same read widened to count it in its own bucket"),
-    "cam_get_status": "poll the generation to completion (empty toolpaths fail)",
-    "cam_post": "post the NC program to disk",
+    "cam_get_status": ("poll the generation to completion (empty toolpaths fail); and the read "
+                       "taken on the finished extension job, whose per-state tally and health "
+                       "counts describe the scope named beside them"),
+    "cam_post": ("post the setup's NC program to disk; then the LAST thing the sweep does - ONE "
+                 "program over the part's TWO setups, the job and its flip, with the setups asked "
+                 "for beside the program's own stored operations re-read after the post and every "
+                 "file stat'd on disk, the reconfigure down to one setup refused naming every "
+                 "input to omit, and the as-is re-post that changes nothing. The rail program is "
+                 "the other multi-setup post, and the one that meets the 5-axis refusal: it is "
+                 "REFUSED while the swarf toolpath is active, naming the machine configuration a "
+                 "5-axis simultaneous toolpath needs, and posts once that operation is parked"),
     "cam_generate_setup_sheet": "write the machinist setup sheet with the file-landed gate",
     "cam_set_nc_comment": "stamp the NC program comment",
     "cam_save_template": ("save the setup as a run-stamped local CAM template - the stamp is what "
                           "keeps two overlapping runs off one name, since this tool always writes "
                           "a NEW template"),
-    "cam_apply_template": "apply the template to a second setup",
+    "cam_apply_template": ("apply the run's own saved template to a second setup by NAME; then "
+                           "Fusion's shipped spotdrill/drill/counterbore hole bundle by the URL "
+                           "the templates slice published for it, with the name passed too - the "
+                           "tool's cross-check (the url must LOAD the template the name says) is "
+                           "what makes the pair one measurement instead of two hopes"),
     "cam_delete_template": ("take the run's own template back out of the Local library: the "
                             "confirm_name mismatch refused while it still exists, then the delete "
                             "proved by the library's asset walk and by nothing loading from the "
@@ -544,7 +701,7 @@ STORY = {
                           "SMT / f3d as solids - each with the format named explicitly, "
                           "which is what makes the last row (a format contradicting its file's "
                           "extension) a refusal instead of a silent mis-read"),
-    "design_set_name": ("rename the machined part and re-find it by the name that landed, rename a "
+    "design_set_name": ("rename a cameo component and re-find it by the name that landed, rename a "
                         "cameo occurrence with its instance name following, give a twin body the "
                         "name its sibling holds so the deduped '(1)' is what gets published, and "
                         "rename a MESH body - the kind reads 'mesh' and a fresh read of the "

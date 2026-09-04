@@ -22,17 +22,14 @@ _ACTION = _inputs.Choice(
     options=["set_text", "rename", "show", "hide", "set_text_point", "set_leader_point",
              "set_plane", "set_alignment", "set_extension", "set_flags", "set_values",
              "set_display", "suppress", "unsuppress", "mark_up_to_date", "convert_imported"],
-    description="set_text replaces a note's {symbol} markup; set_leader_point/set_plane/"
-                "set_alignment/set_extension re-place a note's leader and format; set_flags/"
-                "set_values/set_display adjust a hole callout; suppress/unsuppress toggle the "
-                "timeline feature; mark_up_to_date dismisses the stale flag; convert_imported "
-                "makes an imported dimension/note editable.")
+    description="mark_up_to_date dismisses the stale flag; convert_imported makes an imported "
+                "dimension/note editable.")
 _PLANE = _inputs.Choice(
     "plane", options=sorted(_pmi.PLANE_TYPES),
-    description="set_plane: the annotation plane type; face/custom_face take plane_face.")
+    description="set_plane: face/custom_face take plane_face.")
 _PLANE_FACE = _inputs.GeometryHandle(
     "plane_face", require="face",
-    description="set_plane: the face for plane=face (adjacent) or custom_face.")
+    description="The face for plane=face (ADJACENT) or custom_face.")
 _ALIGN = _inputs.Choice("align", options=sorted(_pmi.H_ALIGN),
                         description="set_alignment: horizontal text alignment.")
 _VALIGN = _inputs.Choice("valign", options=sorted(_pmi.V_ALIGN),
@@ -64,10 +61,8 @@ def _do_set_text(ann, comp, text):
     got = _pmi.segments_markup(ann)
     if got is None:
         return error("The text edit did not take (segments unreadable after the set).")
-    # The landed markup is COMPARED to the request, the way rename compares the name and
-    # apply_note_format compares each format knob. build_segments -> segments_markup round-trips
-    # exactly (one text/symbol/line-break segment per markup piece, re-encoded by the same table),
-    # so a difference is the platform keeping something other than what was asked for.
+    # build_segments -> segments_markup round-trips exactly (one segment per markup piece,
+    # re-encoded by the same table), so a difference is the platform keeping something else.
     if got != text:
         return error(f"The note's segments read back as '{got}', not the requested '{text}' - the "
                      "text edit did not take as asked. The annotation is left carrying what is "
@@ -211,7 +206,10 @@ def _do_set_extension(ann, comp, leader_extension, f):
 def _do_set_flags(ann, comp, flags):
     if _pmi.kind_of(ann) != "hole_note":
         return error("set_flags applies to hole/thread callouts only.")
-    applied, err = _pmi.apply_hole_flags(ann, flags or {})
+    if not flags:
+        return error("action='set_flags' needs a non-empty 'flags' - "
+                     "{threaded: true, through: false}.")
+    applied, err = _pmi.apply_hole_flags(ann, flags)
     if err:
         return error(err)
     rec = _pmi.annotation_record(comp, ann)
@@ -222,7 +220,10 @@ def _do_set_flags(ann, comp, flags):
 def _do_set_values(ann, comp, values, f):
     if _pmi.kind_of(ann) != "hole_note":
         return error("set_values applies to hole/thread callouts only.")
-    applied, err = _pmi.apply_hole_values(ann, values or {}, f)
+    if not values:
+        return error("action='set_values' needs a non-empty 'values' - {diameter: 6.2} or "
+                     "{diameter: {value, tolerance: {type, ...}}}.")
+    applied, err = _pmi.apply_hole_values(ann, values, f)
     if err:
         return error(err)
     rec = _pmi.annotation_record(comp, ann)
@@ -268,13 +269,10 @@ def _do_suppress(ann, comp, on):
 
 
 def _do_unsuppress_by_timeline(d, name, component=""):
-    """A suppressed PMI is absent from the collections and its timeline entity reads as a bare
-    Feature - only the name survives. Flip the matching suppressed feature, then verify the
-    annotation reappears in the PMI collection; a wrong same-named feature is re-suppressed.
-
-    The re-check reads the HIT COUNT, not find_annotation's error text: several hits means the PMI
-    DID come back (in more than one component), which is the opposite of the 'nothing reappeared'
-    case and must not be re-suppressed with that cause."""
+    """Unsuppress the timeline feature whose name matches, then verify the annotation reappears in
+    the PMI collection; a wrong same-named feature is re-suppressed."""
+    # The re-check reads the HIT COUNT, not find_annotation's error text: several hits means the
+    # PMI DID come back in more than one component, which must not be re-suppressed.
     want = (name or "").strip().lower()
     hits = [(item, nm) for item, nm in _pmi.suppressed_pmi_features(d) if nm.lower() == want]
     if not hits:
@@ -398,11 +396,10 @@ def handler(action=None, annotation="", component="", text="", new_name="", text
 
 
 TOOL_DESCRIPTION = (
-"Edit an existing PMI annotation, addressed by its name from pmi_get ('component' disambiguates "
-"a name used in more than one component). See 'action' for the available edits: leader-note "
-"formatting, hole-callout overrides, rename/visibility/suppression, and imported-PMI conversion. "
-"Every action reads the result back - a set that did not take is reported as an error, not a "
-"false success."
+"Edit an existing PMI annotation, addressed by its name from pmi_get ('component' disambiguates a "
+"name used in more than one component). 'action' picks the edit: leader-note formatting, "
+"hole-callout overrides, rename/visibility/suppression, imported-PMI conversion. Every action "
+"reads the result back - a set that did not take is an error, not a false success."
 )
 
 tool = (
@@ -430,9 +427,9 @@ tool = (
     .add_input_property("leader_extension", {"type": "number",
         "description": "set_extension: leader length in 'units'; under 2.5mm is refused."})
     .add_input_property("flags", {"type": "object",
-        "description": "set_flags: {quantity_note, all_matching, flip_normal, through, threaded, threaded_through, show_imported_geometry}."})
+        "description": "set_flags: booleans, e.g. {threaded: true, through: true}; an unknown key names the legal set."})
     .add_input_property("values", {"type": "object",
-        "description": "set_values: {diameter: 6.2} or {diameter: {value, tolerance: {type, ...}}}; keys incl. depth, counterbore_*, countersink_*, thread_depth."})
+        "description": "set_values: {diameter: 6.2} or {diameter: {value, tolerance: {type, ...}}}; an unknown key names the legal set."})
     .add_input_property("display", {"type": "object",
         "description": "set_display: {precision, units, leading_zeros, trailing_zeros, unit_abbreviation, secondary: {...}}."})
     .add_input_property(*_inputs.UNITS.as_property())

@@ -25,19 +25,14 @@ from .design_mode import run_in_base_feature
 
 app = adsk.core.Application.get()
 
-# A parametric mesh WRITE must run inside a BaseFeature edit scope (MeshBodies.add / mesh-feature
-# docstrings). That scope is opened/closed atomically by run_in_base_feature(design, comp, inner_op)
-# from design_mode.py - the SAME leak-proof helper the newer mesh tools (mesh_edit / mesh_combine /
-# mesh_export) use. We do NOT re-check the open scope afterward: a base-feature edit scope's open-state
-# is UNDETECTABLE from the public API (BaseFeature has no isEditing), so a recheck-after-startEdit guard
-# returns a FALSE NEGATIVE and defeats a write that actually succeeded.
+# A parametric mesh WRITE must run inside a BaseFeature edit scope, which run_in_base_feature opens
+# and closes. That scope's open-state is undetectable from the public API (BaseFeature has no
+# isEditing), so a recheck after startEdit reads false-negative on a write that succeeded.
 
 _VALID_EXTS = (".stl", ".obj", ".3mf")
 
-# Threshold (display-mesh triangle count of the SOURCE) above which reduce/remesh may blow the 30s
-# main-thread handler cap. We don't own the poller, but we structure for it: above this we still run
-# synchronously (the only public path) yet annotate the result so a caller/orchestrator can adopt a
-# fire-and-poll wrapper. Modest meshes return cleanly inside the window.
+# Display-mesh triangle count of the SOURCE above which reduce/remesh can exceed the 30s
+# main-thread handler cap. Above it the op still runs synchronously and the result says so.
 _SLOW_TRI_THRESHOLD = 250_000
 
 # mesh_get's row cap: the default a caller who names none gets, and the ceiling max_results cannot
@@ -97,21 +92,13 @@ _NO_AREA_CHANGE_CM2 = 1e-9
 
 
 def _area_volume(mb):
-    """(area cm^2, volume cm^3) of a MeshBody, each None when it cannot be read - the geometry-level
-    SECOND signal a triangle-count gate is backed with.
-
-    measured(), never safe(read, 0.0): MeshBody.volume answers 0.0 for a body that encloses nothing
-    (see _mesh_summary), so 0.0 is an ANSWER here and an unreadable read must stay None."""
+    """(area cm^2, volume cm^3) of a MeshBody, each None when it could not be read."""
     return _common.measured(lambda: mb.area), _common.measured(lambda: mb.volume)
 
 
 def _mesh_moved(before, after):
-    """Did a mesh's geometry MOVE between two _area_volume reads? True when either signal is readable
-    at both ends and differs beyond its no-change band, False when every readable signal is flat, and
-    None when neither was readable at both ends - unknown, which is never 'flat'.
-
-    This is what separates a re-triangulation that happens to land on the SAME triangle count (a cut
-    whose fill adds exactly as many triangles as it removed) from an operation that did nothing."""
+    """True when a signal readable at both ends moved beyond its no-change band, False when every
+    readable signal is flat, None when neither was readable at both ends."""
     pairs = ((before[0], after[0], _NO_AREA_CHANGE_CM2),
              (before[1], after[1], _common.NO_VOLUME_CHANGE_CM3))
     readable = [(b, a, band) for b, a, band in pairs if b is not None and a is not None]
@@ -121,15 +108,8 @@ def _mesh_moved(before, after):
 
 
 def _mesh_summary(mb, include_polygon=True, inv_scale=1.0):
-    """A JSON-safe summary record for one MeshBody. All reads - never raises into the handler.
-
-    area/volume are read per-field with safe(). MeshBody.volume does NOT raise on a mesh that is not
-    closed: it returns 0.0 (measured on a single-triangle STL reading is_closed false), so 0.0 is the
-    API's ANSWER for a body that encloses nothing, and a null volume here means the field could not
-    be read at all - the two are never merged. Check is_closed before reading a 0.0 as an enclosed
-    volume. inv_scale is 1/(units->cm factor),
-    same convention as _bbox_record - area scales by inv_scale^2, volume by inv_scale^3 from the
-    internal cm^2/cm^3 the API reports (see model_inspect._full_props for the same cm-based idiom)."""
+    """A JSON-safe summary record for one MeshBody - reads only, area/volume scaled out of the API's
+    internal cm^2/cm^3 by inv_scale (1/(units->cm factor)) squared and cubed."""
     area = safe(lambda: mb.area)
     volume = safe(lambda: mb.volume)
     rec = {
@@ -203,16 +183,8 @@ def mesh_get_handler(target: str = "", max_results: int = _MESH_ROWS_DEFAULT,
             if c is not None and c not in comps:
                 comps.append(c)
     else:
-        # A named COMPONENT (the one design-wide by-name component resolve), else an OCCURRENCE
-        # through the shared ambiguity-refusing resolver: neither name is unique (two sub-assemblies
-        # each hold a 'Bolt:1'; two components can carry one name), so a name several answer to is
-        # REFUSED rather than listing whichever the walk reached first.
         found, comp_err = _export.find_component(design, name)
         if comp_err:
-            # The occurrence vocabulary just below is what still resolves here, so the refusal
-            # points at it. It offers no find_geometry handle: find_geometry mints face/edge/vertex
-            # handles, and the occurrence step refuses a handle pointing at anything but an
-            # occurrence (its own handle form, from design_get's tree, does resolve).
             return error(comp_err + " List one instance's meshes by its occurrence "
                          "name/fullPathName (design_get(include=['tree']) lists the instances), or "
                          "pass target='' to scan the whole design.")
@@ -286,17 +258,10 @@ def mesh_measure_of_body(mb, units="mm") -> dict:
 # ── mesh_insert ─────────────────────────────────────────────────────────────────────────────────
 
 def _insert_meshes(comp, design, full_path, mesh_units):
-    """Run the actual import, routed through run_in_base_feature so the base-feature scope is opened
-    (parametric) or skipped (direct) and ALWAYS finished in a finally - the same leak-proof helper the
-    newer mesh tools use. inner_op receives the open BaseFeature (parametric) or None (direct); both are
-    valid as meshBodies.add's third arg. Returns (mesh_list, base_feature_name, error_result_or_None).
-
-    The mutation (meshBodies.add) is NOT wrapped in safe() - a real import failure must surface as an
-    error, not a silent false-ok. We verify the returned list is non-empty before declaring success."""
+    """Import through run_in_base_feature; returns (mesh_list, base_feature_name, error or None)."""
 
     def inner_op(base_feature):
-        # The import itself - direct call, no safe around the mutation. base_feature is the open
-        # BaseFeature (parametric) or None (direct); meshBodies.add accepts None in direct mode.
+        # meshBodies.add takes the open BaseFeature (parametric) or None (direct) as its third arg.
         try:
             mesh_list = comp.meshBodies.add(full_path, mesh_units, base_feature)
         except Exception as e:
@@ -335,13 +300,8 @@ def mesh_insert_handler(file_path: str = "", target_component: str = "",
     comp = _target_component(design)
     tc = (target_component or "").strip() if isinstance(target_component, str) else ""
     if tc:
-        # The one design-wide by-name component resolve: a name several components carry is REFUSED
-        # here rather than importing the mesh into whichever one the walk reached first.
         picked, comp_err = _export.find_component(design, tc)
         if comp_err:
-            # This is the one site with no second vocabulary - target_component takes a name and
-            # nothing else - so the remedy is the ACTIVE component, which design_activate_component
-            # sets from an occurrence (that kind addresses one instance by fullPathName).
             return error(comp_err + " Omit target_component to import into the ACTIVE component, "
                          "and set which that is with design_activate_component (it takes the "
                          "occurrence, so it can name one of them).")
@@ -358,14 +318,10 @@ def mesh_insert_handler(file_path: str = "", target_component: str = "",
     if ins_err:
         return ins_err
 
-    # Verify the post-state: the import must have produced at least one body.
     count = safe(lambda: mesh_list.count, 0) or 0
     if not mesh_list or count == 0:
         return error("Mesh import returned no bodies (the file may be empty or unreadable as a mesh).")
 
-    # The per-body stats are scaled into the reported 'units' through the SAME _mesh_summary path
-    # mesh_get scales its listing with - the API reads area/volume in cm^2/cm^3, so publishing them
-    # raw beside units='mm' UNDERSTATES the body by 100x in area and 1000x in volume.
     inv_scale = 1.0 / unit_cm
     bodies = []
     rename_warning = None
@@ -402,8 +358,7 @@ _REDUCE_UNITS = _inputs.UnitField()
 
 
 def _slow_note(tri):
-    """Advisory note when the SOURCE mesh is big enough to risk the 30s main-thread cap (structure for
-    fire-and-poll). None for modest meshes."""
+    """Advisory note when the source mesh risks the 30s cap, None for modest meshes."""
     if tri and tri > _SLOW_TRI_THRESHOLD:
         return ("Source mesh has %d triangles (> %d) - this op can exceed the 30s main-thread cap. It "
                         "ran synchronously here; an orchestrator should wrap large meshes in a fire-and-poll "
@@ -440,9 +395,6 @@ def mesh_reduce_handler(mesh: str = "", target: str = "proportion", value: float
         if v <= 0:
             return error("For target=face_count, 'value' must be a positive integer face count - "
                          f"got {v}.")
-        # A fractional face count has no truncation that is safe to pick FOR the caller: 0.5 truncates
-        # to a ZERO-face target (which the after<before check reads as a successful reduce) and 10.9
-        # to 10 with nothing on the wire saying so. Refuse it naming the value instead.
         if not v.is_integer():
             return error(f"For target=face_count, 'value' must be a WHOLE face count - {v} is not an "
                          "integer. Truncating it here would silently decimate to a different (or "
@@ -473,9 +425,8 @@ def mesh_reduce_handler(mesh: str = "", target: str = "proportion", value: float
 
         tt = safe(lambda: adsk.fusion.MeshReduceTargetTypes)
         try:
-            # proportion/facecount/maximumDeviation each require an adsk.core.ValueInput (NOT a raw
-            # float/int) - the live API rejects bare numbers ("argument 2 of type Ptr<ValueInput>").
-            # Wrap every one in ValueInput.createByReal; the mock accepted raw floats and hid this.
+            # proportion/facecount/maximumDeviation each take an adsk.core.ValueInput; the API
+            # rejects a raw float ("argument 2 of type Ptr<ValueInput>").
             if tgt == "proportion":
                 inp.meshReduceTargetType = safe(lambda: tt.ProportionMeshReduceTargetType)
                 inp.proportion = adsk.core.ValueInput.createByReal(v)   # PERCENT as-is (25 = 25%)
@@ -493,16 +444,13 @@ def mesh_reduce_handler(mesh: str = "", target: str = "proportion", value: float
         except Exception as e:
             return error(f"Could not configure the mesh-reduce input: {e}")
 
-        # Mutation - direct call (no safe around it). A falsy return is NOT a failure: these add
-        # methods "Return nothing in the case where the feature is non-parametric" (a DIRECT design OR
-        # an add inside the BaseFeature edit scope run_in_base_feature opens). mesh_reduce modifies the
-        # mesh IN PLACE, so SUCCESS is observed by re-reading the mesh's (updated) triangle count.
+        # add() returns nothing for a non-parametric feature (a direct design, or an add inside the
+        # base-feature scope), so success is the mesh's re-read triangle count, not this return.
         try:
             feat = feats.add(inp)
         except Exception as e:
             return error(f"Mesh reduce failed (meshReduceFeatures.add raised): {e}")
-        # The open BaseFeature can never be re-found once the scope closes, so its name is captured
-        # HERE - it is what explains a null feature to the caller.
+        # The open BaseFeature cannot be re-found once the scope closes, so capture its name here.
         return {"feat": feat,
     "base_feature_name": safe(lambda: base_feature.name) if base_feature else None}
 
@@ -552,8 +500,7 @@ _REMESH_MESH = _inputs.MeshBodyRef("mesh", required=True, description="The mesh 
 
 
 def _result_mesh_of(feat, fallback):
-    """Best-effort: the MeshBody produced by a mesh feature (so we can report the AFTER counts/handle).
-    Mesh features expose .bodies; fall back to the source mesh if not modelled. Reads only."""
+    """The MeshBody a mesh feature produced (feature.bodies), or `fallback` when it has none."""
     bodies = safe(lambda: feat.bodies)
     if bodies is not None:
         n = safe(lambda: bodies.count, 0) or 0
@@ -593,11 +540,8 @@ def mesh_remesh_handler(mesh: str = "", density: float = 0.0) -> dict:
         if inp is None:
             return error("meshRemeshFeatures.createInput returned nothing.")
 
-        # density set-then-read-back (measured: a safe(setattr) here SILENTLY dropped it - 0.05 vs
-        # 20 produced byte-identical results with the value never echoed). The field takes a
-        # ValueInput, not a raw float (live-verified 2705.0.87: a float raises in the SWIG layer;
-        # createByReal lands and reads back as a ValueInput whose realValue echoes the set). A
-        # build that refuses the set gets a REFUSAL, never the silent default remesh.
+        # density takes a ValueInput, not a raw float (a raw float raises in the SWIG layer), and a
+        # dropped set is silent - the read-back below is what catches it.
         try:
             d = float(density)
         except Exception:
@@ -615,14 +559,13 @@ def mesh_remesh_handler(mesh: str = "", density: float = 0.0) -> dict:
                              "without 'density' for the default remesh.")
             density_applied = d
 
-        # Mutation - direct call. A falsy return is non-parametric SUCCESS (direct design OR base-feature
-        # scope), not a failure. Remesh modifies the mesh IN PLACE: SUCCESS is the mesh's updated counts.
+        # add() returns nothing for a non-parametric feature (a direct design, or an add inside the
+        # base-feature scope), so success is the mesh's re-read counts, not this return.
         try:
             feat = feats.add(inp)
         except Exception as e:
             return error(f"Mesh remesh failed (meshRemeshFeatures.add raised): {e}")
-        # The open BaseFeature can never be re-found once the scope closes, so its name is captured
-        # HERE - it is what explains a null feature to the caller.
+        # The open BaseFeature cannot be re-found once the scope closes, so capture its name here.
         return {"feat": feat, "density_applied": density_applied,
     "base_feature_name": safe(lambda: base_feature.name) if base_feature else None}
 
@@ -663,7 +606,9 @@ def mesh_remesh_handler(mesh: str = "", density: float = 0.0) -> dict:
 
 _CONVERT_MESH = _inputs.MeshBodyRef("mesh", required=True, description="The mesh body to convert.")
 _CONVERT_METHOD = _inputs.Choice("method", ["prismatic", "faceted", "organic"], default="prismatic",
-                                 description="Conversion method.")
+                                 description="prismatic merges flat face groups (fewest faces); "
+                                             "faceted is one BRep face per triangle (exact, heavy); "
+                                             "organic needs the Product Design Extension.")
 _CONVERT_RES = _inputs.Choice("resolution", ["by_accuracy", "by_facet_number"], default="by_accuracy",
                               description="Organic only: resolution driver.")
 _CONVERT_ACC = _inputs.Choice("accuracy", ["low", "medium", "high", "precise"], default="medium",
@@ -721,25 +666,18 @@ def mesh_to_brep_handler(mesh: str = "", method: str = "prismatic", resolution: 
     # parametric design - so the returned feature is no evidence of the design's mode.
     design_mode = _inputs.current_design_type(design)
 
-    # Prismatic convert REQUIRES face groups - if they're missing the add raises
-    # 'MESH_FAILED_BREP - Use Generate Face Groups'. Point the agent at the remedy (do NOT auto-run it;
-    # keep the tools composable). Appended only for the prismatic method, where this is the cause.
+    # Prismatic convert needs face groups; without them the add raises 'MESH_FAILED_BREP - Use
+    # Generate Face Groups'.
     _face_groups_hint = (" If the failure mentions face groups (MESH_FAILED_BREP / 'Use Generate "
                          "Face Groups'), run mesh_generate_face_groups on this mesh first, then retry "
                          "mesh_to_brep(method='prismatic') - prismatic convert needs them."
                          if meth == "prismatic" else "")
 
-    # SUCCESS is observed by a NEW BRep body appearing on the component, NOT by the feature object:
-    # these add methods "Return nothing in the case where the feature is non-parametric" (a DIRECT
-    # design OR an add inside a BaseFeature edit scope), so a None return is success in exactly the
-    # modes this tool runs in. Snapshot the BRep bodies BEFORE the add so the before/after comparison
-    # is valid whether add returns a feature (parametric) or None (non-parametric).
+    # add() returns nothing for a non-parametric feature (a direct design, or an add inside the
+    # base-feature scope), so success is a NEW BRep body in the before/after snapshot below.
     def _brep_snapshot():
-        # (physical-body key, name, handle, body). The DIFF keys on _common.native_identity, never on
-        # the wrapper's own token: each read of the collection mints a fresh wrapper, and a proxy and
-        # its native carry DIFFERENT tokens (measured), so a wrapper-token key reports a body that was
-        # already there as newly converted. The published HANDLE stays the WRAPPER's own token - that
-        # is the string that resolves back to this reference.
+        # (physical-body key, name, handle, body). A proxy and its native carry DIFFERENT tokens, so
+        # the diff keys on native_identity; the published handle stays the wrapper's own token.
         return [(_common.native_identity(b), safe(lambda b=b: b.name),
                  safe(lambda b=b: b.entityToken), b)
                 for b in _common.iter_collection(safe(lambda: comp.bRepBodies))]
@@ -854,15 +792,11 @@ def mesh_to_brep_handler(mesh: str = "", method: str = "prismatic", resolution: 
 mesh_get_tool = (
     Tool.create_simple(
         name="mesh_get",
-        description=("List the MESH bodies (adsk.fusion.MeshBody - STL/OBJ/3MF imports) in a "
-            "component or the whole design, with triangle/vertex counts, area/volume, and "
-            "watertight (is_closed) health. Meshes are a SEPARATE body type from BRep "
-            "solids/surfaces, so the BRep tools (find_geometry / model_inspect) can't see them "
-            "as solids - this is how you find them. Inspect one with model_inspect (mesh "
-            "target), edit with mesh_reduce / mesh_remesh, convert with mesh_to_brep, remove "
-            "with mesh_delete. 'volume' reads 0.0 on a mesh that is not watertight (it encloses "
-            "nothing) and null only when the field could not be read. 'meshes' is "
-            f"capped (max_results, default {_MESH_ROWS_DEFAULT}); 'truncated' flags when the cap was hit."))
+        description=("List the MESH bodies in a component or the whole design, with counts, "
+            "area/volume and the is_closed flag. The BRep tools cannot see meshes, so this is how "
+            "you find them; convert with mesh_to_brep or edit with mesh_reduce / mesh_remesh. "
+            "'volume' reads 0.0 on a mesh that is not watertight, and is null only when the field "
+            "could not be read."))
     .add_input_property("target", {"type": "string", "description": "Component/occurrence name to scan, or '' for the whole design."})
     .add_input_property("max_results", {"type": "integer", "description": f"Cap on the 'meshes' array returned (default {_MESH_ROWS_DEFAULT}, max {_MESH_ROWS_CEILING})."})
     .add_input_property(_MEASURE_UNITS.name, _MEASURE_UNITS.schema())
@@ -873,15 +807,11 @@ mesh_get_item = Item.create_tool_item(tool=mesh_get_tool, write="read", handler=
 mesh_insert_tool = (
     Tool.create_simple(
         name="mesh_insert",
-        description=("Import an STL / OBJ / 3MF from a LOCAL path as a MESH body into the active (or "
-            "named) component. In a PARAMETRIC design the import MUST run inside a BaseFeature edit "
-            "scope (the API forbids a bare MeshBodies.add); this tool opens that scope for you and "
-            "reports the base_feature it created. DIRECT needs none. To import a data-model file, "
-            "first resolve it to a local path with the data_* tools, then pass that path. Convert "
-            "the result to BRep with mesh_to_brep to use it with the BRep/CAM tools."))
+        description=("Import an STL / OBJ / 3MF from a LOCAL path as a MESH body into the active "
+            "(or named) component. Convert it with mesh_to_brep to use the BRep/CAM tools on it."))
     .add_input_property("file_path", {"type": "string", "description": "Full path to a .stl / .obj / .3mf file (required)."})
     .add_input_property("target_component", {"type": "string", "description": "Component name to import into (default: active component)."})
-    .add_input_property("units", {"type": "string", "description": "Units the file is authored in: mm | cm | m | in | ft (default mm). The reported area/volume are in it too."})
+    .add_input_property("units", {"type": "string", "description": "Units the file is authored in: mm | cm | m | in | ft (default mm); area/volume are reported in it."})
     .add_input_property("name", {"type": "string", "description": "Optional name for the imported body (single-body imports only)."})
     .add_required_input("file_path")
     .strict_schema()
@@ -898,10 +828,7 @@ mesh_reduce_tool = (
     _inputs.apply_to_tool(
         Tool.create_simple(
             name="mesh_reduce",
-            description=("Decimate (reduce the triangle count of) a MESH body to a target proportion "
-                         "(percent), face_count, or max_deviation. Big scans (millions of triangles) "
-                         "can exceed the 30s handler cap - the result notes when a fire-and-poll "
-                         "wrapper is advisable.")),
+            description=("Decimate (reduce the triangle count of) a MESH body.")),
         _REDUCE_SPEC)
     .add_input_property("value", {"type": "number", "description": "Percent (0,100] for proportion; a positive integer for face_count; a positive length (in 'units') for max_deviation."})
     .add_required_input("value")
@@ -917,9 +844,8 @@ mesh_reduce_item = Item.create_tool_item(
 mesh_remesh_tool = (
     Tool.create_simple(
         name="mesh_remesh",
-        description=("Regenerate a cleaner, more uniform triangulation of a MESH body (repair / even "
-                     "density). Big meshes can exceed the 30s cap - the result notes when "
-                     "fire-and-poll is advisable."))
+        description=("Regenerate a cleaner, more uniform triangulation of a MESH body (repair / "
+                     "even density)."))
     .add_input_property(_REMESH_MESH.name, _REMESH_MESH.schema())
     .add_required_input(_REMESH_MESH.name)
     .add_input_property("density", {"type": "number", "description": "Optional relative target density (>0). Read back after the set; refused if this build does not take it."})
@@ -937,14 +863,8 @@ mesh_to_brep_tool = (
     _inputs.apply_to_tool(
         Tool.create_simple(
             name="mesh_to_brep",
-            description=("Convert a MESH body into a BRep solid/surface - the bridge back to the BRep "
-                         "tools (find_geometry / fillet / chamfer / CAM). "
-                         "method='prismatic' (default) merges flat face groups (fewest faces, best for "
-                         "machined/scanned parts); 'faceted' makes one BRep face per triangle (exact, "
-                         "heavy); 'organic' rebuilds smooth surfaces but REQUIRES the Product Design "
-                         "Extension (refused with a clear message if absent - no silent fallback). "
-                         "Pre-checks is_closed and REFUSES a non-watertight mesh (conversion almost "
-                         "always fails on open meshes).")),
+            description=("Convert a MESH body into a BRep solid/surface - the bridge back to "
+                         "find_geometry / fillet / CAM.")),
         _CONVERT_SPEC)
     .add_input_property("face_count", {"type": "integer", "description": "Organic + resolution=by_facet_number: target BRep face count."})
     .strict_schema()

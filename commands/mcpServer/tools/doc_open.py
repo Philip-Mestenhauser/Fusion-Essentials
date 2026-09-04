@@ -66,10 +66,9 @@ def handler(file_id: str = "", is_cam_template: bool = False,
         "workspace_orient before continuing. This is the only stable path for these docs.",
         })
 
-    # DECLARE-INTENT default: with no intent declared, REFUSE rather than silently take the API path.
-    # The API path resolves the file (findFileById + openUsingContext) - and on a multi-ref CAM
-    # template that resolution/open is the crash. Since CAM-ness can't be auto-detected, a bare call
-    # is treated as unsafe-by-default: the caller must say which path they mean.
+    # DECLARE-INTENT default: on a multi-ref CAM template the API resolve/open (findFileById +
+    # openUsingContext) is the crash on Fusion 2705.1.4, and CAM-ness cannot be auto-detected.
+    # Re-probe on the next major: force_api_open=true on a COPY of one template, scratch session.
     if not force_api_open:
         return error(
     "doc_open needs you to DECLARE INTENT. "
@@ -113,10 +112,9 @@ def handler(file_id: str = "", is_cam_template: bool = False,
     "one with ConfigurationRow.activate()."
         )
 
-    # Opening a cloud document is asynchronous: the open call can return before the design is
-    # fully loaded and active. We deliberately do NOT sleep/poll here - this handler runs on
-    # Fusion's main (UI) thread, the same thread that loads the document, so blocking would
-    # stall the load AND freeze the UI. Report status honestly and tell the agent how to confirm.
+    # Opening a cloud document is asynchronous, and this handler runs on the same main thread that
+    # loads it - blocking here would stall the load AND freeze the UI, so the status is reported as
+    # read and the caller is told how to confirm.
     if info["is_active"] is False:
         info["note"] = (
         "Document is still loading (open is asynchronous). Call workspace_orient after a "
@@ -127,14 +125,12 @@ def handler(file_id: str = "", is_cam_template: bool = False,
 
 
 TOOL_DESCRIPTION = (
-    "Open a Fusion document by data-model id. 'file_id' = a lineage id (latest version), a versionId "
-    "(that version), a fusionWebURL/source_url (decoded automatically), or a source_id from "
-    "design_get(include=['tree']) / cam_get(include=['references']). Switches the active document; handles configured designs. "
-    "Async - call workspace_orient afterward to confirm it's active. REQUIRED declare-intent flag (a "
-    "missing one has crashed Fusion): pass force_api_open=true for a NORMAL document, OR "
-    "is_cam_template=true for a multi-reference CAM/Manufacture template (which the tool then REFUSES "
-    "to API-open - open those in the Fusion UI, the only stable path). With neither flag it refuses "
-    "and opens nothing. If both, is_cam_template wins."
+    "Open a Fusion document by data-model id: 'file_id' = a lineage id (latest version), a versionId "
+    "(that version), or a fusionWebURL/source_url. Switches the active document; handles configured "
+    "designs. Async - call workspace_orient afterward to confirm it's active. REQUIRED: "
+    "force_api_open=true for a NORMAL document, OR is_cam_template=true for a multi-reference "
+    "CAM/Manufacture template (API-opening those has crashed Fusion, so the tool REFUSES it and "
+    "instructs a UI open). With neither it opens nothing; is_cam_template wins."
 )
 
 tool = (
@@ -145,9 +141,9 @@ tool = (
         input_param_description="A DataFile lineage/versioned URN, or a Fusion web URL (fusionWebURL/source_url).",
     )
     .add_input_property("force_api_open", {"type": "boolean",
-            "description": "Declare a NORMAL document: open it via the API (resolve + openUsingContext). REQUIRED for a normal open - without it (and without is_cam_template) the tool refuses, so a forgotten flag can't silently take the crash-prone API path. Default false."})
+            "description": "Declare a NORMAL document and open it via the API. Default false."})
     .add_input_property("is_cam_template", {"type": "boolean",
-            "description": "Declare this is a freshly-copied multi-reference CAM template. The tool then REFUSES the API open (which crashes Fusion for these docs) and instructs a manual UI open. Wins over force_api_open. Default false."})
+            "description": "Declare a multi-reference CAM template: the API open is refused and a UI open instructed. Default false."})
     .strict_schema()
 )
 

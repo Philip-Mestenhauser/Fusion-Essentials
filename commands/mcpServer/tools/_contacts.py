@@ -1,12 +1,10 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Shared contact-set substrate: the DESIGN-scoped walk over design.contactSets (contact sets hang
-off the Design, never a Component), the resolve-one-by-name every lifecycle op targets through, and
-the membership read-back. The member property is spelled occurencesAndBodies - ONE 'r' - and the
-correctly spelled name is accepted silently while changing nothing, so a membership write is only
-ever confirmed by re-reading it through here.
-"""
+"""Contact-set substrate: the design-scoped walk, the resolve-one, and the membership read-back.
+
+The member property is spelled occurencesAndBodies - ONE 'r' - and the correctly spelled name is
+accepted silently while changing nothing, so a membership write is confirmed only by re-reading."""
 
 import adsk.fusion
 
@@ -14,11 +12,9 @@ from ._common import safe
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
 MAP_BLURB = ("the substrate assembly_get's contacts slice and assembly_edit_contacts share. "
-             "contact_sets/all_contact_sets/contact_set_names - the DESIGN-scoped contactSets walk "
-             "(no component carries one); find_contact_set - the EXACT resolve-one, refusing a "
-             "duplicate instead of taking the first; membership/member_label - the "
-             "occurencesAndBodies read-back: the count from len(), and the name of every member "
-             "that casts")
+             "contact_sets/all_contact_sets/contact_set_names - the DESIGN-scoped contactSets walk; "
+             "find_contact_set - the EXACT resolve-one, refusing a duplicate; "
+             "membership/member_label - the occurencesAndBodies read-back")
 
 
 def contact_sets(design):
@@ -40,17 +36,14 @@ def all_contact_sets(design):
 
 
 def contact_set_names(design):
-    """The names of every contact set, unreadable ones dropped - the candidate list a resolve failure
-    reports back, and the survivor list a delete re-reads."""
+    """The names of every contact set, unreadable ones dropped."""
     return [nm for nm in (safe(lambda cs=cs: cs.name) for cs in all_contact_sets(design)) if nm]
 
 
 def find_contact_set(design, name):
-    """Resolve ONE contact set by name. Returns (contact_set, error_or_None).
-
-    Case-insensitive EXACT match. Fusion's auto-dedupe of a colliding name is CASE-SENSITIVE
-    (measured: renaming a set to 'contactset1' beside an existing 'ContactSet1' lands VERBATIM), so
-    two sets CAN answer one query here - several hits are REFUSED, never the first."""
+    """Resolve ONE contact set by case-insensitive exact name; returns (contact_set, error)."""
+    # Fusion's auto-dedupe of a colliding name is CASE-SENSITIVE, so two sets can answer one
+    # case-insensitive query; several hits are REFUSED, never the first.
     want = (name or "").strip()
     if not want:
         return None, ("'name' is required - the contact set to act on "
@@ -69,10 +62,9 @@ def find_contact_set(design, name):
 
 
 def member_label(entity):
-    """A contact-set member's name: an Occurrence reads its fullPathName, a BRepBody its name,
-    anything else reads None. A BODY member read back off occurencesAndBodies arrives as a raw
-    object that BOTH casts reject (measured on Fusion 2704.1.39), so it carries no name to report -
-    membership() counts it instead."""
+    """A member's name - an Occurrence's fullPathName, a BRepBody's name, else None."""
+    # A body read back off occurencesAndBodies arrives as an object both casts reject, so it
+    # answers None here and membership() counts it as unnamed instead.
     occ = safe(lambda: adsk.fusion.Occurrence.cast(entity))
     if occ is not None:
         return safe(lambda: occ.fullPathName) or safe(lambda: occ.name)
@@ -83,10 +75,8 @@ def member_label(entity):
 
 
 def membership(cs, cap=None):
-    """A contact set's members as (names, total, unnamed). `total` is len(occurencesAndBodies) - the
-    one count the platform answers for EVERY member - `names` holds the members carrying a readable
-    name (bounded by `cap`), and `unnamed` counts the members within that same bound that do not.
-    Returns (None, None, None) when the property cannot be read at all."""
+    """A contact set's members as (names bounded by `cap`, total, unnamed within that bound), or
+    (None, None, None) when occurencesAndBodies cannot be read."""
     members = safe(lambda: list(cs.occurencesAndBodies))
     if members is None:
         return None, None, None

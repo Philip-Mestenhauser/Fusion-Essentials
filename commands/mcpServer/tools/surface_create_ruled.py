@@ -36,7 +36,8 @@ _TYPES = {
 _EDGES = _inputs.EdgeLoopRef("edges", closed=False, required=True,
     description="The edge chain the surface grows from.")
 _TYPE = _inputs.Choice("ruled_type", ["tangent", "normal", "direction"], default="tangent",
-    description="How the surface leaves the edge.")
+    description="tangent continues that face past the edge, normal stands perpendicular to it, "
+                "direction sweeps along the 'direction' entity.")
 _DISTANCE = _inputs.Distance("distance", required=True, description="How far the surface extends.")
 # The direction entity is handed to createInput ITSELF, so it must be an ENTITY: a face handle would
 # only yield a direction vector, which the call cannot consume - entity_only refuses one up front.
@@ -46,36 +47,18 @@ _DIRECTION = _inputs.AxisRef("direction", entity_only=True,
 
 def _added_bodies(bodies, before_keys):
     """The members of `bodies` that were NOT in the component before the mutation, keyed by
-    ``_common.native_identity`` and falling back to the body's NAME.
-
-    MEASURED: RuledSurfaceFeature.bodies also holds the body the edges came from - a tangent surface
-    off a solid box read back [the solid box, the new sheet] - so the feature's own result set is not
-    the result. Published raw it would report the parent as created and let the parent's isSolid
-    decide the sheet verdict.
-
-    The two sides of this diff come from two DIFFERENT collections - the component's own body census
-    before, the feature's result set after - and each mints its own wrapper for the same body. That
-    is why the key is the identity rather than the wrapper's entityToken: a proxy's token differs
-    from its native's (measured), so a parent reached natively in one collection and as a proxy in
-    the other would read as newly created.
-
-    The NAME fallback holds that same pair together where no token reads - a proxy delegates its name
-    to its native - and it cannot merge two different bodies here, because both collections are read
-    off ONE component and a body name is unique inside one component's browser. It is deliberately
-    the bare name: pairing it with the wrapper's SCOPE (its occurrence path for a proxy, its
-    component for a native) is what would split the native/proxy pair again. A body answering neither
-    half keys as None, which matches any other unreadable body already in the census."""
+    ``_common.native_identity`` and falling back to the body's bare NAME."""
+    # RuledSurfaceFeature.bodies also holds the body the edges came from, so the feature's result
+    # set is not the result. The two sides come from different collections, each minting its own
+    # wrapper: a proxy's entityToken differs from its native's, but the identity and name do not.
     return [b for b in bodies
             if (_common.native_identity(b) or safe(lambda b=b: b.name)) not in before_keys]
 
 
 def _resolve_direction(raw, host):
-    """(direction entity, label, error) for the createInput direction argument. A world axis becomes
-    that component's origin ConstructionAxis - the entity form measured to work; an edge/sketch-line
-    handle is passed through as itself.
-
-    The label says what the input RESOLVED to, never the handle string: measured, neither a BRepEdge
-    nor a SketchLine carries a `name`, so an entity is labelled by its TYPE."""
+    """(direction entity, label, error) for the createInput direction argument: a world axis becomes
+    that component's origin ConstructionAxis, an edge/sketch-line handle passes through as itself.
+    Neither a BRepEdge nor a SketchLine carries a `name`, so the label is the entity's TYPE."""
     tagged, aerr = _DIRECTION.resolve(raw)
     if aerr:
         return None, None, aerr
@@ -91,11 +74,9 @@ def _resolve_direction(raw, host):
 
 
 def _feature_readback(feature, want_type, type_key, dist_cm, ang_deg, k):
-    """(fields, unverified, error) read off the CREATED RuledSurfaceFeature. All three members are
-    measured to read back live: ruledSurfaceType as the enum int, distance and angle as
-    ModelParameters carrying CM and RADIANS. The TYPE is the one that matters - a feature can come
-    back successfully without the requested value having landed, and only the feature's own type
-    proves it did. A value that cannot be read is named in `unverified` rather than assumed good."""
+    """(fields, unverified, error) read off the CREATED RuledSurfaceFeature - ruledSurfaceType as
+    the enum int, distance and angle as ModelParameters carrying CM and RADIANS. A value that
+    cannot be read is named in `unverified` rather than assumed good."""
     fields, unverified = {}, []
     got_type = safe(lambda: feature.ruledSurfaceType)
     if got_type is None:
@@ -145,10 +126,9 @@ def ruled_handler(edges=None, ruled_type="tangent", distance=None, units="mm",
     except (TypeError, ValueError):
         return error(f"'angle_deg' must be a number of degrees, got '{angle_deg}'.")
 
-    # The direction entity and the type are one choice, not two: MEASURED, a direction handed to
-    # createInput with TangentRuledSurfaceType is IGNORED - the type still reads back tangent and the
-    # surface is identical to the one built without it - so accepting the pair would let a caller
-    # believe they steered a surface that in fact ignored them.
+    # The direction entity and the type are ONE choice: a direction handed to createInput with
+    # TangentRuledSurfaceType is IGNORED - the type still reads back tangent and the surface is
+    # identical to the one built without it.
     wants_direction = direction not in (None, "", [])
     if type_key == "direction" and not wants_direction:
         return error("ruled_type='direction' needs a 'direction' entity - Fusion refuses to build the "
@@ -190,10 +170,9 @@ def ruled_handler(edges=None, ruled_type="tangent", distance=None, units="mm",
     angle_val = adsk.core.ValueInput.createByReal(math.radians(ang))
 
     ruled = host.features.ruledSurfaceFeatures
-    # The census in identity form, resolved ONCE before the mutation. Two effects need it: the
-    # feature's own result set holds the parent body too (see _added_bodies), and a Features.*.add()
-    # that returns nothing - measured in DIRECT designs for six feature classes, this one not among
-    # them - leaves the model itself as the only evidence. A count cannot say WHICH body is new.
+    # The census in identity form, resolved ONCE before the mutation: the feature's own result set
+    # holds the parent body too, and a Features.*.add() that returns nothing leaves the model as
+    # the only evidence. A count cannot say WHICH body is new.
     before_keys = {(_common.native_identity(b) or safe(lambda b=b: b.name))
                    for b in _common.iter_collection(safe(lambda: host.bRepBodies))}
     try:
@@ -250,11 +229,9 @@ def ruled_handler(edges=None, ruled_type="tangent", distance=None, units="mm",
     if rerr:
         return error(rerr + " " + _common.failed_effect_remedy(design, feature))
 
-    # is_solid is read off the NEW body only - the parent body in feature.bodies would otherwise
-    # decide the verdict, and a ruled surface off a SOLID edge is exactly the draft-check case.
-    # _solid_verdict, not any(): body_facts publishes each flag as True/False/None, and any() folds
-    # an unread flag into False - which is this payload's "an open sheet", the claim a flag nobody
-    # read cannot support.
+    # is_solid is read off the NEW body only - the parent in feature.bodies would otherwise decide
+    # the verdict. _solid_verdict, not any(): each flag is True/False/None, and any() would fold an
+    # unread flag into this payload's "an open sheet".
     facts = _common.body_facts(added)
     names = [f["name"] for f in facts]
     any_solid = _solid_verdict([f["is_solid"] for f in facts])
@@ -294,12 +271,8 @@ def ruled_handler(edges=None, ruled_type="tangent", distance=None, units="mm",
 
 
 _DESC = (
-"Create a RULED surface off an edge chain - the tapered extension behind a draft-check face, a "
-"mold-parting transition, or a flared rim. An edge bounds TWO faces and the surface leaves ONE of "
-"them; which one is not selectable here. 'ruled_type': tangent continues that face past the edge, "
-"normal stands perpendicular to it, direction sweeps along the 'direction' entity (required for that "
-"type; refused with the others, which ignore it). 'angle_deg' tilts the sweep off that base "
-"direction. Lands a NEW open surface body, reported alone with its is_solid read back."
+"Create a RULED surface off an edge chain. The surface leaves ONE of the edge's two faces; which "
+"one is not selectable here."
 )
 
 surface_create_ruled_tool = (

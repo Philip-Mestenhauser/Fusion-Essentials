@@ -21,6 +21,7 @@ import types
 from conftest import load_tool, _NamedCollection
 
 cp = load_tool("cam_post")
+cc = load_tool("_cam_common")   # the readiness sentence the note is measured against is ITS build
 
 
 # -- fakes ---------------------------------------------------------------------
@@ -86,6 +87,8 @@ class _NCInput:
 
 
 class _NCProgram:
+    """MEASURED shape: .operations holds the SETUPS/folders assigned to the program, while
+    .filteredOperations holds every Operation in that scope, posted or not."""
     def __init__(self, name, cam, missing=(), has_error=False):
         self.name = name
         self._cam = cam
@@ -95,6 +98,13 @@ class _NCProgram:
         self.deleted = False
         self.hasError = has_error
         self.error = "toolpath fault" if has_error else None
+
+    @property
+    def filteredOperations(self):
+        out = []
+        for it in (self.operations or []):
+            out.extend(getattr(it, "_ops", [it]))
+        return out
     def postProcess(self, options):
         return self._cam._do_post(self)
     def deleteMe(self):
@@ -103,12 +113,70 @@ class _NCProgram:
         return True
 
 
+class _AmnesicProgram(_NCProgram):
+    """Accepts the operations assignment and stores NOTHING - the swallowed scope write."""
+    @property
+    def operations(self):
+        return []
+    @operations.setter
+    def operations(self, value):
+        pass
+
+
+class _UnfilterableProgram(_NCProgram):
+    """filteredOperations RAISES - the read that answers nothing."""
+    @property
+    def filteredOperations(self):
+        raise RuntimeError("filteredOperations is unavailable on this program")
+
+
+class _PartialProgram(_NCProgram):
+    """Keeps only the FIRST item of an assigned scope - a membership that disagrees with the
+    request without being empty."""
+    @property
+    def operations(self):
+        return self._ops
+    @operations.setter
+    def operations(self, value):
+        self._ops = list(value or [])[:1]
+
+
+class _UnreadableMembershipProgram(_NCProgram):
+    """The operations assignment is accepted; reading them back raises."""
+    @property
+    def operations(self):
+        raise RuntimeError("operations unavailable")
+    @operations.setter
+    def operations(self, value):
+        pass
+
+
+class _UndeletableProgram(_NCProgram):
+    """deleteMe() DECLINES: it answers false and the program stays in the collection."""
+    def deleteMe(self):
+        return False
+
+
+class _DeleteRaisesProgram(_NCProgram):
+    """deleteMe() raises, leaving the program in the collection."""
+    def deleteMe(self):
+        raise RuntimeError("the program is in use")
+
+
+class _SurvivesDeleteProgram(_NCProgram):
+    """deleteMe() answers TRUE and the program still resolves in ncPrograms - the bool that is
+    not the effect."""
+    def deleteMe(self):
+        return True
+
+
 class _NCPrograms:
-    def __init__(self, cam, missing=(), has_error=False):
+    def __init__(self, cam, missing=(), has_error=False, program_class=None):
         self._cam = cam
         self._items = []
         self._missing = missing
         self._has_error = has_error
+        self._class = program_class or _NCProgram
         self.create_calls = 0
         self.add_calls = 0
     @property
@@ -126,7 +194,7 @@ class _NCPrograms:
         return _NCInput(self._missing)
     def add(self, nc_input):
         self.add_calls += 1
-        prog = _NCProgram(nc_input.displayName, self._cam, has_error=self._has_error)
+        prog = self._class(nc_input.displayName, self._cam, has_error=self._has_error)
         prog.parameters = nc_input.parameters       # the params the handler set on the input
         prog.operations = nc_input.operations
         self._items.append(prog)
@@ -140,12 +208,27 @@ class _Op:
     stability of that id across fetches is CAM-1's measurement."""
     _seq = itertools.count(1)
 
-    def __init__(self, name, operation_id=None):
+    def __init__(self, name, operation_id=None, has_toolpath=True):
         self.name = name
+        # what the post EMITS: an operation in the program's scope with no toolpath is held and
+        # not written out (measured - four held ops, one operation block in the file)
+        self.hasToolpath = has_toolpath
         if operation_id is not None:
             self.operationId = operation_id
         else:
             self.operationId = next(self._seq)
+
+
+class _ToolpathlessOp(_Op):
+    """An operation whose hasToolpath flag cannot be read - the row that is counted as neither
+    posted nor held-with-a-path."""
+    @property
+    def hasToolpath(self):
+        raise RuntimeError("hasToolpath is unavailable on this object")
+
+    @hasToolpath.setter
+    def hasToolpath(self, value):
+        pass
 
 
 class _IdlessOp(_Op):
@@ -180,15 +263,17 @@ class _Setups:
 
 
 class _CAM:
-    def __init__(self, setups, writes=True, returns=True, existing=(), missing=(), program_error=False):
+    def __init__(self, setups, writes=True, returns=True, existing=(), missing=(),
+                 program_error=False, program_class=None):
         self.setups = _Setups(setups)
         self.personalPostFolder = "C:/nonexistent/personal"
         self.genericPostFolder = "C:/nonexistent/generic"
         self._writes = writes
         self._returns = returns
-        self.ncPrograms = _NCPrograms(self, missing, program_error)
+        self.ncPrograms = _NCPrograms(self, missing, program_error, program_class)
         for name in existing:
-            self.ncPrograms._items.append(_NCProgram(name, self, missing, has_error=program_error))
+            self.ncPrograms._items.append(
+                (program_class or _NCProgram)(name, self, missing, has_error=program_error))
         self.posted = []
     def _do_post(self, program):
         self.posted.append(program)
@@ -504,6 +589,87 @@ class TestAsIsMode:
         assert res["isError"] is True and "valid" in res["message"].lower()
 
 
+class TestBothArmsPublishTheSameCounts:
+    """The held/posted counts come off ONE builder, so what a count MEANS cannot depend on which
+    arm posted."""
+
+    def _stored(self, cam, name, folder, setup):
+        prog = cam.ncPrograms.itemByName(name)
+        prog.parameters.itemByName("nc_program_output_folder").expression = str(folder).replace("\\", "/")
+        prog.parameters.itemByName("nc_program_name").expression = name
+        prog.postConfiguration = object()
+        prog.operations = [setup]
+        return prog
+
+    def test_as_is_publishes_the_held_and_posted_counts(self, monkeypatch, tmp_path):
+        # Both arms publish the counts: a caller comparing two posts of one program would
+        # otherwise read a held/posted count from the configured arm and nothing from this one.
+        s1 = _Setup("S1", [_Op("Face1"), _Op("Drill1", has_toolpath=False)])
+        cam = _install(monkeypatch, _CAM([s1], existing=["JOB1"]))
+        self._stored(cam, "JOB1", tmp_path, s1)
+        data = _payload(cp.handler(program_name="JOB1"))
+        assert data["mode"] == "as_is"
+        assert data["program_operation_count"] == 2 and data["posted_operations"] == 1
+        assert data["program_item_count"] == 1
+
+    def test_the_configured_arm_reads_the_same_two_counts(self, monkeypatch, tmp_path):
+        s1 = _Setup("Setup1", [_Op("Face1"), _Op("Drill1", has_toolpath=False)])
+        _install(monkeypatch, _CAM([s1]))
+        data = _payload(cp.handler(scope="Setup1", post=str(_write_cps(tmp_path)),
+                                   output_folder=str(tmp_path), program_name="9"))
+        assert data["program_operation_count"] == 2 and data["posted_operations"] == 1
+
+    def test_as_is_publishes_no_membership_verdict(self, monkeypatch, tmp_path):
+        # as-is assigned no scope, so there is nothing to compare the program's membership with -
+        # a verdict here would report a comparison nobody made.
+        s1 = _Setup("S1", [_Op("Face1")])
+        cam = _install(monkeypatch, _CAM([s1], existing=["JOB1"]))
+        self._stored(cam, "JOB1", tmp_path, s1)
+        data = _payload(cp.handler(program_name="JOB1"))
+        assert "membership_verified" not in data and "membership_note" not in data
+
+    def test_the_as_is_note_carries_the_same_counts_sentence(self, monkeypatch, tmp_path):
+        s1 = _Setup("S1", [_Op("Face1")])
+        cam = _install(monkeypatch, _CAM([s1], existing=["JOB1"]))
+        self._stored(cam, "JOB1", tmp_path, s1)
+        data = _payload(cp.handler(program_name="JOB1"))
+        assert cp._COUNTS_NOTE in data["note"]
+
+
+class TestTheComposedNoteFitsTheWireBudget:
+    """The note is assembled at run time from the base, the shared counts sentence and the
+    membership clause, so test_prose_budget measures none of the compositions."""
+
+    def _warned_readiness(self, monkeypatch):
+        """The readiness sentence _cam_common actually builds for a warned job - the longest form a
+        SUCCESSFUL post carries, and not one this test typed itself."""
+        line = cc.ready_verdict("6 of 8 active ops valid", 2,
+                                {"name": "Bore Deep Holes",
+                                 "warning": "Tool is too short for this operation."}, None)
+        monkeypatch.setattr(cp, "live_readiness", lambda: ({"valid": 6, "readiness": line}, None))
+        return line
+
+    def test_the_configured_note_with_a_membership_disagreement_fits(self, monkeypatch, tmp_path):
+        s1, s2 = _Setup("Setup1", [_Op("Face1")]), _Setup("Setup2", [_Op("Drill1")])
+        _install(monkeypatch, _CAM([s1, s2], program_class=_PartialProgram))
+        line = self._warned_readiness(monkeypatch)
+        data = _payload(cp.handler(setups=["Setup1", "Setup2"], post=str(_write_cps(tmp_path)),
+                                   output_folder=str(tmp_path), program_name="9"))
+        assert cp._COUNTS_NOTE in data["note"] and "Membership:" in data["note"]
+        assert len(data["note"]) <= 400, len(data["note"])   # test_prose_budget.NOTE_BUDGET_CHARS
+        # the unbounded sentence rides as its own key rather than inside the bounded note
+        assert data["readiness"] == line and line not in data["note"]
+
+    def test_the_as_is_note_fits_beside_the_same_readiness(self, monkeypatch, tmp_path):
+        s1 = _Setup("S1", [_Op("Face1")])
+        cam = _install(monkeypatch, _CAM([s1], existing=["JOB1"]))
+        TestBothArmsPublishTheSameCounts()._stored(cam, "JOB1", tmp_path, s1)
+        line = self._warned_readiness(monkeypatch)
+        data = _payload(cp.handler(program_name="JOB1"))
+        assert len(data["note"]) <= 400, len(data["note"])
+        assert data["readiness"] == line and line not in data["note"]
+
+
 # -- overwrite guard: reconfiguring an EXISTING program with a DIFFERENT scope --------------------
 
 class TestOverwriteGuard:
@@ -617,6 +783,43 @@ class TestPostWritesFile:
         assert res["isError"] is True
         assert cam.ncPrograms.count == 0                    # the orphan was removed
         assert "removed" in res["message"].lower()
+
+    def test_a_rollback_whose_delete_returns_false_says_the_program_remains(self, monkeypatch,
+                                                                            tmp_path):
+        # deleteMe()'s own bool is the only evidence the orphan went away. Asserting the removal
+        # over a swallowed call leaves a program in the document under a sentence saying it is gone.
+        cam = _install(monkeypatch, _CAM([_Setup("S1", [_Op("Face1")])], writes=False,
+                                         program_class=_UndeletableProgram))
+        res = cp.handler(post=str(_write_cps(tmp_path)), output_folder=str(tmp_path),
+                         program_name="X")
+        assert res["isError"] is True
+        assert cam.ncPrograms.count == 1                     # it really is still there
+        assert "'X' was NOT removed" in res["message"] and "returned false" in res["message"]
+        assert "cam_delete" in res["message"]
+
+    def test_a_rollback_whose_delete_raises_says_the_program_remains_too(self, monkeypatch,
+                                                                         tmp_path):
+        # The other way a delete fails: safe() would swallow the raise into the same false claim.
+        cam = _install(monkeypatch, _CAM([_Setup("S1", [_Op("Face1")])], writes=False,
+                                         program_class=_DeleteRaisesProgram))
+        res = cp.handler(post=str(_write_cps(tmp_path)), output_folder=str(tmp_path),
+                         program_name="X")
+        assert res["isError"] is True
+        assert cam.ncPrograms.count == 1
+        assert "'X' was NOT removed" in res["message"] and "deleteMe raised" in res["message"]
+
+    def test_a_true_delete_the_collection_contradicts_says_the_program_is_still_there(
+            self, monkeypatch, tmp_path):
+        # The rung cam_delete stands on: deleteMe()'s true bool is not the effect, so the name is
+        # re-read off ncPrograms and a program that still resolves is reported as still there.
+        cam = _install(monkeypatch, _CAM([_Setup("S1", [_Op("Face1")])], writes=False,
+                                         program_class=_SurvivesDeleteProgram))
+        res = cp.handler(post=str(_write_cps(tmp_path)), output_folder=str(tmp_path),
+                         program_name="X")
+        assert res["isError"] is True
+        assert cam.ncPrograms.itemByName("X") is not None
+        assert "still resolves in ncPrograms" in res["message"]
+        assert "was removed" not in res["message"]
 
     def test_reused_program_is_not_deleted_on_failed_post(self, monkeypatch, tmp_path):
         # A pre-existing program is the caller's - a failed re-post must NOT delete it.
@@ -750,6 +953,33 @@ class TestPostLog:
         monkeypatch.setattr(cp, "_CAM_LOG_ROOT", str(tmp_path / "nothing"))
         assert cp._post_log_errors("1001", 0.0) == []
 
+    def test_a_program_number_refusal_names_the_non_numeric_name_that_was_sent(self, monkeypatch,
+                                                                                tmp_path):
+        # the post's own line is the only thing that says a number was wanted here; the clause
+        # relays it and names the value that was not one.
+        root = tmp_path / "Fusion360CAM"
+        self._make_log(root, "FinishPass",
+                       "Error: Program number 'NaN' is out of range. Please enter 1-99999.\n")
+        monkeypatch.setattr(cp, "_CAM_LOG_ROOT", str(root))
+        _install(monkeypatch, _CAM([_Setup("S1", [_Op("Face1")])], writes="failed"))
+        res = cp.handler(post=str(_write_cps(tmp_path)), output_folder=str(tmp_path),
+                         program_name="FinishPass")
+        assert res["isError"] is True
+        assert "PROGRAM NUMBER" in res["message"] and "'FinishPass'" in res["message"]
+        assert "numeric program_name" in res["message"]
+
+    def test_a_numeric_name_earns_no_number_clause(self, monkeypatch, tmp_path):
+        # the boundary: the same log line against a name that IS a number - telling that caller to
+        # pass a number names a remedy they already took.
+        root = tmp_path / "Fusion360CAM"
+        self._make_log(root, "1001", "Error: Program number '1001' is out of range.\n")
+        monkeypatch.setattr(cp, "_CAM_LOG_ROOT", str(root))
+        _install(monkeypatch, _CAM([_Setup("S1", [_Op("Face1")])], writes="failed"))
+        res = cp.handler(post=str(_write_cps(tmp_path)), output_folder=str(tmp_path),
+                         program_name="1001")
+        assert res["isError"] is True and "out of range" in res["message"]
+        assert "numeric program_name" not in res["message"]
+
     def test_failed_stub_is_error_with_the_log_reason_not_listed_as_a_deliverable(self, monkeypatch, tmp_path):
         # A '.failed' stub is the ONLY thing the post wrote -> no deliverable NC file -> error that
         # surfaces the LOG's actionable reason, and never lists the stub as if it were G-code.
@@ -761,3 +991,236 @@ class TestPostLog:
         assert res["isError"] is True
         assert "out of range" in res["message"]            # the real reason, from the log
         assert ".failed" not in str(res.get("data", ""))   # the stub is not paraded as a deliverable
+
+
+# -- an explicit SETUPS list: the multi-setup program 'scope' cannot express -------------------
+
+class TestSetupsScope:
+    """'scope' names ONE node; 'setups' names several. What is pinned is the resolve (exact,
+    case-insensitive, refusing what it cannot identify) and that the whole list reaches the
+    program's operations assignment."""
+
+    def _two(self):
+        return _Setup("Setup1", [_Op("Face1")]), _Setup("Setup2", [_Op("Drill1")])
+
+    def test_a_setups_list_puts_several_setups_in_one_program(self, monkeypatch, tmp_path):
+        s1, s2 = self._two()
+        cam = _install(monkeypatch, _CAM([s1, s2]))
+        data = _payload(cp.handler(setups=["Setup1", "Setup2"], post=str(_write_cps(tmp_path)),
+                                   output_folder=str(tmp_path), program_name="9"))
+        # the assignment is a plain LIST of exactly the named setups, in the order asked for
+        assert cam.ncPrograms.item(0).operations == [s1, s2]
+        assert data["scope"] == "setups" and data["scope_setups"] == ["Setup1", "Setup2"]
+        assert data["program_operation_count"] == 2 and data["membership_verified"] is True
+
+    def test_one_setup_of_two_is_not_the_whole_document(self, monkeypatch, tmp_path):
+        # The discriminating case: a single-entry 'setups' must post ONE setup, not fall through to
+        # the document scope that a None target means.
+        s1, s2 = self._two()
+        cam = _install(monkeypatch, _CAM([s1, s2]))
+        _payload(cp.handler(setups=["Setup2"], post=str(_write_cps(tmp_path)),
+                            output_folder=str(tmp_path), program_name="9"))
+        assert cam.ncPrograms.item(0).operations == [s2]
+
+    def test_a_comma_string_resolves_the_same_way(self, monkeypatch, tmp_path):
+        s1, s2 = self._two()
+        cam = _install(monkeypatch, _CAM([s1, s2]))
+        _payload(cp.handler(setups="Setup1, Setup2,", post=str(_write_cps(tmp_path)),
+                            output_folder=str(tmp_path), program_name="9"))
+        assert cam.ncPrograms.item(0).operations == [s1, s2]   # the trailing comma is not a setup
+
+    def test_the_match_is_case_insensitive(self, monkeypatch, tmp_path):
+        s1, s2 = self._two()
+        cam = _install(monkeypatch, _CAM([s1, s2]))
+        _payload(cp.handler(setups=["setup2"], post=str(_write_cps(tmp_path)),
+                            output_folder=str(tmp_path), program_name="9"))
+        assert cam.ncPrograms.item(0).operations == [s2]
+
+    def test_scope_and_setups_together_are_refused(self, monkeypatch, tmp_path):
+        s1, s2 = self._two()
+        cam = _install(monkeypatch, _CAM([s1, s2]))
+        res = cp.handler(scope="Setup1", setups=["Setup2"], post=str(_write_cps(tmp_path)),
+                         output_folder=str(tmp_path), program_name="9")
+        assert res["isError"] is True
+        assert "'scope' or 'setups', not both" in res["message"]
+        assert cam.ncPrograms.count == 0 and cam.posted == []
+
+    def test_an_unknown_setup_name_lists_the_available_ones(self, monkeypatch, tmp_path):
+        s1, s2 = self._two()
+        cam = _install(monkeypatch, _CAM([s1, s2]))
+        res = cp.handler(setups=["Setup1", "Ghost"], post=str(_write_cps(tmp_path)),
+                         output_folder=str(tmp_path), program_name="9")
+        assert res["isError"] is True and "Ghost" in res["message"]
+        assert "Setup1" in res["message"] and "Setup2" in res["message"]
+        assert cam.ncPrograms.count == 0            # a bad name in the list posts nothing at all
+
+    def test_a_setup_listed_twice_is_refused(self, monkeypatch, tmp_path):
+        s1, s2 = self._two()
+        cam = _install(monkeypatch, _CAM([s1, s2]))
+        res = cp.handler(setups=["Setup1", "setup1"], post=str(_write_cps(tmp_path)),
+                         output_folder=str(tmp_path), program_name="9")
+        assert res["isError"] is True and "listed twice" in res["message"]
+        assert cam.ncPrograms.count == 0
+
+    def test_a_setups_value_that_is_neither_list_nor_string_is_refused(self, monkeypatch, tmp_path):
+        s1, s2 = self._two()
+        _install(monkeypatch, _CAM([s1, s2]))
+        res = cp.handler(setups=42, post=str(_write_cps(tmp_path)),
+                         output_folder=str(tmp_path), program_name="9")
+        assert res["isError"] is True and "setups" in res["message"]
+
+    def test_setups_against_an_existing_program_is_not_as_is(self, monkeypatch, tmp_path):
+        # A 'setups' list IS a scope, so it must take the configure path (which then requires
+        # output_folder) rather than silently posting the stored configuration as-is.
+        s1, s2 = self._two()
+        cam = _install(monkeypatch, _CAM([s1, s2], existing=["JOB1"]))
+        prog = cam.ncPrograms.itemByName("JOB1")
+        prog.parameters.itemByName("nc_program_output_folder").expression = str(tmp_path).replace("\\", "/")
+        prog.postConfiguration = object()
+        res = cp.handler(setups=["Setup1"], program_name="JOB1")
+        assert res["isError"] is True and "output_folder" in res["message"]
+
+    def test_the_overwrite_refusal_names_setups_among_what_to_omit(self, monkeypatch, tmp_path):
+        # The refusal's way out is as-is mode, which 'setups' also blocks - a remedy naming only
+        # scope/post/output_folder would land the caller back on this same path.
+        s1, s2 = self._two()
+        cam = _install(monkeypatch, _CAM([s1, s2], existing=["JOB1"]))
+        cam.ncPrograms.itemByName("JOB1").operations = [s1]     # stored: Setup1 only
+        res = cp.handler(setups=["Setup2"], post=str(_write_cps(tmp_path)),
+                         output_folder=str(tmp_path), program_name="JOB1")
+        assert res["isError"] is True and "machinist-curated" in res["message"]
+        assert "'scope', 'setups', 'post', and 'output_folder'" in res["message"]
+
+    def test_an_empty_setups_list_reads_as_not_given(self, monkeypatch, tmp_path):
+        s1, s2 = self._two()
+        cam = _install(monkeypatch, _CAM([s1, s2]))
+        data = _payload(cp.handler(setups=[], post=str(_write_cps(tmp_path)),
+                                   output_folder=str(tmp_path), program_name="9"))
+        assert data["scope"] == "document"
+        assert cam.ncPrograms.item(0).operations == [s1, s2]
+
+
+# -- the membership read-back: what the program's OWN operations answer after the assignment ------
+
+class TestProgramOperationCount:
+    """MEASURED: NCProgram.operations holds the SETUPS/folders assigned, filteredOperations every
+    Operation in that scope - posted or not. So 'program_operation_count' is the filtered read,
+    'posted_operations' the rows of it reading hasToolpath True, and 'program_item_count' the
+    stored containers beside them."""
+
+    def test_the_operations_figure_is_the_filtered_read_not_the_stored_items(self, monkeypatch,
+                                                                             tmp_path):
+        s1 = _Setup("Setup1", [_Op("Face1"), _Op("Drill1")])
+        cam = _install(monkeypatch, _CAM([s1]))
+        data = _payload(cp.handler(setups=["Setup1"], post=str(_write_cps(tmp_path)),
+                                   output_folder=str(tmp_path), program_name="9"))
+        prog = cam.ncPrograms.item(0)
+        assert prog.operations == [s1]                     # one stored item holding two operations
+        assert data["program_item_count"] == len(prog.operations) == 1
+        assert data["program_operation_count"] == 2        # what the program holds
+        assert data["posted_operations"] == 2              # both carry a toolpath
+        assert data["membership_verified"] is True         # the flatten still drives the id compare
+
+    def test_the_held_operations_are_counted_apart_from_the_ones_carrying_a_toolpath(
+            self, monkeypatch, tmp_path):
+        # the shape the file measured: four operations in the program's scope, one operation block
+        # in the posted NC file - the one op reading hasToolpath True.
+        s1 = _Setup("Setup1", [_Op("FaceLeg"), _Op("Chamfer1", has_toolpath=False),
+                               _Op("Drill1", has_toolpath=False),
+                               _Op("Drill2", has_toolpath=False)])
+        _install(monkeypatch, _CAM([s1]))
+        data = _payload(cp.handler(setups=["Setup1"], post=str(_write_cps(tmp_path)),
+                                   output_folder=str(tmp_path), program_name="9"))
+        assert data["program_operation_count"] == 4
+        assert data["posted_operations"] == 1
+        assert "toolpath_unread" not in data               # every flag answered
+
+    def test_a_row_whose_toolpath_flag_does_not_read_is_not_counted_as_posted(self, monkeypatch,
+                                                                              tmp_path):
+        # counting an unreadable flag either way invents a number: it is disclosed instead.
+        s1 = _Setup("Setup1", [_Op("Face1"), _ToolpathlessOp("Mystery1")])
+        _install(monkeypatch, _CAM([s1]))
+        data = _payload(cp.handler(setups=["Setup1"], post=str(_write_cps(tmp_path)),
+                                   output_folder=str(tmp_path), program_name="9"))
+        assert data["program_operation_count"] == 2
+        assert data["posted_operations"] == 1 and data["toolpath_unread"] == 1
+
+    def test_the_note_words_the_operations_figure_as_what_the_program_holds(self, monkeypatch,
+                                                                            tmp_path):
+        # the reading this note exists to correct: 'the operations posted' off a count that also
+        # holds the ops with no toolpath.
+        s1 = _Setup("Setup1", [_Op("Face1"), _Op("Drill1", has_toolpath=False)])
+        _install(monkeypatch, _CAM([s1]))
+        data = _payload(cp.handler(setups=["Setup1"], post=str(_write_cps(tmp_path)),
+                                   output_folder=str(tmp_path), program_name="9"))
+        assert "program_operation_count is what the program HOLDS" in data["note"]
+        assert "posted_operations those reading hasToolpath True" in data["note"]
+        # and the next step for the difference the two counts just published
+        assert "cam_get(include=['operations']) shows the ops left out" in data["note"]
+
+    def test_a_filtered_read_that_raises_publishes_no_operations_figure(self, monkeypatch,
+                                                                        tmp_path):
+        s1 = _Setup("Setup1", [_Op("Face1")])
+        _install(monkeypatch, _CAM([s1], program_class=_UnfilterableProgram))
+        data = _payload(cp.handler(setups=["Setup1"], post=str(_write_cps(tmp_path)),
+                                   output_folder=str(tmp_path), program_name="9"))
+        assert "program_operation_count" not in data       # absent, never a fabricated count
+        assert "posted_operations" not in data
+        assert data["program_item_count"] == 1
+
+
+class TestMembershipReadBack:
+    def test_an_empty_read_back_is_an_error_not_a_false_ok(self, monkeypatch, tmp_path):
+        s1, s2 = _Setup("Setup1", [_Op("Face1")]), _Setup("Setup2", [_Op("Drill1")])
+        cam = _install(monkeypatch, _CAM([s1, s2], program_class=_AmnesicProgram))
+        res = cp.handler(setups=["Setup1", "Setup2"], post=str(_write_cps(tmp_path)),
+                         output_folder=str(tmp_path), program_name="9")
+        assert res["isError"] is True
+        assert "re-read ZERO operations" in res["message"]
+        assert "resolves to 2" in res["message"]
+        assert cam.posted == [] and cam.ncPrograms.count == 0   # nothing posted, no orphan left
+        assert not [p for p in os.listdir(tmp_path) if p.endswith(".nc")]
+
+    def test_a_membership_disagreement_is_disclosed_as_counts_not_judged(self, monkeypatch, tmp_path):
+        # The program kept one of the two setups. Whether an NCProgram stores a scope verbatim is
+        # not measured, so the disagreement is PUBLISHED - it is not turned into a refusal.
+        s1, s2 = _Setup("Setup1", [_Op("Face1")]), _Setup("Setup2", [_Op("Drill1")])
+        _install(monkeypatch, _CAM([s1, s2], program_class=_PartialProgram))
+        data = _payload(cp.handler(setups=["Setup1", "Setup2"], post=str(_write_cps(tmp_path)),
+                                   output_folder=str(tmp_path), program_name="9"))
+        assert data["membership_verified"] is False
+        assert data["program_operation_count"] == 1
+        assert "the program holds 1, not the 2 the scope resolves to" in data["membership_note"]
+        assert "cam_get(include=['nc_programs'])" in data["membership_note"]
+        # the two sides of the disagreement ride as counts, since the clause no longer spells them
+        assert data["membership_missing"] == 1 and data["membership_extra"] == 0
+        assert "Membership:" in data["note"]                 # stated beside the file, not buried
+        assert data["file_count"] == 1                       # the file still landed
+
+    def test_an_unreadable_membership_is_neither_verified_nor_denied(self, monkeypatch, tmp_path):
+        s1 = _Setup("Setup1", [_Op("Face1")])
+        _install(monkeypatch, _CAM([s1], program_class=_UnreadableMembershipProgram))
+        data = _payload(cp.handler(setups=["Setup1"], post=str(_write_cps(tmp_path)),
+                                   output_folder=str(tmp_path), program_name="9"))
+        # null, not false: the read did not answer, which is not the same as a mismatch
+        assert data["membership_verified"] is None
+        # both counts come off collections this program will not read, so neither key is published
+        assert "program_operation_count" not in data and "program_item_count" not in data
+        assert "did not read back" in data["membership_note"]
+
+    def test_an_unreadable_operation_id_leaves_the_comparison_unmade(self, monkeypatch, tmp_path):
+        s1 = _Setup("Setup1", [_IdlessOp("Face1")])
+        _install(monkeypatch, _CAM([s1]))
+        data = _payload(cp.handler(setups=["Setup1"], post=str(_write_cps(tmp_path)),
+                                   output_folder=str(tmp_path), program_name="9"))
+        assert data["membership_verified"] is None
+        assert "no readable operationId" in data["membership_note"]
+
+    def test_a_matching_membership_publishes_no_note(self, monkeypatch, tmp_path):
+        s1 = _Setup("Setup1", [_Op("Face1")])
+        _install(monkeypatch, _CAM([s1]))
+        data = _payload(cp.handler(scope="Setup1", post=str(_write_cps(tmp_path)),
+                                   output_folder=str(tmp_path), program_name="9"))
+        assert data["membership_verified"] is True
+        assert "membership_note" not in data and "Membership read-back:" not in data["note"]
+

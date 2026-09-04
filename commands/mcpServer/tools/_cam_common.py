@@ -12,66 +12,33 @@ import time
 import adsk.core
 import adsk.cam
 
-from ._common import (measured, named_with_remainder, iter_collection, read_flag, safe)
-from ._write_guard import (_active_identity, document_key,   # the one active-document identity read,
-                           on_key_renamed)                   # the one key a cross-call store
-                                                             # remembers a document by, and the
-                                                             # announcement when that key changes
+from ._common import (counted, measured, named_with_remainder, iter_collection, read_flag, safe)
+from ._write_guard import _active_identity, document_key, on_key_renamed
 
-# The "what to reuse from here" catalog line for the generated CLAUDE.md helper map (see
-# tests/gen_manifest.py): each symbol with the one clause that says WHEN to reach for it. The
-# mechanism behind a clause lives at the symbol itself, in its test, or in VERIFIED_API_FACTS.md.
 MAP_BLURB = (
-    "the CAM substrate. get_cam - the active document's CAM product, where every CAM tool starts. "
-    "Tree: walk_cam_tree/resolve_cam_node - the ONE walk and the EXACT by-name resolver a "
-    "setup/operation/folder/pattern is targeted through; a DUPLICATE is REFUSED; tree_nodes/"
-    "operation_nodes/operation_nodes_under (breadcrumbed) and operations_under/walk_operations "
-    "(bare) - its setup-scoped, operation-only and under-one-node slices; the breadcrumb tells "
-    "same-named operations apart; owning_setup/find_setup/find_operation/resolve_operation - the "
-    "Setup over a node, and the by-name wrappers listing the names. Parameters: expression_error "
-    "(did a just-set CAM parameter EVALUATE), parse_parameters (the ONE request parser). State: "
-    "op_state_facts/"
-    "op_primary_state/op_state_tally/counts_as_warning/is_empty_toolpath - the per-op lifecycle "
-    "read and its classifiers: one bucket per op, a warning OVERLAY, a cut-nothing test; "
-    "validity_basis - op validity is only trustworthy in the Manufacture workspace; "
-    "setup_blockers/blocked_setup_records/ready_verdict/first_line - a setup's OWN post "
-    "prerequisites, and the ONE postable-verdict sentence over them; live_readiness (job health), "
-    "clamp_rows (the ONE 'max_results' clamp), register_future (the ONE async-generation "
-    "registration, stamped with its launch document). Machines: machine_library/machine_location/"
-    "machine_catalog/query_machines/resolve_machine/machine_label/machine_ident/machine_kinds - "
-    "the catalog the 'machine' input resolves from (exact LABEL, ambiguity REFUSED) and a row's "
-    "parts; kinematics_parts/machine_limits/machine_spindle_max vs op_spindle_speed/spindle_check "
-    "- what the MACHINE allows against what an op asks. Libraries: walk_library_folders/"
-    "library_assets/library_children - the ONE bounded folder-tree walk (tool, post, template "
-    "alike); each caller passes its leaf op; asset_leaf/asset_key/asset_leaf_keys/assets_named - "
-    "the name matcher a library DELETE resolves on")
+    "the CAM substrate every CAM tool starts from: get_cam (the document's CAM product); the ONE "
+    "tree walk and its EXACT by-name resolvers (walk_cam_tree, resolve_cam_node, find_setup, "
+    "find_operation - a duplicate name is refused); the parameter helpers; the per-op state "
+    "classifiers and readiness verdicts (op_state_facts, ready_verdict, live_readiness); the "
+    "machine catalog; the bounded library walk")
 
 app = adsk.core.Application.get()
 
 
 def expression_error(p):
-    """Read a just-set CAM parameter BACK to confirm its expression EVALUATED - the CAM param store is
-    NOT the CAD one. A CAMParameter exposes .error / .warning message strings; a broken expression
-    ('NoSuchParamXyz * 2') is STORED verbatim (.expression echoes it) and its .value.value even reads
-    back a finite 0.0, so ONLY .error reveals it - live it reads 'Failed to evaluate expression.'.
-    A .warning ('stock less than the model width') fires on VALID expressions too, so it never gates.
-    Returns (error_message_or_None, warning_message_or_None)."""
+    """(error, warning) off a CAM parameter - a broken expression is stored verbatim and its value
+    reads back 0.0, so only .error reveals it, while .warning fires on valid expressions too."""
     err = (safe(lambda: p.error) or "").strip()
     warn = (safe(lambda: p.warning) or "").strip()
-    # Platform quirk (live): a .warning string can arrive with its template tokens uninterpolated
-    # ('${self.title}'). Tag it once here so every consumer's wire shows it as the cosmetic
-    # artifact it is, not a broken parameter reference to chase.
+    # A .warning string can arrive with its template tokens uninterpolated ('${self.title}').
     if "${" in warn:
         warn += " [the ${...} token is an uninterpolated platform template - cosmetic]"
     return (err or None), (warn or None)
 
 
 def unquote_expression(expr):
-    """The VALUE inside a CAM parameter's stored expression. A STRING parameter's stored expression
-    is single-quoted (receipt cam-parameter-expressions, whose probe reads 'context' and 'strategy'
-    back starting with a quote), so a write compared against its read-back sends BOTH sides through
-    here rather than comparing bytes. None stays None, and text carrying no matching outer pair is
-    returned as read (the escaping inside is left alone: this strips the wrapper, nothing else)."""
+    """The VALUE inside a CAM parameter's stored expression - a string parameter stores it
+    single-quoted; None stays None and text with no matching outer pair is returned as read."""
     if expr is None:
         return None
     s = str(expr)
@@ -86,11 +53,35 @@ def quote_expression(text):
     return "'" + str(text).replace("'", "\\'") + "'"
 
 
+# The platform's own refusal for a value outside a CAM enumeration parameter's set, matched
+# case-insensitively: Fusion words it '3 : Invalid enumeration value.'
+_ENUM_REFUSAL = "invalid enumeration value"
+
+
+def matched_quoting(current, request):
+    """(the expression to WRITE, whether this call added the quotes) - a parameter whose CURRENT
+    expression is quoted holds a string, so bare request text is wrapped to match what it stores."""
+    text = str(request)
+    if current is None or unquote_expression(current) == str(current):
+        return text, False                 # nothing quoted to match
+    if unquote_expression(text) != text:
+        return text, False                 # already quoted as sent
+    return quote_expression(text), True
+
+
+def enumeration_remedy(message, written, read_call):
+    """The clause a platform refusal naming an INVALID ENUMERATION VALUE carries - the expression
+    this call actually wrote, and the `read_call` that shows the parameter's own expression. '' for
+    every other message."""
+    if _ENUM_REFUSAL not in (message or "").lower():
+        return ""
+    return (f" Fusion's message names an ENUMERATION value; the expression written was {written}. "
+            f"{read_call} reads the expression this parameter holds - pass one of its own values.")
+
+
 def clamp_rows(max_results, default: int, ceiling: int) -> int:
-    """The row cap a capped CAM read runs under - the ONE clamp every 'max_results' goes through.
-    `max_results` arrives off the wire, so a value that is not a number falls back to `default`
-    rather than raising, and the result is held inside 1..`ceiling`: a caller cannot lift a cap that
-    exists because every row crosses the wire. Each read keeps its OWN default/ceiling pair."""
+    """The row cap a capped CAM read runs under: a non-numeric 'max_results' falls back to
+    `default`, and the result is held inside 1..`ceiling`."""
     try:
         n = int(max_results or default)
     except (TypeError, ValueError):
@@ -99,10 +90,8 @@ def clamp_rows(max_results, default: int, ceiling: int) -> int:
 
 
 def parse_parameters(parameters):
-    """Normalize a 'parameters' request into a dict {name: expression}. Accepts a dict or a
-    'name=value, name=value' string. Returns (dict, error). The ONE parser both CAM parameter
-    editors (operation and setup) validate their request through, so the two wire forms cannot be
-    accepted by one and refused by the other."""
+    """(dict {name: expression}, error) for a 'parameters' request given as a dict or a
+    'name=value, ...' string."""
     if isinstance(parameters, dict):
         out = {str(k).strip(): str(v) for k, v in parameters.items() if str(k).strip()}
         return out, None
@@ -122,9 +111,7 @@ def parse_parameters(parameters):
 
 
 def get_cam():
-    """The active document's CAM product, or (None, reason). Works in ANY workspace (CAM data is
-    readable without entering Manufacture; op VALIDITY is only trustworthy there - that caveat lives
-    on the reads). One resolver shared by every CAM tool."""
+    """The active document's CAM product, or (None, reason) - readable in any workspace."""
     doc = safe(lambda: app.activeDocument)
     if not doc:
         return None, "No active document."
@@ -140,12 +127,8 @@ def get_cam():
 
 
 def tool_holder(t):
-    """A CAM Tool's assigned HOLDER identity, or None when it carries no holder. adsk.cam.Tool exposes
-    NO holder accessor (verified via sys_get_api_doc), so the holder is read from the tool's JSON, where
-    it lives as a 'holder' sub-doc ({description, product-id, vendor, segments}). Returns only the fields
-    that are actually present ({name, product_id, vendor, segment_count}) - claim only what reads back.
-    Shared by cam_get(include=['tool']) and the cam_edit_tools library listing so a holder reads back
-    the same way everywhere."""
+    """A CAM Tool's holder identity {name, product_id, vendor, segment_count}, or None - read out
+    of the tool's JSON, which is where adsk.cam.Tool carries it."""
     raw = safe(lambda: t.toJson())
     if not raw:
         return None
@@ -169,6 +152,27 @@ def tool_holder(t):
     return out or None
 
 
+# key -> the CAM parameter carrying it on an adsk.cam.Tool, each reading a number in cm. All four
+# names are present on a bundled milling tool, tool_cornerRadius reading 0 on a square end
+# (measure_api cam-tool-dimension-parameter-names).
+_TOOL_DIMENSION_PARAMS = (("diameter", "tool_diameter"),
+                          ("flute_length", "tool_fluteLength"),
+                          ("corner_radius", "tool_cornerRadius"),
+                          ("overall_length", "tool_overallLength"))
+
+
+def tool_dimensions(t, factor, unit):
+    """A CAM Tool's cutting geometry {diameter, flute_length, corner_radius, overall_length, units},
+    each scaled from cm by 'factor' and null where the parameter is absent or does not read."""
+    params = safe(lambda: t.parameters)
+    out = {}
+    for key, pname in _TOOL_DIMENSION_PARAMS:
+        p = safe(lambda pname=pname: params.itemByName(pname)) if params is not None else None
+        out[key] = measured(lambda p=p: p.value.value, factor) if p is not None else None
+    out["units"] = unit
+    return out
+
+
 def setups(cam):
     """Every Setup in the document, as a list - the basis for the tree walk below."""
     return list(iter_collection(safe(lambda: cam.setups)))
@@ -179,52 +183,31 @@ def setup_names(cam):
     return [safe(lambda s=s: s.name) for s in setups(cam)]
 
 
-# One node of the CAM tree. kind is STRUCTURAL - which collection yielded the node ('setup' /
-# 'operation' / 'folder' / 'pattern') - so no type-name sniffing is needed. path is the
-# 'Setup / Folder / Op' breadcrumb an ambiguity refusal names its candidates by, and `parent` is the
-# node that CONTAINED this one: the structural answer to "which folder is this op in", which the
-# joined path cannot give back (a setup or folder whose own name contains ' / ' splits wrong).
+# One node of the CAM tree: kind is the collection that yielded it, path the 'Setup / Folder / Op'
+# breadcrumb, parent the node that contained it (a name carrying ' / ' splits the path wrong).
 CamNode = collections.namedtuple("CamNode", ["obj", "kind", "name", "setup", "path", "parent"],
                                  defaults=(None,))
 
 
-# The segment a breadcrumb carries for a level whose own name did NOT read. A None joined into an
-# f-string prints the literal 'None', which reads as a complete address to a container actually
-# NAMED that; this marker discloses the unread level instead.
-#
-# The decision is made on the READ answering None - never on a string match against the joined path -
-# so a container whose real name is the string 'None' keeps its own segment untouched.
+# The segment a breadcrumb carries for a level whose own name did not read: a None joined into an
+# f-string would print the literal 'None' and read as a complete address.
 _UNREAD_SEGMENT = "(name unread)"
 
 
 def _segment(name):
-    """One breadcrumb segment for a level whose name read `name`: that name, or _UNREAD_SEGMENT when
-    the read answered None (it raised, or the property itself answered None). Every level of every
-    path the walk builds goes through this, so no surface can publish an address whose missing
-    segment is invisible."""
+    """One breadcrumb segment: the name, or _UNREAD_SEGMENT when the read answered None."""
     return _UNREAD_SEGMENT if name is None else name
 
 
-# The collection a parent (Setup/CAMFolder/CAMPattern) holds each KIND of child in, keyed by the
-# node kind the walk below stamps. A parent keeps its operations, its folders and its patterns in
-# three SEPARATE collections, so only same-kind children of ONE parent sit in a single ordered list;
-# two items out of different collections share no order. The ONE spelling of that mapping: the walk
-# reads its children through it, and a caller re-reading one collection off a resolved node's parent
-# names the attribute through it too.
+# A parent (Setup/CAMFolder/CAMPattern) keeps its operations, folders and patterns in three
+# SEPARATE collections, so only same-kind children of one parent sit in a single ordered list.
 CHILD_COLLECTIONS = {"operation": "operations", "folder": "folders", "pattern": "patterns"}
 
 
 def _walk_children(parent, setup_name, path, out, parent_node=None):
-    """Collect CamNodes for everything nested under `parent` (a Setup/CAMFolder/CAMPattern).
-    `.operations` lists only the DIRECT children, and setup.allOperations flattens folder children
-    while DROPPING the folder/pattern containers (verified live) - so containers are reachable only
-    by recursing `.folders`/`.patterns` explicitly, which nest. A parent exposing no `.operations`
-    collection degrades to its allOperations flatten (operations only).
-
-    Each level's own segment goes through _segment, so a name that did not read is DISCLOSED in the
-    path instead of printing as the literal 'None'. `name` still carries the raw read (None when it
-    did not answer), which is what a consumer deciding per LEVEL - workspace_orient._op_breadcrumb -
-    climbs the parent links for."""
+    """Collect CamNodes for everything nested under `parent` (a Setup/CAMFolder/CAMPattern) -
+    setup.allOperations DROPS the folder/pattern containers, so those are reached by recursing
+    `.folders`/`.patterns`; a parent exposing no `.operations` degrades to that flatten."""
     ops = safe(lambda: getattr(parent, CHILD_COLLECTIONS["operation"]))
     if ops is not None:
         for o in iter_collection(ops):
@@ -275,27 +258,18 @@ def walk_cam_tree(cam):
 
 
 def operation_nodes(cam):
-    """Every OPERATION node of the CAM tree - the ONE operation pool, walk_cam_tree filtered to
-    kind == 'operation'. Every by-name operation resolve, every available-name listing and every
-    duplicate breadcrumb is read off this one filter, so two of them cannot answer from different
-    censuses of the same tree."""
+    """Every OPERATION node of the CAM tree - walk_cam_tree filtered to kind == 'operation'."""
     return [n for n in walk_cam_tree(cam) if n.kind == "operation"]
 
 
 # The address that picks ONE of several nodes sharing a name: '<name>#<n>', n counting from 1 over
-# the same-named nodes in the walk's own order - the order the ambiguity refusal lists them in. It
-# exists because a SETUP's path is its own bare name (_setup_node), so two same-named setups are
-# told apart by nothing the tree publishes, and the only other way out of the refusal would be
-# renaming one, which needs the address the caller does not have.
+# the same-named nodes in the walk's own order - the order the ambiguity refusal lists them in.
 _ORDINAL_SEP = "#"
 
 
 def _ordinal_address(want):
-    """('<base name>', <1-based ordinal>) when `want` is spelled '<name>#<n>', else (want, None).
-
-    Split on the LAST separator, so a node whose own name carries one ('Op#3') is still addressable
-    as 'Op#3#2' - splitting on the first would read the base as 'Op' and the ordinal as '3#2', which
-    is not a number, and the address would resolve nothing. Same rule as _inputs._split_text_ref."""
+    """('<base name>', <1-based ordinal>) when `want` is spelled '<name>#<n>', else (want, None) -
+    split on the LAST separator, so a node whose own name carries one is still addressable."""
     base, sep, tail = want.rpartition(_ORDINAL_SEP)
     if sep and base.strip() and tail.strip().isdigit():
         return base.strip(), int(tail.strip())
@@ -314,10 +288,8 @@ def _ordinal_reading(pool, asked):
 
 
 def _candidate_label(node, ordinal):
-    """One row of an ambiguity refusal: the '<name>#<n>' address that resolves THIS node, plus the
-    fact that tells it from its namesakes. An operation/folder/pattern is told apart by its
-    'Setup / item' path; a setup's path is its own bare name, so the number of operations under it
-    is named instead."""
+    """One row of an ambiguity refusal: this node's '<name>#<n>' address plus its path, or its
+    operation count where the node is a setup (whose path is its own bare name)."""
     addr = f"{node.name}{_ORDINAL_SEP}{ordinal}"
     if node.kind != "setup":
         return f"{addr} (at {node.path})"
@@ -326,28 +298,17 @@ def _candidate_label(node, ordinal):
 
 
 def _free_sibling_addresses(pool, same):
-    """The '<name>#<n>' addresses over `same` that no node in `pool` CARRIES as a literal name.
-
-    A literal name wins over the ordinal address in this resolver, so an address some node is
-    actually NAMED reaches that node instead of the sibling it counts to - it is no handle on the
-    sibling, and is left out."""
+    """The '<name>#<n>' addresses over `same` that no node in `pool` CARRIES as a literal name -
+    a literal name wins here, so those addresses are no handle on the sibling they count to."""
     carried = {(n.name or "").lower() for n in pool}
     return [addr for addr in (f"{n.name}{_ORDINAL_SEP}{i}" for i, n in enumerate(same, 1))
             if addr.lower() not in carried]
 
 
 def resolve_cam_node(cam, name, kinds=("operation",), setup=None, label=None, nodes=None):
-    """The ONE by-name resolver over the CAM tree: case-insensitive EXACT match on nodes whose kind
-    is in `kinds`, optionally scoped to one setup object (`setup`, in which case `cam` is unused).
-    Returns (CamNode, None) for the unique hit. 0 hits -> (None, error listing the available names).
-    2+ hits -> REFUSED: (None, error naming the count and each duplicate's '<name>#<n>' address,
-    which is what the caller retries with) - operation names legitimately collide across setups, so
-    a first (or last) match silently targets the wrong entity. `label` is the noun the error uses
-    (defaults to the kinds joined with '/').
-
-    `nodes` lets a caller that ALREADY walked the tree hand its own node list in (unscoped only, and
-    `cam` then goes unused): the resolve and whatever else that caller builds off its pool then
-    describe ONE census of the tree, and the walk runs once."""
+    """(CamNode, None) for the one node of a kind in `kinds` matching `name` case-insensitively and
+    exactly; no hit lists the available names, and 2+ hits are REFUSED with each duplicate's
+    '<name>#<n>' address. `setup` scopes the walk, `nodes` reuses a walk the caller already made."""
     if setup is not None:
         nodes = tree_nodes(setup)
     elif nodes is not None:
@@ -379,28 +340,9 @@ def resolve_cam_node(cam, name, kinds=("operation",), setup=None, label=None, no
         return None, (f"No {label} named '{name}'. Available: "
                       f"{named_with_remainder(available) or '(none)'}.")
     if len(matches) == 1 and addressed is not None and addressed is not matches[0]:
-        # Both readings resolve, to DIFFERENT nodes: one node CARRIES this exact name while another
-        # is item <n> of a same-named set. The ambiguity refusal below hands back '<name>#<n>'
-        # addresses, so a design also holding a node named one of them can be asked a question with
-        # two true answers - and answering with either is the first-match this resolver refuses
-        # everywhere else. No spelling on this input separates them, so nothing is picked.
-        #
-        # The way out: the ordinal reading dies once fewer than `ordinal` nodes carry `base`, after
-        # which the literal match below returns. That takes `need` renames, and each one leaves the
-        # same-named set one item SHORTER. Performed HIGHEST-ordinal-first, every address still to
-        # come is a number the shrunken set still holds - by construction, since each later address
-        # is smaller than the one just used and the set lost exactly one item - so the list stays
-        # performable to its end. Lowest-first does not: renaming the FIRST of three leaves two,
-        # and the '#3' printed beside it then addresses nothing. What dissolves the reading is the
-        # COUNT falling below `ordinal`, so renaming ANY `need` of the same-named ones does it, whichever
-        # of them each address reaches - which is why that is all the sentence promises.
-        #
-        # PROBE NEEDED (CAM-33): whether the walk hands the survivors back in the same relative
-        # order after a rename is unmeasured, so no address here is offered as reaching the same
-        # item it named when the list was printed - only as reaching one of the items named `base`.
-        #
-        # Only addresses no node carries as a literal name are offered - the others reach the node
-        # wearing that spelling, not the sibling - so a remedy ships only where `need` are free.
+        # Both readings resolve to DIFFERENT nodes and no spelling on this input separates them, so
+        # nothing is picked. The ordinal reading dies once fewer than `ordinal` nodes carry `base`,
+        # and the renames are ordered highest address first so each one leaves the rest addressable.
         free = _free_sibling_addresses(pool, same)
         need = len(same) - ordinal + 1
         chosen = list(reversed(free[-need:])) if len(free) >= need else []
@@ -429,23 +371,16 @@ def resolve_cam_node(cam, name, kinds=("operation",), setup=None, label=None, no
 
 
 def operation_nodes_under(node):
-    """Every operation CamNode nested anywhere under one setup/folder/pattern NODE - the scoped
-    counterpart of operation_nodes, walked from that node's OWN setup name and path so each row
-    keeps the 'Setup / ... / op' breadcrumb.
-
-    That breadcrumb is the only thing separating two operations of one name, and the object-only
-    projection below drops it: a scoped listing built from bare Operations prints the shared name
-    twice."""
+    """Every operation CamNode nested under one setup/folder/pattern NODE, each keeping the
+    'Setup / ... / op' breadcrumb that separates two operations of one name."""
     nodes = []
     _walk_children(node.obj, node.setup, node.path, nodes, node)
     return [n for n in nodes if n.kind == "operation"]
 
 
 def operations_under(parent):
-    """Every real Operation nested anywhere under one setup/folder/pattern - the scoped leaf
-    projection of the shared walk (a 'show this folder' / 'poll this setup' collects ops through
-    it instead of re-walking). Takes the OBJECT, so it is reachable with no node in hand; a caller
-    holding the node and naming the results takes operation_nodes_under."""
+    """Every real Operation nested anywhere under one setup/folder/pattern OBJECT; a caller
+    naming the results takes operation_nodes_under instead."""
     nodes = []
     _walk_children(parent, None, "", nodes)
     return [n.obj for n in nodes if n.kind == "operation"]
@@ -457,10 +392,8 @@ _MAX_PARENT_HOPS = 64
 
 
 def owning_setup(node):
-    """The Setup OBJECT a CamNode sits under - the node itself when it IS a setup, else the setup
-    its parent chain ends at, or None when the chain does not reach one. Read from the walk's own
-    parent links, never by re-resolving node.setup by NAME: setup names can collide, so a by-name
-    round trip can refuse (or answer with a different setup) for a node already in hand."""
+    """The Setup OBJECT a CamNode sits under, off the walk's parent links; None where the chain
+    does not reach one."""
     seen = 0
     while node is not None and seen <= _MAX_PARENT_HOPS:
         if node.kind == "setup":
@@ -471,39 +404,28 @@ def owning_setup(node):
 
 
 def find_setup(cam, name):
-    """The unique Setup named `name` (case-INSENSITIVE exact) as (setup, available_names, error).
-
-    On a miss `setup` is None and `error` is resolve_cam_node's ready-to-return refusal, where a
-    plain absence and a DUPLICATED name read differently. Callers return that text verbatim: the
-    resolver is the one place that knows WHICH of the two happened, so a caller wrapping it in its
-    own 'not found' prefix would assert absence about a name that was found twice.
-    `available_names` is the plain name list, for callers that offer the choices elsewhere in their
-    payload."""
+    """(setup, available_names, error) for the unique Setup named `name` - the error is
+    resolve_cam_node's own refusal text, which callers return verbatim."""
     node, err = resolve_cam_node(cam, name, kinds=("setup",), label="setup")
     return (node.obj if node else None), setup_names(cam), err
 
 
 def walk_operations(cam):
-    """Every real Operation across every setup, folder/pattern-nested INCLUDED - the object
-    projection of operation_nodes, so 'which operations exist' is answered by the same traversal
-    everywhere."""
+    """Every real Operation across every setup, folder/pattern-nested INCLUDED."""
     return [n.obj for n in operation_nodes(cam)]
 
 
 def _operation_listing(pool, name):
-    """The available list an operation miss carries, read off an ALREADY-WALKED operation pool:
-    each duplicate's 'Setup / op' breadcrumb when several operations share `name`, every operation
-    name otherwise. The ONE rule, so find_operation and resolve_operation cannot list differently."""
+    """The available list an operation miss carries: each duplicate's 'Setup / op' breadcrumb where
+    several share `name`, every operation name otherwise."""
     want = (name or "").strip().lower()
     dupes = [n for n in pool if (n.name or "").lower() == want]
     return [n.path for n in dupes] if len(dupes) > 1 else [n.name for n in pool]
 
 
 def find_operation(cam, name):
-    """The unique Operation named `name` (case-INSENSITIVE exact) anywhere in the CAM tree, or
-    (None, available_names). A DUPLICATED name is REFUSED: (None, each duplicate's 'Setup / op'
-    path) so even a caller's plain not-found error surfaces the collision; a true miss returns
-    every operation name. resolve_cam_node is the same resolver with the full refusal message."""
+    """(operation, available_names) for the unique Operation named `name` anywhere in the CAM tree;
+    a DUPLICATED name is refused and the list carries each duplicate's 'Setup / op' path."""
     pool = operation_nodes(cam)
     want = (name or "").strip().lower()
     matches = [n for n in pool if (n.name or "").lower() == want]
@@ -511,116 +433,124 @@ def find_operation(cam, name):
 
 
 def resolve_operation(cam, name, label="operation"):
-    """(node, error, available) - the unscoped operation resolve for a caller that ALSO needs
-    find_operation's available list, to word a narrower remedy in its own input vocabulary.
-
-    ONE walk answers both: the resolve and the list are read off the SAME operation_nodes pool, so
-    a remedy built from the list cannot describe a different census than the refusal it accompanies,
-    and an unscoped miss walks the tree once instead of twice."""
+    """(node, error, available) - the unscoped operation resolve plus the available list, both off
+    ONE walk, for a caller wording its own remedy."""
     pool = operation_nodes(cam)
     node, err = resolve_cam_node(cam, name, kinds=("operation",), label=label, nodes=pool)
     return node, err, _operation_listing(pool, name)
 
 
 def first_line(text) -> str:
-    """The first line of a fault message, '' when there is none - the trim every disclosure SAMPLE
-    takes, so a multi-line warning/error body never rides inside a one-sentence verdict."""
+    """The first line of a fault message, '' when there is none."""
     lines = (text or "").strip().splitlines()
     return lines[0] if lines else ""
 
 
 def first_error_line(obj):
-    """First line of an object's .error (the disclosure signal; the full text is the per-item record's
-    job). '' if none."""
+    """First line of an object's .error, '' if none."""
     return first_line(safe(lambda: obj.error))
 
 
 def first_warning_line(obj):
-    """First line of an object's .warning - the same disclosure signal for the softer fault. '' if none."""
+    """First line of an object's .warning, '' if none."""
     return first_line(safe(lambda: obj.warning))
 
 
+# The rail-PAIR drive parameter: cam_select_geometry feeds two contours into it, and cam_get_status
+# keys its rail triage on carrying it. One name, or a rename leaves the triage pointing at nothing.
+SWARF_CONTOURS_PARAM = "swarfContours"
+
+
+def is_rail_driven(op) -> bool:
+    """Whether an operation carries the rail-PAIR drive parameter - what a rail promise is keyed on."""
+    return safe(lambda: op.parameters.itemByName(SWARF_CONTOURS_PARAM)) is not None
+
+
+def op_is_suppressed(facts: dict) -> bool:
+    """Whether an operation is SUPPRESSED - answered from EITHER the isSuppressed flag or
+    operation_state Suppressed (2), since a raised flag arrives as False."""
+    return bool(facts.get("is_suppressed") or facts.get("operation_state") == 2)
+
+
 def counts_as_warning(facts: dict) -> bool:
-    """Whether an op's warning counts toward the readiness overlay. A warning on an ERRORED op says
-    nothing beyond its error (which already demotes the verdict), and a SUPPRESSED op carries no
-    toolpath - suppression DISCARDS it (measured, measure_api cam-suppress-discards-toolpath) - so
-    neither demotes a verdict here. What a POST does with a suppressed op is not measured and is not
-    claimed. The ONE predicate every readiness surface counts AND samples through, so the count and
-    the named sample can never describe different sets.
-
-    Read by key so BOTH shapes carrying these facts answer it: op_state_facts (the live per-op read
-    op_state_tally walks) and cam_get's per-op RECORD, which carries has_warning/has_error/
-    is_suppressed but no raw operation_state."""
+    """Whether an op's warning counts toward the readiness overlay - an errored op's warning adds
+    nothing to its error, and suppression discards the toolpath, so neither demotes a verdict."""
     return (bool(facts.get("has_warning")) and not facts.get("has_error")
-            and not (facts.get("is_suppressed") or facts.get("operation_state") == 2))
+            and not op_is_suppressed(facts))
 
 
-def op_state_facts(op) -> dict:
-    """ONE safe read of the raw per-op lifecycle state Fusion exposes, so every op-state tally
-    (cam_get's per-setup op_states via op_primary_state, cam_get_status's live_states via
-    op_state_tally) classifies from the SAME facts instead of each re-reading hasError/operationState/
-    isSuppressed/isGenerating/hasWarning independently. operationState carries an
-    adsk.cam.OperationStates member - IsValid 0, IsInvalid 1, Suppressed 2, NoToolpath 3 (measured;
-    the ints live in tests/live_api_facts.py) - and op_primary_state is what buckets it, together
-    with the flags above, into the one state name a payload publishes ('out_of_date' is that
-    vocabulary's name for IsInvalid, 'no_toolpath' for NoToolpath)."""
+# The three knobs cam.getMachiningTime takes: feed scale percent, rapid feed cm/s, tool change s.
+_TIME_PROBE_ARGS = (100.0, 10.58, 1.5)
+
+# A Manual NC operation carries no toolpath by construction, reading state IsValid (0) with
+# hasToolpath False - the empty class's own flag shape. Its op.strategy reads exactly 'manual'.
+_MANUAL_NC_STRATEGY = "manual"
+
+
+def _machining_time(cam, op, state, has_toolpath):
+    """The seconds cam.getMachiningTime estimates for ONE operation, None where it was not read."""
+    # getMachiningTime raises on an operation holding no toolpath, and costs a platform
+    # computation, so it runs only where the flags already say one generated.
+    if cam is None or state != 0 or has_toolpath is not True:
+        return None
+    return measured(lambda: cam.getMachiningTime(op, *_TIME_PROBE_ARGS).machiningTime)
+
+
+def op_state_facts(op, cam=None) -> dict:
+    """ONE safe read of an operation's raw lifecycle state, every classifier here reads from.
+    operation_state carries an adsk.cam.OperationStates member: IsValid 0, IsInvalid 1,
+    Suppressed 2, NoToolpath 3. `cam` adds machining_time; omitted, it reads None."""
+    state = safe(lambda: op.operationState)
+    # read_flag keeps True/False/None apart: a coerced False on an unreadable flag would invent
+    # the generated-but-empty state is_empty_toolpath reads off this pair.
+    has_toolpath = read_flag(lambda: op.hasToolpath)
     return {
         "name": safe(lambda: op.name),
+        "strategy": safe(lambda: op.strategy),
         "has_error": bool(safe(lambda: op.hasError, False)),
         "has_warning": bool(safe(lambda: op.hasWarning, False)),
         "is_suppressed": bool(safe(lambda: op.isSuppressed, False)),
         "is_generating": bool(safe(lambda: op.isGenerating, False)),
-        "operation_state": safe(lambda: op.operationState),
+        "operation_state": state,
         "generating_progress": safe(lambda: op.generatingProgress),
-        # The toolpath pair is read through read_flag (True/False/None): an op that GENERATED and
-        # produced no toolpath is told from one that never generated by these two flags together
-        # (is_empty_toolpath), and a coerced False on an unreadable flag would invent that state.
-        "has_toolpath": read_flag(lambda: op.hasToolpath),
+        "has_toolpath": has_toolpath,
         "is_toolpath_valid": read_flag(lambda: op.isToolpathValid),
+        "machining_time": _machining_time(cam, op, state, has_toolpath),
     }
 
 
 def is_empty_toolpath(facts: dict) -> bool:
-    """True for the EMPTY class: an operation that generated and produced no toolpath - it cuts
-    nothing, yet it is not out of date and it is not suppressed.
+    """True for the EMPTY class: an operation that generated, is not suppressed, and cuts nothing."""
+    # 'valid' is answered off operationState IsValid (0) only, so the empty claim rests on a state
+    # that was READ; a state that raised buckets _UNREAD_STATE and stops here.
+    if (facts.get("strategy") == _MANUAL_NC_STRATEGY
+            or op_primary_state(facts) != "valid"
+            or facts.get("is_toolpath_valid") is not True):
+        return False
+    if facts.get("has_toolpath") is False:
+        return True
+    # Only a time that READ 0.0 says the operation cut nothing; an unread time is no measurement.
+    return facts.get("has_toolpath") is True and facts.get("machining_time") == 0.0
 
-    Measured as its own state bucket on a 99-operation job: 21 ops read (state IsValid,
-    isToolpathValid True, hasToolpath True), 13 read (state IsValid, isToolpathValid True,
-    hasToolpath False) and 65 read suppressed - no overlap. So an empty op is machine-readable
-    from the flags alone; nothing has to match warning text. Classifies from op_state_facts (which
-    reads both toolpath flags honestly), so an UNREADABLE flag answers False here rather than
-    inventing the state.
 
-    The raw operationState is required BESIDE the bucket, never through it: op_primary_state falls
-    through to 'valid' for every state it has no name for - a state that did not read (None) and
-    Suppressed (2) carried by an op whose isSuppressed flag was coerced to False both land there -
-    and 'this op generated and cut nothing' names a lifecycle. So the state must have ANSWERED
-    IsValid (0), not merely failed to answer one of the other buckets."""
-    return (op_primary_state(facts) == "valid"
-            and facts.get("operation_state") == 0
-            and facts.get("is_toolpath_valid") is True
-            and facts.get("has_toolpath") is False)
+def toolpath_present_tally(ops):
+    """(rows reading hasToolpath True, rows whose flag did not read) over a list of operations."""
+    # An NC program's filteredOperations holds every operation in its scope; hasToolpath is what
+    # separates the ones carrying a path from the ones that read back with none.
+    present = unread = 0
+    for row in (ops or []):
+        flag = read_flag(lambda row=row: row.hasToolpath)
+        if flag is None:
+            unread += 1
+        elif flag:
+            present += 1
+    return present, unread
 
 
 def op_state_tally(ops) -> dict:
-    """The valid/out_of_date/errored/generating/suppressed tally that live_readiness (the WHOLE
-    document) and a scoped-target poll (cam_generate's poller, one setup/operation/folder) both need -
-    the ONE per-op walk both share, classifying every op from the same op_state_facts. An ERRORED op
-    is its OWN bucket: it has a parameter/geometry fault and will NEVER finish generating, so counting
-    it as out_of_date/generating would make a poller wait forever. 'generating' is an independent
-    OVERLAY bit (an op can be valid/out_of_date AND generating), and so is 'warnings': a WARNED op
-    stays in its lifecycle bucket (measured: an unselected-geometry 2D Contour reports hasWarning
-    with hasError False and operationState 0 - it reads 'valid' and has no toolpath at all), so a
-    verdict built from the buckets alone overstates a job carrying warnings.
-
-    Returns {valid, out_of_date, errored, generating, suppressed, warnings, total, active,
-    op_sample, warning_sample} - op_sample is the first errored op's {name, error} and
-    warning_sample the first counted-warning op's {name, warning}, both None when there is none
-    (each is sampled through the same predicate as its count). Each caller layers its OWN payload
-    shape on top (live_readiness adds setup-/program-level errors + a readiness verdict; the scoped
-    poller adds setups_errored=0/programs_errored=0). This is a DIFFERENT tally from cam_get's
-    op_states (a per-SETUP, mutually-exclusive-bucket rollup via op_primary_state) - same raw facts,
-    different shape for a different question ("what's live right now" vs "this setup's state mix)."""
+    """{valid, out_of_date, errored, generating, suppressed, warnings, total, active, op_sample,
+    warning_sample} over a list of operations - the poll tally. An ERRORED op is its own bucket
+    (it never finishes generating); 'generating' and 'warnings' are overlays on the others."""
     valid = ood = errored = generating = suppressed = warnings = total = 0
     active = None
     op_sample = None
@@ -658,25 +588,19 @@ def op_state_tally(ops) -> dict:
 
 
 def _warning_phrase(sample) -> str:
-    """The 'name - first warning line' clause a readiness verdict names its first warning by. A
-    sample that could not be read says so rather than naming a blank operation."""
+    """The 'name - first warning line' clause a readiness verdict names its first warning by."""
     if not sample or not sample.get("name"):
         return "cam_get(include=['operations']) lists which."
     text = (sample.get("warning") or "").strip()
     return f"'{sample['name']}'" + (f" - {text}" if text else " (warning text unreadable).")
 
 
-# The setup-level blocker vocabulary: each code is a state the read VERIFIED, beside the tool that
-# clears it. The remedy is looked up per code so a verdict never names a fix for a code it did not
-# read. 'no_machine_selected' is minted when the setup's machine reads no label at all.
+# The setup-level blocker vocabulary: each code beside the tool that clears it.
 _SETUP_BLOCKER_REMEDY = {"no_machine_selected": "cam_edit_setup assigns a machine"}
 
 
 def setup_blockers(setup) -> list:
-    """The verified setup-level blocker codes for ONE setup, present-and-empty when none.
-
-    The ONE place a setup's own post prerequisites are read, so cam_get's setups slice, its machine
-    slice and every readiness verdict judge one setup off the SAME facts."""
+    """The verified setup-level blocker codes for ONE setup, present-and-empty when none."""
     return [] if machine_label(safe(lambda: setup.machine)) else ["no_machine_selected"]
 
 
@@ -692,15 +616,12 @@ def blocked_setup_records(setup_objs) -> list:
 
 
 # How many blocked setups a verdict NAMES; the rest ride as a count, so the sentence stays one line.
-# ready_verdict slices the named rows once and hands the SAME slice to the phrase and the remedy,
-# which is what stops a fix being offered for a blocker the sentence never printed.
 _BLOCKED_ROWS_NAMED = 1
 
 
 def _blocked_phrase(named, total: int) -> str:
-    """The 'name (codes)' clause a verdict names its blocked setups by: the rows in `named` plus a
-    count of the `total` it left out. A setup whose name will not read is described rather than
-    quoted blank."""
+    """The 'name (codes)' clause a verdict names its blocked setups by, plus a count of the `total`
+    it left out."""
     first = named[0] if named else {}
     name = (first.get("name") or "").strip()
     shown = f"'{name}'" if name else "a setup whose name did not read"
@@ -710,11 +631,8 @@ def _blocked_phrase(named, total: int) -> str:
 
 
 def _blocked_remedies(blocked) -> str:
-    """The remedy clause for the codes actually PRINTED, deduped in first-seen order. A code with no
-    known remedy contributes none - the verdict names a fix only where one is on file.
-
-    It is handed the same rows _blocked_phrase names, never the whole blocked list: a second code in
-    the table would otherwise let the sentence carry a remedy for a blocker it never printed."""
+    """The remedy clause for the codes actually PRINTED, deduped in first-seen order; a code with
+    no known remedy contributes none."""
     codes = [c for row in (blocked or []) for c in (row.get("blocked_by") or [])]
     remedies = list(dict.fromkeys(_SETUP_BLOCKER_REMEDY[c] for c in codes
                                   if c in _SETUP_BLOCKER_REMEDY))
@@ -722,22 +640,9 @@ def _blocked_remedies(blocked) -> str:
 
 
 def ready_verdict(measure: str, warned: int, warning_sample, blocked=None) -> str:
-    """The ONE 'this scope is postable' sentence - built here for EVERY readiness surface
-    (live_readiness's document signal, cam_get_status's scoped poll, cam_get's operations summary),
-    so no surface can emit a plain 'ready to post' over a job carrying warnings or a BLOCKED setup.
-
-    `measure` is the caller's own count clause ("3 of 3 active ops valid") - each surface counts a
-    different thing and keeps its own noun; the VERDICT that clause earns is this function's.
-
-    `blocked` is blocked_setup_records over the setups in the caller's scope. Op state alone cannot
-    earn 'ready to post': a setup can hold nothing but valid ops and still carry a blocked_by the
-    setups projection reports. What that costs the post is not read here, so the verdict states the
-    blocker and withholds the claim rather than asserting the job will fail.
-
-    A WARNED op does NOT block: the job is still postable, so this is never demoted to a blocker.
-    But an op can bucket as valid and carry a warning meaning it cut nothing (measured - see
-    op_state_tally for the specimen), which a plain 'ready to post' hides - so the count is stated
-    and the first warning named instead."""
+    """The ONE 'this scope is postable' sentence over the caller's own count clause (`measure`),
+    the warned-op count and `blocked` (blocked_setup_records for the caller's setups): a blocker
+    withholds the claim, and warnings are stated and named rather than blocking."""
     if blocked:
         named = list(blocked)[:_BLOCKED_ROWS_NAMED]     # the rows the sentence actually prints
         also = f" {warned} active op(s) also carry warnings." if warned else ""
@@ -750,32 +655,82 @@ def ready_verdict(measure: str, warned: int, warning_sample, blocked=None) -> st
             f"{_warning_phrase(warning_sample)}")
 
 
-def live_readiness():
-    """The SINGLE CAM health/readiness signal for the active document, read live - the home for
-    'is this job postable'. cam_get exposes it; cam_get_status (the generation poller) CALLS it instead
-    of re-deriving its own op scan. Walks every setup's operations (via walk_operations + the shared
-    op_state_tally) PLUS the setup- and NC-program-level errors (a faulted setup/program blocks the job
-    even with clean ops; Setup and NCProgram expose the same hasError/error as Operation).
+# ── strategy entitlement: whether this INSTALLATION will generate a strategy at all ──────────────
 
-    Returns (signal, None) or (None, reason). signal:
-      {valid, out_of_date, errored, generating, suppressed, warnings, total, active,
-       setups_errored, programs_errored, setups_blocked, readiness,
-       samples:{op,setup,program,warning}}
-    setups_blocked is the per-setup blocked_by (setup_blockers) the setups projection publishes -
-    read HERE too, so the verdict and cam_get's setup rows answer 'is this job postable' off one
-    input set.
-    Each level carries ONE sample (name + first error line) - the disclosure signal; the full per-item
-    texture is cam_get(include=['operations'/'nc_programs']). 'active' is the op currently computing.
-    The op buckets are op_state_tally's (see there for why an ERRORED op is its OWN bucket); the
-    all-valid branch words its verdict through ready_verdict (see there for why a warned job never
-    reads plainly ready).
-    """
+
+def _create_strategy(name):
+    """Factored to one line so tests patch this seam."""
+    return adsk.cam.OperationStrategy.createFromString(name)
+
+
+def strategy_generation_allowed(name):
+    """True / False / None for ONE strategy NAME's isGenerationAllowed, off the OperationStrategy
+    factory - which needs no document, CAM product or setup. None where the name did not build
+    (createFromString RAISES on an unknown one) or the flag itself did not read."""
+    if not name:
+        return None
+    strat = safe(lambda: _create_strategy(name))
+    if strat is None:
+        return None
+    return read_flag(lambda: strat.isGenerationAllowed)
+
+
+def entitlement_flags(ops) -> list:
+    """One True / False / None per operation - its own strategy's isGenerationAllowed - probed ONCE
+    per distinct strategy name. False is what a generation-blocked operation reads; None is a flag
+    that did not read, which is no entitlement verdict at all."""
+    seen, out = {}, []
+    for op in ops or []:
+        name = safe(lambda op=op: op.strategy)
+        if name not in seen:
+            seen[name] = strategy_generation_allowed(name)
+        out.append(seen[name])
+    return out
+
+
+# The bucket for an operation whose operationState never answered: not valid, not finished, and no
+# claim about the lifecycle - the honest place for a read that raised.
+_UNREAD_STATE = "unread"
+
+# The buckets a blocked operation is NOT waiting on generation in - naming one of these points past
+# the operations a scope is actually stuck on. _UNREAD_STATE is not one of them: nothing read says
+# that operation is done.
+_FINISHED_STATES = ("valid", "suppressed")
+
+
+def entitlement_blocked_names(ops) -> list:
+    """The names of the operations that read isGenerationAllowed False AND still have generating
+    left to do - one already reading valid, or suppressed, is not what the scope is waiting on."""
+    rows = []
+    for op, flag in zip(ops or [], entitlement_flags(ops)):
+        if flag is not False or op_primary_state(op_state_facts(op)) in _FINISHED_STATES:
+            continue
+        rows.append(safe(lambda op=op: op.name) or _UNREAD_SEGMENT)
+    return rows
+
+
+def unfinished_verdict(measure: str, ops) -> str:
+    """The readiness verdict for a scope with operations left to generate: the entitlement-blocked
+    ones NAMED - cam_generate excludes those from its launch - else the plain cam_generate pointer."""
+    names = entitlement_blocked_names(ops)
+    if not names:
+        return f"{measure} - run cam_generate to finish the rest."
+    return (f"{measure}; {len(names)} operation(s) in scope read isGenerationAllowed false and "
+            f"cam_generate EXCLUDES those from a launch: {named_with_remainder(names)}. Run "
+            "cam_generate for the rest.")
+
+
+def live_readiness():
+    """(signal, None) or (None, reason) - the CAM readiness signal for the active document: the op
+    tally, the setup- and NC-program-level errors, setups_blocked, one sample per level, and the
+    readiness verdict over them."""
     cam, err = get_cam()
     if err:
         return None, err
     samples = {"op": None, "setup": None, "program": None, "warning": None}
     try:
-        tally = op_state_tally(walk_operations(cam))
+        ops = walk_operations(cam)
+        tally = op_state_tally(ops)
         samples["op"] = tally["op_sample"]
         samples["warning"] = tally["warning_sample"]
         setups_errored = 0
@@ -810,7 +765,7 @@ def live_readiness():
         readiness = ready_verdict(f"{valid} of {active_total} active ops valid",
                                   warned, samples["warning"], blocked)
     elif active_total:
-        readiness = f"{valid} of {active_total} active ops valid - run cam_generate to finish the rest."
+        readiness = unfinished_verdict(f"{valid} of {active_total} active ops valid", ops)
     else:
         readiness = "no active operations to assess."
     return {"valid": valid, "out_of_date": ood, "errored": errored, "generating": tally["generating"],
@@ -822,27 +777,32 @@ def live_readiness():
 
 
 def op_primary_state(facts: dict) -> str:
-    """The ONE lifecycle bucket an op falls in, priority-ordered so each op counts once and the tally
-    sums to the op total: suppressed > error > generating > no_toolpath > out_of_date > valid. (A
-    warning is an OVERLAY, counted separately - it coexists with any of these.) Classifies from the
-    op_state_facts dict (the same raw facts op_state_tally shares) rather than re-reading the op."""
+    """The ONE lifecycle bucket an op falls in, priority-ordered so each op counts once: suppressed
+    (flag) > error > generating > suppressed (state) > no_toolpath > out_of_date > valid, and
+    'unread' where operationState answered nothing. A warning is an OVERLAY, counted separately."""
     if facts["is_suppressed"]:
         return "suppressed"
     if facts["has_error"]:
         return "error"
     if facts["is_generating"]:
         return "generating"
+    if op_is_suppressed(facts):     # the STATE half; the flag half already answered above
+        return "suppressed"
     state = facts["operation_state"]
     if state == 3:
         return "no_toolpath"
     if state == 1:
         return "out_of_date"
-    return "valid"
+    if state == 0:
+        return "valid"
+    # operationState reads None where the property RAISED, and every value it answers IS a state, so
+    # anything else is no lifecycle answer at all.
+    return _UNREAD_STATE
 
 
 def validity_basis():
-    """'manufacture_verified' iff the Manufacture (CAM) workspace is active - op state/toolpath_valid is
-    only trustworthy there (the cam_get description's caveat). Otherwise 'unverified_design_workspace'."""
+    """'manufacture_verified' iff the Manufacture workspace is active - op validity is only
+    trustworthy there - else 'unverified_design_workspace'."""
     try:
         ws = app.userInterface.activeWorkspace
         if ws and ws.id == "CAMEnvironment":
@@ -854,26 +814,16 @@ def validity_basis():
 
 # ── async generation registry - where every launch path parks its live GenerateToolpathFuture ─────
 
-# Live generations, keyed by a short handle. Each entry holds the Future plus launch metadata.
-# Persists across MCP calls for the life of the add-in session.
-#
-# CRITICAL: holding the GenerateToolpathFuture reference here is not just for polling - if the
-# Future is garbage-collected, Fusion ABANDONS the in-progress generation. So this dict is what
-# keeps the background work alive between the launch call and the poll calls. Do not stop storing
-# the future, and only pop an entry once generation has completed.
+# Live generations by handle, held for the life of the add-in session. Fusion ABANDONS an
+# in-progress generation once its GenerateToolpathFuture is garbage-collected, so an entry is
+# popped only after that generation completed.
 _GENERATIONS = {}
 _HANDLE_SEQ = [0]
 
 
 def _carry_generation_keys(old_key, new_key):
-    """Re-stamp every live generation launched under a document key that just changed (a save
-    re-keys an open document - see _write_guard.on_key_renamed).
-
-    A launch handle survives a stale key on its own (the launch DOCUMENT is kept beside it and
-    _same_document falls through to handle equality), so this is not what keeps a status read
-    correct - it is what keeps the stored key TRUE, so the fallback covers the one call that
-    detects a flip rather than every call after it.
-    """
+    """Re-stamp every live generation launched under a document key that just changed - a save
+    re-keys an open document."""
     for entry in _GENERATIONS.values():
         if entry.get("doc_key") == old_key:
             entry["doc_key"] = new_key
@@ -882,36 +832,32 @@ def _carry_generation_keys(old_key, new_key):
 on_key_renamed(_carry_generation_keys)
 
 
-def register_future(future, target, scope, skip_valid, target_name=""):
-    """Mint a handle and register a live generation Future - the ONE registration path every launch
-    goes through (cam_generate, plus the inline launches in cam_select_geometry and
-    cam_create_operation). Keeps the Future referenced and records which DOCUMENT the generation
-    belongs to, so a later status read taken while another document is active reports the Future's
-    own progress instead of the wrong document's tallies. Returns (handle, total).
+def futures_count(futures, member):
+    """The int `member` ('numberOfOperations' / 'numberOfCompleted') summed over these Futures, or
+    None when any ONE of them did not read - both raise until generation spins up, and a partial
+    sum would publish a smaller job than the handle covers."""
+    total = 0
+    for f in futures or []:
+        n = counted(lambda f=f: getattr(f, member))
+        if n is None:
+            return None
+        total += n
+    return total
 
-    That record is document_key, not the lineage urn alone: a never-saved document HAS no urn, so a
-    urn-only record leaves every launch from a scratch document unidentifiable and its status read
-    falls back to the Future alone rather than the per-op tallies it could read. doc_name / doc_urn
-    stay beside it because the payload NAMES the generating document from them.
 
-    target_name is the RAW setup/folder/operation name a scoped launch resolved to (omit it for a
-    whole-document launch): a status read settles this handle's completion on THAT target's own
-    operations, so a second generation running beside it cannot keep this handle incomplete.
-
-    'doc' is the launch document itself, kept beside that key because the key is derived from what
-    reads on the document and the DOCUMENT outlives the derivation: ONE launch document saved
-    mid-generation can answer a different key MORE THAN ONCE - those flips, and the PROBE NEEDED
-    (KEY-2) on the transient path-form id behind them, are _write_guard.document_key's. Each flip is
-    announced (_carry_generation_keys above re-stamps this entry), and through every one of them the
-    same open document still compares equal by HANDLE - the comparison document_key already matches
-    a never-saved document on - so _same_document answers on the re-stamped key from the call after
-    a flip, and on the handle during the call that detected it."""
+def register_future(future, target, scope, skip_valid, target_name="", also=()):
+    """(handle, total) - mint a handle for a live generation Future and register it with the
+    document it was launched from and, for a scoped launch, the raw `target_name` a status read
+    settles this handle's completion on. `also` holds the SIBLING futures of a launch split across
+    operations: every one is kept referenced, and the status read settles on all of them."""
     _HANDLE_SEQ[0] += 1
     handle = f"gen{_HANDLE_SEQ[0]}"
-    total = safe(lambda: future.numberOfOperations, None)
+    futures = [future] + list(also)
+    total = futures_count(futures, "numberOfOperations")
     doc_name, doc_urn = _active_identity()
     _GENERATIONS[handle] = {
         "future": future,
+        "futures": futures,
         "target": target,
         "scope": scope,
         "target_name": (target_name or "").strip(),
@@ -965,10 +911,8 @@ def machine_location(lib, machine):
 
 
 def machine_kinds(m):
-    """ONE machine's 'kind' labels off its capabilities flags - the per-machine read behind the
-    catalog's kind column. Reading capabilities is the EXPENSIVE part of a machine row (measured
-    ~47ms/machine over the 982-machine bundled library, ~46s for one unfiltered walk), so a caller
-    that needs one machine's kinds calls this instead of walking the catalog."""
+    """ONE machine's 'kind' labels off its capabilities flags - the expensive part of a machine
+    row, so a caller needing one machine's kinds calls this instead of walking the catalog."""
     caps = safe(lambda: m.capabilities)
     return [k for k, attr in sorted(_MACHINE_KINDS.items())
             if bool(safe(lambda caps=caps, attr=attr: getattr(caps, attr), False))]
@@ -990,14 +934,9 @@ def machine_ident(m):
     return machine_label(m), (safe(lambda: m.vendor) or ""), (safe(lambda: m.model) or "")
 
 
-# ── the machine's own limits: spindle speed + axis travels, off its kinematics tree ────────────────
-#
-# The route is Machine.elements -> the KinematicsMachineElement -> .parts (a TREE: each MachinePart
-# carries .children plus an optional .axis / .spindle / .toolStation). Machine.kinematics reaches
-# the same tree in one step and the bindings flag it "not officially supported", so it is never read
-# here. Measured on a library Haas A-axis machine: 7 parts, spindle maxSpeed 12000 rpm, X/Y/Z
-# physicalRange spans of 76.2/40.6/50.8 as the API reports them (the unit is the documented one
-# below, not a measured one) and an A axis whose range reads isInfinite.
+# ── the machine's own limits: spindle speed + axis travels, off its kinematics tree ───────────────
+# The route is Machine.elements -> the KinematicsMachineElement -> .parts, a TREE whose parts carry
+# .children plus an optional .axis / .spindle / .toolStation.
 _MACHINE_PART_DEPTH = 8       # the kinematics tree nests one part per axis; bound the recursion
 _MACHINE_PART_CAP = 200
 
@@ -1058,9 +997,8 @@ def _walk_machine_parts(parts, depth, out):
 
 
 def _spindle_records(parts) -> list:
-    """{max_rpm, min_rpm} for every spindle in the parts list, highest maxSpeed first. A maxSpeed of
-    0 is not a speed anything can be compared against, so it reads as None (never as a limit of 0)
-    and sorts last."""
+    """{max_rpm, min_rpm} for every spindle in the parts list, highest maxSpeed first; a maxSpeed
+    of 0 reads None and sorts last."""
     rows = []
     for part in (parts or []):
         sp = safe(lambda part=part: part.spindle)
@@ -1074,9 +1012,8 @@ def _spindle_records(parts) -> list:
 
 
 def machine_spindle_max(machine):
-    """The machine's highest readable spindle maxSpeed in rpm, or None when no spindle answers one -
-    the one number the per-operation over-max comparison is made against, so the machine slice and
-    that comparison can never quote different maxima."""
+    """The machine's highest readable spindle maxSpeed in rpm, or None when no spindle answers
+    one - the number every per-operation over-max comparison is made against."""
     if machine is None:
         return None
     rows = _spindle_records(kinematics_parts(machine))
@@ -1130,17 +1067,9 @@ def machine_limits(machine, factor, unit) -> dict:
         st = safe(lambda part=part: part.toolStation)
         if st is not None:
             row = {}
-            # A zero on a tool station is what an UNSET field reads as on a library machine
-            # definition (measured: maxToolDiameter and maxToolLength both 0.0 on a machine whose
-            # spindle maxSpeed read 12000), so a zero is never published as a limit of zero. The
-            # `factor` scale below converts a station value as if it were cm - the unit the linear
-            # axis ranges are converted from, which is the unit the BINDINGS DOCUMENT for
-            # physicalRange (see _AXIS_KINDS): the live row reports those range numbers raw and
-            # does not measure the unit. No machine reading a NON-zero station has been found to exercise these two
-            # fields either (PROBE NEEDED, one probe for both halves: on a machine whose station
-            # reads NON-zero and whose X travel is known from its published spec, compare
-            # maxToolDiameter/maxToolLength and physicalRange.max-min against that spec - do the
-            # raw numbers come back in cm?).
+            # An UNSET tool-station field reads 0.0, so a zero is never published as a limit. The
+            # values are scaled as CM, the unit the bindings document for physicalRange; no machine
+            # reading a NON-zero station has been found to confirm it (PROBE NEEDED).
             for key, getter in (("max_tool_diameter", lambda st=st: st.maxToolDiameter),
                                 ("max_tool_length", lambda st=st: st.maxToolLength)):
                 value = measured(getter, factor)
@@ -1172,11 +1101,8 @@ def op_spindle_speed(op):
 
 
 def spindle_check(op, machine_max):
-    """(over, requested, marker) for one operation against its machine's spindle maximum.
-
-    over is True only when the operation asks for MORE than the maximum - a request AT the maximum
-    is not over it. Either number unreadable answers None with a marker naming which side, never a
-    coerced False; the marker is what tells "checked and fine" from "could not be checked"."""
+    """(over, requested, marker) for one operation against its machine's spindle maximum - over is
+    True only ABOVE the maximum, and an unreadable side answers None with a marker naming it."""
     if machine_max is None:
         return None, None, "machine_max_unavailable"
     requested = op_spindle_speed(op)
@@ -1185,36 +1111,43 @@ def spindle_check(op, machine_max):
     return requested > machine_max, requested, None
 
 
-def query_machines(lib, vendor, model):
-    """Run the machine-library query for (vendor, model) across the Local + bundled Fusion360
-    locations, deduped by label. Returns a list of (machine, label, vendor, model); the FIRST
-    location that yields any match wins (Local before Fusion360)."""
-    found, labels = [], set()
+def _walk_machine_locations(lib, vendor, model, visit):
+    """Run the (vendor, model) query in each non-network location in turn, handing
+    `visit(location_label, matches)` its matches; `visit` returns True to stop the walk."""
     for loc_name in _MACHINE_LOCATIONS:
         loc = getattr(adsk.cam.LibraryLocations, loc_name, None)
         if loc is None:
             continue
         try:
-            matches = lib.createQuery(loc, vendor, model).execute() or []
+            matches = lib.createQuery(loc, vendor or "", model or "").execute() or []
         except Exception:
             continue
+        if visit(loc_name.replace("LibraryLocation", "").lower(), matches):
+            return
+
+
+def query_machines(lib, vendor, model):
+    """Run the machine-library query for (vendor, model) across the Local + bundled Fusion360
+    locations, deduped by label. Returns a list of (machine, label, vendor, model); the FIRST
+    location that yields any match wins (Local before Fusion360)."""
+    found, labels = [], set()
+
+    def visit(_loc_label, matches):
         for m in matches:
             label, v, mo = machine_ident(m)
             if label in labels:      # dedupe identical machines that appear in more than one location
                 continue
             labels.add(label)
             found.append((m, label, v, mo))
-        if found:
-            break                    # prefer the first location that yields any match
+        return bool(found)           # prefer the first location that yields any match
+
+    _walk_machine_locations(lib, vendor, model, visit)
     return found
 
 
 def machine_catalog(vendor: str = "", machine_type: str = "", max_results: int = 100):
-    """(rows, truncated, error) - the machine CATALOG the 'machine' input resolves from: every
-    machine in the Local + Fusion360 locations (the same two resolve_machine searches), filtered by
-    vendor and/or machine_type. The ONE catalog read: cam_edit_setup.read_machines is its wire
-    wrapper (cam_get(include=['machines'])) and cam_create_machine checks a new name against these
-    rows before creating anything."""
+    """(rows, truncated, error) - the machine CATALOG the 'machine' input resolves from: the Local
+    and Fusion360 locations, filtered by vendor and/or machine_type."""
     mt = (machine_type or "").strip().lower()
     if mt and mt not in _MACHINE_KINDS:
         return None, False, (f"Unknown machine_type '{machine_type}'. Valid: "
@@ -1223,47 +1156,108 @@ def machine_catalog(vendor: str = "", machine_type: str = "", max_results: int =
         lib = adsk.cam.CAMManager.get().libraryManager.machineLibrary
     except Exception as e:
         return None, False, f"Could not access the machine library: {e}"
-    rows, total = [], 0
-    for loc_name in _MACHINE_LOCATIONS:
-        loc = getattr(adsk.cam.LibraryLocations, loc_name, None)
-        if loc is None:
-            continue
-        loc_label = loc_name.replace("LibraryLocation", "").lower()   # 'local' / 'fusion360'
-        try:
-            matches = lib.createQuery(loc, vendor or "", "").execute() or []
-        except Exception:
-            continue
+    rows, total = [], [0]
+
+    def visit(loc_label, matches):
         for m in matches:
             kinds = machine_kinds(m)
             if mt and mt not in kinds:
                 continue
-            total += 1
+            total[0] += 1
             if len(rows) >= max_results:
                 continue
             label, v, mo = machine_ident(m)
             rows.append({"name": label, "vendor": v, "model": mo, "location": loc_label,
                          "kind": kinds,
                          "simulation_ready": bool(safe(lambda m=m: m.hasSimulationModel, False))})
-    return rows, total > len(rows), None
+        return False                  # every location is listed, so the walk never stops early
+
+    _walk_machine_locations(lib, vendor, "", visit)
+    return rows, total[0] > len(rows), None
+
+
+# WALL-CLOCK budget for the by-description walk, which enumerates both locations UNFILTERED. It is
+# checked BETWEEN machines only - an in-flight query cannot be interrupted - and a trip is its own
+# refusal, since a catalog not read to the end proves nothing about what it holds.
+_MACHINE_WALK_BUDGET_S = 5.0
+
+
+def _machines_labelled(lib, targets):
+    """(machines, timed_out) - the machines whose LABEL is one of `targets`, each a (lower-cased
+    label, required lower-cased vendor or None) pair. The library query keys on the MODEL field, so
+    a name carried only by a description is reachable only by reading the catalog."""
+    found, answered = [], set()
+    deadline = time.monotonic() + _MACHINE_WALK_BUDGET_S
+    timed_out = [False]
+
+    def visit(_loc_label, matches):
+        here = set()
+        for m in matches:
+            if time.monotonic() > deadline:
+                timed_out[0] = True
+                return True
+            label, v, mo = machine_ident(m)
+            key = (label or "").lower()
+            hit = [t for t, req_vendor in targets
+                   if t == key and (req_vendor is None or req_vendor == (v or "").lower())]
+            if not hit or key in answered:
+                continue
+            here.update(hit)
+            found.append((m, label, v, mo))
+        answered.update(here)
+        return answered == {t for t, _req in targets}
+
+    _walk_machine_locations(lib, "", "", visit)
+    return found, timed_out[0]
+
+
+def _split_ident_line(request):
+    """(description, vendor, model) when `request` is a listing LINE handed back as written -
+    'description [vendor|model]' - else None. Machines share descriptions and share vendor|model
+    pairs, so only the triple addresses one."""
+    if not request.endswith("]"):
+        return None
+    opened = request.rfind(" [")
+    if opened <= 0:
+        return None
+    vendor, sep, model = request[opened + 2:-1].partition("|")
+    if not sep:
+        return None
+    return request[:opened].strip(), vendor.strip(), model.strip()
+
+
+def _machines_identified(lib, label, vendor, model):
+    """The machines whose whole (description, vendor, model) identity is exactly this one, over the
+    (vendor, model) query - lower-cased arguments, undeduped so a tie reaches the caller."""
+    found = []
+
+    def visit(_loc_label, matches):
+        for m in matches:
+            lab, v, mo = machine_ident(m)
+            if ((lab or "").lower() == label and (v or "").lower() == vendor
+                    and (mo or "").lower() == model):
+                found.append((m, lab, v, mo))
+        return bool(found)           # Local before Fusion360, as every machine read prefers
+
+    _walk_machine_locations(lib, vendor, model, visit)
+    return found
 
 
 def _exact_machine(cands, machine, vendor, model):
-    """Exact-match, MOST-SPECIFIC first: a unique full-LABEL match wins over a unique 'vendor model'
-    match, which wins over a unique model match. Prioritizing the label is what makes same-model
-    variants selectable - a Haas library ships three machines that all report vendor|model 'HAAS|VF-2'
-    and differ ONLY by description ('Haas VF-2', 'Haas VF-2 with TRT100', ...), so matching the model
-    alone can't pick one, but the exact description can. Returns the single candidate at the first
-    priority yielding exactly one hit, else None (still ambiguous)."""
+    """The single candidate at the first priority yielding exactly one hit - full LABEL, then
+    'vendor model', then model - else None. Same-model variants differ only by description, so the
+    label is tried first."""
     ml = (model or "").strip().lower()
     ven = (vendor or "").strip().lower()
     full = (machine or "").strip().lower()
 
     def _unique(pred):
+        # Deduped on the whole IDENTITY: two machines can carry one description.
         hits, seen = [], set()
         for tup in cands:
             _m, label, v, mo = tup
             if pred(label, v, mo):
-                key = (label or "").lower()
+                key = ((label or "").lower(), (v or "").lower(), (mo or "").lower())
                 if key not in seen:
                     seen.add(key)
                     hits.append(tup)
@@ -1276,12 +1270,13 @@ def _exact_machine(cands, machine, vendor, model):
 
 
 def resolve_machine(machine):
-    """Resolve a 'machine' string (vendor|model, vendor/model, a bare model, or a full description) to
-    a single Machine. Returns (machine, label, None), or (None, None, error) when nothing matches or
-    the match is ambiguous - it refuses to guess. Exact match (LABEL first) beats a shared prefix.
-    The ONE machine resolver: cam_edit_setup assigns through it, and cam_create_machine gates a new
-    machine's reachability on it."""
+    """(machine, label, None) for a 'machine' string - vendor|model, vendor/model, a bare model, a
+    full description, or a listing line handed back - else (None, None, error): nothing matched, or
+    the match was ambiguous and this resolver does not guess."""
     machine = (machine or "").strip()
+    # The separator split below also runs over a listing LINE and reads half the description as a
+    # vendor, so a miss on a parsed line reports what it PARSED.
+    ident = _split_ident_line(machine)
     sep = "|" if "|" in machine else ("/" if "/" in machine else "")
     if sep:
         vendor, model = (p.strip() for p in machine.split(sep, 1))
@@ -1292,11 +1287,21 @@ def resolve_machine(machine):
     except Exception as e:
         return None, None, f"Could not access the machine library: {e}"
 
+    # FIRST: the refusal's own line, handed back - a description and a vendor|model are each
+    # shared, so the whole identity is what resolves.
+    if ident:
+        by_ident = _machines_identified(lib, ident[0].lower(), ident[1].lower(), ident[2].lower())
+        if len(by_ident) == 1:
+            return by_ident[0][0], by_ident[0][1], None
+        if len(by_ident) > 1:
+            return None, None, (f"{len(by_ident)} machines carry that exact description, vendor and "
+                                f"model ('{machine}'). Nothing read tells them apart, so this "
+                                "resolver will not pick one.")
+
     cands = query_machines(lib, vendor, model)
-    # WIDEN when the model as given matches nothing: the library query prefix-matches the MODEL field,
-    # but a variant's distinguishing text ('Haas VF-2 with TRT100') lives in its DESCRIPTION, and callers
-    # pass the label they SEE ('Haas VF-2', 'Haas|Haas VF-2'). Recover a (vendor, broad-model-token) to
-    # fetch the candidate POOL, then LABEL-match it below.
+    # WIDEN when the model as given matches nothing: the query prefix-matches the MODEL field, but a
+    # variant's distinguishing text lives in its DESCRIPTION, which is the label callers pass. The
+    # broad token fetches the candidate pool that is LABEL-matched below.
     if not cands:
         v2, broad = vendor, model
         if vendor and model.lower().startswith(vendor.lower() + " "):
@@ -1309,8 +1314,29 @@ def resolve_machine(machine):
             widened = query_machines(lib, v2, broad)
             if widened:
                 cands, vendor, model = widened, v2, broad
-
+    # LAST: match the DESCRIPTION over one catalog walk, since the query keys on the MODEL field.
+    # Two targets: the whole request against the label, and the half after a 'vendor|description'
+    # separator against the label of a machine whose vendor is the other half.
+    timed_out = False
     if not cands:
+        targets = [(machine.lower(), None)] if machine else []
+        if sep and model:
+            targets.append((model.lower(), vendor.lower()))
+        if targets:
+            cands, timed_out = _machines_labelled(lib, targets)
+
+    if timed_out:
+        # A catalog read that stopped early says nothing about what the catalog holds, so this is
+        # never worded as a miss: cam_create_machine reads a miss as proof that a name is free.
+        return None, None, (f"Timed out after {_MACHINE_WALK_BUDGET_S:g}s reading the machine catalog "
+                            f"for '{machine}', which the Local and Fusion360 queries did not match. "
+                            "Whether a machine carries that name is UNKNOWN - retry, or pass "
+                            "'vendor|model', which is queried without the catalog read.")
+    if not cands:
+        if ident:
+            return None, None, (f"No machine matches description '{ident[0]}' with vendor|model "
+                                f"'{ident[1]}|{ident[2]}' in the Local or Fusion360 machine "
+                                "libraries. Pass a line as the refusal that listed it prints it.")
         return None, None, (f"No machine matches '{machine}' (vendor='{vendor}', model='{model}') in the "
                             "Local or Fusion360 machine libraries. Use the machine name (its description) "
                             "you see in the Manufacture machine library.")
@@ -1319,24 +1345,24 @@ def resolve_machine(machine):
     if exact is not None:
         return exact[0], exact[1], None
     if len(cands) > 1:
-        # List the distinct LABELS (descriptions) - the selectable key, since same-model variants share
-        # vendor|model. The agent passes one of these exact names back to pick a specific variant.
-        labels, seen = [], set()
-        for (_m, lab, _v, _mo) in cands:
-            if lab and lab.lower() not in seen:
-                seen.add(lab.lower())
-                labels.append(lab)
-        return None, None, (f"Ambiguous machine '{machine}' - {len(labels)} matches: "
-                            f"{', '.join(labels[:8])}. Pass one of these exact names.")
+        # Print the whole IDENTITY per row: descriptions and vendor|model pairs are each shared, so
+        # either half alone lists a name that refuses again when passed back.
+        names, seen = [], set()
+        for (_m, lab, v, mo) in cands:
+            if not lab:
+                continue
+            line = f"{lab} [{v}|{mo}]" if (v and mo) else lab
+            if line.lower() not in seen:
+                seen.add(line.lower())
+                names.append(line)
+        return None, None, (f"Ambiguous machine '{machine}' - {len(cands)} matches: "
+                            f"{', '.join(names[:8])}. Pass the full line as shown.")
     return cands[0][0], cands[0][1], None
 
 
 # ── CAM LIBRARY folder walks - the ONE traversal the tool / post / template libraries share ──────
-#
-# All three expose the same shape off a LibraryLocations root url: childFolderURLs nests, and the
-# leaves are read per library kind (childAssetURLs for a tool library or a post config,
-# childTemplates for a template). What the bounds below are for: a cloud/Hub tree NESTS and is
-# network-slow, and enumerating one unbounded is a measured way to hang the add-in.
+# All three expose one shape off a LibraryLocations root url: childFolderURLs nests, and the leaves
+# read per kind (childAssetURLs, childTemplates). An unbounded cloud-tree walk hangs the add-in.
 
 _LIBRARY_MAX_DEPTH = 6
 _LIBRARY_MAX_FOLDERS = 1500
@@ -1352,10 +1378,8 @@ def library_children(lib, url, kind):
 def walk_library_folders(lib, root, visit, max_depth=_LIBRARY_MAX_DEPTH,
                          max_folders=_LIBRARY_MAX_FOLDERS):
     """Depth-first walk of a CAM library's FOLDER tree from `root`, calling `visit(folder_url)` once
-    per folder INCLUDING the root - the ONE library traversal; the leaf op stays the caller's.
-    `visit` returns True to stop the whole walk (its own collection is full). Bounded on both axes:
-    `max_depth` levels below the root and `max_folders` folders visited. An absent root walks nothing.
-    Returns True when a cap (or a full `visit`) stopped it early - i.e. the read is INCOMPLETE."""
+    per folder INCLUDING the root; `visit` returns True to stop the walk. Bounded by `max_depth`
+    and `max_folders`, and returns True when a cap stopped it early - the read is INCOMPLETE."""
     truncated = [False]
     visited = [0]
 
@@ -1383,11 +1407,9 @@ def walk_library_folders(lib, root, visit, max_depth=_LIBRARY_MAX_DEPTH,
 
 def library_assets(lib, root, max_depth=_LIBRARY_MAX_DEPTH, max_folders=_LIBRARY_MAX_FOLDERS,
                    max_assets=None):
-    """(assets, truncated) - every child ASSET url under a library location root, folders recursed:
-    the collect-the-assets projection of walk_library_folders that the tool-library and post-library
-    reads share. An asset url is the addressable identity of a library/post - .leafName is its name
-    and .toString() its url - which is why the walk collects those rather than the heavy loaded
-    objects. `max_assets` caps the collection itself; truncated is True when any cap stopped it."""
+    """(assets, truncated) - every child ASSET url under a library location root, folders recursed.
+    An asset url is the addressable identity: .leafName is its name, .toString() its url.
+    `max_assets` caps the collection; truncated is True when any cap stopped the walk."""
     assets = []
 
     def visit(url):
@@ -1418,15 +1440,8 @@ def asset_leaf(url):
 
 def asset_leaf_keys(url):
     """The names ONE asset answers to, lowercased: its leafName as stored, and its STEM - the part
-    before the LAST dot.
-
-    MEASURED live: a stored asset's leafName carries the file extension
-    ('SweepMach3Axis 20260830-194520.mch') while the machine's own name does not, so comparing the
-    name against the whole leafName finds nothing at all. The STEM is compared rather than the name
-    plus a hardcoded extension because the extension is the library's to choose, and the whole
-    leafName is kept in the set so an asset stored WITHOUT one still matches. Both are EXACT
-    comparisons - a substring match here would delete 'SweepMach3Axis Mk2.mch' for
-    'SweepMach3Axis'."""
+    before the LAST dot, since a stored leafName carries a file extension the asset's own name
+    does not."""
     leaf = asset_leaf(url).lower()
     keys = {leaf}
     stem = leaf.rpartition(".")[0]

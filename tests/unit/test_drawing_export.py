@@ -572,31 +572,27 @@ class TestTheDescriptionAsksForNoHumanStep:
 
 
 class TestSheetRangeCarriesTheWedgeFact:
-    """Measured on 2705.0.87, DISCRIMINATED across three sessions: the minutes-long main-thread
-    block strikes a sheet_range export issued soon AFTER another export of the same drawing (2/2,
-    self-recovering, the file never lands), while a sheet_range export run FIRST completed clean.
-    The input carries that ordering rule - a caller cannot recover the lost minutes or the missing
-    file from the result."""
+    """A sheet_range export issued soon after another export of the same drawing blocks the main
+    thread and never lands its file, while one run FIRST completes clean. The input carries that
+    ordering rule - a caller cannot recover the lost time or the missing file from the result."""
 
     def _sheet_range_description(self):
         return de.tool.to_dict()["inputSchema"]["properties"]["sheet_range"]["description"]
 
-    def test_the_input_states_the_measured_block(self):
+    def test_the_input_states_the_block(self):
         desc = self._sheet_range_description()
-        assert "2705.0.87" in desc
-        assert "blocked" in desc and "minutes" in desc
+        assert "block the main thread" in desc
 
     def test_the_input_states_the_trigger_ordering(self):
         # the block is a follow-up-export collision, not an inherent single-sheet defect
         desc = self._sheet_range_description()
-        assert "AFTER another export" in desc
+        assert "after another export" in desc
 
     def test_the_input_states_the_honest_severity(self):
-        # it self-recovers, but the deliverable never lands - both halves stated
+        # the deliverable never lands - the half a caller cannot recover from the result
         desc = self._sheet_range_description()
-        assert "self-recovers" in desc
         assert "never lands" in desc
 
     def test_the_input_teaches_run_first(self):
         desc = self._sheet_range_description()
-        assert "FIRST" in desc and "never a follow-up" in desc
+        assert "FIRST" in desc

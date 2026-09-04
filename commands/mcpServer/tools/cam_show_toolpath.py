@@ -20,25 +20,16 @@ _ACTIONS = ("show", "hide", "isolate", "show_folder", "hide_all", "list")
 
 
 def _set_bulb(o, on):
-    """Set the lightbulb and confirm it took. Returns (took, read_back).
-
-    took is True only when the re-read ANSWERS the value that was set: a bulb whose isLightBulbOn
-    does not read leaves the toggle unconfirmed, and unconfirmed is not done (the sibling flag
-    write, cam_edit_operation._set_suppressed, fails the same way). The read-back goes through
-    read_flag, so an unreadable bulb answers None - safe(read, False) would pass the `now == wanted`
-    gate on every hide."""
+    """(took, read_back) - set the lightbulb and confirm it took; a bulb whose isLightBulbOn does
+    not read answers None, which is unconfirmed rather than done."""
     o.isLightBulbOn = bool(on)
     now = read_flag(lambda: o.isLightBulbOn)
     return (now is not None and now == bool(on)), now
 
 
 def _op_identity(o):
-    """An operation's operationId - what a mass-hide's read-back is matched to a later show by.
-
-    Two independent walks of the CAM tree hand back DIFFERENT Python objects for one operation
-    (measured - cam_post._op_id_set), so id() matches nothing across them. An operationId that does
-    not read is None, which matches nothing either: the read-back is then reported rather than
-    dropped on a stand-in identity."""
+    """An operation's operationId - two walks of the CAM tree hand back DIFFERENT Python objects
+    for one operation, so id() matches nothing across them."""
     return safe(lambda: o.operationId)
 
 
@@ -49,13 +40,8 @@ def _bulb_word(now):
 
 
 def _activate_owning_setup(cam, setup_name):
-    """Make the shown toolpath's OWN setup active. Returns (activated_name_or_None, warning_or_None);
-    already-active is (None, None).
-
-    MEASURED live: the Manufacture workspace renders only the ACTIVE setup's models. Showing an
-    operation from another setup therefore draws its toolpath beside a DIFFERENT setup's part - and
-    'fit' then frames that part, leaving the isolated toolpath off screen.
-    """
+    """(activated_name_or_None, warning_or_None) - make the shown toolpath's OWN setup active, since
+    the Manufacture workspace renders only the ACTIVE setup's models; already-active is (None, None)."""
     if not setup_name:
         return None, None
     s, _names, serr = find_setup(cam, setup_name)
@@ -68,8 +54,6 @@ def _activate_owning_setup(cam, setup_name):
     except Exception as e:
         return None, (f"Setup '{setup_name}' could not be activated ({e}) - the viewport still "
                       "shows the ACTIVE setup's models, not this operation's part.")
-    # A flag that does not READ has not said the setup became active, and it has not said it stayed
-    # inactive either - so the two get separate sentences, each stating only what was read.
     state = safe(lambda: s.isActive)
     if state is False:
         return None, (f"activate() ran but setup '{setup_name}' still reads isActive=false - the "
@@ -159,10 +143,9 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
                         shown_ids.add(oid)
                 else:
                     failed.append(safe(lambda o=o: o.name))
-        # A hide that did not take on an op this call then SHOWED ends lit, as asked, so it is
-        # dropped - matched by operationId, the identity the two walks share (see _op_identity).
-        # An operation either side of that match whose id did not read matches nothing, and its
-        # read-back is reported rather than dropped.
+        # A hide that did not take on an op this call then SHOWED ends lit as asked, so it drops -
+        # matched by operationId, the identity two walks share. An id that did not read matches
+        # nothing and its read-back is reported instead.
         still_lit = [nm for oid, nm in hide_failed if oid is None or oid not in shown_ids]
         activated, setup_warning = _activate_owning_setup(cam, fnode.setup)
         app.activeViewport.refresh()
@@ -217,8 +200,7 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
                 hide_failed.append((_op_identity(node.obj), node.name))
         # The target is shown immediately below, so its own refused hide ends lit as asked and is
         # dropped - matched by operationId, since this walk and the resolver that produced `o` hold
-        # different objects for one operation (see _op_identity). An id that did not read on either
-        # side matches nothing, and that read-back is reported rather than dropped.
+        # different objects for one operation. An id that did not read matches nothing.
         still_lit = [nm for oid, nm in hide_failed
                      if target_id is None or oid is None or oid != target_id]
     took, now = _set_bulb(o, True)
@@ -272,11 +254,9 @@ TOOL_DESCRIPTION = (
     "'action': 'show'/'hide'/'isolate' one operation (by 'operation' name; isolate = show only it); "
     "'show_folder' (show every op in a 'folder' or setup, hide the rest); 'hide_all'; 'list' (ops "
     "+ state). 'fit' fits the camera to the scene after showing (show/isolate). Toolpaths render "
-    "only in the Manufacture workspace; pair with view_screenshot. Toggles "
-    "Operation.isLightBulbOn, and show/isolate/show_folder also ACTIVATE the operation's own "
-    "setup (the viewport renders only the active setup's models - the payload reports "
-    "setup_activated) - a later CAM call lands in that setup unless it names its own. Does not "
-    "touch simulation/in-process-stock commands (those are unsafe to drive from here)."
+    "only in the Manufacture workspace; pair with view_screenshot. show/isolate/show_folder also "
+    "ACTIVATE the operation's own setup (the payload reports setup_activated) - a later CAM call "
+    "lands in that setup unless it names its own."
 )
 
 tool = (

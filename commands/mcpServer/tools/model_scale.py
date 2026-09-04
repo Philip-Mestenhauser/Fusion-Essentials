@@ -5,10 +5,6 @@
 
   model_scale -> scale one or more bodies uniformly, or per-axis, about a point that stays put -
                  fit a part to a new envelope, add a shrink/growth allowance. WRITES.
-
-ScaleFeatures.createInput takes the entity collection, the anchor POINT (a BRepVertex, SketchPoint or
-ConstructionPoint - all three live-verified), and the UNIFORM factor; setToNonUniform(x, y, z) then
-replaces that factor with per-axis ones. A scale factor is UNITLESS, so no unit scaling touches it.
 """
 
 import adsk.core
@@ -25,9 +21,8 @@ from . import _inputs
 from . import _outputs
 
 
-# Relative tolerance on the measured volume ratio. A scale is an exact linear map, so a body that
-# really scaled lands on f^3 (or x*y*z) far inside this band, while a wrong factor or an untouched
-# body lands far outside it.
+# Relative tolerance on the measured volume ratio - a scale is an exact linear map, so a body that
+# really scaled lands on f^3 (or x*y*z) far inside this band.
 _RATIO_TOL = 1e-3
 
 # Below this volume (cm^3) a before/after ratio is dominated by read-back noise, so the body is
@@ -44,7 +39,6 @@ _UNIT_MATCH_EPS = 1e-12
 _AXIS_INPUTS = ("x_factor", "y_factor", "z_factor")
 _AXIS_PARAMS = {"x_factor": "xScale", "y_factor": "yScale", "z_factor": "zScale"}
 
-# What this tool RETURNS (declared once; drives the PRODUCES: prose + the assert-present contract test).
 RETURNS = [
     _outputs.ReturnsName("feature", of="feature", consumers=["design_delete_feature"],
                          absent_when="no_timeline_feature"),
@@ -54,11 +48,8 @@ RETURNS = [
                           "geometry_changed"),
 ]
 
-# A SOLID-body kind: the volume read-back this tool verifies with needs a closed body, and typing the
-# input keeps sketches/components/meshes out of the collection entirely. That is this tool's own
-# policy, not an API constraint - setToNonUniform accepts a collection holding a sketch at input
-# level (live-verified, contradicting the bindings' "will fail" prose). A mesh/surface handle gets the
-# kind's redirect rather than a feature failure.
+# The solid-body kind is this tool's own policy, not an API constraint - setToNonUniform accepts a
+# collection holding a sketch at input level - but the volume read-back needs a closed body.
 _BODIES = _inputs.BodyRefList("bodies", kind="solid", required=True,
     description="The solid bodies to resize.")
 _ANCHOR = _inputs.GeometryHandle("anchor", require="vertex", required=False,
@@ -68,8 +59,8 @@ app = adsk.core.Application.get()
 
 
 def _positive(label, value, source):
-    """The greater-than-zero contract, applied to whatever a factor resolved to. `source` finishes the
-    sentence naming where that number came from. Returns an error string, or ''."""
+    """The greater-than-zero refusal for a resolved factor, or '' - `source` names where it came
+    from."""
     if value <= 0:
         return (f"'{label}' must be greater than zero, but {source} is {value} - a scale factor is a "
                 "positive multiplier (2 = twice the size, 0.5 = half). To reflect a body, use "
@@ -84,10 +75,8 @@ def _carries_a_unit(label, expr) -> str:
 
 
 def _expression_value(label, expr, design):
-    """(number, error) for a parameter-EXPRESSION factor, evaluated through the design's units engine
-    so an unresolvable, DIMENSIONED, or non-positive expression is refused BY NAME before any
-    mutation. Live-verified: evaluateExpression(expr, "") returns 4.0 for '2*2' and raises for an
-    unknown parameter."""
+    """(number, error) for a parameter-EXPRESSION factor, evaluated through the design's units
+    engine so an unresolvable or DIMENSIONED expression is refused by name before any mutation."""
     um = safe(lambda: design.fusionUnitsManager)
     if um is None:
         return None, (f"'{label}': the design's units engine is unavailable, so the expression "
@@ -101,22 +90,9 @@ def _expression_value(label, expr, design):
     if not isinstance(unitless, (int, float)) or isinstance(unitless, bool):
         return None, (f"'{label}' expression '{expr}' did not evaluate to a number. Use a unitless "
                       "expression or a plain number.")
-    # The unit discriminator, from the measured record of evaluating ONE expression against a
-    # unitless, a length, and an angle context (isValidExpression is True for every shape below, so
-    # this is the only gate). Live-verified, by expression shape - values under "" / "mm" / "deg":
-    #   invalid ('NoSuchParam')      raises   /  -      /  -      -> refused above
-    #   unitless arithmetic ('2*2')  4.0      /  0.4    /  0.0698 -> a plain number, scaled by the
-    #                                                                context: ACCEPT
-    #   unitless param               0.98     /  RAISES /  RAISES -> no dimensioned context can read
-    #     ('ShrinkFactor')                                          it: ACCEPT
-    #   length param / '5 mm'        0.5      /  0.5    /  -      -> carries its own unit (the length
-    #                                                                context returns it unchanged):
-    #                                                                REFUSE
-    #   angle param ('ProbeAngle',   0.5236   /  RAISES /  0.5236 -> carries its own ANGULAR unit
-    #     30 deg -> radians)                                        (its radian value): REFUSE
-    # So a raise under "mm" alone is not proof of unitlessness - the angle context is what separates
-    # the last two rows. A zero result is identical under every context and carries no signal - the
-    # positive check refuses it.
+    # The unit discriminator: a unitless PARAM raises under both "mm" and "deg"; a LENGTH one
+    # evaluates the same under "" and "mm"; an ANGLE one raises under "mm" but reads its radian
+    # value under "deg". So a raise under "mm" alone is not proof of unitlessness.
     try:
         as_length = um.evaluateExpression(expr, "mm")
     except Exception:
@@ -132,11 +108,8 @@ def _expression_value(label, expr, design):
 
 
 def _factor_value(label, raw, design):
-    """(ValueInput, number, error) for one scale factor.
-
-    A factor is UNITLESS, so a number goes to createByReal with no unit scaling. A non-numeric string
-    is a parameter EXPRESSION: it is evaluated here to GATE it (unresolvable / unit-carrying /
-    non-positive) and then applied as the number it resolved to."""
+    """(ValueInput, number, error) for one scale factor - a non-numeric string is a parameter
+    EXPRESSION, gated here and applied as the number it resolved to."""
     if _inputs.looks_like_expression(raw):
         expr = raw.strip()
         value, eerr = _expression_value(label, expr, design)
@@ -145,11 +118,9 @@ def _factor_value(label, raw, design):
         perr = _positive(label, value, f"expression '{expr}'")
         if perr:
             return None, None, perr
-        # Live-verified, which is why the resolved NUMBER goes in rather than the expression string:
-        # createByString raises '3 : invalid expression' at add() for a BARE parameter reference
-        # ('ShrinkFactor'), and where it does succeed ('ShrinkFactor * 1') the created feature's
-        # scaleFactor.expression reads the evaluated literal - the platform bakes the number either
-        # way, so no parametric link is forfeited by passing it directly.
+        # The resolved NUMBER goes in, not the string: createByString raises '3 : invalid
+        # expression' at add() for a bare parameter reference, and where it succeeds the feature's
+        # scaleFactor.expression reads the evaluated literal anyway.
         return adsk.core.ValueInput.createByReal(value), value, None
     try:
         v = float(raw)
@@ -163,10 +134,9 @@ def _factor_value(label, raw, design):
 
 
 def _resolved_factor(requested, feature, param_attr):
-    """One factor as the NUMBER Fusion applied: the feature's own ModelParameter when readable
-    (live-verified: in per-axis mode xScale/yScale/zScale carry the requested factors while
-    scaleFactor reads None, and uniform mode is the exact mirror - the reverse of the bindings'
-    prose), else the number the input resolved to."""
+    """One factor as the NUMBER Fusion applied - the feature's own ModelParameter when readable,
+    else the number the input resolved to."""
+    # Per-axis mode carries xScale/yScale/zScale while scaleFactor reads None; uniform is the mirror.
     v = safe(lambda: getattr(feature, param_attr).value)
     if isinstance(v, (int, float)) and not isinstance(v, bool):
         return float(v)
@@ -199,16 +169,8 @@ def _moved(before, after):
 
 
 def _verify(body_names, before, after, expected, remedy):
-    """(error_text, evidence) proving the scale actually resized the geometry.
-
-    A uniform factor f multiplies a body's volume by f^3 and per-axis factors by x*y*z, so each body's
-    measured ratio is held to that expectation and a mismatch is an error, never a false ok. When the
-    expectation is 1.0 (a volume-preserving mix such as 2 x 0.5 x 1), volume cannot discriminate and
-    the check falls back to the geometry having moved at all.
-
-    `body_names` are captured BEFORE the mutation (a post-mutation proxy can stop answering .name).
-    `remedy` is the mode-aware closing sentence from _common.failed_effect_remedy - the direct path
-    has no timeline feature to send the caller after."""
+    """(error_text, evidence) holding each body's measured volume ratio to `expected` - and, where
+    that expectation is 1.0 and cannot discriminate, to the geometry having moved at all."""
     ratios, total_before, total_after = [], 0.0, 0.0
     readable = 0
     for name, b, a in zip(body_names, before, after):
@@ -244,9 +206,8 @@ def _verify(body_names, before, after, expected, remedy):
                 f"nothing was resized. {remedy}"), {}
     measured["scale_check"] = "geometry_changed"
     if "volume_ratio" not in measured:
-        # No body offered a before/after volume pair above _MIN_VOLUME_CM3, so the ratio check the
-        # description promises did NOT run and no volume_ratio is published. The flag is what
-        # licenses that omission (RETURNS declares it), and the handler turns it into a sentence.
+        # No body offered a before/after volume pair above _MIN_VOLUME_CM3, so the ratio check did
+        # not run; the flag licenses the missing volume_ratio and the handler states it.
         measured["volume_check_skipped"] = True
     return "", measured
 
@@ -274,8 +235,7 @@ def handler(bodies=None, factor=None, x_factor=None, y_factor=None, z_factor=Non
         return error("No active design. Create or open a document first (see doc_new).")
     comp = target_component(design)
 
-    # An expression factor is checked against the design's own units engine here, so a bad one is
-    # refused before anything is created.
+    # Checked before anything is created, so a bad expression refuses with nothing half-built.
     values, literals = {}, {}
     for label in (_AXIS_INPUTS if non_uniform else ("factor",)):
         vi, literal, ferr = _factor_value(label, axes[label] if non_uniform else factor, design)
@@ -283,8 +243,6 @@ def handler(bodies=None, factor=None, x_factor=None, y_factor=None, z_factor=Non
             return error(ferr)
         values[label], literals[label] = vi, literal
 
-    # bodies is a BodyRefList(kind='solid') and anchor a GeometryHandle(require='vertex') - both
-    # resolve+validate in the kind, so this handler never hand-rolls a name/index or re-checks types.
     body_ents, berr = _BODIES.resolve(bodies)
     if berr:
         return error(berr)
@@ -303,8 +261,7 @@ def handler(bodies=None, factor=None, x_factor=None, y_factor=None, z_factor=Non
     coll = adsk.core.ObjectCollection.create()
     for b in body_ents:
         coll.add(b)
-    # Pre-mutation read-back: the geometry a scale must move, plus the NAMES - a post-mutation proxy
-    # can stop answering .name, and a payload must not publish a null for a body that resolved.
+    # A post-mutation proxy can stop answering .name, so the names are read here too.
     before = [_measure(b) for b in body_ents]
     body_names = [safe(lambda b=b: b.name) for b in body_ents]
 
@@ -314,7 +271,6 @@ def handler(bodies=None, factor=None, x_factor=None, y_factor=None, z_factor=Non
         seed = values["factor"] if not non_uniform else adsk.core.ValueInput.createByReal(1.0)
         scale_input = comp.features.scaleFeatures.createInput(coll, point, seed)
         if non_uniform:
-            # 'bodies' is a solid-body kind, so the collection holds only solid BRep bodies here.
             applied = scale_input.setToNonUniform(values["x_factor"], values["y_factor"],
                                                   values["z_factor"])
             if applied is False:
@@ -325,15 +281,13 @@ def handler(bodies=None, factor=None, x_factor=None, y_factor=None, z_factor=Non
         return error(f"Scale failed: {e}. (A parameter expression may not resolve - check it with "
                      "param_get - or the factor may collapse the geometry; try a factor closer "
                      "to 1.)")
-    # MEASURED: scaleFeatures.add returns None in a DIRECT design while the resize LANDS (volume x8
-    # for a x2 factor). The verdict below is the measured volume/bbox read-back off the BODIES, which
-    # needs no feature object - so in direct mode fall through to it. In parametric a None feature is
-    # unmeasured as a success and stays an error.
+    # scaleFeatures.add returns None in a DIRECT design while the resize lands; the volume/bbox
+    # read-back below needs no feature object. In parametric a None feature stays an error.
     direct_no_feature = _common.direct_feature_absence(design, feature)
     if not feature and not direct_no_feature:
         return error(_common.no_feature_error(design, "Scale"))
 
-    # A feature can be ADDED yet fail to compute; report that as failure, not a false ok.
+    # A feature can be ADDED yet fail to compute.
     if safe(lambda: feature.healthState) == adsk.fusion.FeatureHealthStates.ErrorFeatureHealthState:
         msg = safe(lambda: feature.errorOrWarningMessage) or "no detail"
         return error(f"Scale feature was created but failed to compute: {msg}. Try a factor closer "
@@ -346,9 +300,8 @@ def handler(bodies=None, factor=None, x_factor=None, y_factor=None, z_factor=Non
     else:
         expected = _resolved_factor(literals["factor"], feature, "scaleFactor") ** 3
 
-    # Post-mutation read-back: prove the bodies really resized rather than trust the API's success.
-    # Live-verified: a BRepBody reference held across scaleFeatures.add() stays valid and reads the
-    # NEW volume, so before and after measure the same objects.
+    # A BRepBody reference held across scaleFeatures.add() stays valid and reads the NEW volume, so
+    # before and after measure the same objects.
     after = [_measure(b) for b in body_ents]
     verr, measured = _verify(body_names, before, after, expected,
                              _common.failed_effect_remedy(design, feature))
@@ -363,16 +316,12 @@ def handler(bodies=None, factor=None, x_factor=None, y_factor=None, z_factor=Non
         "note": "Bodies resized about the anchor point, which stays put. Factors are unitless: 2 "
                 "doubles every dimension and multiplies volume by 8.",
     }
-    # Direct mode: no feature object, so no name - publish the flag RETURNS declares the omission
-    # against rather than a guessed one. Every other key here is measured off the BODIES, so it
-    # survives the missing feature untouched.
     if direct_no_feature:
         payload["no_timeline_feature"] = True
         payload["note"] += " " + _common.DIRECT_FEATURE_NOTE
     else:
         payload["feature"] = safe(lambda: feature.name)
-    # An expression is echoed as written AND as the number actually applied, so the agent can see what
-    # the parameter resolved to (the feature stores that number, not the expression).
+    # An expression is echoed as written AND as the number applied - the feature stores the number.
     if non_uniform:
         payload["factors"] = {n: _inputs.expression_report(axes[n]) for n in _AXIS_INPUTS}
         if any(_inputs.looks_like_expression(axes[n]) for n in _AXIS_INPUTS):
@@ -390,12 +339,10 @@ def handler(bodies=None, factor=None, x_factor=None, y_factor=None, z_factor=Non
 
 
 TOOL_DESCRIPTION = (
-    "Resize solid bodies about an anchor point that stays put (Fusion's Scale feature) - fit a part "
-    "to a new envelope, or add a shrink allowance. Pass 'factor' to scale uniformly, or all three of "
-    "'x_factor'/'y_factor'/'z_factor' to scale per axis; each also takes a parameter-expression "
-    "string, applied as the number it resolves to. 'anchor' is a vertex handle from find_geometry; "
-    "omit it to scale about the active "
-    "component's origin. WRITES; verifies the measured volume changed by what the factors imply.\n"
+    "Resize solid bodies about an anchor point that stays put (the Scale feature) - fit a part to a "
+    "new envelope, or add a shrink allowance. Pass 'factor' to scale uniformly, or ALL THREE of "
+    "'x_factor'/'y_factor'/'z_factor' to scale per axis. Omit 'anchor' to scale about the active "
+    "component's origin.\n"
     + _outputs.produces_block(RETURNS)
 )
 

@@ -581,13 +581,15 @@ class TestGuards:
         assert res["isError"] is True and "color" in res["message"].lower()
 
     def test_inherited_opacity_is_disclosed_not_claimed(self):
-        # the override is inherited, so what renders can differ from what was asked - the payload
-        # must publish the rendered value and say so rather than echo the request
+        # What renders can differ from what was asked, so the payload publishes the rendered value
+        # and the note states that reading - it must not name a cause (an ancestor's override, a
+        # swallowed write) that nothing in this call read.
         body = FakeBody("Body1", inherited_opacity=0.25)
         _install(FakeRoot(bodies=[body]))
         out = _payload(ap.handler(target="Body1", opacity=80))
         assert out["opacity"] == 80 and out["opacity_rendered"] == 25
         assert "RENDERS at 25%" in out["note"]
+        assert "inherited" not in out["note"] and "ancestor" not in out["note"]
 
     def test_no_active_design_errors(self):
         ap._common.design = lambda: None
@@ -980,6 +982,39 @@ class TestTheColorBase:
         assert "base_appearance" not in out and "base_reused" not in out
 
 
+class _Rgb:
+    """A Color whose components READ - the live Color exposes red/green/blue, which the tuple
+    stand-in _install installs does not, so only this rig can reach the re-read comparison."""
+
+    def __init__(self, r, g, b):
+        self.red, self.green, self.blue = r, g, b
+
+
+def _readable_colors(monkeypatch):
+    """Point Color.create at _Rgb, AFTER _install has bound its tuple stand-in."""
+    import adsk.core
+    monkeypatch.setattr(adsk.core.Color, "create",
+                        staticmethod(lambda r, g, b, o: _Rgb(r, g, b)))
+
+
+def _swallowing_color(prop_id, prior):
+    """A ColorProperty that ACCEPTS an assignment and keeps its prior colour."""
+    inst = type("ColorProperty", (), {
+        "value": property(lambda self: prior, lambda self, v: None)})()
+    inst.id = prop_id
+    return inst
+
+
+def _write_only_color(prop_id):
+    """A ColorProperty that ACCEPTS an assignment and whose value GETTER declines to answer."""
+    def _no_read(self):
+        raise RuntimeError("this ColorProperty's value cannot be read here")
+
+    inst = type("ColorProperty", (), {"value": property(_no_read, lambda self, v: None)})()
+    inst.id = prop_id
+    return inst
+
+
 class TestTheColorLandsOnTheAlbedoOnly:
     """The base exposes two ColorProperties. Writing both puts the requested colour into a channel
     the caller never named; the write is scoped to the albedo."""
@@ -1020,6 +1055,58 @@ class TestTheColorLandsOnTheAlbedoOnly:
         res = ap.handler(target="Body1", color="#1E8E3E")
         assert res["isError"] is True and "opaque_albedo" in res["message"]
         assert body.appearance is None
+
+    def test_a_channel_that_stores_nothing_is_refused_not_reported_as_applied(self, monkeypatch):
+        # The assignment is ACCEPTED and the channel reads its prior colour back, so nothing but
+        # the re-read tells this apart from a landed colour.
+        body = FakeBody("Body1")
+        design, apps = _install(FakeRoot(bodies=[body]))
+        _readable_colors(monkeypatch)
+        swallowing = FakeAppearance("AgentColor_1E8E3E", color_props=())
+        swallowing.appearanceProperties = FakeProps(
+            [_swallowing_color("opaque_albedo", _Rgb(200, 120, 48))])
+        apps._items.append(swallowing)
+        res = ap.handler(target="Body1", color="#1E8E3E")
+        assert res["isError"] is True
+        assert "opaque_albedo" in res["message"] and "different one back" in res["message"]
+        assert body.appearance is None
+
+    def test_a_channel_that_stores_the_colour_is_still_applied(self, monkeypatch):
+        # The mirror of the gate above on the same readable-colour rig: a channel that KEEPS what
+        # it was given comes back applied with NO unconfirmed qualifier, or the re-read would
+        # refuse - or hedge - every good write.
+        body = FakeBody("Body1")
+        _install(FakeRoot(bodies=[body]))
+        _readable_colors(monkeypatch)
+        out = _payload(ap.handler(target="Body1", color="#1E8E3E"))
+        assert out["applied"] is True and out["applied_to"] == ["Body1"]
+        assert "color_unconfirmed_channels" not in out
+        assert "UNCONFIRMED" not in out["note"]
+
+    def test_a_channel_that_will_not_read_back_is_applied_but_says_it_is_unconfirmed(self):
+        # The fail-open direction: nothing refutes the write, so it stands - but the payload must
+        # not read as a confirmed colour, the way the opacity path discloses the same condition.
+        body = FakeBody("Body1")
+        _install(FakeRoot(bodies=[body]))         # the tuple Color stand-in: no comparison possible
+        out = _payload(ap.handler(target="Body1", color="#1E8E3E"))
+        assert out["applied"] is True
+        assert out["color_unconfirmed_channels"] == ["opaque_albedo"]
+        assert "UNCONFIRMED" in out["note"]
+
+    def test_the_written_colour_reads_but_the_channel_does_not_answer(self, monkeypatch):
+        # The LIVE shape of the same disclosure: a real Color always answers red/green/blue, so
+        # the colour WRITTEN reads and the only route left is a channel whose own read-back
+        # declines. Without this the guard's second half is never exercised.
+        body = FakeBody("Body1")
+        design, apps = _install(FakeRoot(bodies=[body]))
+        _readable_colors(monkeypatch)
+        blind = FakeAppearance("AgentColor_1E8E3E", color_props=())
+        blind.appearanceProperties = FakeProps([_write_only_color("opaque_albedo")])
+        apps._items.append(blind)
+        out = _payload(ap.handler(target="Body1", color="#1E8E3E"))
+        assert out["applied"] is True
+        assert out["color_unconfirmed_channels"] == ["opaque_albedo"]
+        assert "UNCONFIRMED" in out["note"]
 
 
 # ── the opacity override: where it lands, what it renders, and how it fails ────

@@ -1,12 +1,12 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""ACT rows: the overture that opens the document, and the finale that discards it.
+"""ACT rows: the overture that opens the document, the showcase, and the finale that discards it.
 
-The two acts bracketing the sweep - the orientation reads and the one `doc_new` at the top, then
-the beauty shots, the export/import round trips and the document close at the end. `reload_smoke`
-is the post-run beat run() fires after every act: the add-in reload, which restarts the server and
-so can be no act's step.
+The orientation reads and the one `doc_new` at the top; the presentation act - beauty shots, the
+view verbs, the renames and the export/import round trips - which runs before the machining acts
+so the CAM job is what the sweep ends on; and the discard. `reload_smoke` is the post-run beat
+run() fires after every act: the add-in reload, which restarts the server and so can be no step.
 """
 
 import json
@@ -19,17 +19,28 @@ from verify_core import (
     _new_document, _refused, _watch, facade)
 
 
-# --- ACT 0: OVERTURE - orient, then open the one document the whole gyroscope lives in ---------
+# --- ACT 0: OVERTURE - orient, then open the one document the whole story lives in -------------
 _OVERTURE = [
     ("doc_new", {}, _new_document, None),
     ("workspace_orient", {}, "ok", ("fusion_version", lambda p: p["fusion_version"])),
-    ("sys_capability_map", {}, "ok", None),
+    # the family map is a live registry walk: a family whose module failed to register is ABSENT
+    # here, not merely uncounted, and every family it does list has to carry an entry tool.
+    ("sys_capability_map", {},
+     lambda p: ({"cam", "mesh", "model", "sketch", "surface", "view"}
+                <= {f["family"] for f in p["families"]}
+                and all(f["tool_count"] >= 1 and f["entry_tool"] for f in p["families"])
+                and p["tool_count"] >= 150), None),
     # the read stamp is for DOCUMENT reads: a tool that answers off the registry rather than the
     # active design carries no 'active_document' key at all (design_get's own beat in the FINALE is
     # the other half of this pair).
     ("sys_find_tool", {"query": "revolve"},
      lambda p: "active_document" not in p and p.get("tool_count", 0) > 0, None),
-    ("sys_get_api_doc", {"searchPattern": "RevolveFeatures", "max_results": 3}, "ok", None),
+    # the introspection FOUND the class in the module it lives in: an adsk submodule that would not
+    # import is skipped silently, and the search then answers ok with nothing in it.
+    ("sys_get_api_doc", {"searchPattern": "RevolveFeatures", "max_results": 3},
+     lambda p: (any(c["name"] == "RevolveFeatures" and c["namespace"] == "adsk.fusion"
+                    for c in p["classes"])
+                and p["counts"]["classes"] == len(p["classes"])), None),
     # the packaged design guidance, the way a client with tools and no skill loader reads it: the
     # section index, then ONE section - its rule records keyed by the ids the canonical document
     # carries, beside the content hash that says which version answered.
@@ -39,7 +50,12 @@ _OVERTURE = [
                 <= {r.get("id") for r in (p.get("rules") or [])}
                 and len(p.get("sha256") or "") == 64
                 and all(c in "0123456789abcdef" for c in p.get("sha256") or "")), None),
-    ("view_list_workspaces", {}, "ok", None),
+    # each row's is_active is read off the workspace itself and a read that raises publishes null,
+    # so exactly one row flagged active - and it is the one 'active_workspace' names - is the read.
+    ("view_list_workspaces", {},
+     lambda p: (p["workspace_count"] == len(p["workspaces"])
+                and [w["name"] for w in p["workspaces"] if w["is_active"]]
+                == [p["active_workspace"]]), None),
     ("view_set", {"action": "orient", "orientation": "iso-top-right"}, "ok", None),
     # camera projection: a perspective orient carries the angle through to the camera and reads it
     # back; the follow-up orient returns the projection to orthographic for the rest of the story.
@@ -96,19 +112,26 @@ _OVERTURE = [
     ("sys_set_preferences", {"member": "network.proxyHost", "value": "127.0.0.1"}, "refused", None),
 ]
 
-# --- FINALE: back to the design, beauty shots, then DISCARD the document on camera --------------
-_FINALE = [
+# --- THE SHOWCASE: the finished fixture photographed, renamed, exported and read back -----------
+# It runs BEFORE the machining acts so the sweep ends on the CAM job and its post, which is the
+# deliverable. Nothing here touches the part's name or its geometry, so the CAM acts that follow
+# address exactly what the modelling acts built.
+_SHOWCASE = [
     ("model_extrude", {"sketch_name": "NoSuchSketch", "distance": 5}, "refused", None),   # guard probe
     ("param_set", {"name": "", "expression": "1"}, "refused", None),                      # guard probe
-    ("view_switch_workspace", {"workspace": "design"}, "ok", None),
-    # CAM hid the sketch folders for the machining movement; the design is a sketch-bearing
-    # story again from here, and the FINALE always runs, so this is where they come back.
-    ("view_set", {"action": "display", "categories": ["sketches"], "visible": True},
-     lambda p: p.get("visible") is True, None),
-    # the machined part in its fixture - the gyroscope itself was stripped away in ACT 8, so the
-    # end state IS the vise holding the stock the Carrier was cut from
+    # THE SCRATCH FIELD OFF THE PICTURES: every act above this one left its sketches on screen, and
+    # the shots below are of the fixture. The FOLDER bulb, so no entity's own visibility is
+    # disturbed; the finale puts it back after the machining acts have finished with it too.
+    ("view_set", {"action": "display", "categories": ["sketches"], "visible": False},
+     lambda p: p.get("visible") is False, None),
+    # the machined part in its fixture - the end state of the modelling movement is the vise
+    # holding the billet the bracket is cut from.
     _watch(["ViseBase:1", "STOCK:1"]),
-    ("view_screenshot_multi", {"views": ["iso-top-right", "front"], "width": 500, "height": 400}, "ok", None),
+    # the summary counts the views actually CAPTURED - one that failed to orient or capture is
+    # skipped, not failed - and names the camera it could not put back after a read.
+    ("view_screenshot_multi", {"views": ["iso-top-right", "front"], "width": 500, "height": 400},
+     lambda p: ("Captured 2 view(s): iso-top-right, front" in str(p)
+                and "could NOT be put back" not in str(p)), None),
     # THE VIEW VERBS, all on the finished fixture. ONE framed orient sets the subject; every preset
     # after it carries fit=false and no focus, so the camera ROTATES about what is already framed
     # instead of re-fitting per preset. That is the difference between a turntable and ten separate
@@ -143,8 +166,8 @@ _FINALE = [
     # show it again, then drop the isolation. Each verb reports what it reached.
     ("view_set", {"action": "isolate", "target": "STOCK:1"}, "ok", None),
     ("view_set", {"action": "clear_isolation"}, "ok", None),
-    ("view_set", {"action": "hide", "target": "JawL:1"}, "ok", None),
-    ("view_set", {"action": "show", "target": "JawL:1"}, "ok", None),
+    ("view_set", {"action": "hide", "target": "JawMoving:1"}, "ok", None),
+    ("view_set", {"action": "show", "target": "JawMoving:1"}, "ok", None),
     # a persistent Named View: parked, listed among the document's own, and re-applied.
     ("view_set", {"action": "save_view", "view_name": "SweepHero"}, "ok", None),
     # the camera has to LEAVE the saved view for re-applying it to prove anything - in place, so the
@@ -222,16 +245,16 @@ _FINALE = [
      lambda p: p.get("kind") == "body", None),
     ("appearance_set", {"target": "SoloColor:1", "color": "#00897B"},
      _refused("reached NONE", "SoloBody"), None),
-    # the machined part, then re-found through the name that landed - the rename reaches the browser
-    # name every other tool addresses it by. The STEP round-trip of the deliverables act leaves a
-    # SECOND Carrier component in the tree ('Carrier (1)'), so the bare name is ambiguous by now and
-    # the original is addressed by its fullPathName - the unambiguous key the refusal points at.
-    ("design_set_name", {"target": "Carrier:1", "new_name": "CarrierBar"},
-     lambda p: p.get("name") == "CarrierBar" and p.get("previous_name") == "Carrier"
+    # A COMPONENT rename, then the component re-found through the name that landed - the rename
+    # reaches the browser name every other tool addresses it by. It is taken on a cameo rather than
+    # on the machined part, because the CAM acts after this one address the part by the name the
+    # modelling acts gave it.
+    ("design_set_name", {"target": "SoloColor:1", "new_name": "SoloRenamed"},
+     lambda p: p.get("name") == "SoloRenamed" and p.get("previous_name") == "SoloColor"
      and p.get("kind") == "component", None),
-    ("find_geometry", {"target": "CarrierBar", "kind": "planar_face", "max_results": 1}, "ok", None),
+    ("find_geometry", {"target": "SoloRenamed", "kind": "planar_face", "max_results": 1}, "ok", None),
     # re-asking for the name it already holds mutates nothing and says so.
-    ("design_set_name", {"target": "CarrierBar", "new_name": "CarrierBar"},
+    ("design_set_name", {"target": "SoloRenamed", "new_name": "SoloRenamed"},
      lambda p: p.get("changed") is False, None),
     ("design_set_name", {"target": "", "new_name": "X"}, "refused", None),
     # the ROOT component is refused UP FRONT: its name is the document's, and the platform's own
@@ -257,34 +280,37 @@ _FINALE = [
     # with the format named EXPLICITLY: doc_insert_import refuses a format that contradicts the
     # file's extension, so naming it checks that the extension the exporter chose is the one the
     # importer expects.
-    ("design_export", {"format": "iges", "file_path": EXPORT_DIR + "/fmt_carrier",
-                       "target": "CarrierBar"}, _exported_bytes, None),
+    ("design_export", {"format": "iges", "file_path": EXPORT_DIR + "/fmt_bracket",
+                       "target": "Bracket"}, _exported_bytes, None),
     # SAT is deliberately NOT here. Measured on this build: the FIRST createSATExportOptions export
     # in a Fusion session writes its file, and every one after it returns false having written
     # nothing - on any target, in a fresh document holding one box, and into a directory no .sat has
     # ever been written to, while IGES and SMT through the same call shape keep working in that same
     # session. The tool reports the failure honestly, which is the behaviour that matters; what the
     # sweep cannot do is assert an outcome that depends on whether anything exported SAT earlier.
-    ("design_export", {"format": "smt", "file_path": EXPORT_DIR + "/fmt_carrier",
-                       "target": "CarrierBar"}, _exported_bytes, None),
-    ("design_export", {"format": "f3d", "file_path": EXPORT_DIR + "/fmt_carrier",
-                       "target": "CarrierBar"}, _exported_bytes, None),
-    ("design_export", {"format": "obj", "file_path": EXPORT_DIR + "/fmt_carrier",
-                       "target": "CarrierBar"}, _exported_bytes, None),
-    ("design_export", {"format": "3mf", "file_path": EXPORT_DIR + "/fmt_carrier",
-                       "target": "CarrierBar"}, _exported_bytes, None),
+    ("design_export", {"format": "smt", "file_path": EXPORT_DIR + "/fmt_bracket",
+                       "target": "Bracket"}, _exported_bytes, None),
+    # F3D of a COMPONENT is the row where execute()'s bool and the disk disagree: the archive lands
+    # while execute() answers false, so the tool verifies the file and discloses the bool under
+    # 'execute_returned_false' - and this row stands on the size on disk, as its siblings do.
+    ("design_export", {"format": "f3d", "file_path": EXPORT_DIR + "/fmt_bracket",
+                       "target": "Bracket"}, _exported_bytes, None),
+    ("design_export", {"format": "obj", "file_path": EXPORT_DIR + "/fmt_bracket",
+                       "target": "Bracket"}, _exported_bytes, None),
+    ("design_export", {"format": "3mf", "file_path": EXPORT_DIR + "/fmt_bracket",
+                       "target": "Bracket"}, _exported_bytes, None),
     # USD lands as .usdz whatever extension the path carries - Fusion appends its own - so the tool
     # publishes the path it actually wrote.
-    ("design_export", {"format": "usd", "file_path": EXPORT_DIR + "/fmt_carrier",
-                       "target": "CarrierBar"},
+    ("design_export", {"format": "usd", "file_path": EXPORT_DIR + "/fmt_bracket",
+                       "target": "Bracket"},
      lambda p: _exported_bytes(p) is True and str(p.get("file_path", "")).endswith(".usdz"), None),
     # STL with the units baked in: the one format carrying its own unit, so the knob is set and read
     # back off the options object that LANDED. The single-file path publishes 'options_applied' and
     # 'options_requested'; this predicate reads only the applied value - what the options object
     # that wrote THIS file read back. Reading 'options_requested' here would only echo this step's
     # own two arguments back at it.
-    ("design_export", {"format": "stl", "file_path": EXPORT_DIR + "/fmt_carrier_in",
-                       "target": "CarrierBar", "stl_units": "in", "stl_binary": False},
+    ("design_export", {"format": "stl", "file_path": EXPORT_DIR + "/fmt_bracket_in",
+                       "target": "Bracket", "stl_units": "in", "stl_binary": False},
      lambda p: _exported_bytes(p) is True
      and (p.get("options_applied") or {}).get("stl_units") == "in"
      and (p.get("options_applied") or {}).get("stl_binary") is False, None),
@@ -299,13 +325,12 @@ _FINALE = [
      _imported_curves, None),
     # NO further solid re-imports. An import lands its geometry at the coordinates the FILE carries,
     # so re-importing a part into the design it came from drops a second copy exactly on top of the
-    # original - measured: one per format left FIVE coincident Carriers on the machined part, which
-    # is the one thing the CAM shot is of. The STEP round trip above is the story's visible proof
-    # that a written file reads back; every other format is proven by its own measured bytes on
-    # disk, which costs the scene nothing. Restoring an import here means giving it somewhere to
-    # land that is not on top of the part.
+    # original - measured: one per format left FIVE coincident copies on the machined part, which is
+    # the one thing the CAM shot is of. Every format is proven by its own measured bytes on disk,
+    # which costs the scene nothing; the STEP round trip the deliverables act runs is the visible
+    # proof that a written file reads back.
     # the contradiction the explicit format exists to catch, on a file that is certainly there.
-    ("doc_insert_import", {"file_path": EXPORT_DIR + "/fmt_carrier.smt", "format": "step"},
+    ("doc_insert_import", {"file_path": EXPORT_DIR + "/fmt_bracket.smt", "format": "step"},
      "refused", None),
     # DRAWING GUARDS: every one of these is settled before the tool looks for a cloud source, so
     # they run on the story document exactly as they would on a saved one, and each refuses for the
@@ -326,6 +351,21 @@ _FINALE = [
     ("workspace_orient", {}, "ok", None),
     # the API silently IGNORES a sheet size from the other standard, so the pairing is guarded here.
     ("drawing_create", {"standard": "asme", "sheet_size": "a2"}, "refused", None),
+]
+
+
+# --- FINALE: put the workspace and the browser back, then DISCARD the document on camera --------
+# Everything that must run LAST and nothing else. The machining acts leave Manufacture active and
+# the sketch folders hidden, so the two restores are the sweep leaving the application as it found
+# it; the document identity is read while it still answers, and then it goes.
+_FINALE = [
+    # the CAM acts left Manufacture active, so this is a real switch: 'activation_verified' is true
+    # only where isActive or the UI's own active workspace read the change back.
+    ("view_switch_workspace", {"workspace": "design"},
+     lambda p: p.get("switched") is True and p.get("activation_verified") is True, None),
+    # CAM hid the sketch folders for the machining movement; this is where they come back.
+    ("view_set", {"action": "display", "categories": ["sketches"], "visible": True},
+     lambda p: p.get("visible") is True, None),
     ("doc_get", {}, _document_read, None),
     ("doc_close", {"save_changes": False}, _document_closed, None),
 ]

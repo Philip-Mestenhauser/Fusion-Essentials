@@ -2,12 +2,10 @@
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
 """MCP building blocks for DESIGN MODE awareness - many adsk.* mutation methods are valid in only ONE
-of Fusion's two design modes (parametric/direct), or only inside an OPEN base-feature edit scope.
-get_mode_handler() reports designType + a capability `can{}` map (consumed by design_get's 'mode'
-slice); design_set_mode converts parametric<->direct (destroys the timeline going to direct, so it
-refuses without confirm_history_loss=true); model_base_feature opens/closes a base-feature edit scope,
-always finishEdit()ing in a finally so a leaked scope can't corrupt later calls. Every mode read/gate
-goes through _inputs.current_design_type / _inputs.ModeGuard (single source of truth).
+of Fusion's two design modes, or only inside an OPEN base-feature edit scope. get_mode_handler()
+reports designType and a capability can{} map, design_set_mode converts parametric<->direct, and
+model_base_feature opens/closes a base-feature edit scope. Every mode read goes through
+_inputs.current_design_type / _inputs.ModeGuard.
 """
 
 import adsk.core
@@ -26,9 +24,8 @@ app = adsk.core.Application.get()
 # ── shared mode reads (all via the ONE true reader) ─────────────────────────
 
 def _timeline_feature_count(design):
-    """The parametric timeline's feature count, or None if there is no timeline (a direct design has
-    none by definition). safe()-guarded so a direct design - where design.timeline raises - reads as
-    None, NOT as a broken parametric timeline."""
+    """The parametric timeline's feature count, or None where there is no timeline (design.timeline
+    raises in a direct design, which reads as None rather than as a broken timeline)."""
     tl = safe(lambda: design.timeline)
     if tl is None:
         return None
@@ -36,8 +33,7 @@ def _timeline_feature_count(design):
 
 
 def _base_feature_count(design):
-    """Count base features across the design (root + all components). Base features live only in a
-    parametric design; in a direct design this is 0. safe()-guarded throughout."""
+    """Count base features across the design (0 in a direct design, which has none)."""
     root = safe(lambda: design.rootComponent)
     if root is None:
         return 0
@@ -55,8 +51,7 @@ def _base_feature_count(design):
 
 
 def _capability_map(mode):
-    """The actionable `can{}` payload, keyed by each mode's requirements. Derived PURELY from `mode`
-    (the one true reader's verdict) so the report and the ModeGuards agree."""
+    """The actionable `can{}` payload, derived purely from `mode` so it agrees with the ModeGuards."""
     parametric = mode == _inputs.MODE_PARAMETRIC
     direct = mode == _inputs.MODE_DIRECT
     return {
@@ -73,8 +68,7 @@ def _capability_map(mode):
 # ── modelling-mode read (get_mode_handler - design_get's mode slice) ──────────────
 
 def get_mode_handler() -> dict:
-    """Report the active design's modeling mode + a capability map. Read-only - never fails except
-    when there is no active design (a read-only capability probe is the whole point)."""
+    """Report the active design's modelling mode and its capability map. Read-only."""
     design = _common.design()
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")
@@ -95,12 +89,8 @@ def get_mode_handler() -> dict:
 # ── design_set_mode (WRITES, destructive one-way) ───────────────────────────
 
 def set_mode_handler(target: str = "", confirm_history_loss: bool = False) -> dict:
-    """Convert the active design between parametric and direct.
-
-    target: 'parametric' | 'direct'. Parametric->Direct DESTROYS the timeline and all history
-    (irreversible) - it REFUSES unless confirm_history_loss=true. Direct->Parametric is free.
-    Idempotent: already in `target` returns a no-op ok (not an error). WRITES.
-    """
+    """Convert the active design between parametric and direct - idempotent, and refusing the
+    timeline-destroying direction without confirm_history_loss=true. WRITES."""
     design = _common.design()
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")
@@ -130,10 +120,8 @@ def set_mode_handler(target: str = "", confirm_history_loss: bool = False) -> di
     except Exception as e:
         return error(f"Could not convert to {tgt}: {e}")
 
-    # Verify against the SAME reader the report/guards use, so the result can't disagree with them.
-    # Both published flags ride on THIS read-back, never on the request: the timeline is discarded by
-    # the conversion, so an assignment that did not take discarded nothing, and a mode that does not
-    # read back ('unknown') settles neither flag - it publishes null with the reason in the note.
+    # Both published flags ride on this READ-BACK, never on the request: an assignment that did not
+    # take discarded nothing, and a mode that does not read back settles neither flag.
     now = _inputs.current_design_type(design)
     if now == "unknown":
         converted, discarded = None, None
@@ -159,9 +147,7 @@ def set_mode_handler(target: str = "", confirm_history_loss: bool = False) -> di
 
 # ── model_base_feature (WRITES) ─────────────────────────────────────────────
 
-# Base features ONLY exist in a parametric design (a base feature IS a direct-edit scope inside a
-# parametric design). Declaring the guard generates the CORRECT inverse of the model_construction
-# message: it names PARAMETRIC as the requirement.
+# Base features ONLY exist in a parametric design - a base feature IS a direct-edit scope inside one.
 _PARAMETRIC_GUARD = _inputs.ModeGuard(
     _inputs.MODE_PARAMETRIC,
     why="A base feature is a direct-edit scope inside a parametric design.",
@@ -169,13 +155,9 @@ _PARAMETRIC_GUARD = _inputs.ModeGuard(
         "see design_get(include=['mode'])."))
 
 
-# The captured open scope(s). While a base-feature edit scope is open the API hides it:
-# Component.features.baseFeatures reports count==0, itemByName returns None, Design.activeEditObject
-# returns the Component (not the BaseFeature), and Design.timeline raises "this is not a parametric
-# design". So an open scope cannot be found by enumeration or lookup - the only handle to it is the
-# BaseFeature object that add() returned. start() stashes that object here; finish() closes it
-# directly (the same captured-object discipline run_in_base_feature uses within one call, extended
-# across the two calls of the explicit start/finish escape hatch).
+# The captured open scope(s). While a base-feature edit scope is open the API hides it: baseFeatures
+# reports count==0, itemByName returns None, and Design.timeline raises - so the only handle to an
+# open scope is the BaseFeature object add() returned, which start() stashes here for finish().
 _OPEN_BASE_FEATURES = []
 
 
@@ -189,17 +171,12 @@ def _resolve_base_feature(design, comp, name):
     if comp is not None:
         candidates.append(comp)
     root = safe(lambda: design.rootComponent)
-    # same_component, not `is`: component wrappers are never identity-stable, so `root is not comp`
-    # reads True even when comp IS the root and root would be searched twice. Both de-dupes below
-    # drop a candidate only on a PROVEN match: this list is a SEARCH order, so an unproven pair
-    # searches one component twice (a repeated itemByName read) where dropping it would skip the
-    # component holding the base feature and report it missing.
+    # same_component, never `is`/`in`: component wrappers are not identity-stable, so an identity
+    # dedupe never fires. Both de-dupes drop a candidate only on a PROVEN match - this is a SEARCH
+    # order, and an unproven pair costs one repeated read where dropping it could skip the holder.
     if root is not None and _common.same_component(root, comp) is not True:
         candidates.append(root)
     for c in _common.all_components(design):
-        # same_component, not `in`: `in` compares with ==, which on a component wrapper falls back
-        # to identity - and component wrappers are measured never identity-stable, so the dedupe
-        # would never fire and the same component would be searched twice.
         if c is not None and not any(_common.same_component(c, k) is True for k in candidates):
             candidates.append(c)
     for c in candidates:
@@ -210,27 +187,8 @@ def _resolve_base_feature(design, comp, name):
 
 
 def base_feature_handler(action: str = "start", base_feature: str = "") -> dict:
-    """Manage a base-feature edit scope in the active (parametric) design.
-
-    For tool code, prefer the helper run_in_base_feature(design, comp, inner_op): it opens, runs, and
-    always finishes a scope atomically within one call. This tool's explicit start/finish is the
-    multi-call escape hatch - for work that must span several tool calls inside one scope. Opening a
-    scope makes Design.designType read direct and the timeline inaccessible until finish; that is the
-    open scope, not a real mode change.
-
-    action='start' : create a new base feature and open its edit scope; geometry from subsequent calls
-                     lands inside it. Stashes the scope object (see _OPEN_BASE_FEATURES) and returns
-                     {base_feature, editing:true}. Always pair with a 'finish'.
-    action='finish': close the scope(s) opened by this session, by the captured object (an open scope
-                     is invisible to lookup, so it cannot be re-found by name). A name additionally
-                     finishes any enumerable base feature of that name (a no-op when not editing).
-                     Not mode-gated - it must close a scope while the design reads direct. Idempotent.
-                     A finishEdit that raises or returns false leaves the scope unconfirmed: its
-                     handle is KEPT for a retry and the result publishes it under unclosed_scopes.
-
-    Base features exist only in a parametric design, so 'start' is mode-guarded; startEdit()'s bool
-    return is checked explicitly. WRITES.
-    """
+    """Start or finish a base-feature edit scope - the multi-call escape hatch; tool code takes the
+    run_in_base_feature helper instead. WRITES."""
     design = _common.design()
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")
@@ -242,11 +200,8 @@ def base_feature_handler(action: str = "start", base_feature: str = "") -> dict:
     comp = target_component(design)
 
     if act == "start":
-        # Mode gate only on START - you need a PARAMETRIC design to CREATE a base feature. Do NOT gate
-        # 'finish': while a base-feature scope is OPEN, Fusion reports the active edit target as DIRECT
-        # mode, so guarding finish on MODE_PARAMETRIC would make the tool unable to CLOSE the very scope
-        # it opened - leaking it (and a leaked open scope corrupts every later call). Error text derived
-        # from MODE_PARAMETRIC (non-invertible).
+        # Mode gate only on START: while a scope is OPEN the design reads DIRECT, so gating 'finish'
+        # on MODE_PARAMETRIC would make the tool unable to close the scope it opened.
         good, mode_err = _PARAMETRIC_GUARD.check(design)
         if not good:
             return mode_err
@@ -258,18 +213,14 @@ def base_feature_handler(action: str = "start", base_feature: str = "") -> dict:
         bf = base_features.add()
         if not bf:
             return error("BaseFeatures.add() returned nothing - could not create a base feature.")
-        # Name BEFORE startEdit - once the scope is open the feature is invisible to the API
-        # (count==0, itemByName==None), so a rename attempt then would target nothing.
-        # apply_rename, not a swallowed setattr: a declined rename is disclosed in the payload.
+        # Name BEFORE startEdit - once the scope is open the feature is invisible to the API, so a
+        # rename attempt then would target nothing.
         bf_name, rename_warning = _common.apply_rename(bf, base_feature)
         started = bf.startEdit()
         if started is False:
-            # add() succeeded but the scope won't open - delete the orphan feature so it doesn't
-            # linger, and report. (Not safe()-swallowed: a real failure must surface.)
-            safe(lambda: bf.deleteMe())
+            safe(lambda: bf.deleteMe())      # the scope will not open - do not leave the orphan
             return error("Could not enter base-feature edit (startEdit returned false).")
-        # CAPTURE the open scope's object - the ONLY way to close it later (it is now un-findable by
-        # any enumeration/lookup; see _OPEN_BASE_FEATURES). finish() pops from here.
+        # CAPTURE the open scope's object - the only way to close it later.
         _OPEN_BASE_FEATURES.append(bf)
         start_payload = {
         "action": "start",
@@ -278,34 +229,22 @@ def base_feature_handler(action: str = "start", base_feature: str = "") -> dict:
         "component": safe(lambda: comp.name),
         "open_scope_count": len(_OPEN_BASE_FEATURES),
         "note": ("Base-feature edit OPEN - geometry from subsequent tool calls lands in this scope. "
-            "While it is open the design READS as 'direct' and the timeline is inaccessible - "
-            "that is the open scope, NOT a real mode change; it reverts on finish. ALWAYS pair "
-            "with model_base_feature(action='finish') (no name needed - it closes the scope "
-            "this call opened). For a single mesh/import op prefer the auto-wrapped tools "
-            "(save_as_mesh, mesh_insert, mesh_*), which open+finish a scope atomically and "
-            "can never leak."),
+            "While it is open the design READS as 'direct' and the timeline is inaccessible; "
+            "that reverts on finish. ALWAYS pair with model_base_feature(action='finish') - no "
+            "name needed, it closes the scope this call opened. For a single mesh/import op use "
+            "the mesh_* tools, which open and finish a scope in one call."),
         }
         if rename_warning:
             start_payload["rename_warning"] = rename_warning
         return ok(start_payload)
 
-    # act == "finish".
-    #
-    # An OPEN base-feature scope is invisible to enumeration - baseFeatures.count
-    # reads 0 and itemByName returns None WHILE the scope is open. The ONLY reliable handle to an
-    # open scope is the BaseFeature object add() returned, which 'start' stashed in
-    # _OPEN_BASE_FEATURES, so finish closes THOSE captured objects directly. finishEdit() returns the
-    # design to parametric and makes the feature enumerable again. No mode gate - finish must work
-    # while the design READS direct (that read IS the open scope).
+    # act == "finish" - closing the captured objects directly, with no mode gate, because the design
+    # READS direct while a scope is open. finishEdit() returns it to parametric.
     nm = (base_feature or "").strip()
 
-    # 1) Close every captured open scope (LIFO). This is the path that actually un-wedges a session.
-    #
-    # A finishEdit() that RAISES, and one that returns False, both leave the scope NOT PROVEN closed -
-    # and this object is the only handle to it (an open base feature is invisible to enumeration and
-    # lookup, so a dropped handle strands the scope open for the rest of the session). Such a handle
-    # is KEPT in _OPEN_BASE_FEATURES so a later finish can retry; only a scope whose finishEdit came
-    # back without raising and without False is published as closed.
+    # Close every captured open scope (LIFO). A finishEdit() that raises or returns False leaves the
+    # scope NOT PROVEN closed, and this object is the only handle to it, so such a handle is KEPT in
+    # _OPEN_BASE_FEATURES for a retry rather than dropped.
     pending = list(_OPEN_BASE_FEATURES)
     _OPEN_BASE_FEATURES.clear()
     closed, unclosed, kept = [], [], []
@@ -324,8 +263,7 @@ def base_feature_handler(action: str = "start", base_feature: str = "") -> dict:
     # kept is LIFO order; restore the append order the pop-from-the-end discipline reads back.
     _OPEN_BASE_FEATURES.extend(reversed(kept))
 
-    # 2) If a name was given, ALSO finish any now-enumerable base feature by that name (a no-op on one
-    # not in edit) - covers a scope opened outside this tool, now that it is closeable. Harmless.
+    # A name ALSO finishes any now-enumerable base feature of that name - a no-op on one not in edit.
     named, named_error = None, None
     if nm:
         bf = _resolve_base_feature(design, comp, nm)
@@ -337,8 +275,6 @@ def base_feature_handler(action: str = "start", base_feature: str = "") -> dict:
             else:
                 named = safe(lambda b=bf: b.name)
 
-    # Report the post-state via the SAME readers the rest of the suite uses, so the result can't
-    # disagree with the mode read.
     now_mode = _inputs.current_design_type(design)
     note = (f"Closed {len(closed)} captured open base-feature scope(s); design is now {now_mode}."
             if closed else "No scope was open in this session to close.")
@@ -373,16 +309,12 @@ def base_feature_handler(action: str = "start", base_feature: str = "") -> dict:
 # ── design_activate_component (WRITES - changes the active edit target) ──────
 
 _OCCURRENCE = _inputs.OccurrenceRef("occurrence",
-        description="Occurrence to activate. '' or 'root' returns to the root component.")
+        description="Occurrence to activate; '' or 'root' is the root.")
 
 
 def activate_component_handler(occurrence: str = "") -> dict:
-    """Make an EXISTING component the active edit target (or return to the root component).
-
-    occurrence: the occurrence to activate, by fullPathName (from design_get(include=['tree'])) or
-    name (ambiguous names refused). Pass '' (or 'root') to deactivate back to the ROOT component.
-    WRITES (UI edit target).
-    """
+    """Make an EXISTING component the active edit target, or return to the root component with ''
+    (or 'root'). WRITES (UI edit target)."""
     design = _common.design()
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")
@@ -392,9 +324,8 @@ def activate_component_handler(occurrence: str = "") -> dict:
     # Return to root: activating the root deactivates any occurrence edit target.
     if want == "" or want.lower() == "root":
         root = safe(lambda: design.rootComponent)
-        # Occurrence.activate makes an occurrence active; to get back to root we activate the root
-        # component's own edit context. Design.activateRootComponent() isn't universal, so fall back
-        # to deactivating the active occurrence if present.
+        # Design.activateRootComponent() is not on every build, so an absent one falls back to
+        # deactivating the active occurrence.
         did = safe(lambda: design.activateRootComponent(), None)
         if did is None:
             active_occ = safe(lambda: _active_occurrence(design))
@@ -436,8 +367,7 @@ def activate_component_handler(occurrence: str = "") -> dict:
 def _active_occurrence(design):
     """The currently active-edit occurrence, if any (isActive == True). None if root is active."""
     # The shared census, not a bare root.allOccurrences: that property RAISES on a design holding an
-    # unresolved external reference, and an empty walk would report "root is active" - a wrong answer,
-    # not a missing one.
+    # unresolved external reference, and an empty walk would report "root is active" - a wrong answer.
     for o in _common.all_occurrences(design):
         if safe(lambda o=o: o.isActive, False):
             return o
@@ -445,15 +375,8 @@ def _active_occurrence(design):
 
 
 def base_feature_run_wrapper(open_scope, inner_op):
-    """Run an inner operation inside a fresh base-feature scope, ALWAYS finishing in a finally.
-
-    open_scope() must return (base_feature, error_result_or_None). If it errors we surface that and
-    never open a scope. Otherwise we startEdit-check, run inner_op(base_feature), and finishEdit() in a
-    finally so the scope can NEVER leak - even when inner_op raises. The inner error is re-raised after
-    the scope is closed (callers wrap this however they report errors).
-
-    Returns (base_feature, inner_result). open_scope owns add()+startEdit; this owns the finally.
-    """
+    """Run inner_op inside the scope open_scope() -> (base_feature, error or None) opens, ALWAYS
+    finishing in a finally: (base_feature, inner_result), or (None, that error)."""
     bf, err = open_scope()
     if err is not None:
         return None, err
@@ -463,35 +386,16 @@ def base_feature_run_wrapper(open_scope, inner_op):
     try:
         result = inner_op(bf)
     finally:
-        # ALWAYS finish - a leaked open base-feature edit corrupts every later tool call this session.
-        # finishEdit() is called ON THE CAPTURED bf (the one add() returned), NOT via any design-mode
-        # lookup - so it closes correctly even though Design.designType now READS AS DIRECT while the
-        # scope is open (the lookup would otherwise fail to find a scope and leak it).
+        # ALWAYS finish - a leaked open base-feature edit corrupts every later call this session -
+        # and on the CAPTURED bf, since a lookup cannot find a scope while designType reads direct.
         safe(lambda: bf.finishEdit())
     return bf, result
 
 
 def run_in_base_feature(design, comp, inner_op):
-    """The BLESSED entry point for any tool whose mutation may need a base-feature scope (mesh
-    inserts, imported-body edits). Mode-aware and leak-proof:
-
-      - DIRECT design  -> runs inner_op(None) DIRECTLY, with NO scope (you already edit geometry
-        directly in direct mode - opening a base feature is neither needed nor possible).
-      - PARAMETRIC design -> runs inner_op(base_feature) INSIDE the atomic add()->startEdit()->
-        [inner]->finishEdit() wrapper, which ALWAYS finishes in a finally on the captured BaseFeature
-        (so the scope can never leak, even if inner_op raises, and even though designType now reads
-        DIRECT while the scope is open).
-
-    inner_op receives the open BaseFeature in parametric mode, or None in direct mode (so a mesh tool
-    can pass it straight to meshBodies.add(path, units, base_feature) - None is the valid 'no scope'
-    argument). Returns (result, error): on success error is None and result is inner_op's return; on
-    a setup failure (no comp / couldn't open the scope) result is None and error is a ready-to-return
-    _common.error() result. Inner exceptions propagate (the scope is closed first).
-
-    This is what mesh_insert / mesh_to_brep and the sibling mesh write tools import instead of
-    hand-rolling baseFeatures.add()/startEdit()/finishEdit() (and instead of the leaky
-    model_base_feature(action='start')).
-    """
+    """The entry point for any mutation that may need a base-feature scope: inner_op runs inside one
+    in a PARAMETRIC design (receiving the open BaseFeature) and directly in a DIRECT design
+    (receiving None, the valid 'no scope' argument). Returns (inner_op's result, error or None)."""
     mode = _inputs.current_design_type(design)
     if mode != _inputs.MODE_PARAMETRIC:
         # Direct (or unknown): no base-feature scope - run the op directly. inner_op gets None.
@@ -527,10 +431,8 @@ _set_mode_tool = (
     Tool.create_simple(
         name="design_set_mode",
         description=("Convert the active design between parametric and direct modeling. "
-            "target=parametric|direct. Direct->Parametric is free. Parametric->Direct "
-            "destroys the timeline and all design history (irreversible) - it refuses unless "
-            "confirm_history_loss=true. Idempotent: already in target -> no-op. "
-            "Re-run design_get(include=['mode']) afterwards."))
+            "Parametric->Direct destroys the timeline and all design history, and refuses "
+            "without confirm_history_loss=true. Re-run design_get(include=['mode']) afterwards."))
     .add_input_property("target", {"type": "string",
             "description": "parametric | direct (required)."})
     .add_input_property("confirm_history_loss", {"type": "boolean",
@@ -549,16 +451,11 @@ set_mode_item = Item.create_tool_item(
 _base_feature_tool = (
     Tool.create_simple(
         name="model_base_feature",
-        description=("Manage a base-feature edit scope in a parametric design (a base feature is a "
-            "direct-edit scope inside parametric - required for mesh inserts / imported-body "
-            "edits). action='start' opens a scope; subsequent calls' geometry lands inside it. "
-            "action='finish' closes the scope this session opened (no name needed). While a scope "
-            "is open the design reads as 'direct' and the timeline is inaccessible - that is the "
-            "open scope itself, not a real mode change; it reverts on finish. Always finish what "
-            "you start. For a single mesh/import op, prefer the auto-wrapped tools (save_as_mesh, "
-            "mesh_insert, mesh_*), which open and finish a scope atomically and cannot leak - use "
-            "this explicit start/finish only for multi-step work spanning several calls. Base "
-            "features exist only in parametric mode; start refuses in direct."))
+        description=("Manage a base-feature edit scope in a parametric design - a direct-edit "
+            "scope needed for mesh inserts and imported-body edits. action='start' opens one and "
+            "subsequent calls' geometry lands inside it; action='finish' closes the scope this "
+            "session opened (no name needed). For a single mesh/import op use the mesh_* tools "
+            "instead, which open and finish a scope in one call."))
     .add_input_property("action", {"type": "string",
             "description": "start | finish (default start)."})
     .add_input_property("base_feature", {"type": "string",
@@ -578,12 +475,9 @@ base_feature_item = Item.create_tool_item(
 _activate_component_tool = (
     Tool.create_simple(
         name="design_activate_component",
-        description=("Make an existing component the active edit target (or return to the root). The "
-            "counterpart to model_create_component(activate=true) - use it to go back to a "
-            "component created earlier so subsequent sketch_create / model_extrude / "
-            "sketch_dimension / sketch_constrain build into it (those tools target the active "
-            "component). 'occurrence' is the occurrence to activate; pass '' or 'root' to return "
-            "to the root component. This changes the edit target, not geometry."))
+        description=("Make an existing component the active edit target, or return to the root. "
+            "Subsequent sketch_create / model_extrude / sketch_dimension / sketch_constrain build "
+            "into the active component. This changes the edit target, not geometry."))
     .add_input_property(*_OCCURRENCE.as_property())
     .strict_schema()
 )

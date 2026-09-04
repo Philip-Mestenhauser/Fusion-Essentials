@@ -32,11 +32,9 @@ _HEIGHT_DEFAULT = 500
 
 
 def _parse_views(views):
-    """Resolve the 'views' argument to an ordered, de-duplicated list of known view names.
-
-    Accepts a JSON list of view names (the schema shape), or - back-compat - a comma-separated
-    string. "" / [] -> a sensible default multi-view set; "all" (alone) -> the six orthographic
-    views. Returns (list, None) or (None, error_message)."""
+    """Resolve 'views' (a list, or a comma-separated string) to an ordered, de-duplicated list of
+    known view names; "" / [] -> the default set, "all" -> the six orthographic views. Returns
+    (list, None) or (None, error)."""
     if isinstance(views, (list, tuple)):
         tokens = [str(v).strip().lower() for v in views if str(v).strip()]
     else:
@@ -87,12 +85,15 @@ def handler(views=None, width: int = _WIDTH_DEFAULT, height: int = _HEIGHT_DEFAU
     saved_camera = vp.camera   # restore once at the end
     camera_warning = None
     captured = []
+    standoff_views, standoff_cm = [], None
     try:
         for name in names:
+            fallback_cm = None
             try:
                 # every parsed view name resolves in the shared table (_VIEWS is built from it); the
-                # shared apply sets exact world-axis vectors (guaranteed square) + ortho + fit.
-                _view_common.apply_named_view(vp, name)
+                # shared apply sets exact world-axis vectors (guaranteed square) + ortho + fit, and
+                # answers the eye-target standoff it FELL BACK to when the camera's own did not read.
+                fallback_cm = _view_common.apply_named_view(vp, name)
             except Exception as e:
                 content.append({"type": "text", "text": f"[{name}] failed to orient: {e}"})
                 continue
@@ -105,6 +106,9 @@ def handler(views=None, width: int = _WIDTH_DEFAULT, height: int = _HEIGHT_DEFAU
             content.append({"type": "text", "text": f"View: {name}"})
             content.append({"type": "image", "data": b64, "mimeType": "image/png"})
             captured.append(name)
+            if fallback_cm is not None:
+                standoff_cm = fallback_cm
+                standoff_views.append(name)
     finally:
         try:
             vp.camera = saved_camera
@@ -122,6 +126,11 @@ def handler(views=None, width: int = _WIDTH_DEFAULT, height: int = _HEIGHT_DEFAU
                "Each image is labelled with its view above it.")
     if camera_warning:
         summary += " " + camera_warning
+    if standoff_views:
+        cm = f"{standoff_cm:g}"
+        summary += (f" standoff_fallback_cm={cm} on {', '.join(standoff_views)}: the camera's "
+                    "eye-target distance did not read as a positive number, so the eye was placed "
+                    f"{cm} cm from the target along each of those view directions before the fit.")
     if dropped:
         summary += (f" Dropped {len(dropped)} view(s) over the {_MAX_VIEWS}-view cap: "
                     f"{', '.join(dropped)} - request them in a second call.")
@@ -130,13 +139,9 @@ def handler(views=None, width: int = _WIDTH_DEFAULT, height: int = _HEIGHT_DEFAU
 
 
 TOOL_DESCRIPTION = (
-    "Capture SEVERAL views of the model in ONE call - front/top/right/iso etc. as separate labelled "
-    "images - so you can read geometry/position reliably instead of guessing from a single "
-    "isometric. 'views' is a list of view names, or ['all'] for the six orthographic views; omit "
-    "for a default front/top/right/iso set. 'width'/'height' size each "
-    "image; 'transparent_background'/'anti_aliased' apply to every shot. "
-    "The camera is restored afterward (read-only). Prefer this over view_screenshot when "
-    "judging a 3D layout."
+    "Capture SEVERAL views of the model in ONE call - front/top/right/iso etc. as separate "
+    "labelled images. The camera is restored afterward (read-only). Prefer this over "
+    "view_screenshot when judging a 3D layout."
 )
 
 tool = (

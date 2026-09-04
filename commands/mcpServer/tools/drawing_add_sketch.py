@@ -45,11 +45,9 @@ def _point(raw):
 
 
 def _plan(geometry):
-    """Validate the WHOLE request before anything is drawn -> (entries, expected, error).
-
-    entries = [(kind, points, radius)] in call order; expected = the per-collection curve count the
-    sketch must gain. Nothing is drawn until every entry passes: a rejected entry part-way through
-    would leave geometry the API cannot delete one entity at a time."""
+    """Validate the WHOLE request before anything is drawn: (entries, expected, error), entries being
+    [(kind, points, radius)] in call order and expected the per-collection curve count the sketch
+    must gain. A rejected entry part-way through would leave geometry the API cannot delete."""
     if not isinstance(geometry, (list, tuple)) or not geometry:
         return None, None, ("Provide 'geometry' - a non-empty list of entities to draw, each "
                             "{'kind': ..., 'points': [[x, y], ...]}. Kinds: "
@@ -197,25 +195,19 @@ def handler(geometry=None, sheet_name: str = "", name: str = "") -> dict:
         "note": (f"Sketch '{sketch_name}' on sheet '{on_sheet}' carries {total_landed} curves, counted "
                  f"off its own collections. Coordinates were taken as {units_said}, which the "
                  "drawing STANDARD fixes - 'sheet_units' is the dimension display unit and does not "
-                 "move the geometry. "
-                 "Drawing.deleteEntities raises 'API Function not yet implemented' on a drawn curve, "
-                 "so only the whole sketch can be deleted, in the Fusion UI. A drawing document has no "
-                 "viewport to screenshot; drawing_export writes the PDF that shows the result. Drawing "
-                 "sketches are a preview part of the drawing API that Autodesk may change in a future "
-                 "release."),
+                 "move the geometry. Drawing.deleteEntities raises 'API Function not yet "
+                 "implemented' on a drawn curve, so only the whole sketch is deletable, in the "
+                 "Fusion UI. drawing_export writes the PDF that shows it."),
     })
 
 
 TOOL_DESCRIPTION = (
-    "Draw 2D geometry on a NEW sketch on a sheet of the active 2D drawing document. One call adds one "
-    "sketch and draws every entity in 'geometry' onto it, reporting curves landed against curves "
-    "asked for. Coordinates are in the unit the drawing STANDARD fixes - mm under ISO, in under "
-    "ASME, reported as coordinate_unit - not the modelling tools' centimetres and not the dimension "
-    "display unit. Open the drawing as the active document first (doc_open, or the Fusion UI). "
-    "Nothing drawn can be read back or moved, and Drawing.deleteEntities raises 'not yet "
-    "implemented' on a "
-    "drawn curve - only the whole sketch is deletable, in the Fusion UI - so send a sheet's geometry "
-    "in one call and check it with drawing_export."
+    "Draw 2D geometry on a NEW sketch on a sheet of the active 2D drawing document. One call adds "
+    "one sketch and draws every entity in 'geometry' onto it. Coordinates are in the unit the "
+    "drawing STANDARD fixes - mm under ISO, in under ASME, reported as coordinate_unit - not the "
+    "dimension display unit. Open the drawing as the active document first (doc_open, or the Fusion "
+    "UI). Nothing drawn can be moved or deleted individually, so send a sheet's geometry in ONE "
+    "call and check it with drawing_export."
 )
 
 FULL_DESCRIPTION = TOOL_DESCRIPTION + "\n" + _outputs.produces_block(RETURNS)
@@ -224,10 +216,9 @@ tool = (
     Tool.create_simple(name="drawing_add_sketch", description=FULL_DESCRIPTION)
     .add_input_property("geometry", {
         "type": "array",
-        "description": "Entities to draw, in order. Each is {kind, points}, points being [x, y] pairs. "
-                       "line: 2 or more, one connected chain (N points make N-1 segments). rectangle: "
-                       "2 corners. arc: 3 (start, on the arc, end). ellipse: 3 (center, major-axis "
-                       "point, a point on the ellipse). circle: 1 (center) plus 'radius'.",
+        "description": "Entities to draw, in order, each {kind, points} with points as [x, y] pairs. "
+                       "line: 2+, one chain. rectangle: 2 corners. arc: 3 (start, on it, end). "
+                       "ellipse: 3 (center, major-axis, a point on it). circle: 1 + 'radius'.",
         "items": {"type": "object", "properties": {
             "kind": {"type": "string", "enum": sorted(_KINDS)},
             "points": {"type": "array", "items": {"type": "array"}},

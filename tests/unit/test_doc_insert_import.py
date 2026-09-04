@@ -77,12 +77,13 @@ def cad(tmp_path):
 
 @pytest.fixture
 def wire(monkeypatch):
-    """Factory: wire a design and a stand-in ImportManager into the module, patching BOTH design
-    seams (the handler's own _common and the input kinds' _inputs._common)."""
-    def _wire(design=None, **manager_kwargs):
+    """Factory: wire a design, a stand-in ImportManager and the ``ui`` the workspace reads see into
+    the module, patching BOTH design seams (the handler's own _common and _inputs._common)."""
+    def _wire(design=None, ui=None, **manager_kwargs):
         design = make_design() if design is None else design
         manager, calls = _fake_manager(**manager_kwargs)
-        monkeypatch.setattr(mod, "app", types.SimpleNamespace(importManager=manager))
+        monkeypatch.setattr(mod, "app", types.SimpleNamespace(importManager=manager,
+                                                              userInterface=ui))
         monkeypatch.setattr(mod._common, "design", lambda: design)
         monkeypatch.setattr(mod._inputs._common, "design", lambda: design)
         return design, manager, calls
@@ -91,6 +92,47 @@ def wire(monkeypatch):
 
 def _sketch(name="Sketch1", curves=()):
     return types.SimpleNamespace(name=name, sketchCurves=_NamedCollection(list(curves)))
+
+
+_WORKSPACE_NAMES = {"CAMEnvironment": "Manufacture", "FusionSolidEnvironment": "Design"}
+
+
+class _FakeUI:
+    """A stand-in userInterface. ``activate`` is what Workspace.activate() answers: True switches,
+    'lies' answers true without switching, False declines, an Exception is raised. ``reads`` caps
+    the activeWorkspace property reads that succeed - one workspace read costs two (id and name)."""
+
+    def __init__(self, active="CAMEnvironment", activate=True, reads=None):
+        self._active = active
+        self._activate = activate
+        self._reads = reads
+        self.activated = []
+        self.workspaces = types.SimpleNamespace(
+            itemById=lambda ws_id: self._workspace(ws_id) if ws_id in _WORKSPACE_NAMES else None)
+
+    @property
+    def activeWorkspace(self):
+        if self._reads is not None:
+            if self._reads <= 0:
+                raise RuntimeError("activeWorkspace is unavailable")
+            self._reads -= 1
+        return self._workspace(self._active)
+
+    def _workspace(self, ws_id):
+        return types.SimpleNamespace(id=ws_id, name=_WORKSPACE_NAMES[ws_id],
+                                     activate=lambda: self._do(ws_id))
+
+    def _do(self, ws_id):
+        self.activated.append(ws_id)
+        if isinstance(self._activate, Exception):
+            raise self._activate
+        if self._activate is True:
+            self._active = ws_id
+        return self._activate is not False
+
+    def switch_to(self, ws_id):
+        """The side effect importManager has on the UI - it activates the Design workspace."""
+        self._active = ws_id
 
 
 def _occurrence(name="Part:1", component=None):
@@ -489,6 +531,114 @@ class TestNewDocument:
         wire(fail=RuntimeError("unreadable archive"))
         msg = error_message(mod.handler(file_path=cad("part.f3d"), new_document=True))
         assert "importToNewDocument raised" in msg
+
+
+class TestTheWorkspaceTheImportSwitchedAway:
+    """importManager activates the Design workspace, so an import run with Manufacture active
+    leaves the UI in Design. The workspace read BEFORE the import is re-activated by its id and
+    read back; a restore that does not read back is disclosed, never claimed."""
+
+    def _solid_import_flipping_the_workspace(self, wire, ui):
+        design = make_design()
+        room = design.rootComponent
+
+        def _side_effect():
+            room.bRepBodies._items.append(BRepBody("Imported"))
+            ui.switch_to("FusionSolidEnvironment")
+
+        return wire(design=design, ui=ui, created=[BRepBody("Imported")], on_import=_side_effect)
+
+    def test_a_restored_workspace_is_published_by_name(self, wire, cad):
+        ui = _FakeUI()
+        self._solid_import_flipping_the_workspace(wire, ui)
+        out = payload(mod.handler(file_path=cad("part.step")))
+        assert out["workspace_restored"] == "Manufacture"
+        assert "workspace_changed" not in out
+        assert ui.activated == ["CAMEnvironment"]
+        assert ui.activeWorkspace.name == "Manufacture"
+        assert "view_switch_workspace" not in out["note"]
+
+    def test_an_activate_that_lies_is_a_changed_workspace_not_a_restore(self, wire, cad):
+        ui = _FakeUI(activate="lies")
+        self._solid_import_flipping_the_workspace(wire, ui)
+        out = payload(mod.handler(file_path=cad("part.step")))
+        assert out["workspace_changed"] == {"from": "Manufacture", "to": "Design"}
+        assert "workspace_restored" not in out
+        assert "view_switch_workspace" in out["note"]
+        assert out["imported"] is True                  # the import itself still succeeded
+
+    @pytest.mark.parametrize("activate", [False, RuntimeError("no document to switch in")])
+    def test_a_declined_or_raising_activate_is_reported_the_same_way(self, wire, cad, activate):
+        ui = _FakeUI(activate=activate)
+        self._solid_import_flipping_the_workspace(wire, ui)
+        out = payload(mod.handler(file_path=cad("part.step")))
+        assert out["workspace_changed"] == {"from": "Manufacture", "to": "Design"}
+        assert "workspace_restored" not in out
+
+    def test_a_workspace_the_import_left_alone_publishes_neither_key(self, wire, cad):
+        ui = _FakeUI()
+        design = make_design()
+        room = design.rootComponent
+        wire(design=design, ui=ui, created=[BRepBody("Imported")],
+             on_import=lambda: room.bRepBodies._items.append(BRepBody("Imported")))
+        out = payload(mod.handler(file_path=cad("part.step")))
+        assert "workspace_restored" not in out and "workspace_changed" not in out
+        assert ui.activated == []              # an unchanged workspace is never re-activated
+
+    def test_a_ui_that_will_not_read_claims_nothing(self, wire, cad):
+        # with no userInterface the before-read is None, so the import publishes no workspace
+        # verdict rather than a confident "unchanged".
+        design = make_design()
+        room = design.rootComponent
+        wire(design=design, created=[BRepBody("Imported")],
+             on_import=lambda: room.bRepBodies._items.append(BRepBody("Imported")))
+        out = payload(mod.handler(file_path=cad("part.step")))
+        assert "workspace_restored" not in out and "workspace_changed" not in out
+
+    def test_an_after_read_that_will_not_read_publishes_no_verdict(self, wire, cad):
+        # the workspace read BEFORE the import answers and the one AFTER raises: an unreadable
+        # 'to' is not a workspace the import switched to, so nothing is re-activated and no
+        # {from, to} pair carrying a null is published.
+        ui = _FakeUI(reads=2)
+        design = make_design()
+        room = design.rootComponent
+        wire(design=design, ui=ui, created=[BRepBody("Imported")],
+             on_import=lambda: room.bRepBodies._items.append(BRepBody("Imported")))
+        out = payload(mod.handler(file_path=cad("part.step")))
+        assert "workspace_restored" not in out and "workspace_changed" not in out
+        assert ui.activated == []               # never a blind re-activate on an unread workspace
+        assert "None" not in out["note"]
+
+    def test_the_dxf_arm_discloses_the_workspace_too(self, wire, cad):
+        ui = _FakeUI()
+        comp = MakeComp("Root")
+        comp.xYConstructionPlane = types.SimpleNamespace(name="XY")
+        design = make_design(comp=comp)
+
+        def _side_effect():
+            comp.sketches._items.append(_sketch("Outline"))
+            ui.switch_to("FusionSolidEnvironment")
+
+        wire(design=design, ui=ui, created=[_sketch("Outline")], on_import=_side_effect)
+        out = payload(mod.handler(file_path=cad("plate.dxf")))
+        assert out["workspace_restored"] == "Manufacture"
+
+    def test_the_worst_composed_note_fits_the_wire_budget(self, wire, cad):
+        # the SVG note is the longest base and the changed arm appends the workspace sentence to
+        # it, a composition test_prose_budget's per-literal measurement never sees.
+        ui = _FakeUI(activate=False)
+        target = _sketch("Logo")
+        design = make_design(sketches=[target])
+
+        def _side_effect():
+            target.sketchCurves._items.append(object())
+            ui.switch_to("FusionSolidEnvironment")
+
+        wire(design=design, ui=ui, created=[types.SimpleNamespace(name="Curve")],
+             on_import=_side_effect)
+        out = payload(mod.handler(file_path=cad("logo.svg"), sketch="Logo"))
+        assert out["workspace_changed"]["to"] == "Design"
+        assert len(out["note"]) <= 400, len(out["note"])    # test_prose_budget.NOTE_BUDGET_CHARS
 
 
 class TestFeatureHealthAcrossADocumentSwitch:

@@ -5,10 +5,6 @@
 
   model_move -> translate, move along an entity, rotate, or point-to-point a body as a parametric
                 timeline feature. WRITES.
-
-A move feature moves BRepBody objects only. createInput2's binding doc offers BRepFace too, but a
-BRepFace collection raises InternalValidationError inside the kernel (measured in a parametric
-design).
 """
 
 import math
@@ -132,15 +128,8 @@ def _expected_cm(mode_key, offsets_cm, dist_cm, start_pt, end_pt):
 
 
 def _verify(before, after, remedy, expected_cm=None, scale_factor=1.0, units="cm"):
-    """(error_text, largest_displacement_cm) proving the move displaced the geometry - and, when the
-    mode fixes the distance up front, that it moved by exactly that much. Every sample point of a
-    rigid translation travels the same vector, so the largest displacement IS the expected magnitude;
-    a rotation has no single expected scalar and passes expected_cm=None.
-
-    The mismatch is reported in the caller's OWN units: the request was made in them, so a millimetre
-    caller reading a centimetre number would compare two different scales and call a correct move
-    wrong. `remedy` is the mode-aware closing sentence from _common.failed_effect_remedy - the direct
-    path has no timeline feature to send the caller after."""
+    """(error_text, largest_displacement_cm) proving the move displaced the geometry, by exactly
+    expected_cm when the mode fixes the distance up front (None for a rotation)."""
     dists = [d for d in (_displacement(b, a) for b, a in zip(before, after)) if d is not None]
     if not dists:
         return ("Move reported success but no moved geometry could be read back, so the result "
@@ -157,13 +146,8 @@ def _verify(before, after, remedy, expected_cm=None, scale_factor=1.0, units="cm
 
 
 def _axis_entity(raw, comp, design, context=None):
-    """(linear entity, error) for the axis a move takes its direction from. A move is defined by a
-    linear ENTITY, so a world axis resolves to the component's origin ConstructionAxis and a handle
-    to the straight edge or sketch line itself.
-
-    A HANDLE native to another component takes the same _inputs.single_placement lift the moved body
-    took - the entity a feature consumes has to be reachable in the hosting component's assembly
-    context, whichever input it arrived on."""
+    """(linear entity, error) for the axis a move takes its direction from - a world axis resolves
+    to the component's origin ConstructionAxis, a handle to the edge or sketch line itself."""
     tagged, aerr = _AXIS.resolve(raw)
     if aerr:
         return None, aerr
@@ -185,11 +169,8 @@ def _axis_entity(raw, comp, design, context=None):
     if ent is None:
         return None, (f"'axis': the active component has no {raw} origin construction axis to move "
                       "along. Pass a find_geometry handle at a straight edge or sketch line.")
-    # An origin construction axis is refused ("3 : Invalid entity") unless it is proxied into the
-    # occurrence the moved body belongs to. Proxying alone is not enough - see _host_for. The lift
-    # ends on the shared leaf op, which REFUSES a createForAssemblyContext that handed back nothing:
-    # falling back to the native axis returns the very entity the lift exists to avoid, and defineAs
-    # then fails inside the API with nothing pointing at why.
+    # An origin construction axis is refused ("3 : Invalid entity") at defineAs unless it is
+    # proxied into the occurrence the moved body belongs to.
     if context is not None:
         return _inputs._proxy_or_refuse(
             f"'axis': the {raw} origin construction axis", ent, context,
@@ -200,22 +181,15 @@ def _axis_entity(raw, comp, design, context=None):
 
 def _host_for(design, body):
     """(component that must host the move feature, occurrence the axis is proxied into, error) for
-    `body`. Measured: a move on a sub-component body needs BOTH - hosting on the active component
-    raises "object is not in the assembly context of this component" at add(), and a native axis on
-    the owning component raises "3 : Invalid entity" at defineAs. Together they succeed.
-
-    The occurrence comes from _inputs.single_placement, so a component placed SEVERAL times is
-    refused naming each path rather than resolved to its first instance: the instances sit in
-    different places, and the axis proxied into the wrong one aims the move somewhere else while the
-    displacement check still passes."""
+    `body`."""
+    # A sub-component body needs both: hosting on the active component raises "object is not in the
+    # assembly context of this component" at add(), and a native axis on the owning component
+    # raises "3 : Invalid entity" at defineAs.
     root = safe(lambda: design.rootComponent)
     owner = safe(lambda: body.parentComponent) or root
-    # same_component, not `is`: component wrappers are never identity-stable, so `owner is root` reads
-    # False even for a ROOT body, which then takes the sub-component path (a pointless
-    # allOccurrencesByComponent lookup that finds nothing). `is True` only: hosting on root is the
-    # claim that the body IS a root body, and hosting a sub-component body there raises "object is
-    # not in the assembly context of this component" at add() - an unproven owner takes the
-    # placement path, whose own refusal names the component it could not place.
+    # same_component, not `is`: component wrappers are not identity-stable, so `owner is root` reads
+    # False even for a root body. `is True` only - same_component answers neither when it cannot
+    # tell, and an unproven owner takes the placement path rather than hosting on root.
     if owner is None or _common.same_component(owner, root) is True:
         return root, None, None
     ctx = safe(lambda: body.assemblyContext)
@@ -257,8 +231,7 @@ def handler(mode: str = "translate", bodies=None, faces=None, dx=None, dy=None, 
     if has_faces:
         return error("A move feature cannot move FACES - pass 'bodies'. createInput2 accepts a "
                      "BRepFace collection and then raises InternalValidationError inside the "
-                     "kernel (measured in a parametric design). To push or pull a face, use "
-                     "model_offset_face.")
+                     "kernel. To push or pull a face, use model_offset_face.")
     if not has_bodies:
         return error("'bodies' is required - the bodies to move.")
 
@@ -320,12 +293,10 @@ def handler(mode: str = "translate", bodies=None, faces=None, dx=None, dy=None, 
     for e in ents:
         coll.add(e)
     before = [_body_points(e) for e in ents]
-    # Also captured BEFORE: the NAMES - a post-mutation proxy can stop answering .name, and a payload
-    # must not publish a null for a body that resolved.
+    # A post-mutation proxy can stop answering .name, so the names are read here.
     body_names = [safe(lambda e=e: e.name) for e in ents]
-    # Measured BEFORE the mutation: a point_to_point from_point normally rides the body being
-    # moved, so after add() the two vertices have closed on each other and their separation no
-    # longer describes the travel that was asked for.
+    # A point_to_point from_point rides the body being moved: after add() the two vertices have
+    # closed on each other and their separation no longer describes the travel asked for.
     expected_cm = _expected_cm(mode_key, offsets_cm, dist_cm, start_pt, end_pt)
 
     try:
@@ -354,9 +325,8 @@ def handler(mode: str = "translate", bodies=None, faces=None, dx=None, dy=None, 
         feature = comp.features.moveFeatures.add(move_input)
     except Exception as e:
         return error(f"Move failed: {e} {_HINTS[mode_key]}")
-    # MEASURED: moveFeatures.add returns None in a DIRECT design while the translate LANDS. The
-    # verdict below is the measured before/after body-point read-back, which needs no feature object
-    # - so in direct mode fall through to it. In parametric a None feature stays an honest error.
+    # moveFeatures.add returns None in a DIRECT design while the move lands; the before/after
+    # read-back below needs no feature object. In parametric a None feature stays an error.
     direct_no_feature = _common.direct_feature_absence(design, feature)
     if not feature and not direct_no_feature:
         return error(_common.no_feature_error(design, "Move"))
@@ -382,9 +352,6 @@ def handler(mode: str = "translate", bodies=None, faces=None, dx=None, dy=None, 
         "note": ("Geometry repositioned. To reposition a component instance instead, use "
                  "assembly_move."),
     }
-    # Direct mode: no feature object, so no name - publish the flag RETURNS declares the omission
-    # against, and drop the timeline claim that only holds for the parametric feature. Every other
-    # key here is measured off the BODIES, so it survives the missing feature untouched.
     if direct_no_feature:
         payload["no_timeline_feature"] = True
         payload["note"] += " " + _common.DIRECT_FEATURE_NOTE
@@ -398,11 +365,10 @@ def handler(mode: str = "translate", bodies=None, faces=None, dx=None, dy=None, 
 
 TOOL_DESCRIPTION = (
     "Move BODIES as a feature in the TIMELINE, so the move replays on every recompute. A move "
-    "feature cannot move faces - use model_offset_face to push or pull one. "
-    "'mode' picks the inputs used: translate -> dx/dy/dz; "
-    "along_entity -> axis + distance; rotate -> axis + angle_deg; point_to_point -> from_point + "
-    "to_point. To reposition a component OCCURRENCE with no timeline feature, use assembly_move. "
-    "WRITES; verifies the geometry changed position.\n"
+    "feature cannot move faces - use model_offset_face to push or pull one; to reposition a "
+    "component OCCURRENCE with no timeline feature, use assembly_move. 'mode' picks the inputs: "
+    "translate -> dx/dy/dz; along_entity -> axis + distance; rotate -> axis + angle_deg; "
+    "point_to_point -> from_point + to_point.\n"
     + _outputs.produces_block(RETURNS)
 )
 

@@ -1,12 +1,10 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP RICH READ: model_inspect - measure a target (size, mass, mesh stats) in one read, by detail level.
-
-The "rich read" pattern (CLAUDE.md "Reads are RICH"): a light default (bounding box) plus
-include=['mass'] for full physical properties. 'target' is a TargetRef (a find_geometry handle or a
-name, or '' for the whole design); a MESH target automatically reports mesh stats instead. Read-only.
-
+"""MCP RICH READ: model_inspect - measure a target (size, mass, mesh stats) in one read, by detail
+level: a light default (bounding box) plus include=['mass'] for full physical properties. 'target'
+is a TargetRef (a find_geometry handle, a name, or '' for the whole design); a MESH target reports
+mesh stats instead. Read-only.
 """
 
 import json
@@ -26,12 +24,14 @@ from . import _joints
 app = adsk.core.Application.get()
 
 _SLICES = ("mass",)   # mesh stats are automatic for a mesh target (routed by kind), not an include=
+# The default measurement's name in include=: include= omits the bounding box unless 'default' rides
+# beside it, so a mass read carries the properties asked for and not the box again.
+_DEFAULT_NAMES = ("default",)
 # target accepts a handle (body/face/mesh) or a name (occurrence/component/body), or '' = whole design.
 _TARGET = _inputs.TargetRef("target")
 # frame: the Joint Origin the oriented box is measured in. NATIVE selector - this READS the frame's
 # axis vectors rather than handing the JO to a joint, so it stays on the object the owning component
-# carries instead of an assembly proxy. required=True is about the resolve, not the schema: the tool
-# reaches it only after its own "was a frame asked for?" test, so a blank here is a caller bug.
+# carries instead of an assembly proxy. required=True is about the resolve, not the schema.
 _FRAME = _inputs.JointOriginRef(
     "frame", native=True, required=True,
     description="Measure the bounding box in this Joint Origin's part-space frame.")
@@ -51,25 +51,17 @@ _MAX_PER_OCCURRENCE_ROWS = 200   # per_body rows: one per occurrence, each cross
 
 
 def _vec(v, f=1.0):
-    """[x, y, z] for a Vector3D/Point3D, scaled by `f` - or None when v is None or any component
-    will not read. The list form of the shared whole-point tri-state (_common.ptxyz), which is the
-    same contract the extents below hold: a 0.0 stand-in for an unreadable component publishes a
-    direction/position nobody measured, and 0 is an answer here (an axis-aligned vector's other two
-    components are genuinely 0)."""
+    """[x, y, z] for a Vector3D/Point3D scaled by `f`, or None when any component will not read - a
+    0.0 stand-in would publish a direction nobody measured, and 0 is a real answer here."""
     p = _common.ptxyz(v, f)
     return None if p is None else [p["x"], p["y"], p["z"]]
 
 
 def _measurable_geometry(entity):
-    """Return a B-Rep entity for getOrientedBoundingBox (which rejects a Component and an Occurrence).
-
-    A BRepBody is returned as-is. Neither a Component (the root, the whole-design target) nor an
-    Occurrence carries a B-Rep identity the call accepts - MEASURED, an Occurrence raises
-    "3 : invalid argument geometry" - so both fall back to the bodies they hold: the single one, or
-    the largest by world-AABB volume when there are several. An occurrence's bodies are its assembly
-    PROXIES, so the fallback keeps measuring the instance the caller named. Returns (geometry, note)
-    where note flags any fallback for the caller.
-    """
+    """(geometry, note) - a B-Rep entity for getOrientedBoundingBox, which rejects a Component and
+    an Occurrence (an Occurrence raises "3 : invalid argument geometry"). Both fall back to the
+    bodies they hold: the single one, or the largest by world-AABB volume. An occurrence's bodies
+    are its assembly PROXIES, so the fallback still measures the instance the caller named."""
     tname = safe(lambda: type(entity).__name__) or ""
     if tname == "BRepBody":
         return entity, ""
@@ -99,14 +91,10 @@ def _measurable_geometry(entity):
 
 
 def _subtree_occurrences(entity, limit):
-    """Every occurrence in `entity`'s subtree - nested levels included - capped at `limit` + 1.
-
-    A Component answers ``allOccurrences``, its whole subtree already flattened; its ``occurrences``
-    collection holds only the DIRECT children, so a body owned by a grandchild component would never
-    reach a row of its own. An Occurrence carries no flattened list - only ``childOccurrences`` - so
-    its subtree is walked here. The one extra item past `limit` is what lets the caller say the list
-    was cut without publishing a total it never counted.
-    """
+    """Every occurrence in `entity`'s subtree - nested levels included - capped at `limit` + 1. A
+    Component answers ``allOccurrences``, already flattened, while its ``occurrences`` holds only
+    DIRECT children; an Occurrence carries no flattened list, so its subtree is walked here. The one
+    extra item past `limit` lets the caller say the list was cut without publishing a total."""
     out = []
     flat = safe(lambda: entity.allOccurrences)
     if flat is not None:
@@ -118,9 +106,8 @@ def _subtree_occurrences(entity, limit):
     kids = safe(lambda: entity.childOccurrences)
     if kids is None:
         # ``allOccurrences`` did not answer AND there is no ``childOccurrences``: a COMPONENT whose
-        # subtree holds an unresolved external reference, which makes that property RAISE (measured).
-        # The shared census rebuilds the subtree from component.occurrences instead of reporting the
-        # component as holding nothing.
+        # subtree holds an unresolved external reference makes that property RAISE. The shared census
+        # rebuilds the subtree from component.occurrences instead.
         for o in _common.component_walk(entity).occurrences:
             out.append(o)
             if len(out) > limit:
@@ -135,16 +122,10 @@ def _subtree_occurrences(entity, limit):
 
 
 def _joint_origin_axes(frame_name):
-    """(X_vec, Y_vec, Z_vec, jo, jo_name, error) for the Joint Origin 'frame' references.
-    X=secondary, Y=third, Z=primary, in the JO's own PART space - the frame the payload publishes.
-    The resolved JO travels out too, because measuring needs those axes lifted into the space the
-    target's geometry is read in and only the JO knows which component's frame they are in.
-
-    Resolution is the JointOriginRef kind's, in its NATIVE selector: one acceptor for the handle, the
-    bare name and the '<occurrence>:<JO name>' form, one refusal for an ambiguous name, and no
-    assembly proxy - the frame read here is the one the owning component carries. The read-axes leaf
-    is all that is local. Every failure travels in the error slot, so a JO that resolved but whose
-    axis vectors did not read is never reported as a JO that does not exist."""
+    """(X_vec, Y_vec, Z_vec, jo, jo_name, error) for the Joint Origin 'frame' names. X=secondary,
+    Y=third, Z=primary, in the JO's own PART space. The resolved JO travels out too, because the
+    axes still need lifting into the space the target's geometry reads in. Every failure travels in
+    the error slot, so a JO whose axes did not read is never reported as one that does not exist."""
     jo, err = _FRAME.resolve(frame_name)
     if err:
         return None, None, None, None, None, err
@@ -162,28 +143,13 @@ def _joint_origin_axes(frame_name):
 
 def _measuring_axes(jo, geom, x_vec, y_vec, jo_name, desc):
     """(X, Y, error) - the frame's X/Y axes re-expressed in the coordinate space
-    ``getOrientedBoundingBox`` reads `geom` in.
-
-    MEASURED, on a 40x30x10 mm slab in a component turned 30 deg about Z and moved 50 mm in X: the
-    call reads its AXIS ARGUMENTS in the SAME space as the geometry it is handed, and a JointOrigin
-    reports its axis vectors in its owning COMPONENT's space whether it is read natively or through
-    an assembly proxy (both read (1,0,0) while that component's X in world is (0.866, 0.5, 0)). An
-    assembly-PROXY body is read in world coordinates (its AABB spanned 3.5 to 8.464 cm) and a NATIVE
-    body in its own component's (the same slab, 0 to 4.0 cm). Both MATCHED pairings measured
-    4.000 x 3.000 x 1.000 cm - the slab's true size; both MIXED pairings measured
-    4.964 x 4.598 x 1.000.
-
-    Only directions are transformed, so a matrix's translation never enters (measured: the lifted X
-    read (0.866, 0.5, 0), not the occurrence's 5 cm offset) - two instances of one component that
-    differ only in position give the same answer here.
-    """
+    ``getOrientedBoundingBox`` reads `geom` in. That call reads its AXIS ARGUMENTS in the SAME space
+    as the geometry it is handed, and a JointOrigin reports its axis vectors in its owning
+    COMPONENT's space. Only directions are transformed - a matrix's translation never enters."""
     occ = safe(lambda: geom.assemblyContext)
-    # Two reads, because no ONE of them spans the target kinds this tool accepts (both MEASURED):
-    # every BRepBody answers parentComponent while the shared entity_component chain returns None
-    # for it, and a BRepFace is the mirror image - it has no parentComponent attribute at all
-    # (hasattr False), and its owner is reached through the chain's body.parentComponent leg.
-    # A face landing on the miss below is measured UNLIFTED: the +X face of a root body read in a
-    # 30-deg-turned frame came back 0.0 x 30.0 x 10.0 mm instead of 15.0 x 25.981 x 10.0.
+    # Two reads, because neither spans the target kinds this tool accepts: every BRepBody answers
+    # parentComponent while the shared entity_component chain returns None for it, and a BRepFace is
+    # the mirror image - no parentComponent at all, its owner reached through body.parentComponent.
     geom_comp = safe(lambda: geom.parentComponent) or _inputs.entity_component(geom)
     jo_comp = safe(lambda: jo.parentComponent)
     # `is True`: "nothing to lift" is a claim that both sides sit in ONE frame, so an unproven pair
@@ -192,10 +158,9 @@ def _measuring_axes(jo, geom, x_vec, y_vec, jo_name, desc):
     if occ is None and _common.same_component(geom_comp, jo_comp) is True:
         return x_vec, y_vec, None       # one component's frame on both sides - nothing to lift
     if occ is None and geom_comp is None:
-        # Nothing this tool can read said which space the target is measured in, so there is no
-        # lift to derive and no ambiguity to report either - the axes go on as read. A geometry
-        # getOrientedBoundingBox cannot measure is refused by the call itself, and that refusal
-        # names the target rather than blaming the frame.
+        # Nothing this tool can read said which space the target is measured in, so there is no lift
+        # to derive and no ambiguity to report either - the axes go on as read. A geometry
+        # getOrientedBoundingBox cannot measure is refused by the call itself.
         return x_vec, y_vec, None
     design = _common.design()
     # Two DIFFERENT inputs can be the one with no single placement, and each has its own remedy, so
@@ -213,10 +178,9 @@ def _measuring_axes(jo, geom, x_vec, y_vec, jo_name, desc):
     to_world = _joints.component_world_matrix(design, jo_comp, occ)
     if to_world is None:
         return None, None, frame_unplaced
-    # A PROXY's geometry is read in world, so world axes are the answer and nothing comes back out.
-    # A NATIVE body is read in its OWN component's frame, so the world axes have to be brought back
-    # into that one - the only pairing left here, since a native body of the JO's own component
-    # returned above.
+    # A PROXY's geometry is read in world, so world axes are the answer. A NATIVE body is read in
+    # its OWN component's frame, so the world axes come back into that one - the only pairing left,
+    # since a native body of the JO's own component returned above.
     inverse = None
     if occ is None:
         from_world = _joints.component_world_matrix(design, geom_comp)
@@ -472,9 +436,9 @@ def handler(target: str = "", include=None, units: str = "mm", accuracy: str = "
     desc = _entity_desc(ent, kind)
 
     inc = _normalize_include(include)
-    bad = [s for s in inc if s not in _SLICES]
+    bad = [s for s in inc if s not in _SLICES and s not in _DEFAULT_NAMES]
     if bad:
-        return error(f"Unknown include {bad}. Valid: {', '.join(_SLICES)}.")
+        return error(f"Unknown include {bad}. Valid: {', '.join(_SLICES + _DEFAULT_NAMES)}.")
 
     # A MESH target is measured by mesh stats (it has no BRep bbox/mass the solid path computes).
     if kind == "mesh":
@@ -487,15 +451,19 @@ def handler(target: str = "", include=None, units: str = "mm", accuracy: str = "
                        "no B-Rep bounding box or mass; target a solid body/occurrence for include=['mass'].)")
         return ok(out)
 
-    # Solid/occurrence/component/design: bbox by default.
-    out, e = _unwrap(_bbox(design, ent, desc, frame, units))
-    if e:
-        return e
+    # Solid/occurrence/component/design: the bbox measurement, unless include= asked past it.
+    deep = [s for s in inc if s in _SLICES]
+    want_default = not deep or any(s in _DEFAULT_NAMES for s in inc)
+    out = {}
+    if want_default:
+        out, e = _unwrap(_bbox(design, ent, desc, frame, units))
+        if e:
+            return e
+        if kind == "body":
+            # A body's disconnected-piece count: a multi-lump body is usually a shipped defect (a
+            # join that fused nothing), and no interference or bbox read can show it. None = unread.
+            out["lump_count"] = _geom.lump_count(ent)
     out["kind"] = kind
-    if kind == "body":
-        # A body's disconnected-piece count: a multi-lump body is usually a shipped defect (a join
-        # that fused nothing), and no interference or bbox read can show it. None = unreadable.
-        out["lump_count"] = _geom.lump_count(ent)
     if "mass" in inc:
         out["mass"], e = _unwrap(_physical_properties(design, ent, desc, units, accuracy, per_body))
         if e:
@@ -512,12 +480,9 @@ def handler(target: str = "", include=None, units: str = "mm", accuracy: str = "
 
 TOOL_DESCRIPTION = (
     "Measure a target - size, mass, or mesh stats - in one read. 'target' is a find_geometry handle "
-    "(body/face/mesh) OR an occurrence/component/body name, or '' for the WHOLE design. Default: the "
-    "bounding box (X/Y/Z extents + center in 'units'; 'frame'=<Joint Origin> measures in part space). "
-    "include=['mass'] adds full physical properties (mass/volume/area/CoM/inertia; 'accuracy'; "
-    "'per_body' adds a mass + CoM row per occurrence in the target's subtree, nested ones included). "
-    "A MESH target reports triangle/vertex counts + watertight instead. For the distance "
-    "or angle BETWEEN two entities, use model_measure_between."
+    "or an occurrence/component/body name, or '' for the WHOLE design. Default: the bounding box "
+    "(X/Y/Z extents + center in 'units'). A MESH target reports triangle/vertex counts + watertight "
+    "instead. For the distance or angle BETWEEN two entities, use model_measure_between."
 )
 
 tool = (
@@ -525,7 +490,7 @@ tool = (
     .add_input_property(*_TARGET.as_property())
     .add_input_property("include", {"type": ["array", "string"],
             "description": "Deeper detail: 'mass' (full physical properties). A list or comma-string. "
-                           "Omit for just the bounding box."})
+                           "Omit for just the bounding box; 'default' keeps the box beside 'mass'."})
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("accuracy", {"type": "string", "enum": ["low", "medium", "high", "very_high"],
             "description": "Physical-properties accuracy when include=['mass'] (default medium)."})

@@ -197,7 +197,10 @@ class FakeProfile:
 class FakeSketch:
     def __init__(self, name, lines=(), circles=(), arcs=(), ellipses=(), points=(),
                  constraints=(), dimensions=(), profiles=0, fully_constrained=False,
-                 splines=(), cv_splines=(), fixed_splines=(), texts=()):
+                 splines=(), cv_splines=(), fixed_splines=(), texts=(), compute_deferred=False):
+        # compute_deferred: the flag's value, or "raises" for a sketch whose read throws - the
+        # state read_flag answers None for, which must publish neither a flag nor a refusal.
+        self._compute_deferred = compute_deferred
         self.name = name
         self.sketchCurves = FakeCurves(list(lines), list(circles), list(arcs), list(ellipses),
                                        splines, cv_splines, fixed_splines)
@@ -215,6 +218,12 @@ class FakeSketch:
         self.isFullyConstrained = fully_constrained
         rp = type("RP", (), {"name": "XY"})()
         self.referencePlane = rp
+
+    @property
+    def isComputeDeferred(self):
+        if self._compute_deferred == "raises":
+            raise RuntimeError("3 : the compute state of this sketch is unavailable")
+        return self._compute_deferred
 
 
 class FakeSketches:
@@ -611,6 +620,49 @@ class TestProfiles:
         _install(FakeSketch("Empty", profiles=0))
         out = _payload(sd.handler(sketch_name="Empty"))
         assert out["profiles"] == [] and out["profile_count"] == 0
+
+
+class TestComputeDeferredRead:
+    """A sketch whose compute is DEFERRED reports the profile set from before the deferral, so a
+    handle minted off it addresses a region the caller cannot see. The read publishes the flag and
+    withholds the handles instead."""
+
+    def _deferred(self):
+        ring = FakeProfile("tok_ring", area=11.71, cx=0.0, cy=0.0, loops=2)
+        return FakeSketch("Stale", profiles=[ring], compute_deferred=True)
+
+    def test_a_deferred_sketch_publishes_no_profile_handles(self):
+        _install(self._deferred())
+        out = _payload(sd.handler(sketch_name="Stale"))
+        assert out["compute_deferred"] is True and out["profiles_stale"] is True
+        assert "profiles" not in out
+        assert out["profile_count"] == 1          # published as read, and flagged stale beside it
+
+    def test_the_deferred_note_names_the_flag_and_the_two_ways_out(self):
+        _install(self._deferred())
+        note = _payload(sd.handler(sketch_name="Stale"))["note"]
+        assert "isComputeDeferred" in note
+        assert "sketch_add_geometry" in note and "sys_execute_script" in note
+        # the handle sentence must go with the handles - it would point at a key that is not there
+        assert "profiles[].handle" not in note
+
+    def test_the_xray_still_answers_and_leads_with_the_deferral(self):
+        # entities/constraints are not profile-derived, so the X-ray is still worth returning - the
+        # caller just must not read its profile_count as current
+        _install(self._deferred())
+        out = _payload(sd.handler(sketch_name="Stale", include_entities=True))
+        assert "entities" in out and out["compute_deferred"] is True
+        assert out["note"].startswith("Compute is DEFERRED")
+
+    def test_an_unreadable_flag_publishes_neither_the_flag_nor_a_withheld_list(self):
+        # read_flag answers None for a read that raised; a coerced False would be a confident "not
+        # deferred", and a coerced True would withhold handles off a sketch that is perfectly fine
+        ring = FakeProfile("tok_ring", area=11.71, cx=0.0, cy=0.0, loops=2)
+        _install(FakeSketch("Unknown", profiles=[ring], compute_deferred="raises"))
+        out = _payload(sd.handler(sketch_name="Unknown"))
+        assert "compute_deferred" not in out and "profiles_stale" not in out
+        assert len(out["profiles"]) == 1 and out["profiles"][0]["handle"]
+        assert "DEFERRED" not in out["note"]
 
 
 class TestProgressiveDisclosure:
@@ -2188,3 +2240,12 @@ class TestEveryRefusalNamesTheCallersInput:
         _comp, _occ, named = sd.scope_component(design, "Frame", "dxf_component")
         assert "'dxf_component' also takes an occurrence fullPathName" in named
         assert "'component'" not in named
+
+    def test_the_refusal_is_the_only_home_of_the_read_that_mints_an_occurrence_path(self,
+                                                                                    monkeypatch):
+        # COMPONENT_SCOPE's wire description names the two vocabularies but not where an occurrence
+        # path comes from - this refusal is the one place that pointer survives, so it is pinned.
+        design = self._ambiguous_scope(monkeypatch)
+        _comp, _occ, err = sd.scope_component(design, "Frame")
+        assert "design_get(include=['tree'])" in err
+        assert "design_get" not in sd.COMPONENT_SCOPE[1]["description"]

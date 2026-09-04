@@ -22,33 +22,29 @@ from ._joints import (DRIVES_ANGLE, DRIVES_ANY, DRIVES_SLIDE, find_joint as _fin
                       current_joint_type as _current_joint_type,
                       motion_link_record as _motion_link_record)
 
-# The bands a member's placement change must EXCEED to count as motion, one per quantity, because the
-# placement record publishes them at different resolutions: its origin carries 3 decimals of a
-# millimetre, its basis axes 4 decimals of a direction component. A basis quantized that way places
-# two orientations less than ~0.008 deg apart on the same reading, so a degree band below that would
-# report rounding as rotation.
+# The bands a member's placement change must EXCEED to count as motion: the placement record
+# carries 3 decimals of a millimetre and 4 of a direction component, and a basis quantized that way
+# places two orientations under ~0.008 deg apart on the same reading.
 _MOVE_BAND_MM = 1e-3
 _MOVE_BAND_DEG = 0.01
 
-# (document identity, joint ENTITY TOKEN) pairs successfully driven this add-in session. Driving BOTH
-# members of a motion-linked pair can kill the Fusion process outright - observed live only in an
-# XREF / referenced context; plain in-document pairs survive it. So the second-member refusal is
-# scoped to xref-context pairs (see _pair_is_plain); a plain in-document pair is allowed with a warning.
-# Keyed by entity TOKEN so a delete+recreate of the driven joint (a NEW token) clears the block, while a
-# rename (token stable) does not. The set outlives doc close.
+# rotationValue lands on a 0.1 deg grid, so a stored angle sits at most half a step from the
+# command; a read-back inside that half-step landed the value. Measured by measure_api.py row
+# joint-revolute-value-tenth-degree-grid; the slide band stays at 1e-3 mm.
+_ANGLE_GRID_DEG = 0.1
+_ANGLE_BAND_DEG = 0.05
+
+# (document identity, joint ENTITY TOKEN) driven this add-in session, keyed by token so a
+# delete+recreate clears the block while a rename does not. The refusal it arms, and the crash that
+# refusal exists for, are at the point of use in handler().
 _driven_this_session = set()
 
 
 def _carry_driven_entries(old_key, new_key):
-    """Re-key this document's driven-joint entries when its document key changes (a save re-keys an
-    open document - see _write_guard.on_key_renamed).
-
-    Without this the crash guard fails OPEN, which is the direction that kills Fusion: entries
-    parked under old_key stop matching, so the partner of a joint driven before the save reads as
-    never driven and the both-members refusal does not fire. The key is only the document HALF of
-    each entry, so every entry carrying old_key moves and keeps its own entity token - the token is
-    document-local and says nothing about which document it came from.
-    """
+    """Re-key this document's driven-joint entries when its document key changes."""
+    # Without this the crash guard fails OPEN, the direction that kills Fusion: entries under
+    # old_key stop matching, so a joint driven before the save reads as never driven and the
+    # both-members refusal does not fire.
     for entry in [e for e in _driven_this_session if e[0] == old_key]:
         _driven_this_session.discard(entry)
         _driven_this_session.add((new_key,) + tuple(entry[1:]))
@@ -58,9 +54,8 @@ _write_guard.on_key_renamed(_carry_driven_entries)
 
 
 def _reg_key(doc_id, joint):
-    """Registry key for a driven joint: (doc identity, entityToken). The token makes delete+recreate
-    clear the poison (new token) while a rename keeps it (stable token). Falls back to the joint NAME
-    when no token is readable (an un-persisted joint, or a fake under test)."""
+    """Registry key for a driven joint: (doc identity, entityToken), falling back to the joint NAME
+    when no token is readable."""
     token = safe(lambda: joint.entityToken)
     return (doc_id, token if token else (safe(lambda: joint.name) or ""))
 
@@ -71,23 +66,17 @@ _NO_DOCUMENT = "<no document>"
 
 
 def _doc_key():
-    """The document half of _reg_key - what tells one document's driven joints from another's.
-
-    _write_guard.document_key is the one home for that identity: a cloud data file's id, else a
-    per-instance token matched by document handle. A NAME cannot serve here - every never-saved
-    document answers 'Untitled' (measured on two open at once), so a name key merges two documents'
-    driven-joint sets, and a joint's entityToken is DOCUMENT-LOCAL, so two documents can carry one
-    token too. Merged, the registry reports a joint as already driven this session because a
-    DIFFERENT document's joint was, which refuses a safe drive.
-    """
+    """The document half of _reg_key - what tells one document's driven joints from another's."""
+    # A NAME cannot serve: every never-saved document answers 'Untitled', so a name key merges two
+    # documents' driven-joint sets, and a joint's entityToken is document-local. Merged, the
+    # registry refuses a safe drive because a DIFFERENT document's joint was driven.
     key = _write_guard.document_key()
     return _NO_DOCUMENT if key is None else key
 
 
 def _occ_positively_plain(occ):
-    """True only when this occurrence can be POSITIVELY confirmed native - not a referenced/xref
-    component and with no referenced ancestor up its assembly-context chain. Any unreadable value ->
-    False, so an unknown context keeps the crash guard ON (fail toward refusal)."""
+    """True only when this occurrence is POSITIVELY confirmed native - no referenced component up
+    its assembly-context chain. Any unreadable value is False, keeping the crash guard ON."""
     if occ is None:
         return False
     ref = safe(lambda: occ.isReferencedComponent)
@@ -105,9 +94,9 @@ def _occ_positively_plain(occ):
 
 
 def _pair_is_plain(j1, j2):
-    """Both linked joints wholly native - no xref anywhere in either joint's two occurrences. Only such
-    a pair skips the second-member refusal (all four crashes were xref-context; plain pairs survived
-    every controlled both-members drive). Unprovable -> False, so the guard stays on."""
+    """Both linked joints wholly native - no xref anywhere in either joint's two occurrences. Only
+    such a pair skips the second-member refusal, since every observed crash was xref-context;
+    unprovable is False, so the guard stays on."""
     for j in (j1, j2):
         if j is None:
             return False
@@ -118,9 +107,8 @@ def _pair_is_plain(j1, j2):
 
 
 def _current_value_text(jm, jtype):
-    """The joint's current driven value as display text ('12.5 mm' / '30.0 deg'), or None when no DOF
-    of this kind answered - the read-side twin of _limits_text, over the same per-type DOF split. A
-    caller renders that None through _value_clause rather than dropping it into a sentence."""
+    """The joint's current driven value as display text ('12.5 mm' / '30.0 deg'), or None when no
+    DOF of this kind answered - a caller renders that None through _value_clause."""
     parts = []
     if jtype in DRIVES_ANGLE:
         rv = safe(lambda: jm.rotationValue)
@@ -141,10 +129,9 @@ def _value_clause(name, jm, jtype, verb="reads"):
     return f"'{name}' {verb} {text}" if text else f"the current value of '{name}' did not read"
 
 
-# joint type -> (the JointMotion property holding its driven value, the JointLimits property bounding
-# it, the display formatter for a native value). Only the ONE-DOF types are here: a cylindrical joint
-# drives two values, so which one a motion link couples is not established by the joint's type alone,
-# and every scaled claim below is withheld for it rather than guessed.
+# joint type -> (its driven-value property, its bounding JointLimits property, a display formatter).
+# Only the ONE-DOF types: a cylindrical joint drives two values, so which one a motion link couples
+# is not established by the joint's type alone, and every scaled claim below is withheld for it.
 _ONE_DOF = {
     "revolute": ("rotationValue", "rotationLimits", lambda v: f"{round(math.degrees(v), 4)} deg"),
     "slider": ("slideValue", "slideLimits", lambda v: f"{round(v * 10.0, 4)} mm"),
@@ -152,12 +139,9 @@ _ONE_DOF = {
 
 
 def _link_couples(link):
-    """Whether a motion_link_record describes a link that TRANSMITS motion, as a TRI-STATE.
-
-    False when it names no partner, or reads SUPPRESSED or BROKEN; True when a partner is named and
-    both states read clean; None when a state could not be read at all. A caller branches with
-    ``is``: an unread state is not a working link (so no coupling is claimed on it) and it is not a
-    dead one either (so a guard that fails toward refusal stays armed)."""
+    """Whether a motion_link_record describes a link that TRANSMITS motion, as a TRI-STATE: False
+    when it names no partner or reads SUPPRESSED or BROKEN, True when a partner is named and both
+    states read clean, None when a state could not be read at all."""
     if link["linked"] is not True:
         return False if link["linked"] is False else None
     if link["suppressed"] is True or link["broken"] is True:
@@ -203,8 +187,7 @@ def _enabled_bounds(limits, fmt):
 
 def _limits_text(jm, jtype):
     """One joint's ENABLED limits as display text ('min 0.0 deg, max 120.0 deg'), or None when none
-    are enabled or nothing read - the read-side twin of _current_value_text, over the same per-type
-    DOF split."""
+    are enabled or nothing read."""
     parts = []
     if jtype in DRIVES_ANGLE:
         parts += _enabled_bounds(safe(lambda: jm.rotationLimits),
@@ -216,25 +199,11 @@ def _limits_text(jm, jtype):
 
 
 def _ground_lock_census(design):
-    """The DESIGN-WIDE ground_to_parent census as (locked paths, unanswered, total, complete).
-
-    The lock is not a top-level property - ground_to_parent can be set on a nested instance - so the
-    walk is the shared design-wide occurrence census (``_common.occurrence_walk``), which reaches
-    every depth and, when ``allOccurrences`` RAISES on an unresolved external reference, rebuilds the
-    census from the component-local collections instead of answering with an empty design. A
-    root-only collection read would leave a nested lock invisible.
-
-    `total` is that census's own count, or None when neither walk enumerated - which is a different
-    answer from a design whose members are all free, and the one an empty `locked` list would
-    otherwise publish as "nothing is locked". `complete` is the walk's OWN completeness flag: a node
-    whose collection would not enumerate, or a depth/node cap, stops the recursion with the subtree
-    behind it never asked, so on False every count and every negative here is a LOWER BOUND and the
-    caller discloses that rather than publishing a whole-design claim. `unanswered` counts the rows
-    whose flag gave no answer (``read_flag``, never ``safe(read, False)``), so a census that saw the
-    occurrences but not their flags says so instead of reading silence as freedom; the unresolved
-    rows are asked too, and whatever they do not answer is counted there. A locked row is named by
-    its fullPathName, since a nested instance's leaf name is shared by every instance of its
-    component - falling back to the name for a row that answers the flag but not the path."""
+    """The DESIGN-WIDE ground_to_parent census as (locked fullPathNames, unanswered, total,
+    complete). `total` is None when neither walk enumerated; `complete` False makes every count a
+    LOWER BOUND; `unanswered` counts the rows whose flag gave no answer."""
+    # ground_to_parent can be set on a NESTED instance, so a root-only collection read would leave
+    # a nested lock invisible.
     walk = _common.occurrence_walk(design)
     total = walk.total
     if total is None:
@@ -251,11 +220,10 @@ def _ground_lock_census(design):
 
 
 def _limit_refusal(limits, value, fmt):
-    """The refusal when 'value' (native units: rad / cm) lies STRICTLY beyond an enabled limit.
-    Fusion IGNORES an out-of-range drive rather than clamping (measured live on 2705.0.108: at
-    5 deg with limits +/-10 deg, commanding 45 leaves the value at 5; commanding a bound exactly
-    lands on it), so the only honest receipt is a refusal BEFORE the assignment. fmt renders a
-    native value in display units for the message. None when the value is in range."""
+    """The refusal when 'value' (native rad / cm) lies STRICTLY beyond an enabled limit, else
+    None; fmt renders a native value in display units."""
+    # Fusion IGNORES an out-of-range drive rather than clamping - the value simply stays where it
+    # was - so the only honest receipt is a refusal BEFORE the assignment.
     if limits is None:
         return None
     lo_on = bool(safe(lambda: limits.isMinimumValueEnabled, False))
@@ -271,24 +239,10 @@ def _limit_refusal(limits, value, fmt):
 
 def _partner_limit_cause(link, partner_joint, jtype, jm, rad, cm):
     """The clause reporting that the link's RECORDED ratio puts the partner beyond an enabled bound
-    of its own, or None when the reads do not establish that.
-
-    ARITHMETIC ON READ VALUES, not an observed coupling. What the clause states is what this
-    function computes: implied = the partner's current value + this joint's commanded CHANGE scaled
-    by value_partner / value_self and signed by isReversed. Those three terms are the link's own
-    recorded parameters (the same ones joint_motion_link WRITES); nothing here compares the
-    partner's value BEFORE and AFTER this drive - p_now is a SINGLE read of the partner's current
-    value, taken as this clause is built - so no coupling is observed here, and the wire sentence
-    names the arithmetic and the read-back that checks it rather than a cause the receipt observed.
-
-    Emitted only from facts that all READ, and any unread one withholds it: the link must couple
-    (_link_couples True), THIS joint and the partner must each drive exactly one value (_ONE_DOF -
-    a cylindrical joint on either side leaves the coupled quantity unestablished), the link's two
-    values and its reversed flag must read, both current values must read, and value_self must be
-    non-zero (a zero first value is no ratio at all, and dividing by it raises). The clause lands
-    only when the implied value is STRICTLY beyond an ENABLED bound - the same comparison
-    _limit_refusal makes for a value commanded directly - and it publishes every number it used, so
-    the arithmetic can be checked against assembly_get."""
+    of its own, or None when the reads do not establish that."""
+    # ARITHMETIC ON READ VALUES, not an observed coupling: implied = the partner's current value
+    # plus this joint's commanded change, scaled by value_partner / value_self and signed by
+    # isReversed. Any unread term withholds the clause; every number used is published.
     if partner_joint is None or _link_couples(link) is not True:
         return None
     spec, p_spec = _ONE_DOF.get(jtype), _ONE_DOF.get(_current_joint_type(partner_joint))
@@ -339,20 +293,16 @@ def _delta_mm(before, after):
 
 
 def _unit(v):
-    """A basis axis rescaled to length 1, or None when it has no length. The published axes are
-    ROUNDED to 4 decimals, which leaves them slightly off unit length (a 30 deg axis reads
-    [0.866, 0.5, 0.0], whose length is 0.999978) - and the angle read below turns that missing length
-    into rotation that never happened (measured: 0.5375 deg reported for a part that had not turned
-    at all), so every axis is rescaled before it is compared."""
+    """A basis axis rescaled to length 1, or None when it has no length."""
+    # The published axes are ROUNDED to 4 decimals, leaving them slightly off unit length, and the
+    # angle read below turns that missing length into rotation that never happened.
     n = math.sqrt(sum(c * c for c in v))
     return [c / n for c in v] if n else None
 
 
 def _delta_deg(before, after):
-    """The angle in DEGREES between two samples' orientations, or None when either sample is missing
-    a basis axis. The rotation carrying the before basis onto the after basis has trace
-    1 + 2*cos(theta), and that trace is the sum of the corresponding axes' dot products. Magnitude
-    only - a sense would need a rotation axis this pair of samples does not establish."""
+    """The angle in DEGREES between two samples' orientations, or None when either is missing a
+    basis axis. Magnitude only - a sense needs a rotation axis these samples do not establish."""
     keys = ("x_axis", "y_axis", "z_axis")
     if not before or not after or any(k not in before or k not in after for k in keys):
         return None
@@ -392,14 +342,16 @@ def _moved_rows(members):
     return [r[2] for r in rows], readable
 
 
-def _value_move(before, after, unit):
-    """What the joint's OWN driven value did across this drive, as (moved, clause).
+def _off_grid_deg(angle):
+    """True when a commanded angle is not a multiple of the grid rotationValue stores on."""
+    steps = float(angle) / _ANGLE_GRID_DEG
+    return abs(steps - round(steps)) > 1e-6
 
-    `moved` is True when the published value CHANGED, False when it did not, None when the
-    pre-drive value did not read - a caller branches with ``is``, since an unread before-value
-    neither proves a move nor rules one out. The two numbers are compared at the resolution the
-    receipt publishes them at (4 decimals), so the clause states only what both reads show: the
-    before value, the after value and their difference. It elects no cause for either answer."""
+
+def _value_move(before, after, unit):
+    """What the joint's OWN driven value did across this drive, as (moved, clause): True when the
+    published value CHANGED, False when it did not, None when the pre-drive value did not read.
+    The two are compared at the 4 decimals the receipt publishes them at."""
     if before is None or after is None:
         return None, "has no readable pre-drive value here, so whether it moved is not known"
     delta = round(after - before, 4)
@@ -443,14 +395,9 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
     if jm is None:
         return error(f"Could not read the motion of joint '{joint_name}'.")
 
-    # Second-member refusal, scoped to XREF context: if this joint's motion-link partner was already
-    # driven this session AND the pair is not provably plain (native, no xref), refuse BEFORE mutating -
-    # driving both members of a linked pair in an xref assembly has killed the Fusion process. A plain
-    # in-document pair falls through (allowed) and gets a warning below. Keyed on the lineage URN +
-    # entity token. A link that reads SUPPRESSED or BROKEN transmits nothing, so it arms no refusal
-    # (measured: both members of a suppressed rack/pinion link drove independently); an unread state
-    # DOES arm it - the guard fails toward refusal - and what is dropped there is the claim about the
-    # partner, which no read backs.
+    # Driving BOTH members of a linked pair in an xref assembly KILLED Fusion 2705.1.4, so a pair
+    # not provably plain whose partner was already driven refuses BEFORE mutating (a SUPPRESSED or
+    # BROKEN link arms none). Re-probe next major: drive both members in a scratch xref assembly.
     doc_id = _doc_key()
     resolved_name = safe(lambda: joint.name) or joint_name
     link = _motion_link_record(joint)
@@ -462,10 +409,8 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
     partner_driven = bool(partner_joint and _reg_key(doc_id, partner_joint) in _driven_this_session)
     plain_pair = _pair_is_plain(joint, partner_joint) if partner_joint else True
     if partner_driven and not plain_pair and couples is not False:
-        # What was READ: the link's two states (both clean - that is what couples is True) and this
-        # joint's current value. Whether the partner's drive moved THIS joint is a comparison no
-        # read here makes - there is no pre-drive value of it to compare against - so the refusal
-        # states the two readings and sends the caller to the read that settles it.
+        # What was READ: the link's two states and this joint's current value. Whether the
+        # partner's drive moved THIS joint is a comparison no read here makes.
         moved_claim = (f"The link reads neither suppressed nor compute-failed, and "
                        f"{_value_clause(resolved_name, jm, jtype, 'now reads')} - whether the "
                        f"partner's drive moved it is not read here. Read it back with assembly_get "
@@ -476,33 +421,20 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
                            f"{_value_clause(resolved_name, jm, jtype, 'now reads')}; read it back "
                            f"with assembly_get. The refusal stands on that unread state, not on a "
                            f"coupling that was observed. ")
-        # What the context clause may claim is what _pair_is_plain READ, and it SHORT-CIRCUITS:
-        # between ONE and four occurrence reads - each joint's occurrenceOne then occurrenceTwo -
-        # stopping at the first that does not come back positively native. A pair whose first
-        # occurrence reads None arms the guard on that single read, so a refusal claiming four
-        # readings would name reads that were never taken. Any ONE occurrence answers non-native on
-        # any of four outcomes: it reads isReferencedComponent true, an ancestor up its
-        # assemblyContext chain does, the flag would not answer, or the occurrence itself read as
-        # None. Naming an xref context here would state a context no read established, and naming
-        # only the first three outcomes would state a referenced-component reading nothing took on
-        # an occurrence-less pair. The refusal names the reading it has - the pair did not read as
-        # wholly native - with all four outcomes, and the crash beside it as the reason the
-        # unproven case refuses too.
+        # _pair_is_plain SHORT-CIRCUITS at the first occurrence that is not positively native, so
+        # the refusal claims only the reading it has - the pair did not read as wholly native -
+        # with all four outcomes that produce it, rather than an xref context no read established.
         return error(
-            f"Refused: '{resolved_name}' is motion-linked to '{partner}', which was already driven "
-            f"this session, and the pair did NOT read as wholly native: an occurrence read for one "
-            f"of the two joints did not come back POSITIVELY native - it reads as a REFERENCED "
-            f"component, sits under one, did not answer isReferencedComponent, or did not read as "
-            f"an occurrence at all. Driving BOTH members of a linked pair has killed the Fusion "
-            f"process in an xref/referenced context, and nothing read here places this pair outside "
-            f"one. " + moved_claim
-            + f"Rebuilding '{partner}' (delete+recreate, a new token) clears this refusal.")
+            f"Refused: '{resolved_name}' is motion-linked to '{partner}', already driven this "
+            f"session, and the pair did NOT read as wholly native - an occurrence of one joint "
+            f"reads as a REFERENCED component, sits under one, did not answer "
+            f"isReferencedComponent, or did not read as an occurrence at all. Driving BOTH members "
+            f"of a linked pair has killed the Fusion process. "
+            + moved_claim + f"Rebuilding '{partner}' (a new token) clears this refusal.")
 
     applied = {}
-    # Out-of-range commands are REFUSED before ANY assignment: Fusion IGNORES a beyond-limit
-    # drive (see _limit_refusal's measured fact) - assigning would produce a receipt about a
-    # value that never changed - and checking BOTH values first means a cylindrical drive can
-    # never half-apply on a limit refusal.
+    # Out-of-range commands are REFUSED before ANY assignment, since Fusion IGNORES a beyond-limit
+    # drive; checking BOTH values first keeps a cylindrical drive from half-applying.
     refusals = []
     rad = cm = None
     if angle_deg is not None:
@@ -523,16 +455,13 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
             + "; ".join(refusals) + ". Fusion IGNORES an out-of-range drive (the value stays "
             "where it was), so nothing would move. Command a value inside the limits (a command "
             "exactly AT a bound lands on it), or widen them with joint_edit.")
-    # The PRE-drive values, for the two read-back verdicts below. The equivalence gate: a read-back
-    # that only matches the command modulo 360 leaves two possible receipts - the mechanism sat there
-    # already, or it turned to get there - and only the before-value tells them apart. The mismatch
-    # verdict: a read-back that misses the command is reported WITH the move the value made, so a
-    # drive that moved and landed near the command is told apart from one that did not move at all.
+    # The PRE-drive values, for the two read-back verdicts below: only a before-value tells a
+    # read-back matching the command modulo 360 from a mechanism that already sat there, and a
+    # mismatch is reported WITH the move the value made.
     rv_before = safe(lambda: jm.rotationValue) if jtype in DRIVES_ANGLE else None
     sv_before = safe(lambda: jm.slideValue) if jtype in DRIVES_SLIDE else None
-    # The pre-drive placement of BOTH members, plus the joint's own motion vector for each DOF being
-    # commanded: sampling the same placements again after the drive is what says WHICH member the
-    # mechanism displaced, rather than only that the joint value took.
+    # The pre-drive placement of BOTH members, plus the joint's motion vector per commanded DOF:
+    # re-sampling those placements after the drive is what says WHICH member was displaced.
     occ_one, occ_two = safe(lambda: joint.occurrenceOne), safe(lambda: joint.occurrenceTwo)
     before_one, before_two = _placement(occ_one), _placement(occ_two)
     directions = {}
@@ -553,10 +482,8 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
             applied["distance"] = round(float(distance), 6)
     except Exception as e:
         # A cylindrical drive can land its rotation and then fail on the slide: the earlier
-        # assignment was ACCEPTED, so the session guard registers the attempt - it fails toward
-        # refusal, or the xref both-members refusal fails open on exactly the partial-drive sequence
-        # it exists for. Nothing on this path reads a value back, this joint's or the partner's, so
-        # the receipt names the accepted assignments and the read that settles the rest.
+        # assignment was ACCEPTED, so the session guard registers the attempt rather than failing
+        # open on exactly the partial-drive sequence it exists for.
         if applied:
             _driven_this_session.add(_reg_key(doc_id, joint))
             return error(f"Could not drive joint '{joint_name}': {e}. The assignments made before "
@@ -572,9 +499,8 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
         if rv is not None:
             acc = round(math.degrees(rv), 4)
             read_back["angle_deg"] = acc
-            # A revolute keeps the full turns it was commanded rather than normalizing (measured on
-            # 2705.1.4: commanding 750 reads back 750, commanding 390 reads back 390), and no view
-            # of the mechanism can tell such an angle from its mod-360 form. Publish both.
+            # A revolute keeps the full turns it was commanded rather than normalizing, and no view
+            # of the mechanism tells such an angle from its mod-360 form, so publish both.
             norm = round(acc % 360.0, 4)
             if abs(acc - norm) > 1e-9:
                 read_back["angle_deg_normalized"] = norm
@@ -590,20 +516,14 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
         "applied": applied,
         "value_now": read_back,
         "units": units,
-        "note": "Joint driven (the Drive Joints command) - the mechanism followed along this joint's "
-                "DOF. This pose is TRANSIENT: a recompute resets it unless captured. Call "
-                "assembly_capture_position (action='capture') to write it into the timeline as a "
-                "Position marker - a captured pose survives a full recompute. Driving again after a "
-                "capture arms a NEW pending snapshot; capture again to persist the new pose. There is "
-                "no parameter for a slide/rotation VALUE (the 'offset' param moves a DIFFERENT axis - "
-                "the frame Z - so it cannot persist a drive). Pair with assembly_get to confirm the "
-                "kinematics and view_screenshot to see it.",
+        "note": "Joint driven (the Drive Joints command). This pose is TRANSIENT: a recompute "
+                "resets it unless captured, so call assembly_capture_position (action='capture') "
+                "to write it into the timeline as a Position marker; driving again after a capture "
+                "arms a NEW pending snapshot. There is no parameter for a slide/rotation VALUE - "
+                "the 'offset' param moves the frame Z instead.",
     }
-    # value_now verify gate: a drive the mechanism silently ignored reads back its pre-drive
-    # value (measured: driven:true with value_now 0.0 vs applied 25 while an auto-grounded first
-    # component froze the whole chain - isFirstComponentGroundToParent sets that lock without any
-    # user action). Limits cannot explain a mismatch here: an out-of-range command was already
-    # refused before the assignment.
+    # value_now verify gate: a drive the mechanism silently ignored reads back its pre-drive value.
+    # Limits cannot explain a mismatch here - an out-of-range command was already refused above.
     mismatched = []
     # What each MISSED value did anyway, from its own before/after pair: the tri-states decide the
     # verdict's wording, the clauses publish the numbers behind it.
@@ -611,17 +531,18 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
     angle_landed = slide_landed = None      # per-value outcome, for the PARTIAL diagnosis below
     if "angle_deg" in applied and "angle_deg" in read_back:
         angle_landed = True
-        if abs(read_back["angle_deg"] - applied["angle_deg"]) > 1e-3:
+        if abs(read_back["angle_deg"] - applied["angle_deg"]) > _ANGLE_BAND_DEG:
             # 720 and 0 are the SAME physical pose: a command the read-back matches modulo 360 is
             # an equivalent pose, not a failed drive - the stored value kept a full-turn count the
             # command did not. Only a mismatch that survives the mod-360 test is a genuine no-take.
             d = abs(read_back["angle_deg"] - applied["angle_deg"]) % 360.0
-            if min(d, 360.0 - d) <= 1e-3:
+            if min(d, 360.0 - d) <= _ANGLE_BAND_DEG:
                 before_deg = round(math.degrees(rv_before), 4) if rv_before is not None else None
                 acc_txt = (f"value_now reads {read_back['angle_deg']} deg"
                            + (f" (= {read_back['angle_deg_normalized']} deg normalized)"
                               if "angle_deg_normalized" in read_back else ""))
-                if before_deg is not None and abs(read_back["angle_deg"] - before_deg) > 1e-3:
+                if (before_deg is not None
+                        and abs(read_back["angle_deg"] - before_deg) > _ANGLE_BAND_DEG):
                     # The value CHANGED: the drive moved the mechanism and landed pose-equivalent
                     # to the command. A real move, not a no-op - say so instead of claiming the
                     # pose was already there.
@@ -676,27 +597,22 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
             landed_bits.append(f"slide landed at {read_back['distance_mm']} mm")
         moved_at_all = any(m is True for m in moves)
         if landed_bits:
-            # One value read back AT the command: whatever held the other value did not hold this
-            # one, so no frozen-chain diagnosis is elected here. The missed value states what it did
-            # anyway, since a value that moved and stopped short is not a value that never moved.
-            # Nothing on this path reads the motion-link PARTNER, so nothing here says what it did.
+            # One value read back AT the command, so whatever held the other did not hold this one
+            # and no frozen-chain diagnosis is elected. Nothing here reads the motion-link PARTNER.
             return error(
                 f"PARTIAL drive of '{resolved_name}': " + ", ".join(landed_bits) + "; "
                 + "; ".join(mismatched) + " did NOT land the commanded value - "
                 + "; ".join(move_clauses) + ". Read the pose back with assembly_get.")
-        # A total no-take publishes OBSERVATIONS and elects a cause only where the reads prove one.
-        # A parent-locked occurrence EXISTING is no proof it held this drive: measured on a rack
-        # whose command was held by its linked pinion's enabled limit, parent-locked members were
-        # present and releasing them changed nothing.
+        # A total no-take publishes OBSERVATIONS and elects a cause only where the reads prove one:
+        # a parent-locked occurrence EXISTING is no proof it held this drive.
         locked, unanswered, census, census_whole = _ground_lock_census(design)
         if census is None:
             seen = ["the design's occurrence census did not read, so no ground_to_parent state "
                     "was seen"]
         else:
             # The scope word follows the walk: a census that stopped early asked only the rows it
-            # reached, so "no occurrence in the design" would state a design-wide negative over a
-            # subtree nothing looked in - the reading that rules grounding out. The count is a lower
-            # bound for the same reason, and the closing clause says so for both.
+            # reached, so a design-wide negative would cover a subtree nothing looked in. The count
+            # is a lower bound for the same reason.
             if locked:
                 seen = [f"ground_to_parent is SET on {_common.named_with_remainder(locked)}"]
             elif census_whole:
@@ -740,12 +656,9 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
             verdict = (" These observations do not single out a cause. Read the mechanism with "
                        "assembly_get (per-occurrence ground_to_parent, and the joint limits of every "
                        "joint in the chain), then re-drive.")
-        # The headline states which of the three the before/after pair shows: a value that moved
-        # and stopped off the command, one that never moved, or one whose move is unknown because
-        # the pre-drive value did not read. 'DID NOT TAKE' is reserved for the second - on a value
-        # that moved it reads as a frozen chain, which its own two reads contradict. That pair is
-        # this joint's OWN value: no headline says what the PARTNER did, which no read here
-        # establishes - the link's state is published among the observations instead.
+        # The headline states which of the three this joint's OWN before/after pair shows. 'DID NOT
+        # TAKE' is reserved for a value that never moved: on one that moved it would read as a
+        # frozen chain its own two reads contradict.
         if moved_at_all:
             headline = (f"Drive of '{resolved_name}' MOVED the joint but did NOT land the command - "
                         f"value_now reads " + "; ".join(mismatched) + "; "
@@ -757,6 +670,11 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
             headline = (f"Drive of '{resolved_name}' DID NOT TAKE - value_now reads "
                         + "; ".join(mismatched) + "; " + "; ".join(move_clauses) + ".")
         return error(headline + " Observed: " + "; ".join(seen) + "." + verdict)
+    if (applied.get("angle_deg") is not None and "angle_deg" in read_back
+            and _off_grid_deg(applied["angle_deg"])):
+        result["note"] += (f" NOTE: {applied['angle_deg']} deg is off the {_ANGLE_GRID_DEG} deg "
+                           f"grid rotationValue stores on; value_now reads "
+                           f"{read_back['angle_deg']} deg.")
     # WHICH member the drive displaced, from the placement samples taken either side of it. This is
     # an observation, never a prediction: the rows name the occurrence that moved and its measured
     # change, and a drive after which neither placement changed says exactly that.
@@ -816,22 +734,13 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
 
 
 TOOL_DESCRIPTION = (
-    "Drive a joint to a value - the API's Drive Joints command - moving the mechanism along that "
-    "joint's DOF. Give 'angle_deg' (revolute/cylindrical) and/or 'distance' in 'units' "
-    "(slider/cylindrical); rigid has no value, and a ball joint is posed with assembly_move. "
-    "An out-of-range command is REFUSED before anything moves - Fusion IGNORES a beyond-limit "
-    "drive rather than clamping (a command exactly AT a bound lands). A revolute stores the angle "
-    "you command VERBATIM, full turns included - 750 reads back 750, and commanding 30 next reads "
-    "back 30 - so value_now adds angle_deg_normalized ([0,360)) whenever the stored angle leaves "
-    "that range, and a read-back matching the command only modulo 360 reports equivalent_pose=true "
-    "(the same physical pose, not a failed drive). 'moved' names the member the drive displaced. "
-    "A drive is TRANSIENT: it arms a pending snapshot; a "
-    "recompute resets it unless captured - assembly_capture_position (action='capture') writes the "
-    "pose into the timeline. The 'offset' "
-    "param moves a DIFFERENT axis (frame Z) and cannot persist a drive. Motion-linked pairs: the "
-    "receipt says whether the link couples. Where it may, read the partner back rather than driving "
-    "it, and an xref/referenced pair refuses the SECOND member for the session - it has killed the "
-    "Fusion process."
+    "Drive a joint to a value - the API's Drive Joints command - moving the mechanism along its "
+    "DOF. 'angle_deg' (revolute/cylindrical) and/or 'distance' in 'units' (slider/cylindrical). An "
+    "out-of-range command is REFUSED before anything moves - Fusion IGNORES a beyond-limit drive "
+    "and never clamps, though a command AT a bound lands. A drive is TRANSIENT: a recompute resets "
+    "it unless assembly_capture_position(action='capture') keeps it. Motion-linked pairs: the "
+    "receipt says whether the link couples. Where it may, read the partner back rather than "
+    "driving it, and an xref/referenced pair refuses the SECOND member for the session."
 )
 
 tool = (

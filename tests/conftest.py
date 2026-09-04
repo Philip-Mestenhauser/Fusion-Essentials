@@ -517,9 +517,8 @@ def fusion_fake(live_type=None, facts=(), factory_for=None, scenario_double=None
     ``scenario_double`` classifies a double that impersonates no live type at all, its string being
     the reason.
 
-    test_api_fact_provenance.py resolves every id against measure_api.ROWS, so a row renamed or
-    dropped from the registry turns each fake citing it red. Nothing reads the prose around a
-    declaration.
+    test_fake_shapes_exist.py resolves every id against measure_api.ROWS, so a row renamed or
+    dropped from the registry turns each fake citing it red.
     """
     declaration = {"live_type": live_type, "facts": tuple(facts), "factory_for": factory_for,
                    "scenario_double": scenario_double}
@@ -624,7 +623,8 @@ class _FakePolygonMesh:
 
 
 @fusion_fake(live_type="MeshBody",
-             facts=("shape-dump-mesh-world", "meshbody-volume-open-returns-zero"))
+             facts=("shape-dump-mesh-world", "meshbody-volume-open-returns-zero",
+                    "meshbody-assembly-context-proxy"))
 class MeshBody:
     """Matches type(entity).__name__ == 'MeshBody' - the shared mesh fake every mesh-feature tool
     test builds on (repair, shell, smooth, separate, reverse_normal).
@@ -647,9 +647,14 @@ class MeshBody:
     normals). A test flips one on the instance to break that read mid-flight."""
     def __init__(self, name="Scan1", tri=12, nodes=8, is_closed=True, volume=1.0, coords=(),
                  normals=(), token=None, parent=None, counts_readable=True, volume_readable=True,
-                 closed_readable=True, mesh_readable=True):
+                 closed_readable=True, mesh_readable=True, lifts=True):
         self.name = name
         self.isValid = True
+        # A NATIVE body reads assemblyContext None and nativeObject None; createForAssemblyContext
+        # mints the proxy that answers both. `lifts` False models a lift handing nothing back.
+        self.assemblyContext = None
+        self.nativeObject = None
+        self._lifts = lifts
         self._dead = False
         self._display = _FakeTriangleMesh(tri, nodes)
         self._is_closed = is_closed
@@ -708,6 +713,12 @@ class MeshBody:
             raise RuntimeError("3 : the volume of this body is unavailable")
         return 0.0
 
+    def createForAssemblyContext(self, occurrence):
+        """This body IN `occurrence` - a _MeshProxy VIEW onto it (measured
+        meshbody-assembly-context-proxy / meshbody-proxy-token-differs), or None when `lifts`
+        is off."""
+        return _MeshProxy(self, occurrence) if self._lifts else None
+
 
 @fusion_fake(scenario_double="a harness affordance, not a stand-in for any live type: it publishes "
                              "no member of its own and delegates every read to the fake it wraps, "
@@ -731,22 +742,14 @@ class _EntityProxy:
 
 @fusion_fake(factory_for="_EntityProxy")
 def entity_proxy(obj):
-    """A DISTINCT Python object standing for the same entity - one per reference a test hands out.
-
-    The CONTRACT this fake declares, which no measurement row carries: a python object identity
-    never answers an is-it-the-same question, for bodies, faces, edges and components alike. Holding
-    code to that is what keeps an identity-keyed comparison distinguishable from a token-keyed one -
-    reusing the SAME object for two references makes the two indistinguishable, which is exactly how
-    that class of defect survives a green suite.
-
-    Every read delegates to `obj`, so a mutation a fake applies is visible through each proxy. A
-    harness affordance, deliberately NOT a method on the fakes - they expose only attributes the
-    live types have.
-    """
+    """A DISTINCT Python object for the same entity, every read delegated to `obj` (measured:
+    entity-proxy-token-shared - six wrappers of one entity share one token and no two are the
+    same object, so identity never answers an is-it-the-same question)."""
     return _EntityProxy(obj)
 
 
-@fusion_fake(live_type="BRepBody", facts=("shape-dump-design-world",))
+@fusion_fake(live_type="BRepBody", facts=("shape-dump-design-world", "body-proxy-token-differs",
+                                          "entity-proxy-token-shared"))
 class _OccurrenceProxy(_EntityProxy):
     """See ``body_proxy``. Every read but the three that make a proxy a proxy goes to the native."""
 
@@ -779,20 +782,45 @@ class _OccurrenceProxy(_EntityProxy):
         return object.__getattribute__(self, "_occurrence")
 
 
+@fusion_fake(live_type="MeshBody", facts=("shape-dump-mesh-world",
+                                          "meshbody-assembly-context-proxy",
+                                          "meshbody-proxy-token-differs"))
+class _MeshProxy(_EntityProxy):
+    """See ``MeshBody.createForAssemblyContext``. A VIEW onto the native: every read but the three
+    that make a proxy a proxy goes to it, so a flip on the native (deleteMe, isClosed, a readability
+    switch) is visible through this proxy the way it is live."""
+
+    def __init__(self, native, occurrence=None):
+        _EntityProxy.__init__(self, native)          # explicit: zero-arg super() and __class__ clash
+        # One token PER PLACEMENT, MEASURED: a proxy's token differs from its native's and from the
+        # other placement's, so a handle minted in one instance cannot resolve to the other.
+        object.__setattr__(self, "_token", f"MPROXY::{getattr(occurrence, 'name', None)}"
+                                           f"::{getattr(native, 'entityToken', None)}")
+        object.__setattr__(self, "_occurrence", occurrence)
+
+    @property
+    def __class__(self):
+        # A proxy IS a MeshBody live, and mesh code isinstance-checks adsk.fusion.MeshBody.
+        return type(object.__getattribute__(self, "_obj"))
+
+    @property
+    def entityToken(self):
+        return object.__getattribute__(self, "_token")
+
+    @property
+    def nativeObject(self):
+        return object.__getattribute__(self, "_obj")
+
+    @property
+    def assemblyContext(self):
+        return object.__getattribute__(self, "_occurrence")
+
+
 @fusion_fake(factory_for="_OccurrenceProxy")
 def body_proxy(native, occurrence=None, entity_token=None):
-    """The occurrence PROXY of `native` - what an occurrence's bRepBodies hands back for a body its
-    component owns natively. The members it publishes are BRepBody's own; the proxy CONTRACT below
-    is this fake's, and no measurement row carries it.
-
-    That contract is the reason a token cannot be the de-dup key on its own: a proxy's entityToken
-    DIFFERS from its native's (each is stable across re-fetches of that wrapper), while
-    ``proxy.nativeObject`` IS the native and a native's own ``nativeObject`` reads None. One physical
-    body therefore answers two tokens, and a walk that reaches it both natively and through an
-    occurrence sees two entities unless it keys on ``(nativeObject or self).entityToken``. `occurrence`
-    is the Occurrence the proxy hangs off (its fullPathName is the body's context); every other read
-    and write delegates to `native`, so a mutation is visible through both.
-    """
+    """The occurrence PROXY of `native` (measured: body-proxy-token-differs - a proxy's entityToken
+    differs from its native's, proxy.nativeObject IS the native, a native's nativeObject reads None,
+    so a de-dup keys on (nativeObject or self).entityToken); every other read delegates to `native`."""
     return _OccurrenceProxy(native, occurrence, entity_token)
 
 
@@ -1063,15 +1091,18 @@ class Circle3D:
 class FakeOperation:
     """A CAM Operation leaf. Every attribute is real per live_api_facts.SHAPES['Operation'].
 
-    state_readable=False models an operationState whose READ raises (the _InspPoint shape): the one
-    lifecycle member that answers nothing while the flags beside it read normally. Callers
-    read it through safe() with no default, so the facts carry operation_state None - every value
-    operationState CAN answer is itself a state, so a coerced default would publish one of them off
-    a read that never happened."""
+    state_readable=False drives the DEFENSIVE branch for an operationState that will not read (the
+    _InspPoint shape) - no walk of a live document here has answered one, so it is a guard rather
+    than a measured live shape. Callers read the member through safe() with no default, so the facts
+    carry operation_state None - every value operationState CAN answer is itself a state, so a
+    coerced default would publish one of them off a read that never happened."""
     def __init__(self, name, has_toolpath=True, valid=True, suppressed=False, shown=False,
                  operation_state=0, has_error=False, error="", has_warning=False, warning="",
-                 state_readable=True):
+                 state_readable=True, strategy="contour2d"):
         self.name = name
+        # Operation.strategy - 'manual' is the Manual NC pass-through, which carries no toolpath by
+        # construction and is excluded from the empty-toolpath class.
+        self.strategy = strategy
         self.hasToolpath = has_toolpath
         self.isToolpathValid = valid
         self.isSuppressed = suppressed
@@ -1175,11 +1206,60 @@ def wcs_params(origin_mode=None, orientation_mode=None, origin=None, z_axis=None
     return _NamedCollection(params)
 
 
+class _Strategy:
+    """An OperationStrategy as the entitlement seam reads it - only isGenerationAllowed. Named
+    without a Fake prefix because OperationStrategy has no live SHAPES dump to sweep against
+    (test_fake_shapes_exist), like _SetupParam above. allowed=None makes the flag itself RAISE."""
+
+    def __init__(self, allowed):
+        self._allowed = allowed
+
+    @property
+    def isGenerationAllowed(self):
+        if self._allowed is None:
+            raise RuntimeError("isGenerationAllowed is unreadable on this build")
+        return self._allowed
+
+
+def strategy_factory(table, seen=None):
+    """A stand-in for _cam_common._create_strategy (the OperationStrategy.createFromString seam
+    workspace_orient's capability block and cam_generate's launch pre-flight share): `table` maps a
+    strategy name -> True / False / None (None => the flag raises when read). A name ABSENT from the
+    table RAISES the way the live factory does on an unknown/renamed strategy, which must degrade to
+    null. `seen` counts the calls per name, for pinning the probe-once-per-strategy contract."""
+    def create(name):
+        if seen is not None:
+            seen[name] = seen.get(name, 0) + 1
+        if name not in table:
+            raise RuntimeError(f"3 : Unknown strategy: {name}")
+        return _Strategy(table[name])
+    return create
+
+
 @fusion_fake(factory_for="_NamedCollection")
-def make_cam(*setups):
+def make_cam(*setups, machining_times=None):
     """A minimal CAM product carrying `setups` (count/item protocol) - pair with
-    `monkeypatch.setattr(mod, "get_cam", lambda: (cam, None))`."""
-    return types.SimpleNamespace(setups=_NamedCollection(list(setups)))
+    `monkeypatch.setattr(mod, "get_cam", lambda: (cam, None))`.
+
+    getMachiningTime answers off `machining_times`, a {operation name: seconds} mapping - the
+    second signal the EMPTY-toolpath class reads (an operation that generated an empty toolpath
+    still reads hasToolpath True and answers 0.0 s). An operation the mapping does not carry RAISES
+    '3 : Machining time could not be calculated.', which is what an operation holding no toolpath
+    answers, so a test that wants a time has to name the operation it wants one for. The call
+    records into .machining_time_calls, for a test that cares how often it was made."""
+    times = dict(machining_times or {})
+    calls = []
+
+    def _machining_time(obj, *knobs):
+        calls.append((obj, knobs))
+        name = getattr(obj, "name", None)
+        if name not in times:
+            raise RuntimeError("3 : Machining time could not be calculated.")
+        return types.SimpleNamespace(machiningTime=times[name])
+
+    return types.SimpleNamespace(setups=_NamedCollection(list(setups)),
+                                 getMachiningTime=_machining_time,
+                                 machining_time_calls=calls)
 
 
 # ── inspection results (CAM.inspectionResults) - the recorded probing measurements ────────────────
@@ -1231,9 +1311,10 @@ class _InspMeasure:
 
 @fusion_fake(factory_for="_NamedCollection")
 def make_inspection_cam(measures):
-    """A CAM product whose inspectionResults is a collection of `measures`. measures=None models one
-    of the two zero-measure answers the read path handles - the property answering None rather than
-    a count-0 collection - and no measurement row carries it."""
+    """A CAM product whose inspectionResults is a collection of `measures`. measures=None drives the
+    DEFENSIVE branch for the property answering None: a CAM product that never recorded a probe
+    reads a COUNT-0 CAMInspectionResults instead, and a document carrying no CAM product never
+    reaches the read at all (itemByProductType raises)."""
     return types.SimpleNamespace(
         inspectionResults=None if measures is None else _NamedCollection(list(measures)))
 
@@ -1640,12 +1721,11 @@ def install(mod, design, *, cast_design=True, object_collection=True):
 
 
 @fusion_fake(live_type="ObjectCollection",
-             facts=("shape-dump-design-world", "objectcollection-protocol"))
+             facts=("shape-dump-design-world", "objectcollection-protocol",
+                    "objectcollection-duplicate-add-takes"))
 class _FakeObjectCollection:
-    """ObjectCollection: add() ANSWERS whether the collection took the object (live returns a bool),
-    so a tool that reads that answer sees a real one. `refuse` holds the objects it rejects - the
-    silent-False case a collection-building tool has to report rather than run on an empty
-    collection."""
+    """ObjectCollection: add() answers a bool; a duplicate add is TAKEN live (measured: True twice,
+    count 2), so the False here is `refuse`'s own silent rejection, never a de-dup."""
     def __init__(self, refuse=()):
         self._items = []
         self._refuse = list(refuse)

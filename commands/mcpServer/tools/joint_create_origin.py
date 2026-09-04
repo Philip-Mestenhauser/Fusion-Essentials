@@ -1,14 +1,8 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Creates a Joint Origin (a reusable coordinate frame / WCS anchor) at an agent-specified or COMPUTED
-anchor - anchor='coordinates'|'sketch_line'|'sketch_point'|'geometry'|'bbox_center'|'face_center'.
-bbox_center places the frame at a body/occurrence's world bounding-box CENTER, oriented so Z aligns to
-orient_axis (world x/y/z, or a handle/name at an edge, sketch line or construction axis);
-face_center sits at a planar face's centroid with Z = the face normal. sketch_line/geometry/bbox_center/face_center orient the frame; a bare
-coordinate/point is world-aligned (Z = world Z). A computed anchor is read back and reported so the
-caller can verify the point it landed on. WRITES.
-"""
+"""Create a Joint Origin - a reusable coordinate frame - at a specified or COMPUTED anchor. A
+computed anchor is read back and reported so the caller can verify where it landed. WRITES."""
 
 import adsk.core
 import adsk.fusion
@@ -28,10 +22,8 @@ _TARGETS = ("at", "origin")
 _ANCHORS = ("coordinates", "sketch_line", "sketch_point", "geometry", "bbox_center", "face_center")
 _KEYPOINTS = {"start": 0, "middle": 1, "end": 2, "center": 3}
 
-_ANCHOR_CHOICE = _inputs.Choice("anchor", list(_ANCHORS), default="coordinates",
-                                description="What the joint origin is built from.")
-_TARGET_CHOICE = _inputs.Choice("target", list(_TARGETS), default="at",
-                                description="For anchor=coordinates: place at x,y,z, or at the model origin.")
+_ANCHOR_CHOICE = _inputs.Choice("anchor", list(_ANCHORS), default="coordinates")
+_TARGET_CHOICE = _inputs.Choice("target", list(_TARGETS), default="at")
 _KEYPOINT_CHOICE = _inputs.Choice("keypoint", list(_KEYPOINTS), default="start",
                                   description="Where on the line/edge to locate the frame.")
 
@@ -39,23 +31,23 @@ _KEYPOINT_CHOICE = _inputs.Choice("keypoint", list(_KEYPOINTS), default="start",
 # comes from that real geometry (a planar face's normal, a cylinder/edge's axis, a hole edge).
 # anchor='face_center' reuses this same 'geometry' handle, requiring a PLANAR face.
 _GEOM = _inputs.GeometryHandle("geometry", require="any",
-                               description="A find_geometry handle to anchor on (anchor=geometry: face/edge/vertex; anchor=face_center: a PLANAR face).")
+                               description="geometry: a face/edge/vertex; face_center: a PLANAR face.")
 
 # anchor='bbox_center': the thing whose WORLD bounding-box center becomes the origin. TargetRef resolves
 # a body (handle or name), an occurrence (fullPathName), or a component - and refuses an ambiguous name.
 _BBOX_TARGET = _inputs.TargetRef("bbox_target", allow=("body", "occurrence", "component"),
-                                 description="anchor='bbox_center': the body/occurrence/component whose world bounding-box CENTER becomes the origin.")
+                                 description="bbox_center: whose world bounding-box CENTER becomes the origin.")
 
 # anchor='bbox_center': the axis the frame's Z is aligned to (world x/y/z, or a handle/name at a
 # straight edge, sketch line or construction axis the axis runs along). 'flip' reverses it 180 deg.
 _ORIENT_AXIS = _inputs.AxisRef("orient_axis", default="z",
-                               description="anchor='bbox_center': the axis the frame's Z aligns to.")
+                               description="bbox_center: the axis the frame's Z aligns to.")
 
-# The component whose jointOrigins collection RECEIVES the origin - measured:
-# sub.component.jointOrigins.createInput(geo) + .add(inp) lands a JO whose parentComponent IS the
-# sub-component, which is what lets a JO serve as the sub-component side of a joint. Omitted = root.
+# The component whose jointOrigins collection RECEIVES the origin: adding through
+# sub.component.jointOrigins lands a JO whose parentComponent IS the sub-component, which is what
+# lets a JO serve as the sub-component side of a joint. Omitted = root.
 _COMPONENT = _inputs.OccurrenceRef("component", required=False,
-    description="Occurrence whose component receives the joint origin; omit for root.")
+    description="Occurrence whose component receives the origin; omit for root.")
 
 
 def _vec(v):
@@ -78,13 +70,10 @@ def _is_identity(matrix):
 
 
 def _sits_at_world_origin(occ):
-    """True when `occ` AND every occurrence it nests inside carry an identity transform - the one case
-    where a world coordinate and that component's own coordinate are the same numbers. False when a
-    transform moves/rotates it, None when a transform could not be read.
-
-    The whole chain is checked, not just the leaf: an occurrence placed at identity INSIDE a moved
-    parent is still displaced in world space. Occurrence.transform is relative to the PARENT
-    component, so nothing but the chain answers this."""
+    """True when `occ` AND every occurrence it nests inside carry an identity transform - the one
+    case where a world coordinate and that component's own coordinate are the same numbers; None
+    when a transform could not be read. Occurrence.transform is relative to the PARENT component,
+    so only the whole chain answers this."""
     node = occ
     for _ in range(64):      # a path this deep is a cycle, not an assembly
         if node is None:
@@ -249,13 +238,9 @@ def _geometry_from_args(design, comp, anchor, target, x_cm, y_cm, z_cm,
         return None, None, "geometry handle is not a face/edge/vertex."
 
     if anchor == "coordinates":
-        # Anchor on the component ORIGIN (a fixed, always-present point) and carry the target as the JO's
-        # own offsetX/Y/Z PARAMETERS (applied on the input in the handler). This makes the reported
-        # location REAL and recompute-robust - NOT an undimensioned point floating in a hidden auto-sketch
-        # (which reads plausibly but drifts on recompute and spawns 0.00mm parameters). The frame stays
-        # world-aligned, so the offsets map straight to X/Y/Z of THIS component's space - the root's
-        # (world) unless the handler resolved a sub-component, which it only does at world-origin
-        # placement. `comp` is the NATIVE component, so its origin point is the native one.
+        # Anchor on the component ORIGIN and carry the target as the JO's own offsetX/Y/Z
+        # parameters: an undimensioned point in a hidden auto-sketch drifts on recompute. The frame
+        # stays world-aligned, so the offsets map straight to X/Y/Z of THIS component's space.
         origin_pt = safe(lambda: comp.originConstructionPoint)
         if origin_pt is None:
             return None, None, "coordinates: the component has no origin construction point to anchor on."
@@ -269,12 +254,9 @@ def _geometry_from_args(design, comp, anchor, target, x_cm, y_cm, z_cm,
     if anchor in ("sketch_line", "sketch_point"):
         if not (sketch_name or "").strip():
             return None, None, f"anchor '{anchor}' needs 'sketch_name'."
-        # Whole-design resolve (every component, no preference among them), so a JO can anchor on a
-        # sketch line/point drawn in an activated sub-component - not only one in the root component.
-        # A name SEVERAL sketches carry comes back with its owners named, so the refusal cannot read
-        # "No sketch named X" over sketches that exist, and 'sketch_component' narrows it. That scope
-        # is NOT the handler's 'component': that one names the occurrence RECEIVING the joint origin,
-        # and the sketch the JO anchors on can be owned by a different component entirely.
+        # Whole-design resolve, so a JO can anchor on a sketch drawn in a sub-component;
+        # 'sketch_component' narrows a shared name. That scope is NOT the handler's 'component',
+        # which names the occurrence RECEIVING the joint origin.
         sketch, ambiguous = _sketch_detail.scoped_sketch(
             design, sketch_name.strip(), sketch_component, "sketch_component")
         if ambiguous:
@@ -349,10 +331,9 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
     else:
         x_cm, y_cm, z_cm = x * scale, y * scale, z * scale
 
-    # 'component' names the occurrence whose component RECEIVES the origin (its jointOrigins
-    # collection); omitted keeps today's root landing. OccurrenceRef refuses an ambiguous name rather
-    # than grabbing an instance. The component is the NATIVE one (occ.component), so the anchor and
-    # the offsets it carries are built in that component's own space, the way the platform stores them.
+    # 'component' names the occurrence whose component RECEIVES the origin; omitted lands at root.
+    # The component is the NATIVE one, so the anchor and its offsets are built in that component's
+    # own space, the way the platform stores them.
     comp = design.rootComponent
     target_occ = None
     if (component or "").strip():
@@ -364,10 +345,8 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
             return error(f"'component': occurrence '{safe(lambda: target_occ.fullPathName) or component}' "
                          "has no readable component to receive the joint origin.")
         comp = native
-        # A WORLD-coordinate anchor (an x,y,z or a world bounding-box center) only agrees with the
-        # component's own space while that component sits at the world origin unrotated. Anything
-        # else is refused rather than placed wrong; an entity anchor carries no coordinates of ours,
-        # so it is not gated here.
+        # A WORLD-coordinate anchor agrees with the component's own space only while that component
+        # sits at the world origin unrotated; an entity anchor carries no coordinates of ours.
         world_anchor = (anchor == "bbox_center"
                         or (anchor == "coordinates"
                             and any(abs(v) > 1e-12 for v in (x_cm, y_cm, z_cm))))
@@ -439,10 +418,8 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
 
     jo_name_final, rename_warning = apply_rename(joint_origin, name)
 
-    # anchor='coordinates': prove the parametric offsets took by reading them BACK off the created JO -
-    # a value that didn't stick (or a 0 where a coordinate was asked) is a mislocated origin, not
-    # success. The offset parameters ARE the reported location (a real value per axis), so a
-    # plausible-looking report cannot hide an unconstrained point that drifts on recompute.
+    # anchor='coordinates': prove the parametric offsets took by reading them BACK off the created
+    # JO - a value that did not stick is a mislocated origin, not success.
     offset_params = None
     if coord_off is not None:
         ox, oy, oz = coord_off
@@ -504,12 +481,11 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
     "component": landed_name or want_name,
     "component_verified": landed_here is True,
     "joint_origin_count": safe(lambda: comp.jointOrigins.count),
-    "note": ("Joint origin created. frame_axes shows the resulting Z/X/Y directions. For an oriented "
-        "frame: anchor='bbox_center' (Z = orient_axis) / 'face_center' (Z = face normal) / a sketch "
-        "line (draw it with sketch_add_3d_line). anchor='coordinates' is world-aligned and PARAMETRIC - "
-        "the location is held by real offsetX/Y/Z parameters from the model origin (offset_parameters, "
-        "read back to verify), so it survives recompute. A computed anchor reports computed_anchor + "
-        "origin_readback. View with view_screenshot."),
+    "note": ("Joint origin created. frame_axes shows the resulting Z/X/Y directions. For an "
+        "oriented frame: anchor='bbox_center' (Z = orient_axis) / 'face_center' (Z = face normal) "
+        "/ a sketch line. anchor='coordinates' is world-aligned and PARAMETRIC - the location is "
+        "held by offsetX/Y/Z parameters from the model origin (offset_parameters, read back). A "
+        "computed anchor reports computed_anchor + origin_readback."),
     }
     if anchor == "coordinates":
         # The authoritative, read-back location (the verified offset parameters); falls back to the
@@ -523,10 +499,9 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
         if offset_params is not None:
             payload["offset_parameters"] = offset_params
     if landed_here is not True:
-        # Every un-proven landing is disclosed, not just the one where parentComponent read. An
-        # UNREADABLE parentComponent is the weaker read of the two, and it is also the one whose
-        # 'component' field falls back to the name the CALLER asked for - so staying silent there
-        # published the request as the landing. Each clause names the read that actually failed.
+        # Every un-proven landing is disclosed. An UNREADABLE parentComponent is the weaker read,
+        # and its 'component' field falls back to the name the CALLER asked for - so each clause
+        # names the read that actually failed.
         detail = ("was read but could not be matched against the requested component "
                   f"'{want_name}'" if landed_comp is not None else
                   f"did not read at all, so 'component' below repeats the requested '{want_name}' "
@@ -568,22 +543,13 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
 
 
 TOOL_DESCRIPTION = (
-    "Create a Joint Origin (a reusable coordinate frame anchor). 'anchor' picks how it's placed:\n"
-    "- coordinates (default): at x,y,z, or target='origin'. World-aligned, root-absolute; held by "
-    "parametric offsetX/Y/Z from the model origin (dNN params named in the result for param_set); "
-    "with 'component' the offsets run from THAT component's origin, so x,y,z is refused unless it "
-    "sits at the world origin unrotated.\n"
-    "- sketch_line: on a sketch line (sketch_name + entity_index + keypoint); Z runs along it.\n"
-    "- sketch_point: on a sketch point (position only).\n"
-    "- geometry: on a find_geometry handle - planar face (Z=normal), cylinder/cone face or edge "
-    "(axis), or vertex (position); 'keypoint' picks where on an edge.\n"
-    "- bbox_center: at bbox_target's world bounding-box center, Z aligned to 'orient_axis' (world "
-    "x/y/z or an edge/line handle; 'flip' reverses it).\n"
-    "- face_center: at a planar face's centroid ('geometry'), Z = the face normal.\n"
-    "Optional 'name'. Returns frame_axes (Z/X/Y). Lands on the root component unless 'component' "
-    "names the occurrence/component to receive it. "
-    "Placement is a snapshot - bbox_center/face_center don't track a later resize; for that, use "
-    "anchor='coordinates' with offset expressions on the dNN params."
+    "Create a Joint Origin (a reusable coordinate frame anchor). 'anchor' picks the placement: "
+    "coordinates (x,y,z or target='origin'; world-aligned, held by parametric offsetX/Y/Z named in "
+    "the result), sketch_line (Z along the line), sketch_point (position only), geometry (planar "
+    "face Z=normal, cylinder/cone face or edge axis, or vertex), bbox_center (Z along "
+    "'orient_axis'), face_center (Z = the face normal). Returns frame_axes. Lands on the root "
+    "unless 'component' names the occurrence to receive it, and does not track a later resize. "
+    "Feed it to joint_create / joint_at_geometry by name or handle."
 )
 
 tool = (
@@ -592,21 +558,21 @@ tool = (
     .add_input_property("geometry", _GEOM.schema())
     .add_input_property(*_TARGET_CHOICE.as_property())
     .add_input_property(*_inputs.UNITS.as_property())
-    .add_input_property("x", {"type": "number", "description": "X coordinate (anchor=coordinates, target=at)."})
-    .add_input_property("y", {"type": "number", "description": "Y coordinate (anchor=coordinates, target=at)."})
-    .add_input_property("z", {"type": "number", "description": "Z coordinate (anchor=coordinates, target=at)."})
+    .add_input_property("x", {"type": "number", "description": "X coordinate."})
+    .add_input_property("y", {"type": "number", "description": "Y coordinate."})
+    .add_input_property("z", {"type": "number", "description": "Z coordinate."})
     .add_input_property("sketch_name", {"type": "string",
-            "description": "Sketch holding the anchor line/point (anchor=sketch_line/sketch_point)."})
+            "description": "Sketch holding the anchor line/point."})
     .add_input_property(*_sketch_detail.component_scope("sketch_component",
                                                         narrows="sketch_name"))
     .add_input_property("entity_index", {"type": "integer",
-            "description": "Index of the line/point within the sketch (default 0)."})
+            "description": "Index within the sketch."})
     .add_input_property(*_KEYPOINT_CHOICE.as_property())
     .add_input_property(*_BBOX_TARGET.as_property())
     .add_input_property(*_ORIENT_AXIS.as_property())
     .add_input_property("flip", {"type": "boolean",
-            "description": "Flip the oriented Z axis 180 deg (anchor=bbox_center)."})
-    .add_input_property("name", {"type": "string", "description": "Optional name for the joint origin."})
+            "description": "Flip the oriented Z axis 180 deg."})
+    .add_input_property("name", {"type": "string", "description": "Name for the joint origin."})
     .add_input_property(*_COMPONENT.as_property())
     .strict_schema()
 )

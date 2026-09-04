@@ -29,11 +29,8 @@ _MAX_CLASS_MEMBERS = 200
 
 
 def _load_modules(namespace_filter):
-    """Return [(dotted_name, module)] for the API modules in scope.
-
-    namespace_filter (e.g. "adsk.cam" or "adsk.fusion.Extrude") narrows the modules walked: only
-    modules whose dotted name is a prefix of, or prefixed by, the filter's module part are kept.
-    """
+    """[(dotted_name, module)] for the API modules in scope - namespace_filter ('adsk.cam',
+    'adsk.fusion.Extrude') keeps only modules on the same dotted path as its module part."""
     want_mod = None
     if namespace_filter:
         # The filter may be a namespace ("adsk.cam") or namespace.Class ("adsk.fusion.Extrude").
@@ -190,12 +187,9 @@ def handler(searchPattern: str = "", apiCategory: str = "all",
 
 TOOL_DESCRIPTION = (
     "Search the LIVE Fusion API documentation (classes, methods, properties, enum values) by regex, "
-    "returning names, signatures, and docstrings. This introspects the adsk.* Python modules in the "
-    "running Fusion process, so the docs ALWAYS match the installed version - nothing is bundled or "
-    "hosted. Use it BEFORE writing an sys_execute_script to confirm exact signatures and behaviour "
-    "(e.g. how getOrientedBoundingBox orients its box, what generateAllToolpaths returns). "
-    "'searchPattern' is a case-insensitive regex over names (and over docstrings when apiCategory is "
-    "'description' or 'all')."
+    "returning names, signatures, and docstrings - read from the adsk.* modules in the running "
+    "process, so they always match the installed version. Use it BEFORE writing a "
+    "sys_execute_script to confirm exact signatures and behaviour."
 )
 
 api_doc_tool = (

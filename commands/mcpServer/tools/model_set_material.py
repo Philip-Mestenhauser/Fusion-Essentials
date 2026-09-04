@@ -4,10 +4,8 @@
 """MCP building block: assign a PHYSICAL material (a density-bearing adsk.core.Material) to a body,
 occurrence, component, or the whole design. WRITES.
 
-Distinct from appearance_set (cosmetic color): this sets the mass-bearing material, so model_inspect's
-mass/density numbers reflect reality. The material is looked up by exact name across the document's own
-materials AND every loaded material library; a name matching nothing returns nearest candidates, and a
-name present in more than one library is refused as ambiguous.
+Distinct from appearance_set (cosmetic color): this one carries the mass and density model_inspect
+reports.
 """
 
 import difflib
@@ -25,10 +23,9 @@ from . import _outputs
 
 app = adsk.core.Application.get()
 
-# A physical material lives on a BRepBody, a MeshBody, or a Component (whole design = root
-# component); a FACE carries none. MeshBody.material is settable and echoes on read-back
-# (live-verified 2705.0.87: default 'Steel', assignment landed + re-read) - an unassigned mesh
-# silently carries default steel density, which is exactly why the walk must reach meshes.
+# A physical material lives on a BRepBody, a MeshBody or a Component (whole design = root
+# component); a FACE carries none. MeshBody.material is settable and echoes on read-back, and an
+# unassigned mesh carries a default steel density.
 _TARGET = _inputs.TargetRef("target", allow=("body", "mesh", "occurrence", "component", "design"))
 
 RETURNS = [
@@ -99,6 +96,18 @@ def _density_kg_per_m3(entity):
     return round(d * 1e6, 3) if isinstance(d, (int, float)) else None
 
 
+def _owner_name(body):
+    """The name of the component a body belongs to, or None."""
+    return safe(lambda: body.parentComponent.name)
+
+
+def _body_label(row):
+    """'<component>/<body>' for one applied/failed row - a body name is unique only inside its own
+    component, so a design-wide walk can emit several rows reading 'Body1'."""
+    comp = row.get("component")
+    return f"{comp}/{row.get('body')}" if comp else str(row.get("body"))
+
+
 def handler(target: str = "", material: str = "") -> dict:
     """Assign a physical material to the resolved target, then read back each body's material + density
     to prove it took. WRITES."""
@@ -114,24 +123,42 @@ def handler(target: str = "", material: str = "") -> dict:
     if terr:
         return terr if isinstance(terr, dict) else error(terr)
     entity, kind = resolved
-    if kind == "design":
-        kind = "component" # whole design = the root component; assign to all its bodies
+    whole_design = kind == "design"
+    if whole_design:
+        kind = "component" # whole design = every component's bodies, not just the root's
 
     # Collect the bodies to assign to. A component/design/occurrence assigns PER BODY (so
     # model_inspect's per-body mass is trustworthy and a partial failure stays visible); a body target
     # is just that one body.
+    comps, walked = None, None
     if kind in ("body", "mesh"):
-        bodies = [entity]
+        bodies = [(_owner_name(entity), entity)]
         desc = f"{'mesh ' if kind == 'mesh' else ''}body '{safe(lambda: entity.name)}'"
     elif kind == "occurrence":
         # BRep AND mesh bodies: an unreached mesh keeps default steel density, silently wrong mass.
-        bodies = (list(iter_collection(safe(lambda: entity.bRepBodies)))
-                  + list(iter_collection(safe(lambda: entity.component.meshBodies))))
+        occ_owner = safe(lambda: entity.component.name)
+        bodies = [(occ_owner, b) for b in
+                  (list(iter_collection(safe(lambda: entity.bRepBodies)))
+                   + list(iter_collection(safe(lambda: entity.component.meshBodies))))]
         desc = f"occurrence '{safe(lambda: entity.fullPathName) or safe(lambda: entity.name)}'"
     else: # component
-        bodies = (list(iter_collection(safe(lambda: entity.bRepBodies)))
-                  + list(iter_collection(safe(lambda: entity.meshBodies))))
-        desc = f"component '{safe(lambda: entity.name)}'"
+        # An empty target is the WHOLE design: a body lives on the component that owns it, so a
+        # root-only read misses every body held by a child component. all_components DEGRADES to
+        # [root] when the design's own collection will not read, which `walked` keeps apart.
+        walked = safe(lambda: design.allComponents) is not None if whole_design else None
+        comps = _common.all_components(design) if whole_design else [entity]
+        bodies = []
+        for c in comps:
+            cname = safe(lambda c=c: c.name)
+            bodies += [(cname, b) for b in
+                       (list(iter_collection(safe(lambda c=c: c.bRepBodies)))
+                        + list(iter_collection(safe(lambda c=c: c.meshBodies))))]
+        if not whole_design:
+            desc = f"component '{safe(lambda: entity.name)}'"
+        elif walked:
+            desc = "the whole design (%d component(s))" % len(comps)
+        else:
+            desc = "the design's ROOT component (its component list did not read)"
 
     if not bodies:
         return error(f"{desc} has no bodies to assign a material to.")
@@ -139,34 +166,42 @@ def handler(target: str = "", material: str = "") -> dict:
     want_name = safe(lambda: mat.name) or (material or "").strip()
     applied = []
     failed = []
-    for b in bodies:
+    for owner, b in bodies:
         bname = safe(lambda b=b: b.name)
         try:
             # The MUTATION - NOT safe-wrapped so a genuine failure raises here and is reported per
             # body, never swallowed into a false success.
             b.material = mat
         except Exception as e:
-            failed.append({"body": bname, "error": str(e)})
+            failed.append({"body": bname, "component": owner, "error": str(e)})
             continue
         # Verify the assignment actually took: read the body's material back. A silent no-op (the API
         # returned but nothing changed) leaves a name that doesn't match the one requested - treat that
         # as failure. Fusion may suffix a duplicated name ('Steel (2)'), so accept a startswith match.
         got = safe(lambda b=b: b.material.name)
         if not got or not (got == want_name or got.lower().startswith(want_name.lower())):
-            failed.append({"body": bname,
+            failed.append({"body": bname, "component": owner,
                            "error": f"assignment did not take (material reads '{got}')"})
             continue
-        applied.append({"body": bname, "material": got, "density_kg_per_m3": _density_kg_per_m3(b)})
+        applied.append({"body": bname, "component": owner, "material": got,
+                        "density_kg_per_m3": _density_kg_per_m3(b)})
 
     if not applied:
-        return error(f"Could not assign material '{want_name}' to any body of {desc}: "
-                     f"{failed[0]['error'] if failed else 'unknown error'}.")
+        first = (f"{_body_label(failed[0])}: {failed[0]['error']}" if failed else "unknown error")
+        return error(f"Could not assign material '{want_name}' to any body of {desc}: {first}.")
 
     note = (f"Physical material '{want_name}' assigned (source: {scope}). model_inspect mass/density "
             "now reflects this material. This is NOT color - use appearance_set for cosmetic color.")
+    if whole_design and walked:
+        note = (f"Empty target: assigned to the bodies of all {len(comps)} component(s) the design "
+                "listed. " + note)
+    elif whole_design:
+        note = ("Empty target: the design's component list did not read, so only the ROOT "
+                "component's bodies were reached - a child component's bodies keep the material "
+                "they had. " + note)
     if failed:
         note = (f"Material assigned to {len(applied)} of {len(applied) + len(failed)} bodies; "
-                f"{len(failed)} failed - see 'failed'. " + note)
+                f"{len(failed)} failed - see 'failed' ('<component>/<body>' names each). " + note)
 
     result = {
         "assigned": True,
@@ -178,18 +213,22 @@ def handler(target: str = "", material: str = "") -> dict:
         "applied_to": applied,
         "note": note,
     }
+    if whole_design:
+        result["components_covered"] = len(comps)
+        if not walked:
+            # The count is the ROOT alone, not a design-wide census - a reader must not take it
+            # for one.
+            result["component_walk_complete"] = False
     if failed:
         result["failed"] = failed
     return ok(result)
 
 
 _DESC = (
-"Assign a PHYSICAL material (density-bearing) to a body (BRep or MESH), occurrence, component (all "
-"its bodies, meshes included), or the whole design (empty target), so model_inspect's mass/density "
-"is trustworthy - an unassigned MESH silently carries default steel density. This is NOT color - use "
-"appearance_set for cosmetic color. 'material' is matched by EXACT name across the document's materials "
-"and every loaded material library; an unknown name returns nearest candidates and a name present in "
-"more than one library is refused as ambiguous. WRITES; reads back each body's material + density.\n"
+"Assign a PHYSICAL material (density-bearing) to a body (BRep or MESH), occurrence, component, or "
+"the whole design (empty target), so model_inspect's mass is trustworthy - an unassigned MESH "
+"silently carries default steel density. This is NOT color; appearance_set does cosmetic color. "
+"'material' is matched by EXACT name across the document and every loaded material library.\n"
 + _outputs.produces_block(RETURNS)
 )
 

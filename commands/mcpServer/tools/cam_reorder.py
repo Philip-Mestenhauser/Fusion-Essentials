@@ -37,12 +37,8 @@ def _row_nodes(nodes, parent_node, kind):
 
 
 def _requested_order(row, mover_node, ref_node, position):
-    """(the row as the REQUESTED move leaves it, the moved item's index in it, the reference's index
-    in it) - what the post-move read-back is compared against.
-
-    'before'/'after' name a placement next to the reference: the mover leaves the row it is in (when
-    it is in this one) and goes back immediately before or after `ref_node`. The nodes come from one
-    walk, so a row holding two same-named items still tells them apart by identity."""
+    """(the row of names as the REQUESTED move leaves it, the moved item's index, the reference's
+    index) - what the post-move read-back is compared against."""
     sim = [n for n in row if n is not mover_node]
     ref_i = next(i for i, n in enumerate(sim) if n is ref_node)
     at = ref_i if position == "before" else ref_i + 1
@@ -80,10 +76,8 @@ def handler(entity: str = "", position: str = "after", reference: str = "") -> d
                      f"'{mover_node.path}') - nothing to reorder.")
     mover, ref = mover_node.obj, ref_node.obj
 
-    # The row the move is asked to land in is the REFERENCE's own: the reference does not move, so
-    # the collection it sits in is the same one before and after. Every operation/folder/pattern the
-    # walk yields carries the node that contained it, so a resolved node of those kinds has a parent
-    # (only a setup is rootless, and the kinds here exclude it).
+    # The row the move lands in is the REFERENCE's own, which does not move. Every node of these
+    # kinds carries its container (only a setup is rootless, and _KINDS excludes it).
     expected = at = ref_place = None
     if mover_node.kind == ref_node.kind:
         expected, at, ref_place = _requested_order(
@@ -95,11 +89,8 @@ def handler(entity: str = "", position: str = "after", reference: str = "") -> d
         return error(f"Move of '{entity}' {position} '{reference}' was not allowed (e.g. moving an "
                      "operation out of its setup, or across incompatible parents (setup or folder)).")
 
-    # moveBefore/moveAfter returning true says Fusion ALLOWED the move, not that the tree changed.
-    # The destination collection is re-read off the reference's own parent and compared against the
-    # order the request asks for - an item already sitting where it was asked to go reads back as
-    # that same order - so the payload publishes what the document answers, never the three strings
-    # the call was handed.
+    # moveBefore/moveAfter returning true says Fusion ALLOWED the move, not that the tree changed,
+    # so the destination collection is re-read and compared against the requested order.
     order = None if expected is None else _row_names(ref_node.parent.obj, ref_node.kind)
     if order is None:
         payload = {"moved": mover_node.name, "position": position, "reference": ref_node.name,
@@ -125,10 +116,8 @@ def handler(entity: str = "", position: str = "after", reference: str = "") -> d
             f"land: re-reading the collection under '{ref_node.parent.path}' gives {order}, where "
             f"the requested move leaves {expected}.")
 
-    # The re-read is a row of NAMES, so it tells the mover from its siblings only while the row
-    # carries ONE item under the mover's name. Where it carries several, that row is what a landed
-    # move and a swallowed one both leave - the identity separating them is not in it - so the match
-    # is published as an unverified order rather than asserted as a measured landing.
+    # The re-read is a row of NAMES, so a row carrying several items under the mover's name reads
+    # the same whether the move landed or was swallowed - published unverified, not asserted.
     namesakes = order.count(mover_node.name)
     if namesakes > 1:
         return ok({

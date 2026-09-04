@@ -11,7 +11,7 @@ nesting last, because it restructures what it nests.
 from verify_core import (
     EXPORT_DIR, _RECALL, _arranged, _base_feature_closed, _base_feature_open, _box, _ctx_get,
     _datum_plane, _drilled, _dwell, _extent_measured, _extruded, _fg, _fgn, _holder_computed,
-    _made_component, _measured, _mesh_round_trip, _rebuilt, _recall, _refused, _repair_no_op,
+    _made_component, _measured, _mesh_round_trip, _num, _rebuilt, _recall, _refused, _repair_no_op,
     _split_bodies, _stitched, _unstitched, _watch)
 
 
@@ -21,11 +21,14 @@ from verify_core import (
 # ACT 5: MACHINING PREP - surfaces, sheet ops, split/stitch/arrange/base-feature, holder read.
 _MACHINING = [
     # the surface/split/stitch cameos live on a GRID (y=200 row, plus a z-lifted revolve) so each
-    # builds in clear space a viewer can see, never on top of the gyroscope or another cameo.
+    # builds in clear space a viewer can see, never on top of the part or another cameo.
     ("model_create_component", {"name": "SRev", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xz", "name": "SRevS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "line", "x1": 10, "y1": 60, "x2": 10, "y2": 90, "sketch_name": "SRevS"}, "ok", None),
-    ("surface_revolve", {"sketch_name": "SRevS", "axis": "z", "angle_deg": 360}, "ok", None),
+    # 'is_solid' is isSolid read off the created body: a profile that closed into a SOLID, and a
+    # body whose flag would not read at all (named in 'unverified'), both return ok.
+    ("surface_revolve", {"sketch_name": "SRevS", "axis": "z", "angle_deg": 360},
+     lambda p: p["is_solid"] is False and bool(p["result_bodies"]) and "unverified" not in p, None),
     # a CLOSED revolved sphere surface encloses one cell; surface_fill must seal it to a SOLID at
     # the enclosed volume (r=6mm -> 904.78 mm3) MEASURED off the result, never predicted.
     ("model_create_component", {"name": "FillDemo", "activate": True}, _made_component, None),
@@ -53,7 +56,11 @@ _MACHINING = [
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 200, "y1": 200, "x2": 240, "y2": 230, "sketch_name": "SurfS"}, "ok", None),
     ("surface_extrude", {"sketch_name": "SurfS", "distance": 15}, "ok", None),
     ("find_geometry", {"target": "Surf", "kind": "planar_face", "max_results": 1}, "ok", _fg("surf_face")),
-    ("surface_offset", lambda c: {"faces": [_ctx_get(c, "surf_face", "surface face")], "distance": 3}, "ok", None),
+    # 'faces_offset' is counted off the CREATED surface, so it disagrees with the one face requested
+    # when chaining widened the selection - and reads null (in 'unverified') when nothing was read.
+    ("surface_offset", lambda c: {"faces": [_ctx_get(c, "surf_face", "surface face")], "distance": 3},
+     lambda p: (p["faces_offset"] == p["faces_requested"] == 1 and bool(p["result_bodies"])
+                and "unverified" not in p), None),
     ("surface_offset", lambda c: {"faces": [_ctx_get(c, "surf_face", "surface face")], "distance": 0}, "ok", None),
     # THREE edges of ONE body, not one: edge.body hands back a fresh proxy per read, so a
     # body-set walk keyed on object identity counts this single body three times and refuses a
@@ -98,7 +105,10 @@ _MACHINING = [
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 300, "y1": 200, "x2": 320, "y2": 220, "sketch_name": "SD1"}, "ok", None),
     ("model_extrude", {"sketch_name": "SD1", "profile_index": 0, "distance": 10}, _extruded, None),
     ("find_geometry", {"target": "SDel", "kind": "planar_face", "nearest_to": [310, 210, 10], "max_results": 1}, "ok", _fg("sdel_top")),
-    ("surface_delete_face", lambda c: {"faces": [_ctx_get(c, "sdel_top", "top face")], "heal": False}, "ok", None),
+    # one face off a six-faced box: 'faces_delta' is measured across the result bodies' own counts,
+    # and a delete that RAISED the count or ate a whole body is published with a warning, not an error.
+    ("surface_delete_face", lambda c: {"faces": [_ctx_get(c, "sdel_top", "top face")], "heal": False},
+     lambda p: p["faces_delta"] == -1 and p["bodies_consumed"] == 0, None),
     ("find_geometry", {"target": "SDel", "kind": "line_edge", "nearest_to": [310, 210, 10], "max_results": 4}, "ok", _fgn("sdel_rim")),
     ("surface_patch", lambda c: {"boundary": _ctx_get(c, "sdel_rim", "rim edges")}, "ok", None),
     # a patch with operation 'new' leaves the opened body untouched, so the SAME rim carries the two
@@ -339,9 +349,21 @@ _MESH = [
     ("save_as_mesh", lambda c: {"body": _ctx_get(c, "msh_body", "box body"), "name": "ME", "quality": "low"}, "ok", None),
     ("save_as_mesh", lambda c: {"body": _ctx_get(c, "msh_body", "box body"), "name": "MF", "quality": "low"}, "ok", None),
     ("mesh_get", {"target": "Msh"}, "ok", None),
-    ("mesh_generate_face_groups", {"mesh": "MA", "method": "fast"}, "ok", None),
-    ("mesh_to_brep", {"mesh": "MA", "method": "faceted", "operation": "base_feature"}, "ok", None),
-    ("mesh_reduce", {"mesh": "MRED", "target": "proportion", "value": 50}, "ok", None),
+    # 'face_group_count' is mb.faceGroups.count after the add - the side effect prismatic convert
+    # needs. The no-op guard only fires where add() returned nothing, so a feature with zero groups
+    # behind it reads ok.
+    ("mesh_generate_face_groups", {"mesh": "MA", "method": "fast"},
+     lambda p: p["generated"] is True and (p["face_group_count"] or 0) >= 1, None),
+    # the converted bodies are the component's BRep census differenced across the add; a row with no
+    # handle is a body the next tool cannot address, and 'design_mode' is read before the scope opens.
+    ("mesh_to_brep", {"mesh": "MA", "method": "faceted", "operation": "base_feature"},
+     lambda p: (bool(p["brep_bodies"]) and all(b["handle"] for b in p["brep_bodies"])
+                and p["design_mode"] == "parametric"), None),
+    # both triangle counts are read off the model; 'reduced_pct' is published only where both read,
+    # so an after-count that would not read is caught here rather than passing as a reduce.
+    ("mesh_reduce", {"mesh": "MRED", "target": "proportion", "value": 50},
+     lambda p: (p["after"]["triangle_count"] < p["before"]["triangle_count"]
+                and (p.get("reduced_pct") or 0) > 0), None),
     # 'density' is set-then-read-back off the input (a build that drops it refuses), and the
     # before/after triangle counts are read off the model - 'changed' is null when either count
     # could not be read at all, which is a remesh nothing was measured about.
@@ -364,7 +386,11 @@ _MESH = [
     # different lineage; this beat exercises the plain-delete contract.
     ("save_as_mesh", lambda c: {"body": _ctx_get(c, "msh_body", "box body"), "name": "MDEL",
                                 "quality": "low"}, "ok", None),
-    ("mesh_delete", {"mesh": "MDEL"}, "ok", None),
+    # 'deleted_via' names the branch the design's own mode chose - a parametric delete leaves an
+    # undoable MeshRemoveFeature - and 'remaining_meshes' is the design-wide re-scan behind it.
+    ("mesh_delete", {"mesh": "MDEL"},
+     lambda p: (p["deleted"] == "MDEL" and p["deleted_via"] == "meshRemoveFeatures"
+                and isinstance(p["remaining_meshes"], int)), None),
     # execute() answers true while writing nothing, so the file's own size is the read-back - and
     # it is the same file the mesh_insert beat below re-imports.
     ("mesh_export", {"target": "MA", "file_path": EXPORT_DIR + "/eval_mesh", "format": "stl"},
@@ -385,8 +411,13 @@ _MESH = [
     # fortieth of its distance from the origin too - measured, near the world origin and inside
     # whatever is parked there, not out on the field where it was exported from. The size read-back
     # below is what makes that a failure instead of a surprise.
+    # the row is the imported body read back: the name it answers to (a dedupe leaves the model_inspect
+    # below naming a mesh that is not this one) and a triangle count off the mesh itself.
     ("mesh_insert", {"file_path": EXPORT_DIR + "/eval_mesh.stl", "name": "MshIns",
-                     "units": "mm"}, "ok", None),
+                     "units": "mm"},
+     lambda p: (len(p["bodies"]) == 1 and p["bodies"][0]["name"] == "MshIns"
+                and (p["bodies"][0]["triangle_count"] or 0) > 0
+                and "rename_warning" not in p), None),
     # the round trip measured END TO END: the re-imported mesh is the size of the mesh that was
     # written - measured 74.99 x 74.99 x 20.0 on a finished run. A size, not a position: the layout
     # moves the bench, and 25.4 is the only thing this is looking for.
@@ -484,5 +515,28 @@ _MESH = [
      and p.get("previous_name") == "MREV", None),
     ("mesh_get", {"target": "Msh", "max_results": 100},
      lambda p: any(m.get("name") == "MeshRenamed" for m in (p.get("meshes") or [])), None),
+    # THE QUALIFIED ADDRESS, on a component this document places ONCE. Fusion names the first body
+    # of every component 'Body1', so the bare name reaches several of them and is refused with the
+    # candidate list; the '<occurrence>:<body>' spelling that refusal offers picks Msh's own.
+    ("save_as_mesh", {"body": "Body1", "name": "MQUAL", "quality": "low"},
+     _refused("is ambiguous - it names",
+              "qualified '<occurrence-or-component>:<body>' names"), None),
+    ("save_as_mesh", {"body": "Msh:1:Body1", "name": "MQUAL", "quality": "low"},
+     lambda p: _measured("the qualified source address reached Msh's own body",
+                         {"component": p.get("component"), "source_body": p.get("source_body"),
+                          "name": p.get("name"), "triangle_count": p.get("triangle_count")},
+                         p.get("component") == "Msh" and p.get("source_body") == "Body1"
+                         and p.get("name") == "MQUAL" and _num(p.get("triangle_count"))
+                         and p["triangle_count"] > 0), None),
+    # ...and the MESH under the same spelling. A mesh belongs to the COMPONENT rather than to a
+    # placement, so the address is answered through the placed component - and the facts read back
+    # are the mesh's own, not the source solid's.
+    ("model_inspect", {"target": "Msh:1:MQUAL"},
+     lambda p: _measured("the mesh's own facts under its '<occurrence>:<mesh>' address",
+                         {"kind": p.get("kind"), "name": p.get("name"),
+                          "triangle_count": p.get("triangle_count"), "volume": p.get("volume"),
+                          "is_closed": p.get("is_closed")},
+                         p.get("kind") == "mesh" and p.get("name") == "MQUAL"
+                         and _num(p.get("triangle_count")) and p["triangle_count"] > 0), None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
 ]

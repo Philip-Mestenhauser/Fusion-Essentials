@@ -66,13 +66,11 @@ def _do_add(dwg, new_name):
         "sheet_units": _drawing_common.sheet_units(dwg),
         "facts": facts,
         "sheets": _sheet_listing(dwg),
-        "note": ("Sheet added after the active sheet, inheriting its size and orientation, and it is "
-                 "now the ACTIVE sheet. It lands DIRECTLY AFTER the active sheet, not at the end, so "
-                 "every sheet below it moves down one and its export index shifts with it - 'sheets' "
-                 "above is the new order, with the 1-based indices drawing_export's sheet_range "
-                 "takes. Set its size with action='set_size' and its shape with "
-                 "action='set_orientation'; drawing_export is the only way to see it (a drawing "
-                 "document has no viewport)."),
+        "note": ("Sheet added DIRECTLY AFTER the active sheet, not at the end, inheriting its size "
+                 "and orientation and becoming the ACTIVE sheet: every sheet below moves down one "
+                 "and its export index shifts with it, so 'sheets' above is the new order with the "
+                 "1-based indices drawing_export's sheet_range takes. Set its size with "
+                 "action='set_size', its shape with action='set_orientation'."),
     }
     if want and facts["name"] != want:
         out["name_warning"] = (f"The sheet reports the name '{facts['name']}', not the requested "
@@ -145,10 +143,9 @@ def _do_delete(dwg, sheet):
         "note": ("Fusion accepted the delete (deleteMe returned true), which cannot be undone. The "
                  f"count of {reads} above and 'sheets_still_read' beside it are what the drawing "
                  "still reports inside this call - a drawing delete is not visible in the call that "
-                 "makes it, so neither is a verification, and the deleted sheet is expected to be "
-                 "listed there. Re-read the drawing in a later call to see the sheets it holds and "
-                 "the 1-based export indices they then carry; drawing state across calls must be "
-                 "re-read, never assumed."),
+                 "makes it, so neither is a verification and the deleted sheet is expected there. "
+                 "Re-read in a later call for the sheets it holds and their 1-based export "
+                 "indices."),
     })
 
 
@@ -342,16 +339,13 @@ def handler(action: str = "", sheet: str = "", new_name: str = "", sheet_size: s
 
 
 TOOL_DESCRIPTION = (
-    "Manage the active 2D drawing's sheets: 'add' a sheet, 'copy' one (sketches and tables come "
-    "along; it lands last), 'delete' one, 'rename' one, 'set_size', 'set_orientation', or 'tidy_up' "
-    "(lay a sheet's views out again). An ADDED sheet inherits the ACTIVE sheet's size and "
-    "orientation, a COPY the SOURCE sheet's; either way the new sheet becomes active, which is the "
-    "only way a sheet becomes active. Sheet width and height are read-only, follow the size, and "
-    "are millimetres on EVERY drawing (width_height_unit); sheet_units reports the drawing's "
-    "dimension display unit, which is not theirs. A DELETE is not "
-    "visible inside the call that makes it: the result carries Fusion's own true/false, and the "
-    "sheets the drawing holds must be re-read in a later call. Acts on whichever drawing is the "
-    "active document; drawing_export is the only way to see a sheet (a drawing has no viewport)."
+    "Manage the active 2D drawing's sheets - add, copy, delete, rename, set_size, set_orientation, "
+    "or tidy_up (lay a sheet's views out again). An ADDED sheet inherits the ACTIVE sheet's size "
+    "and orientation, a COPY the SOURCE sheet's; either way the new sheet becomes active, which is "
+    "the only way a sheet becomes active. Sheet width and height are read-only, follow the size, "
+    "and are millimetres on EVERY drawing (width_height_unit); sheet_units reports the drawing's "
+    "dimension display unit, which is not theirs. Acts on whichever drawing is the active "
+    "document; drawing_export is the only way to see a sheet (a drawing has no viewport)."
 )
 
 tool = (

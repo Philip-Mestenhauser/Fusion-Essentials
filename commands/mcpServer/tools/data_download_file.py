@@ -39,11 +39,9 @@ def handler(file: str = "", project: str = "", folder: str = "", destination_fol
         return error(err)
 
     name = safe(lambda: df.name) or ""
-    # The two signals disagree in OPPOSITE directions, both measured live, which is why the refusal
-    # reads them in this order. A non-CAD upload: name 'probe_note.txt' (true), fileExtension 'sql'
-    # (wrong) - so the NAME leads. A Fusion design: name 'Gyroscope' (no extension, no signal at all),
-    # fileExtension 'f3d' - so an extensionless name is exactly when fileExtension must be consulted,
-    # and that fallback is the branch a design's refusal travels.
+    # The two signals disagree in OPPOSITE directions, so the NAME leads: a non-CAD upload named
+    # 'probe_note.txt' reads fileExtension 'sql', while a design named 'Gyroscope' carries no
+    # extension in its name at all and only fileExtension ('f3d') answers.
     ext = name_extension(name) or (safe(lambda: df.fileExtension) or "").strip().lower()
     if ext in FUSION_NATIVE_EXTENSIONS:
         return error(f"'{name}' is Fusion-native data (.{ext}) and cannot be downloaded: "
@@ -124,27 +122,25 @@ def handler(file: str = "", project: str = "", folder: str = "", destination_fol
 TOOL_DESCRIPTION = (
     "Download ONE non-Fusion cloud file to a local folder. Fusion-native data is REFUSED: a design "
     "leaves through design_export, a drawing through drawing_export. The transfer is SYNCHRONOUS and "
-    "FREEZES Fusion until it finishes - small files only. The local name defaults to the cloud name; "
-    "an existing local file is refused unless overwrite=true (it is removed first, so success means "
-    "THIS download landed).\n"
+    "FREEZES Fusion until it finishes - small files only. An existing local file is refused unless "
+    "overwrite=true.\n"
     + _outputs.produces_block(RETURNS)
 )
 
 tool = (
     Tool.create_simple(name="data_download_file", description=TOOL_DESCRIPTION)
     .add_input_property("file", {"type": "string",
-            "description": "Lineage URN (from data_get), or the file's name - a name needs 'project' "
-                           "and is refused if several files there share it."})
+            "description": "Lineage URN (data_get), or the file's name (which needs 'project')."})
     .add_input_property("project", {"type": "string",
-            "description": "Project holding the file; required when 'file' is a name."})
+            "description": "Project holding the file."})
     .add_input_property("folder", {"type": "string",
             "description": "Cloud folder path scoping a by-name lookup."})
     .add_input_property("destination_folder", {"type": "string",
             "description": "LOCAL folder to write into; created if missing."})
     .add_input_property("file_name", {"type": "string",
-            "description": "Local filename (bare, no path). Default: the cloud name."})
+            "description": "Local filename, bare. Default: the cloud name."})
     .add_input_property("overwrite", {"type": "boolean",
-            "description": "Replace an existing local file (default false = refuse)."})
+            "description": "Replace an existing local file (default false)."})
     .strict_schema()
 )
 

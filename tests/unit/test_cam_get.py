@@ -1,8 +1,9 @@
 """Tests for `cam_get` — the CAM rich read (setups default + include= deeper slices).
 
 Same fixture-based pattern as test_design_get.py (CLAUDE.md "Tests"): stub
-the _slice_* SEAMS and assert the ROUTER's composition (default = setups orientation only; each include=
-adds its slice; the note advertises the rest; unknown include + no-CAM guards). The slice→source-handler
+the _slice_* SEAMS and assert the ROUTER's composition (default = setups orientation only; an include=
+returns that slice INSTEAD of the orientation unless 'default'/'setups' is named beside it; the note
+advertises the rest; unknown include + no-CAM guards). The slice→source-handler
 delegation is proven by live validation, not by mocking 6 handlers' internals.
 """
 
@@ -33,6 +34,8 @@ def stub_slices(monkeypatch):
     monkeypatch.setattr(cg, "_slice_setups", lambda cam, setup: (
         {"setup_count": 2, "setups": [{"name": "Setup1", "operation_count": 3}]}, None))
     monkeypatch.setattr(cg, "_slice_operations", lambda cam, setup: ({"operations": []}, None))
+    monkeypatch.setattr(cg, "_slice_strategies",
+                        lambda cam, setup: ({"setup_count": 0, "setups": []}, None))
     monkeypatch.setattr(cg, "_slice_references", lambda cam, setup: ({"references": []}, None))
     monkeypatch.setattr(cg, "_slice_nc_programs", lambda cam: ({"nc_programs": []}, None))
     monkeypatch.setattr(cg, "_slice_time", lambda cam, setup, units: ({"total_minutes": 12}, None))
@@ -56,8 +59,8 @@ class TestDefaultSlice:
         out = _payload(cg.handler())
         assert "setups" in out and "setup_count" in out
         # the heavy slices must be absent by default (anti-flood)
-        for k in ("operations", "references", "nc_programs", "time", "tools", "library_types",
-                  "inspection"):
+        for k in ("operations", "strategies", "references", "nc_programs", "time", "tools",
+                  "library_types", "inspection"):
             assert k not in out
 
     def test_default_note_advertises_remaining(self, stub_slices):
@@ -87,6 +90,49 @@ class TestIncludeSlices:
     def test_multiple_includes(self, stub_slices):
         out = _payload(cg.handler(include=["operations", "time"]))
         assert "operations" in out and "time" in out
+
+
+class TestDeepReadDropsTheDefaultSlice:
+    """A deep include= returns the slice asked for, NOT the orientation slice again - a
+    cam_get(include=['tool']) that re-emits every setup pays for the whole job twice. The caller
+    keeps the orientation by naming it: 'default', or the slice's own name 'setups'."""
+
+    def test_a_deep_include_omits_the_setups_slice(self, stub_slices):
+        out = _payload(cg.handler(include=["operations"]))
+        assert "operations" in out
+        assert "setups" not in out and "setup_count" not in out
+
+    def test_default_beside_a_deep_slice_keeps_both(self, stub_slices):
+        out = _payload(cg.handler(include=["default", "operations"]))
+        assert out["setup_count"] == 2 and "operations" in out
+
+    def test_the_slices_own_name_keeps_it_too(self, stub_slices):
+        out = _payload(cg.handler(include=["setups", "time"]))
+        assert out["setups"][0]["name"] == "Setup1" and "time" in out
+
+    def test_default_alone_is_the_orientation_read(self, stub_slices):
+        out = _payload(cg.handler(include=["default"]))
+        assert "setups" in out and "operations" not in out
+        assert "include=" in out["note"]          # still advertises the slices not pulled
+
+    def test_the_advertising_note_rides_only_on_the_default_read(self, stub_slices):
+        assert "include=" not in _payload(cg.handler(include=["operations"])).get("note", "")
+        assert "include=" in _payload(cg.handler(include=["default", "operations"]))["note"]
+
+    def test_the_validity_caveat_rides_on_every_read_that_carries_op_state(self, stub_slices):
+        for inc in (None, ["operations"], ["default", "operations"]):
+            assert "Manufacture" in _payload(cg.handler(include=inc))["note"]
+        assert "note" not in _payload(cg.handler(include=["time"]))
+
+    def test_a_deep_read_publishes_no_orientation_pointers(self, monkeypatch):
+        # the pointers are read OFF the orientation rows, so a deep read has nothing to point at -
+        # and the pointer walk must take the unread slice without raising.
+        monkeypatch.setattr(cg, "get_cam", lambda: (object(), None))
+        monkeypatch.setattr(cg, "_slice_setups", lambda cam, setup: (
+            {"setups": [{"name": "S", "op_states": {"out_of_date": 6}}]}, None))
+        monkeypatch.setattr(cg, "_slice_time", lambda cam, setup, units: ({"total_minutes": 5}, None))
+        out = _payload(cg.handler(include=["time"]))
+        assert "pointers" not in out and "setups" not in out
 
 
 class TestReferencesCensus:
@@ -215,6 +261,239 @@ class TestReferencesCensus:
         assert "Counted 0 referenced component(s)" in out["references"]["note"]
 
 
+class TestStrategiesSlice:
+    """include=['strategies'] = each setup's compatible strategy vocabulary with its
+    isGenerationAllowed entitlement flag, delegated to cam_create_operation.read_strategies (the
+    tool whose 'strategy' input that vocabulary types, so both sides take ONE walk).
+
+    Measured on the base license (Fusion 2705.1.4): a milling setup offers 54 strategies, 33
+    reading allowed and 21 blocked; a blocked one creates successfully and then never generates.
+    """
+
+    # Measured on a milling setup's 54 strategies: is_suppressible read true on every row, the rest
+    # false but for one is_cutting (profile2d) and one is_additive (feature_construction).
+    _FLAG_DEFAULTS = {"is_suppressible": True}
+
+    def _row(self, name, allowed, **flags):
+        row = {"name": name, "title": name.title(), "allowed": allowed}
+        for key in ("is_2d", "is_3d", "is_drilling", "is_milling", "is_rotary", "is_turning",
+                    "is_finishing", "is_additive", "is_cutting", "is_support", "is_suppressible"):
+            row[key] = flags.get(key, self._FLAG_DEFAULTS.get(key, False))
+        return row
+
+    def _stub_source(self, monkeypatch, setups):
+        """Stub read_strategies so these tests cover the SLICE's own razor/cap/note, not the walk."""
+        cco = load_tool("cam_create_operation")
+        seen = {}
+        monkeypatch.setattr(cco, "read_strategies",
+                            lambda setup="": (seen.update(setup=setup) or {
+                                "isError": False,
+                                "content": [{"type": "text", "text": json.dumps(
+                                    {"setup_count": len(setups), "setups": setups})}]}))
+        return seen
+
+    def test_router_includes_strategies_and_passes_the_setup_scope(self, monkeypatch, stub_slices):
+        seen = {}
+        monkeypatch.setattr(cg, "_slice_strategies",
+                            lambda cam, setup: (seen.update(setup=setup)
+                                                or ({"setup_count": 1, "setups": []}, None)))
+        out = _payload(cg.handler(include=["strategies"], setup="Op1"))
+        assert out["strategies"]["setup_count"] == 1
+        assert seen == {"setup": "Op1"}
+
+    def test_the_slice_delegates_to_cam_create_operations_reader(self, monkeypatch):
+        seen = self._stub_source(monkeypatch, [
+            {"setup": "Op1", "strategy_count": 1, "allowed_count": 1, "blocked_count": 0,
+             "strategies": [self._row("face", True, is_2d=True)]}])
+        out, err = cg._slice_strategies(object(), "Op1")
+        assert err is None and out["setups"][0]["setup"] == "Op1"
+        assert seen == {"setup": "Op1"}          # the scope reaches the reader, not just the router
+
+    def test_a_false_classification_flag_drops_but_a_blocked_entitlement_survives(self,
+                                                                                   monkeypatch):
+        # THE razor bite: 'allowed' is the read the create refuses on, so a false there must never
+        # be collapsed as noise the way is_rotary false is. Dropping it would publish a blocked
+        # strategy as indistinguishable from an allowed one.
+        self._stub_source(monkeypatch, [
+            {"setup": "Op1", "strategy_count": 2, "allowed_count": 1, "blocked_count": 1,
+             "strategies": [self._row("face", True, is_2d=True, is_milling=True),
+                            self._row("steep_and_shallow", False, is_3d=True, is_finishing=True)]}])
+        out, _err = cg._slice_strategies(object(), "")
+        by_name = {r["name"]: r for r in out["setups"][0]["strategies"]}
+        assert by_name["steep_and_shallow"]["allowed"] is False
+        assert by_name["face"]["allowed"] is True
+        assert by_name["face"]["is_2d"] is True and by_name["face"]["is_milling"] is True
+        assert "is_rotary" not in by_name["face"]            # the quiet answer drops
+        assert "is_2d" not in by_name["steep_and_shallow"]
+
+    def test_the_added_classification_flags_go_through_the_same_razor(self, monkeypatch):
+        # a flag the razor does not know stays on every row it appears in, which is the flood the
+        # razor exists to stop - so each added key needs its own quiet default here.
+        self._stub_source(monkeypatch, [
+            {"setup": "Op1", "strategy_count": 1, "allowed_count": 1, "blocked_count": 0,
+             "strategies": [self._row("lattice", True, is_additive=True, is_support=True)]}])
+        out, _err = cg._slice_strategies(object(), "")
+        row = out["setups"][0]["strategies"][0]
+        assert row["is_additive"] is True and row["is_support"] is True
+        assert "is_cutting" not in row and "is_suppressible" not in row
+
+    def test_is_suppressible_collapses_at_TRUE_and_pops_where_it_read_false(self, monkeypatch):
+        # its quiet value is the opposite of the others': measured true on all 54 strategies of a
+        # milling setup, so a true-only razor would stamp it on every row and the one strategy that
+        # cannot be suppressed - the row actually worth seeing - would be the one saying nothing.
+        self._stub_source(monkeypatch, [
+            {"setup": "Op1", "strategy_count": 2, "allowed_count": 2, "blocked_count": 0,
+             "strategies": [self._row("face", True),
+                            self._row("locked", True, is_suppressible=False)]}])
+        out, _err = cg._slice_strategies(object(), "")
+        by_name = {r["name"]: r for r in out["setups"][0]["strategies"]}
+        assert "is_suppressible" not in by_name["face"]           # the usual answer drops
+        assert by_name["locked"]["is_suppressible"] is False      # the exception pops
+
+    def test_a_classification_flag_that_did_not_read_survives_the_razor_as_null(self, monkeypatch):
+        # the razor drops a flag's own USUAL value only, so a flag read_flag could not read stays
+        # and pops as null - which is why the note says a flag is omitted at its usual value and
+        # cannot say flags show only where true.
+        self._stub_source(monkeypatch, [
+            {"setup": "Op1", "strategy_count": 1, "allowed_count": 1, "blocked_count": 0,
+             "strategies": [self._row("mystery", True, is_2d=None, is_milling=True)]}])
+        out, _err = cg._slice_strategies(object(), "")
+        row = out["setups"][0]["strategies"][0]
+        assert row["is_2d"] is None                  # unreadable, not the quiet default
+        assert "is_drilling" not in row              # read its usual false, dropped
+        assert "omitted at its usual value (false; is_suppressible true)" in out["note"]
+
+    def test_an_unreadable_entitlement_survives_the_razor_as_null(self, monkeypatch):
+        # null is not the noise default, so it stays and pops - an unknown entitlement must never
+        # read as an allowed one.
+        self._stub_source(monkeypatch, [
+            {"setup": "Op1", "strategy_count": 1, "allowed_count": 0, "blocked_count": 0,
+             "unreadable_count": 1, "strategies": [self._row("mystery", None)]}])
+        out, _err = cg._slice_strategies(object(), "")
+        assert out["setups"][0]["strategies"][0]["allowed"] is None
+        assert out["setups"][0]["unreadable_count"] == 1
+
+    def test_rows_are_capped_across_setups_and_the_cap_is_flagged(self, monkeypatch):
+        # one over the cap: the cap bites, the flag is set, and the pointer names the scope input.
+        rows = [self._row(f"s{i}", True) for i in range(cg._STRATEGY_CAP + 1)]
+        self._stub_source(monkeypatch, [
+            {"setup": "Op1", "strategy_count": len(rows), "allowed_count": len(rows),
+             "blocked_count": 0, "strategies": rows}])
+        out, _err = cg._slice_strategies(object(), "")
+        assert len(out["setups"][0]["strategies"]) == cg._STRATEGY_CAP
+        assert out["truncated"] is True
+        assert f"Capped at {cg._STRATEGY_CAP} rows" in out["note"]
+        assert "'setup' scopes the read" in out["note"]
+
+    def test_exactly_the_cap_is_not_truncated(self, monkeypatch):
+        # the other side of `emitted >= _STRATEGY_CAP`: a job that fits exactly may not be reported
+        # as cut short, and every row it holds must survive.
+        rows = [self._row(f"s{i}", True) for i in range(cg._STRATEGY_CAP)]
+        self._stub_source(monkeypatch, [
+            {"setup": "Op1", "strategy_count": len(rows), "allowed_count": len(rows),
+             "blocked_count": 0, "strategies": rows}])
+        out, _err = cg._slice_strategies(object(), "")
+        assert len(out["setups"][0]["strategies"]) == cg._STRATEGY_CAP
+        assert "truncated" not in out
+        assert "Capped at" not in out["note"]      # the cap sentence's own opening words
+
+    def test_the_cap_counts_ACROSS_setups_not_per_setup(self, monkeypatch):
+        # a per-setup cap lets N setups each emit the full cap - the flood the bound exists to stop.
+        half = cg._STRATEGY_CAP // 2 + 1
+        rows = [self._row(f"s{i}", True) for i in range(half)]
+        self._stub_source(monkeypatch, [
+            {"setup": "Op1", "strategy_count": half, "allowed_count": half, "blocked_count": 0,
+             "strategies": list(rows)},
+            {"setup": "Op2", "strategy_count": half, "allowed_count": half, "blocked_count": 0,
+             "strategies": list(rows)}])
+        out, _err = cg._slice_strategies(object(), "")
+        emitted = sum(len(s["strategies"]) for s in out["setups"])
+        assert emitted == cg._STRATEGY_CAP and out["truncated"] is True
+
+    def test_the_true_per_setup_total_rides_through_a_truncated_read(self, monkeypatch):
+        # the capped rows are the flood control; strategy_count is what says how much was cut.
+        rows = [self._row(f"s{i}", True) for i in range(cg._STRATEGY_CAP + 7)]
+        self._stub_source(monkeypatch, [
+            {"setup": "Op1", "strategy_count": len(rows), "allowed_count": len(rows),
+             "blocked_count": 0, "strategies": rows}])
+        out, _err = cg._slice_strategies(object(), "")
+        assert out["setups"][0]["strategy_count"] == cg._STRATEGY_CAP + 7
+        assert "strategy_count is the true total" in out["note"]
+
+    def test_the_note_says_what_allowed_means_and_that_null_refuses_nothing(self, monkeypatch):
+        self._stub_source(monkeypatch, [
+            {"setup": "Op1", "strategy_count": 0, "allowed_count": 0, "blocked_count": 0,
+             "strategies": []}])
+        out, _err = cg._slice_strategies(object(), "")
+        note = out["note"]
+        assert "isGenerationAllowed" in note
+        assert "cam_create_operation REFUSES" in note
+        assert "no refusal comes from that" in note
+        assert "silently" not in note
+        # what a blocked op then does is taught where an agent meets it - the create's own refusal
+        # and cam_generate's entitlement_blocked - not restated on every strategy browse.
+        assert "entitlement_blocked" not in note
+
+    def test_a_setup_whose_list_did_not_read_survives_the_slice_and_is_named(self, monkeypatch):
+        # the row's empty 'strategies' reads exactly like a setup that offers nothing, so both the
+        # KEY and a note clause naming it have to reach the wire - the key alone is a null nobody
+        # is looking for, and the note alone cannot say which setup.
+        self._stub_source(monkeypatch, [
+            {"setup": "Op1", "strategies_read": False, "strategy_count": None,
+             "allowed_count": None, "blocked_count": None, "strategies": []},
+            {"setup": "Op2", "strategy_count": 1, "allowed_count": 1, "blocked_count": 0,
+             "strategies": [self._row("face", True, is_2d=True)]}])
+        out, _err = cg._slice_strategies(object(), "")
+        assert out["setups"][0]["strategies_read"] is False
+        assert out["setups"][0]["strategy_count"] is None
+        assert "strategies_read false" in out["note"]
+
+    def test_an_all_readable_read_does_not_mention_the_unreadable_case(self, monkeypatch):
+        # the clause is CONDITIONAL: riding every read would make the one payload it describes
+        # indistinguishable from the healthy ones.
+        self._stub_source(monkeypatch, [
+            {"setup": "Op1", "strategy_count": 1, "allowed_count": 1, "blocked_count": 0,
+             "strategies": [self._row("face", True)]}])
+        out, _err = cg._slice_strategies(object(), "")
+        assert "strategies_read" not in out["note"]
+
+    def test_the_worst_composed_note_fits_the_wire_budget(self, monkeypatch):
+        # the note is assembled at run time from up to three pieces, so test_prose_budget measures
+        # none of the compositions - the cap sentence, the base note and the unreadable clause all
+        # ride together when a big job holds one setup that would not report its list.
+        rows = [self._row(f"s{i}", True) for i in range(cg._STRATEGY_CAP + 1)]
+        self._stub_source(monkeypatch, [
+            {"setup": "Op1", "strategies_read": False, "strategy_count": None,
+             "allowed_count": None, "blocked_count": None, "strategies": []},
+            {"setup": "Op2", "strategy_count": len(rows), "allowed_count": len(rows),
+             "blocked_count": 0, "strategies": rows}])
+        out, _err = cg._slice_strategies(object(), "")
+        assert out["truncated"] is True and "strategies_read false" in out["note"]
+        assert len(out["note"]) <= 400, len(out["note"])       # test_prose_budget.NOTE_BUDGET_CHARS
+
+    def test_a_source_error_passes_through_with_no_note(self, monkeypatch):
+        cco = load_tool("cam_create_operation")
+        monkeypatch.setattr(cco, "read_strategies",
+                            lambda setup="": cg.error("No setup named 'Ghost'. Available: Op1."))
+        payload, err = cg._slice_strategies(object(), "Ghost")
+        assert payload is None
+        assert "Ghost" in err["message"]
+
+    def test_the_slice_rides_through_the_router(self, monkeypatch):
+        # end to end: the reader's payload reaches the wire under include=['strategies'].
+        monkeypatch.setattr(cg, "get_cam", lambda: (object(), None))
+        monkeypatch.setattr(cg, "_slice_setups", lambda cam, setup: ({"setups": []}, None))
+        self._stub_source(monkeypatch, [
+            {"setup": "Op1", "strategy_count": 1, "allowed_count": 0, "blocked_count": 1,
+             "strategies": [self._row("steep_and_shallow", False, is_3d=True)]}])
+        out = _payload(cg.handler(include=["strategies"]))
+        assert out["strategies"]["setups"][0]["strategies"][0]["allowed"] is False
+
+    def test_the_default_note_advertises_the_slice(self, stub_slices):
+        # a flag nothing names is invisible - the orientation note is where an agent finds it.
+        assert "'strategies'" in _payload(cg.handler())["note"]
+
+
 class TestCamPointers:
     """`_cam_pointers` - the actionable breadcrumb: a present, actionable CAM state names the tool that
     resolves it (stale/ungenerated toolpaths -> cam_generate; out-of-date machine -> cam_edit_setup)."""
@@ -247,9 +526,9 @@ class TestCamPointers:
 
 
 class TestOrientationDedup:
-    """Content-aware de-dup: the orientation block STAYS on a deep call, but a fact the included slice
-    restates per-op is dropped from the orientation copy. The orientation context an agent needs to act
-    on a cold jump-in (machine, op_states, names) is preserved."""
+    """Content-aware de-dup on a call that asks for BOTH ('default' beside a deep slice): a fact the
+    included slice restates per-op is dropped from the orientation copy, while the context an agent
+    needs to act on a cold jump-in (machine, op_states, names) is preserved."""
 
     @pytest.fixture
     def stub_with_reasons(self, monkeypatch):
@@ -265,14 +544,14 @@ class TestOrientationDedup:
         assert "invalidation_reasons" in out["setups"][0]
 
     def test_operations_drops_setup_reasons_keeps_context(self, stub_with_reasons):
-        out = _payload(cg.handler(include=["operations"]))
+        out = _payload(cg.handler(include=["default", "operations"]))
         s = out["setups"][0]
         assert "invalidation_reasons" not in s          # restated per-op -> dropped from orientation
         assert s["machine"] == "Haas" and "op_states" in s and s["name"] == "Op1"   # context preserved
 
     def test_unrelated_include_keeps_setup_reasons(self, stub_with_reasons):
         # the time slice does NOT restate invalidation reasons, so they stay
-        out = _payload(cg.handler(include=["time"]))
+        out = _payload(cg.handler(include=["default", "time"]))
         assert "invalidation_reasons" in out["setups"][0]
 
 
@@ -280,6 +559,12 @@ class TestGuards:
     def test_unknown_include_errors(self, stub_slices):
         res = cg.handler(include=["bogus"])
         assert "bogus" in error_message(res).lower() or "unknown" in error_message(res).lower()
+
+    def test_the_refusal_lists_the_default_tokens_beside_the_slices(self, stub_slices):
+        # the refusal IS the vocabulary an agent that mistyped reads next: a list that names only
+        # the deep slices hides the one token that keeps the orientation block beside them.
+        msg = error_message(cg.handler(include=["bogus"]))
+        assert "operations" in msg and "default" in msg and "setups" in msg
 
     def test_no_cam_data_guard(self, monkeypatch):
         monkeypatch.setattr(cg, "get_cam", lambda: (None, "This document has no CAM (Manufacture) data."))
@@ -489,6 +774,7 @@ class TestDeepZoom:
         class _P:
             def __init__(s, name, title, expr="", vis=True, en=True, val=None):
                 s.name, s.title, s.expression, s.isVisible, s.isEnabled, s.value = name, title, expr, vis, en, val
+                s.isEditable = True                          # a settable parameter's live read
         class _Coll:
             def __init__(s, items): s._i = items
             @property
@@ -716,10 +1002,11 @@ class TestOperationScopedBySetup:
     def test_the_router_passes_setup_through_to_the_tool_slice(self, monkeypatch, stub_slices):
         seen = {}
         monkeypatch.setattr(cg, "_slice_tool",
-                            lambda cam, operation, preset, setup="": (
-                                seen.update(operation=operation, setup=setup) or ({}, None)))
-        cg.handler(include=["tool"], operation="Shared", setup="Bottom")
-        assert seen == {"operation": "Shared", "setup": "Bottom"}
+                            lambda cam, operation, preset, setup="", units="mm": (
+                                seen.update(operation=operation, setup=setup, units=units)
+                                or ({}, None)))
+        cg.handler(include=["tool"], operation="Shared", setup="Bottom", units="in")
+        assert seen == {"operation": "Shared", "setup": "Bottom", "units": "in"}
 
     def test_a_miss_inside_the_scope_lists_THAT_setups_operations(self, monkeypatch):
         # a scoped miss that listed the whole document's operations would offer names this call
@@ -842,6 +1129,120 @@ class TestToolSlicePresets:
         out, err = cg._slice_tool(cam, "Adaptive1", "")
         assert err is None and out["preset_names"] == [] and out["preset_count"] == 0
 
+    def test_a_case_differing_spelling_resolves_to_the_presets_own_name(self, monkeypatch):
+        # cam_edit_tools resolves a preset case-insensitively, so it accepts 'alu rough'; a read
+        # matching byte-for-byte missed the very spelling the write path had taken.
+        cam = self._wire(monkeypatch, [_Preset("Alu Rough", {"tool_feedCutting": "3000 mm/min"}),
+                                       _Preset("Steel", {})])
+        out, err = cg._slice_tool(cam, "Adaptive1", "alu rough")
+        assert err is None
+        assert out["preset"] == {"name": "Alu Rough",
+                                 "expressions": {"tool_feedCutting": "3000 mm/min"}}
+
+    def test_two_presets_sharing_a_name_are_both_returned_keyed_by_index(self, monkeypatch):
+        # two recipes answer to one name; publishing the first as 'preset' would present one
+        # tool's feeds as though the name identified them. This is a READ - it discloses both.
+        cam = self._wire(monkeypatch, [_Preset("Alu Rough", {"tool_feedCutting": "3000 mm/min"}),
+                                       _Preset("Alu Rough", {"tool_feedCutting": "800 mm/min"})])
+        out, err = cg._slice_tool(cam, "Adaptive1", "Alu Rough")
+        assert err is None
+        rows = out["presets_sharing_name"]
+        assert [r["index"] for r in rows] == [0, 1]
+        assert [r["expressions"]["tool_feedCutting"] for r in rows] == ["3000 mm/min", "800 mm/min"]
+        assert "preset" not in out              # neither was picked as THE recipe
+        assert "2 presets" in out["note"] and "preset_names" in out["note"]
+
+    def test_a_preset_asked_of_a_tool_with_no_presets_names_none(self, monkeypatch):
+        # an empty candidate list rendered as 'Available: .' - a sentence with no answer in it
+        cam = self._wire(monkeypatch, [])
+        out, err = cg._slice_tool(cam, "Adaptive1", "Alu Rough")
+        assert out is None
+        msg = error_message(err)
+        assert "no presets at all" in msg and "Available: ." not in msg
+        assert "add_preset" in msg
+
+    def test_presets_whose_names_do_not_read_are_counted_not_denied(self, monkeypatch):
+        # the SLOTS are there and only the names would not read. Reporting "no presets at all" and
+        # pointing at add_preset would have the caller author a fourth on a tool holding three.
+        cam = self._wire(monkeypatch, [_Preset(None, {}), _Preset(None, {}), _Preset(None, {})])
+        out, err = cg._slice_tool(cam, "Adaptive1", "Alu Rough")
+        assert out is None
+        msg = error_message(err)
+        assert "3 preset(s)" in msg and "none of their names read" in msg
+        assert "no presets at all" not in msg and "add_preset" not in msg
+
+
+class TestToolSliceDimensions:
+    """include=['tool'] publishes the operation's own tool geometry off op.tool.parameters. The
+    values are Fusion's internal cm, so the slice scales them into the unit it names."""
+
+    def _wire(self, params):
+        """A one-setup CAM tree whose operation carries a tool with 'params' (a _SetupParams)."""
+        from conftest import FakeSetup, make_cam
+        tool = type("T", (), {"description": "6mm flat", "presets": None, "parameters": params})()
+        op = type("O", (), {"name": "Adaptive1", "tool": tool, "toolPreset": None})()
+        return make_cam(FakeSetup("Setup1", ops=[op]))
+
+    def _full(self):
+        return _SetupParams([_Param("tool_diameter", value=0.6),
+                             _Param("tool_fluteLength", value=2.5),
+                             _Param("tool_cornerRadius", value=0.05),
+                             _Param("tool_overallLength", value=5.0)])
+
+    def test_the_four_dimensions_land_scaled_into_the_named_unit(self):
+        out, err = cg._slice_tool(self._wire(self._full()), "Adaptive1", "")
+        assert err is None
+        assert out["dimensions"] == {"diameter": 6.0, "flute_length": 25.0, "corner_radius": 0.5,
+                                     "overall_length": 50.0, "units": "mm"}
+
+    def test_the_unit_the_caller_asked_for_scales_the_values(self):
+        # a handler that reported cm regardless would pass the mm test above and fail this one
+        out, err = cg._slice_tool(self._wire(self._full()), "Adaptive1", "", "", "in")
+        assert err is None
+        assert out["dimensions"]["diameter"] == round(0.6 / 2.54, 6)
+        assert out["dimensions"]["units"] == "in"
+
+    def test_an_absent_parameter_reads_null_not_zero(self):
+        # a square-ended tool carries no corner radius; publishing 0 would read as a measured
+        # sharp corner rather than "this tool does not carry the parameter".
+        out, err = cg._slice_tool(
+            self._wire(_SetupParams([_Param("tool_diameter", value=0.6)])), "Adaptive1", "")
+        assert err is None
+        assert out["dimensions"]["diameter"] == 6.0
+        assert out["dimensions"]["corner_radius"] is None
+        assert out["dimensions"]["flute_length"] is None
+        assert out["dimensions"]["overall_length"] is None
+
+    def test_a_tool_exposing_no_parameters_answers_null_rather_than_raising(self):
+        out, err = cg._slice_tool(self._wire(None), "Adaptive1", "")
+        assert err is None
+        assert out["dimensions"] == {"diameter": None, "flute_length": None, "corner_radius": None,
+                                     "overall_length": None, "units": "mm"}
+
+    def test_the_note_says_the_dimensions_are_this_operations_own_copy(self):
+        # MEASURED: an op created before a document-tool edit keeps the values it was made with, so
+        # a caller reading these as the library tool's current geometry would be reading stale ones.
+        out, _err = cg._slice_tool(self._wire(self._full()), "Adaptive1", "")
+        assert "own copy" in out["note"] and "created before" in out["note"]
+
+    def test_an_unknown_unit_is_refused_before_anything_is_read(self):
+        out, err = cg._slice_tool(self._wire(self._full()), "Adaptive1", "", "", "parsecs")
+        assert out is None and "parsecs" in err["message"]
+
+    def test_the_shared_preset_disclosure_rides_beside_the_copy_note(self):
+        # both facts describe the same payload, so the ambiguous-preset sentence rides BESIDE the
+        # copy note rather than replacing it - and the composition stays inside the wire budget.
+        params = self._full()
+        tool = type("T", (), {"description": "6mm flat", "parameters": params,
+                              "presets": _PresetColl([_Preset("Alu Rough", {}),
+                                                      _Preset("Alu Rough", {})])})()
+        op = type("O", (), {"name": "Adaptive1", "tool": tool, "toolPreset": None})()
+        from conftest import FakeSetup, make_cam
+        out, err = cg._slice_tool(make_cam(FakeSetup("Setup1", ops=[op])), "Adaptive1", "Alu Rough")
+        assert err is None
+        assert "own copy" in out["note"] and "2 presets" in out["note"]
+        assert len(out["note"]) <= 400, len(out["note"])   # test_prose_budget.NOTE_BUDGET_CHARS
+
 
 class TestMachineSlice:
     """include=['machine'] = the ASSIGNED machine's own limits (spindle speed, axis travels),
@@ -912,13 +1313,28 @@ class _SetupParams:
 
 
 class _Param:
-    def __init__(self, name, title=None, expression="", visible=True, enabled=True, value=None):
+    def __init__(self, name, title=None, expression="", visible=True, enabled=True, value=None,
+                 editable=True):
         self.name = name
         self.title = title or name
         self.expression = expression
         self.isVisible = visible
         self.isEnabled = enabled
         self.value = type("V", (), {"value": value})()
+        # A CAMParameter answers isEditable; a settable one reads True.
+        self.isEditable = editable
+
+
+class _UnreadableEditableParam(_Param):
+    """isEditable does not answer at all - the read that may not publish a verdict."""
+
+    @property
+    def isEditable(self):
+        raise RuntimeError("isEditable unreadable")
+
+    @isEditable.setter
+    def isEditable(self, value):
+        pass
 
 
 class TestSetupParameterSlice:
@@ -1054,6 +1470,47 @@ class TestSetupParameterSlice:
         out, _err = cg._slice_parameters(object(), "", "Op1")
         assert out["stock_extents"]["stockZLow"] == {"value": None,
                                                      "expression": "stockZHigh - 38.1"}
+
+
+class TestParameterEditableFlag:
+    """isEditable is the flag cam_edit_operation and cam_edit_setup refuse a write on (measured:
+    273 of a face op's 327 parameters and 274 of a setup's 304 read False), so the read that lists
+    the parameters is where an agent learns which rows refuse - not the refusal it gets afterwards."""
+
+    def test_a_row_that_refuses_a_write_is_marked_editable_false(self):
+        g = cg._grouped_visible_params(
+            _SetupParams([_Param("tool_diameter", "Diameter", "10.", editable=False)]))
+        assert g["General"][0]["editable"] is False
+
+    def test_a_writable_row_carries_no_editable_key(self):
+        # the quiet default: most rows an agent reads are settable, and a key on every one of them
+        # is 300 rows of noise.
+        g = cg._grouped_visible_params(_SetupParams([_Param("tolerance", "Tolerance", "0.01")]))
+        assert g["General"][0] == {"name": "tolerance", "title": "Tolerance",
+                                   "expression": "0.01"}
+
+    def test_an_unreadable_flag_publishes_null_and_never_false(self):
+        # a flag that did not answer is not a refusal - false here would name a row the write takes.
+        g = cg._grouped_visible_params(
+            _SetupParams([_UnreadableEditableParam("tolerance", "Tolerance", "0.01")]))
+        assert g["General"][0]["editable"] is None
+
+    def test_the_operation_slice_note_says_which_rows_refuse_a_write(self, monkeypatch):
+        op = type("O", (), {"name": "Adaptive1", "strategy": "adaptive", "parameters": _SetupParams(
+            [_Param("tool_diameter", "Diameter", "10.", editable=False)])})()
+        monkeypatch.setattr(cg, "resolve_operation",
+                            lambda cam, name, label="operation": (SimpleNamespace(obj=op), None, []))
+        out, err = cg._slice_parameters(object(), "Adaptive1", "")
+        assert err is None and out["sections"]["General"][0]["editable"] is False
+        assert "editable false refuses a write" in out["note"]
+
+    def test_the_setup_slice_note_carries_it_beside_the_units_sentence(self, monkeypatch):
+        setup = type("S", (), {"name": "Op1", "parameters": _SetupParams(
+            [_Param("surfaceZHigh", "Top", "0.0", editable=False)])})()
+        monkeypatch.setattr(cg, "find_setup", lambda cam, name: (setup, ["Op1"], None))
+        out, _err = cg._slice_parameters(object(), "", "Op1")
+        assert out["sections"]["General"][0]["editable"] is False
+        assert "editable false refuses a write" in out["note"] and "DIFFERENT units" in out["note"]
 
 
 class TestInspectionSlice:

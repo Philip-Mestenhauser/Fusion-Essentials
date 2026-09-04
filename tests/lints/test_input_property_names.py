@@ -3,15 +3,8 @@
 
 """Every property assigned onto a FeatureInput must exist on that input's real class.
 
-A SWIG proxy ACCEPTS an assignment to a name it does not define. The value lands on a dead Python
-attribute, the object keeps its API default, and nothing raises - so a misspelled property makes the
-tool run the DEFAULT operation while reporting the requested one. No runtime check catches it:
-set_verified reads the value back, but a dead attribute reads back exactly what was written.
-
-This is the only place the mistake is catchable. The input's class comes from the factory that
-built it (`comp.features.<x>Features.createInput(...)` -> that method's declared return type), and
-the legal member names come from the generated tests/api_surface.py.
-"""
+A SWIG proxy ACCEPTS an assignment to a name it does not define: the value lands on a dead Python
+attribute, the object keeps its API default, and set_verified's read-back reads that back."""
 
 import ast
 
@@ -52,11 +45,8 @@ class TestInputPropertyNamesAreReal:
 
     def test_the_gate_checks_a_real_number_of_assignments(self):
         """Resolving inputs is not the same as CHECKING properties on them: a scope walk that lost
-        the assignments would still resolve every binding and verify nothing.
-
-        Counted over `input_scopes` - the same resolution the gate itself runs on - so a binding
-        shape the gate learns to follow is counted here too, and the census cannot measure a path
-        the gate no longer uses."""
+        the assignments would still resolve every binding and verify nothing. Counted over
+        `input_scopes`, the same resolution the gate itself runs on."""
         checked = 0
         for _name, path in _iter_tool_files():
             for nodes, bound in input_scopes(_corpus.tree(path)):

@@ -25,9 +25,8 @@ RETURNS = [
 ]
 
 # datum key -> the DatumPositionsTypes member name (the strategy table is the shared
-# _drawing_common.DIMENSION_STRATEGIES, the same one the creation-time generator offers). Every
-# member is read by NAME through _drawing_common.enum_value, and a name this Fusion version does not
-# define is refused (set_verified) instead of silently running the default strategy.
+# _drawing_common.DIMENSION_STRATEGIES). Every member is read by NAME, and one this Fusion version
+# does not define is refused rather than silently running the default strategy.
 _DATUM_MEMBERS = {
     "bottom_left": "BottomLeftDatumPositionType",
     "bottom_right": "BottomRightDatumPositionType",
@@ -107,10 +106,9 @@ def handler(view: int = None, strategy: str = "baseline", datum: str = "bottom_l
     if serr:
         return error(serr)
 
-    # A fresh AutoDimensionInput reports view=None, and an assigned View reads back as an OBJECT, so
-    # this gates on NON-NULL. Nothing measures whether the object AutoDimensionInput.view hands back
-    # is the View that was assigned, so it cannot gate on identity; drawing_get reads only `type` off
-    # a View.
+    # A fresh AutoDimensionInput reports view=None and an assigned View reads back as an OBJECT, so
+    # this gates on NON-NULL: nothing establishes that the object handed back is the View assigned,
+    # so it cannot gate on identity.
     try:
         inp.view = target
     except Exception as ex:
@@ -160,10 +158,9 @@ def handler(view: int = None, strategy: str = "baseline", datum: str = "bottom_l
 
 TOOL_DESCRIPTION = (
     "Auto-dimension one view on the active drawing's active sheet - the API's only route to "
-    "dimensions (no manual dimension, note or leader exists). Open the drawing and make it active "
-    "first. A view has no readable type or position: it is addressed by index only, and calling "
-    "this without 'view' reports how many the sheet has. Dimensions placed cannot be listed or "
-    "removed afterwards - export to check them, doc_save to keep them."
+    "dimensions (there is no manual dimension, note or leader). Open the drawing and make it active "
+    "first. A view is addressed by INDEX only; calling this without 'view' reports how many the "
+    "sheet has. drawing_export shows what was placed, doc_save keeps it."
 )
 
 FULL_DESCRIPTION = TOOL_DESCRIPTION + "\n" + _outputs.produces_block(RETURNS)

@@ -31,8 +31,7 @@ _REBUILD = _inputs.Choice("rebuild_method",
                            "adaptive_preserve_sharp_edges"],
                           description="Rebuild triangulation method (default fast).")
 _OFFSET = _inputs.Distance("offset", allow_zero=True,
-                           description="Rebuild offset from the original. Needs "
-                                       "rebuild_method='accurate'.")
+                           description="Rebuild offset from the original.")
 _UNITS = _inputs.UnitField()
 
 _SPEC = [_MESH, _TYPE, _REBUILD, _OFFSET, _UNITS]
@@ -138,10 +137,9 @@ def handler(mesh: str = "", repair_type: str = "", rebuild_method: str = "", den
             return error("meshRepairFeatures.createInput returned nothing.")
 
         try:
-            # The enum properties go through set_verified: a SWIG proxy ACCEPTS an assignment to a
-            # name it does not define (measured - inp.repairType = 99 landed on a dead attribute and
-            # read back 99 while meshRepairType stayed 3), so a misspelling would run the DEFAULT
-            # repair and report success. Both of these read the enum int back, so the check works.
+            # A SWIG proxy ACCEPTS an assignment to a name it does not define and reads it back, so
+            # a misspelled property would run the DEFAULT repair and report success - set_verified
+            # reads the enum int back off the property that matters.
             rt = safe(lambda: adsk.fusion.MeshRepairTypes)
             serr = _common.set_verified(inp, "meshRepairType",
                                         safe(lambda: getattr(rt, _REPAIR_TYPES[rtype])),
@@ -157,10 +155,9 @@ def handler(mesh: str = "", repair_type: str = "", rebuild_method: str = "", den
                         f"rebuild_method='{rmethod}'", "MeshRepairFeatureInput")
                     if serr:
                         return error(serr)
-                # density and offset are typed core.ValueInput on the input object, so a bare number
-                # is not accepted; offset is a length and ValueInput.createByReal speaks internal cm.
-                # These do NOT survive set_verified - reading one back yields a DIFFERENT ValueInput
-                # proxy - so they are confirmed off the created feature's ModelParameter instead.
+                # density and offset are typed core.ValueInput (createByReal speaks internal cm) and
+                # do NOT survive set_verified - a read-back yields a different proxy - so they are
+                # confirmed off the created feature's ModelParameter instead.
                 if dens is not None:
                     inp.density = adsk.core.ValueInput.createByReal(dens)
                 if offset_cm is not None:
@@ -196,11 +193,9 @@ def handler(mesh: str = "", repair_type: str = "", rebuild_method: str = "", den
                      "mesh afterwards (triangle/vertex counts, is_closed and volume are all "
                      "unreadable) - the repair is UNVERIFIED, so it is reported as a failure.")
 
-    # A repair that moved nothing is only a FAILURE when the mesh had that kind of defect to fix.
-    # Live-measured: one_touch_fix on a clean closed box moves nothing and is correct to do so, so
-    # a bare "nothing moved" verdict reported healthy geometry as an error. is_closed is the only
-    # defect state a MeshBody exposes, so it is the only one that can convict: an OPEN mesh handed
-    # to a hole-closing repair must change something.
+    # A repair that moved nothing is only a FAILURE when the mesh had that kind of defect to fix -
+    # one_touch_fix on a clean closed box moves nothing and is correct to. is_closed is the only
+    # defect state a MeshBody exposes, so it is the only one that can convict.
     closes_holes = rtype in ("close_holes", "one_touch_fix", "wrap")
     if not moved and closes_holes and before["is_closed"] is False:
         return error(f"The {rtype} repair reported success but the mesh is unchanged "
@@ -264,12 +259,8 @@ def handler(mesh: str = "", repair_type: str = "", rebuild_method: str = "", den
 
 
 TOOL_DESCRIPTION = (
-    "Repair a MESH body with the MeshRepair feature - close holes, stitch and remove, wrap, rebuild "
-    "or a one-touch fix (the BRep tools cannot reach a mesh). rebuild_method, density and offset "
-    "apply to repair_type='rebuild' only. The effect is read back off the body (triangles, "
-    "vertices, the is_closed watertight flag, mesh body count, volume): a hole-closing repair "
-    "(close_holes, one_touch_fix, wrap) that changes none of them and leaves the mesh open is an "
-    "error; any other unchanged result is reported as measured."
+    "Repair a MESH body with the MeshRepair feature - the BRep tools cannot reach a mesh. Re-read "
+    "the body with mesh_get afterwards."
 )
 
 tool = (

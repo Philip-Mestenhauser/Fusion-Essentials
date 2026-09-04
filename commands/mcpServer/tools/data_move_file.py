@@ -140,18 +140,17 @@ def handler(file: str = "", project: str = "", folder: str = "", target_folder: 
 
 TOOL_DESCRIPTION = (
     "Move ONE cloud file into another EXISTING folder of its own project. The destination must "
-    "already exist - this tool creates nothing (use data_create_folder). Verified: the file is "
-    "re-resolved and its parent folder read back, so a move the data model does not show is an "
-    "error, never a false ok. A file already there returns moved=false, not an error."
+    "already exist - this tool creates nothing (use data_create_folder). Verified by re-resolving "
+    "the file and reading its parent folder back. A file already there returns moved=false, not an "
+    "error."
 )
 
 tool = (
     Tool.create_simple(name="data_move_file", description=TOOL_DESCRIPTION)
     .add_input_property("file", {"type": "string",
-            "description": "Lineage URN (from data_get), or the file's name - a name needs 'project' "
-                           "and is refused if several files there share it."})
+            "description": "Lineage URN (data_get), or the file's name (which needs 'project')."})
     .add_input_property("project", {"type": "string",
-            "description": "Project holding the file; required when 'file' is a name."})
+            "description": "Project holding the file."})
     .add_input_property("folder", {"type": "string",
             "description": "Cloud folder path scoping a by-name lookup."})
     .add_input_property("target_folder", {"type": "string",

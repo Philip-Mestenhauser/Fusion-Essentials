@@ -371,7 +371,8 @@ skill's.
    `is_infinite: true` with no number for an unlimited one). `kinematics_readable: false` with
    `blocked_by: ["no_machine_selected"]` means the setup has no machine - the comparison below is
    impossible for that setup; say so, never treat it as "within limits".
-2. `cam_get(include=['operations'])` - one call, every setup. The setup row carries
+2. `cam_get(include=['default', 'operations'])` - one call, every setup (a deep include omits the
+   default slice unless it is named, and step 3 reads that slice). The setup row carries
    `machine_spindle_max_rpm` (the same number as step 1's `spindle.max_rpm`). Each operation row
    carries `name`, `state`, `preset` (the tool preset it uses, null when none), `folder` (the
    CAM folder it sits in, beside `is_suppressed`) and the comparison:

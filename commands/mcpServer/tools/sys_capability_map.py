@@ -71,10 +71,7 @@ def handler() -> dict:
         }
         out.append(rec)
 
-    # GATED tools: registered-but-disabled unless a specific settings checkbox allows them, derived
-    # from GATED_TOOLS (the same map entry.py's sweep acts on - see its _GATED_TOOL_MODULES) rather
-    # than a hand-maintained list here, so this can't drift stale. 'enabled_now' is a live registry
-    # check (has_tool), not a settings-file read, so it never needs a second source of truth either.
+    # 'enabled_now' is a live registry check, not a settings-file read.
     gated_tools = [
         {"tool": name, "enabled_now": has_tool(name),
          "enable_path": f"Fusion Essentials Settings command -> MCP Server tab -> '{label}' checkbox"}

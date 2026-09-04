@@ -82,11 +82,9 @@ def handler() -> dict:
     except Exception as ex:
         return error(f"updateAllReferences failed: {ex}")
 
-    # updateAllReferences returning true is not on its own proof the stale state cleared - the
-    # ReferencesFresh postcondition on this tool's Item re-walks the references under its own bounded
-    # settle wait (the refresh lands asynchronously) and fails the call if any isOutOfDate survived
-    # that wait. The re-read here is one immediate sample, feeding the payload's 'references'
-    # evidence: taken before that wait, so a row can still read stale on a refresh that then settles.
+    # updateAllReferences returning true is not proof the stale state cleared; the ReferencesFresh
+    # postcondition re-walks the references under its own settle wait. This re-read is one immediate
+    # sample taken BEFORE that wait, so a row can still read stale on a refresh that then settles.
     _stale_after, refs_after, unread_after = _reference_state(dd)
 
     payload = {
@@ -110,14 +108,10 @@ def handler() -> dict:
 
 TOOL_DESCRIPTION = (
     "Refresh the active 2D drawing's out-of-date references to the latest source design - the API "
-    "equivalent of the 'Refresh' button, regenerating the drawing's views after the source design was "
-    "edited and saved. Use it to close the round-trip: edit the component, doc_save the design, then "
-    "drawing_update to bring the drawing's views current. Operates on whichever drawing is the active "
-    "document (doc_open it and make it active first). Gated on the drawing's up-to-date "
-    "state before and after - a refresh that does not clear the out-of-date flag is returned as an "
-    "error, never a false ok. If the drawing is already up to date, it reports that and does nothing. "
-    "The refresh dirties the drawing but does not save it - call doc_save afterward to persist a new "
-    "version, then drawing_export for the PDF."
+    "equivalent of the 'Refresh' button, regenerating the views after the source design was edited "
+    "and saved. Operates on whichever drawing is the active document (doc_open it and make it "
+    "active first). The refresh does NOT save: call doc_save afterward to persist a new version, "
+    "then drawing_export for the PDF."
 )
 
 FULL_DESCRIPTION = TOOL_DESCRIPTION + "\n" + _outputs.produces_block(RETURNS)
@@ -127,10 +121,9 @@ tool = (
     .strict_schema()
 )
 
-# enforce_timeout=False: updateAllReferences regenerates views against the latest source and is a
-# blocking, uninterruptible main-thread call that can run past the server's call timeout for a large
-# drawing. The reference read-back is the real proof of success, so we wait for it rather than
-# false-failing on a timeout.
+# enforce_timeout=False: updateAllReferences is a blocking, uninterruptible main-thread call that
+# can run past the server's call timeout for a large drawing, and the reference read-back is the
+# real proof of success.
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True,
                              enforce_timeout=False,
                              postconditions=[_assert.ReferencesFresh()])

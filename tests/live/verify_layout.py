@@ -273,7 +273,7 @@ def _framed(steps):
     together with the neighbours around it.
 
     Two rules, both learned from watching the run. A camera row per family moved the camera ~126
-    times and bounced between a cameo and the gyroscope every time the story alternated, so a
+    times and bounced between a cameo and the part every time the story alternated, so a
     subject already inside the standing frame gets no row at all. And a family is one compact cell,
     so framing it alone fills the screen with a 20 mm sketch; the focus list grows outward through
     the nearest already-built neighbours until it spans the caller's target, which is what puts the
@@ -353,7 +353,7 @@ def _framed(steps):
         for key in ("occurrence", "occurrences", "occurrence_one", "occurrence_two"):
             v = step[1].get(key)
             for nm in (v if isinstance(v, list) else [v]):
-                # an occurrence may be named through a sub-entity ('Carrier:1:origin') - the frame
+                # an occurrence may be named through a sub-entity ('Bracket:1:origin') - the frame
                 # wants the occurrence itself.
                 if isinstance(nm, str) and nm and nm != "origin":
                     m = re.match(r"^([^:]+:\d+)", nm)
@@ -535,7 +535,7 @@ def _frame_neighbourhood(members, subject, built, target=None, cap=None):
 # Rigid translation is what makes it safe: a chunk's internal offsets, sizes and probe points all
 # move with it, so nothing inside a chunk can be broken by the move. What could break is a world
 # point one chunk aims at another - so the chunk is the COMPONENT, which is the unit those points
-# are shared within, and the gyroscope/vise/stock world at the origin never moves at all. A world
+# are shared within, and the part/billet/vise world at the origin never moves at all. A world
 # point that DOES cross a component boundary fails the layout gate in test_tool_verify_complete.py
 # rather than drifting quietly: put the geometry in one component, or pin it.
 
@@ -590,6 +590,7 @@ _JOINT_GROUPS = (
     ("AsbPin", "AsbPlate"),
     ("ConA", "ConB"),            # the single-relationship constrain pair
     ("MateSeat", "MateArm"),     # the multi-relationship one - a seat AND a turn in one feature
+    ("LnkA", "LnkB"),            # the motion link's fresh revolute pair
     # the joint bench: the base and every indicator arm its stations carry into place
     ("JointBase",) + tuple("Ind" + s[0] for s in _JOINT_STATIONS),
 )
@@ -776,9 +777,9 @@ def _place_slots(program):
     Cells are dealt left to right in the order the acts build them, wrapping into a new row past
     _FIELD_WIDTH, so the camera walks the field in the order the story runs.
 
-    Anything reaching into the origin neighbourhood stays exactly where it is: that is the
-    gyroscope, the vise built around it, the CAM stock and the fallback world, which are addressed
-    by scripts and by each other."""
+    Anything reaching into the origin neighbourhood stays exactly where it is: that is the machined
+    part, the billet and the vise built around it, and the fallback world, which are addressed by
+    scripts and by each other."""
     box, order, locked = {}, [], set()
     for _name, _pre, narr, _fb in program:
         for step, chunk, _cursor, frame in _place_walk(narr):
@@ -857,7 +858,7 @@ def _place_slots(program):
             w = box[weld]
             box[weld] = [min(w[0], b[0]), max(w[1], b[1]), min(w[2], b[2]), max(w[3], b[3])]
 
-    # The field starts beside the gyroscope and steps AROUND what cannot move, rather than being
+    # The field starts beside the part and steps AROUND what cannot move, rather than being
     # exiled to a band of its own - a scene twice as tall is not easier to watch. The obstacles are
     # small and clustered (the origin world, and the strip of chunks nailed to an origin plane), so
     # stepping past one costs a gap in a row, not a row.

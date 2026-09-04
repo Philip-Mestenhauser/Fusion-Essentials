@@ -45,15 +45,11 @@ _NO_AXIS_MOTIONS = {"rigid", "ball"}
 _AXIS = _inputs.Choice(
     "axis", ["auto", "x", "y", "z"], default="auto",
     description="The frame axis the motion runs on, for the types that use one (ball uses none). "
-                "'auto' takes it from the geometry; x/y/z are FRAME axes, NOT world - "
-                "joint_edit(world_axis=) sets a true world axis, and forcing one rotates the free "
-                "part to align.")
+                "'auto' takes it from the geometry; x/y/z are FRAME axes, NOT world.")
 
 
-# The two handle inputs are typed GeometryHandle kinds (require='any' - a joint can land on a face,
-# edge, vertex, or construction/sketch point; _joint_geometry_for does the per-kind validation). Using
-# the kind means resolution + the stale-handle error + the contract note are the shared, single-source
-# path, not hand-rolled here.
+# require='any': a joint can land on a face, edge, vertex, or construction/sketch point, and
+# _joint_geometry_for does the per-kind validation.
 _HANDLE_ONE = _inputs.GeometryHandle(
     "handle_one", require="any", required=True,
     description="The FIRST part's geometry to joint at (whichever part is FREE moves).")
@@ -72,13 +68,10 @@ def _joint_input_for(entity):
 
 
 def _occ_origin(occ):
-    """The moving occurrence's origin as (x,y,z) cm, in WORLD space. None if unreadable.
-
-    transform2, not transform: measured on a nested proxy whose parent is rotated 90deg and
-    translated, .transform reads the occurrence's LOCAL matrix with the parent NOT composed in while
-    .transform2 reads the composed WORLD matrix. They agree only while every ancestor is identity, so
-    a joint reposition measured off .transform under a placed sub-assembly reports the wrong frame.
-    .transform is the fallback for a build that does not carry transform2."""
+    """The moving occurrence's origin as (x,y,z) cm in WORLD space, None if unreadable."""
+    # transform2, not transform: .transform is the occurrence's LOCAL matrix with no parent
+    # composed in, so the two agree only while every ancestor is identity. .transform is the
+    # fallback for a build that does not carry transform2.
     m = safe(lambda: occ.transform2) or safe(lambda: occ.transform)
     t = safe(lambda: m.translation) if m is not None else None
     if t is None:
@@ -92,10 +85,10 @@ _MOVE_TOL_CM = 0.005
 
 
 def _move_delta(before, after):
-    """{distance_mm, direction} if the moving occurrence shifted more than _MOVE_TOL_CM, else None.
-    joint_at aligns the two picked KEYPOINTS (a planar face's CENTROID, an edge's MIDPOINT), so pairing
-    a small feature with a large one repositions the moving part by the keypoint gap - real joint
-    behavior, but it must not be silent (a 10mm face on a 60mm face moved a part ~75mm, live)."""
+    """{distance_mm, direction} if the moving occurrence shifted more than _MOVE_TOL_CM, else
+    None."""
+    # joint_at aligns the two picked KEYPOINTS (a planar face's centroid, an edge's midpoint), so
+    # pairing a small feature with a large one repositions the part by the keypoint gap.
     if before is None or after is None:
         return None
     dx, dy, dz = after[0] - before[0], after[1] - before[1], after[2] - before[2]
@@ -108,10 +101,8 @@ def _move_delta(before, after):
 
 
 def _axis_entity(entity):
-    """If 'entity' is a cylinder/cone face (or a circular edge), return it as an entity that can
-    define the joint's rotation/slide axis (its own axis). Else None. A pin's joint must rotate about
-    the PIN'S axis, not a world axis the caller guessed - passing a world axis that doesn't match the
-    geometry over-constrains the assembly ('Compute Failed')."""
+    """A cylinder/cone face or circular edge, which can define the joint's rotation/slide axis
+    from its own axis; else None."""
     if isinstance(entity, adsk.fusion.BRepFace):
         st = safe(lambda: entity.geometry.surfaceType)
         if st in (adsk.core.SurfaceTypes.CylinderSurfaceType, adsk.core.SurfaceTypes.ConeSurfaceType):
@@ -130,10 +121,8 @@ _NON_FAILURE_STATES = (("healthy", "HealthyFeatureHealthState"),
 
 
 def _non_failure_state(joint):
-    """The NAME of the non-failure health state the joint reports, read off the joint first and then
-    its timeline item - the same two sources, in the same order, the verdict below is taken from.
-    None when neither answers a state this build carries a member for; the members are read off
-    adsk.fusion.FeatureHealthStates by NAME, never a hand-typed int."""
+    """The NAME of the non-failure health state the joint reports, read off the joint first and
+    then its timeline item; None when neither answers a state this build carries a member for."""
     states = safe(lambda: adsk.fusion.FeatureHealthStates)
     if states is None:
         return None
@@ -148,16 +137,9 @@ def _non_failure_state(joint):
 
 
 def _health_verdict(joint):
-    """(healthy, state_name, message) for the created joint - the tri-state read behind the payload's
-    authoritative 'healthy' flag.
-
-    The verdict is _assert.compute_state's: the joint AND its timeline item are both asked, joint
-    first, so this create tool and joint_create reach the same verdict on one design. False when
-    either source answered an ERROR or WARNING state - the only two that ARE a failed compute - and
-    `message` is the shared classifier's condensed text. True when a source answered a state that is
-    not a failure; `state_name` names it where the name is one this tool carries, else null. None
-    when NEITHER source answered a state at all - an unread state is not a clean bill of health, so
-    no verdict is published for it."""
+    """(healthy, state_name, message) for the created joint, over _assert.compute_state: False on
+    an ERROR or WARNING state with the classifier's condensed text, True on a state that is no
+    failure, None when NEITHER the joint nor its timeline item answered a state at all."""
     state, failure = _assert.compute_state(joint)
     if state == "broken":
         label, msg = failure
@@ -168,10 +150,8 @@ def _health_verdict(joint):
 
 
 def _axis_note(mot, ax_name, use_custom):
-    """The note sentence for what the motion axis ACTUALLY is: '' for the motions that take no axis
-    (rigid, ball), the geometry's own axis when the custom-direction path ran, else the joint geometry
-    FRAME's axis - which is the world axis of the same name only when that frame is world-aligned.
-    joint_edit(world_axis=) is the only true world axis available from here."""
+    """The note sentence for what the motion axis ACTUALLY is: '' for a motion taking no axis, the
+    geometry's own axis when the custom-direction path ran, else the joint FRAME's axis."""
     if mot in _NO_AXIS_MOTIONS:
         return ""
     if use_custom:
@@ -184,17 +164,9 @@ def _axis_note(mot, ax_name, use_custom):
 
 def handler(handle_one: str = "", handle_two: str = "", motion: str = "revolute",
             axis: str = "auto", name: str = "", flip: bool = False) -> dict:
-    """Joint two parts at two geometry handles (from find_geometry).
-
-    handle_one / handle_two: the entity-token handles to joint AT (e.g. a rod bore face and a crank
-    pin face). motion: rigid | revolute | slider | cylindrical | ball. axis: the axis the motion runs
-    on, for the types that use one (ball uses none) - 'auto' (default) derives it FROM the geometry's
-    own axis, e.g. a cylinder face's axis, which is what you want for a pin so it moves about the PIN;
-    x | y | z are FRAME-relative, the joint geometry's own frame axes rather than world axes whenever
-    the picked geometry is not world-aligned, and joint_edit(world_axis=) re-points a joint to a true
-    world axis. name: optional joint name. The joint lands at the real geometry; keypoint/proxy/axis
-    rules are handled internally. WRITES.
-    """
+    """Joint two parts at two geometry handles from find_geometry. 'auto' axis derives the motion
+    axis from the geometry itself; x/y/z are FRAME-relative, and joint_edit(world_axis=) re-points
+    a joint to a true world axis. WRITES."""
     mot = (motion or "revolute").strip().lower()
     if mot not in _MOTIONS:
         return error(f"Unknown motion '{motion}'. Use: {', '.join(sorted(_MOTIONS))}.")
@@ -308,10 +280,8 @@ def handler(handle_one: str = "", handle_two: str = "", motion: str = "revolute"
     if normals_oppose and not flip:
         out["flip_hint"] = FLIP_HINT
     if healthy is False:
-        # The message is _assert's condensation: Fusion's errorOrWarningMessage repeats its sentence
-        # joined by 'Compute Failed' + the joint's name, and a raw slice of that blob can land
-        # mid-word. Held to this site's own 200-character ceiling, tighter than the reader's default,
-        # because the warning carries a lead-in sentence of its own.
+        # _assert's condensation: Fusion's errorOrWarningMessage repeats its sentence joined by
+        # 'Compute Failed' plus the joint's name, and a raw slice of that blob lands mid-word.
         msg = _assert.compute_failure_message(failure_message, 200)
         out["health_warning"] = ("This joint FAILED TO COMPUTE (likely over-constrained): "
                                  + (msg or "conflicts with assembly relationships"))
@@ -351,18 +321,13 @@ def handler(handle_one: str = "", handle_two: str = "", motion: str = "revolute"
 
 
 TOOL_DESCRIPTION = (
-                                 "Joint two parts AT specific geometry (an offset pin/bore center), not collapsed to part "
-                                 "origins like an ':origin' snap. handle_one/handle_two are find_geometry handles (not "
-                                 "names/snap-strings; re-find if stale after a model edit). The joint ALIGNS the picked "
-                                 "keypoints (face CENTROID, edge MIDPOINT) and MOVES whichever occurrence is FREE "
-                                 "(grounding wins; 'moved_by' names the actual mover). A placed part gets REPOSITIONED "
-                                 "(restore offsets with joint_edit). motion: "
-                                 "revolute/slider/cylindrical/ball/rigid. 'axis' is the frame axis the motion runs "
-                                 "on, for the types that use one (ball uses none). 'flip' seats two planar faces "
-                                 "whose normals OPPOSE flush (else the free part rotates 180 deg; flip_hint flags it). "
-                                 "If it can't solve in the current pose "
-                                 "the joint is still added with healthy=false - the returned 'healthy' flag is authoritative.\n"
-                                 + _outputs.produces_block(RETURNS)
+    "Joint two parts AT specific geometry (an offset pin/bore center), not collapsed to part "
+    "origins like an ':origin' snap - joint_create takes names and snap-strings instead. "
+    "handle_one/handle_two are find_geometry handles. The joint ALIGNS the picked keypoints (face "
+    "CENTROID, edge MIDPOINT) and MOVES whichever occurrence is FREE (grounding wins), so a placed "
+    "part gets REPOSITIONED - 'moved_by' names the actual mover, and joint_edit(offset) restores an "
+    "intended offset.\n"
+    + _outputs.produces_block(RETURNS)
 )
 
 joint_at_tool = (
@@ -373,7 +338,7 @@ joint_at_tool = (
         "motion", options=("rigid", "revolute", "slider", "cylindrical", "ball"),
         default="revolute", description="Joint motion type (planar/pin_slot not supported here).").as_property())
     .add_input_property(*_AXIS.as_property())
-    .add_input_property("flip", {"type": "boolean", "description": "Reverse the alignment (default false): true seats two planar faces with OPPOSING normals flush."})
+    .add_input_property("flip", {"type": "boolean", "description": "Reverse the alignment: true seats two planar faces with OPPOSING normals flush."})
     .add_input_property("name", {"type": "string", "description": "Optional joint name."})
     .strict_schema()
 )

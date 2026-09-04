@@ -1,30 +1,16 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Typed OUTPUT KINDS: the producer-side mirror of ``_inputs.InputKind``. A tool declares
-``RETURNS = [_outputs.ReturnsHandle(...), ...]`` for each stable id/value it mints;
-``assert_present(payload)`` is a test hook that fails if the handler's ``ok()`` payload doesn't
-actually carry the declared key, so a renamed field breaks the suite instead of silently lying to
-every consumer that reads it. See ``tools/CLAUDE.md`` and ``CONTRIBUTING.md`` ("Return the IDs the
-next call needs") for the full rationale."""
+"""Typed OUTPUT KINDS: a tool declares ``RETURNS = [...]`` for each id/value its ok() payload mints,
+and ``assert_present(payload)`` fails when the declared key is not there."""
 
-# One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
 MAP_BLURB = ("RETURNS kinds (ReturnsHandle/Urn/Name/Value/Verdict) - declare a tool's stable "
              "outputs once")
 
 
 class OutputKind:
-    """One declared tool output. ``key`` = the payload field a consumer reads; ``label`` = the human
-    "what it is"; ``consumers`` = the tool names that read it (for the generated prose); ``stable`` =
-    deterministic / round-trippable id (vs a transient value); ``in_list`` = the key lands inside each
-    item of a list (e.g. find_geometry's ``matches``) rather than at the payload top level.
-
-    ``absent_when`` names ANOTHER payload key (a boolean flag) whose truth licenses this output to be
-    OMITTED - the shape for a value that genuinely does not exist in some run (a feature name in a
-    direct-mode design, where the add() creates no timeline feature object). It is a CONDITION, not
-    an excuse: the flag must be published in the payload for the omission to pass, so a run that
-    quietly drops the key still fails, and the produces_note tells the calling agent when to expect
-    the gap instead of leaving it to discover a missing field."""
+    """One declared tool output: ``key`` the payload field, ``in_list`` for a key inside each list
+    item, ``absent_when`` the payload flag whose truth licenses omitting it."""
 
     def __init__(self, key, label, consumers=(), stable=True, in_list=False, absent_when=""):
         self.key = key
@@ -39,7 +25,6 @@ class OutputKind:
         when = f" (omitted when {self.absent_when}=true)" if self.absent_when else ""
         return f"{self.key}: {self.label}{who}{when}".rstrip()
 
-    # ── the test hook ────────────────────────────────────────────────────────
     def _present_in(self, obj) -> bool:
         """True if self.key appears at obj's top level, or - when in_list - inside any list item."""
         if isinstance(obj, dict):
@@ -53,12 +38,11 @@ class OutputKind:
         return False
 
     def assert_present(self, payload) -> str:
-        """Return an error string if the (already-decoded) ok() payload doesn't carry self.key, else ''.
-        ``payload`` is the dict a handler json.dumps into its ok() text content."""
+        """An error string if the decoded ok() payload doesn't carry self.key, else ''."""
         if self._present_in(payload):
             return ""
         if self.absent_when and isinstance(payload, dict) and payload.get(self.absent_when) is True:
-            return ""            # declared-conditional, and the payload states the condition itself
+            return ""
         where = "in any list item" if self.in_list else "at the payload top level"
         because = (f" - and '{self.absent_when}' is not true in this payload, so the declared "
                    "omission does not apply") if self.absent_when else ""
@@ -66,31 +50,28 @@ class OutputKind:
 
 
 class ReturnsHandle(OutputKind):
-    """Mints a find_geometry-style entityToken handle - the producer counterpart to
-    ``_inputs.GeometryHandle``. Resolves via ``findEntityByToken`` WHILE LIVE; tokens are short-lived
-    (the same entity can return a different token on a later query), so consume promptly + re-find if
-    stale. ``stable=False`` reflects that - it is not a durable id like a URN."""
+    """Mints a find_geometry-style entityToken handle, consumed by ``_inputs.GeometryHandle``."""
 
     def __init__(self, key="handle", require="any", in_list=True, **kw):
+        # 'any' names no kind, so it drops out of the label rather than reading "a any 'handle'".
+        kind = "" if require == "any" else f"{require} "
+        article = "an" if kind[:1] and kind[0] in "aeiou" else "a"
         super().__init__(
             key,
-            f"a {require} 'handle' (entityToken; short-lived - use promptly, re-find if stale)",
+            f"{article} {kind}'handle' (entityToken; short-lived - use promptly, re-find if stale)",
             stable=False, in_list=in_list, **kw)
         self.require = require
 
 
 class ReturnsUrn(OutputKind):
-    """Mints a data-model lineage/version URN (document_id / versionId / source_id / folder_id /
-    project id) - consumed by the doc_*/data_* tools."""
+    """Mints a data-model lineage/version URN, consumed by the doc_*/data_* tools."""
 
     def __init__(self, key="document_id", **kw):
         super().__init__(key, "a data-model lineage URN", stable=True, **kw)
 
 
 class ReturnsName(OutputKind):
-    """Mints an EXACT name a consumer keys off (occurrence / setup / operation / joint / body).
-    Stable for round-tripping within the session, but only as unique as the thing it names - prefer a
-    fullPathName/handle where one exists."""
+    """Mints an EXACT name a consumer keys off (occurrence / setup / operation / joint / body)."""
 
     def __init__(self, key, of="occurrence", in_list=False, **kw):
         super().__init__(key, f"the exact {of} name", stable=True, in_list=in_list, **kw)
@@ -98,20 +79,15 @@ class ReturnsName(OutputKind):
 
 
 class ReturnsValue(OutputKind):
-    """Mints a measured / computed value (extents, frame axes, cycle time, a health verdict) - a result
-    to read, not a stable id to round-trip."""
+    """Mints a measured / computed value (extents, frame axes, cycle time) - not an id."""
 
     def __init__(self, key, label, **kw):
         super().__init__(key, label, stable=False, **kw)
 
 
 class ReturnsVerdict(OutputKind):
-    """The ASSERTION-READ contract: a named check that returns a boolean verdict WITH the evidence
-    that justifies it - never a bare boolean. One shape across every assertion read
-    (model_measure_relation, assembly_inspect_interference): 'relation' names the check, 'passed' is the
-    verdict, 'measured' holds the observed numbers, 'tolerance_used' what it was judged against.
-    assert_present enforces ALL FOUR keys, that 'passed' is a real bool, and - when the declaring
-    tool names its relations - that 'relation' is one of them."""
+    """The assertion-read contract: relation / passed / measured / tolerance_used together, never a
+    bare boolean - assert_present requires all four, a real bool, and a declared relation."""
 
     KEYS = ("relation", "passed", "measured", "tolerance_used")
 
@@ -137,12 +113,8 @@ class ReturnsVerdict(OutputKind):
         return ""
 
 
-# ── prose generation (mirrors _inputs.contract_block) ─────────────────────────
-
 def produces_block(spec, header="PRODUCES") -> str:
-    """Assemble a tool's RETURNS spec into a description block - the producer-side counterpart of
-    _inputs.contract_block. One canonical 'what this returns + who consumes it' line per output, so the
-    chain is declared once here instead of hand-written in the producer AND paraphrased in each consumer."""
+    """A tool's RETURNS spec as a description block, one line per declared output."""
     lines = [f"{header}:"]
     for out in spec:
         lines.append(f"- {out.produces_note()}")

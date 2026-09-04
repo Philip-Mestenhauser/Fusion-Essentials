@@ -24,11 +24,6 @@ def compare_operations_handler(operation_a: str = "", operation_b: str = "",
     if err:
         return error(err)
 
-    # The shared resolver words both misses: a name nothing carries lists the operations, and a name
-    # SEVERAL carry is refused naming each one's '<name>#<n>' address - the spelling THIS input
-    # resolves, since the same resolver reads it back. This tool has no scope input to offer, so the
-    # ordinal address is the only way through it can name, and re-rolling the refusal here could
-    # only offer a rename.
     node_a, err_a = resolve_cam_node(cam, operation_a, kinds=("operation",), label="operation")
     if err_a:
         return error(err_a)
@@ -75,11 +70,8 @@ def compare_operations_handler(operation_a: str = "", operation_b: str = "",
 
 
 def _operation_params(op):
-    """Read an operation's CAM parameters keyed by NAME: (values, titles) where values is
-    {name: expression} and titles is {name: title} for display. Keyed by NAME because a parameter's
-    NAME is scope-unique on an op but its TITLE is NOT - two parameters can share a title across an
-    op's groups, so keying by title would let a colliding title overwrite (and MASK) a real
-    difference. Title rides along only for readable display."""
+    """({name: expression}, {name: title}) for one operation's CAM parameters - keyed by NAME,
+    which is scope-unique on an op where a parameter TITLE is not."""
     values, titles = {}, {}
     try:
         params = op.parameters

@@ -37,12 +37,9 @@ _MOVE_EPS_CM = 1e-7
 
 
 def _object_collection(ents, refs):
-    """(ObjectCollection, error) holding the entities to transform. Sketch.move/copy take an
-    ObjectCollection: handed a plain Python list they raise TypeError "in method 'Sketch_move',
-    argument 2 of type 'adsk::core::Ptr< adsk::core::ObjectCollection > const &'" (measured). The
-    neighbouring GeometricConstraints.createCircularPatternInput takes the OPPOSITE container - a
-    plain list, measured raising TypeError "argument 2 of type 'std::vector<...SketchEntity...>'"
-    on an ObjectCollection - so the two are never built by one helper."""
+    """(ObjectCollection, error) holding the entities to transform."""
+    # Sketch.move/copy take an ObjectCollection and raise TypeError on a plain list; the
+    # neighbouring GeometricConstraints.createCircularPatternInput takes the OPPOSITE container.
     coll = adsk.core.ObjectCollection.create()
     for ent, ref in zip(ents, refs):
         if not coll.add(ent):
@@ -173,18 +170,10 @@ def _curve_ref_by_token(sketch):
 
 def _copied_refs(target, items):
     """The '<type>:<index>' refs of the copied curves, resolved through each returned entity's
-    nativeObject.
-
-    For a sketch owned by a COMPONENT, Sketch.copy hands back assembly-context PROXIES while the
-    sketch's own collections hold the NATIVE curves, and MEASURED: neither identity NOR entityToken
-    crosses that seam - the proxy carries assemblyContext='<occurrence>' and a 248-character token
-    where the landed native curve carries assemblyContext None and a 192-character one. The tokens are
-    stable and round-trip through findEntityByToken; they simply belong to two different entities.
-    What DOES bridge it is `nativeObject`, measured to match the landed curve by BOTH identity and
-    token; it reads None for an already-native entity (the root-sketch case), so the same expression
-    serves both. Token first, then identity for a token two curves share (see _curve_ref_by_token).
-    A copied endpoint resolves to neither - it is not a curve of the target - so the caller compares
-    the count found against the curve-count delta and reports what went unnamed."""
+    nativeObject; a copied endpoint resolves to none, being no curve of the target."""
+    # For a sketch a COMPONENT owns, Sketch.copy hands back assembly-context PROXIES while the
+    # sketch's collections hold the NATIVE curves, and neither identity nor entityToken crosses that
+    # seam. `nativeObject` does, and reads None for an already-native entity.
     by_token = _curve_ref_by_token(target)
     refs = []
     for c in items:
@@ -222,10 +211,9 @@ def move_handler(sketch_name: str = "", entities: str = "", units: str = "mm", d
         did = sketch.move(coll, matrix)
     except Exception as e:
         return error(f"Could not move {', '.join(refs)} in sketch '{name}': {e}")
-    # The bool cannot be the verdict: the binding's own contract is "Transform respects any
-    # constraints that would normally prohibit the move", so a refused entity and a moved one are
-    # reachable through the same true return. Coordinates decide instead - and isFixed is measured
-    # NOT to hold an entity still against an API move, so stillness is never inferred from a flag.
+    # The bool cannot be the verdict: "Transform respects any constraints that would normally
+    # prohibit the move", so a refused entity and a moved one share one true return. Coordinates
+    # decide instead - and isFixed does NOT hold an entity still against an API move.
     after = [_assert.entity_position(e) for e in ents]
     verdicts = [_moved(b, a) for b, a in zip(before, after)]
     moved = [r for r, v in zip(refs, verdicts) if v is True]
@@ -237,13 +225,11 @@ def move_handler(sketch_name: str = "", entities: str = "", units: str = "mm", d
                      f"none of {', '.join(refs)} changed position.")
     if not moved and not unread:
         return error(f"move returned {bool(did)} but {', '.join(refs)} read the same coordinates "
-                     "afterwards, so nothing in the sketch changed. Two things produce that: the "
-                     "transform is one this geometry is symmetric under (a circle rotated about its "
-                     "own centre lands on itself), or an existing relationship refused it - the "
-                     "API's contract is 'Transform respects any constraints that would normally "
-                     "prohibit the move'. sketch_get(include_entities=true) lists this sketch's "
-                     "constraints and dimensions; a CONSTRAINT can be removed with "
-                     "sketch_delete_entity(target='constraint:<index>').")
+                     "afterwards, so nothing in the sketch changed. Either the transform is one "
+                     "this geometry is symmetric under (a circle rotated about its own centre), or "
+                     "a constraint refused it: sketch_get(include_entities=true) lists this "
+                     "sketch's constraints and dimensions, and "
+                     "sketch_delete_entity(target='constraint:<index>') removes one.")
 
     errors_after, _warn_after, _total_after = _common.timeline_health(design)
     broke = [n for n in errors_after if n not in errors_before]
@@ -351,17 +337,16 @@ def copy_handler(sketch_name: str = "", entities: str = "", target_sketch: str =
 MOVE_DESCRIPTION = (
     "MOVE existing sketch entities by one transform in the sketch's own frame: translate "
     "'dx'/'dy', rotate 'rotation_deg' about ('center_x','center_y'), scale by 'scale_factor' about "
-    "the same anchor. 'entities' are '<type>:<index>' refs from sketch_get(include_entities=true). "
-    "Verified by reading COORDINATES back: the result names any entity that stayed put, since a "
-    "constraint can refuse the move for part of a selection. sketch_copy leaves the originals."
+    "the same anchor. 'entities' are '<type>:<index>' refs from sketch_get. The result names any "
+    "entity that stayed put - a constraint can refuse the move for part of a selection. "
+    "sketch_copy leaves the originals."
 )
 
 COPY_DESCRIPTION = (
     "COPY existing sketch entities, placing the copies through a transform: 'dx'/'dy', "
     "'rotation_deg' and 'scale_factor' about ('center_x','center_y'). 'entities' are "
-    "'<type>:<index>' refs from sketch_get(include_entities=true); 'target_sketch' copies into "
-    "another sketch. Returns the NEW curves' refs off whichever sketch received them. sketch_move "
-    "relocates the originals instead."
+    "'<type>:<index>' refs from sketch_get; 'target_sketch' copies into another sketch. Returns "
+    "the NEW curves' refs in the receiving sketch. sketch_move relocates the originals instead."
 )
 
 _TRANSFORM_INPUTS = (

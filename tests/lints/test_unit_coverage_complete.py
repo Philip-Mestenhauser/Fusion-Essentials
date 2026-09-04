@@ -3,13 +3,8 @@
 
 """Gate: every tool module is exercised by a unit test, or excused with a recorded reason.
 
-test_tool_verify_complete.py reconciles the LIVE ledger against the registry; this is the same
-reconciliation at the unit layer, keyed by module (a module's tests load it via
-conftest.load_tool). A tool module ships with a unit test or an UNTESTED entry naming why skipping
-is correct (Tier-3 in tests/README.md's triage: a pure Fusion pass-through with no logic worth
-pinning). Neither is silent: an unaccounted module fails here, and a stale excuse (the module
-gained a test, or no longer exists) fails the other way, so the table can't rot.
-"""
+Reconciled by module, since a module's tests load it via conftest.load_tool. An unaccounted module
+fails here; a stale excuse - the module gained a test, or is gone - fails the other way."""
 
 import re
 from pathlib import Path

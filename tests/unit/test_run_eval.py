@@ -202,6 +202,138 @@ class TestAuthSignature:
         assert run_eval._auth_failure("") is False
 
 
+class TestStallWatch:
+    """The liveness read over a transcript, and the no-progress verdict built on it. Nothing here
+    spawns the CLI: progress_counts is a pure function over lines, stall_reason over two numbers."""
+
+    # The CLI writes its stream COMPACT (no space after a colon), which is what the line reads
+    # match on; a pretty-printed line here would test a shape the runner never sees.
+    _CALL = json.dumps({"type": "assistant",
+                        "message": {"content": [{"type": "tool_use", "name": _MCP}]}},
+                       separators=(",", ":"))
+
+    @staticmethod
+    def _think(est):
+        return json.dumps({"type": "system", "subtype": "thinking_tokens",
+                           "estimated_tokens": est, "estimated_tokens_delta": 50},
+                          separators=(",", ":"))
+
+    def test_calls_and_thinking_events_are_counted_separately(self):
+        lines = [self._CALL, self._think(50), self._think(200), self._CALL]
+        assert run_eval.progress_counts(lines) == (2, 2, 200)
+
+    def test_the_estimated_tokens_reported_are_the_latest_events(self):
+        # The figure RESTARTS at 50 on each new thinking block, so the last event's number is what
+        # the heartbeat prints - it is not a running total and never claims to be.
+        assert run_eval.progress_counts([self._think(1800), self._think(50)])[2] == 50
+
+    def test_a_transcript_with_no_thinking_reports_none_rather_than_zero(self):
+        # None says "no thinking event yet"; a 0 would read as a thinking event that did nothing.
+        assert run_eval.progress_counts([self._CALL]) == (1, 0, None)
+
+    def test_thinking_alone_is_progress_even_with_no_tool_call(self):
+        # The stall this watch exists for: 16 calls then only thinking. Thinking IS work.
+        assert run_eval.progress_counts([self._think(50)]) == (0, 1, 50)
+
+    def test_an_executor_idle_past_the_limit_stalls(self):
+        reason = run_eval.stall_reason(600, 600, 16, 39_950)
+        assert "NO PROGRESS for 600s" in reason and "~16 tool calls" in reason
+        assert "39950 est. tokens" in reason
+
+    def test_one_second_under_the_limit_is_not_a_stall(self):
+        assert run_eval.stall_reason(599, 600, 16, 39_950) == ""
+
+    def test_a_zero_limit_disables_the_watchdog(self):
+        assert run_eval.stall_reason(10_000, 0, 0, None) == ""
+
+    def test_the_reason_says_so_when_no_thinking_event_ever_arrived(self):
+        assert "no thinking event yet" in run_eval.stall_reason(600, 600, 0, None)
+
+    def test_a_thinking_only_stretch_keeps_resetting_the_idle_clock(self):
+        # The stall this watch exists for is SILENCE, not silence of tool calls: 16 calls and then
+        # pure thinking is a working executor, and a clock only tool calls reset would kill it.
+        live = run_eval.Liveness(0.0)
+        live.read(self._CALL, 1.0)
+        for t in range(2, 40):
+            live.read(self._think(50 * (t - 1)), float(t))
+        assert (live.calls, live.thinking) == (1, 38)
+        assert live.idle_s(39.0) == 0.0
+        assert run_eval.stall_reason(live.idle_s(39.0), 10, live.calls, live.est_tokens) == ""
+        # ... and the clock runs again once the thinking stops
+        assert run_eval.stall_reason(live.idle_s(49.0), 10, live.calls, live.est_tokens) != ""
+
+    def test_a_line_carrying_neither_leaves_the_idle_clock_where_it_was(self):
+        live = run_eval.Liveness(0.0)
+        live.read(self._CALL, 5.0)
+        live.read('{"type":"system","subtype":"init","tools":[]}', 30.0)
+        assert live.idle_s(30.0) == 25.0
+
+    def test_the_limit_comes_from_the_environment(self, monkeypatch):
+        monkeypatch.setenv("EVAL_STALL_S", "45")
+        assert run_eval.stall_limit_s() == 45
+        monkeypatch.setenv("EVAL_STALL_S", "not-a-number")
+        assert run_eval.stall_limit_s() == run_eval.STALL_S_DEFAULT
+        monkeypatch.delenv("EVAL_STALL_S")
+        assert run_eval.stall_limit_s() == 600
+
+
+class TestMainStopsOnAStall:
+    """A stall is the runner's OWN kill, so main must leave the retry loop on it. Nothing spawns:
+    launch is replaced by a stub that writes the transcript audit reads."""
+
+    def _scenario(self, tmp_path):
+        path = tmp_path / "S.md"
+        path.write_text("---\nid: X\n---\n\n## AGENT PROMPT (verbatim)\n\n```\nbuild it\n```\n",
+                        encoding="utf-8")
+        return str(path)
+
+    def test_a_stalled_launch_is_never_retried_and_exits_with_the_stall_code(self, tmp_path,
+                                                                             monkeypatch):
+        # A stall can kill the executor before its first call, so the same audit carries BOTH retry
+        # signatures - zero MCP calls (the spawn-flake read) and, with a credential marker in the
+        # CLI's stderr, an auth rejection. Either retry would replay the prompt over live state the
+        # run may already have mutated.
+        scenario = self._scenario(tmp_path)
+        monkeypatch.setattr(run_eval, "_RESULTS", str(tmp_path / "results"))
+        monkeypatch.setattr(run_eval, "preflight_server", lambda: None)
+        monkeypatch.setattr(sys, "argv", ["run_eval.py", scenario])
+        monkeypatch.setattr(time, "sleep", lambda _s: None)
+        launches = []
+
+        def fake_launch(prompt, run_dir, model, max_turns):
+            launches.append(run_dir)
+            transcript = os.path.join(run_dir, "transcript.jsonl")
+            with open(transcript, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps({"type": "result", "result": "", "usage": {}}) + "\n")
+            return transcript, "Error: Not logged in. Please run /login", False, True
+
+        monkeypatch.setattr(run_eval, "launch", fake_launch)
+        code = run_eval.main()
+        assert code == run_eval.EXIT_STALL
+        assert len(launches) == 1, f"the stalled run was relaunched {len(launches)} times"
+
+    def test_the_same_stub_without_the_stall_does_take_a_retry(self, tmp_path, monkeypatch):
+        # The counterpart that proves the test above is not passing for want of a retry path: the
+        # identical zero-call, auth-marked run relaunches once when it is NOT flagged stalled.
+        scenario = self._scenario(tmp_path)
+        monkeypatch.setattr(run_eval, "_RESULTS", str(tmp_path / "results"))
+        monkeypatch.setattr(run_eval, "preflight_server", lambda: None)
+        monkeypatch.setattr(sys, "argv", ["run_eval.py", scenario])
+        monkeypatch.setattr(time, "sleep", lambda _s: None)
+        launches = []
+
+        def fake_launch(prompt, run_dir, model, max_turns):
+            launches.append(run_dir)
+            transcript = os.path.join(run_dir, "transcript.jsonl")
+            with open(transcript, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps({"type": "result", "result": "", "usage": {}}) + "\n")
+            return transcript, "Error: Not logged in. Please run /login", False, False
+
+        monkeypatch.setattr(run_eval, "launch", fake_launch)
+        code = run_eval.main()
+        assert code == run_eval.EXIT_AUTH and len(launches) == 2
+
+
 class TestExitStatus:
     _CLEAN = {"blind": True, "harness_leak": False, "within_call_budget": True,
               "source_access_calls": [], "harness_utility_calls": []}
@@ -228,6 +360,11 @@ class TestExitStatus:
         code, reason = run_eval.exit_status(report)
         assert code == run_eval.EXIT_HARNESS_INTEGRITY and "Skill" in reason
 
+    def test_a_stalled_run_exits_with_its_own_code_naming_the_stall(self):
+        code, reason = run_eval.exit_status(dict(self._CLEAN), stalled=True)
+        assert code == run_eval.EXIT_STALL and code != 0
+        assert "stopped progressing" in reason and "EVAL_STALL_S" in reason
+
     def test_no_report_at_all_exits_nonzero(self):
         code, reason = run_eval.exit_status(None)
         assert code != 0 and "no run record" in reason
@@ -239,4 +376,4 @@ class TestExitStatus:
 
     def test_each_harness_failure_has_its_own_code(self):
         assert len({run_eval.EXIT_OK, run_eval.EXIT_DEAD_SPAWN, run_eval.EXIT_AUTH,
-                    run_eval.EXIT_HARNESS_INTEGRITY}) == 4
+                    run_eval.EXIT_HARNESS_INTEGRITY, run_eval.EXIT_STALL}) == 5

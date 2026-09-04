@@ -1,7 +1,8 @@
 """Tests for `model_inspect` — the measurement rich read (bbox default + include=['mass']; mesh routing).
 
 Same fixture pattern as test_design_get/test_cam_get: stub the slice SEAMS + the TargetRef resolution,
-assert the ROUTER's job — default = bbox, include=['mass'] adds mass, a MESH target routes to mesh stats,
+assert the ROUTER's job — default = bbox, include=['mass'] returns mass INSTEAD of the box ('default'
+keeps both), a MESH target routes to mesh stats,
 the kind tag is surfaced, unknown include + target errors guard. The slice→handler delegation is proven
 by live validation.
 """
@@ -70,6 +71,35 @@ class TestDefaultAndDispatch:
         out = _payload(mi.handler(target="Body1", include=["mass"]))
         assert out["mass"]["mass_kg"] == 1.5
 
+    def test_include_mass_omits_the_bounding_box(self, monkeypatch, stub_slices):
+        # the deep read returns what was asked for: a mass read that also re-measures and re-sends
+        # the box pays for both every call.
+        _resolve_to(monkeypatch, "body")
+        out = _payload(mi.handler(target="Body1", include=["mass"]))
+        assert out["mass"]["mass_kg"] == 1.5
+        assert "x" not in out and "lump_count" not in out
+        assert out["kind"] == "body"                     # the resolved-target stamp stays
+
+    def test_default_beside_mass_keeps_both(self, monkeypatch, stub_slices):
+        _resolve_to(monkeypatch, "body")
+        out = _payload(mi.handler(target="Body1", include=["default", "mass"]))
+        assert out["x"] == 10 and out["mass"]["mass_kg"] == 1.5
+
+    def test_default_alone_is_the_box(self, monkeypatch, stub_slices):
+        _resolve_to(monkeypatch, "body")
+        out = _payload(mi.handler(target="Body1", include=["default"]))
+        assert out["x"] == 10 and "mass" not in out and "include=" in out["note"]
+
+    def test_a_mass_read_does_not_run_the_box_measurement(self, monkeypatch, stub_slices):
+        # the omission has to skip the MEASUREMENT, not just drop its keys - with 'frame' the box
+        # costs a getOrientedBoundingBox call a mass-only read has no reason to pay for.
+        _resolve_to(monkeypatch, "body")
+        calls = []
+        monkeypatch.setattr(mi, "_bbox",
+                            lambda *a: calls.append(1) or _ok({"x": 10}))
+        mi.handler(target="Body1", include=["mass"])
+        assert calls == []
+
     def test_mesh_target_routes_to_mesh_stats(self, monkeypatch, stub_slices):
         _resolve_to(monkeypatch, "mesh")
         out = _payload(mi.handler(target="Mesh1"))
@@ -95,6 +125,13 @@ class TestGuards:
         _resolve_to(monkeypatch, "body")
         res = mi.handler(target="Body1", include=["bogus"])
         assert "bogus" in error_message(res).lower() or "unknown" in error_message(res).lower()
+
+    def test_the_refusal_lists_default_beside_mass(self, monkeypatch, stub_slices):
+        # the refusal IS the vocabulary a caller that mistyped reads next; naming only 'mass' hides
+        # the token that keeps the bounding box beside it.
+        _resolve_to(monkeypatch, "body")
+        msg = error_message(mi.handler(target="Body1", include=["bogus"]))
+        assert "mass" in msg and "default" in msg
 
 
 class TestBodyAabb:

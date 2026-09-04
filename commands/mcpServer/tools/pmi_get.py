@@ -45,12 +45,8 @@ def _normalize_include(include):
 
 
 def _row_cap(max_results) -> int:
-    """The record cap this call runs under, in full: an absent/zero/unparseable request falls back
-    to _MAX_RESULTS_DEFAULT, anything else is held inside 1.._MAX_RESULTS_CAP - so a negative
-    request caps at 1, and an over-cap request is clamped rather than refused (every record
-    crosses the wire, so a caller cannot lift the cap). 'truncated' in the payload says when the
-    cap bit. This is pmi_get's own contract and no other tool's: the fleet's capped reads clamp
-    too, but they do NOT agree on what a negative request means."""
+    """The record cap this call runs under: an absent/zero/unparseable request falls back to
+    _MAX_RESULTS_DEFAULT, anything else is clamped into 1.._MAX_RESULTS_CAP rather than refused."""
     try:
         n = int(max_results or _MAX_RESULTS_DEFAULT)
     except (TypeError, ValueError):
@@ -286,11 +282,9 @@ def handler(include=None, geometry=None, kind="", component="", max_results=None
 
     cap = _row_cap(max_results)
 
-    # geometry= narrows via each component collection's own itemsByEntities associativity query.
-    # Matches are keyed by (component, name) rather than by object identity: identity across two
-    # PMI reads is UNMEASURED on 2705 (it needs authored PMI, which the extension gate blocks),
-    # and every other adsk collection hands out a fresh wrapper per access, so an identity
-    # intersection would silently return nothing.
+    # geometry= narrows via each collection's own itemsByEntities query, keyed by (component,
+    # name): an adsk collection hands out a fresh wrapper per access, so an identity intersection
+    # would silently return nothing.
     only = None
     if geometry:
         ents, gerr = _GEOMETRY.resolve(geometry)
@@ -334,10 +328,8 @@ def handler(include=None, geometry=None, kind="", component="", max_results=None
     out = {"total": total, "by_kind": by_kind, "annotations": records, "units": units}
     if truncated:
         out["truncated"] = True
-    # 'total'/'by_kind' count what the walk could READ. A component whose collection or count did
-    # not read, and an annotation that did not read, are holes in the search space - published
-    # beside the tallies so a partial design is never handed over as the whole one. 'truncated'
-    # covers only the row cap, which is a different fact.
+    # 'total'/'by_kind' count what the walk could READ; the holes ride beside them so a partial
+    # design is never handed over as the whole one. 'truncated' covers only the row cap.
     comps_bad = walk_holes.get("components_unreadable", 0)
     items_bad = walk_holes.get("items_unreadable", 0)
     if comps_bad or items_bad:
@@ -354,11 +346,9 @@ def handler(include=None, geometry=None, kind="", component="", max_results=None
             "geometry= matched by (component, name), not by object identity. If one component "
             "holds two annotations with the same name, a match on either publishes both - compare "
             "the rows before acting on one.")
-    # Every SUPPRESSED timeline feature, listed by name: a suppressed PMI is expected to be absent
-    # from the collections above with only its timeline name surviving, so listing them is what
-    # keeps one from vanishing silently. That behaviour is UNMEASURED on 2705 (see _pmi's
-    # extension-gate note), which is why the list is unfiltered rather than claiming which rows
-    # are the PMI.
+    # Every SUPPRESSED timeline feature by name: a suppressed PMI leaves the collections above
+    # with only its timeline name surviving, and the list is unfiltered because nothing read here
+    # says which rows are the PMI.
     suppressed = [nm for _item, nm in _pmi.suppressed_pmi_features(d)]
     if suppressed:
         out["suppressed_features"] = suppressed
@@ -381,14 +371,10 @@ def handler(include=None, geometry=None, kind="", component="", max_results=None
 TOOL_DESCRIPTION = (
 "Read the design's PMI (Product Manufacturing Information - 3D annotations attached to model "
 "faces/edges): Fusion-authored leader notes and hole/thread callouts, plus PMI imported with a "
-"STEP/model (dimensions, GD&T frames, datums, surface textures, folders). Default: counts by "
-"kind + light records (name, kind, component, visibility; text on Fusion-authored kinds only), "
-"bounded by max_results. "
-"include=['segments'] adds each note's {symbol} markup; include=['detail'] adds per-kind "
-"structure - placement/plane/alignment for notes, values+tolerances+thread+display for hole "
-"callouts, nominal/tolerance/datum-frame/roughness data for imported PMI - scaled to 'units'. "
-"kind=, component=, and geometry= (find_geometry handles) narrow. Author/change PMI with "
-"pmi_create / pmi_edit / pmi_delete."
+"STEP/model (dimensions, GD&T frames, datums, surface textures, folders). Default: counts by kind "
+"+ light records (name, kind, component, visibility; text on Fusion-authored kinds only), bounded "
+"by max_results. include=['segments'|'detail'] deepens - the returned note says what each adds - "
+"and kind=/component=/geometry= narrow. Author/change PMI with pmi_create / pmi_edit / pmi_delete."
 )
 
 tool = (

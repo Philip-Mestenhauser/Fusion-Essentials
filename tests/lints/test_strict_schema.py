@@ -1,15 +1,7 @@
 """Lint: every registered tool's inputSchema carries additionalProperties:false.
 
-A tool without ``.strict_schema()`` silently DROPS a misspelled optional argument instead of
-refusing it - the caller believes the option was applied while the handler ran on its default.
-The write guard, the typed kinds, and every refusal in the fleet assume an argument that reaches
-the handler was one the schema admits; ``additionalProperties: false`` is what makes that true at
-the wire.
-
-This walks the LIVE registry (the same one the server serves), so the offender list can never go
-stale against a grep heuristic: whatever this lint names is missing the call, wherever its wiring
-lives (a direct chain, ``create_with_string_input``, or a shared wiring helper).
-"""
+A tool without ``.strict_schema()`` silently DROPS a misspelled optional argument and runs on its
+default. The walk is over the LIVE registry, so it names the offender whatever its wiring shape."""
 
 from conftest import register_all_tools
 

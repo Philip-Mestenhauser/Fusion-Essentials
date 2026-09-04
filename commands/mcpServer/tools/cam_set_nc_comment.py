@@ -22,14 +22,8 @@ _NAME_PARAM = "nc_program_name"
 
 
 def _set_param(ncp, internal_name, value):
-    """Set a CAM string parameter on the NC program and CONFIRM the program kept it. Returns
-    (before, after, error).
-
-    The read-back is COMPARED to what was written, not just published: a parameter that accepts the
-    assignment and keeps the expression it already held is a swallowed write the platform reports as
-    success. Both sides of the compare go through the same _quote/_unquote codec, so the comparison
-    is of the value this call wrote against the value the program now reads - an escaped apostrophe
-    cannot make a landed write look like a stuck one."""
+    """(before, after, error) - set a CAM string parameter on the NC program and CONFIRM it kept
+    the value; a parameter can accept the assignment and keep the expression it already held."""
     param = safe(lambda: ncp.parameters.itemByName(internal_name))
     if param is None:
         return None, None, f"parameter '{internal_name}' not found on this NC program"
@@ -82,10 +76,8 @@ def handler(comment: str = "", program: str = "", set_name: str = "") -> dict:
         return error(f"No NC program named '{program}'. Available: "
                       f"{', '.join(str(a) for a in available)}.")
 
-    # Pre-validate every target's params BEFORE writing anything. There is no true CAM
-    # transaction here, so a mid-loop failure across multiple programs would leave earlier ones
-    # already mutated. Checking presence + editability up front makes a partial-apply far less
-    # likely (the common failure - a locked/missing param - is caught before the first write).
+    # Pre-validate every target's params BEFORE writing: there is no CAM transaction here, so a
+    # mid-loop failure would leave the earlier programs already mutated.
     for ncp, nm in targets:
         if write_comment:
             p = safe(lambda ncp=ncp: ncp.parameters.itemByName(_COMMENT_PARAM))
@@ -135,11 +127,9 @@ def handler(comment: str = "", program: str = "", set_name: str = "") -> dict:
 
 TOOL_DESCRIPTION = (
     "Set the COMMENT field of the active document's NC programs (post/output jobs) - what most "
-    "posts emit near the top of the G-code. 'comment' is the text to write. 'program' limits the "
-    "change to one NC program by name (omit to update ALL programs). 'set_name' optionally also "
-    "sets each program's Name field. Reports before/after per program. "
-    "Works without switching to the Manufacture workspace. (Use cam_get(include=['nc_programs']) to list program "
-    "names - note it reports post parameters, not the comment, which this tool edits directly.)"
+    "posts emit near the top of the G-code. Reports before/after per program. "
+    "Works without switching to the Manufacture workspace. "
+    "cam_get(include=['nc_programs']) lists the program names."
 )
 
 tool = (

@@ -2,12 +2,9 @@
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
 """MCP building block: re-parent an occurrence - move a component instance INTO another instance's
-component without rebuilding it. WRITES.
-
-Occurrence.moveToComponent takes an OCCURRENCE (a Component, root included, raises) and returns the
-moved occurrence as a NEW proxy; the handle held before the call keeps reading its old path, so
-everything the result reports is captured before the call or read after through the returned proxy /
-the tree walk. All measured.
+component without rebuilding it. Occurrence.moveToComponent takes an OCCURRENCE (a Component, root
+included, raises) and returns a NEW proxy, while the handle held before the call keeps reading its
+old path. WRITES.
 """
 
 from ..mcp_primitives.tool import Tool
@@ -108,10 +105,8 @@ def handler(occurrence: str = "", into_component: str = "") -> dict:
                      f"component '{safe(lambda: moving.name)}' or sits inside it, so the component "
                      "would contain an instance of itself. Pick a target outside it.")
     if cycle is None:
-        # The tri-state's whole point: False is the claim "this move is legal", and the walk answers
-        # None for several distinct reads - an unenumerable collection, a census holding an
-        # unresolved reference, or one occurrence whose component identity would not read. The wire
-        # says only what is common to all of them: no verdict was reached.
+        # The walk answers None for several distinct reads, so the wire says only what is common to
+        # them: no verdict was reached.
         return error(f"Refusing to move '{name}' into {target_label}: whether "
                      f"'{safe(lambda: moving.name)}' already sits inside that target could not be "
                      "determined - its subtree could not be searched to a verdict, so a move there "
@@ -131,9 +126,7 @@ def handler(occurrence: str = "", into_component: str = "") -> dict:
 
     after = occurrence_paths(design)
     # An UNREADABLE assembly walk yields the SAME empty set an empty assembly would, and the move
-    # just proved at least one occurrence exists - so an empty census here is a failed read, not a
-    # verdict. Reporting it as "moved" would publish a re-parent nothing confirmed
-    # (design_remove_feature refuses on the same signal).
+    # just proved at least one occurrence exists - so an empty census here is a failed read.
     if not after:
         return error(f"moveToComponent ran for '{name}', but the assembly census that confirms it "
                      "could not be read - the move may or may not have taken. Check with "
@@ -178,12 +171,9 @@ def handler(occurrence: str = "", into_component: str = "") -> dict:
 
 
 TOOL_DESCRIPTION = (
-"Re-parent a component instance: move an occurrence INTO the component of another occurrence - "
-"restructuring a flat assembly without rebuilding parts. The part keeps its WORLD position; "
-"only its place in the browser tree changes. Its fullPathName changes with it, and so does every "
-"path beneath it - use the 'full_path' it publishes. This direction only: the API moves an "
-"occurrence into another OCCURRENCE, so there is no way to move one back out to the top level "
-"(delete it and place a new one with design_add_instance instead).\n"
+"Re-parent a component instance: move an occurrence INTO the component of another occurrence, "
+"restructuring an assembly without rebuilding parts. The part keeps its WORLD position; only its "
+"place in the browser tree changes - and every path beneath it changes with it.\n"
 + _outputs.produces_block(RETURNS)
 )
 

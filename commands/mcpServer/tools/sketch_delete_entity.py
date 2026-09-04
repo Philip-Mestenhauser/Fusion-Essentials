@@ -1,22 +1,9 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: delete a single sketch ENTITY or CONSTRAINT, so a wrong curve/point or a
-bad constraint can be surgically removed WITHOUT deleting and rebuilding the whole sketch.
-
-  sketch_delete_entity -> remove one 'target' from a named sketch. 'target' is '<type>:<index>':
-      line / arc / circle / ellipse / point / spline / cv_spline / fixed_spline (a curve or point,
-      via the shared resolve_entity_ref/entity_collection - see _common.ENTITY_REF_KINDS),
-      constraint (a geometric constraint, indexed in sketch.geometricConstraints creation order),
-      OR text (a sketch text, indexed in sketch.sketchTexts creation order - the same index
-      sketch_set_text edits by). The delete is verified by reading the collection count back - a
-      delete that removed nothing is reported as a failure, never a false ok. WRITES.
-
-The recovery tool for a constraint that landed on the wrong geometry - a coincident onto a curve
-puts the point ON it rather than at its centre, and sketch_constrain says so on its own success
-path: apply a wrong constraint, delete just THAT constraint here, re-constrain - instead of
-design_delete_feature on the entire sketch.
-"""
+"""sketch_delete_entity - remove one '<type>:<index>' target (a curve/point kind from
+_common.ENTITY_REF_KINDS, 'constraint', or 'text') from a named sketch, WITHOUT rebuilding the whole
+sketch. The delete is verified by reading the collection count back. WRITES."""
 
 import adsk.core
 import adsk.fusion
@@ -93,10 +80,7 @@ def handler(sketch_name: str = "", target: str = "", component: str = "") -> dic
     if not design:
         return error("No active design.")
 
-    # Resolve across the whole design (every component, no preference among them) so a sketch in an activated
-    # sub-component is reachable, matching sketch_constrain / the rest of the family. A name SEVERAL
-    # components' sketches carry is refused with them named - a delete cannot pick one blind - and
-    # the refusal names 'component', which narrows the walk to one component's own sketches.
+    # Resolve across the whole design, so a sketch in an activated sub-component is reachable.
     wanted = (sketch_name or "").strip()
     sketch, refusal = _sketch_detail.scoped_sketch(design, wanted, component)
     if refusal:
@@ -225,13 +209,9 @@ def handler(sketch_name: str = "", target: str = "", component: str = "") -> dic
 
 
 TOOL_DESCRIPTION = (
-    "Delete ONE sketch entity, constraint or text from a named sketch - the surgical alternative to "
-    "deleting and rebuilding the whole sketch. 'target' is '<type>:<index>': line | arc | circle | "
-    "ellipse | point | spline | cv_spline | fixed_spline (a curve or point) or constraint - indexes "
-    "from sketch_get - or text, at the index sketch_set_text edits by. Use it to undo a WRONG "
-    "constraint (e.g. a coincident that pinned a circle to a curve instead of centering it - see "
-    "sketch_constrain) without losing the rest of the sketch. The delete is verified by reading the "
-    "collection count back: a delete that removed nothing is returned as an error, never a false ok."
+    "Delete ONE sketch entity, constraint or text from a named sketch. 'target' is "
+    "'<type>:<index>' - indexes come from sketch_get, and a text's index is the one "
+    "sketch_set_text edits by."
 )
 
 tool = (
@@ -239,13 +219,13 @@ tool = (
         name="sketch_delete_entity",
         description=TOOL_DESCRIPTION,
         input_param_name="sketch_name",
-        input_param_description="The sketch holding the entity (resolved design-wide across every component; a name several sketches carry is refused).",
+        input_param_description="The sketch holding the entity (a name several sketches carry is refused).",
     )
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
     .add_input_property("target", {"type": "string",
             "description": "The entity to delete as '<type>:<index>' - line | arc | circle | ellipse | "
                            "point | spline | cv_spline | fixed_spline | constraint | text (e.g. "
-                           "'circle:0', 'constraint:2', 'text:0'). 0-based, in creation order."})
+                           "'circle:0', 'text:0'). 0-based, in creation order."})
     .add_required_input("target")
     .strict_schema()
 )

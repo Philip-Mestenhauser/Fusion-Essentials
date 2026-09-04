@@ -22,6 +22,7 @@ from conftest import FakeOperation, _NamedCollection, load_tool
 
 ct = load_tool("cam_edit_tools")
 cp = load_tool("_cam_presets")          # the preset helpers cam_edit_tools' preset paths run through
+cc = load_tool("_cam_common")           # the shared expression codec _quote delegates to
 
 
 # ── fakes ────────────────────────────────────────────────────────────────────
@@ -501,6 +502,19 @@ class TestAddRich:
         assert "needs 'from_type'" in res["message"]
 
 
+class TestExpressionQuoting:
+    """product_id/vendor are written as expressions through the shared CAM codec. The ONE difference
+    is a backslash: what the tool-parameter store spells it as is unmeasured, so the doubling stays."""
+
+    def test_a_value_holding_no_backslash_is_the_shared_codec(self):
+        for text in ("HAM-123", "Hoffmann Group", "O'Brien", "", "12"):
+            assert ct._quote(text) == cc.quote_expression(text)
+
+    def test_a_backslash_is_doubled_where_the_shared_codec_passes_it_through(self):
+        assert cc.quote_expression("A\\B") == "'A\\B'"
+        assert ct._quote("A\\B") == "'A\\\\B'"
+
+
 # ── add: product_id / vendor (tool_productId/tool_vendor, applied as expressions AFTER creation - ──
 # ── createFromJson's JSON schema silently drops these keys, verified live) ──────────────────────────
 
@@ -791,12 +805,26 @@ class TestEdit:
         assert "present, not that it was stored" in out["note"] and "doc_save" in out["note"]
         assert "persist" not in out["note"].lower()
 
+    def test_a_document_tool_edit_says_existing_operations_keep_their_copies(self, monkeypatch):
+        # MEASURED: a document tool edited 25 -> 40 mm flute reaches an op created AFTER the edit,
+        # while an op created before keeps the copy it was made with. Without this clause the
+        # caller reads 'Tool edited' and expects its existing operations to cut at the new geometry.
+        _install(monkeypatch, _Target(tools=[_Tool("EM", tool_numberOfFlutes="3")],
+                                      is_document=True))
+        out = _payload(ct.handler(action="edit", scope="document", tool=0,
+                                  parameters={"tool_numberOfFlutes": "4"}))
+        assert "keep their own copy" in out["note"]
+        assert "cam_edit_operation(tool_scope, tool_index)" in out["note"]
+        assert len(out["note"]) <= 400, len(out["note"])   # test_prose_budget.NOTE_BUDGET_CHARS
+
     def test_edit_confirmed_against_the_fresh_library_says_so(self, monkeypatch):
         _install(monkeypatch, _Target(tools=[_Tool("EM", tool_numberOfFlutes="3")]))
         out = _payload(ct.handler(action="edit", scope="cloud", library="L", tool=0,
                                   parameters={"tool_numberOfFlutes": "4"}))
         assert out["verified_in_memory_only"] is False
         assert "persisted" in out["note"] and "library url" in out["note"]
+        # a SHARED library holds no operations, so the operation-copy clause does not ride there
+        assert "keep their own copy" not in out["note"]
 
     def test_an_expression_that_does_not_evaluate_errors_and_rolls_back(self, monkeypatch):
         # A tool parameter STORES an unresolvable expression verbatim and reads it back, so the
@@ -1808,6 +1836,12 @@ class TestPresetSpecNumberGate:
         # included, so refusing bools can never become refusing numbers
         assert cp._preset_spec_error({"name": "Alu", "feed": value}) is None
 
+    def test_the_preset_input_states_the_fixed_unit_a_bare_number_carries(self):
+        # The gate never fires on {"name": "Rough", "feed": 500}, so the wire is the only place
+        # an agent learns a bare number is rpm / mm-per-min whatever the document's units.
+        desc = ct.tool.to_dict()["inputSchema"]["properties"]["preset"]["description"]
+        assert "rpm / mm-per-min" in desc and "35in/min" in desc
+
 
 class TestRemovePreset:
     def test_removes_the_named_preset_by_index(self, monkeypatch):
@@ -1908,6 +1942,17 @@ class TestRemovePreset:
         res = ct.handler(action="remove_preset", scope="document", tool=0, preset={"name": "Alu"})
         assert res["isError"] is True
         assert "Steel, Brass" in res["message"] and tool.presets.count == 2
+
+    def test_a_long_preset_list_is_capped_and_the_remainder_counted(self, monkeypatch):
+        # A cloned mill ships 25 presets. An uncapped join floods the wire AND reads as the whole
+        # set; the shared renderer names the cap's worth and COUNTS the rest.
+        names = [f"P{i:02d}" for i in range(25)]
+        tool = _tool_with_presets("EM", names)
+        _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        res = ct.handler(action="remove_preset", scope="document", tool=0, preset={"name": "Alu"})
+        assert res["isError"] is True
+        assert "P07" in res["message"] and "P08" not in res["message"]
+        assert "(+17 more not listed)" in res["message"]
 
     def test_no_presets_at_all_says_none(self, monkeypatch):
         tool = _tool_with_presets("EM")

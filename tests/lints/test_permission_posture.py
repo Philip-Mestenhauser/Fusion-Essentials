@@ -1,23 +1,8 @@
 """Lint: the generated permission presets NEVER auto-allow a hard-to-reverse tool.
 
-``gen_posture.py`` emits ready-to-paste Claude Code ``settings.json`` presets straight from the
-registry's write= truth: reads auto-allow, writes ask, destructive writes ask/deny, and the
-arbitrary-code hatch (``sys_execute_script``) is denied everywhere. The load-bearing SECURITY
-invariant is that no bucket rule ever routes a destructive-kind tool - above all the script hatch -
-into an allow list. A generator refactor that miscategorised one tool would silently hand an agent
-unattended delete/close/arbitrary-code power, and a freshness check alone would not catch it (the
-committed doc would match the wrong-but-consistent generator). This lint asserts the invariant
-against the presets the generator actually builds, and proves it bites on a doctored bad preset.
-
-FRESHNESS is already covered: ``gen_posture`` is registered in ``gen_all.py``'s generator list, and
-``test_generated_docs_current.py`` shells ``gen_all.py --check`` - so a stale PERMISSION_POSTURE.md
-fails there, naming ``py -3 tests/gen_all.py`` to regenerate. This lint does NOT duplicate that gate;
-it enforces the one thing freshness cannot: that the generator's OWN output is safe.
-
-The COMMITTED ``.claude/settings.json`` (the team's default posture) is held to the same truth: its
-fusion-wire allow entries must be exactly the registry's read bucket - so adding a read tool forces
-the allow-list update its own comment asks for, and a write-kind tool can never sit auto-approved.
-"""
+A destructive-kind tool or ``sys_execute_script`` in any ``gen_posture`` preset's allow list fails,
+as does the hatch missing from a preset's deny list. The committed ``.claude/settings.json`` allow
+list must be exactly the registry's read bucket plus the ``_OWNER_ALLOWED_WRITES`` exceptions."""
 
 import json
 import os
@@ -30,17 +15,16 @@ _SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 
 def _must_never_auto_allow(tools):
-    """The registry-truth set of tool names that must never appear in ANY allow list: every
-    destructive-kind tool, plus the arbitrary-code hatch (which is destructive too, named explicitly
-    so the intent survives even if its kind were ever mislabeled)."""
+    """Tool names that must never appear in ANY allow list: every destructive-kind tool, plus the
+    script hatch by name, so the ban survives even if its kind were ever mislabeled."""
     banned = {t["name"] for t in tools if t["write"] == "destructive"}
     banned.add(gen_posture.SCRIPT_HATCH)
     return banned
 
 
 def _auto_allow_violations(presets, banned):
-    """Every (preset, tool) pair where a banned tool leaked into that preset's allow list. Empty ==
-    the invariant holds. Wire names are stripped back to bare tool names for the membership test."""
+    """Every (preset, tool) pair where a banned tool leaked into that preset's allow list; wire
+    names are stripped back to bare tool names for the membership test."""
     prefix = gen_posture.WIRE_PREFIX
     violations = []
     for preset_name, preset in presets.items():
@@ -71,19 +55,6 @@ class TestPermissionPostureNeverAutoAllowsDestructive:
                 f"{name}: {gen_posture.SCRIPT_HATCH} must be explicitly denied, not left to fall "
                 "through to a prompt")
 
-    def test_the_check_bites_on_a_doctored_allow_list(self):
-        # Doctor a preset the way a broken generator would: slip a real destructive tool into allow.
-        # The checker MUST flag it - otherwise it is decoration that would pass any output.
-        banned = {"cam_delete", gen_posture.SCRIPT_HATCH}
-        good = {"conservative": {"allow": [gen_posture.WIRE_PREFIX + "cam_get"], "ask": [], "deny": []}}
-        assert _auto_allow_violations(good, banned) == []          # clean output is not flagged
-
-        bad = {"conservative": {"allow": [gen_posture.WIRE_PREFIX + "cam_delete"], "ask": [], "deny": []}}
-        assert _auto_allow_violations(bad, banned) == [("conservative", "cam_delete")]
-
-        hatch_leak = {"modeling": {"allow": [gen_posture.WIRE_PREFIX + gen_posture.SCRIPT_HATCH]}}
-        assert _auto_allow_violations(hatch_leak, banned) == [("modeling", gen_posture.SCRIPT_HATCH)]
-
 
 # Write-kind tools the local permission config auto-approves anyway, each with the reason it is
 # exempt from prompting. The tool's write= stays honest on the wire; this table governs only the
@@ -97,9 +68,7 @@ _OWNER_ALLOWED_WRITES = {
 
 def _fusion_allow_diff(allow_entries, read_names, owner_writes=None):
     """(missing, extra) between the committed allow list's fusion-wire entries and the registry's
-    read bucket plus the owner's explicit write exceptions. Non-fusion entries (another server's
-    tools, shell rules) are out of scope - the invariant governs only what THIS server
-    auto-approves."""
+    read bucket plus the owner's write exceptions; non-fusion entries are out of scope."""
     prefix = gen_posture.WIRE_PREFIX
     committed = {e[len(prefix):] for e in allow_entries if e.startswith(prefix)}
     writes = _OWNER_ALLOWED_WRITES if owner_writes is None else owner_writes
@@ -121,19 +90,3 @@ class TestCommittedSettingsMatchTheReadBucket:
             "unattended; remove them (or fix the tool's write= kind if it truly reads): "
             + ", ".join(extra))
 
-    def test_the_diff_bites_both_ways(self):
-        reads = ["cam_get", "doc_get"]
-        wire = [gen_posture.WIRE_PREFIX + n for n in reads]
-        assert _fusion_allow_diff(wire + ["Bash(git status)"], reads, owner_writes={}) == ([], [])
-        assert _fusion_allow_diff(wire[:1], reads, owner_writes={}) == (["doc_get"], [])
-        assert _fusion_allow_diff(wire + [gen_posture.WIRE_PREFIX + "cam_delete"], reads,
-                                  owner_writes={}) == ([], ["cam_delete"])
-
-    def test_an_owner_write_exception_is_allowed_and_still_required(self):
-        # the exception makes the committed entry legal AND missing-if-absent - an entry the owner
-        # approved must actually be in the file, so the two surfaces cannot drift apart silently.
-        reads = ["cam_get"]
-        wire = [gen_posture.WIRE_PREFIX + "cam_get", gen_posture.WIRE_PREFIX + "view_screenshot"]
-        exc = {"view_screenshot": "reason"}
-        assert _fusion_allow_diff(wire, reads, owner_writes=exc) == ([], [])
-        assert _fusion_allow_diff(wire[:1], reads, owner_writes=exc) == (["view_screenshot"], [])

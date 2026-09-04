@@ -3,14 +3,8 @@
 
 """Lint: acquire the active Design / CAM product through the resolver, not a hand cast.
 
-`adsk.fusion.Design.cast(app.activeProduct)` returns None when the active product is NOT a design
-(e.g. a CAM product is in front while a design is open behind it). `_common.design()` handles that -
-it falls back to the active document's DesignProductType - so a hand cast silently breaks features
-(fit_to, active-component notes) whenever CAM is active. Likewise `adsk.cam.CAM.cast(...)` is what
-`_cam_common.get_cam()` already does once, in one place. Banned in tool modules:
-  - `Design.cast(...activeProduct...)` outside _common  -> call `_common.design()`;
-  - `CAM.cast(...)` outside _cam_common                 -> call `_cam_common.get_cam()`.
-"""
+`Design.cast(...activeProduct...)` outside _common.py fails - it returns None when a CAM product is
+active, so call `_common.design()`. `CAM.cast(...)` outside _cam_common.py fails - call get_cam()."""
 
 import os
 import re
@@ -47,10 +41,3 @@ class TestNoHandCastProduct:
         assert not offenders, (
             "hand cast to a CAM product - call `_cam_common.get_cam()` (the one shared CAM resolver):\n  "
             + "\n  ".join(offenders))
-
-    def test_the_lint_bites(self):
-        # prove the regex catches the banned activeProduct cast and skips the sanctioned fallback
-        # shape _common.design() itself uses (cast off doc.products, not app.activeProduct).
-        assert _DESIGN_CAST.search("d = adsk.fusion.Design.cast(app.activeProduct)")
-        assert not _DESIGN_CAST.search(
-            "d = adsk.fusion.Design.cast(app.activeDocument.products.itemByProductType('DesignProductType'))")

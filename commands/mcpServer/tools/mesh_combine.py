@@ -23,20 +23,18 @@ from .mesh_ops import _result_mesh_of, _tri_count
 
 app = adsk.core.Application.get()
 
-# target = ONE mesh body (kept/modified); tools = a LIST of mesh bodies combined into it. There is no
-# MeshBodyRefList helper in _inputs (only MeshBodyRef), so the list uses BodyRefList(kind="mesh") -
-# which kind-checks EVERY element as a MESH body BEFORE returning (so a BRep handle in the list fails
-# the call before any mutation), exactly the enforcement we want for the createInput(list[MeshBody]).
+# BodyRefList(kind="mesh") kind-checks EVERY element before returning, so a BRep handle in the list
+# fails the call before any mutation - what createInput(target, list[MeshBody]) needs.
 _TARGET = _inputs.MeshBodyRef("target", required=True,
                               description="The MESH body kept/modified (the result lands here).")
 _TOOLS = _inputs.BodyRefList("tools", kind="mesh", required=True,
                              description="The MESH bodies combined INTO the target.")
 _OPERATION = _inputs.Choice("operation", ["join", "cut", "intersect", "merge"], default="join",
-                            description="join (combine by enclosing volumes) | cut (remove the "
-                            "tools' overlap from the target) | intersect (keep only the shared "
-                            "volume) | merge (combine without altering faces).")
+                            description="join combines by enclosing volumes; cut removes the tools' "
+                            "overlap; intersect keeps only the shared volume; merge combines "
+                            "without altering faces.")
 _ALGORITHM = _inputs.Choice("algorithm", ["legacy", "enhanced"], default="enhanced",
-                            description="legacy | enhanced (default - fewer triangles).")
+                            description="'enhanced' yields fewer triangles.")
 
 _SPEC = [_TARGET, _TOOLS, _OPERATION, _ALGORITHM]
 
@@ -59,14 +57,8 @@ _UNSET = object()
 
 
 def _algorithm_held(inp, at):
-    """(algorithm_key, why_not) - the algorithm the INPUT actually holds, mapped back through
-    _ALGORITHMS, or (None, reason).
-
-    Read off inp.algorithmType and matched against the enum family member by member, so what is
-    published is a value that was read, never the coercion the API doc predicts. The three ways
-    this comes back unknown are DIFFERENT facts and each says so: the family is absent on this
-    build (so nothing was ever assigned and nothing can be decoded), the property itself would not
-    read, or it read a value matching no member of the family."""
+    """(algorithm_key, why_not) - the algorithm inp.algorithmType actually reads back, decoded
+    against the enum family member by member, or (None, the reason it could not be decoded)."""
     if at is None:
         return None, ("MeshCombineAlgorithmTypes is not available on this Fusion version, so the "
                       "algorithm was never set and cannot be decoded")
@@ -88,9 +80,6 @@ def handler(target: str = "", tools=None, operation: str = "join",
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")
 
-    # target = MeshBodyRef, tools = BodyRefList(kind="mesh"): resolve + KIND-VALIDATE every input up
-    # front - a BRep handle is redirected (the whole point), and the list is fully checked BEFORE any
-    # mutation. createInput wants list[MeshBody], so the kind gate must pass first.
     tgt, terr = _TARGET.resolve(target)
     if terr:
         return error(terr)
@@ -105,13 +94,9 @@ def handler(target: str = "", tools=None, operation: str = "join",
     if aerr:
         return error(aerr)
 
-    # same-body guard: the target must NOT also be a tool body. Compared by _common.native_identity,
-    # never by Python identity - the API mints a FRESH wrapper per access, so `is` reads False even
-    # when both references name the same physical body and the guard would never fire. The NATIVE
-    # half of that key, because two wrappers of one body (a native and an occurrence proxy) carry
-    # DIFFERENT tokens of their own; the SOURCE-DOCUMENT half, because a token is document-local -
-    # two bodies reached through two x-refs answer one token (measured), and keyed on that alone this
-    # guard REFUSES a legitimate combine of two distinct meshes.
+    # The same-body guard keys on native_identity, never Python identity: the API mints a fresh
+    # wrapper per access (`is` reads False for one physical body), a native and its proxy carry
+    # different tokens, and a token is document-local (two x-refs can answer one token).
     tgt_key = _common.native_identity(tgt)
     for b in tool_bodies:
         b_key = _common.native_identity(b)
@@ -119,25 +104,17 @@ def handler(target: str = "", tools=None, operation: str = "join",
             return error("A tool body is the same as the target - pick distinct mesh bodies "
     "(the target is combined INTO, the tools are combined FROM).")
 
-    # Identity reads captured BEFORE the mutation: the combine CONSUMES the tool bodies, and a
-    # consumed body's wrapper is not guaranteed to still answer .name - read after the add, the
-    # tools list published nulls for the very bodies that were combined.
+    # Read BEFORE the mutation: the combine CONSUMES the tool bodies, and a consumed body's wrapper
+    # answers .name with null.
     tool_names = [safe(lambda b=b: b.name) for b in tool_bodies]
     tgt_name = safe(lambda: tgt.name)
-    # The handle the payload publishes when the feature hands back no result bodies and the combine
-    # landed in the TARGET in place. It is the NATIVE's token: for a proxy target that is a different
-    # string from the one the caller passed, and from the result-body handles below, which are each
-    # wrapper's OWN token.
+    # Published when the feature hands back no result bodies. It is the NATIVE's token, a different
+    # string from a proxy target's own.
     tgt_token = _common.native_token(tgt)
 
-    # Meshes that do not touch make every operation here a lie waiting to happen: a JOIN lands one
-    # body still holding both shells, and a CUT/INTERSECT reports success while consuming the tool
-    # and changing nothing (measured). A MeshBody carries no lump or shell count to check with
-    # (BRepBody.lumps has no mesh counterpart), but its AABB is readable: boxes that do not overlap
-    # PROVE the two cannot touch. Measured here, BEFORE the add consumes the tools - for
-    # cut/intersect that makes it a REFUSAL (the cutter is consumed unconditionally, there is no
-    # keep_tools to soften a post-hoc error), for join a warning (an apart tool may still fuse
-    # through another tool).
+    # A cut/intersect of meshes that do not touch reports success while consuming the tool and
+    # changing nothing. A MeshBody carries no lump/shell count, but bounding boxes that do not
+    # overlap prove the two cannot touch - checked here, BEFORE the add consumes the tools.
     apart = []
     for b, nm in zip(tool_bodies, tool_names):
         gap = _geom.aabb_gap(tgt, b)
@@ -163,10 +140,7 @@ def handler(target: str = "", tools=None, operation: str = "join",
         return error("This design has no meshCombineFeatures collection (mesh combine unavailable "
     "here).")
 
-    # createInput(target, list[MeshBody]) -> set operation + algorithm -> add. This whole sequence
-    # CREATES/edits mesh bodies, so it runs INSIDE run_in_base_feature: direct mode calls inner_op(None)
-    # directly; parametric mode wraps it in an atomic base-feature scope that always finishEdits in a
-    # finally. The add mutation is NOT wrapped in safe - a real failure must surface.
+    # createInput -> set operation + algorithm -> add, all inside the (possibly open) scope.
     def inner_op(base_feature):
         try:
             inp = feats.createInput(tgt, list(tool_bodies))
@@ -188,12 +162,8 @@ def handler(target: str = "", tools=None, operation: str = "join",
             return error(oerr2)
 
         # algorithmType "is only effective in non-parametric mode - in parametric mode the algorithm
-        # type is always LegacyMeshCombineAlgorithmType" (API doc), so a read-back mismatch here is
-        # the platform's documented coercion, not a failure: report what landed instead of erroring.
-        # What landed is READ OFF THE INPUT, never inferred from the doc - the same set_verified
-        # failure also covers a member missing on this build and a setattr that raised, and in
-        # neither of those did anything coerce to legacy. Unreadable is published as null plus the
-        # reason, so the caller can tell "it ran legacy" from "nobody knows which it ran".
+        # type is always LegacyMeshCombineAlgorithmType" (API doc), so a read-back mismatch is a
+        # coercion, not a failure: what landed is READ OFF THE INPUT and published, or null.
         at = safe(lambda: adsk.fusion.MeshCombineAlgorithmTypes)
         aerr2 = _common.set_verified(
             inp, "algorithmType",
@@ -235,10 +205,9 @@ def handler(target: str = "", tools=None, operation: str = "join",
     feature = result["feature"]
     after_mesh_count = result["after_mesh_count"]
 
-    # No-op catch: body count AND the target's triangle count both unchanged = nothing was combined,
-    # whatever the API returned. For cut/intersect the target's triangle count ALONE decides: the
-    # consumed tool DROPS the body count (measured on a disjoint cut - count moved, target untouched),
-    # so requiring both signals there lets the silent no-op through with the cutter destroyed.
+    # No-op catch: body count AND target triangle count both unchanged means nothing was combined.
+    # For cut/intersect the triangle count ALONE decides - the consumed tool drops the body count,
+    # so requiring both signals there would let a silent no-op through with the cutter destroyed.
     before_tri = result["before_tri"]
     after_tri = _tri_count(_result_mesh_of(feature, tgt) if feature else tgt)
     if (after_mesh_count is not None and after_mesh_count == result["before_mesh_count"]
@@ -261,21 +230,18 @@ def handler(target: str = "", tools=None, operation: str = "join",
     if not result_bodies:
         result_bodies.append({"name": tgt_name, "handle": tgt_token})
 
-    note = ("Mesh bodies combined. 'enhanced' produces fewer triangles than 'legacy'. Inspect "
-            "the result with model_inspect (mesh target), or convert with mesh_to_brep. Pair with "
-            "view_screenshot to view it.")
-    # A null feature is explained by the shared sentence: the fleet's ONE direct-mode vocabulary
-    # when that is what this design is, otherwise the base-feature scope THIS call opened. The
-    # direct-mode return of meshCombineFeatures.add is not in the measured per-class register, so
-    # nothing here asserts one.
+    # comp = tgt.parentComponent above: every occurrence places that one component. Tool placement
+    # is measured by measure_api.py row mesh-combine-tool-lands-where-placed.
+    note = ("Mesh bodies combined ('enhanced' yields fewer triangles than 'legacy'). The edit lands "
+            "on the COMPONENT, so EVERY instance carries it; a tool addressed '<occurrence>:<mesh>' "
+            "lands where that occurrence places it. Inspect with model_inspect (mesh target) or "
+            "convert with mesh_to_brep.")
     bf_name = result["base_feature_name"]
     if feature is None:
         note += " " + _common.null_feature_note(design, feature, bf_name, "combine")
     if apart:
-        # Only what was measured: each named tool cannot touch the TARGET. It may still have fused
-        # through another tool in the same call (A touches the target, B touches A), so nothing here
-        # claims what the result body holds. 'gap_cm' is the bounding-box separation - a LOWER BOUND
-        # on the clearance, not the distance to move.
+        # Each named tool cannot touch the TARGET; it may still have fused through another tool in
+        # the same call, so nothing here claims what the result body holds.
         note += (" WARNING: " + ", and ".join(
             f"'{a['tool']}' is at least {a['gap_cm']} cm clear of the target" for a in apart)
             + " - a join cannot fuse what does not touch, so nothing of the target fused with "
@@ -304,11 +270,7 @@ def handler(target: str = "", tools=None, operation: str = "join",
 
 
 TOOL_DESCRIPTION = (
-    "Boolean-combine MESH bodies - the MeshCombine feature (the mesh analogue of model_combine, which "
-    "only sees BRep solids). 'target' is the mesh body kept/modified; 'tools' is the mesh body "
-    "handle(s)/name(s) to combine into it (a list, or comma-separated). Every input is validated to "
-    "be a MESH body (a BRep handle is redirected to the BRep tools). In a PARAMETRIC design the "
-    "combine is wrapped in a BaseFeature edit scope (API-required for mesh writes)."
+    "Boolean-combine MESH bodies - the mesh analogue of model_combine, which only sees BRep solids."
 )
 
 mesh_combine_tool = _inputs.apply_to_tool(

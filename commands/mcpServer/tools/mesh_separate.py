@@ -78,10 +78,8 @@ def handler(mesh: str = "") -> dict:
     if inp is None:
         return error("meshSeparateFeatures.createInput returned nothing.")
 
-    # The enum goes through set_verified: a SWIG proxy ACCEPTS an assignment to a name it does not
-    # define, so a member that is not there would leave the input on its default and still report
-    # success. MeshSeparateTypes carries exactly ShellMeshSeparateType and FaceGroupMeshSeparateType;
-    # only the shell split is offered here, so it is set explicitly rather than assumed.
+    # A SWIG proxy ACCEPTS an assignment to a name it does not define, so a missing member would
+    # leave the input on its default and still report success - set_verified reads it back.
     st = safe(lambda: adsk.fusion.MeshSeparateTypes)
     serr = _common.set_verified(inp, "meshSeparateType",
                                 safe(lambda: st.ShellMeshSeparateType),
@@ -147,12 +145,8 @@ def handler(mesh: str = "") -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Split a MESH body into its disconnected shells with the MeshSeparate feature - the way to take "
-    "one imported scan holding several lumps apart. The input body is CONSUMED and each shell is "
-    "minted as a new auto-named mesh body in the same component; 'pieces' reports those names read "
-    "back from the component, since a mesh feature reports no bodies of its own. A separate that "
-    "minted fewer than two bodies did not divide the mesh and is an error. Splitting at face-group "
-    "boundaries is not offered here."
+    "Split a MESH body into its disconnected shells - the way to take one imported scan holding "
+    "several lumps apart. The input body is CONSUMED and 'pieces' names the new auto-named bodies."
 )
 
 tool = _inputs.apply_to_tool(

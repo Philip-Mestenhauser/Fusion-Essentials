@@ -28,8 +28,7 @@ RETURNS = [
 # kind="brep" accepts a SOLID or an OPEN SURFACE body and REDIRECTS a mesh - boundaryFillFeatures
 # takes BRep bodies, so a mesh is refused before the transaction opens rather than inside it.
 _TOOLS = _inputs.BodyRefList("tools", kind="brep", required=True,
-    description="The bodies that bound the volume - open surfaces and/or solids. Bodies only, "
-                "not a construction plane.")
+    description="The bodies that bound the volume - bodies only, not a construction plane.")
 _OPERATION = _inputs.boolean_op(options=("new", "join", "cut", "intersect"), default="new")
 _UNITS = _inputs.UnitField()
 
@@ -63,12 +62,8 @@ def _abort(fill_input) -> str:
 
 def _solid_snapshot(design):
     """Every SOLID body in the WHOLE design - the pre-image the volume read-back compares against.
-
-    Design-wide, not component-scoped: a join/cut can move material in a body that lives in another
-    component, and model_extrude's own snapshot documents why a component-scoped sample cannot see
-    it (feature.bodies reports only the feature's OWN-component result body, confirmed live there).
-    A component-scoped sample would read such a fill as "changed nothing" and roll back a feature
-    that worked."""
+    Design-wide, since a join/cut can move material in a body another component holds and
+    feature.bodies reports only the feature's own-component result body."""
     out = []
     for comp in _common.all_components(design):
         for b in _common.iter_collection(safe(lambda c=comp: c.bRepBodies)):
@@ -79,9 +74,8 @@ def _solid_snapshot(design):
 
 def _cell_volumes(fill_input, factor):
     """(cells collection, [volume-or-None per cell]) - each cell's transient cellBody volume, scaled
-    by `factor` (cm3 -> the caller's units cubed). A None collection means bRepCells itself could not
-    be read, which is NOT the same as finding zero cells. An unreadable volume is None, never a
-    fabricated zero: it is the number the agent picks a cell BY."""
+    by `factor` (cm3 -> the caller's units cubed). A None collection means bRepCells itself could
+    not be read, which is NOT finding zero cells; an unreadable volume is None, never a zero."""
     cells = safe(lambda: fill_input.bRepCells)
     if cells is None:
         return None, []
@@ -129,16 +123,12 @@ def _parse_cells(raw, total):
 
 
 def _select_kept_cells(cells, total, keep):
-    """Mark every cell. A boundary fill KEEPS a selected cell - the opposite of a trim, which
-    removes it. MEASURED, not read off the docs: selecting the single cell of a closed sphere
-    surface sealed it to a solid of exactly the enclosed 33.5103 cm3. Every cell is set explicitly -
-    kept or not - so the feature never rides on whatever the input's default selection happened to
-    be. Each write goes through set_verified, since a property assignment that does not take cannot
-    raise. Returns an error string, or ''."""
+    """Mark every cell, kept or not, returning an error string or ''. A boundary fill KEEPS a
+    selected cell - the opposite of a trim, which removes it. Each write goes through set_verified,
+    since a property assignment that does not take cannot raise."""
     keep_set = set(keep)
-    # A cell's INDEX is its address ('keep' holds indices and the refusal names the index), so this
-    # stays a positional walk: iter_collection drops an unreadable cell, which would select a
-    # different set of cells than the one requested instead of refusing.
+    # A cell's INDEX is its address, so this stays a positional walk: dropping an unreadable cell
+    # would select a different set of cells than the one requested instead of refusing.
     for i in range(total):
         cell = safe(lambda i=i: cells.item(i))
         if cell is None:
@@ -152,36 +142,21 @@ def _select_kept_cells(cells, total, keep):
 
 
 def _tool_identity(bodies):
-    """[(name, owning component)] per tool body, read BEFORE the feature runs - the only moment both
-    are reliable, and the basis for judging what remove_tools consumed.
-
-    LIVE-MEASURED, and the reason this is not done the obvious ways: (1) feature.isRemoveTools (and
-    feature.tools) RAISE "3 : Didn't roll editing feature back." when read after add(), so under
-    safe() they yield None - unverifiable, not confirmation; (2) a CONSUMED body's pre-add proxy
-    does not raise either - isValid still reads True on it (measured on a consumed SURFACE tool),
-    so the proxy cannot convict or acquit, and its volume read is STALE rather than absent (0.0 for
-    that surface; a consumed SOLID keeps reporting its pre-fill 256.0); (3) what does hold is the
-    component's BODY CENSUS - after an isRemoveTools=True fill the tool body is simply gone from
-    bRepBodies."""
+    """[(name, owning component)] per tool body, read BEFORE the feature runs - the basis for
+    judging what remove_tools consumed."""
+    # feature.isRemoveTools and feature.tools RAISE "3 : Didn't roll editing feature back." after
+    # add(), and a CONSUMED body's pre-add proxy still reads isValid True with a stale volume. The
+    # component's BODY CENSUS holds: after an isRemoveTools=True fill the body is gone from it.
     return [(safe(lambda b=b: b.name), safe(lambda b=b: b.parentComponent)) for b in bodies]
 
 
 def _tool_fate(identities, produced_names):
     """(consumed, kept, unreadable count, inherited names) for the tool bodies, by re-scanning each
-    tool's owning component after the fill (see _tool_identity for why the census is the only honest
-    signal). Matched by NAME within that component - Fusion keeps body names unique there, while an
-    entityToken can be re-minted by the rebuild.
-
-    Two ways the census declines to answer, and neither may be published as a verdict:
-
-    - a READ FAILED (unreadable name, component, or bRepBodies collection, or a raising lookup) -
-      that is not evidence a body is gone, and calling it 'consumed' would alarm about a body still
-      in the model;
-    - the found name is ALSO the name of a body this feature PRODUCED. Live-measured on
-      join + remove_tools=True: the result body INHERITED the consumed tool's name ("Body2"), so the
-      lookup finds a body that is the fill's own product, not the survivor it looks like. Reporting
-      that as 'kept' invites the caller to delete what the fill just made, so the name goes to
-      `inherited` - unjudged, and excluded from the still-in-component alarm."""
+    tool's owning component after the fill. Matched by NAME within that component - body names are
+    unique there, while an entityToken can be re-minted by the rebuild."""
+    # Two answers the census cannot give a verdict on: a failed READ is not evidence a body is
+    # gone, and a found name that a PRODUCED body also carries (the result body can inherit the
+    # consumed tool's name) is the fill's own product, so it goes to `inherited` unjudged.
     consumed, kept, unreadable, inherited = [], [], 0, []
     for name, comp in identities:
         coll = safe(lambda c=comp: c.bRepBodies) if (name is not None and comp is not None) else None
@@ -225,11 +200,9 @@ def handler(tools=None, cells=None, operation: str = "new", remove_tools: bool =
     factor = _common.CM_TO_UNIT[units_key] ** 3          # cm3 -> the caller's units cubed
     comp = target_component(design)
 
-    # THE ANNIHILATION CORNER, measured: operation='join' with remove_tools=True and the target body
-    # among 'tools' (which join REQUIRES) produced a healthy BoundaryFill1 and a design with ZERO
-    # bodies - the merge landed INTO the target tool body, and remove_tools then consumed the tools
-    # including the merged result. There is no measured way to consume only the surface tools, so
-    # the combination is refused rather than half-served.
+    # operation='join' with remove_tools=True and the target body among 'tools' (which join
+    # REQUIRES) leaves a design with ZERO bodies: the merge lands INTO the target tool body and
+    # remove_tools then consumes the merged result with the rest, so the pair is refused.
     if remove_tools and op_key != "new":
         return error(
             f"remove_tools=true is not supported with operation='{op_key}'. For join/cut/intersect "
@@ -315,12 +288,9 @@ def handler(tools=None, cells=None, operation: str = "new", remove_tools: bool =
     facts = _common.body_facts(produced)
     result_volume = _total_volume(produced, factor)
     delta_cm3, delta_readable = _geom.volume_delta(pre_solids, before)
-    # The census runs BEFORE the honesty gate because remove_tools=True blinds the other two signals
-    # at once - all three measured on join + remove_tools: feature.bodies came back EMPTY; a consumed
-    # SOLID's pre-add proxy keeps reporting its pre-fill volume, so its contribution to the delta is
-    # stale-minus-stale = 0; and the join's product is a NEW body that was never in pre_solids to be
-    # compared. A census-ANSWERED consumption is itself proof the fill did something, so it must be
-    # in hand before anything considers deleting the feature.
+    # The census runs BEFORE the honesty gate: remove_tools=True blinds the other two signals at
+    # once - feature.bodies comes back EMPTY, and a consumed solid's pre-add proxy keeps reporting
+    # its pre-fill volume, so its contribution to the delta is stale-minus-stale = 0.
     consumed, kept_tools, unreadable, inherited = _tool_fate(tool_ids, {f["name"] for f in facts})
     if not facts and not consumed and not (delta_readable and abs(delta_cm3) > 1e-9):
         rolled = bool(safe(lambda: feature.deleteMe()))
@@ -341,10 +311,9 @@ def handler(tools=None, cells=None, operation: str = "new", remove_tools: bool =
     if not_solid:
         note.append("PARTIAL: " + ", ".join(str(n) for n in not_solid) + " reads isSolid=false - "
                     "inspect it with model_inspect.")
-    # A new-body fill's product IS the kept cells, so the two numbers should agree; a divergence is
-    # reported rather than errored, because feature.bodies is known to also list a pre-existing
-    # source body for some feature types (live-verified for surface offset), which would inflate
-    # result_volume for a fill that was in fact correct.
+    # A new-body fill's product IS the kept cells, so the numbers should agree; a divergence is
+    # reported rather than errored, since feature.bodies also lists a pre-existing source body for
+    # some feature types, which would inflate result_volume for a correct fill.
     if (op_key == "new" and predicted and result_volume is not None
             and abs(result_volume - predicted) > abs(predicted) * _VOLUME_TOLERANCE):
         note.append(f"The bodies produced measure {result_volume} {units_key}3, not the "
@@ -391,11 +360,8 @@ def handler(tools=None, cells=None, operation: str = "new", remove_tools: bool =
 
 TOOL_DESCRIPTION = (
     "Seal the volume enclosed by a set of surface and/or solid bodies into a solid - Fusion's "
-    "Boundary Fill. It closes a region bounded by SEVERAL separate surfaces, which surface_thicken "
-    "and model_stitch cannot. The enclosed volumes come back as numbered cells; 'cells' picks which "
-    "to keep by index. Omit it only when exactly one exists - otherwise the call is refused, "
-    "listing each cell's index and volume. WRITES; the bodies produced are measured after the "
-    "fact.\n"
+    "Boundary Fill, which closes a region bounded by SEVERAL separate surfaces. 'cells' picks "
+    "which enclosed volume to keep by index.\n"
     + _outputs.produces_block(RETURNS)
 )
 
@@ -403,11 +369,10 @@ fill_tool = (
     _inputs.apply_to_tool(
         Tool.create_simple(name="surface_fill", description=TOOL_DESCRIPTION), _SPEC)
     .add_input_property("cells", {"type": "array", "items": {"type": "integer"},
-                                  "description": "Indices of the cells to KEEP. Valid for the NEXT "
-                                                 "call only - a later compute re-orders them."})
+                                  "description": "Indices of the cells to KEEP."})
     .add_input_property("remove_tools", {"type": "boolean",
-                                         "description": "Consume the bounding bodies (default "
-                                                        "false). operation='new' only."})
+                                         "description": "Consume the bounding bodies "
+                                                        "(default false)."})
     .strict_schema()
 )
 fill_item = Item.create_tool_item(tool=fill_tool, write="write", handler=handler,

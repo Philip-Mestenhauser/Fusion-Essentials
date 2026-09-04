@@ -35,20 +35,16 @@ _FACE = _inputs.GeometryHandle("face", require="planar_face", required=True,
 
 _PLACEMENTS = ("sketch_points", "center", "on_edge", "plane_offsets")
 
-# Which frame 'points' are measured in. The placement sketch this tool creates carries its OWN
-# frame, and nothing predicts it before the sketch exists: measured, a 45-deg chamfer face gave a
-# sketch origin of (0, 0.5, -0.5) against its plane's (3, 3.5, 2.5), and a flat face gave sketch X
-# (-1,0,0) against plane u (+1,0,0) - an origin shift AND an axis flip, neither derivable from the
-# face. So 'world' exists to let a caller hand over coordinates it already read; the conversion
-# goes through the sketch's own converter (see _sketch_space_point).
+# Which frame 'points' are read in. The placement sketch this tool creates carries its OWN frame,
+# which differs from the face plane's in origin AND in axis sign and is not derivable from the face.
+# 'world' lets a caller hand over coordinates it already read; _sketch_space_point converts them.
 _POINTS_SPACES = ("sketch", "world")
 _POINTS_SPACE = _inputs.Choice("points_space", options=list(_POINTS_SPACES), default="sketch",
     description="Which frame 'points' are read in.")
 
-# How far off the face's plane a WORLD point may sit and still be drilled. It absorbs the rounding
-# a world read publishes (find_geometry rounds to 3 decimals in the caller's units - 0.0013 cm at
-# worst, in inches); past it the point is not on the face, and projecting it would drill somewhere
-# the caller never asked for.
+# How far off the face's plane a WORLD point may sit and still be drilled. It absorbs the rounding a
+# world read publishes (find_geometry rounds to 3 decimals in the caller's units); past it the point
+# is not on the face, and projecting it would drill somewhere the caller never asked for.
 _OFF_PLANE_TOL_CM = 0.005
 
 _EDGE = _inputs.GeometryHandle("edge", require="edge",
@@ -90,11 +86,8 @@ _extent_dirs = adsk.fusion.ExtentDirections
 
 
 # ── clearance holes (fastener-aware) ────────────────────────────────────────
-#
-# A clearance hole is sized for a FASTENER, not a raw diameter: setToClearanceHole tags the hole
-# semantically but does not resize it on this Fusion version, so the diameter also comes from this
-# ISO 273 metric table .
-# Values are nominal clearance-hole diameters in mm: (close, normal, loose).
+# setToClearanceHole tags the hole semantically but does not resize it, so the diameter comes from
+# this ISO 273 table: nominal metric clearance-hole diameters in mm, (close, normal, loose).
 _CLEARANCE_MM = {
     "M2":  (2.2, 2.4, 2.6),
     "M2.5":(2.7, 2.9, 3.1),
@@ -209,19 +202,10 @@ _PROFILE_CUT_REMEDY = (
 
 
 def _world_lift(design, sketch, context_occ):
-    """(matrix, error) for carrying a WORLD point into the model space `modelToSketchSpace` reads
-    from - the SKETCH'S OWN parent component's frame.
-
-    A None matrix with no error means no lift is needed: the sketch belongs to the design ROOT,
-    whose model space IS world, and applying anything there double-compensates (measured - the
-    root-owned sketch on an occurrence proxy face already reports world coordinates).
-
-    Anywhere else the lift is the INVERSE of that component's placement: component_world_matrix is
-    the one ladder that answers component -> world, and the point travels the other way. That ladder
-    answers None when no SINGLE placement does (several instances, or a transform2 that will not
-    read), and a world point then names no one frame to convert from, so the call is refused rather
-    than drilled at a guessed instance. `context_occ` is the occurrence the caller reached 'face'
-    through, which resolves a multiply-placed component for the instance actually in hand."""
+    """(matrix, error) for carrying a WORLD point into the space `modelToSketchSpace` reads from -
+    the sketch's own parent component's frame. A None matrix with no error means no lift is needed:
+    the sketch belongs to the design ROOT, whose model space IS world. Anywhere else the lift is the
+    INVERSE of that component's placement, and no SINGLE placement means a refusal."""
     owner = safe(lambda: sketch.parentComponent)
     # `is True`: "no lift needed" is the claim that this sketch's model space IS world. An unproven
     # owner goes down the ladder, which answers a real matrix or None - and None is already refused
@@ -248,11 +232,9 @@ def _world_lift(design, sketch, context_occ):
 
 
 def _feature_host(face_ent, active):
-    """(the component this hole is built in, whether the FACE is what named it).
-
-    The component that owns the drilled body hosts both the HoleFeature and its placement sketch.
-    `active` stands in only when the face's owner does not read at all, and the payload publishes
-    which of the two answered."""
+    """(the component this hole is built in, whether the FACE named it). The component owning the
+    drilled body hosts both the HoleFeature and its placement sketch; `active` stands in only when
+    the face's owner does not read at all."""
     owner = _inputs.entity_component(face_ent)
     if owner is None:
         return active, False
@@ -267,18 +249,10 @@ def _active_host_clause(host_named):
 
 
 def _no_placement_sketch_error(comp, active, detail, host_from_face):
-    """The refusal for a build host that will not take 'face' as a placement sketch's plane.
-
-    It names the component the sketch was attempted through and, where that host and the ACTIVE
-    component are PROVEN to be different components, the active one the hole was not built in -
-    nothing else on the wire shows that the host came from 'face' rather than from the active pick.
-    `same_component` is tri-state, so the divergence clause is emitted on `is False` alone: an
-    identity that did not read supports no claim that the two components differ.
-
-    The activate-the-host step needs a name to quote AND a host the FACE named: on the fallback the
-    host IS the component `active` stands for, so activating it moves the caller nowhere. That gate
-    is `host_from_face`, not the divergence: the fallback returns the active component itself, whose
-    identity may not read at all, and `same_component` would then answer None rather than True."""
+    """The refusal for a build host that will not take 'face' as a placement sketch's plane. It
+    names the host and - where same_component PROVES the two different - the active component the
+    hole was not built in. The activate step needs a name to quote AND a host the FACE named, since
+    on the fallback the host IS the active component and activating it moves the caller nowhere."""
     host = safe(lambda: comp.name)
     named = f" '{host}'" if host else ""
     msg = f"Could not create a placement sketch on the face in the host component{named}{detail}."
@@ -294,11 +268,8 @@ def _no_placement_sketch_error(comp, active, detail, host_from_face):
 
 def _ownership_readback(host, feature, sketch):
     """(the sides that read back as a DIFFERENT component, the sides whose owner would not read) for
-    the hole feature and its placement sketch, against the component they were built through.
-
-    Every comparison is the TRI-STATE one: only a PROVEN difference is a mismatch, and an identity
-    that did not read is carried out as unreadable rather than counted as agreement - the payload
-    discloses it instead of claiming a host it never confirmed."""
+    the hole feature and its placement sketch. Every comparison is TRI-STATE: only a PROVEN
+    difference is a mismatch, and an identity that did not read is carried out as unreadable."""
     mismatched, unreadable = [], []
     for label, entity in (("the hole feature", feature), ("its placement sketch", sketch)):
         if entity is None:
@@ -317,22 +288,10 @@ def _ownership_readback(host, feature, sketch):
 
 
 def _sketch_space_point(sketch, x, y, z, to_model=None):
-    """A WORLD point (cm) in the sketch's own space: (u, v, off_plane) in cm, or (None, None, None)
-    when the conversion cannot be made. `to_model` is _world_lift's matrix, applied first when the
-    sketch's model space is not world; None means the point is already in that space.
-
-    modelToSketchSpace is the API's own converter and the only thing that can be right here,
-    because the space a placement sketch reads follows the sketch's OWNER, not the face: a sketch
-    created in the ROOT on an occurrence PROXY face reports a WORLD frame (measured: origin
-    (2,0,1) cm, the world face corner), while the same face sketched inside its owning component
-    reports a component-LOCAL one (origin (0,0,1)). So no fixed occurrence transform can serve both
-    - applied to the root-owned case one double-compensated, drilling at u=0 where world u=40 mm
-    was asked for. Measured on the real placement sketch: modelToSketchSpace((4,2,1) cm world) ->
-    (2.0, 2.0, 0.0), and sketchToModelSpace round-trips it back to (4,2,1).
-
-    q.z is the off-plane distance - how a point that does not lie on the face is caught instead of
-    being silently flattened onto it. Reads are STRICT: an unreadable coordinate voids the whole
-    conversion rather than drilling at a guessed one."""
+    """A WORLD point (cm) in the sketch's own space: (u, v, off_plane) in cm, or (None, None, None).
+    `to_model` is _world_lift's matrix, applied first when the sketch's model space is not world.
+    The space a placement sketch reads follows the sketch's OWNER, not the face, so no fixed
+    occurrence transform serves both cases - modelToSketchSpace is the converter that does."""
     p = safe(lambda: adsk.core.Point3D.create(x, y, z))
     if p is not None and to_model is not None and not safe(lambda: p.transformBy(to_model)):
         return None, None, None
@@ -367,11 +326,9 @@ def _point_on_axis(px, py, pz, axis):
 
 
 def _drill_axes(feature):
-    """The DISTINCT drill-axis lines among the faces the feature CREATED - each drilled point
-    contributes one axis line (bore cylinder / drill-point or countersink cone, all coaxial per
-    hole; a counterbore's two cylinders dedupe to one line). Coordinates are the parent component's
-    space (cm). Returns (axes, readable); readable=False means feature.faces could not be read at
-    all and NOTHING was checked. Never raises."""
+    """The DISTINCT drill-axis lines among the faces the feature CREATED - one per drilled point (a
+    counterbore's two cylinders dedupe to one line), in the parent component's space (cm). Returns
+    (axes, readable); readable=False means feature.faces could not be read at all."""
     faces = safe(lambda: feature.faces)
     if faces is None:
         return [], False
@@ -396,9 +353,8 @@ def _drill_axes(feature):
         if not dup:
             axes.append(cand)
     # The EMPTY verdict is gated on the collection's own count, never on how many items the walk
-    # yielded: iter_collection skips an unreadable face, so a walk that yielded nothing over a
-    # count of 3 means "nothing could be read", not "this feature drilled no holes". Calling that
-    # verified deletes a hole that landed and reports it as never cut.
+    # yielded: iter_collection skips an unreadable face, so nothing yielded over a count of 3 means
+    # "nothing could be read", not "this feature drilled no holes".
     if axes or int(safe(lambda: faces.count, 0) or 0) == 0:
         return axes, True
     # faces exist but none exposes a readable axis - inconclusive, never a guessed shortfall
@@ -582,14 +538,8 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
     world_lift = None          # the component whose placement carried the world points, if any
 
     def _rollback_sketch():
-        """Roll the placement sketch back and answer the clause disclosing a rollback that did NOT
-        report success - '' when there is no sketch, or deleteMe answered true.
-
-        deleteMe's answer is the only thing read, so it is the only thing the clause states: a
-        delete that answers TRUE over a sketch that stayed is disclosed to nobody, and nothing here
-        re-reads the component for a survivor (that read's answer is unmeasured)."""
-        # a placement that never made a sketch has none to roll back, and the clause would then
-        # state an effect this call never had - about a sketch that does not exist.
+        """Roll the placement sketch back; the clause disclosing a rollback that did NOT report
+        success, or '' when there is no sketch or deleteMe answered true."""
         if sketch is None:
             return ""
         name = safe(lambda: sketch.name)
@@ -759,12 +709,9 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
     if not feature:
         return _abandon(_common.no_feature_error(design, "Hole"))
 
-    # READ THE EFFECT BACK: a point that misses the body cuts nothing while add() still 'succeeds'
-    # (only a warning on the feature). Count the DISTINCT drill axes the feature created - one per
-    # hole, in any frame - and require one per expected hole; a position-based check is NOT reliable
-    # here (live: a trimmed face's sketch reported origin x=-20 cm while placement ignored it). On a
-    # shortfall, roll the partial feature back (plus its placement sketch, if any) and error rather
-    # than reporting a partial cut as ok.
+    # READ THE EFFECT BACK: a point that misses the body cuts nothing while add() still succeeds,
+    # leaving only a warning on the feature. The DISTINCT drill axes are counted, one per expected
+    # hole; a position-based check is not reliable here. A shortfall rolls the partial feature back.
     axes, verified = _drill_axes(feature)
     n_pts = n_expected
     if verified and len(axes) < n_pts:
@@ -883,18 +830,10 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
 
 TOOL_DESCRIPTION = (
     "Drill HOLES with the real Hole command (not a sketch + extrude-cut), so the feature carries "
-    "hole/thread metadata. 'face' = a find_geometry planar-face handle to drill into; 'points' = "
-    "[x,y,z] positions (mm) in the frame 'points_space' names: 'world' takes find_geometry "
-    "positions directly, 'sketch' (default) is the placement sketch's own frame - measured to "
-    "differ from the face plane's in origin AND in axis SIGN, so only [x,y,0] there sits on the "
-    "face. Multiple points => ONE patterned hole feature, so pass a whole bolt circle in one call. "
-    "'placement' can instead place ONE "
-    "hole off existing geometry on 'face': 'center' (needs 'edge') / 'on_edge' (needs "
-    "'edge'+'edge_position') / 'plane_offsets' (needs 'point'+'offset_edge_one'/'offset_one'). "
-    "counterbore needs 'cbore_diameter'/'cbore_depth'; countersink needs "
-    "'csink_diameter'/'csink_angle'. 'tap' = a thread designation like 'M5x0.8' to make it tapped. "
-    "'fastener' = a clearance spec like 'M6 Socket Head Cap Screw' (+ 'fit') sizes + "
-    "tags the hole for that fastener (overrides 'diameter')."
+    "hole/thread metadata. 'face' is the planar face to drill into and 'points' the positions on "
+    "it, read in the frame 'points_space' names - under the default 'sketch' frame only [x,y,0] "
+    "sits on the face. Several points make ONE patterned hole feature (a bolt circle in one call). "
+    "'placement' instead places ONE hole off existing geometry on 'face'."
 )
 
 tool = (
@@ -921,7 +860,7 @@ tool = (
             "description": "True = real MODELED thread (needs 'tap'); default cosmetic."})
     .add_input_property("tip_angle", {"type": "string",
             "description": "Drill tip angle, e.g. '118 deg'."})
-    .add_input_property("fastener", {"type": "string", "description": "Clearance fastener spec, e.g. 'M6 Socket Head Cap Screw'."})
+    .add_input_property("fastener", {"type": "string", "description": "Clearance fastener spec, e.g. 'M6 Socket Head Cap Screw'; sizes the hole, overriding 'diameter'."})
     .add_input_property("fit", {"type": "string", "enum": list(_FITS), "description": "Clearance fit for 'fastener' (default normal)."})
     .add_input_property("placement", {"type": "string", "enum": list(_PLACEMENTS),
             "description": "Default 'sketch_points'; else see 'edge'/'point'."})

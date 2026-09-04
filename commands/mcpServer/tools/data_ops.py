@@ -1,15 +1,9 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building blocks for the cloud DATA MODEL: create projects/folders and upload CAD from disk.
-
-  data_create_project -> create a new project in the active hub
-  data_create_folder  -> create a folder in a project (optionally inside a parent path; mkdir -p)
-  data_upload_file    -> upload a local CAD file into a project/folder (async)
-  data_delete_folder  -> delete a data-model folder by id, guarded
-
-The document-lifecycle tools live in doc_lifecycle.py; shared helpers live in _data_common.
-"""
+"""MCP building blocks for the cloud DATA MODEL: data_create_project, data_create_folder (mkdir -p),
+data_upload_file (async, from disk) and data_delete_folder. The document-lifecycle tools live in
+doc_lifecycle.py; shared helpers live in _data_common."""
 
 import os
 import time
@@ -27,8 +21,8 @@ from . import _outputs
 # What data_upload_file RETURNS: a poll handle so data_get_upload_status can report the upload's
 # real uploading/processing/complete/failed state instead of the caller re-listing files and guessing.
 RETURNS = [
-    _outputs.ReturnsValue("upload_handle", "an upload poll handle - poll data_get_upload_status(handle) "
-                          "until state='complete'", consumers=["data_get_upload_status"]),
+    _outputs.ReturnsValue("upload_handle", "an upload poll handle - poll until state='complete'",
+                          consumers=["data_get_upload_status"]),
 ]
 
 
@@ -69,11 +63,9 @@ def create_project_handler(name: str = "", purpose: str = "") -> dict:
 # ---------------------------------------------------------------------------
 
 def _retained_parents(auto_created):
-    """The clause an ERROR appends when mkdir -p already created folders before the call failed.
-
-    Those folders are real, kept mutations: a failure after them is a PARTIAL success, and the
-    error is the only place the caller ever hears about them (the auto_created_parents field only
-    ships on the ok path)."""
+    """The clause an ERROR appends when mkdir -p already created folders before the call failed -
+    real, kept mutations the error is the only place the caller hears about (auto_created_parents
+    ships on the ok path only)."""
     if not auto_created:
         return ""
     return (" This call had already created the folder(s) "
@@ -147,10 +139,9 @@ def create_folder_handler(folder_name: str = "", project: str = "", project_id: 
 
 _UPLOAD_STATE = {0: "processing", 1: "finished", 2: "failed"}
 
-# FLAGGED ADDITION: this registry is what makes an upload POLLABLE. It keeps the live DataFileFuture
-# referenced (mirrors _GENERATIONS in cam_generate.py) so a data_get_upload_status call issued after
-# this handler returns can still read the upload/cloud-translation state. Session-scoped; an entry is
-# popped once its terminal state (complete/failed) has been reported once.
+# The registry that makes an upload POLLABLE: it keeps the live DataFileFuture referenced, so a
+# data_get_upload_status call after this handler returns can still read the state. Session-scoped;
+# an entry is popped once its terminal state (complete/failed) has been reported once.
 _UPLOADS = {}
 _UPLOAD_HANDLE_SEQ = [0]
 
@@ -267,19 +258,14 @@ def upload_file_handler(file_path: str = "", project: str = "", project_id: str 
 
 _LF_MAX_DEPTH = 12
 
-# The folder walk's HARD budget, counting every dataFolders fetch (enumerating one folder's children).
-# Each fetch is a slow cloud round-trip on Fusion's MAIN thread (~0.45-0.8 s measured live; an
-# unbudgeted walk of a real project stalled past the 30 s handler cap, freezing the UI - the same
-# class doc_copy's by-name walk was bounded for, see _WALK_FOLDER_BUDGET there). 20 fetches keeps the
-# worst case around ~16 s; a bigger tree must be read shallow (max_depth) or a folder at a time
-# (data_get(project, folder=<path>)).
+# The folder walk's HARD budget, counting every dataFolders fetch. Each fetch is a cloud round-trip
+# on Fusion's MAIN thread (~0.45-0.8 s), so a bigger tree must be read shallow (max_depth) or a
+# folder at a time (data_get(project, folder=<path>)).
 _LF_FOLDER_BUDGET = 20
 
-# WALL-CLOCK budget for the folder-tree walk, on top of _LF_FOLDER_BUDGET's fetch count: a single
-# dataFolders fetch can itself hang past normal latency on a transient network stall (the same class
-# live-verified for _data_read's project/file walk - see its _TIME_BUDGET_S). The fetch-count cap
-# never catches a stall on fetch #1. Checked BETWEEN folder visits only (an in-flight fetch can't be
-# interrupted); 'time_truncated' is a SIBLING of 'truncated', never a replacement.
+# WALL-CLOCK budget on top of the fetch count: one dataFolders fetch can hang past normal latency on
+# a network stall, which the count cap never catches. Checked BETWEEN folder visits (an in-flight
+# fetch cannot be interrupted); 'time_truncated' is a SIBLING of 'truncated', never a replacement.
 _TIME_BUDGET_S = 20.0
 
 
@@ -314,15 +300,10 @@ def list_folders_handler(project: str = "", project_id: str = "", max_depth: int
 
 
 def _folder_tree_bounded(root, max_depth):
-    """The nested folder tree under `root`, walked BREADTH-FIRST (shallow folders land before deep
-    run/archive subtrees) and HARD-bounded by _LF_FOLDER_BUDGET fetches - every folder whose children
-    are enumerated costs one main-thread cloud round-trip, so nothing beyond the budget is fetched
-    (not even a has-children count). A node whose children were NOT fetched is marked:
-    folders_truncated=true when the BUDGET (fetch count OR the _TIME_BUDGET_S wall-clock deadline,
-    checked between folder visits since an in-flight fetch can't be interrupted) cut it,
-    children_unknown=true at the depth cap. `truncated` (returned) reports only the budget cut - the
-    depth cap is caller-chosen and visible as max_depth. Returns (tree, node_count, truncated,
-    time_truncated) - time_truncated is a SIBLING flag naming a wall-clock stall specifically."""
+    """The nested folder tree under `root`, BREADTH-FIRST and bounded by _LF_FOLDER_BUDGET fetches
+    and _TIME_BUDGET_S: (tree, node_count, truncated, time_truncated). A node whose children were NOT
+    fetched carries folders_truncated=true for a budget cut, children_unknown=true at the depth cap;
+    `truncated` reports the budget cut only, the depth cap being visible as max_depth."""
     tree = []
     count = 0
     fetches = 0
@@ -389,36 +370,26 @@ def _folder_counts(folder):
 
 
 def _unreadable_counts(file_count, sub_count):
-    """The census reads that would not answer, named as the caller sees them ([] when both read).
-
-    A folder whose census failed is NOT provably empty: it may hold an entire subtree, so the delete
-    gate treats an unreadable count exactly like a non-empty folder rather than opening the
-    empty-folder door on a read that never happened."""
+    """The census reads that would not answer, named as the caller sees them ([] when both read). A
+    folder whose census failed is NOT provably empty, so the delete gate treats an unreadable count
+    exactly like a non-empty folder."""
     return [label for label, value in (("dataFiles.count", file_count),
                                        ("dataFolders.count", sub_count)) if value is None]
 
 
-# Folder-visit budget for the recursive blast-radius count. Each visited folder is a main-thread
-# cloud round-trip (dataFiles.count + dataFolders.asArray), so a wide subtree could stall the delete
-# preview past the handler cap. When the budget is spent the counts are a LOWER BOUND (_state
-# ['truncated']=True), reported as "at least N" - honest, and never a hang.
+# Folder-visit budget for the recursive blast-radius count: each visited folder is a main-thread
+# cloud round-trip, so when the budget is spent the counts are a LOWER BOUND
+# (_state['truncated']=True), reported as "at least N".
 _SUBTREE_VISIT_BUDGET = 60
 
 _UNREADABLE = object()      # a dataFolders enumeration that RAISED - distinct from one that is empty
 
 
 def _subtree_counts(folder, _depth=0, _state=None):
-    """(total_file_count, total_subfolder_count) for the WHOLE subtree under 'folder' (recursive,
-    depth- and visit-capped). This is the real blast radius of a recursive delete - the immediate
-    counts hide nested files that force=true would also wipe (and whose xrefs would be orphaned).
-    Bounded by _SUBTREE_VISIT_BUDGET folder visits; on a bigger subtree the walk stops and
-    _state['truncated'] is set, so the returned counts are a lower bound rather than a main-thread
-    hang.
-
-    A folder whose file count or subfolder enumeration will not READ is a HOLE, never a zero: its
-    files are missing from these totals exactly like the ones past the visit budget. It is tallied in
-    _state['unreadable'] (once per folder, however many of its two reads failed) so the preview can
-    say the totals are a lower bound and how many folders it could not look inside."""
+    """(total_file_count, total_subfolder_count) for the WHOLE subtree under 'folder' - the real blast
+    radius of a recursive delete - bounded by _SUBTREE_VISIT_BUDGET visits, past which
+    _state['truncated'] makes the counts a lower bound. A folder whose count or enumeration will not
+    READ is a HOLE, never a zero, tallied once in _state['unreadable']."""
     if _state is None:
         _state = {"visits": 0, "truncated": False, "unreadable": 0}
     hole = False
@@ -489,9 +460,8 @@ def delete_folder_handler(folder_id: str = "", confirm_name: str = "",
 
     if unreadable:
         # Fail CLOSED: the census that would have shown a subtree is the read that failed, so the
-        # direct empty-folder delete is refused and the same force + recursive_confirm the recursive
-        # wipe needs is demanded instead. The refusal names WHICH read failed, since the caller's
-        # options differ (retry a transient cloud failure vs. accept a blind delete).
+        # empty-folder delete is refused and the recursive wipe's force + recursive_confirm are
+        # demanded instead. The refusal names WHICH read failed.
         if not force or recursive_confirm != actual_name:
             return error(
                 f"The contents of '{actual_name}' could not be read ({' and '.join(unreadable)} "
@@ -568,14 +538,14 @@ _create_project_tool = (
     Tool.create_with_string_input(
         name="data_create_project",
         description=(
-        "Create a new project in the user's active Autodesk hub. Returns the new "
-        "project's name and id. Fails if a project with the same name already exists."
+        "Create a new project in the user's active Autodesk hub. Fails if a project with "
+        "the same name already exists."
         ),
         input_param_name="name",
         input_param_description="Name for the new project.",
     )
     .add_input_property("purpose", {"type": "string",
-        "description": "Optional project description/purpose."})
+        "description": "Project description/purpose."})
     .strict_schema()
 )
 create_project_item = Item.create_tool_item(
@@ -592,10 +562,9 @@ _create_folder_tool = (
         name="data_create_folder",
         description=(
         "Create a folder in a project, identified by 'project' (name) or 'project_id'. "
-        "'parent_folder' may be a nested path like 'Fixtures/Vises' - any missing "
-        "folders along the path are created automatically (mkdir -p). Fails only on a "
-        "duplicate name in the same target location. Use data_get(include=['folders']) first to see the "
-        "existing structure."
+        "'parent_folder' may be a nested path like 'Fixtures/Vises' - missing folders "
+        "along it are created (mkdir -p). Fails on a duplicate name in the same location; "
+        "data_get(include=['folders']) shows the existing structure."
         ),
         input_param_name="folder_name",
         input_param_description="Name for the new folder.",
@@ -603,7 +572,7 @@ _create_folder_tool = (
     .add_input_property("project", {"type": "string", "description": "Destination project name."})
     .add_input_property("project_id", {"type": "string", "description": "Destination project id (alt to name)."})
     .add_input_property("parent_folder", {"type": "string",
-        "description": "Optional parent path (e.g. 'Fixtures/Vises'); missing folders are created."})
+        "description": "Parent path (e.g. 'Fixtures/Vises'); missing folders are created."})
     .strict_schema()
 )
 create_folder_item = Item.create_tool_item(
@@ -618,14 +587,11 @@ _upload_tool = (
     Tool.create_with_string_input(
         name="data_upload_file",
         description=(
-        "Upload a local CAD file from the user's filesystem into a project, optionally "
-        "into a nested 'folder' path (e.g. 'Imports/STEP'). Neutral formats (STEP, IGES, "
-        "SAT, etc.) are translated into a Fusion design (.f3d) during cloud processing. "
-        "The upload is ASYNCHRONOUS: this returns once it has started. Poll "
-        "data_get_upload_status(handle=upload_handle) for the real uploading/processing/complete/"
-        "failed state - do not guess from re-listing data_get. The destination folder path must "
-        "exist unless create_path=true (then missing folders are created). Use "
-        "data_get(include=['folders']) to see the structure.\n"
+        "Upload a local CAD file into a project, optionally into a nested 'folder' path "
+        "(e.g. 'Imports/STEP'). Neutral formats (STEP, IGES) are translated into a Fusion "
+        "design during cloud processing. ASYNCHRONOUS: this returns once the upload has "
+        "started - poll data_get_upload_status(handle=upload_handle) for the real state. "
+        "The destination path must exist unless create_path=true.\n"
         + _outputs.produces_block(RETURNS)
         ),
         input_param_name="file_path",
@@ -634,7 +600,7 @@ _upload_tool = (
     .add_input_property("project", {"type": "string", "description": "Destination project name."})
     .add_input_property("project_id", {"type": "string", "description": "Destination project id (alt to name)."})
     .add_input_property("folder", {"type": "string",
-        "description": "Optional destination folder path (e.g. 'Imports/STEP')."})
+        "description": "Destination folder path (e.g. 'Imports/STEP')."})
     .add_input_property("create_path", {"type": "boolean",
         "description": "Create missing folders in the destination path (default false)."})
     .strict_schema()
@@ -654,23 +620,21 @@ _delete_folder_tool = (
     Tool.create_with_string_input(
         name="data_delete_folder",
         description=(
-            "Delete a data-model folder by its 'folder_id' (from data_get(include=['folders'])). GUARDED and "
-            "IRREVERSIBLE: you must also pass 'confirm_name' that EXACTLY matches the folder's "
-            "current name - refuses on mismatch. Never deletes a project ROOT. An EMPTY folder "
-            "deletes directly. A NON-EMPTY folder is a RECURSIVE wipe of its whole subtree (and "
-            "bypasses the per-file reference-orphan check), so it needs BOTH force=true AND "
-            "'recursive_confirm' = the folder's name (a deliberate second acknowledgment). Without "
-            "recursive_confirm, force returns a full-subtree PREVIEW (the blast radius) and refuses."
+            "Delete a data-model folder by its 'folder_id' (from data_get(include=['folders'])). "
+            "GUARDED and IRREVERSIBLE: 'confirm_name' must EXACTLY match the folder's current name, "
+            "and a project ROOT is never deleted. A NON-EMPTY folder is a RECURSIVE wipe of its "
+            "whole subtree that bypasses the per-file reference-orphan check: it needs force=true "
+            "AND recursive_confirm=<the folder's name>, and force alone returns a subtree PREVIEW."
         ),
         input_param_name="folder_id",
         input_param_description="Id of the folder to delete (from data_get(include=['folders'])).",
     )
     .add_input_property("confirm_name", {"type": "string",
-        "description": "Exact current name of the folder, case-sensitive (safety confirmation; must match)."})
+        "description": "Exact current name of the folder, case-sensitive."})
     .add_input_property("force", {"type": "boolean",
-        "description": "Allow deleting a non-empty folder (default false). Still requires recursive_confirm for the recursive wipe."})
+        "description": "Allow deleting a non-empty folder (default false)."})
     .add_input_property("recursive_confirm", {"type": "string",
-        "description": "For a non-empty folder: set to the folder's name to acknowledge the recursive subtree delete. Required (with force) to actually delete; omit to get a preview."})
+        "description": "The folder's name, acknowledging the recursive subtree delete; omit to get a preview."})
     .strict_schema()
 )
 delete_folder_item = Item.create_tool_item(

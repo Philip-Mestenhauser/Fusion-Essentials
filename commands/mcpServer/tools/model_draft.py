@@ -3,13 +3,9 @@
 
 """MCP building block: taper faces to a pull direction (the Draft feature).
 
-  model_draft -> add draft (taper) to faces so a molded/cast part releases from its tooling. The pull
-                 direction is a planar face or construction plane; each selected face tapers by the
-                 angle relative to it. WRITES.
-
-DraftFeatures.createInput takes a Python list of BRepFace + a pull-direction plane (a planar BRepFace
-OR a ConstructionPlane) + isTangentChain; the angle is set on the input via setSingleAngle(isSymmetric,
-ValueInput). Angle ValueInput is in radians (Fusion's internal angle unit).
+  model_draft -> add draft (taper) to faces so a molded/cast part releases from its tooling. The
+                 pull direction is a planar face or construction plane. WRITES.
+                 The angle ValueInput is in RADIANS - Fusion's internal angle unit.
 """
 
 import math
@@ -62,8 +58,6 @@ def handler(faces=None, pull_direction: str = "", angle_deg: float = 0.0,
         return error("No active design. Create or open a document first (see doc_new).")
     comp = target_component(design)
 
-    # faces is a GeometryHandleList(require='face'); pull_direction a PlaneRef - both resolve+validate
-    # in the kind, so this handler never hand-rolls a name/index or re-checks the entity type.
     face_ents, ferr = _FACES.resolve(faces)
     if ferr:
         return error(ferr)
@@ -101,10 +95,9 @@ def handler(faces=None, pull_direction: str = "", angle_deg: float = 0.0,
                      "'flip', or a different pull direction. "
                      + _common.failed_effect_remedy(design, feature))
 
-    # MATERIAL evidence. A one-sided taper always cuts or adds a wedge, so an unmoved volume there
-    # means the draft tapered nothing. A SYMMETRIC draft tapers both sides of the pull plane in
-    # OPPOSITE directions, where the two wedges can cancel to zero on a real taper - so the delta is
-    # published there but can never carry a no-op verdict.
+    # MATERIAL evidence: a one-sided taper always cuts or adds a wedge, so an unmoved volume means
+    # the draft tapered nothing. A SYMMETRIC draft tapers both sides in OPPOSITE directions, where
+    # the wedges can cancel on a real taper - so its delta is published but carries no verdict.
     volume_delta_cm3 = None
     if draft_bodies:
         delta, readable = _geom.volume_delta(draft_bodies, vol_before)
@@ -118,12 +111,9 @@ def handler(faces=None, pull_direction: str = "", angle_deg: float = 0.0,
                          "not already parallel to it. " + _common.failed_effect_remedy(design, feature))
 
     requested = len(face_list)
-    # The count the FEATURE reports - its own `faces`, the faces this draft created or modified -
-    # never the request echoed back; an unreadable read publishes null, with the requested number
-    # beside it in 'faces_requested'. NOT `inputFaces`: that property raises RuntimeError "Didn't
-    # roll editing feature back" here, and retrying it behind an adsk.doEvents pump took the whole
-    # call down instead of answering, while `faces` reads on the newest feature and on an earlier
-    # one alike (measured: 1 for a one-face draft, 2 for a two-face draft).
+    # The count the FEATURE reports, never the request echoed back. NOT `inputFaces`: that property
+    # raises RuntimeError "Didn't roll editing feature back" here, while `faces` reads on the newest
+    # feature and on an earlier one alike.
     drafted = _common.counted(lambda: feature.faces.count)
     note = "Faces tapered to the pull direction. Pair with view_screenshot to view."
     if drafted is None:
@@ -149,13 +139,8 @@ def handler(faces=None, pull_direction: str = "", angle_deg: float = 0.0,
 
 
 TOOL_DESCRIPTION = (
-    "Taper (draft) faces relative to a pull direction - the Draft feature every molded or cast part "
-    "needs so it releases from its tooling. 'faces' is a list of face handles from find_geometry; "
-    "'pull_direction' is the plane the faces taper relative to (an origin alias, a construction-plane "
-    "name, or a planar-face handle). 'angle_deg' is the taper in degrees; sign plus 'flip' set which "
-    "way it leans. 'symmetric' splits the faces at the pull plane and "
-    "tapers both sides equally. 'tangent_chain' also drafts faces tangent to the selected ones "
-    "(default true). WRITES; verifies the feature computed and returns the drafted-face count."
+    "Taper (draft) faces relative to a pull direction - the Draft feature a molded or cast part "
+    "needs so it releases from its tooling. 'angle_deg' sign plus 'flip' set which way it leans."
 )
 
 FULL_DESCRIPTION = TOOL_DESCRIPTION + "\n" + _outputs.produces_block(RETURNS)

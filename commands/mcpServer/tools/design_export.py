@@ -6,9 +6,6 @@
 a sketch (dxf_sketch) or a planar face's projected outline (dxf_face) via
 ExportManager.createDXFSketchExportOptions. Pair with data_upload_file to round-trip the file back
 into the cloud. WRITES a file to disk (does not modify the design).
-
-Arg order differs by format family (live-verified for every format here): STEP/IGES/SAT/SMT/USD/
-Fusion-Archive take factory(path, geometry); STL/OBJ/3MF take factory(geometry, path).
 """
 
 import os
@@ -28,13 +25,9 @@ from . import _sketch_detail
 
 app = adsk.core.Application.get()
 
-# format -> (file extension, ExportManager factory name, geom_first). geom_first=True: the mesh-style
-# arg order factory(geometry, path); geom_first=False: the neutral-CAD arg order
-# factory(path, geometry). Both orders live-verified for every format listed. USD: the ext here must
-# be .usdz - Fusion writes .usdz and appends that extension itself when the path carries a different
-# one, so any other ext leaves the landed file's name mismatching the path this tool verifies.
-# "dxf" is a 2D SKETCH/face-profile export handled separately (_export_dxf) - its tuple entry exists
-# only so Choice validates the name.
+# format -> (file extension, ExportManager factory name, geom_first: factory(geometry, path) rather
+# than factory(path, geometry)). USD's ext must be .usdz - Fusion writes .usdz and appends that
+# extension itself, so any other ext leaves the landed file's name mismatching the verified path.
 _FORMATS = {
     "step": (".step", "createSTEPExportOptions", False),
     "iges": (".igs", "createIGESExportOptions", False),
@@ -49,42 +42,28 @@ _FORMATS = {
 }
 
 _FORMAT = _inputs.Choice("format", options=list(_FORMATS), default="step",
-                         description="Neutral CAD format to write (dxf = a 2D sketch/face export).")
+                         description="Output format.")
 
-# STL-only: bake units into the file (unitType) and pick binary vs ASCII (isBinaryFormat).
-# stl_units defaults to mm and is ALWAYS assigned - the shape mesh_export takes, for the same
-# measured reason: an STL whose unitType is left untouched takes the unit of the LAST EXPLICIT
-# assignment made anywhere in the Fusion session, across documents (measure_api
-# stl-export-unittype-is-sticky-session-state), so omitting it inherits an unrelated earlier
-# export's unit instead of any stable default. stl_binary omitted leaves the factory value alone.
+# STL-only: bake units into the file (unitType) and pick binary vs ASCII (isBinaryFormat). stl_units
+# is ALWAYS assigned - an untouched unitType takes the unit of the LAST EXPLICIT assignment made
+# anywhere in the session, across documents. stl_binary omitted leaves the factory value alone.
 _STL_UNITS = _inputs.Choice("stl_units", options=list(_export.STL_UNIT_MEMBERS), default="mm",
-    description="format=stl only: the units baked into the file. Always assigned - an untouched "
-                "STL takes the unit of the last explicit unit assignment made anywhere in this "
-                "Fusion session, across documents.")
+    description="format=stl only: the unit baked into the file. Always assigned.")
 
 # There is deliberately NO dxf_units input: the FIRST read of DXFSketchExportOptions.units kills the
-# call UNCATCHABLY - no surrounding try/except runs, no later line lands, and the whole transaction
-# rolls back reporting "3 : Distance unit is not supported by DXF" (measured live).
-# The property is untouchable, so the DXF is written in the design's default length unit.
+# call UNCATCHABLY - no try/except runs and the transaction rolls back with "3 : Distance unit is
+# not supported by DXF" - so the DXF is written in the design's default length unit.
 
 # format=dxf inputs: a whole SKETCH by name, or a planar FACE's projected outline (find_geometry
 # handle). Exactly one of these is required when format=dxf; both are ignored otherwise.
 _DXF_FACE = _inputs.GeometryHandle("dxf_face", require="planar_face", required=False,
-    description="format=dxf only: a find_geometry PLANAR-FACE handle - its outline is projected "
-                "into a scratch sketch, written to DXF, then the scratch sketch is removed (the "
-                "note says so if the removal failed). Pass this OR 'dxf_sketch', never both.")
+    description="format=dxf only: the face whose outline is written (via a scratch sketch that is "
+                "removed again).")
 
 def _resolve_target(design, target):
-    """Resolve 'target' -> (geometry, description, error). Empty -> root component (whole design).
-
-    Order: empty -> whole design; a handle -> a specific body; then a component, an occurrence, or a
-    body by name. All three name lookups go through the shared ambiguity-refusing resolvers
-    (_export.find_component / _inputs._resolve_occurrence / _resolve_any_body), so a name shared by
-    several components or instances is REFUSED rather than silently exporting the first (the
-    wrong-geometry bug of a first-match itemByName). Component stays FIRST among the name lookups so a
-    component's own name is not captured by its instances' substring match. Returns (None, None, None)
-    on a plain miss, or (None, None, err) when a name was ambiguous.
-    """
+    """Resolve 'target' -> (geometry, description, error): empty is the whole design, then a handle,
+    then a component, an occurrence, or a body by name. Component stays FIRST among the name lookups
+    so a component's own name is not captured by its instances' match. All-None is a plain miss."""
     root = design.rootComponent
     name = (target or "").strip()
     if not name:
@@ -99,11 +78,6 @@ def _resolve_target(design, target):
             return ent, f"body (handle {name[:10]}...)", None
         return None, None, None
 
-    # Component by name (export the whole component) - the shared resolver, which REFUSES a name
-    # several components carry rather than writing one of them to disk as if it were the one asked
-    # for. The refusal goes on the wire carrying the instance paths it found, and THIS site adds the
-    # remedy: both vocabularies it names are still open below (the occurrence step at the bottom
-    # takes a fullPathName, and a body handle resolved above this line). A plain miss falls through.
     comp, comp_err = _export.find_component(design, name)
     if comp_err:
         return None, None, comp_err + (
@@ -112,11 +86,8 @@ def _resolve_target(design, target):
     if comp:
         return comp, f"component '{name}'", None
 
-    # Occurrence by name / fullPathName - the shared resolver refuses an ambiguous name (several
-    # instances) with its candidate list instead of grabbing the first. Only a PLAIN miss falls
-    # through to the body vocabulary: string-matching "ambiguous" here would drop the shared-path
-    # and shared-exact-name refusals, losing their candidate lists (only one of the three refusal
-    # texts carries that word - the OCCURRENCE_MISS stem is the discriminator).
+    # Only a PLAIN miss falls through to the body vocabulary, and the OCCURRENCE_MISS stem is what
+    # marks one - the other refusal texts carry the candidate lists.
     occ, occ_err = _inputs._resolve_occurrence("target", name)
     if occ is not None:
         return occ, f"occurrence '{safe(lambda: occ.name) or name}'", None
@@ -137,12 +108,8 @@ def _resolve_target(design, target):
 
 def _option_spec(fmt, incl_bodies, incl_comps, stl_binary, stl_unit_key):
     """[(knob name, options property, value to ASSIGN, value to REPORT)] for every option THIS call
-    writes - the one table both the set-and-read-back pass and the requested-values payload read, so
-    a knob can never be applied under one name and requested under another. Every knob here but one
-    is present only when the call asked for it; stl_units is written on EVERY stl export, asked for
-    or not, because its omitted case inherits a unit rather than defaulting to one. stl_units
-    resolves its enum here: a build carrying no member for it yields a None assign value, which the
-    caller records as a refusal instead of assigning None."""
+    writes - the one table both the read-back pass and the requested-values payload read. A build
+    carrying no enum member for a knob yields a None assign value, recorded as a refusal."""
     spec = []
     if incl_bodies:
         spec.append(("invisible_bodies", "isIncludingInvisibleBodies", True, True))
@@ -165,36 +132,16 @@ def _requested_options(fmt, incl_bodies, incl_comps, stl_binary, stl_unit_key):
             _option_spec(fmt, incl_bodies, incl_comps, stl_binary, stl_unit_key)}
 
 
-# Knobs whose READ VALUE determines the written file, each measured on its own - for these the
-# read-back answers what the caller asked whoever put the value there, so _export.applied_pair's
-# 'changed' half is dropped and no verification travels beside them. MEASURED for stl_binary
-# (isBinaryFormat) on STL: its factory value is True, an untouched export and an explicit-True one
-# are byte-identical, and explicit-False writes a distinct, larger file with an ASCII 'solid '
-# header - so 'true' colliding with the factory value costs the caller nothing.
-# A knob NOT named here publishes its verification: unitType's READ VALUE is measured not to
-# determine the file (see _export.applied_pair), and the two invisible-* flags are unmeasured -
-# they are only ever assigned True, so a False factory value would never collide at all, but
-# nothing has measured it.
+# Knobs whose READ VALUE determines the written file: for these _export.applied_pair's 'changed'
+# half is dropped and no verification travels beside them. isBinaryFormat qualifies - False writes a
+# distinct, larger ASCII file - while unitType's read value does not, so it keeps its verification.
 _READ_DETERMINES_FILE = frozenset({"stl_binary"})
 
 
 def _configure_export_options(fmt, opts, incl_bodies, incl_comps, stl_binary, stl_unit_key):
-    """Best-effort per-format option knobs on a freshly-created *ExportOptions object, each written
-    through _export.applied_pair - the ONE knob writer, which reads the property BEFORE the set as
-    well. Never fails the export over a missing or wrongly-typed attribute (the file landing on disk
-    is the deliverable this tool is graded on, verified separately by
-    verify_written/_assert.DeliverablesExist). Returns (applied, refused, verified): applied maps
-    each knob that LANDED to the value read back off the options object, refused lists the knob
-    names that did not, and verified maps each LANDED knob to whether that read-back could have
-    failed.
-
-    The VALUE that landed is recorded, not whether it stuck: a did-it-stick boolean under the knob's
-    own name reads exactly like the value it is not ('stl_binary': true on an ASCII file). Which is
-    why the evidence travels under its OWN key - measured, a set-then-read-back cannot bite on a
-    knob whose factory value already equals the request, and every knob here has such a value
-    (unitType's is 'mm'; a boolean's is whichever of its two the factory holds). 'verified' omits
-    the knobs in _READ_DETERMINES_FILE, for which that distinction has been measured not to matter.
-    """
+    """Write each option knob through _export.applied_pair, never failing the export over one:
+    (applied = the value each knob READ BACK, refused = the knobs that did not land, verified = per
+    landed knob, whether that read-back could have failed - omitted for _READ_DETERMINES_FILE)."""
     applied, refused, verified = {}, [], {}
     for name, prop, want, report in _option_spec(fmt, incl_bodies, incl_comps,
                                                  stl_binary, stl_unit_key):
@@ -212,10 +159,10 @@ def _configure_export_options(fmt, opts, incl_bodies, incl_comps, stl_binary, st
 
 
 def _export_one(em, factory_name, geom_first, geom, path, configure=None):
-    """Write one geometry to one path. 'configure', if given, receives the created options object
-    BEFORE execute() and returns (applied, refused, verified) - see _configure_export_options. It
-    never raises: a decorative-option failure never blocks the export. Returns
-    (ok_bool, error_or_None, (applied, refused, verified))."""
+    """Write one geometry to one path: (execute_bool, raise_error_or_None, (applied, refused,
+    verified)). 'configure', if given, receives the created options object BEFORE execute() and
+    returns the knob triple - see _configure_export_options; it never blocks the export. A FALSE
+    execute() is not a verdict here - the caller's _landed reads the disk."""
     factory = getattr(em, factory_name)
     knobs = ({}, [], {})
     try:
@@ -226,21 +173,27 @@ def _export_one(em, factory_name, geom_first, geom, path, configure=None):
         did = em.execute(opts)
     except Exception as e:
         return False, str(e), ({}, [], {})
-    if not did:
-        return False, "export returned false - nothing was written", ({}, [], {})
-    return True, None, knobs
+    return bool(did), None, knobs
+
+
+def _landed(fmt, path, before, executed):
+    """(size_bytes, error_or_None) for a finished export - the file on disk is the verdict, and
+    each refusal names the bool execute() returned."""
+    # execute() returning FALSE while a valid archive lands at the path is a MEASURED shape
+    # (measure_api row fusion-archive-execute-bool-vs-landed-file), so the bool decides nothing.
+    size, verr = _export.verify_written(path, before)
+    if not verr:
+        return size, None
+    if executed:
+        return None, (f"{fmt.upper()} export reported success but {verr}. execute() returned true "
+                      "but produced nothing - treating this as a failure, not a false success. "
+                      "Check the target geometry and the output path are valid.")
+    return None, f"{fmt.upper()} export failed: execute() returned false and {verr}."
 
 
 def _write_dxf(design, sk, path, want_construction, want_points, want_projected):
-    """Write sketch 'sk' to DXF via ExportManager.createDXFSketchExportOptions - unlike the
-    parameterless Sketch.saveAsDXF (which offers no filtering: it writes every curve/point
-    unfiltered), this exposes three content flags. Each defaults to True (matching that
-    all-inclusive output) unless the caller explicitly narrows it. Signature is
-    (filename, sketch), live-verified - (sketch, filename) raises TypeError. The options
-    object's 'units' property is never touched: the first read of it kills the call uncatchably and
-    rolls the transaction back (measured live), so the DXF is written in the design's
-    default length unit. Returns (size_bytes_or_None, error_or_None).
-    """
+    """Write sketch 'sk' to DXF through createDXFSketchExportOptions(filename, sketch), whose three
+    content flags each default to True: (size_bytes or None, error or None)."""
     em = safe(lambda: design.exportManager)
     if em is None:
         return None, "This design exposes no exportManager - cannot export."
@@ -422,27 +375,44 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
     stl_unit_key, sue = _STL_UNITS.resolve(stl_units)
     if sue:
         return error(sue)
-    # A unit asked for on a format this tool bakes no unit into is REFUSED naming both, rather than
-    # dropped: the caller who asked for it would otherwise get a file whose unit nothing states.
-    # An empty request is the omitted case and takes the Choice's default. Ahead of the dxf
-    # dispatch, so the 2D branch answers the same way the neutral-CAD formats do.
+    # Both STL-only knobs are refused on another format rather than dropped, ahead of the dxf
+    # dispatch so the 2D branch answers as the neutral-CAD formats do.
     if (stl_units or "").strip() and fmt != "stl":
         return error(f"'stl_units' ('{stl_unit_key}') applies to format=stl only, and this call "
                      f"asked for format={fmt} - refusing rather than dropping it. Export as stl to "
                      "bake the unit into the file, or omit 'stl_units'.")
-    # The same refusal for the other STL-only knob, for the same reason: dropped, the caller who
-    # asked for ASCII gets a file nothing tells them the shape of. Keyed on `is not None` rather
-    # than on truthiness - stl_binary=False IS a request (ASCII), and a truthy test would drop the
-    # half of this input that changes the file. Ahead of the dxf dispatch, as above.
+    # Keyed on `is not None`, never truthiness: stl_binary=False IS a request (ASCII).
     if stl_binary is not None and fmt != "stl":
         return error(f"'stl_binary' ({'true' if stl_binary else 'false'}) applies to format=stl "
                      f"only, and this call asked for format={fmt} - refusing rather than dropping "
                      "it. Export as stl to choose binary or ASCII, or omit 'stl_binary'.")
 
+    # The dxf branch writes the ONE sketch/face named by dxf_sketch/dxf_face, and the split walk picks
+    # its own top-level occurrences - so every knob that cannot reach either write is refused here.
     if fmt == "dxf":
+        if (target or "").strip():
+            return error(f"'target' ('{target.strip()}') does not apply to format=dxf, which writes "
+                         "the 2D geometry named by 'dxf_sketch' or 'dxf_face' - refusing rather than "
+                         "dropping it. Name the sketch or face instead, or omit 'target'.")
+        if split_by_component:
+            return error("'split_by_component' (true) does not apply to format=dxf, which writes one "
+                         "sketch or face to one file - refusing rather than dropping it. Call "
+                         "design_export once per sketch/face, or omit 'split_by_component'.")
+        for knob in ("include_invisible_bodies" if include_invisible_bodies else "",
+                     "include_invisible_components" if include_invisible_components else ""):
+            if knob:
+                return error(f"'{knob}' (true) applies to the 3D formats only, and this call asked "
+                             "for format=dxf, whose source is one named sketch or face - refusing "
+                             f"rather than dropping it. Export as a 3D format, or omit '{knob}'.")
         return _export_dxf(dxf_sketch, dxf_face, file_path,
                            dxf_export_construction, dxf_export_points, dxf_export_projected,
                            dxf_component)
+
+    if split_by_component and (target or "").strip():
+        return error(f"'target' ('{target.strip()}') and split_by_component=true cannot be combined: "
+                     "the split writes one file per TOP-LEVEL occurrence and would not narrow to "
+                     "that target - refusing rather than dropping it. Omit 'target' to split the "
+                     "whole design, or omit 'split_by_component' to export just that target.")
 
     ext, factory_name, geom_first = _FORMATS[fmt]
 
@@ -478,26 +448,26 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
             return error("No top-level occurrences to split - the design has no component instances. "
                          "Export without split_by_component to write the whole design as one file.")
 
-        # Each file gets its OWN freshly-created options object, so each one has its own knob
-        # read-back, keyed by the path it belongs to. split_by_occurrence's per-file record carries
-        # (occurrence, file_path, size_bytes) only, so what each file's options object read back is
-        # collected here and folded into that record below - the same per-file applied/requested
-        # pair mesh_export publishes, rather than one file's read-back standing in for the rest.
+        # Each file gets its OWN options object and so its own knob read-back, collected here by
+        # path and folded into split_by_occurrence's per-file records below.
         applied_by_path = {}
         verified_by_path = {}
+        false_execute_paths = set()
 
         def _write_one(occ, fpath):
             before = _export.snapshot(fpath)     # the baseline this file's landed check is proven on
-            okk, eerr, knobs = _export_one(em, factory_name, geom_first, occ, fpath, configure)
-            if not okk:
-                return None, eerr
-            # VERIFY the file is actually on disk, non-empty, and written by THIS call - execute()
-            # returning truthy is NOT proof, and neither is a stale file at the same path.
-            size, verr = _export.verify_written(fpath, before)
+            executed, eerr, knobs = _export_one(em, factory_name, geom_first, occ, fpath, configure)
+            if eerr:
+                return None, f"{fmt.upper()} export failed: {eerr}"
+            # VERIFY the file is actually on disk, non-empty, and written by THIS call - execute()'s
+            # bool is NOT proof either way, and neither is a stale file at the same path.
+            size, verr = _landed(fmt, fpath, before, executed)
             if verr:
-                return None, f"{fmt.upper()} export reported success but {verr}"
+                return None, verr
             applied_by_path[fpath] = knobs[0]
             verified_by_path[fpath] = knobs[2]
+            if not executed:
+                false_execute_paths.add(fpath)
             return size, None
 
         files, errors = _export.split_by_occurrence(occs, out_dir, ext, _write_one)
@@ -507,6 +477,9 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
             return error(f"{fmt.upper()} split export wrote NO files - all "
                          f"{len(errors)} occurrence(s) failed: "
                          + _export.failure_detail(errors))
+        for rec in files:
+            if rec.get("file_path") in false_execute_paths:
+                rec["execute_returned_false"] = True
         requested = _requested_options(fmt, include_invisible_bodies,
                                        include_invisible_components, stl_binary, stl_unit_key)
         if requested:
@@ -547,6 +520,10 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
             out["note"] = (f"PARTIAL: {len(files)} of {len(files) + len(errors)} top-level "
                            f"occurrence(s) exported to separate {fmt.upper()} files; "
                            f"{len(errors)} produced NO file - see 'failed'.")
+        if false_execute_paths:
+            out["note"] += (f" ExportManager.execute() returned FALSE for {len(false_execute_paths)}"
+                            f" of the {len(files)} file(s), which landed non-empty anyway - each "
+                            "such record carries 'execute_returned_false'.")
         if unlanded:
             # ONE fact was observed per null: that file's export options did not read back the value
             # set on them. WHY, and what the writer then used instead, is not readable from here, so
@@ -590,19 +567,16 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
             return error(f"Could not create output directory '{out_dir}': {e}")
 
     before = _export.snapshot(path)   # the pre-write state the landed check is proven against
-    okk, eerr, applied_opts = _export_one(em, factory_name, geom_first, geom, path, configure)
-    if not okk:
+    executed, eerr, applied_opts = _export_one(em, factory_name, geom_first, geom, path, configure)
+    if eerr:
         return error(f"{fmt.upper()} export failed: {eerr}")
 
-    # VERIFY the file is actually on disk, non-empty, and written by THIS call - execute() returning
-    # truthy is NOT proof a file was written, and a stale file from an earlier export at the same
-    # path is not this export's deliverable. That comparison is the SOURCE OF TRUTH for success.
-    size, verr = _export.verify_written(path, before)
+    # VERIFY the file is actually on disk, non-empty, and written by THIS call - execute()'s bool is
+    # NOT proof either way, and a stale file from an earlier export at the same path is not this
+    # export's deliverable. That comparison is the SOURCE OF TRUTH for success.
+    size, verr = _landed(fmt, path, before, executed)
     if verr:
-        return error(
-            f"{fmt.upper()} export reported success but {verr}. execute() returned true but produced "
-            f"nothing - treating this as a failure, not a false success. Check the target geometry "
-            f"and the output path are valid.")
+        return error(verr)
 
     out = {
         "exported": True,
@@ -614,6 +588,11 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
     "note": ("Exported to local disk. To round-trip into the cloud, upload it with "
             "data_upload_file (STEP/IGES are translated to a Fusion design on the cloud)."),
     }
+    if not executed:
+        out["execute_returned_false"] = True
+        out["note"] += (" ExportManager.execute() returned FALSE for this call and the file at "
+                        "'file_path' landed non-empty anyway - 'execute_returned_false' carries "
+                        "that, and the file on disk is what this result stands on.")
     applied_opts, refused_opts, verified_opts = applied_opts
     # What was ASKED FOR, one entry per knob this call writes - the key the split path above and the
     # sibling mesh_export both publish, and the only place a REFUSED knob's attempted value is
@@ -627,9 +606,8 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
         # did-it-stick flag under the knob's own name.
         out["options_applied"] = applied_opts
         # Whether each of those values is BACKED: true only where the read-back could have failed
-        # (the options object was not already reading the requested value). 'applied' is a claim
-        # about the options object, and this is what stands behind it - a guard that cannot fail is
-        # not a verification. Absent for the knobs whose read is measured to determine the file.
+        # (the options object was not already reading the requested value). Absent for the knobs in
+        # _READ_DETERMINES_FILE.
         if verified_opts:
             out["options_verified"] = verified_opts
         unverified_opts = sorted(n for n, backed in verified_opts.items() if not backed)
@@ -647,48 +625,43 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
 
 
 TOOL_DESCRIPTION = (
-    "Export a body, component/occurrence, or the WHOLE design (omit 'target') to a neutral CAD file on "
-    "local disk - STEP / IGES / SAT / SMT / USD / Fusion-Archive (f3d) / STL / 3MF / OBJ. "
-    "split_by_component=true exports EACH top-level occurrence to its own file (one per part - what 3D "
-    "printing wants) into the DIRECTORY 'file_path' ('target' is ignored in that mode). "
-    "include_invisible_bodies/include_invisible_components widen any of these formats past the "
-    "visible-only default. format=dxf is a different shape - a 2D laser/waterjet/sheet-metal export of "
-    "a SKETCH ('dxf_sketch') or a planar FACE's projected outline ('dxf_face'), narrowed by the "
-    "dxf_export_* flags; the design is left unchanged either way. format=stl also "
-    "takes stl_binary/stl_units. Pair with data_upload_file to round-trip the file back into the cloud "
-    "(STEP/IGES are translated to a Fusion design there). WRITES a file to disk (does not modify the "
-    "design)."
+    "Export a body, component/occurrence, or the WHOLE design (omit 'target') to a neutral CAD file "
+    "on local disk - STEP / IGES / SAT / SMT / USD / Fusion-Archive (f3d) / STL / 3MF / OBJ. "
+    "format=dxf is a different shape: a 2D export of a SKETCH ('dxf_sketch') or a planar FACE's "
+    "outline ('dxf_face'), for which 'target' and split_by_component do not apply. Pair with "
+    "data_upload_file to round-trip the file into the cloud. WRITES a file to disk, leaving the "
+    "design unchanged."
 )
 
 tool = (
     Tool.create_simple(name="design_export", description=TOOL_DESCRIPTION)
     .add_input_property(_FORMAT.name, _FORMAT.schema())
     .add_input_property("file_path", {"type": "string",
-            "description": "Local output path (a file; or a DIRECTORY when split_by_component=true). Extension appended if missing; directory created if needed."})
+            "description": "Local output path - a file, or a DIRECTORY when split_by_component=true."})
     .add_input_property("target", {"type": "string",
-            "description": "What to export: a find_geometry handle, or a body / component / occurrence NAME; omit for the WHOLE design. Resolution is COMPONENT-FIRST: instances of one component share its name, so that name exports the COMPONENT geometry (never refused); to export ONE instance pass its fullPathName (e.g. Bracket:2). Only a name that is ambiguous ACROSS different occurrences/bodies is refused with candidates."})
+            "description": "What to export: a find_geometry handle, or a body/component/occurrence NAME; omit for the WHOLE design. A name its instances share exports the COMPONENT - pass a fullPathName (Bracket:2) for ONE instance."})
     .add_input_property("split_by_component", {"type": "boolean",
-            "description": "Export each top-level occurrence to its own file in directory 'file_path' (default false)."})
+            "description": "Write each top-level occurrence to its own file in directory 'file_path'."})
     .add_input_property("include_invisible_bodies", {"type": "boolean",
-            "description": "Include currently-hidden bodies in the export (default false = visible only). Ignored for format=dxf."})
+            "description": "Include hidden bodies (default: visible only)."})
     .add_input_property("include_invisible_components", {"type": "boolean",
-            "description": "Include currently-hidden components/occurrences in the export (default false = visible only). Ignored for format=dxf."})
+            "description": "Include hidden components/occurrences (default: visible only)."})
     .add_input_property("stl_binary", {"type": "boolean",
-            "description": "format=stl only: true=binary STL, false=ASCII. Omit to keep the factory default."})
+            "description": "format=stl only: true=binary, false=ASCII. Omit for the API default."})
     .add_input_property(_STL_UNITS.name, _STL_UNITS.schema())
     .add_input_property("dxf_sketch", {"type": "string",
-            "description": "format=dxf only: the NAME of the sketch to write whole. Pass this OR 'dxf_face', never both and never neither; 'target'/'split_by_component' are ignored for dxf. The file is written in the design's default length unit."})
+            "description": "format=dxf only: the NAME of the sketch to write whole. It is written in the design's default length unit."})
     .add_input_property("dxf_component", {"type": "string",
-            "description": "The component holding 'dxf_sketch', when two components carry that name "
-                           "(Fusion numbers sketches per component from 1). A component name, or an "
-                           "occurrence fullPathName/handle from design_get(include=['tree'])."})
+            "description": "The component holding 'dxf_sketch', when two components carry that "
+                           "name: a component name, or an occurrence fullPathName/handle from "
+                           "design_get(include=['tree'])."})
     .add_input_property(_DXF_FACE.name, _DXF_FACE.schema())
     .add_input_property("dxf_export_construction", {"type": "boolean",
-            "description": "format=dxf only: include construction geometry (default true - Sketch.saveAsDXF writes everything unfiltered)."})
+            "description": "format=dxf only: include construction geometry (default true)."})
     .add_input_property("dxf_export_points", {"type": "boolean",
-            "description": "format=dxf only: include sketch points (default true - Sketch.saveAsDXF writes everything unfiltered)."})
+            "description": "format=dxf only: include sketch points (default true)."})
     .add_input_property("dxf_export_projected", {"type": "boolean",
-            "description": "format=dxf only: include projected/reference geometry - the dxf_face path is ENTIRELY projected geometry, so false there writes an empty file (default true, as with the other dxf_export_* flags)."})
+            "description": "format=dxf only: include projected geometry (default true). The dxf_face path is ALL projected geometry, so false there writes an empty file."})
     .strict_schema()
 )
 

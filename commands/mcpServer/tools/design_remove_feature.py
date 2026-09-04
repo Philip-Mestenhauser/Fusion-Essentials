@@ -15,19 +15,16 @@ from . import _common
 from . import _inputs
 from . import _assert
 
-# Either/or targets - RemoveFeatures.add takes ONE item (a solid/surface body OR an occurrence), so
-# both kinds are singular and neither is schema-required; the handler refuses none and refuses both.
-# kind="brep" is the API's own limit ("a single body (solid or surface) or component occurrence"):
-# a mesh body is refused by the kind, with its redirect, instead of reaching add().
+# RemoveFeatures.add takes ONE item, "a single body (solid or surface) or component occurrence", so
+# both kinds are singular, neither is schema-required, and kind="brep" refuses a mesh body with its
+# redirect instead of letting it reach add().
 _BODY = _inputs.BodyRef("body", kind="brep", required=False,
-                        description="The body to remove (alternative to 'occurrence').")
+                        description="The body to remove.")
 _OCCURRENCE = _inputs.OccurrenceRef("occurrence", required=False,
-                                    description="The component instance to remove (alternative to 'body').")
+                                    description="The component instance to remove.")
 
-# Live-verified: removeFeatures.add() in a DIRECT-modelling design raises "3 : RemoveFeature is not
-# supported in Direct Modeling." The guard teaches that before the mutation instead of surfacing the
-# raw API error, and keeps the suppress/delete reversibility this tool promises scoped to the
-# parametric timeline that can actually carry it.
+# removeFeatures.add() in a DIRECT-modelling design raises "3 : RemoveFeature is not supported in
+# Direct Modeling.", so the guard refuses before the mutation.
 _MODE_GUARD = _inputs.ModeGuard(
     _inputs.MODE_PARAMETRIC,
     why="A Remove FEATURE is a parametric timeline step - removeFeatures.add() raises "
@@ -37,12 +34,8 @@ _MODE_GUARD = _inputs.ModeGuard(
 
 
 def _host_component(design, target, kind):
-    """Which component's features.removeFeatures the new Remove feature is added to: a body goes to
-    its own parentComponent, an occurrence to the component CONTAINING it (its assemblyContext's
-    component when nested, else the root).
-
-    For a NESTED body that means the NATIVE parent component - live-verified: add() there accepts an
-    assembly-context proxy of the body, and the native component's bRepBodies loses it."""
+    """Which component's features.removeFeatures the Remove feature is added to: a body's own
+    parentComponent, or the component CONTAINING an occurrence (else the root)."""
     if kind == "body":
         return safe(lambda: target.parentComponent)
     parent = safe(lambda: target.assemblyContext)
@@ -66,10 +59,8 @@ def _occurrence_census(design, path):
     """How many occurrences currently carry `path` as their fullPathName, or None when the walk
     cannot be read. A COUNT, not a lookup: a bare name repeats across sub-assemblies and two siblings
     can even wear one path, so what the before/after diff needs is how many carry it."""
-    # The WALK itself is guarded, not just the per-item read: a census nothing could be read from is
-    # unanswerable (None), never an escaping exception or a short count. root.allOccurrences RAISES
-    # on a design holding an unresolved external reference, so the shared walk's component.occurrences
-    # fallback is what keeps a removal from this design VERIFIABLE instead of refused.
+    # root.allOccurrences RAISES on a design holding an unresolved external reference, so the shared
+    # walk's component.occurrences fallback is what keeps this census answerable there.
     walk = _common.occurrence_walk(design)
     if not walk.readable:
         return None
@@ -197,9 +188,7 @@ def handler(body: str = "", occurrence: str = "") -> dict:
 TOOL_DESCRIPTION = (
 "Remove ONE body or component occurrence from the design as a Remove FEATURE on the timeline - "
 "reversible by suppressing or deleting that feature, unlike design_delete_occurrence / "
-"design_delete_feature, which erase the item itself. Pass 'body' OR 'occurrence', not both; delete "
-"a MESH body with mesh_delete instead. The removal is confirmed by re-scanning the collection the "
-"item lived in - an item still present afterwards is reported as a failure."
+"design_delete_feature, which erase the item itself."
 )
 
 tool = (

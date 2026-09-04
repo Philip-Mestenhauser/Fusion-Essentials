@@ -1067,6 +1067,91 @@ class TestDxfWriterGuards:
         assert "the design is unchanged" not in out["note"]
 
 
+class TestInputsABranchCannotReachAreRefused:
+    """An input the chosen branch never hands to the writer is refused by NAME, the shape the
+    stl_units/stl_binary guards set - dropped, it hands back a file the caller did not ask for."""
+
+    def _sketch(self, monkeypatch):
+        """A dxf export that WOULD succeed, so a refusal below is the guard and not a sketch miss."""
+        sk = FakeSketch(lines=2)
+        monkeypatch.setattr(dx._common, "find_sketch",
+                            lambda design, name, remedy=None: (sk, None))
+        return sk
+
+    def test_a_target_on_a_dxf_export_is_refused_naming_it(self, tmp_path, monkeypatch):
+        # _export_dxf is never handed 'target' - the DXF is the named sketch's outline whatever was
+        # asked for, so a dropped 'target' writes a file of the wrong geometry with no error.
+        _, em, _ = _install(monkeypatch)
+        self._sketch(monkeypatch)
+        res = dx.handler(format="dxf", dxf_sketch="Profile1", target="CarrierBar",
+                         file_path=str(tmp_path / "p.dxf"))
+        assert res["isError"] is True
+        assert "'target' ('CarrierBar')" in res["message"] and "format=dxf" in res["message"]
+        assert "dxf_sketch" in res["message"]
+        assert em.calls == []                              # nothing was written
+
+    def test_split_by_component_on_a_dxf_export_is_refused(self, tmp_path, monkeypatch):
+        # The split walk sits BEHIND the dxf dispatch, so split_by_component=true on a dxf call
+        # writes one file from one sketch - the opposite of the per-component set asked for.
+        _, em, _ = _install(monkeypatch, occurrences=[FakeOcc("Body:1"), FakeOcc("Cab:1")])
+        self._sketch(monkeypatch)
+        res = dx.handler(format="dxf", dxf_sketch="Profile1", split_by_component=True,
+                         file_path=str(tmp_path))
+        assert res["isError"] is True
+        assert "'split_by_component' (true)" in res["message"] and "format=dxf" in res["message"]
+        assert em.calls == []
+
+    def test_include_invisible_bodies_on_a_dxf_export_is_refused_naming_it(self, tmp_path,
+                                                                           monkeypatch):
+        # The dxf branch never hands the include_invisible_* knobs to its options object (the type
+        # does carry an isIncludingInvisible* pair - measured live), so the request is refused
+        # rather than answered with a file whose hidden content is a coin toss.
+        _, em, _ = _install(monkeypatch)
+        self._sketch(monkeypatch)
+        res = dx.handler(format="dxf", dxf_sketch="Profile1", include_invisible_bodies=True,
+                         file_path=str(tmp_path / "p.dxf"))
+        assert res["isError"] is True
+        assert "'include_invisible_bodies' (true)" in res["message"]
+        assert "format=dxf" in res["message"]
+        assert em.calls == []
+
+    def test_include_invisible_components_on_a_dxf_export_is_refused_too(self, tmp_path,
+                                                                         monkeypatch):
+        # The SECOND knob of the pair: a guard narrowed to bodies alone reads as correct against the
+        # test above, and goes on dropping the components request.
+        _, em, _ = _install(monkeypatch)
+        self._sketch(monkeypatch)
+        res = dx.handler(format="dxf", dxf_sketch="Profile1", include_invisible_components=True,
+                         file_path=str(tmp_path / "p.dxf"))
+        assert res["isError"] is True
+        assert "'include_invisible_components' (true)" in res["message"]
+        assert em.calls == []
+
+    def test_a_dxf_export_that_asked_for_none_of_them_still_writes(self, tmp_path, monkeypatch):
+        # THE BOUNDARY. All four guards key on what the CALLER passed: false and "" are the DEFAULTS
+        # every dxf call carries, so a guard keyed on the knob existing would refuse every one.
+        _, em, _ = _install(monkeypatch)
+        sk = self._sketch(monkeypatch)
+        out = _payload(dx.handler(format="dxf", dxf_sketch="Profile1", target="",
+                                  split_by_component=False, include_invisible_bodies=False,
+                                  include_invisible_components=False,
+                                  file_path=str(tmp_path / "p.dxf")))
+        assert out["exported"] is True
+        assert em.calls[-1]["geom"] is sk
+
+    def test_a_target_with_split_by_component_is_refused_naming_it(self, tmp_path, monkeypatch):
+        # The split walk exports EVERY top-level occurrence off its own census, never 'target' - so a
+        # dropped 'target' hands back a directory of files for parts the caller did not ask for.
+        _, em, _ = _install(monkeypatch, occurrences=[FakeOcc("Body:1"), FakeOcc("Cab:1")])
+        res = dx.handler(format="step", split_by_component=True, target="Cab:1",
+                         file_path=str(tmp_path))
+        assert res["isError"] is True
+        assert "'target' ('Cab:1')" in res["message"]
+        assert "split_by_component" in res["message"]
+        assert em.calls == []                              # nothing built, nothing written
+        assert list(tmp_path.iterdir()) == []              # and no directory of parts on disk
+
+
 # ── split_by_component (one file per top-level occurrence) ─────────────────────
 
 class TestSplitByComponent:
@@ -1280,7 +1365,27 @@ class TestSplitByComponent:
         assert res["isError"] is True
         assert "wrote NO files" in res["message"]
         assert "A:1" in res["message"] and "B:1" in res["message"]
-        assert "nothing was written" in res["message"]
+        # the per-occurrence reason names BOTH readings: the false bool and the empty disk
+        assert "execute() returned false" in res["message"]
+        assert "no file was written" in res["message"]
+
+    def test_a_split_file_that_landed_under_a_false_execute_is_kept_and_flagged(self, tmp_path,
+                                                                                monkeypatch):
+        # The split path reads the same disk: an occurrence whose execute() answered false while
+        # its file landed belongs in 'files', flagged, not in 'failed'.
+        _, em, _ = _install(monkeypatch, occurrences=[FakeOcc("Good:1"), FakeOcc("Quiet:1")])
+        real_exec = em.execute
+
+        def false_for_quiet(opts):
+            real_exec(opts)
+            return "Quiet" not in opts["path"]
+
+        em.execute = false_for_quiet
+        out = _payload(dx.handler(format="stl", file_path=str(tmp_path), split_by_component=True))
+        assert out["file_count"] == 2 and "failed" not in out
+        flagged = [f for f in out["files"] if f.get("execute_returned_false")]
+        assert [f["occurrence"] for f in flagged] == ["Quiet:1"]
+        assert "FALSE for 1 of the 2 file(s)" in out["note"]
 
     def test_execute_true_but_no_file_written_is_a_split_failure(self, tmp_path, monkeypatch):
         # execute() lying (True, but nothing landed on disk) must land the occurrence in 'failed',
@@ -1320,12 +1425,14 @@ class TestExportOne:
         dx._export_one(em, "createSTEPExportOptions", False, "GEOM", out)
         assert em.calls[-1]["geom"] == "GEOM" and em.calls[-1]["path"] == out
 
-    def test_execute_false_is_a_failure(self, tmp_path):
+    def test_execute_false_is_reported_as_the_bool_not_as_an_error(self, tmp_path):
+        # A false execute() is a READING, not a verdict: the caller checks the disk, because a
+        # component f3d export returns false over a file that landed.
         em = FakeExportManager()
         em.execute = lambda opts: False
-        okk, err, applied = dx._export_one(em, "createSTEPExportOptions", False, "G",
-                                           str(tmp_path / "out"))
-        assert okk is False and "nothing was written" in err and applied == ({}, [], {})
+        executed, err, applied = dx._export_one(em, "createSTEPExportOptions", False, "G",
+                                                str(tmp_path / "out"))
+        assert executed is False and err is None and applied == ({}, [], {})
 
     def test_exception_captured_as_error_string(self, tmp_path):
         em = FakeExportManager()
@@ -1351,13 +1458,13 @@ class TestExportOne:
         assert applied == {"custom": True}
 
     def test_configure_never_blocks_a_failed_execute(self, tmp_path):
-        # a decorative-option configure step must not stop the real failure from being reported.
+        # a decorative-option configure step must not stop the real reading from being reported.
         em = FakeExportManager()
         em.execute = lambda opts: False
-        okk, err, applied = dx._export_one(em, "createSTEPExportOptions", False, "G",
-                                           str(tmp_path / "out"),
-                                           lambda opts: {"x": True})
-        assert okk is False and "nothing was written" in err
+        executed, err, applied = dx._export_one(em, "createSTEPExportOptions", False, "G",
+                                                str(tmp_path / "out"),
+                                                lambda opts: {"x": True})
+        assert executed is False and err is None
 
 
 # ── file-existence gate (single-target export) ────────────────────────────────
@@ -1391,6 +1498,34 @@ class TestFileExistenceGate:
         res = dx.handler(format="step", file_path=target)
         assert res["isError"] is True
         assert "no file was written" in res["message"].lower()
+
+    def test_execute_false_over_a_landed_file_is_an_export_that_discloses_the_bool(
+            self, tmp_path, monkeypatch):
+        # MEASURED on a component f3d export: execute() answers false and a valid archive lands at
+        # the path. The disk decides, and the false reading rides on the payload.
+        _, em, _ = _install(monkeypatch)
+        real_exec = em.execute
+
+        def false_but_writes(opts):
+            real_exec(opts)
+            return False
+
+        em.execute = false_but_writes
+        out = _payload(dx.handler(format="f3d", file_path=str(tmp_path / "p.f3d")))
+        assert out["exported"] is True and out["size_bytes"] > 0
+        assert out["execute_returned_false"] is True
+        assert "FALSE" in out["note"]
+
+    def test_execute_false_with_no_file_is_still_a_failure_naming_the_bool(self, tmp_path,
+                                                                          monkeypatch):
+        # THE BOUNDARY the disclosure above must not wash away: false AND nothing on disk is the
+        # real failure, and the refusal names both readings rather than only the missing file.
+        _, em, _ = _install(monkeypatch)
+        em.execute = lambda opts: False
+        res = dx.handler(format="f3d", file_path=str(tmp_path / "p.f3d"))
+        assert res["isError"] is True
+        assert "execute() returned false" in res["message"]
+        assert "no file was written" in res["message"]
 
     def test_a_stale_file_from_an_earlier_export_is_not_a_landing(self, tmp_path, monkeypatch):
         # the strongest form of the lie: execute() returns true, writes nothing, and a file of the

@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import load_tool, _NamedCollection
+from conftest import load_tool, make_cam, _NamedCollection
 from conftest import FakeSetup as SharedSetup, FakeCAMFolder as SharedFolder, FakeOperation as SharedOp
 
 gen = load_tool("cam_generate")
@@ -29,10 +29,14 @@ def _payload(result):
 # ── target resolution (via the shared _cam_common.resolve_cam_node) ─────────────────────────────────
 
 class _FakeCAM:
-    def __init__(self, setups):
+    def __init__(self, setups, machining_times=None):
         s = list(setups)
         self.setups = SimpleNamespace(count=len(s), item=lambda i: s[i])
         self.generate_calls = []
+        # The EMPTY class's second signal: an operation whose toolpath generated empty reads
+        # hasToolpath True and only its machining time answers. The answer is the SHARED one
+        # (conftest.make_cam), borrowed rather than re-rolled.
+        self.getMachiningTime = make_cam(machining_times=machining_times).getMachiningTime
 
     def generateToolpath(self, tgt):
         self.generate_calls.append(("target", tgt))
@@ -125,15 +129,25 @@ class TestTargetResolution:
 
 # ── _collect_op_health: warnings / errors / empty derivation ────────────────────────────────────────
 
+# The fake answers the SAME parameter name the tool keys the rail triage on: spelled here instead,
+# a rename would leave both sides agreeing on a name no operation carries.
+_RAIL_PARAM = gen._cam_common.SWARF_CONTOURS_PARAM
+
+
 def _op(name, warning=None, error=None, has_toolpath=True, toolpath_valid=True,
-        suppressed=False, state=0):
-    return SimpleNamespace(
+        suppressed=False, state=0, rail=False):
+    op = SimpleNamespace(
         name=name,
         hasWarning=warning is not None, warning=warning or "",
         hasError=error is not None, error=error or "",
         hasToolpath=has_toolpath, isToolpathValid=toolpath_valid,
         isSuppressed=suppressed, isGenerating=False, operationState=state,
     )
+    # A rail-driven strategy is the one that carries the rail-PAIR drive parameter, read from its
+    # ONE home; every other operation answers None, the way a collection answers an absent name.
+    op.parameters = SimpleNamespace(
+        itemByName=lambda nm: object() if (rail and nm == _RAIL_PARAM) else None)
+    return op
 
 
 class TestCollectOpHealth:
@@ -159,6 +173,32 @@ class TestCollectOpHealth:
         # the discriminator: same warning text, but the op HAS a toolpath - it cut something.
         ops = [_op("face", warning="Toolpath is empty in one region.", has_toolpath=True)]
         assert gen._collect_op_health(ops)["empty"] == []
+
+    def test_a_toolpath_that_generated_empty_is_named_from_its_machining_time(self, monkeypatch):
+        # the shape the flags read as a clean valid: hasToolpath TRUE, state IsValid, 0.0 s. The
+        # cutting operation beside it carries a warning of its own and stays out of the list.
+        cam = make_cam(machining_times={"Swarf1": 0.0, "Cut": 4.193083})
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
+        out = gen._collect_op_health([_op("Swarf1", warning="No passes to link."),
+                                      _op("Cut", warning="Tool was lifted.")])
+        assert out["empty"] == ["Swarf1"]
+        assert [r["name"] for r in out["warnings"]] == ["Swarf1", "Cut"]
+
+    def test_the_empty_list_falls_back_to_the_flags_when_no_product_resolves(self, monkeypatch):
+        # no CAM product means no time signal, so the list covers the flags shape alone rather
+        # than claiming the operation holding a toolpath cut something
+        monkeypatch.setattr(gen._cam_common, "get_cam",
+                            lambda: (None, "This document has no CAM product yet"))
+        out = gen._collect_op_health([_op("Swarf1"), _op("NoPath", has_toolpath=False)])
+        assert out["empty"] == ["NoPath"]
+
+    def test_the_empty_rows_are_named_by_the_labels_the_caller_passed(self, monkeypatch):
+        # a document-scope list names a shared operation name by its path; the empty row has to
+        # take that same label, or two payload lists address one operation two ways
+        cam = make_cam(machining_times={"Bore": 0.0})
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
+        out = gen._collect_op_health([_op("Bore")], ["Front / Bore"])
+        assert out["empty"] == ["Front / Bore"]
 
     def test_a_suppressed_op_with_no_toolpath_is_not_empty(self):
         # a parked op has no toolpath BY DESIGN (measured state 2) - counting it as empty would
@@ -190,7 +230,55 @@ class TestCollectOpHealth:
     def test_no_operations_reads_no_health(self):
         # the size-0 end of the scope contract: a scope holding nothing reports nothing, rather
         # than falling back to some wider set.
-        assert gen._collect_op_health([]) == {"warnings": [], "errors": [], "empty": []}
+        assert gen._collect_op_health([]) == {"warnings": [], "errors": [], "empty": [],
+                                              "empty_rail": []}
+
+    def test_only_a_rail_driven_empty_toolpath_earns_the_rail_row(self, monkeypatch):
+        # the triage names otherSide, the rail order and the flute length - inputs a 2D contour has
+        # not got, so the rail row is keyed on the drive parameter, never on being empty.
+        cam = make_cam(machining_times={"Swarf1": 0.0, "Contour1": 0.0})
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
+        out = gen._collect_op_health([_op("Swarf1", rail=True), _op("Contour1")])
+        assert out["empty"] == ["Swarf1", "Contour1"]
+        assert out["empty_rail"] == ["Swarf1"]
+
+    def test_a_rail_op_that_cut_something_is_no_rail_row(self, monkeypatch):
+        # the row is the intersection of the two: rail-driven AND empty. A rail op with a toolpath
+        # has nothing to triage.
+        cam = make_cam(machining_times={"Swarf1": 4.19})
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
+        assert gen._collect_op_health([_op("Swarf1", rail=True)])["empty_rail"] == []
+
+
+class TestRailTriageRidesTheEmptyToolpathDisclosure:
+    """The rail triage is disclosed where the empty toolpath shows up, and only over the operations
+    it describes - not on every successful rail selection."""
+
+    def _attach(self, monkeypatch, empty, empty_rail):
+        monkeypatch.setattr(gen, "_collect_op_health",
+                            lambda ops, labels=None: {"warnings": [], "errors": [],
+                                                      "empty": empty, "empty_rail": empty_rail})
+        payload = {}
+        return payload, gen._attach_op_health(payload, [], "document")
+
+    def test_an_empty_rail_toolpath_publishes_the_triage_and_the_note_names_it(self, monkeypatch):
+        payload, note = self._attach(monkeypatch, ["Swarf1"], ["Swarf1"])
+        assert payload["empty_rail_toolpaths"] == ["Swarf1"]
+        assert "rail_triage" in note and "1 rail-driven" in note
+
+    def test_the_triage_orders_the_empty_toolpath_suspects_as_measured(self, monkeypatch):
+        # An upper-first pair and a wrong otherSide produce the SAME empty-toolpath signature, so
+        # the triage orders the suspects rather than naming one; the flute check comes last because
+        # that failure announces itself in the warning channel.
+        payload, _note = self._attach(monkeypatch, ["Swarf1"], ["Swarf1"])
+        triage = payload["rail_triage"]
+        assert "No passes to link." in triage and "Invalid contours." in triage
+        assert triage.index("otherSide") < triage.index("rail order") < triage.index("flute")
+
+    def test_a_non_rail_empty_toolpath_carries_no_triage(self, monkeypatch):
+        payload, note = self._attach(monkeypatch, ["Contour1"], [])
+        assert "rail_triage" not in payload and "rail_triage" not in note
+        assert "empty_rail_toolpaths" not in payload
 
 
 # ── generate_handler: scope selection + skip-valid short-circuit ────────────────────────────────────
@@ -275,6 +363,38 @@ class TestStatusHandler:
         res = gen.status_handler(handle="gen99")
         assert res["isError"] is True and "gen1" in res["message"]
 
+    def test_the_worst_composed_completed_note_fits_the_wire_budget(self, monkeypatch):
+        # the completed note is assembled at run time from five pieces, so test_prose_budget
+        # measures none of the compositions: the completion sentence, the per-op pointer, the
+        # repeated-name clause, the rail pointer and the count caveat all ride together.
+        readiness = gen._cam_common.ready_verdict(
+            "6 of 8 active ops valid", 2,
+            {"name": "Bore Deep Holes", "warning": "Tool is too short for this operation."}, None)
+        gen._GENERATIONS["gen1"] = {
+            "future": SimpleNamespace(isGenerationCompleted=True, numberOfOperations=8,
+                                      numberOfCompleted=8),
+            "target": "all setups", "started_at": 0.0, "total": 8,
+            "doc_name": "Doc", "doc_urn": "urn:doc", "doc_key": "urn:doc"}
+        gen._HANDLE_SEQ[0] = 1
+        monkeypatch.setattr(gen._cam_common, "live_readiness",
+                            lambda: ({"valid": 6, "generating": 0, "total": 8,
+                                      "readiness": readiness}, None))
+        # two operations of ONE name in different setups - what earns the substitution clause
+        monkeypatch.setattr(gen, "_document_ops", lambda: [
+            SimpleNamespace(name="Rough clean", path="Roughing / Rough clean", obj=object()),
+            SimpleNamespace(name="Rough clean", path="Finishing / Rough clean", obj=object())])
+        monkeypatch.setattr(gen, "_collect_op_health",
+                            lambda ops, labels=None: {"warnings": [], "errors": [],
+                                                      "empty": list(labels or []),
+                                                      "empty_rail": list(labels or [])})
+        out = _payload(gen.status_handler(handle="gen1"))
+        note = out["note"]
+        # the unbounded verdict rides as its own key rather than inside the bounded note
+        assert out["readiness"] == readiness and readiness not in note
+        assert "'Setup / op' paths" in note and "rail_triage" in note
+        assert "numberOfCompleted at THIS read" in note
+        assert len(note) <= 400, len(note)      # test_prose_budget.NOTE_BUDGET_CHARS
+
     def _completed_entry(self):
         # numberOfCompleted is pass-through data, not a completion signal - live it reads 0 even
         # when isGenerationCompleted is True (cam-generate-future in tests/live/VERIFIED_API_FACTS.md).
@@ -303,7 +423,8 @@ class TestStatusHandler:
         them. A test stubbing only the second half reaches the real walk through the first."""
         monkeypatch.setattr(gen, "_document_ops", list)
         monkeypatch.setattr(gen, "_collect_op_health",
-                            lambda ops, labels=None: {"warnings": [], "errors": [], "empty": []})
+                            lambda ops, labels=None: {"warnings": [], "errors": [], "empty": [],
+                                                      "empty_rail": []})
 
     def test_latest_resolves_to_last_handle(self, monkeypatch):
         gen._GENERATIONS["gen1"] = self._completed_entry()
@@ -345,9 +466,9 @@ class TestStatusHandler:
         self._stub_health(monkeypatch)
         out = _payload(gen.status_handler(handle="gen1"))
         assert out["operations_completed"] == 2
-        assert "instantaneous figure" in out["note"]
-        assert "24 -> 23 -> 25" in out["note"]
-        assert "never from this number rising" in out["note"]
+        assert "numberOfCompleted at THIS read" in out["note"]
+        assert "can fall between reads" in out["note"]
+        assert "read 0 once complete" in out["note"]
 
     def test_an_incomplete_poll_carries_the_caveat_on_a_ZERO_count(self, monkeypatch):
         # 0 is the reading most likely to be misread as "nothing has happened yet", so the caveat
@@ -362,7 +483,7 @@ class TestStatusHandler:
                             self._readiness(generating=2, total=2, readiness=""))
         out = _payload(gen.status_handler(handle="gen1"))
         assert out["completed"] is False and out["operations_completed"] == 0
-        assert "instantaneous figure" in out["note"]
+        assert "numberOfCompleted at THIS read" in out["note"]
 
     def test_a_foreign_document_poll_carries_the_caveat_too(self, monkeypatch):
         # the Future-alone path publishes operations_completed as well, so the sentence about what
@@ -373,7 +494,7 @@ class TestStatusHandler:
         out = _payload(gen.status_handler(handle="gen1"))
         assert out["operations_completed"] == 2
         assert "NOT the active document" in out["note"]
-        assert "instantaneous figure" in out["note"]
+        assert "numberOfCompleted at THIS read" in out["note"]
 
     def test_a_future_whose_count_does_not_read_carries_no_caveat(self, monkeypatch):
         # numberOfCompleted raises "Generation not started" on the launch tick: the payload's
@@ -397,6 +518,13 @@ class TestStatusHandler:
         out = _payload(gen.status_handler(handle="gen1"))
         assert out["operations_completed"] is None
         assert "instantaneous figure" not in out["note"]
+
+    def test_the_caveat_is_one_bounded_sentence(self):
+        # it rides EVERY poll that publishes the number, so it is paid on every call while being
+        # only one clause of a note the wire budgets at 400 characters as a whole.
+        caveat = gen._COUNT_IS_INSTANTANEOUS
+        assert caveat.count(".") == 1, caveat
+        assert len(caveat) <= 150, len(caveat)
 
     def test_errored_op_surfaced_while_still_generating(self, monkeypatch):
         # An errored op (hasError) will NEVER finish, so a still-generating poll must
@@ -619,7 +747,8 @@ class TestStatusHandler:
         monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (object(), None))
         monkeypatch.setattr(gen._cam_common, "live_readiness", self._readiness(**states))
         monkeypatch.setattr(gen, "_collect_op_health",
-                            lambda ops, labels=None: {"warnings": [], "errors": [], "empty": []})
+                            lambda ops, labels=None: {"warnings": [], "errors": [], "empty": [],
+                                                      "empty_rail": []})
 
     def test_a_bare_read_answers_about_the_active_document_not_a_registered_handle(self, monkeypatch):
         # THE BITE: a stale handle of another (here, no-longer-active) document sits in the registry
@@ -719,7 +848,9 @@ class TestStatusHandler:
         out = _payload(gen.status_handler(handle="gen1"))
         assert out["completed"] is True                      # nothing is generating
         assert "not a success verdict" in out["note"]        # ...which is NOT the same as succeeded
-        assert "0 of 2 active ops valid" in out["note"]      # the readiness line rides beside it
+        # the verdict itself is a key: it embeds an op name and warning text, so a note that
+        # inlined it could not be bounded, and the note points at the key instead
+        assert "0 of 2 active ops valid" in out["readiness"] and "'readiness'" in out["note"]
 
     def test_the_foreign_document_path_words_what_completed_means(self, monkeypatch):
         entry = self._completed_entry()
@@ -891,7 +1022,8 @@ class TestSameDocumentIdentity:
                                       "readiness": "ready to post."}, None))
         monkeypatch.setattr(gen, "_document_ops", list)
         monkeypatch.setattr(gen, "_collect_op_health",
-                            lambda ops, labels=None: {"warnings": [], "errors": [], "empty": []})
+                            lambda ops, labels=None: {"warnings": [], "errors": [], "empty": [],
+                                                      "empty_rail": []})
         entry = self._entry("Untitled", "unsaved:1")
         entry["doc"] = _DocHandle("doc-a")
         gen._GENERATIONS["gen1"] = entry
@@ -940,7 +1072,8 @@ class TestSameDocumentIdentity:
                                       "readiness": "ready to post."}, None))
         monkeypatch.setattr(gen, "_document_ops", list)
         monkeypatch.setattr(gen, "_collect_op_health",
-                            lambda ops, labels=None: {"warnings": [], "errors": [], "empty": []})
+                            lambda ops, labels=None: {"warnings": [], "errors": [], "empty": [],
+                                                      "empty_rail": []})
         gen._GENERATIONS["gen1"] = self._entry("Untitled", "unsaved:1")
         gen._HANDLE_SEQ[0] = 1
         out = _payload(gen.status_handler(handle="latest"))
@@ -964,10 +1097,11 @@ class TestSameDocumentIdentity:
                                                    "finish the rest."}, None))
         monkeypatch.setattr(gen, "_document_ops", list)
         monkeypatch.setattr(gen, "_collect_op_health",
-                            lambda ops, labels=None: {"warnings": [], "errors": [], "empty": []})
+                            lambda ops, labels=None: {"warnings": [], "errors": [], "empty": [],
+                                                      "empty_rail": []})
         out = _payload(gen.status_handler(handle="gen1"))
         assert out["live_states"]["out_of_date"] == 1
-        assert "0 of 1 active ops valid" in out["note"]
+        assert "0 of 1 active ops valid" in out["readiness"]
 
     def test_a_handle_with_no_recorded_identity_attaches_no_tallies(self, monkeypatch):
         # THE BITE for this consumer: no tally may be attached over a document the call cannot
@@ -1065,7 +1199,8 @@ class TestScopedReadinessWarningVerdict:
         cam = _FakeCAM([_setup("Roughing", ops)])
         monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
         monkeypatch.setattr(gen, "_collect_op_health",
-                            lambda ops, labels=None: {"warnings": [], "errors": [], "empty": []})
+                            lambda ops, labels=None: {"warnings": [], "errors": [], "empty": [],
+                                                      "empty_rail": []})
         return _payload(gen.status_handler(target="Roughing"))
 
     def test_the_tally_carries_the_warning_count_and_its_sample(self, monkeypatch):
@@ -1091,7 +1226,7 @@ class TestScopedReadinessWarningVerdict:
         assert "postable" in readiness and "1 with WARNINGS" in readiness
         assert "2D Contour1" in readiness
         assert "contours are missing selections" in readiness
-        assert readiness in out["note"]                  # and it reaches the agent-facing note
+        assert out["readiness"] == readiness             # and it reaches the agent as its own key
 
     def test_a_suppressed_warned_op_leaves_the_scoped_verdict_plain(self, monkeypatch):
         out = self._out(monkeypatch, [_warn_op("Face1", warning=""),
@@ -1123,7 +1258,8 @@ class TestScopedReadinessSetupBlockers:
         cam = _FakeCAM([setup])
         monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
         monkeypatch.setattr(gen, "_collect_op_health",
-                            lambda ops, labels=None: {"warnings": [], "errors": [], "empty": []})
+                            lambda ops, labels=None: {"warnings": [], "errors": [], "empty": [],
+                                                      "empty_rail": []})
         return _payload(gen.status_handler(target=target))
 
     def test_a_machine_less_setup_never_reads_ready_to_post_however_valid_its_ops(self, monkeypatch):
@@ -1135,7 +1271,7 @@ class TestScopedReadinessSetupBlockers:
         assert "cam_edit_setup" in readiness                # the remedy, in tool vocabulary
         assert out["live_states"]["setups_blocked"] == [
             {"name": "Roughing", "blocked_by": ["no_machine_selected"]}]
-        assert readiness in out["note"]                     # and it reaches the agent-facing note
+        assert out["readiness"] == readiness                # and it reaches the agent as its own key
 
     def test_an_assigned_machine_restores_the_plain_scoped_verdict(self, monkeypatch):
         # the other side of the boundary - the demotion must key on the blocker, not on being scoped
@@ -1244,8 +1380,9 @@ class TestScopedHealthLists:
     def test_the_payload_names_which_operations_the_health_lists_cover(self, monkeypatch):
         self._cam(monkeypatch)
         out = _payload(gen.status_handler(target="Roughing"))
+        # health_scope is the ONE place the lists' scope is stated - the note does not restate it
         assert out["health_scope"] == "setup 'Roughing'"
-        assert "cover: setup 'Roughing'" in out["note"]
+        assert "Roughing" not in out["note"]
 
     def test_a_document_read_still_covers_every_setup(self, monkeypatch):
         # the other side of the boundary: unscoped, the lists ARE the whole document's - it is the
@@ -1277,7 +1414,7 @@ class TestScopedHealthLists:
         # not a name. The clause ships only where the substitution happened.
         self._cam(monkeypatch)
         note = _payload(gen.status_handler())["note"]
-        assert "named by their setup path instead - 'Setup / op', with any folders between" in note
+        assert "Repeated names show as 'Setup / op' paths" in note
 
     def test_a_scope_whose_names_are_already_distinct_claims_no_substitution(self, monkeypatch):
         # the other side: inside 'Roughing' every name identifies one operation, so the rows keep
@@ -1410,7 +1547,7 @@ class TestOpLabelsRepeatedPath:
         out = _payload(gen.status_handler(target="Roughing"))
         assert out["empty_toolpaths"] == ["Roughing / Rough clean (operation 1)",
                                           "Roughing / Rough clean (operation 2)"]
-        assert "by the position they hold in this list" in out["note"]
+        assert "then by position" in out["note"]
 
 
 class TestStatusLivePoll:
@@ -1444,7 +1581,8 @@ class TestStatusLivePoll:
                             self._readiness(valid=3, generating=0, total=3,
                                             readiness="3 of 3 active ops valid - ready to post."))
         monkeypatch.setattr(gen, "_collect_op_health",
-                            lambda ops, labels=None: {"warnings": [], "errors": [], "empty": []})
+                            lambda ops, labels=None: {"warnings": [], "errors": [], "empty": [],
+                                                      "empty_rail": []})
         out = _payload(gen.status_handler())
         assert out["completed"] is True and out["handle"] is None
 
@@ -1456,11 +1594,12 @@ class TestStatusLivePoll:
                             self._readiness(valid=0, out_of_date=34, generating=0, total=34,
                                             readiness="0 of 34 active ops valid - run cam_generate to finish the rest."))
         monkeypatch.setattr(gen, "_collect_op_health",
-                            lambda ops, labels=None: {"warnings": [], "errors": [], "empty": []})
+                            lambda ops, labels=None: {"warnings": [], "errors": [], "empty": [],
+                                                      "empty_rail": []})
         out = _payload(gen.status_handler())
         assert out["completed"] is True
         assert "not a success verdict" in out["note"]
-        assert "0 of 34 active ops valid" in out["note"]
+        assert "0 of 34 active ops valid" in out["readiness"] and "'readiness'" in out["note"]
 
     def test_live_errored_op_flagged_not_generating_forever(self, monkeypatch):
         # an errored op will NEVER finish - a still-generating live poll must flag the BLOCKER now, not
@@ -1500,7 +1639,7 @@ class TestStatusLivePoll:
         assert out["live_states"]["errored"] == 1
         assert out["live_states"]["valid"] == 1
         assert out["completed"] is True                         # nothing generating (errored != generating)
-        assert "BLOCKER" in out["note"]
+        assert "BLOCKER" in out["readiness"]                    # the verdict beside the flag
 
     def test_target_not_found_errors(self, monkeypatch):
         cam = _FakeCAM([_setup("Roughing")])
@@ -1523,3 +1662,275 @@ class TestStatusLivePoll:
         assert reads["n"] == 1                                  # exactly one snapshot
         assert out["completed"] is False
         assert "pumped_seconds" not in out
+
+
+class TestStatusNamesAToolpathThatGeneratedEmpty:
+    """The status read's own shape for the EMPTY class's second half: an operation whose toolpath
+    generated empty reads hasToolpath True and state IsValid, so nothing in the flags separates it
+    from one that cut - its own machining time (0.0 s against 4.193 s) is what does."""
+
+    def _out(self, monkeypatch, times):
+        import adsk.cam
+        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
+        setup = SharedSetup("S1", ops=[_op("Swarf1", warning="No passes to link."),
+                                       _op("Swarf4", warning="Tool was lifted.")])
+        cam = _FakeCAM([setup], machining_times=times)
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
+        return _payload(gen.status_handler(target="S1"))
+
+    def test_the_empty_operation_is_named_and_the_cutting_one_is_not(self, monkeypatch):
+        out = self._out(monkeypatch, {"Swarf1": 0.0, "Swarf4": 4.193083})
+        assert out["empty_toolpaths"] == ["Swarf1"]
+        assert out["counts"]["empty_toolpaths"] == 1
+        # both still bucket VALID - the empty list is an overlay on that bucket, not a state change
+        assert out["live_states"]["valid"] == 2
+
+    def test_an_unread_time_names_nothing(self, monkeypatch):
+        # every getMachiningTime raises here: an unread signal is not a measurement of zero
+        out = self._out(monkeypatch, {})
+        assert out["empty_toolpaths"] == [] and out["counts"]["empty_toolpaths"] == 0
+
+
+# ── the entitlement pre-flight ─────────────────────────────────────────────────────────────────────
+#
+# Measured: a whole-document generate holding two operations whose strategy reads
+# isGenerationAllowed false regenerated NOTHING while three healthy out-of-date ops sat in the same
+# scope, and targeting one of those healthy ops alone generated it in 2.6 s. So the launch reads the
+# entitlement first, excludes the operations reading false, and launches the rest one at a time.
+
+def _entitlement(table):
+    """A ``_cam_common.strategy_generation_allowed`` stand-in: strategy name -> True / False / None.
+    A name absent from the table reads None - the flag that would not read, which blocks nothing."""
+    return lambda name: table.get(name)
+
+
+class TestEntitlementPreflight:
+    def _install(self, monkeypatch, setups, table):
+        import adsk.cam
+        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
+        cam = _FakeCAM(setups)
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(gen._cam_common, "strategy_generation_allowed", _entitlement(table))
+        return cam
+
+    def _launched(self, cam):
+        return [tgt.name for kind, tgt in cam.generate_calls if kind == "target"]
+
+    def test_a_blocked_op_is_excluded_and_the_healthy_ones_still_launch(self, monkeypatch):
+        # THE BITE: the whole-document sweep is what regenerated nothing, so it must not be the call
+        # made here - each operation that did not read false is launched on its own.
+        gen._GENERATIONS.clear()
+        setup = SharedSetup("S", ops=[SharedOp("Cham", operation_state=1, strategy="chamfer"),
+                                      SharedOp("Face1", operation_state=1, strategy="face"),
+                                      SharedOp("Face2", operation_state=1, strategy="face")])
+        cam = self._install(monkeypatch, [setup], {"chamfer": False, "face": True})
+        out = _payload(gen.generate_handler(target=""))
+        assert out["launched"] is True
+        assert [kind for kind, _ in cam.generate_calls] == ["target", "target"]
+        assert self._launched(cam) == ["Face1", "Face2"]
+        assert out["entitlement_blocked"] == [{"name": "Cham", "strategy": "chamfer"}]
+        assert out["operations_to_generate"] == 2
+        assert "isGenerationAllowed false" in out["note"] and "Cham" in out["note"]
+        assert "Machining Extension" in out["note"]          # the remedy cam_create_operation uses
+        assert "cam_get_status" in out["note"]               # this launch claims no completion either
+
+    def test_one_handle_covers_every_future_the_split_launch_made(self, monkeypatch):
+        # the futures must all stay REFERENCED: Fusion abandons an in-progress generation whose
+        # Future is garbage-collected, so the registry entry holds them, not just the first.
+        gen._GENERATIONS.clear()
+        setup = SharedSetup("S", ops=[SharedOp("Cham", operation_state=1, strategy="chamfer"),
+                                      SharedOp("Face1", operation_state=1, strategy="face"),
+                                      SharedOp("Face2", operation_state=1, strategy="face")])
+        self._install(monkeypatch, [setup], {"chamfer": False, "face": True})
+        out = _payload(gen.generate_handler(target=""))
+        entry = gen._GENERATIONS[out["handle"]]
+        assert len(entry["futures"]) == 2
+        assert entry["future"] is entry["futures"][0]
+        gen._GENERATIONS.clear()
+
+    def test_every_op_blocked_refuses_and_launches_nothing(self, monkeypatch):
+        setup = SharedSetup("S", ops=[SharedOp("Cham", operation_state=1, strategy="chamfer"),
+                                      SharedOp("Walls", operation_state=1, strategy="inclined_walls")])
+        cam = self._install(monkeypatch, [setup],
+                            {"chamfer": False, "inclined_walls": False})
+        res = gen.generate_handler(target="")
+        assert res["isError"] is True
+        assert "Cham" in res["message"] and "Walls" in res["message"]
+        assert "Machining Extension" in res["message"]
+        assert cam.generate_calls == []
+
+    def test_a_blocked_operation_target_is_refused_by_name(self, monkeypatch):
+        setup = SharedSetup("S", ops=[SharedOp("Cham", operation_state=1, strategy="chamfer")])
+        cam = self._install(monkeypatch, [setup], {"chamfer": False})
+        res = gen.generate_handler(target="Cham", skip_valid=False)
+        assert res["isError"] is True and "isGenerationAllowed false" in res["message"]
+        assert cam.generate_calls == []
+
+    def test_an_unreadable_flag_excludes_nothing_and_is_disclosed(self, monkeypatch):
+        # an unread flag is no entitlement verdict, so the plain document sweep still runs - and the
+        # payload says the pre-flight was not made rather than staying silent about it.
+        gen._GENERATIONS.clear()
+        setup = SharedSetup("S", ops=[SharedOp("Odd", operation_state=1, strategy="mystery")])
+        cam = self._install(monkeypatch, [setup], {})
+        out = _payload(gen.generate_handler(target=""))
+        assert cam.generate_calls == [("all", True)]
+        assert "entitlement_blocked" not in out
+        assert out["entitlement_unread"] == 1 and "did not read" in out["note"]
+        gen._GENERATIONS.clear()
+
+    def test_the_split_launch_skips_the_valid_and_the_suppressed_ones(self, monkeypatch):
+        gen._GENERATIONS.clear()
+        ops = [SharedOp("Cham", operation_state=1, strategy="chamfer"),
+               SharedOp("Done", operation_state=0, strategy="face"),
+               SharedOp("Parked", operation_state=2, suppressed=True, strategy="face"),
+               SharedOp("Todo", operation_state=1, strategy="face")]
+        cam = self._install(monkeypatch, [SharedSetup("S", ops=ops)],
+                            {"chamfer": False, "face": True})
+        out = _payload(gen.generate_handler(target="", skip_valid=True))
+        assert self._launched(cam) == ["Todo"]
+        assert out["operations_to_generate"] == 1
+        gen._GENERATIONS.clear()
+
+    def test_skip_valid_false_regenerates_the_valid_op_but_never_the_suppressed_one(self, monkeypatch):
+        # the boundary of the skip test: state 0 is skipped only while skip_valid is set, and a
+        # suppressed op is skipped either way (measured: generateAllToolpaths skips it too).
+        gen._GENERATIONS.clear()
+        ops = [SharedOp("Cham", operation_state=1, strategy="chamfer"),
+               SharedOp("Done", operation_state=0, strategy="face"),
+               SharedOp("Parked", operation_state=2, suppressed=True, strategy="face"),
+               SharedOp("Todo", operation_state=1, strategy="face")]
+        cam = self._install(monkeypatch, [SharedSetup("S", ops=ops)],
+                            {"chamfer": False, "face": True})
+        _payload(gen.generate_handler(target="", skip_valid=False))
+        assert self._launched(cam) == ["Done", "Todo"]
+        gen._GENERATIONS.clear()
+
+    def test_blocked_beside_only_valid_ops_launches_nothing_and_says_why(self, monkeypatch):
+        ops = [SharedOp("Cham", operation_state=1, strategy="chamfer"),
+               SharedOp("Done", operation_state=0, strategy="face")]
+        cam = self._install(monkeypatch, [SharedSetup("S", ops=ops)],
+                            {"chamfer": False, "face": True})
+        out = _payload(gen.generate_handler(target="", skip_valid=True))
+        assert out["launched"] is False and cam.generate_calls == []
+        assert "1 already valid" in out["reason"] and "0 suppressed" in out["reason"]
+        assert out["entitlement_blocked"][0]["name"] == "Cham"
+
+    def test_a_launch_that_raises_is_named_beside_the_ones_that_started(self, monkeypatch):
+        # partial success is reported as partial: the two that started keep their handle, and the
+        # one the platform refused is named rather than swallowed into the count.
+        gen._GENERATIONS.clear()
+        ops = [SharedOp("Cham", operation_state=1, strategy="chamfer"),
+               SharedOp("Bad", operation_state=1, strategy="face"),
+               SharedOp("Good", operation_state=1, strategy="face")]
+        cam = self._install(monkeypatch, [SharedSetup("S", ops=ops)],
+                            {"chamfer": False, "face": True})
+        real = cam.generateToolpath
+
+        def _launch(tgt):
+            if tgt.name == "Bad":
+                raise RuntimeError("3 : Toolpath requires tool to be selected.")
+            return real(tgt)
+        cam.generateToolpath = _launch
+        out = _payload(gen.generate_handler(target=""))
+        assert out["launched"] is True and out["operations_to_generate"] == 1
+        assert out["launch_failures"][0]["name"] == "Bad"
+        assert "tool to be selected" in out["launch_failures"][0]["error"]
+        gen._GENERATIONS.clear()
+
+    def test_every_remaining_launch_failing_is_an_error_not_a_launched_payload(self, monkeypatch):
+        ops = [SharedOp("Cham", operation_state=1, strategy="chamfer"),
+               SharedOp("Bad", operation_state=1, strategy="face")]
+        cam = self._install(monkeypatch, [SharedSetup("S", ops=ops)],
+                            {"chamfer": False, "face": True})
+        cam.generateToolpath = lambda tgt: None      # returns no future: nothing is running
+        res = gen.generate_handler(target="")
+        assert res["isError"] is True and "Bad" in res["message"]
+
+    def test_a_clean_scope_still_takes_the_plain_launch(self, monkeypatch):
+        # no blocked op means no behaviour change: the document sweep and the scoped launch stay
+        # the single measured calls they were.
+        gen._GENERATIONS.clear()
+        setup = SharedSetup("S", ops=[SharedOp("Face1", operation_state=1, strategy="face")])
+        cam = self._install(monkeypatch, [setup], {"face": True})
+        out = _payload(gen.generate_handler(target=""))
+        assert cam.generate_calls == [("all", True)]
+        assert "entitlement_blocked" not in out and "entitlement_unread" not in out
+        gen._GENERATIONS.clear()
+
+    def test_the_scoped_readiness_names_the_blocked_op_instead_of_a_regenerate(self, monkeypatch):
+        # the poll's own half of the row: 'run cam_generate to finish the rest' is circular advice
+        # over an operation cam_generate excludes, so the verdict names it.
+        ops = [SharedOp("Cham", operation_state=1, strategy="chamfer"),
+               SharedOp("Face1", operation_state=0, strategy="face")]
+        self._install(monkeypatch, [SharedSetup("S", ops=ops)], {"chamfer": False, "face": True})
+        out = _payload(gen.status_handler(target="S"))
+        readiness = out["live_states"]["readiness"]
+        assert "Cham" in readiness and "isGenerationAllowed false" in readiness
+        assert "run cam_generate to finish the rest" not in readiness
+
+    def test_a_stalled_poll_carries_the_readiness_that_names_them(self, monkeypatch):
+        # the stall warning fires exactly where a blocked op parks: nothing generating, out-of-date
+        # ops left. Without the verdict beside it the note only guesses at broken geometry.
+        gen._GENERATIONS.clear()
+        gen._GENERATIONS["gen1"] = {
+            "future": SimpleNamespace(isGenerationCompleted=False, numberOfOperations=2,
+                                      numberOfCompleted=0),
+            "target": "all setups", "started_at": 0.0, "total": 2,
+            "doc_name": "Doc", "doc_urn": "urn:doc", "doc_key": "urn:doc"}
+        monkeypatch.setattr(gen, "_active_identity", lambda: ("Doc", "urn:doc"))
+        monkeypatch.setattr(gen, "document_key", lambda: "urn:doc")
+        monkeypatch.setattr(gen._cam_common, "live_readiness",
+                            lambda: ({"valid": 0, "out_of_date": 2, "generating": 0, "total": 2,
+                                      "readiness": "0 of 2 active ops valid; 1 of them read "
+                                                   "isGenerationAllowed false"}, None))
+        out = _payload(gen.status_handler(handle="gen1"))
+        assert out["completed"] is False and "WARNING" in out["note"]
+        assert "isGenerationAllowed false" in out["note"]
+        gen._GENERATIONS.clear()
+
+
+class TestOneHandleOverSeveralFutures:
+    """A split launch registers several Futures under ONE handle, so the poll settles on all of
+    them: one still running keeps the handle open, and the counts are the sum."""
+
+    def setup_method(self):
+        gen._GENERATIONS.clear()
+        gen._HANDLE_SEQ[0] = 0
+
+    @pytest.fixture(autouse=True)
+    def _same_active_document(self, monkeypatch):
+        monkeypatch.setattr(gen, "_active_identity", lambda: ("Doc", "urn:doc"))
+        monkeypatch.setattr(gen, "document_key", lambda: "urn:doc")
+
+    def _entry(self, *pairs):
+        futures = [SimpleNamespace(isGenerationCompleted=done, numberOfOperations=ops,
+                                   numberOfCompleted=ops if done else 0)
+                   for ops, done in pairs]
+        return {"future": futures[0], "futures": futures, "target": "all setups",
+                "started_at": 0.0, "total": None, "doc_name": "Doc", "doc_urn": "urn:doc",
+                "doc_key": "urn:doc"}
+
+    def test_one_future_still_running_keeps_the_handle_incomplete(self, monkeypatch):
+        # nothing reads as generating in the live tally, so ONLY the second Future's own flag can
+        # hold this back - reading the first alone would publish a premature completed:true.
+        gen._GENERATIONS["gen1"] = self._entry((1, True), (1, False))
+        gen._HANDLE_SEQ[0] = 1
+        monkeypatch.setattr(gen._cam_common, "live_readiness",
+                            lambda: ({"valid": 2, "generating": 0, "total": 2,
+                                      "readiness": "ready to post."}, None))
+        out = _payload(gen.status_handler(handle="gen1"))
+        assert out["completed"] is False and "gen1" in gen._GENERATIONS
+
+    def test_the_totals_are_summed_across_the_futures(self, monkeypatch):
+        gen._GENERATIONS["gen1"] = self._entry((2, True), (3, True))
+        gen._HANDLE_SEQ[0] = 1
+        monkeypatch.setattr(gen._cam_common, "live_readiness",
+                            lambda: ({"valid": 5, "generating": 0, "total": 5,
+                                      "readiness": "ready to post."}, None))
+        monkeypatch.setattr(gen, "_document_ops", list)
+        monkeypatch.setattr(gen, "_collect_op_health",
+                            lambda ops, labels=None: {"warnings": [], "errors": [], "empty": [],
+                                                      "empty_rail": []})
+        out = _payload(gen.status_handler(handle="gen1"))
+        assert out["completed"] is True
+        assert out["operations_total"] == 5 and out["operations_completed"] == 5

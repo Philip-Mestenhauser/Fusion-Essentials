@@ -1,11 +1,8 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Shared joint substrate: the JointGeometry keypoint factory (planar/cylinder/cone face, edge,
-vertex/point), the motion-type dispatcher (frame-relative axis, or a custom direction entity for a
-true world axis or a geometry's own axis), and the Joint/AsBuiltJoint-by-name lookup every joint tool
-that edits, drives, or links an existing joint resolves through.
-"""
+"""Joint substrate: the JointGeometry keypoint factory, the motion-type dispatcher, and the
+Joint/AsBuiltJoint-by-name lookup every joint tool resolves an existing joint through."""
 
 import math
 
@@ -19,9 +16,8 @@ from ._common import safe
 
 
 def is_joint_origin(x):
-    """isinstance(x, adsk.fusion.JointOrigin) that degrades to False when the type isn't a real class
-    (an un-modelled Mock attribute under test) instead of raising - the one JO type check every tool
-    that branches on 'is this resolved handle a JointOrigin?' shares."""
+    """isinstance(x, adsk.fusion.JointOrigin), degrading to False when the type is not a real
+    class instead of raising."""
     try:
         return isinstance(x, adsk.fusion.JointOrigin)
     except TypeError:
@@ -29,35 +25,20 @@ def is_joint_origin(x):
 
 
 def is_as_built_joint(x):
-    """isinstance(x, adsk.fusion.AsBuiltJoint), degrading to False when the type isn't a real class
-    (a Mock under test). apply_motion routes an as-built joint through a DIFFERENT setter arity."""
+    """isinstance(x, adsk.fusion.AsBuiltJoint), degrading to False when the type is not a real
+    class. apply_motion routes an as-built joint through a DIFFERENT setter arity."""
     try:
         return isinstance(x, adsk.fusion.AsBuiltJoint)
     except TypeError:
         return False
 
-# The "what to reuse from here" catalog line for the generated CLAUDE.md helper map (see
-# tests/gen_manifest.py): each symbol with the one clause that says WHEN to reach for it. The
-# mechanism behind a clause lives at the symbol itself, in its test, or in VERIFIED_API_FACTS.md.
+# The "what to reuse from here" catalog line for the generated CLAUDE.md helper map.
 MAP_BLURB = (
-    "build_joint_geometry/apply_motion - the keypoint factory per entity kind, and the motion-type "
-    "dispatch; all_joints/find_joints_by_name/find_joint - the full walk (joints AND asBuiltJoints, "
-    "root and every sub-component) and its by-name forms, which REFUSE a shared name - a joint "
-    "name is component-locally unique; DRIVES_ANGLE/DRIVES_SLIDE/DRIVES_ANY - which joint kinds "
-    "TURN, which SLIDE, and their union, the ONE drivable-at-all gate; motion_link_record/"
-    "motion_link_partner - a joint's own MotionLink membership as ONE TRI-STATE record a coupling "
-    "claim gates on, plus its NAME projection; link_ratio_values/dof_motion_kind/"
-    "link_ratio_mismatch - the ONE ratio codec both link writers send through (DISPLAY units per "
-    "DOF -> the rad/cm pair setMotionData takes; UNCONVERTED, and saying so, for a DOF answering "
-    "neither kind), and the read-back gate after it; all_joint_origins/find_joint_origins_by_name/"
-    "jo_assembly_proxy - the ONE JointOrigin walk, its resolve-one, and the ASSEMBLY-CONTEXT proxy "
-    "a native sub-component JO must become first; component_world_matrix - the "
-    "ONE matrix-to-world ladder, answering None where several placements would each give a "
-    "different frame; motion_param_names/OFFSET_PARAM_NOTE - the joint's own offset/angle dNN "
-    "read, and the offset-is-frame-Z sentence a joint payload appends; pending_position/"
-    "pending_move_guard/PENDING_MOVE_REFUSAL - the moved-but-uncaptured position read, and the "
-    "refusal a joint CREATE returns while it is set; planar_outward_normal/normals_oppose/"
-    "FLIP_HINT - the flush face-to-face detection (outward normals OPPOSE) and its hint")
+    "build_joint_geometry/apply_motion - the keypoint factory and motion dispatch; all_joints/"
+    "find_joint - the walk over joints AND asBuiltJoints, REFUSING a shared name; DRIVES_ANY - the "
+    "drivable gate; motion_link_record/link_ratio_values - the link record and ratio codec; "
+    "all_joint_origins/jo_assembly_proxy - the JointOrigin walk and proxy; component_world_matrix "
+    "- the matrix-to-world ladder")
 
 
 def planar_outward_normal(entity):
@@ -81,8 +62,8 @@ def normals_oppose(n1, n2):
 
 
 # The ONE flip-hint sentence every joint create publishes for the flush face-to-face pick without
-# flip (live-verified: a joint aligns the two geometry frames Z-onto-Z - each planar face's frame Z
-# is its OUTWARD normal - so opposing normals rotate the free part 180 deg, typically embedding it).
+# flip. A joint aligns the two geometry frames Z-onto-Z and a planar face's frame Z is its OUTWARD
+# normal, so opposing normals rotate the free part 180 deg.
 FLIP_HINT = ("The two planar faces' outward normals OPPOSE (the flush face-to-face pick). A joint "
              "aligns the two geometry frames Z-onto-Z, so the free part was ROTATED 180 deg to "
              "satisfy that - typically embedding it. For the seated flush mate, re-run with "
@@ -90,11 +71,10 @@ FLIP_HINT = ("The two planar faces' outward normals OPPOSE (the flush face-to-fa
 
 
 def motion_param_names(joint):
-    """The joint's OWN ModelParameter names: {'offset': dNN, 'angle': dNN}, absent ones omitted.
-    Joint.offset moves the anchor along the joint frame's TERTIARY (Z) axis (the API's own docstring;
-    live-verified) and is the ONLY parametric position drive a joint has; a slider's slide VALUE has
-    no ModelParameter at all, even after joint_drive poses it (live-verified). OFFSET_PARAM_NOTE
-    carries both to the caller."""
+    """The joint's OWN ModelParameter names: {'offset': dNN, 'angle': dNN}, absent ones omitted."""
+    # Joint.offset moves the anchor along the joint frame's tertiary (Z) axis and is the ONLY
+    # parametric position drive a joint has; a slider's slide VALUE carries no ModelParameter at
+    # all, even after joint_drive poses it. OFFSET_PARAM_NOTE carries both to the caller.
     out = {}
     for key in ("offset", "angle"):
         nm = safe(lambda k=key: getattr(joint, k).name)
@@ -103,55 +83,37 @@ def motion_param_names(joint):
     return out
 
 
-# The one wire sentence appended wherever a payload carries model_parameters (single shared home -
-# three tools return the block; the teaching must not fork).
+# The one wire sentence appended wherever a payload carries model_parameters.
 OFFSET_PARAM_NOTE = (
     " model_parameters are the joint's own dNN params: param_set 'offset' to an expression for a "
-    "PARAMETRIC position - it ALWAYS moves along the joint FRAME'S Z axis, not the motion axis, and "
-    "neither 'flip' (which does not invert its sign) nor 'world_axis' redirects it. A slider's slide "
-    "VALUE has no parameter (joint_drive poses it; driven poses do not survive recompute), so "
-    "parametric TRAVEL comes from co-driving the geometry the joint anchors on - there is no slide "
-    "parameter to set.")
+    "PARAMETRIC position - it ALWAYS moves along the joint FRAME'S Z axis, and neither 'flip' nor "
+    "'world_axis' redirects it. A slider's slide VALUE has no parameter, so parametric TRAVEL "
+    "comes from co-driving the geometry the joint anchors on.")
 
 
-# The design-wide moved-but-uncaptured position flag, and the refusal a joint CREATE returns while it
-# is set. Home for both: every joint-creation tool and assembly_capture_position read the same flag,
-# and a second copy is how one of them keeps creating through a pending move after the other stops.
+# The design-wide moved-but-uncaptured position flag, and the refusal a joint CREATE returns while
+# it is set - the one home every joint-creation tool and assembly_capture_position read.
 
 def pending_position(design):
-    """Whether the design carries a moved-but-uncaptured occurrence position
-    (Design.snapshots.hasPendingSnapshot) as True / False / None - None when the flag cannot be read
-    at all (a design exposing no snapshots surface), which is NOT evidence either way.
-
-    A free move (assembly_move) and a joint_drive pose both set this same flag; assembly_capture_position
-    records the pose into the timeline, discards it, or reports the flag. A design_add_instance
-    PLACEMENT does not set it (measured: the flag still reads false after a placed instance, and a
-    capture there refuses with "Nothing to capture")."""
+    """Design.snapshots.hasPendingSnapshot as True / False / None - None when the flag cannot be
+    read at all, which is NOT evidence either way. A free move and a joint_drive pose both set it;
+    a design_add_instance placement does not."""
     return _common.read_flag(lambda: design.snapshots.hasPendingSnapshot)
 
 
 PENDING_MOVE_REFUSAL = (
     "Uncaptured occurrence moves exist and this joint creation would silently revert them - "
-    "assembly_capture_position(action='capture') first to record the current pose into the timeline, "
-    "or assembly_capture_position(action='discard_pending') to throw the move away deliberately. The "
-    "flag is design-wide, so it does not name the moved occurrences; "
-    "assembly_capture_position(action='status') reports it and lists the captured markers.")
+    "assembly_capture_position(action='capture') records the current pose into the timeline, and "
+    "action='discard_pending' throws the move away. The flag is design-wide, so it names no "
+    "occurrence; action='status' reports it and lists the captured markers.")
 
 
 def pending_move_guard(design):
-    """The refusal a joint CREATE returns while an uncaptured move is pending, else None.
-
-    Creating a joint recomputes the assembly, and a recompute REVERTS an uncaptured position - the
-    parts snap back to their last captured (or joint-defined) pose and the new joint freezes THAT
-    pose, not the one the caller placed. Refusing beats creating a joint at a position the caller
-    never asked for. Only a flag that reads True refuses: an unreadable flag (None) is not evidence
-    a move is pending, so it never blocks the create.
-
-    Two measured facts bound what this refuses, and both are what keeps an automated
-    move-then-joint sequence from deadlocking on it: driving a joint BACK to 0 clears the flag
-    (joint_drive to 30 sets it, joint_drive to 0 clears it), so a sequence that restores its drives
-    before creating a joint never meets this guard; and a design_add_instance placement never sets
-    the flag at all, so placing instances then jointing them is likewise unaffected."""
+    """The refusal a joint CREATE returns while an uncaptured move is pending, else None. Only a
+    flag that reads True refuses - an unreadable flag is not evidence a move is pending."""
+    # Creating a joint recomputes the assembly, and a recompute REVERTS an uncaptured position: the
+    # parts snap back to their last captured pose and the new joint freezes THAT one. Driving a
+    # joint back to 0 clears the flag, so a sequence that restores its drives never meets this.
     return _common.error(PENDING_MOVE_REFUSAL) if pending_position(design) is True else None
 
 # axis keyword -> JointDirections axis index (Custom=3 is not indexed here - it is selected by
@@ -160,10 +122,8 @@ AXES = {"x": 0, "y": 1, "z": 2}
 
 
 def _non_planar_face_geometry(entity, keypoint):
-    """createByNonPlanarFace(entity, keypoint) as (geometry, error_or_None). The API's OWN raise text
-    is carried into the error rather than swallowed: it names the keypoint a face type demands
-    ("Key point type should be CenterKeyPoint, if the face is sphere and torus face"), which a flat
-    "createByNonPlanarFace failed" would hide from the caller."""
+    """createByNonPlanarFace(entity, keypoint) as (geometry, error) - the API's OWN raise text is
+    carried into the error, since it names the keypoint a face type demands."""
     try:
         g = adsk.fusion.JointGeometry.createByNonPlanarFace(entity, keypoint)
     except Exception as e:
@@ -185,15 +145,13 @@ def _xyz(pt):
 
 
 def _fmt_point(xyz):
-    """A published coordinate - the caller labels the FRAME it is in. Rounded to 4dp (a micron in
-    cm) so a float artefact never reads as a real offset."""
+    """A published coordinate, rounded to 4dp (a micron in cm); the caller labels its FRAME."""
     return "(%.4f, %.4f, %.4f)" % xyz
 
 
 def _occurrence_chain(occ):
-    """`occ` and each of its assembly ancestors, innermost first - the path a proxy is reached
-    through. A top-level occurrence's assemblyContext reads None (measured), which ends the walk;
-    the depth cap is a cycle guard, not a real assembly limit."""
+    """`occ` and each of its assembly ancestors, innermost first. A top-level occurrence's
+    assemblyContext reads None, ending the walk; the depth cap is a cycle guard."""
     out = []
     while occ is not None and len(out) < 64:
         out.append(occ)
@@ -202,30 +160,16 @@ def _occurrence_chain(occ):
 
 
 def component_world_matrix(design, comp, context_occ=None):
-    """The Matrix3D taking `comp`'s OWN coordinate frame into WORLD, or None when no single
-    placement answers for it. The ONE matrix-to-world ladder in this module.
-
-    The resolution ladder is ``jo_assembly_proxy``'s, answering with a matrix instead of a proxy:
-    the ROOT component's frame IS world (identity); a component placed ONCE is carried by that
-    occurrence's transform2; a component placed SEVERAL times has no one world frame.
-
-    transform2 is the ONLY matrix read. ``transform`` is the LOCAL one and composes no parent, so on
-    a nested occurrence it names a different frame - falling back to it would answer with a matrix
-    this function's own contract calls unknowable, under a caller that reads None as "make no
-    judgement". An unreadable transform2 is therefore None, like any other unresolved placement.
-
-    `context_occ` is the occurrence the caller reached the geometry through: when `comp` is placed by
-    it or by one of its assembly ancestors, THAT instance's transform is the answer, so a
-    multi-placed component still resolves for the instance actually being measured. With no context
-    and several placements this returns None - the caller then refuses, or makes no judgement,
-    rather than picking an instance whose rotation may differ from the one in hand."""
+    """The Matrix3D taking `comp`'s OWN frame into WORLD, or None when no single placement answers
+    for it: the ROOT's frame IS world, a component placed once takes that occurrence's transform2,
+    and `context_occ` (or one of its ancestors) picks the instance for a multi-placed one."""
+    # transform2 is the ONLY matrix read: `transform` is LOCAL and composes no parent, so on a
+    # nested occurrence it names a different frame.
     root = safe(lambda: design.rootComponent)
     if comp is None or root is None:
         return None
-    # `is True` on both: an identity comparison that did not read cannot mint a frame. The identity
-    # matrix is the claim "this component's frame IS world" and an occurrence's transform2 is the
-    # claim "THIS instance carries it" - an unproven match falls through to the placement ladder and,
-    # failing that, to the None this function's callers read as "make no judgement".
+    # `is True` on both: an identity comparison that did not read cannot mint a frame. An unproven
+    # match falls through the placement ladder and, failing that, to None.
     if _common.same_component(comp, root) is True:
         return safe(lambda: adsk.core.Matrix3D.create())
     for o in _occurrence_chain(context_occ):
@@ -238,26 +182,19 @@ def component_world_matrix(design, comp, context_occ=None):
 
 
 def _world_placement(entity):
-    """The Matrix3D taking `entity`'s owning component's frame into WORLD, or None when no single
-    placement answers for it - the module's one matrix-to-world ladder,
-    ``component_world_matrix``, over the entity's owner and the occurrence it was reached through.
-
-    An entity reached through an assembly proxy names its instance in assemblyContext; a NATIVE one
-    carries no context, and its owning component's own placement answers. None means the caller
-    makes NO judgement rather than a wrong one."""
+    """The Matrix3D taking `entity`'s owning component's frame into WORLD, over
+    component_world_matrix and the occurrence the entity was reached through; None when no single
+    placement answers, which means the caller makes NO judgement rather than a wrong one."""
     return component_world_matrix(_common.design(),
                                   safe(lambda: entity.body.parentComponent),
                                   safe(lambda: entity.assemblyContext))
 
 
 def _world_torus_centre(entity):
-    """The torus face's own centre in WORLD coordinates, or None when it cannot be established.
-
-    Which frame ``geometry.origin`` answers in follows assemblyContext, MEASURED on a torus centred
-    at component-local (0, 0, -1) in a component turned 30 deg about Z and placed 8 cm out: the
-    NATIVE face reads (0, 0, -1) and needs the lift through its owning component's one placement,
-    while the face reached through the assembly PROXY reads (8, 0, -1) - already world, and lifting
-    it a second time lands (14.9282, 4.0, -1.0), a point on no part of the model."""
+    """The torus face's own centre in WORLD coordinates, or None when it cannot be established."""
+    # Which frame geometry.origin answers in follows assemblyContext: a NATIVE face reads
+    # component-local and needs the lift, while a face reached through the assembly PROXY is
+    # already world and a second lift would land it off the model.
     origin = safe(lambda: entity.geometry.origin)
     if origin is None:
         return None
@@ -273,19 +210,11 @@ def _world_torus_centre(entity):
 
 
 def _torus_keypoint_error(g, entity):
-    """Error text when a TORUS CenterKeyPoint does not describe the torus face, else None.
-
-    Measured rule for createByNonPlanarFace(torus_face, CenterKeyPoint), across three rigs:
-      - a PARAMETRIC torus returns the true centre, world-framed, from a native face or a proxy;
-      - a torus inside a BASE FEATURE returns the OWNING COMPONENT'S ORIGIN, world-framed, whatever
-        the torus centre is - (0,0,0) for a root-component body, the child's world origin for a
-        placed one. Nothing raises, so the returned origin is the only signal there is.
-    The component origin is right only when the torus happens to be centred on it.
-
-    So the discriminating comparison is the keypoint against the torus's own centre read in the
-    SAME world frame. A world-origin signature alone would catch only root-component bodies and pass
-    a placed one's plausible-but-wrong point silently; comparing against the raw component-LOCAL
-    centre would false-refuse every placed assembly. Either side unestablished -> no judgement."""
+    """Error text when a TORUS CenterKeyPoint does not describe the torus face, else None -
+    either side unestablished means no judgement."""
+    # createByNonPlanarFace on a torus inside a BASE FEATURE returns the OWNING COMPONENT'S ORIGIN,
+    # world-framed, and raises nothing - so the keypoint is compared against the torus's own centre
+    # read in the SAME world frame, the only comparison that separates the two.
     kp = _xyz(safe(lambda: g.origin))
     centre = _world_torus_centre(entity)
     if kp is None or centre is None:
@@ -301,12 +230,9 @@ def _torus_keypoint_error(g, entity):
 
 
 def build_joint_geometry(entity, edge_keypoint=None):
-    """Build a JointGeometry for a face/edge/vertex/point entity, picking the keypoint the API accepts
-    for that entity's kind. CenterKeyPoint is INVALID on a cylinder/cone face - MiddleKeyPoint is used
-    there instead - while a SPHERE or TORUS face accepts ONLY CenterKeyPoint; a circular edge centers,
-    a straight edge uses its midpoint. edge_keypoint overrides the automatic edge pick with an explicit
-    JointKeyPointTypes value (a start/middle/end/center choice an anchor tool offers its caller).
-    Returns (geometry, label, error_or_None)."""
+    """Build a JointGeometry for a face/edge/vertex/point entity, picking the keypoint the API
+    accepts for that kind; edge_keypoint overrides the automatic edge pick with an explicit
+    JointKeyPointTypes value. Returns (geometry, label, error)."""
     JG = adsk.fusion.JointGeometry
     KP = adsk.fusion.JointKeyPointTypes
     if isinstance(entity, adsk.fusion.BRepFace):
@@ -317,9 +243,8 @@ def build_joint_geometry(entity, edge_keypoint=None):
         if st in (adsk.core.SurfaceTypes.CylinderSurfaceType, adsk.core.SurfaceTypes.ConeSurfaceType):
             g, err = _non_planar_face_geometry(entity, KP.MiddleKeyPoint)
             return g, "cylinder_face@middle", err
-        # A sphere or torus face takes ONLY CenterKeyPoint, both measured on live faces:
-        # MiddleKeyPoint raises "Key point type should be CenterKeyPoint, if the face is sphere and
-        # torus face", CenterKeyPoint returns a JointGeometry at the face's centre.
+        # A sphere or torus face takes ONLY CenterKeyPoint: MiddleKeyPoint raises "Key point type
+        # should be CenterKeyPoint, if the face is sphere and torus face".
         centre_only = {adsk.core.SurfaceTypes.SphereSurfaceType: "sphere_face@center",
                        adsk.core.SurfaceTypes.TorusSurfaceType: "torus_face@center"}
         if st in centre_only:
@@ -349,29 +274,19 @@ def build_joint_geometry(entity, edge_keypoint=None):
 
 
 def apply_motion(ji, jtype, axis_idx, custom_entity=None, slide_axis_idx=None):
-    """Set rigid/revolute/slider/cylindrical/planar/ball/pin_slot motion on a JointInput (or an
-    existing Joint being redefined). axis_idx (0/1/2 = x/y/z) selects the FRAME-relative axis unless
-    custom_entity is given, in which case JointDirections.CustomJointDirection pairs with that entity
-    for a TRUE direction instead of the joint geometry's local frame - either a world construction axis
-    (an explicit world-axis override) or a cylinder/cone face's or circular edge's own axis (deriving
-    the motion axis from the geometry itself).
-
-    pin_slot alone takes TWO frame-relative directions: axis_idx is the ROTATION axis and slide_axis_idx
-    (0/1/2, default = the next frame axis so it is guaranteed distinct) is the perpendicular SLIDE
-    direction; the two must differ. custom_entity, when given with pin_slot, re-points the ROTATION axis
-    to a true direction while the slide stays frame-relative. Returns (did, error_or_None)."""
+    """Set rigid/revolute/slider/cylindrical/planar/ball/pin_slot motion on a JointInput or an
+    existing Joint. axis_idx (0/1/2) selects the FRAME-relative axis unless custom_entity is given,
+    which pairs CustomJointDirection with that entity for a TRUE direction. pin_slot takes two:
+    axis_idx rotates and slide_axis_idx slides, and they must differ. Returns (did, error)."""
     JD = adsk.fusion.JointDirections
     dirs = [JD.XAxisJointDirection, JD.YAxisJointDirection, JD.ZAxisJointDirection]
     if custom_entity is not None:
         ax = JD.CustomJointDirection
     else:
         ax = dirs[axis_idx]
-    # An EXISTING as-built joint being redefined takes a DIFFERENT setter arity than a JointInput: the
-    # motion setters carry an extra JointGeometry arg (setAsSliderJointMotion(direction, geometry
-    # [, customEntity]) - live-verified via sys_get_api_doc), and a rigid as-built joint carries NO
-    # geometry ("Geometry should not be null if joint motion is not rigid" - live-verified), so it
-    # cannot be converted to any motion type. Route it here rather than let the JointInput calls below
-    # misfile the custom entity as the geometry ("wrong number or type of arguments" overload error).
+    # An EXISTING as-built joint takes a DIFFERENT setter arity than a JointInput: its motion
+    # setters carry an extra JointGeometry arg, and a rigid as-built joint carries NO geometry
+    # ("Geometry should not be null if joint motion is not rigid"), so it converts to no motion.
     if jtype != "rigid" and is_as_built_joint(ji):
         geom = safe(lambda: ji.geometry)
         if geom is None:
@@ -398,9 +313,8 @@ def apply_motion(ji, jtype, axis_idx, custom_entity=None, slide_axis_idx=None):
             return bool(ji.setAsRigidJointMotion()), None
         if jtype == "pin_slot":
             # setAsPinSlotJointMotion(rotationAxis, slideDirection[, customRotationAxisEntity,
-            # customSlideDirectionEntity]). Rotation = ax (custom or frame); slide = a distinct frame
-            # axis. Passing custom_entity positionally fills customRotationAxisEntity (pairs with
-            # ax == CustomJointDirection); the slide direction stays frame-relative.
+            # customSlideDirectionEntity]) - a positional custom_entity fills the ROTATION entity,
+            # so the slide direction stays frame-relative.
             s_idx = slide_axis_idx if slide_axis_idx is not None else (axis_idx + 1) % 3
             if s_idx == axis_idx:
                 return False, "pin_slot rotation axis and slide direction must differ."
@@ -448,13 +362,9 @@ def current_joint_type(joint):
     return _MOTION_CLASS_TO_TYPE.get(type(jm).__name__, "") if jm else ""
 
 
-# Joint KIND (current_joint_type's vocabulary) -> the drivable degree of freedom it carries, the ONE
-# pairing every consumer of a rotate-or-slide member selects through: a revolute and a cylindrical
-# TURN, a slider and a cylindrical SLIDE. So a kind in DRIVES_ANGLE is the one whose rotationValue /
-# rotationLimits / rotationAxisVector are read, and one in DRIVES_SLIDE the one whose slideValue /
-# slideLimits / slideDirectionVector are. The kinds in NEITHER set - rigid, ball, planar, pin_slot -
-# are not addressed here, and a consumer reading a rotate-or-slide member off one of them states its
-# own basis for that read.
+# Joint KIND -> the drivable degree of freedom it carries, the ONE pairing every consumer of a
+# rotate-or-slide member selects through. The kinds in NEITHER set - rigid, ball, planar, pin_slot -
+# are not addressed here, and a consumer reading one states its own basis.
 DRIVES_ANGLE = frozenset(("revolute", "cylindrical"))
 DRIVES_SLIDE = frozenset(("slider", "cylindrical"))
 
@@ -463,17 +373,12 @@ DRIVES_SLIDE = frozenset(("slider", "cylindrical"))
 DRIVES_ANY = frozenset(DRIVES_ANGLE | DRIVES_SLIDE)
 
 
-# JointMotion subclass -> the single JointMotionTypes DOF a MotionLink.setMotionData couples. This is
-# the DEGREE OF FREEDOM enum (RevoluteJointRotateMotionType, ...), a DIFFERENT enum from JointTypes:
-# jointMotion.jointType returns a JointTypes value (RevoluteJointType == 1), which setMotionData
-# REJECTS as "BAD_JOINT_DOF - Motion Link joint DOF is wrong type" - verified live, along with the
-# accepted DOF values below. Cylindrical exposes both a rotate and a slide DOF (both accepted live);
-# rotation is the gear/belt coupling default. Rigid (no DOF) and the multi-DOF ball/planar/pin_slot
-# joints have no single DOF this tool can pick unambiguously, so they map to None.
+# JointMotion subclass -> the single JointMotionTypes DOF a MotionLink.setMotionData couples. That
+# is a DIFFERENT enum from JointTypes: jointMotion.jointType is a JointTypes value, which
+# setMotionData REJECTS as "BAD_JOINT_DOF - Motion Link joint DOF is wrong type".
 def motion_link_dof(joint):
-    """The JointMotionTypes DOF that MotionLink.setMotionData couples for `joint`, as (value, None), or
-    (None, reason) when the joint has no single linkable rotate/slide DOF (rigid, or a multi-DOF
-    ball/planar/pin_slot). setMotionData wants this DOF, NOT the joint's JointTypes value."""
+    """The JointMotionTypes DOF MotionLink.setMotionData couples for `joint` as (value, None), or
+    (None, reason) when it has no single linkable rotate/slide DOF."""
     JMT = adsk.fusion.JointMotionTypes
     table = {
         "RevoluteJointMotion": JMT.RevoluteJointRotateMotionType,
@@ -510,9 +415,8 @@ _SLIDE_DOF_NAMES = ("SliderJointSlideMotionType", "CylindricalJointSlideMotionTy
 
 
 def dof_motion_kind(dof):
-    """'rotation' or 'slide' for a JointMotionTypes DOF value, else None - None meaning the value
-    answers to neither table, which is what keeps a ratio across it UNCONVERTED instead of scaled by
-    a guessed unit."""
+    """'rotation' or 'slide' for a JointMotionTypes DOF value, else None - which keeps a ratio
+    across it UNCONVERTED rather than scaled by a guessed unit."""
     if dof is None:
         return None
     JMT = adsk.fusion.JointMotionTypes
@@ -525,37 +429,17 @@ def dof_motion_kind(dof):
 
 
 def _ratio_text(value):
-    """A ratio number as a wire sentence states it: rounded to 12 significant digits, so a caller's
-    own number of no more digits than that reads back unchanged and a converted one carries no float
-    tail."""
+    """A ratio number as a wire sentence states it, rounded to 12 significant digits."""
     return "%.12g" % value
 
 
-# MEASURED on a rack-and-pinion rig: the two values are in Fusion's NATIVE units, not the display
-# units a caller states a ratio in. value_two = 0.5 (rad per cm) turns the pinion 28.6479 deg over
-# 10 mm of rack; the same coupling stated as the caller's 2.8647889757 deg per mm and sent RAW turns
-# it 82.0701 deg over 5 mm. So a ratio across two DIFFERENT DOF kinds converts by both factors.
+# setMotionData's two values are in Fusion's NATIVE units, not the display units a caller states a
+# ratio in, so a ratio across two DIFFERENT DOF kinds converts by both factors.
 def link_ratio_values(dof_one, dof_two, ratio):
     """The (value_one, value_two, facts) MotionLink.setMotionData is given for a caller's `ratio` -
-    the ONE codec both motion-link writers (the create and the re-value) convert through.
-
-    `ratio` is joint_two's motion per ONE unit of joint_one in DISPLAY units - degrees for a rotation
-    DOF, millimetres for a slide DOF - while setMotionData takes Fusion's native radians and
-    centimetres. value_one is always 1, so value_two carries the whole coupling: |ratio| for two DOF
-    of the SAME kind (the display factors cancel, so the number is passed through untouched) and
-    |ratio| * f2 / f1 across kinds, f being each DOF's native-per-display factor. Both are
-    MAGNITUDES - the sign travels to setMotionData as isReversed, which the caller passes itself.
-
-    `facts` is the three wire keys both writers publish beside their own 'ratio': 'ratio_units' (the
-    display units the number was read in), 'value_units' (the native units the pair was sent in) and
-    'interpreted' (the one sentence stating both). A DOF answering neither unit table leaves all
-    three unconvertible: the magnitude goes out unchanged, the two unit keys are None, and the
-    sentence says the number was sent unconverted. The sentence names the sent pair per JOINT rather
-    than as 'value_one'/'value_two': both writers publish those two keys as the link's own parameters
-    READ BACK, and one payload cannot spell one name two ways.
-
-    This encodes the WRITE only. Whether the platform's coupling follows the pair is not read here,
-    so every sentence states what was SENT, never what will move."""
+    joint_two's motion per ONE unit of joint_one in DISPLAY units. value_one is always 1 and both
+    are MAGNITUDES, the sign travelling as isReversed; `facts` carries the three wire keys both
+    writers publish, and states what was SENT rather than what will move."""
     r = float(ratio)
     mag = abs(r)
     k1, k2 = dof_motion_kind(dof_one), dof_motion_kind(dof_two)
@@ -580,23 +464,15 @@ def link_ratio_values(dof_one, dof_two, ratio):
 
 
 # Two link parameters whose RATIO agrees with the sent value_two to this relative band express the
-# same coupling: a converted value carries a float tail (0.5000000000080081 for the rig ratio) that
-# a platform storing the clean 0.5 does not.
+# same coupling: a converted value carries a float tail a platform storing the clean number does not.
 RATIO_READ_TOLERANCE = 1e-6
 
 
 def link_ratio_mismatch(value_two, read_one, read_two):
-    """Why a link's own valueOne/valueTwo do NOT express `value_two` - the codec's second value - as
-    a clause naming the numbers, or None when they do. The read-back gate BOTH motion-link writers
-    apply after setMotionData, which answers a boolean: a link left holding a different coupling is
-    the wrong ratio this codec exists to keep off the model, and no other field in either result
-    would reveal it.
-
-    The comparison is the RATIO read_two / read_one rather than the two numbers apart: a platform
-    storing the coupling scaled (2:8 for a sent 4) still expresses the sent ratio. A pair that did
-    not READ as two numbers is no evidence either way and answers None - each caller says what an
-    unconfirmed pair means for the write it just made, since one has a fresh link to speak for and
-    the other a link that was already there."""
+    """Why a link's own valueOne/valueTwo do NOT express `value_two` as a clause naming the
+    numbers, or None when they do. The comparison is the RATIO read_two / read_one, since a
+    platform storing the coupling scaled still expresses the sent ratio; a pair that did not READ
+    as two numbers is no evidence either way and answers None."""
     for v in (read_one, read_two):
         if not isinstance(v, (int, float)) or isinstance(v, bool):
             return None
@@ -610,27 +486,12 @@ def link_ratio_mismatch(value_two, read_one, read_two):
 
 
 def all_joints(design):
-    """Every Joint AND AsBuiltJoint in the design, as a flat list of the joint objects: every
-    component once, over both of the SEPARATE collections a component carries them in. A joint
-    internal to a sub-component lives on THAT component, so a root-only walk under-reports and a
-    broken sub-component or as-built joint would be invisible to a health rollup. The ONE joint
-    walk: find_joint resolves a name over it, and the assembly_get / workspace_orient health rollups
-    count broken joints over it, so 'which joints exist' is answered the same way everywhere.
-
-    The component walk is ``_common.all_components`` and nothing else - the ONE design-wide component
-    walk, which holds the contract for how ``design.allComponents`` reaches the root and for what it
-    answers when that collection does not read. That collection already carries the root, so
-    prepending ``design.rootComponent`` to it reads every root joint twice: the root arrives a second
-    time as a distinct wrapper. Both identity keys below are shared by two readings of ONE joint, so
-    such a pair collapses; a doubled joint answering NEITHER a token NOR a name falls to id(), which
-    two wrappers never share, and that one escapes the de-dup - it is returned twice, over-reporting
-    joint_count and repeating itself in the health rollup.
-
-    The entityToken de-dup is a SECOND line, over the joint objects themselves: two readings that
-    answer ONE token collapse to one row."""
+    """Every Joint AND AsBuiltJoint in the design as a flat list, over every component and both of
+    the SEPARATE collections one carries them in - a joint internal to a sub-component lives on
+    THAT component, so a root-only walk under-reports."""
     out, seen = [], set()
-    # No None guard on the component: all_components drops the rows its own collection read as None,
-    # so every component reaching here is one that read.
+    # _common.all_components already carries the root, so prepending design.rootComponent would
+    # read every root joint twice as two wrappers, which the id() fallback key never collapses.
     for c in _common.all_components(design):
         for coll_name in ("joints", "asBuiltJoints"):
             jc = safe(lambda c=c, cn=coll_name: getattr(c, cn))
@@ -638,10 +499,9 @@ def all_joints(design):
                 j = safe(lambda i=i: jc.item(i))
                 if j is None:
                     continue
-                # A key has to be one a SECOND reading of the same joint can share, and id() never
-                # is. A SUPPRESSED joint's token can read None (it degrades toward a bare feature),
-                # so the fallback key is (name, objectType, owning component), which two readings of
-                # one joint still share; id() remains only for a joint with no readable name.
+                # A SUPPRESSED joint's token can read None, so the fallback key is (name,
+                # objectType, owning component), which two readings of one joint still share; id()
+                # remains only for a joint with no readable name.
                 token = safe(lambda j=j: j.entityToken)
                 if token is not None:
                     key = ("tok", token)
@@ -659,10 +519,7 @@ def all_joints(design):
 
 def find_joints_by_name(design, name):
     """Every Joint or AsBuiltJoint whose name EXACTLY matches `name`, over all_joints - a LIST,
-    because a joint name is only component-locally unique (two sub-assemblies can each hold a
-    'Revolute1'). The caller decides: one hit resolves, several REFUSE with candidates (the house
-    rule for a non-unique name space); never grab the first. The same shape as
-    find_joint_origins_by_name, over the same walk the health rollups count."""
+    since a joint name is only component-locally unique."""
     want = (name or "").strip()
     if not want:
         return []
@@ -670,13 +527,9 @@ def find_joints_by_name(design, name):
 
 
 def find_joint(design, name):
-    """Resolve ONE Joint or AsBuiltJoint by name over all_joints - the walk that reaches joints AND
-    asBuiltJoints on the root component and every sub-component. Returns (joint, error_or_None).
-
-    A name carried by SEVERAL joints is REFUSED, naming each hit's owning component: the name space
-    is component-local, so picking one of them targets an arbitrary assembly's joint. A name no
-    joint carries is (None, None) - the caller words its own not-found error, each pointing at the
-    listing read it already names."""
+    """Resolve ONE Joint or AsBuiltJoint by name over all_joints; returns (joint, error). Several
+    hits are REFUSED naming each hit's owning component, and a name no joint carries is
+    (None, None) - the caller words its own not-found error."""
     hits = find_joints_by_name(design, name)
     if len(hits) == 1:
         return hits[0], None
@@ -704,15 +557,9 @@ def _link_partner_name(ml, my_name):
 
 
 def _suppression_state(entity):
-    """`entity`'s suppression as a TRI-STATE over BOTH sources it can carry one on - its own
-    ``isSuppressed`` and its ``timelineObject``'s: True when EITHER reads True, False when at least
-    one read and neither is True, None when NEITHER read.
-
-    The pairing is the one assembly_get makes for a Joint, where it is live-verified: Joint's own
-    flag keeps reading False when the suppression was set on the TIMELINE item, so the entity flag
-    alone reports a suppressed joint as active. A bare ``a or b`` over the two collapses an unread
-    pair into False - a confident "not suppressed" from two flags that never answered - so the
-    unknown is kept apart here for a caller that branches with ``is``."""
+    """`entity`'s suppression as a TRI-STATE over its own isSuppressed and its timelineObject's:
+    True when EITHER reads True, False when at least one read and neither is True, None when
+    NEITHER read - a Joint's own flag keeps reading False for a suppression set on the timeline."""
     own = _common.read_flag(lambda: entity.isSuppressed)
     timeline = _common.read_flag(lambda: entity.timelineObject.isSuppressed)
     if own is True or timeline is True:
@@ -721,52 +568,18 @@ def _suppression_state(entity):
 
 
 def _blank_link(linked):
-    """The record shape for a joint carrying no partner link: `linked` False when the membership READ
-    and named none, None when the membership itself could not be read. Every state key is present and
-    unknown, so a consumer reads the same keys whichever answer it got."""
+    """The record shape for a joint carrying no partner link: `linked` False when the membership
+    READ and named none, None when the membership itself could not be read."""
     return {"linked": linked, "partner": None, "link": None, "suppressed": None, "broken": None,
             "value_self": None, "value_partner": None, "reversed": None}
 
 
 def motion_link_record(joint):
-    """`joint`'s own MotionLink membership as ONE record - always a dict, every state a TRI-STATE a
-    consumer branches on with ``is True`` / ``is False`` / ``is None``, never on truthiness.
-
-    Read off the joint's OWN membership (Joint/AsBuiltJoint.motionLinks - 'the MotionLink objects
-    that this joint is involved in'), so a pair linked inside an xref'd sub-assembly is seen through
-    the same joint find_joint resolved - no component walk. Joint.motionLinks returns a
-    MotionLinkVector - a plain SEQUENCE (len/index/iterate; it has NO .count/.item, so a
-    collection-style read finds nothing, verified live) - unlike Component.motionLinks, which is a
-    MotionLinks collection. The partner is whichever of MotionLink.jointOne/jointTwo is not this
-    joint (jointTwo is null for a same-joint two-DOF link - no partner to report).
-
-    Keys:
-      ``linked``      True when a link naming a PARTNER was found, False when the membership read and
-                      named none, None when the membership itself did not read - so "in no link"
-                      stays distinguishable from "could not be asked".
-      ``partner``     the partner joint's name.
-      ``link``        the MotionLink's own name.
-      ``suppressed``  BOTH suppression flags paired (_suppression_state): the link's own
-                      isSuppressed and its timelineObject's, True when either reads True. That
-                      pairing is live-verified for a Joint, whose own flag keeps reading False for a
-                      suppression set on the timeline item; here it answers None when neither source
-                      reads, so a pair that never answered is never published as "not suppressed".
-      ``broken``      the shared compute-state verdict (_assert.compute_state), which asks the entity
-                      AND its timelineObject. MotionLink declares healthState and
-                      errorOrWarningMessage in the bindings, and the paired read also answers for a
-                      class that raises on both - measured for an AsBuiltJoint and a RigidGroup,
-                      whose TimelineObject answers what they will not. True = error/warning,
-                      False = a state that is no failure, None = neither source answered.
-      ``value_self`` / ``value_partner``  the link's own ModelParameter values (valueOne/valueTwo) on
-                      this joint's side and on the partner's, in Fusion's internal units (radians /
-                      cm) - the two numbers joint_motion_link writes a ratio as. What a live link
-                      does with them is a read this record does not make: a consumer scaling by them
-                      says so in what it publishes.
-      ``reversed``    MotionLink.isReversed.
-
-    A link's STATE is what says whether it couples at all, so a caller claiming that driving this
-    joint moved the partner reads these rather than the partner name alone.
-    """
+    """`joint`'s own MotionLink membership as ONE record: linked / partner / link / suppressed /
+    broken / value_self / value_partner / reversed, each a TRI-STATE a consumer branches on with
+    ``is True`` / ``is False`` / ``is None``. The two values are in Fusion's internal units."""
+    # Joint.motionLinks is a MotionLinkVector - a plain SEQUENCE with no .count/.item, so a
+    # collection-style read finds nothing. jointTwo is null for a same-joint two-DOF link.
     my_name = safe(lambda: joint.name)
     if not my_name:
         return _blank_link(None)
@@ -797,36 +610,18 @@ def motion_link_record(joint):
 
 
 def motion_link_partner(joint):
-    """The name of the joint motion-linked to `joint`, or None when it is in no link - the NAME
-    projection of motion_link_record, for a caller that needs only the partner. A caller that
-    BRANCHES on whether the link actually couples reads the record instead: this projection cannot
-    tell a suppressed or broken link from a working one, and it answers None for a membership that
-    did not read as well as for one that named nobody."""
+    """The name of the joint motion-linked to `joint`, else None - the NAME projection of
+    motion_link_record. A caller that branches on whether the link COUPLES reads the record: this
+    cannot tell a suppressed or broken link from a working one, nor an unread membership."""
     return motion_link_record(joint)["partner"]
 
 
 def all_joint_origins(design):
-    """Every JointOrigin in the design as a flat list of (jo, owning_component): every component
-    once (a JO internal to a sub-component lives on that component, so a root-only walk
-    under-reports). The ONE JointOrigin walk that the three JO leaf ops share: collect-names
-    (joint_create's available-JO list), read-axes (model_inspect's oriented bbox frame), and
-    resolve-one-by-name (find_joint_origins_by_name, under the JointOriginRef kind). Joints know
-    'which joints exist' one way; this answers 'which joint origins exist' the same way everywhere.
-
-    The component walk is ``_common.all_components`` and nothing else - the ONE design-wide component
-    walk, which holds the contract for how ``design.allComponents`` reaches the root and for what it
-    answers when that collection does not read. That collection already carries the root, so
-    prepending ``design.rootComponent`` to it reads every root JO twice: the root arrives a second
-    time as a distinct wrapper. A JO answering a token collapses to one row; one whose token does not
-    read falls to id(), which two wrappers never share, and that one escapes the de-dup - it is
-    returned twice, over-reporting the JO list and making its own name ambiguous to the resolve-one
-    over this walk.
-
-    The entityToken de-dup is a SECOND line, over the JointOrigin objects themselves: two readings
-    that answer ONE token collapse to one row."""
+    """Every JointOrigin in the design as a flat list of (jo, owning_component), over every
+    component - a JO internal to a sub-component lives on THAT component."""
     out, seen = [], set()
-    # No None guard on the component: all_components drops the rows its own collection read as None,
-    # so every component reaching here is one that read.
+    # _common.all_components already carries the root, so prepending design.rootComponent would
+    # read every root JO twice as two wrappers, which the id() fallback key never collapses.
     for c in _common.all_components(design):
         jos = safe(lambda c=c: c.jointOrigins)
         for i in range(safe(lambda: jos.count, 0) or 0 if jos else 0):
@@ -843,10 +638,8 @@ def all_joint_origins(design):
 
 
 def find_joint_origins_by_name(design, name):
-    """Every (jo, owning_component) whose JointOrigin name EXACTLY matches `name`, over all_joint_origins
-    - a LIST, because a JO name is only component-locally unique (two sub-assemblies can each carry a
-    'Center of Model'). The caller decides: one hit resolves, several REFUSE with candidates (the house
-    rule for a non-unique name space); never grab the first."""
+    """Every (jo, owning_component) whose JointOrigin name EXACTLY matches `name`, over
+    all_joint_origins - a LIST, since a JO name is only component-locally unique."""
     want = (name or "").strip()
     if not want:
         return []
@@ -855,11 +648,10 @@ def find_joint_origins_by_name(design, name):
 
 
 def jo_assembly_proxy(design, jo, comp):
-    """Return `jo` usable in ASSEMBLY CONTEXT: the native JO when it's on the root component (already in
-    context), else its proxy in the SINGLE occurrence of its owning component (a native sub-component JO
-    yields Fusion's 'Provided input paths for joint are not valid' - it must be proxied). Returns
-    (obj, error): an owning component instanced MORE THAN ONCE is ambiguous which instance carries the
-    frame, so it refuses and names the '<occurrence>:<JO name>' form that picks one."""
+    """Return `jo` usable in ASSEMBLY CONTEXT as (obj, error): the native JO on the root component,
+    else its proxy in the SINGLE occurrence of its owning component - a native sub-component JO
+    yields 'Provided input paths for joint are not valid'. An owner instanced MORE THAN ONCE is
+    refused, naming the '<occurrence>:<JO name>' form that picks one."""
     root = safe(lambda: design.rootComponent)
     # `is True`: only a PROVEN root JO is handed back native (the form Fusion refuses anywhere else).
     # An unproven owner takes the placement walk below, which ends on the same native when nothing
@@ -887,11 +679,9 @@ def jo_assembly_proxy(design, jo, comp):
 
 
 def jo_reference_names(design, jo, comp):
-    """The resolvable reference string(s) for a JointOrigin: its BARE name when it's on the root
-    component (unique there), else '<occurrence fullPathName>:<name>' for EACH occurrence of its owning
-    component. A JointOriginRef / joint tool accepts any of these; the qualified form is what
-    disambiguates a name shared across components or instanced several times. Shared by the
-    assembly_get JO slice (its qualified_name field) and the JointOriginRef ambiguity candidate list."""
+    """The resolvable reference string(s) for a JointOrigin: its BARE name on the root component,
+    else '<occurrence fullPathName>:<name>' for EACH occurrence of its owning component - the
+    qualified form disambiguates a name shared across components or instanced several times."""
     nm = safe(lambda: jo.name) or "?"
     root = safe(lambda: design.rootComponent)
     # `is True`: an owner proven to be the root is reachable by the bare name. An unproven one takes

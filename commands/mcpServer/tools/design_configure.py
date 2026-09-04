@@ -23,8 +23,7 @@ from . import _inputs
 app = adsk.core.Application.get()
 
 _BODY = _inputs.BodyRef("body",
-        description="Body whose visibility, appearance or physical material varies per configuration "
-                    "(add_visibility / set_appearance / add_material).")
+        description="Body whose visibility, appearance or material varies per configuration.")
 
 
 def _find_row(table, target):
@@ -48,10 +47,8 @@ _ACTIONS = ("create", "activate", "add_configuration", "rename_configuration", "
 
 # ── resolvers (patched in tests; real lookups here) ─────────────────────────
 
-# The suppress column's target resolves through the typed FeatureRef kind: timeline entity names
-# are NOT design-wide unique (two components can each hold an 'Extrude1'), so a first-exact-match
-# walk can suppress the WRONG same-named feature - the kind refuses the ambiguity with the
-# 'name@index' candidates instead.
+# Timeline entity names are NOT design-wide unique (two components can each hold an 'Extrude1'), so
+# the suppress column's target goes through FeatureRef, which refuses the ambiguity.
 _FEATURE = _inputs.FeatureRef("feature")
 
 
@@ -163,11 +160,10 @@ def _do_create(design):
                "configurations": _row_names(table),
                "note": "Design converted to a configured design (one configuration so far). Add columns "
                        "(add_parameter/add_suppress/add_visibility/set_appearance/add_material) and "
-                       "configurations (add_configuration). THEN to see it as a configured design in "
-                       "the UI: SAVE, then REOPEN - and the first save after this conversion MOVES the "
-                       "document to a NEW lineage URN (measured; versions restart at 1), so reopen by "
-                       "the URN that save's own result reports, never a URN read before it - a "
-                       "superseded URN opens the pre-conversion file."})
+                       "configurations (add_configuration). To see it in the UI: SAVE, then REOPEN by "
+                       "the URN that save's own result reports - the first save after this conversion "
+                       "moves the document to a NEW lineage URN, and an older URN opens the "
+                       "pre-conversion file."})
 
 
 def _do_activate(design, table, name):
@@ -489,10 +485,9 @@ def _do_add_material(design, table, body, materials):
     mtbl = safe(lambda: table.materialTable)
     if not mtbl:
         return error("This design has no material table.")
-    # ORDERING GOTCHA: add the body column FIRST - on an empty table it also mints the first theme
-    # row. Adding the first non-root column auto-creates a root-component column ahead of it too, so
-    # the column COUNT jumps by two - never gate the effect check on it; the returned column object
-    # is the honest signal.
+    # Add the body column FIRST: on an empty table it also mints the first theme row, and the first
+    # non-root column auto-creates a root-component column ahead of it, so the column COUNT jumps by
+    # two - the returned column object is the signal, never the count.
     col = mtbl.columns.add(ent)                   # MUTATION (creates first theme row)
     if not col:
         return error(f"materialTable.columns.add for '{body}' returned null.")
@@ -500,11 +495,9 @@ def _do_add_material(design, table, body, materials):
     if theme_col is None:
         return error("The material table has no theme column (parentTableColumn) to link configurations.")
 
-    # Theme rows and the configuration -> theme link are table-GLOBAL: every material column reads
-    # the same row a configuration references, and a fresh column leaves every configuration on the
-    # one auto-created row. So a theme row is allocated PER CONFIGURATION - reuse the row this
-    # configuration alone references, and mint one only when it would otherwise share (which would
-    # overwrite the other configuration's materials for every body already in the table).
+    # Theme rows and the configuration -> theme link are table-GLOBAL, and a fresh column leaves
+    # every configuration on the one auto-created row - so a row shared with another configuration
+    # is replaced by a minted one rather than written through.
     links = _theme_links(table, theme_col)
     applied = {}
     for rname, material in resolved.items():
@@ -665,25 +658,7 @@ def handler(action: str = "", name: str = "", new_name: str = "", parameter: str
             feature: str = "", body: str = "", values: dict = None, suppressed_in: list = None,
             hidden_in: list = None, appearances: dict = None, materials: dict = None,
             insert_part: str = "", insert_config: str = "", insert_map: dict = None) -> dict:
-    """Build/extend a configured design. 'action' selects the verb:
-
-      create               - convert the active design into a configured design (idempotent).
-      add_configuration    - add a configuration row ('name').
-      rename_configuration - rename configuration 'name' to 'new_name' (e.g. 'Configuration 1'->'Medium').
-      add_parameter        - vary a model parameter ('parameter') across configs ('values' =
-                             {config_name: "expression"}).
-      add_suppress         - suppress a timeline feature ('feature') in configs ('suppressed_in' = [names]).
-      add_visibility       - hide a body ('body') in configs ('hidden_in' = [names]).
-      set_appearance       - per-config color a body ('body') with 'appearances' = {config_name: appearance_name}.
-      add_material         - per-config physical material for a body ('body') with 'materials' =
-                             {config_name: material_name}; each material must already be in the design.
-      add_insert           - insert a configured part ('insert_part', initial 'insert_config') and map
-                             each assembly config to a part config ('insert_map' = {asm_config: part_config})
-                             - a NESTED configuration. Part must be in the same project.
-
-    WRITES. After switching configurations the geometry rebuilds only if the varied parameter drives a
-    dimension; use design_configure(action='activate', name=...) to switch and view.
-    """
+    """Build/extend a configured design - 'action' selects the verb, dispatched below. WRITES."""
     action = (action or "").strip()
     if action not in _ACTIONS:
         return error(f"Unknown action '{action}'. Use one of: {', '.join(_ACTIONS)}.")
@@ -732,24 +707,20 @@ def handler(action: str = "", name: str = "", new_name: str = "", parameter: str
 
 
 TOOL_DESCRIPTION = (
-    "BUILD or SWITCH a Configured Design (read the table with design_get(include=['configurations'])). "
-    "'action' is the verb: create | activate | add_configuration | rename_configuration | add_parameter "
-    "| add_suppress | add_visibility | set_appearance | add_material | add_insert (each action's inputs "
-    "are documented on the properties below). Non-obvious runtime rules: 'create' needs a SAVED document "
-    "and the Configurations dropdown only appears after you SAVE and REOPEN the doc; adding a "
-    "configuration ACTIVATES it; a parameter column changes geometry only if that parameter drives a "
-    "dimension; the appearances and materials named by set_appearance/add_material must already exist "
-    "in the design; add_insert's part must be in the same project."
+    "BUILD or SWITCH a Configured Design: 'action' picks the verb - convert the design ('create'), "
+    "add or rename a configuration, switch to one ('activate'), or add a column that varies a "
+    "parameter, a feature suppress, a body visibility, an appearance, a material or a nested part "
+    "insert across them. Read the table back with design_get(include=['configurations'])."
 )
 
 tool = (
     Tool.create_simple(name="design_configure", description=TOOL_DESCRIPTION)
     .add_input_property("action", {"type": "string", "enum": list(_ACTIONS),
             "description": "Which configuration operation to perform."})
-    .add_input_property("name", {"type": "string", "description": "Configuration name (add_configuration; the existing one for rename_configuration)."})
+    .add_input_property("name", {"type": "string", "description": "Configuration name; for rename_configuration, the existing one."})
     .add_input_property("new_name", {"type": "string", "description": "New name for rename_configuration."})
     .add_input_property("parameter", {"type": "string", "description": "Model parameter name (add_parameter)."})
-    .add_input_property("feature", {"type": "string", "description": "Timeline feature name (add_suppress); a name several features share is refused - pick one with 'name@index'."})
+    .add_input_property("feature", {"type": "string", "description": "Timeline feature name (add_suppress)."})
     .add_input_property(*_BODY.as_property())
     .add_input_property("values", {"type": "object", "description": "{config_name: expression} (add_parameter)."})
     .add_input_property("suppressed_in", {"type": "array", "items": {"type": "string"},

@@ -90,10 +90,9 @@ def handler(mesh: str = "", smoothness=None) -> dict:
     if inp is None:
         return error("meshSmoothFeatures.createInput returned nothing.")
 
-    # smoothness is a typed core.ValueInput, so a bare number is refused; it is unitless, so
-    # createByReal takes the factor as given. It does NOT survive set_verified (a read-back hands
-    # out a different proxy) and is confirmed off the feature's ModelParameter after the add.
-    # Omitted, the property is left alone so the API's own default applies.
+    # smoothness is a unitless core.ValueInput (a bare number is refused) that does NOT survive
+    # set_verified - a read-back hands out a different proxy - so it is confirmed off the feature's
+    # ModelParameter after the add. Omitted, the property is left alone for the API's own default.
     if smooth is not None:
         try:
             inp.smoothness = adsk.core.ValueInput.createByReal(smooth)
@@ -175,12 +174,8 @@ def handler(mesh: str = "", smoothness=None) -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Smooth a MESH body with the MeshSmooth feature - relaxes scan noise and faceting. 'smoothness' "
-    "is a unitless 0-1 strength; omit it to leave the API's own default in place, and the value "
-    "that actually landed is read back off the feature. Smoothness 0.5 collapses a coarse mesh to "
-    "a near-point, so start low. Triangle and vertex counts do "
-    "NOT move across a smooth, so the effect is judged on the node coordinates - a smooth that left "
-    "every node where it was is an error."
+    "Smooth a MESH body with the MeshSmooth feature - relaxes scan noise and faceting. Smoothness "
+    "0.5 collapses a coarse mesh to a near-point, so start low."
 )
 
 tool = (

@@ -40,7 +40,10 @@ class FakeLines:
 
 
 class FakeSketch:
-    def __init__(self, name, profile_count=1, line_count=2):
+    def __init__(self, name, profile_count=1, line_count=2, compute_deferred=False):
+        # A live sketch always answers isComputeDeferred; True is the state whose `profiles` and
+        # `profiles.count` are both the pre-deferral ones.
+        self.isComputeDeferred = compute_deferred
         self.name = name
         self.profiles = FakeProfiles(profile_count)
         self.sketchCurves = type("C", (), {"sketchLines": FakeLines(line_count)})()
@@ -213,6 +216,19 @@ class TestGuards:
         _install([FakeSketch("S")])
         res = rv.handler(sketch_name="S", axis="q")
         assert res["isError"] is True and "Could not resolve axis" in res["message"]
+
+    def test_an_index_into_a_deferred_sketch_is_refused(self):
+        # int(profile_index) then profiles.item(idx) - neither reaches ProfileRef, so a deferred
+        # sketch would revolve whichever region was first before the deferral.
+        _install([FakeSketch("S", profile_count=3, compute_deferred=True)])
+        res = rv.handler(sketch_name="S", profile_index=0)
+        assert res["isError"] is True
+        assert "isComputeDeferred=true" in res["message"] and "'S'" in res["message"]
+        assert "'profile_index'" in res["message"]
+
+    def test_an_index_into_a_sketch_computing_normally_still_revolves(self):
+        _install([FakeSketch("S", profile_count=3)])
+        assert _payload(rv.handler(sketch_name="S", profile_index=0))["sketch"] == "S"
 
 
 class TestRevolve:

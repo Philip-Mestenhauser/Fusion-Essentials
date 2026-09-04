@@ -12,8 +12,8 @@ import adsk.fusion
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe
-from ._cam_common import get_cam
+from ._common import apply_rename, ok, error, safe
+from ._cam_common import get_cam, setup_names
 from . import _common
 from . import _inputs
 
@@ -30,12 +30,25 @@ _MODELS = _inputs.TargetRefList("models", required=False,
                                 description="Bodies OR component occurrences to machine (omit = every root-component body).")
 
 
-def _all_root_bodies(design):
-    """Every BRep body in the root component - solid AND surface - the default machining set.
+def setup_name_clash(cam, want, current=""):
+    """The refusal for a name setups already answer to, shared by the create and the rename arm.
+    None when the name is free, empty, or already the caller's own (`current`)."""
+    want = (want or "").strip()
+    if not want or want.lower() == (current or "").strip().lower():
+        return None
+    taken = [n for n in setup_names(cam) if (n or "").lower() == want.lower()]
+    if not taken:
+        return None
+    # Measured: Setup.name dedupes silently rather than refusing - 'LegSetup' with one taken lands
+    # 'LegSetup1' - so a taken name is refused here instead of landing unasked-for.
+    return (f"{len(taken)} setup(s) already answer to '{want}'. Setup.name dedupes rather than "
+            f"refusing, so it would land as something like '{want}1' - a name nothing asked for. "
+            "Pick one no setup carries; cam_get lists them.")
 
-    Deliberately UNFILTERED: Setup.models is typed to BRepBody, not to solids, and a design whose
-    only body is a SURFACE (isSolid false) creates a setup that carries that body in models - so an
-    isSolid filter here would silently drop bodies the setup does take."""
+
+def _all_root_bodies(design):
+    """Every BRep body in the root component - solid AND surface - the default machining set;
+    Setup.models is typed to BRepBody, and a setup does carry a surface body."""
     root = safe(lambda: design.rootComponent)
     return list(_common.iter_collection(safe(lambda: root.bRepBodies) if root else None))
 
@@ -66,19 +79,24 @@ def handler(operation_type: str = "milling", models=None, name: str = "") -> dic
     "- add geometry first, or pass 'models' = body handles/names (a body inside a "
     "sub-component is not in the default set).")
 
+    # The name is refused BEFORE the add, through the same check the rename arm runs: a deduped
+    # name would otherwise land silently and the caller would address the setup by the wrong one.
+    clash = setup_name_clash(cam, name)
+    if clash:
+        return error(clash)
+
     try:
         op_enum = getattr(adsk.cam.OperationTypes, _OP_TYPES[op_key])
         inp = cam.setups.createInput(op_enum)
         inp.models = list(body_list)
-        nm = (name or "").strip()
-        if nm:
-            inp.name = nm
         setup = cam.setups.add(inp)
     except Exception as e:
         return error(f"Failed to create the {op_key} setup: {e}")
     if not setup:
         return error("Setup creation returned nothing.")
-    new_name = safe(lambda: setup.name)
+    # The setup has landed, so a declined or deduped name is a DISCLOSURE, not a failed create -
+    # what the payload publishes is the name Setup.name reads back.
+    new_name, rename_warning = apply_rename(setup, name)
     if new_name:
         landed = any(safe(lambda s=s: s.name) == new_name
                      for s in _common.iter_collection(safe(lambda: cam.setups)))
@@ -86,9 +104,9 @@ def handler(operation_type: str = "milling", models=None, name: str = "") -> dic
             return error(f"setups.add returned '{new_name}' but it does not appear when the setups "
                          "are re-listed - the setup did not land.")
 
-    return ok({
+    result = {
         "created": True,
-        "setup_name": safe(lambda: setup.name),
+        "setup_name": new_name,
         "operation_type": op_key,
         "model_count": len(body_list),
     "models": [safe(lambda b=b: b.name) for b in body_list],
@@ -96,25 +114,27 @@ def handler(operation_type: str = "milling", models=None, name: str = "") -> dic
     "note": ("Setup created (no operations yet). Add toolpaths with cam_apply_template (a "
             "COMPATIBLE template - a milling setup needs a milling template), then "
             "cam_generate. Be in the Manufacture workspace before generating."),
-    })
+    }
+    if rename_warning:
+        result["rename_warning"] = rename_warning
+    return ok(result)
 
 
 TOOL_DESCRIPTION = (
     "Create a CAM (Manufacture) SETUP on the active part - the prerequisite for any CAM job, since "
-    "the other CAM tools (cam_apply_template, cam_generate) need a setup to act on. 'operation_type' "
-    "is milling (default) | turning. 'models' selects what to machine - find_geometry HANDLES, body "
-    "NAMES, OR a COMPONENT occurrence name (a list) - or omit for EVERY body in the root component. "
-    "Selecting the COMPONENT occurrence (not the body inside) keeps the setup's selection when its contents are "
-    "swapped - the shop-template pattern. 'name' optionally names the setup. After this, add "
+    "the other CAM tools (cam_apply_template, cam_generate) need a setup to act on. "
+    "Selecting the COMPONENT occurrence (not the body inside) keeps the setup's selection when its "
+    "contents are swapped - the shop-template pattern. After this, add "
     "toolpaths with cam_apply_template (use a COMPATIBLE template - milling vs turning) then "
-    "cam_generate. The CAM product must exist (when it does not, the error names the next call)."
+    "cam_generate."
 )
 
 tool = (
     Tool.create_simple(name="cam_create_setup", description=TOOL_DESCRIPTION)
     .add_input_property(_OP_TYPE.name, _OP_TYPE.schema())
     .add_input_property(_MODELS.name, _MODELS.schema())
-    .add_input_property("name", {"type": "string", "description": "Optional name for the new setup."})
+    .add_input_property("name", {"type": "string",
+            "description": "Optional name for the new setup; the payload publishes the name it reads back."})
     .strict_schema()
 )
 

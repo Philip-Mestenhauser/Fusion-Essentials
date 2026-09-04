@@ -1,13 +1,9 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block that DELETES one MESH body. DESTRUCTIVE. A MeshBody is neither a Feature nor an
-Occurrence, so design_delete_feature/design_delete_occurrence can't reach it - this is the mesh-side
-delete. PARAMETRIC design: MeshRemoveFeatures (undoable, timeline-tracked) at NORMAL parametric scope
-- unlike mesh_reduce/mesh_remesh (which edit mesh GEOMETRY and need a base-feature edit scope), remove
-is a timeline feature in its own right and must NOT run inside one (see the point-of-use comment).
-DIRECT design: MeshBody.deleteMe() directly - no timeline, no scope. Either way the delete is
-verified: a decline is an error, and the mesh is re-resolved afterwards to confirm it is gone.
+"""MCP building block that DELETES one MESH body - the mesh-side delete design_delete_feature and
+design_delete_occurrence cannot reach. Parametric designs get a timeline MeshRemoveFeature, direct
+designs a MeshBody.deleteMe(); either way the mesh is re-resolved afterwards. DESTRUCTIVE.
 """
 
 import adsk.core
@@ -29,12 +25,7 @@ _SPEC = [_MESH]
 
 
 def _count_named_in_component(design, comp_name, name):
-    """How many meshes named `name` live in the component named `comp_name`, via the ONE design-wide
-    mesh traversal (_common.all_meshes).
-
-    A handle resolves to one of several same-named meshes (the ambiguity refusal only fires for a
-    NAME), so the count is scoped to the owning component: a same-named mesh in another component
-    is irrelevant to this delete, while one in the SAME component still keeps the check honest."""
+    """How many meshes named `name` live in the component named `comp_name`."""
     n = 0
     for c, m in _common.all_meshes(design):
         if safe(lambda c=c: c.name) == comp_name and safe(lambda m=m: m.name) == name:
@@ -66,10 +57,9 @@ def handler(mesh: str = "") -> dict:
             return error("This design has no meshRemoveFeatures collection (parametric mesh delete "
                          "unavailable here).")
 
-        # Live-verified: createInput binds std::vector, so it takes a plain list - an
-        # ObjectCollection raises a type error. And unlike mesh_reduce/mesh_remesh, this add() must
-        # run OUTSIDE a base-feature scope: inside one the design presents as direct and the remove
-        # raises "Mesh remove only available in parametric mode".
+        # createInput binds std::vector, so it takes a plain list - an ObjectCollection raises. This
+        # add() must run OUTSIDE a base-feature scope: inside one the design presents as direct and
+        # the remove raises "Mesh remove only available in parametric mode".
         try:
             inp = feats.createInput([mb])
         except Exception as e:
@@ -95,10 +85,8 @@ def handler(mesh: str = "") -> dict:
         deleted_via = "MeshBody.deleteMe"
         feature_name = None
 
-    # Survivor check: only the fresh collection walk is trustworthy after a remove. Live-verified,
-    # the collections empty immediately, while the held wrapper's isValid stays True and an
-    # entityToken lookup still resolves the pre-remove body (the historical-resolution trap
-    # pmi_delete documents for suppressed PMI).
+    # Survivor check: only a fresh collection walk is trustworthy after a remove - the held
+    # wrapper's isValid stays True and an entityToken lookup still resolves the pre-remove body.
     remaining = len(_common.all_meshes(design))
     n_after = _count_named_in_component(design, comp_name, name)
     if n_after != n_before - 1:
@@ -117,12 +105,7 @@ def handler(mesh: str = "") -> dict:
 
 
 TOOL_DESCRIPTION = (
-"Delete a MESH body (adsk.fusion.MeshBody) by find_geometry handle (preferred) or name - "
-"design_delete_feature and design_delete_occurrence can't reach it (a mesh is neither a Feature nor "
-"an Occurrence). In a PARAMETRIC design this creates an undoable MeshRemoveFeature on the timeline; "
-"in a DIRECT design it calls MeshBody.deleteMe() directly. The deletion is verified: a decline is "
-"reported as an error, and the mesh is re-resolved afterwards across the whole design to confirm it "
-"is gone."
+"Delete a MESH body - design_delete_feature and design_delete_occurrence cannot reach one."
 )
 
 tool = _inputs.apply_to_tool(

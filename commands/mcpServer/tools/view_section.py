@@ -42,10 +42,9 @@ def _find_occurrence(design, name):
     return _inputs._resolve_occurrence("through", name)
 
 
-# World normal of each origin plane, sourced from the shared named-view table (_view_common). The
-# xy/top and yz/right planes share the sign of their named view's camera direction; the xz/front
-# plane's construction-plane normal is the OPPOSITE sign (it points toward the front camera's eye,
-# not away from it) - so front sources the look direction, not the view direction.
+# World normal of each origin plane, off the shared named-view table. The xz/front plane's
+# construction-plane normal points TOWARD the front camera's eye, so it sources the look
+# direction where xy/top and yz/right source the view direction.
 _PLANE_NORMALS = {
 "xy": _view_common.view_direction("top"), "top": _view_common.view_direction("top"),
 "xz": _view_common.look_direction("front"), "front": _view_common.look_direction("front"),
@@ -77,13 +76,9 @@ def _aim_at_cut(normal, flipped):
 
 
 def _context_remedy(design, exc):
-    """The remedy sentence for the assembly-context refusal, or '' for any other failure.
-
-    MEASURED live: with a SUB-COMPONENT active, an origin alias resolves to THAT
-    component's plane (PlaneRef resolves against the active component) and the section refuses it with
-    '3 : object is not in the assembly context of this component'; the same call with the root active
-    works. The platform text says what is wrong but not what to do, so the remedy is named here.
-    """
+    """The remedy sentence for the assembly-context refusal, or '' for any other failure."""
+    # A plane alias resolves against the ACTIVE component, so a sub-component active makes the
+    # section raise '3 : object is not in the assembly context of this component'.
     if "assembly context" not in str(exc).lower():
         return ""
     active = safe(lambda: _common.target_component(design).name)
@@ -233,16 +228,10 @@ def handler(action: str = "", plane: str = "", through: str = "", offset: float 
 
 
 TOOL_DESCRIPTION = (
-    "Cut the active model with a live Section Analysis so you can SEE INSIDE - cavities, wall "
-    "thickness, how a part nests in a fixture, where a void sits - that a solid view hides. "
-    "'action': cut | list | clear (clear removes ALL sections, restoring the un-cut view). Cut by "
-    "'plane' OR by 'through' (an occurrence, cut through its center). NON-DESTRUCTIVE: a cutaway view, "
-    "not a geometry edit; 'clear' fully undoes it. Camera is auto-aimed at the exposed cut face by "
-    "default (auto_view=false keeps your camera) - otherwise it may sit on the solid side where the "
-    "model looks uncut. Pair with view_set "
-    "(orient/isolate) and view_screenshot. Typical: view_section(cut, through='<OccurrenceName>:1', "
-    "plane='front') -> view_set(orient, orientation='front') -> view_screenshot -> "
-    "view_section(clear)."
+    "Cut the active model with a live Section Analysis so you can SEE INSIDE. Cut by 'plane' OR by "
+    "'through' (an occurrence, cut through its center); 'clear' removes ALL sections. "
+    "NON-DESTRUCTIVE: a cutaway view, not a geometry edit. Pair with view_set (orient/isolate) and "
+    "view_screenshot; typical: cut -> view_screenshot -> clear."
 )
 
 tool = (
@@ -263,7 +252,7 @@ tool = (
     .add_input_property("show_hatch", {"type": "boolean",
             "description": "Show the section hatch on cut faces (default true)."})
     .add_input_property("auto_view", {"type": "boolean",
-            "description": "Aim the camera at the exposed cut face after cutting (default true). False keeps your current camera."})
+            "description": "Aim the camera at the exposed cut face after cutting. False keeps your camera, which may sit on the solid side where the model looks uncut. Default true."})
     .strict_schema()
 )
 

@@ -427,7 +427,8 @@ class TestVersionHistoryCompleteness:
         out = dg._slice_versions()
         assert out["version_count"] == 1            # only the open version could be read
         assert out["history_readable"] is False and out["history_complete"] is False
-        assert "history_readable=false" in out["note"]
+        # the note names the marker that separates a whole lineage from a short one
+        assert "only history_complete=true" in out["note"]
 
     def test_a_version_that_will_not_read_is_counted_not_silently_dropped(self):
         # a row skipped without a marker shortens the history while the payload still reads whole.
@@ -511,15 +512,14 @@ class TestVersionMilestones:
         assert out["milestone_count"] == 1
         assert "flag_lagging" in out["note"]
 
-    def test_the_note_carries_the_MEASURED_lag_window_not_a_vague_few_seconds(self):
-        # "re-read in a moment" is unactionable; the measured windows are what tell a caller how
-        # long to wait before a false is_milestone means anything (tip 2.9-4.4s; the flag and the
-        # collection arrive together at 15.7-19.9s).
+    def test_the_note_says_the_metadata_lags_and_that_unknown_is_not_absence(self):
+        # the two halves a caller acts on: metadata LAGS the save (so re-read), and an unreadable
+        # milestone signal is UNKNOWN - never evidence that a version is not a milestone.
         df = _DFileVers(open_num=1, latest=1, others=[], milestones=_MStones([]))
         _install(_Doc("Bracket", data_file=df))
         note = dg._slice_versions()["note"]
-        assert "2.9-4.4s" in note and "15.7-19.9s" in note
-        assert "UNKNOWN" in note
+        assert "LAGS" in note and "re-read" in note
+        assert "UNKNOWN" in note and "never 'not a milestone'" in note
 
     def test_milestone_walk_is_bounded_by_the_row_cap(self):
         # each entry's .version hop is a cloud read - the walk may not outrun the cap that bounds
@@ -1054,6 +1054,48 @@ class TestSliceRouter:
         out = _payload(dg.handler(include=["versions"]))
         assert out["versions"] == {"marker": "V"}
         assert "xref_tree" not in out and "used_in" not in out
+
+    def test_a_slice_only_read_omits_the_session_projection(self, monkeypatch):
+        # the cloud slice is what was asked for; re-sending the active record and the open-document
+        # list beside it pays for the session read on every version/xref call.
+        _install(_Doc("A", data_file=_DataFile()))
+        monkeypatch.setattr(dg, "_slice_versions", lambda versions_max=25: {"marker": "V"})
+        assert _payload(dg.handler(include=["versions"])) == {"versions": {"marker": "V"}}
+
+    def test_default_beside_a_slice_keeps_the_projection(self, monkeypatch):
+        _install(_Doc("A", data_file=_DataFile()))
+        monkeypatch.setattr(dg, "_slice_versions", lambda versions_max=25: {"marker": "V"})
+        out = _payload(dg.handler(include=["default", "versions"]))
+        assert out["active"]["name"] == "A" and out["versions"] == {"marker": "V"}
+        assert out["document_id"] == "urn:lineage:abc" and "note" in out
+
+    def test_a_slice_only_read_does_not_walk_the_open_documents(self, monkeypatch):
+        # the walk is the projection's cost (one DataFile read per open document), so a slice-only
+        # read must skip it, not build the rows and drop them.
+        _install(_Doc("A", data_file=_DataFile()))
+        calls = []
+        monkeypatch.setattr(dg, "_open_documents",
+                            lambda max_results: (calls.append(1)
+                                                 or ([], {"open_count": 0, "exceptions": []}, False)))
+        monkeypatch.setattr(dg, "_slice_versions", lambda versions_max=25: {"marker": "V"})
+        dg.handler(include=["versions"])
+        assert calls == []
+
+    def test_the_active_record_is_read_once_for_the_guard_and_the_payload(self, monkeypatch):
+        # the guard and the published record must be the SAME read: the record carries a cloud
+        # DataFile fetch, so a second one can answer differently from the one that was checked.
+        _install(_Doc("A", data_file=_DataFile()))
+        calls = []
+        real = dg._active_document_facts
+        monkeypatch.setattr(dg, "_active_document_facts", lambda: (calls.append(1) or real()))
+        out = _payload(dg.handler())
+        assert len(calls) == 1 and out["active"]["name"] == "A"
+
+    def test_the_no_active_document_guard_still_fires_on_a_slice_read(self):
+        # the slices each answer for the ACTIVE document, so with none open the read is refused by
+        # name rather than answered with a slice's own "never saved to the cloud".
+        _install(None)
+        assert "no active document" in error_message(dg.handler(include=["versions"])).lower()
 
     def test_include_used_in_adds_where_used_slice(self, monkeypatch):
         _install(_Doc("A", data_file=_DataFile()))

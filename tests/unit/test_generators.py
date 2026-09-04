@@ -3,14 +3,8 @@
 
 """Unit tests for the harness generators (gen_manifest / gen_wiring / gen_posture /
 gen_api_surface) and check_all's flag contract.
-
-test_generated_docs_current.py pins output FRESHNESS (the committed doc matches the generator);
-these pin the generators' LOGIC (the generator matches the truth). A generator defect that lies
-consistently sails through a freshness check, so the load-bearing transforms are pinned here on
-synthetic input - above all gen_wiring's per-tool attribution, where sibling tools sharing a name
-stem must never swap notes, and the two ways a check can green over a truth it never established
-(a stale table nobody could recompute; a name collision each module hides in isolation).
-"""
+test_generated_docs_current.py pins output FRESHNESS; these pin the generators' LOGIC - a
+generator that lies consistently sails through a freshness check."""
 
 import ast
 import os

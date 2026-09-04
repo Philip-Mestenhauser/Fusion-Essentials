@@ -647,6 +647,42 @@ class TestAnnotationRecord:
                      if k.startswith("fusion.PMI") and "plainText" in members}
         assert with_text == {"PMILeaderLineNote", "PMIHoleThreadNote"}
 
+    def test_the_measured_reference_failure_message_reads_as_sentences(self):
+        # The exact string Fusion hands back for three failed references: an HTML count, a <br/>,
+        # three sentences glued to their neighbours, and a title plus the annotation's own NAME
+        # after the last full stop - the tail the reader cuts, so no entity name is re-spaced.
+        raw = ("Face 1 missingFace 2 missingFace 3 missing<b>3 Reference Failures</b><br/>The "
+               "model is using cached geometry to solve. Please reselect reference geometry for "
+               "failed features in the timeline.The selection geometry has become invalid. It is "
+               "likely that the selection is missing. \nPlease edit this annotation and select new "
+               "reference geometry.Selected Geometry LostProbeNote")
+        rec = pm.annotation_record(SimpleNamespace(name="Root"),
+                                   _ann("ProbeNote", errorOrWarningMessage=raw))
+        assert rec["warning"] == (
+            "Face 1 missing Face 2 missing Face 3 missing 3 Reference Failures The model is using "
+            "cached geometry to solve. Please reselect reference geometry for failed features in "
+            "the timeline. The selection geometry has become invalid. It is likely t ...")
+        assert len(rec["warning"]) <= pm._WARNING_LIMIT + 4
+
+    def test_the_trailing_title_and_annotation_name_are_cut_not_re_spaced(self):
+        # A ONE-failure message is short enough that the bound cannot hide the tail: the title and
+        # the annotation's own name sit after the last full stop, and 'ProbeNote' must not come
+        # back out as two words.
+        raw = ("Face 1 missing<b>1 Reference Failure</b><br/>The model is using cached geometry "
+               "to solve.Selected Geometry LostProbeNote")
+        rec = pm.annotation_record(SimpleNamespace(name="Root"),
+                                   _ann("ProbeNote", errorOrWarningMessage=raw))
+        assert rec["warning"] == ("Face 1 missing 1 Reference Failure The model is using cached "
+                                  "geometry to solve.")
+        assert "Probe Note" not in rec["warning"]
+
+    def test_a_message_with_no_terminator_keeps_its_whole_text(self):
+        # THE FALLBACK BOUNDARY: cutting at the last terminator must not empty a message that
+        # carries none - the short warnings ('reference lost') are exactly that shape.
+        rec = pm.annotation_record(SimpleNamespace(name="Root"),
+                                   _ann("N", errorOrWarningMessage="reference lost"))
+        assert rec["warning"] == "reference lost"
+
     def test_the_warning_flags_ride_only_when_set(self):
         healthy = _ann("N", isVisible=True, isOutOfDate=False, isSuppressed=False,
                        errorOrWarningMessage="")

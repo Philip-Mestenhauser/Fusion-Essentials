@@ -1,14 +1,11 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: turn a solid holder model into a CAM TOOL HOLDER profile (the headless form
-of the "Add Tool Holder" command).
+"""MCP building block: turn a solid holder model into a CAM TOOL HOLDER profile.
 
   model_compute_holder -> reduce a body of revolution to a stack of (height, lower/upper-diameter)
                     segments + holder library JSON, from three find_geometry handles (body, axis,
                     end datum). Read-only - computes + returns; does NOT write to a tool library.
-
-Core logic lives in tools/_holder.py, shared with the interactive Add Tool Holder command.
 """
 
 import adsk.core
@@ -96,11 +93,9 @@ def handler(body: str = "", axis: str = "", end_datum: str = "",
 
 TOOL_DESCRIPTION = (
     "Turn a solid HOLDER model into a CAM tool-holder profile - the headless form of the Add Tool "
-    "Holder command. Pass three find_geometry handles: 'body', 'axis', and 'end_datum'. Returns the "
-    "holder as (height, lower/upper-diameter) segments in mm plus the full library JSON in "
-    "'holder_json'. Optional name/product_id/product_link/vendor stamp the JSON. READ-ONLY: it "
-    "computes + returns; it does NOT add the holder to a tool library (do that yourself with the "
-    "JSON - a holder in a document is a fork of library data, not a live link)."
+    "Holder command. Returns the holder as (height, lower/upper-diameter) segments in mm plus the "
+    "full library JSON in 'holder_json'. It does NOT add the holder to a tool library; use the "
+    "JSON yourself."
 )
 
 tool = (

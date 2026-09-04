@@ -35,16 +35,15 @@ _CONTINUITY = {
 
 # curves: an OPEN chain of edge/sketch-curve handles to use as the profile (instead of a sketch).
 _CURVES = _inputs.EdgeLoopRef("curves", closed=False, required=False,
-    description="OPEN edge/curve handles to extrude as a profile (instead of a sketch profile).")
+    description="The profile.")
 # boundary: the CLOSED loop a patch fills.
 _BOUNDARY = _inputs.EdgeLoopRef("boundary", closed=True, required=True,
-    description="The closed loop of edges to fill with a surface.")
+    description="The loop to fill.")
 # interior_rails: B-Rep EDGES the patch surface must pass through. The API property also accepts
 # sketch curves/points and construction points, but find_geometry mints handles for BRep faces and
 # edges only, so an edge is the one kind this server can reference.
 _INTERIOR_RAILS = _inputs.GeometryHandleList("interior_rails", require="edge", required=False,
-    description="Interior edges the patch surface is fitted through - B-Rep edges only, so a "
-                "sketch curve or point cannot be a rail.")
+    description="Interior edges the patch is fitted through.")
 
 
 def _curve_host_component(ents, fallback):
@@ -76,11 +75,8 @@ def _open_profile_from_curves(comp, ents):
 
 
 def _body_names_and_solid(feature):
-    """(names, is_solid) for a feature's result bodies - each body's name and isSolid read LIVE.
-
-    is_solid is True when ANY body reads solid, False when a flag read and none did, and None when
-    NO body's flag could be read at all. read_flag rather than bool(safe(...)): a body whose isSolid
-    will not read is not thereby an open sheet, and every note here is worded off this value."""
+    """(names, is_solid) for a feature's result bodies: is_solid is True when ANY body reads solid,
+    False when a flag read and none did, None when NO body's flag could be read at all."""
     bodies = _common.result_bodies(feature)
     names = [safe(lambda b=b: b.name) for b in bodies]
     flags = [_common.read_flag(lambda b=b: b.isSolid) for b in bodies]
@@ -90,11 +86,8 @@ def _body_names_and_solid(feature):
 
 
 def _landed_depth(feature, want_cm, k):
-    """(depth in display units, error) over the shared extent read-back (_common.landed_extent_cm,
-    which carries the measured contract and the match band). The depth published is the feature's
-    own, never the echoed input, and a depth disagreeing with the request is an error rather than a
-    false ok. What is local here is the display-unit projection and this surface's own sentence.
-    A depth that cannot be read comes back None, which the caller names in `unverified`."""
+    """(depth in display units, error) over _common.landed_extent_cm - the feature's OWN depth, not
+    the echoed input; a depth that cannot be read comes back None for the caller's `unverified`."""
     got = _common.landed_extent_cm(feature)
     if got is None:
         return None, ""
@@ -235,10 +228,9 @@ def revolve_handler(sketch_name: str = "", curves=None, axis: str = "z",
         return error("No active design. Create or open a document first (see doc_new).")
     comp = target_component(design)
 
-    # Build the profile, take the origin axis, AND create the feature on the source's OWNING component
-    # (curves' or sketch's owner) - a profile-consuming feature on the active component raises bSet when
-    # the source is owned elsewhere, and a revolve input mixes contexts if the axis is a different
-    # component's.
+    # Build the profile, take the axis and create the feature on the SOURCE's owning component: a
+    # profile-consuming feature on the active component raises bSet when the source is owned
+    # elsewhere, and a revolve input mixes contexts if the axis is a different component's.
     if curves not in (None, "", []):
         resolved, cerr = _CURVES.resolve(curves)
         if cerr:
@@ -316,12 +308,9 @@ def revolve_handler(sketch_name: str = "", curves=None, axis: str = "z",
 # ── surface_patch ───────────────────────────────────────────────────────────
 
 def _rails_readback(patch_input, expected):
-    """Read interiorRailsAndPoints back and return (count, error) - the count is what the input
-    holds, so it is the number the payload publishes.
-
-    Measured: the read-back is a FRESH ObjectCollection - never the object assigned - so identity
-    (and _common.set_verified's != comparison) can never carry this verification; and an EMPTY
-    collection's count reads None, which is 0 entities."""
+    """Read interiorRailsAndPoints back as (count, error) - the count the payload publishes."""
+    # The read-back is a FRESH ObjectCollection, never the object assigned, so identity (and
+    # set_verified's != compare) cannot verify it; an EMPTY collection's count reads None.
     got = safe(lambda: patch_input.interiorRailsAndPoints)
     n = safe(lambda: got.count)
     n = 0 if n is None else int(n)
@@ -378,14 +367,9 @@ def _patch_one_loop(comp, boundary, op, cont, cont_key, rails=()):
         feature = comp.features.patchFeatures.add(patch_input)
     except Exception as e:
         msg = str(e).lower()
-        # This error text (raises 'invalid argument chainOptions'; also seen as
-        # ASM_BL_NON_MAN_EDVERT / PATCH_NO_TOOLBODY) is a single-seed auto-complete failure with TWO
-        # distinct live-verified causes that look identical from the string alone: (1) a degenerate
-        # TANGENT saddle opening (a radial hole tangent to a flat face splits the rim into exactly
-        # two half-edges pinched at the tangent points); (2) an edge loop SPLIT into more than two
-        # segments by a later feature (e.g. a fillet reaching the opening). Name both and point at
-        # the one cheap probe (find_geometry's edge count) that tells them apart - never assert
-        # either cause alone, the string can't distinguish them.
+        # These strings ('invalid argument chainOptions', ASM_BL_NON_MAN_EDVERT, PATCH_NO_TOOLBODY)
+        # are one single-seed auto-complete failure with two causes the string cannot tell apart,
+        # so the error names both and points at the probe that does.
         if any(s in msg for s in ("chainoptions", "non_man", "non-man", "toolbody")):
             return None, (f"Patch failed: {e}. This failure has two known causes: (1) a degenerate "
                 "TANGENT saddle opening - a radial hole tangent to a flat face splits the rim into "
@@ -517,19 +501,15 @@ def patch_handler(boundary=None, boundaries=None, continuity: str = "connected",
 # ── tool / item wiring ──────────────────────────────────────────────────────
 
 _EXTRUDE_DESC = (
-"Extrude an OPEN sketch profile (or B-Rep/sketch 'curves' handles) into a SHEET (surface) body - "
-"isSolid == false, the entry point to surface modelling. Provide EITHER 'curves' (an open chain of "
-"edge/curve handles from find_geometry) OR a 'sketch_name' whose open curves form the profile "
-"(omit = most recent). 'distance' (non-zero) is the depth in 'units'; 'symmetric' extrudes both "
-"sides. 'operation' excludes cut/intersect (not meaningful for a new sheet). The profile is swept as "
-"an OPEN sheet - a closed boundary becomes a tube/wall, NOT a capped solid (use model_extrude for a "
-"solid). Returns the body + is_solid (read back, expected false)."
+"Extrude an OPEN profile into a SHEET body (isSolid false). A closed boundary becomes a "
+"tube/wall, NOT a capped solid; use model_extrude for a solid. Feed the sheet to "
+"surface_trim/extend/patch/thicken."
 )
 
 surface_extrude_tool = (
     Tool.create_simple(name="surface_extrude", description=_EXTRUDE_DESC)
     .add_input_property("sketch_name", {"type": "string",
-            "description": "Sketch whose OPEN curves form the profile (omit = most recent)."})
+            "description": "The sketch to use (omit = most recent)."})
     .add_input_property("curves", _CURVES.schema())
     .add_input_property("distance", {"type": "number", "description": "Depth in 'units' (non-zero; negative reverses)."})
     .add_input_property(*_inputs.UNITS.as_property())
@@ -543,17 +523,14 @@ surface_extrude_item = Item.create_tool_item(tool=surface_extrude_tool, write="w
                                              postconditions=[_assert.FeatureHealthy()])
 
 _REVOLVE_DESC = (
-                                             "Revolve an OPEN profile (sketch open chain, or 'curves' handles) about an x/y/z axis into a SHEET "
-                                             "(surface) body - isSolid == false. 'angle_deg' (non-zero) is the sweep (360 = full); 'symmetric' "
-                                             "splits it both ways. The profile is spun as an OPEN sheet - a closed "
-                                             "boundary becomes a shell, NOT a capped solid (use model_revolve for a solid). Returns "
-                                             "the body + is_solid (read back, expected false)."
+"Revolve an OPEN profile about an x/y/z axis into a SHEET body (isSolid false). A closed boundary "
+"becomes a shell, NOT a capped solid; use model_revolve for a solid."
 )
 
 surface_revolve_tool = (
     Tool.create_simple(name="surface_revolve", description=_REVOLVE_DESC)
     .add_input_property("sketch_name", {"type": "string",
-            "description": "Sketch whose OPEN curves form the profile (omit = most recent)."})
+            "description": "The sketch to use (omit = most recent)."})
     .add_input_property("curves", _CURVES.schema())
     .add_input_property(*_inputs.frame_axis("axis", default="z", description="Component origin axis to revolve about.").as_property())
     .add_input_property("angle_deg", {"type": "number", "description": "Sweep angle in degrees (360 = full, default)."})
@@ -567,26 +544,17 @@ surface_revolve_item = Item.create_tool_item(tool=surface_revolve_tool, write="w
                                              postconditions=[_assert.FeatureHealthy()])
 
 _PATCH_DESC = (
-                                             "Fill CLOSED loop(s) of edges with surface face(s) - 'cap the hole(s)' / 'bridge the gap(s)'. "
-                                             "Pass EITHER 'boundary' (ONE loop: prefer a SINGLE seed edge - Fusion auto-completes the "
-                                             "connected loop; an explicit multi-edge list of a flat coplanar rim can fail to compute where "
-                                             "the single-seed form succeeds), OR 'boundaries' (a LIST of loops, patched ALL in one "
-                                             "call - each element is one edge handle Fusion auto-completes, or a list of handles forming one "
-                                             "loop). Use 'boundaries' to patch every hole of a part at once (pass each hole's rim edge). "
-                                             "In the multi "
-                                             "form a loop that fails is reported per-loop without aborting the rest. 'interior_rails' "
-                                             "(single 'boundary' form only) fits the patch through interior edges. Returns the patch "
-                                             "body/bodies (isSolid=false)."
+"Fill CLOSED loop(s) of edges with surface face(s) - cap a hole, bridge a gap. 'boundary' patches "
+"ONE loop (prefer a SINGLE seed edge - its loop is auto-completed); 'boundaries' patches many in "
+"one call, a failing loop reported without aborting the rest."
 )
 
 surface_patch_tool = (
     Tool.create_simple(name="surface_patch", description=_PATCH_DESC)
     .add_input_property("boundary", _BOUNDARY.schema())
     .add_input_property("boundaries", {"type": "array", "items": {"type": ["string", "array"]},
-            "description": "A LIST of closed loops to patch in ONE call - "
-            "each element an edge handle (Fusion auto-completes that hole's "
-            "loop) or a list of handles forming one loop. The way to patch "
-            "every hole at once."})
+            "description": "Several loops at once - each element an edge handle, or a list of "
+            "handles forming one loop."})
     .add_input_property(*_inputs.Choice("continuity", ["connected", "tangent", "curvature"],
         default="connected", description="Edge continuity of the patch.").as_property())
     .add_input_property("interior_rails", _INTERIOR_RAILS.schema())

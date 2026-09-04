@@ -1,21 +1,7 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""The material/appearance catalog walk behind design_get's 'materials' and 'appearances' slices.
-One MaterialLibrary hosts BOTH .materials and .appearances and a Design hosts those same two
-attribute names for its document-local copies, so the two catalogs are one traversal over two
-projections. Entry names are non-unique - MEASURED across every loaded library: 530 appearances
-carry 172 distinct names, 92 of which are shared by two or more entries - so every row publishes
-'id' beside 'name'.
-
-An id names the SOURCE ASSET, not one entry: it is stable across fresh reads, two same-named
-LIBRARY entries that are different assets carry distinct ids, and two entries holding one asset
-carry identical ids. So in a library scope the id does tell two same-named rows apart. In the
-DOCUMENT scope it does not on its own - a copy KEEPS its source's id whatever it was copied from
-(MEASURED for both a library asset and a document-local one), so every row minted from one base
-shares an id and they are told apart by name. Name and id together identify a document entry;
-neither does alone.
-"""
+"""The material/appearance catalog walk behind design_get's 'materials' and 'appearances' slices."""
 
 import adsk.core
 
@@ -23,25 +9,16 @@ from ._common import counted, error, iter_collection, read_flag, safe
 
 app = adsk.core.Application.get()
 
-# One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
-MAP_BLURB = ("browse - the ONE material/appearance catalog read: a library CENSUS (counts only) "
-             "plus the document-local set when no library is named, one library's filtered and "
-             "capped entries when it is; catalog_census/find_library/entries - its leaf ops: the "
-             "O(1) per-library counts, the EXACT-name library resolver that refuses a duplicate "
-             "instead of taking the first, and the page reporting the TRUE match count beside a "
-             "capped row list")
+MAP_BLURB = ("browse - the ONE material/appearance catalog read: a library census plus the "
+             "document-local set when no library is named, one library's filtered and capped "
+             "entries when it is; catalog_census/find_library/entries are its leaf ops")
 
-# Design.materials / Design.appearances and MaterialLibrary.materials / MaterialLibrary.appearances
-# carry the same two attribute names, so one walk serves both owners.
+# A Design and a MaterialLibrary both carry .materials and .appearances, so one walk serves both.
 KINDS = ("materials", "appearances")
 
-# A library census is cheap: 6 libraries with all 12 counts read in 5 ms. Walking ONE library's 324
-# materials for name+id costs 0.53 s, so an entry page is capped and the true match count is
-# reported beside it.
 DEFAULT_CAP = 50
 MAX_CAP = 200
 
-# What each catalog's names feed - the pointer that makes a browse actionable.
 _CONSUMERS = {
     "materials": "A material name feeds model_set_material.",
     "appearances": "A document appearance name feeds design_configure(action='set_appearance').",
@@ -59,14 +36,9 @@ def libraries():
 
 
 def catalog_census():
-    """(rows, readable) - one row per loaded library: name, id, is_native, and BOTH entry counts.
-    The counts come straight off the collections and never walk their contents - a stock install's
-    6 libraries census in 5 ms.
-
-    A count that will not read is null, never 0: this census IS the caller's evidence of what a
-    library holds, and a 0 there reads as "this library is empty" - the one claim an unread count
-    cannot support. `readable` is False when the materialLibraries collection itself would not
-    read, which must never be published as "no libraries are loaded"."""
+    """(rows, readable) - one row per loaded library: name, id, is_native, both entry counts.
+    A count that will not read is null, never 0; `readable` is False when the collection itself
+    would not read."""
     coll = safe(lambda: app.materialLibraries)
     rows = []
     for lib in iter_collection(coll):
@@ -81,14 +53,8 @@ def catalog_census():
 
 
 def find_library(name):
-    """Resolve ONE loaded library by EXACT case-insensitive name. Returns (library, error_or_None):
-    a miss lists the loaded names; a name carried by two loaded libraries is refused rather than
-    resolved to whichever came first.
-
-    A miss states which of two DIFFERENT facts it saw. An unreadable materialLibraries collection
-    also yields no names, and reporting that hole as 'Loaded libraries: none' asserts the catalog is
-    empty - the one claim an unread collection cannot support, and the one that sends a caller off
-    to install a library that is already there."""
+    """Resolve ONE loaded library by EXACT case-insensitive name -> (library, error_or_None); a
+    duplicate name is refused, a miss lists the loaded names."""
     want = (name or "").strip().lower()
     hits, names = [], []
     for lib in libraries():
@@ -102,8 +68,7 @@ def find_library(name):
         return hits[0], None
     listed = ", ".join(f"'{n}'" for n in names) or "none"
     if not hits:
-        # Only the refusal pays this second read - it is what tells an EMPTY catalog from an
-        # unreadable one, the same collection-is-None signal catalog_census reports as `readable`.
+        # A None collection is an unreadable catalog, not an empty one.
         if safe(lambda: app.materialLibraries) is None:
             return None, ("The material-library collection could not be read, so whether a library "
                           f"named '{name}' is loaded is UNKNOWN - this is NOT a report that none "
@@ -114,22 +79,16 @@ def find_library(name):
 
 
 def _row(obj, name, scope, with_usage):
-    """One catalog row. 'id' rides beside 'name' on every row because names repeat within a single
-    library; it names the row's SOURCE ASSET, so document rows copied from one base share it and
-    the pair is what identifies an entry. Library rows omit is_used - a per-entry read left to the
-    usedBy follow-up."""
+    """One catalog row: name, the source-asset 'id', scope, and is_used when asked."""
     row = {"name": name, "id": safe(lambda: obj.id), "scope": scope}
     if with_usage:
-        # read_flag: null when the flag will not read. A coerced False says "nothing in this
-        # document uses this material", which is what a caller deletes or overwrites an entry on.
         row["is_used"] = read_flag(lambda: obj.isUsed)
     return row
 
 
 def entries(coll, scope, name_filter="", cap=DEFAULT_CAP, with_usage=False):
-    """Rows from ONE collection, narrowed by a case-insensitive name substring and capped. Returns
-    (rows, matched, truncated) - `matched` counts EVERY match (the filter pass reads only the name),
-    so a capped page still reports the true total rather than the page size."""
+    """(rows, matched, truncated) from ONE collection, name-substring narrowed and capped -
+    `matched` counts every match, not the page."""
     wl = (name_filter or "").strip().lower()
     rows, matched = [], 0
     for obj in iter_collection(coll):
@@ -145,8 +104,7 @@ def entries(coll, scope, name_filter="", cap=DEFAULT_CAP, with_usage=False):
 
 
 def clamp_cap(max_results):
-    """The row cap for one page: an absent/unparseable/non-positive request falls back to the
-    default, and any request is clamped to MAX_CAP so a page stays a page."""
+    """The row cap for one page: absent/unparseable/non-positive -> DEFAULT_CAP, else min(n, MAX_CAP)."""
     try:
         n = int(max_results)
     except (TypeError, ValueError):
@@ -155,11 +113,8 @@ def clamp_cap(max_results):
 
 
 def browse(design, kind, library="", name_filter="", max_results=0):
-    """The catalog read at two zoom levels. Returns (payload, error_result_or_None).
-
-    No 'library': the document-local entries plus a census of every loaded library (counts only,
-    no library contents). With 'library': that library's entries, name_filter-narrowed and capped
-    with the true match count beside them."""
+    """(payload, error_result_or_None): without 'library' the document entries plus a library
+    census, with it that library's narrowed and capped entries."""
     if kind not in KINDS:
         return None, error(f"Unknown catalog kind '{kind}'. Use one of: {', '.join(KINDS)}.")
     cap = clamp_cap(max_results)
@@ -170,8 +125,6 @@ def browse(design, kind, library="", name_filter="", max_results=0):
         if lerr:
             return None, error(lerr)
         lib_name = safe(lambda: lib.name) or want_lib
-        # A collection that would not read yields no rows, and count 0 beside them would claim the
-        # library is empty - the marker is what separates "none" from "not read".
         coll = collection(lib, kind)
         rows, matched, truncated = entries(coll, lib_name, name_filter, cap)
         payload = {"kind": kind, "library": lib_name, "library_id": safe(lambda: lib.id),
@@ -198,8 +151,6 @@ def browse(design, kind, library="", name_filter="", max_results=0):
     lib_rows, libs_readable = catalog_census()
     payload = {"kind": kind, "document": doc, "libraries": lib_rows,
                "libraries_readable": libs_readable,
-               # a library whose count would not read publishes null - counted here so the caller
-               # sees the census is partial without walking the rows for nulls.
                "unread_libraries": sum(1 for r in lib_rows
                                        if r["material_count"] is None
                                        or r["appearance_count"] is None)}

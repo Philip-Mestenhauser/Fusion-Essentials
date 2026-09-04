@@ -1,13 +1,10 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Export the ACTIVE 2D drawing document to a local PDF, DXF or DWG file. The caller opens the
-drawing first (doc_open / the Fusion UI); this tool exports whichever drawing is active.
-
-DrawingExportManager.execute returning true is NOT proof the file is on disk yet - measured, a
-Simplified DWG stayed absent for ~3s of pumping and then appeared at its full size - so the
-file-landed gate WAITS for the write rather than stat-ing once. WRITES a file.
-"""
+"""Export the ACTIVE 2D drawing document to a local PDF, DXF or DWG file; the caller opens the
+drawing first (doc_open / the Fusion UI). DrawingExportManager.execute returning true is NOT proof
+the file is on disk yet - a Simplified DWG can stay absent for seconds - so the file-landed gate
+WAITS for the write rather than stat-ing once. WRITES a file."""
 
 import os
 
@@ -45,10 +42,9 @@ _DWG_MEMBERS = {"simplified": "SimplifiedDWGFormat", "autocad": "AutoCADDWGForma
 _DWG_VARIANT = _inputs.Choice("dwg_variant", list(_DWG_MEMBERS), default="autocad", required=False,
                               description="format=dwg only: which DWG flavour to write.")
 
-# input name -> the ONE format whose export options carry that setting. Measured member lists:
-# PDFExportOptions = filename/openPDF/sheetRange/sheetsToExport/useLineWeights,
-# DXFExportOptions = filename/exportSplinesAsSplines, DWGExportOptions = filename/format. So an
-# option aimed at another format has nothing to set, and is refused instead of silently dropped.
+# input name -> the ONE format whose export options carry that setting: PDFExportOptions holds
+# sheetRange/sheetsToExport/useLineWeights, DXFExportOptions exportSplinesAsSplines, DWGExportOptions
+# format. An option aimed at another format has nothing to set, and is refused, never dropped.
 _SCOPED = (("sheet_range", "pdf"), ("line_weights", "pdf"),
            ("dwg_variant", "dwg"), ("splines_as_splines", "dxf"))
 
@@ -87,11 +83,9 @@ def _dwg_format_member(variant):
 
 
 def _apply_options(fmt, opts, rng, line_weights, variant, splines):
-    """Set the chosen format's options on a freshly-created *ExportOptions, each one read back.
-    Returns (payload_fields, error): an option that does not read back is an error, not a silent
-    drop - the file would carry settings the call did not ask for. PDF sheetRange/useLineWeights,
-    DXF exportSplinesAsSplines and DWG format each have a measured read-back; openPDF is read back
-    on the same path."""
+    """Set the chosen format's options on a freshly-created *ExportOptions, each one read back:
+    (payload_fields, error). An option that does not read back is an error, not a silent drop - the
+    file would carry settings the call did not ask for."""
     if fmt == "pdf":
         weights = True if line_weights is None else bool(line_weights)
         # openPDF is forced off: opening the file drives UI we cannot dismiss headlessly.
@@ -117,16 +111,9 @@ def _apply_options(fmt, opts, rng, line_weights, variant, splines):
 
 def _wait_for_file(path, before=None):
     """Poll until a non-empty file at `path` that THIS call wrote reports the SAME size on two
-    consecutive samples, bounded by _LAND_DEADLINE_S. Returns (size_bytes, error_or_None).
-
-    Measured: execute() returns true while the file is still absent, and the file appears about 3s
-    later - inside the same call - once the main thread is pumped. The two-equal-samples gate costs
-    one extra pump when the first non-zero size is already final (measured: it is), and refuses to
-    report a size that is still climbing when it is not. `before` is the path's snapshot() taken
-    before the export, and it belongs INSIDE the loop: a stale file from an earlier export reports a
-    stable size on its first two samples, so a wait without it settles on that file rather than on
-    this export's write. The bounded pump loop is _export.pump_until; the size-went-stable signal is
-    this tool's own."""
+    consecutive samples, bounded by _LAND_DEADLINE_S: (size_bytes, error_or_None). execute() returns
+    true while the file is still absent, and it appears once the main thread is pumped. `before` (the
+    path's snapshot()) belongs INSIDE the loop, or a stale file settles the wait on its own size."""
     prev = None
 
     def probe():
@@ -231,11 +218,8 @@ def handler(format: str = "pdf", file_path: str = "", sheet_range: str = "",
 TOOL_DESCRIPTION = (
     "Export the active 2D drawing document to a PDF, DXF or DWG file on local disk. Exports "
     "whichever drawing is the active document, so open the drawing first (drawing_create makes one; "
-    "doc_open opens it by file_id, no Fusion UI step first), then export. Success is "
-    "gated on a non-empty file actually landing on disk: the export waits for the write to finish, "
-    "and an export that produces nothing returns an error, never a false ok. This tool does not open "
-    "a drawing by id. WRITES a file to "
-    "disk (does not modify the drawing)."
+    "doc_open opens it by file_id, no Fusion UI step first), then export. This tool does not open "
+    "a drawing by id. WRITES a file to disk (does not modify the drawing)."
 )
 
 FULL_DESCRIPTION = TOOL_DESCRIPTION + "\n" + _outputs.produces_block(RETURNS)
@@ -244,15 +228,12 @@ tool = (
     Tool.create_simple(name="drawing_export", description=FULL_DESCRIPTION)
     .add_input_property(*_FORMAT.as_property())
     .add_input_property("file_path", {"type": "string",
-            "description": "Local output path. The chosen format's extension is appended if "
-                           "missing; the directory is created if needed."})
+            "description": "Local output path; the format's extension is appended if missing."})
     .add_input_property("sheet_range", {"type": "string",
-            "description": "format=pdf only: sheets to export, e.g. '1-3' or '1-2,5'. Omit to "
-                           "export all sheets. Measured on Fusion 2705.0.87: a sheet_range export "
-                           "issued soon AFTER another export of the same drawing twice blocked "
-                           "the Fusion main thread for minutes (it self-recovers, but the file "
-                           "never lands), while a sheet_range export run FIRST completed clean - "
-                           "make the sheet_range export the first export, never a follow-up."})
+            "description": "format=pdf only: sheets to export, e.g. '1-3' or '1-2,5'. Omit for all "
+                           "sheets. Run a sheet_range export FIRST: issued soon after another "
+                           "export of the same drawing it can block the main thread and the file "
+                           "never lands."})
     .add_input_property("line_weights", {"type": "boolean",
             "description": "format=pdf only: render line weights (default true)."})
     .add_input_property(*_DWG_VARIANT.as_property())

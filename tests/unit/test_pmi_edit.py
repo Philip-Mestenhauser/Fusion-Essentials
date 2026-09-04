@@ -650,6 +650,14 @@ class TestHoleCallouts:
         assert out["flags"] == {"through": True, "threaded": False}
         assert hole.isThrough is True and hole.isThreaded is False
 
+    def test_an_empty_or_missing_flags_spec_is_refused_naming_the_action(self, hole):
+        """An empty spec applies nothing, so ok would be a false success."""
+        for spec in ({}, None):
+            msg = error_message(pe.handler(action="set_flags", annotation="Hole Note1",
+                                           flags=spec))
+            assert "action='set_flags'" in msg and "non-empty 'flags'" in msg
+        assert not hasattr(hole, "isThrough")
+
     def test_an_unknown_flag_is_refused(self, hole):
         assert "Unknown flag 'bogus'" in error_message(
             pe.handler(action="set_flags", annotation="Hole Note1", flags={"bogus": True}))
@@ -789,6 +797,14 @@ class TestSetValues:
         assert hole.made[0].symmetric == pytest.approx(0.05)
         applied = out["values"]["diameter"]
         assert applied["value"] == 6.0 and applied["tolerance"]["upper"] == 0.5
+
+    def test_an_empty_or_missing_values_spec_is_refused_naming_the_action(self, hole):
+        """An empty spec applies nothing, so ok would be a false success."""
+        for spec in ({}, None):
+            msg = error_message(pe.handler(action="set_values", annotation="Hole Note1",
+                                           values=spec))
+            assert "action='set_values'" in msg and "non-empty 'values'" in msg
+        assert hole.ann.diameter.value == 0.0 and hole.ann.diameter.isOverriddenValue is False
 
     def test_an_unreadable_value_property_is_refused(self, hole):
         hole.ann.depth = None

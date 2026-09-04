@@ -33,13 +33,10 @@ _NO_READBACK_NOTE = (
     "The image is NOT readable back: the Images collection has no count, item or delete, so an "
     "inserted image cannot be listed, verified, moved or removed through the API - undo it in "
     "Fusion. Export the sheet (drawing_export) to see it. A file no decoder can read inserts "
-    "successfully and renders nothing, so a decodable image file is the caller's responsibility. "
-    "Sheet placement is part of the API's preview surface, so it can change between Fusion "
-    "releases.")
+    "successfully and renders nothing, so a readable image file is the caller's responsibility.")
 
 # The one failure the insert boolean and the modified flag BOTH miss: an insert anchored off the
-# sheet returns true, flips the document to modified, and renders nothing at all - measured. So the
-# anchor is bounded before the call where it CAN be bounded, and the result says so where it cannot.
+# sheet returns true, flips the document to modified, and renders nothing at all.
 _OFF_SHEET_UNCHECKED_NOTE = (
     "The position was NOT bounds-checked (%s): an insert anchored off the sheet returns true and "
     "renders nothing, and no read-back can tell that from a real placement - export the sheet to "
@@ -53,16 +50,10 @@ _FILE_NOT_FOUND = ("Image file not found: %s. Pass a local path that exists (a c
 
 
 def _off_sheet_error(dwg, sheet, px, py):
-    """(refusal, unchecked_reason) for an image anchor.
-
-    The refusal is non-empty only for an anchor measurably outside the sheet; unchecked_reason is
-    non-empty whenever the bound could not run at all, and the caller must publish it - a silent
-    skip reads exactly like a passed check.
-
-    An image POSITION is standard-keyed like the rest of a drawing's own numbers - millimetres under
-    ISO, inches under ASME, both measured by placing an image and reading where it rendered - while
-    Sheet.width/height are millimetres whatever the standard, so the anchor converts through the one
-    DOCUMENT_UNIT table before the comparison."""
+    """(refusal, unchecked_reason) for an image anchor: the refusal is non-empty only for an anchor
+    measurably outside the sheet, unchecked_reason whenever the bound could not run at all and the
+    caller must publish it. An image POSITION is standard-keyed (mm under ISO, in under ASME) while
+    Sheet.width/height are always mm, so the anchor converts through DOCUMENT_UNIT first."""
     width = _common.measured(lambda: sheet.width)
     height = _common.measured(lambda: sheet.height)
     if width is None or height is None:
@@ -98,11 +89,9 @@ def handler(image_path: str = "", x=None, y=None, scale=None, rotate_deg=None) -
     if ext not in _IMAGE_EXTS:
         return error(f"Unsupported image file '{ext or path}'. A sheet image is one of: "
                      f"{', '.join(_IMAGE_EXTS)}.")
-    # The file is checked BEFORE createInput: a Fusion failure raised inside the call rolls the
-    # whole MCP script transaction back, so a missing file is refused here rather than there. Its
-    # refusal is HELD rather than returned, because the position bound below is independent of the
-    # file - returning here would make the off-sheet refusal, and the sheet extent it names,
-    # unobservable to any caller whose file is also missing.
+    # The file is checked BEFORE createInput: a Fusion failure raised inside the call rolls the whole
+    # MCP script transaction back. Its refusal is HELD, not returned, so the independent off-sheet
+    # refusal below stays observable to a caller whose file is also missing.
     held = []
     if not safe(lambda: os.path.isfile(path)):
         held.append(_FILE_NOT_FOUND % path)
@@ -176,10 +165,9 @@ def handler(image_path: str = "", x=None, y=None, scale=None, rotate_deg=None) -
         inp.position = adsk.core.Point2D.create(px, py)
     except Exception as ex:
         return error(f"Could not set the image position: {ex}")
-    # scale is a RATIO on the image's natural size: the same image inserted at 0.5 renders exactly
-    # half the width it renders at 1.0. The natural size itself varies with the sheet, so the ratio
-    # is the whole contract and no absolute rendered size is published. An omitted scale is left
-    # untouched, so the API's own default stands and the payload reports null.
+    # scale is a RATIO on the image's natural size, which itself varies with the sheet - so no
+    # absolute rendered size is published. An omitted scale is left untouched, leaving the API's own
+    # default, and the payload reports null.
     if factor is not None:
         serr = _common.set_verified(inp, "scale", factor, f"scale={factor}", "ImageInsertInput")
         if serr:
@@ -224,13 +212,9 @@ def handler(image_path: str = "", x=None, y=None, scale=None, rotate_deg=None) -
         "sheet": safe(lambda: sheet.name),
         "image_path": path,
         "position": [px, py],
-        # An image position is standard-keyed - millimetres under ISO, inches under ASME, both
-        # measured from where a placed image rendered - which is the unit this key names and the
-        # one the off-sheet bound converts through. documentSettings.units is the DIMENSION
-        # display unit and does not describe a sheet coordinate, so it is not the label for x/y.
-        # The sheet spans 0..width x 0..height from a corner origin, and a NEGATIVE anchor is
-        # silently CLAMPED to the edge (an x of -1in rendered at x=0), so refusing one is stricter
-        # than the platform and the honest posture: a relocation nothing signals is a false success.
+        # An image position is standard-keyed - mm under ISO, in under ASME - which is what this key
+        # names; documentSettings.units is the DIMENSION display unit and does not label x/y. The
+        # sheet spans 0..width x 0..height from a corner, and a NEGATIVE anchor is silently CLAMPED.
         "coordinate_unit": _drawing_common.coordinate_unit(dwg),
         "sheet_units": _drawing_common.sheet_units(dwg),
         "sheet_extent": sheet_extent,
@@ -251,13 +235,9 @@ TOOL_DESCRIPTION = (
     "Place an image file from local disk onto the active drawing's active sheet. Open the drawing "
     "and make it active first. 'x'/'y' are sheet coordinates; the result reports the sheet's "
     "coordinate_unit beside sheet_units, which is the dimension display unit and does not describe "
-    "a sheet coordinate. 'scale' multiplies the image's natural size and 'rotate_deg' turns the image "
-    "about that position. An off-sheet position is "
-    "REFUSED where it can be bounded (it would insert and render nothing); "
-    "position_bounds_checked reports which. "
-    "The placed image cannot be listed, moved or removed "
-    "afterwards through the API, so undo an unwanted placement in Fusion; export the sheet "
-    "(drawing_export) to see it, and doc_save to keep it."
+    "a sheet coordinate. 'scale' multiplies the image's natural size and 'rotate_deg' turns the "
+    "image about that position. An off-sheet position is REFUSED where it can be bounded; "
+    "position_bounds_checked reports which. drawing_export shows the result, doc_save keeps it."
 )
 
 FULL_DESCRIPTION = TOOL_DESCRIPTION + "\n" + _outputs.produces_block(RETURNS)

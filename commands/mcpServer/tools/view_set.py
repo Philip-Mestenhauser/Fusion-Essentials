@@ -1,13 +1,11 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: the agent's "eyes" - move the camera, isolate/show/hide, toggle wireframe, and
-RESTORE the prior visual state when done. View-state only; pair with view_screenshot to capture.
+"""Move the camera, isolate/show/hide, toggle style, and RESTORE the prior visual state.
 
-Camera orientation is set via explicit eye/target/upVector rather than camera.viewOrientation, which
-does not reliably move the eye/target in this API flow. The snapshot stack is module-level so it
-survives between MCP calls (one session).
-"""
+Camera orientation is set via explicit eye/target/upVector: assigning camera.viewOrientation does
+not reliably move the eye/target. The snapshot stack is module-level so it survives between MCP
+calls within one session."""
 
 import json
 import math
@@ -27,26 +25,21 @@ from . import _write_guard
 
 app = adsk.core.Application.get()
 
-# Monotonic call counter -> a per-response 'request_echo' tracer. A once-observed failure had view_set
-# replay an OLD payload verbatim across 7 consecutive calls; this tracer makes the next occurrence
-# diagnosable: a REPEATED seq means the handler never re-ran (a cached/replayed response, client-side),
-# while an advancing seq whose 'received' echo is stale under new inputs means the wrong args reached the
-# server. Cleared on reload (like _SNAPSHOTS).
+# Monotonic call counter -> the per-response 'request_echo' tracer. A REPEATED seq means the
+# handler never re-ran (a replayed response); an advancing seq whose 'received' echo is stale
+# under new inputs means the wrong args reached the server. Cleared on reload.
 _CALL_SEQ = 0
 
 _ACTIONS = ("snapshot", "orient", "isolate", "show", "hide", "clear_isolation", "display",
     "style", "restore", "save_view", "apply_view", "list_views")
-# The occurrence cap snapshot/restore/clear_isolation run under. An assembly with more occurrences
-# than this gets a PARTIAL snapshot, so every payload built off the walk publishes 'truncated' and
-# the count it stopped at - a restore that silently put back 1000 of 1500 bulbs would report
-# success for a state it never reinstated.
+# The occurrence cap snapshot/restore/clear_isolation run under. A larger assembly gets a PARTIAL
+# snapshot, so every payload built off the walk publishes 'truncated' and the count it stopped at.
 _MAX_OCC = 1000
 
 _TARGET = _inputs.OccurrenceRefList("target",
         description="Occurrence(s) to isolate/show/hide - a fullPathName/name, or a list of them.")
-# hide/show also reach single BODIES (a root-level body, one body of a multi-body component) -
-# occurrence-granular visibility can't. Same 'target' property; isolate stays occurrence-only
-# (Fusion isolates occurrences, not bodies). with_kinds so the handler branches occurrence-vs-body.
+# hide/show also reach single BODIES, which occurrence-granular visibility cannot; isolate stays
+# occurrence-only. with_kinds so the handler branches occurrence-vs-body.
 _VIS_TARGET = _inputs.TargetRefList("target", with_kinds=True,
         description="Target(s) to isolate/show/hide.",
         contract=("A list of occurrences (handle/fullPathName/name) and/or - hide/show only - bodies "
@@ -54,11 +47,9 @@ _VIS_TARGET = _inputs.TargetRefList("target", with_kinds=True,
 _FOCUS = _inputs.OccurrenceRef("focus",
         description="Occurrence or sketch name to frame the view on (orient).")
 
-# The way forward a SHARED sketch name gets on this input. 'focus' carries no component scope, so no
-# spelling of it names one of two same-named sketches; what it does take is an occurrence
-# fullPathName, which the shared-name refusal has just named the owning components for. The default
-# remedy - rename one - is the dead end this replaces: a shared sketch name usually comes from two
-# referenced documents, and renaming there means editing a different document.
+# The way forward a SHARED sketch name gets on this input, replacing the default rename-one remedy
+# (a shared sketch name usually comes from two referenced documents, where renaming means editing
+# a different document).
 _FOCUS_SKETCH_REMEDY = ("'focus' carries no component scope, so no spelling of it picks one of them. "
                         "It does take an occurrence fullPathName - frame the placement of the "
                         "component you mean (design_get(include=['tree']) lists the paths).")
@@ -67,10 +58,8 @@ _FOCUS_SKETCH_REMEDY = ("'focus' carries no component scope, so no spelling of i
 # Each entry: {"camera": <Camera copy>, "visualStyle": int, "occ": {fullPath: (bulb, isolated)}}
 _SNAPSHOTS = {}
 
-# The named-orientation table (view_direction = eye - target, i.e. the direction FROM the model TO
-# the camera; eye/target/up are set directly because assigning camera.viewOrientation is
-# unreliable) lives in _view_common, shared with view_screenshot (which applies the negated
-# look_direction) and view_section (which aims a cut at the same directions).
+# The named-orientation table: view_direction is eye - target, the direction FROM the model TO
+# the camera.
 _ORIENTATIONS = _view_common.VIEW_DIRECTIONS
 _STYLES = {
 "shaded": "ShadedVisualStyle",
@@ -82,10 +71,7 @@ _STYLES = {
 }
 
 # Camera projection: a wire key -> its adsk.core.CameraTypes member name. Fusion's third camera
-# type, PerspectiveWithOrthoFaces, is deliberately NOT settable here: assigning it does not stick.
-# Live-measured, both halves: wrote 2, read back 1, and the probe that measured it had isFitView
-# set - so the coercion is not a stale-extents artifact. Offering the value would promise a state
-# the platform will not hold.
+# type, PerspectiveWithOrthoFaces, is NOT offered here - assigning it coerces to plain Perspective.
 _PROJECTIONS = {
     "orthographic": "OrthographicCameraType",
     "perspective": "PerspectiveCameraType",
@@ -98,11 +84,9 @@ def _camera_type(key):
 
 
 def _projection_key(value):
-    """The projection key a CameraTypes value carries. Names perspective_ortho_faces too - a user's
-    camera can already BE in that mode even though view_set cannot set it - and falls back to the
-    stringified value, so a read-back mismatch names what it actually found. Not settable is not
-    unusable: an angle written on a PerspectiveWithOrthoFaces camera LANDS exactly (wrote 30 deg,
-    read 30 deg, live-measured) while the TYPE coerces to plain Perspective."""
+    """The projection key a CameraTypes value carries - perspective_ortho_faces included, since a
+    user's camera can already be in that mode - falling back to the stringified value so a
+    read-back mismatch names what it found."""
     for key in _PROJECTIONS:
         if _camera_type(key) == value:
             return key
@@ -112,29 +96,21 @@ def _projection_key(value):
 
 
 def _is_perspective(value):
-    """True for either of Fusion's perspective camera types - the ones Camera.perspectiveAngle
-    applies to. PerspectiveWithOrthoFaces counts: view_set cannot SET that mode, but a camera
-    already in it ACCEPTS a written angle exactly (30 deg written, 30 deg read, live-measured)."""
+    """True for either of Fusion's perspective camera types - the ones perspectiveAngle applies to.
+    PerspectiveWithOrthoFaces counts: view_set cannot set that mode, but a camera already in it
+    accepts a written angle."""
     return value in (_camera_type("perspective"),
                      adsk.core.CameraTypes.PerspectiveWithOrthoFacesCameraType)
 
 
-# A closed document's snapshot describes a viewport and an occurrence set that closed with it, and
-# leaving it parks a Camera copy plus a per-occurrence dict per scratch document for the life of the
-# add-in session. The shared key registry evicts the closed document; this drops the snapshot it
-# held, in the same pass and whichever consumer's read triggered the prune.
+# A closed document's snapshot describes a viewport and an occurrence set that closed with it, so
+# the shared key registry's eviction drops it in the same pass.
 _write_guard.on_key_evicted(lambda key: _SNAPSHOTS.pop(key, None))
 
 
 def _carry_snapshot(old_key, new_key):
-    """Move this document's saved state onto the key it answers now (a save re-keys an open
-    document - see _write_guard.on_key_renamed).
-
-    The snapshot is the ONLY copy of the pre-explore camera/visibility state, and nothing else can
-    reclaim it: it was never parked under the new key, so a restore taken after the flip misses
-    honestly and the state it was holding is lost for the session. Both keys name the same open
-    document, so this re-addresses one entry - it never merges two documents' snapshots.
-    """
+    """Move this document's saved state onto the key it answers now - a save re-keys an open
+    document, and the snapshot is the only copy of its pre-explore camera/visibility state."""
     snap = _SNAPSHOTS.pop(old_key, None)
     if snap is not None:
         _SNAPSHOTS[new_key] = snap
@@ -144,25 +120,16 @@ _write_guard.on_key_renamed(_carry_snapshot)
 
 
 def _doc_key():
-    """The key the snapshot store holds the active document's saved state under.
-
-    _write_guard.document_key is the one home for that identity: a cloud data file's id, else a
-    per-instance token matched by document handle - NOT by name, because two open unsaved documents
-    share the name "Untitled" and a name key makes one of them restorable into the other.
-    "<active>" is this store's own stand-in for a call where no document reads at all.
-    """
+    """The key the snapshot store holds the active document's saved state under; "<active>" stands
+    in for a call where no document reads at all."""
     key = _write_guard.document_key()
     return "<active>" if key is None else key
 
 
 def _show_with_ancestors(occ):
-    """Turn on this occurrence's light bulb AND every ancestor occurrence's bulb.
-
-    A nested occurrence is only visible if its whole assemblyContext chain is lit; showing the
-    leaf alone does nothing if a parent is hidden. Every bulb is READ BACK: returns
-    (names whose bulb reads on, names whose bulb did NOT) - a swallowed write up the chain leaves
-    the target invisible, which is not a state to report as shown.
-    """
+    """Turn on this occurrence's light bulb AND every ancestor's, each read back; returns (names
+    whose bulb reads on, names whose bulb did NOT). A nested occurrence is visible only when its
+    whole assemblyContext chain is lit."""
     lit, stuck = [], []
     cur = occ
     guard = 0
@@ -200,14 +167,9 @@ def _do_snapshot(design):
             continue
         occ_state[fp] = (bool(safe(lambda o=o: o.isLightBulbOn, True)),
                          bool(safe(lambda o=o: o.isIsolated, False)))
-    # Per-component display-folder bulbs (sketches/construction/origins/joints), keyed by
-    # _common.native_identity - so a display toggle is covered by restore. NOT the component's bare
-    # entityToken and not its name: a name is non-unique, and a token is DOCUMENT-LOCAL, which every
-    # document's ROOT component answers with the same value (measured on a job assembled from 7
-    # source documents). Keyed on the token these 7 components write ONE entry, the last one wins,
-    # and restore below puts that one component's bulbs onto all 7. A component whose identity does
-    # not read is skipped rather than stored under a key that would collide with every other
-    # unidentifiable one.
+    # Per-component display-folder bulbs, keyed by _common.native_identity: a name is non-unique
+    # and a bare entityToken is DOCUMENT-LOCAL, so every document's root answers the same one. A
+    # component whose identity does not read is skipped rather than keyed with every other.
     folder_state = {}
     for comp in _view_common.all_display_components(design):
         ident = _common.native_identity(comp)
@@ -296,18 +258,9 @@ _FRAME_MARGIN = 2.0
 
 
 def _frame_world_spans(vp):
-    """(width, height) of what the viewport currently shows, in MODEL units - read from the
-    viewport's own view->model mapping, so no fit is needed to learn it.
-
-    Reading the frame is what lets framing skip a whole-model fit. Fusion repaints on the camera
-    ASSIGNMENT, so a fit taken only to measure against is still drawn - a zoom-out to the whole
-    model followed by a zoom-in, which is most of what a watching operator sees. This costs four
-    viewToModelSpace calls and moves no camera.
-
-    Exact for an ORTHOGRAPHIC camera, where the frame is the same size at every depth. On a
-    perspective camera the span varies with depth and this is the span at the plane the mapping
-    picks, which is close enough to aim a camera with.
-    """
+    """(width, height) of what the viewport currently shows, in MODEL units, off the viewport's own
+    view->model mapping - four reads that move no camera. Exact on an orthographic camera; on a
+    perspective one it is the span at the depth the mapping picks."""
     w, h = safe(lambda: vp.width), safe(lambda: vp.height)
     if not w or not h:
         return None
@@ -330,33 +283,26 @@ def _frame_world_spans(vp):
 
 
 def _frame_ratio(cam, focus_bb, frame_w, frame_h):
-    """How far the camera's extents must scale for 'focus_bb' to fill the frame that currently
-    measures frame_w x frame_h in model units - or None when the box or the camera basis will not
-    read (a refusal to report, never a 1.0 that silently leaves the view where it was).
-
-    The LARGER of the two per-axis ratios wins: the focus has to fit across AND down, and the
-    smaller would crop it on the other axis. NOT capped at 1: the baseline is the live frame, not a
-    whole-model fit, so coming from a tightly framed part onto a bigger one legitimately zooms OUT.
-    """
+    """How far the camera's extents must scale for 'focus_bb' to fill a frame_w x frame_h frame, or
+    None when the box or camera basis will not read. The LARGER per-axis ratio wins (the focus must
+    fit across AND down) and it is not capped at 1, so a bigger focus legitimately zooms out."""
     axes = _camera_axes(cam)
     if axes is None or focus_bb is None or not frame_w or not frame_h:
         return None
     right, up = axes
     fw, fh = _screen_span(focus_bb, right, up)
     if fw <= 0 and fh <= 0:
-        # A point sketch, or an entity seen exactly edge-on, spans nothing on either screen axis.
-        # There is no size to scale to - but re-aiming at it is still the right answer, so this
-        # reports "no zoom" rather than failing a framing the caller legitimately asked for.
+        # A point sketch, or an entity seen exactly edge-on, spans nothing on either screen axis:
+        # there is no size to scale to, but re-aiming at it is still the right answer.
         return 0.0
     return max(fw / frame_w, fh / frame_h) * _FRAME_MARGIN
 
 
 def _do_orient(design, orientation, focus, fit, projection="", perspective_angle_deg=None):
     vp = app.activeViewport
-    # Measured BEFORE anything moves: the frame the viewport shows right now is the baseline a
-    # focus framing scales from, so the framed path never needs a whole-model fit. Orientation does
-    # not change these spans on an orthographic camera - the frame is the same size whichever way
-    # it points - so one read here serves the camera this call is about to build.
+    # Measured BEFORE anything moves: the live frame is the baseline a focus framing scales from,
+    # so the framed path never needs a whole-model fit. Orientation does not change these spans on
+    # an orthographic camera, so one read here serves the camera this call is about to build.
     frame = _frame_world_spans(vp) if (focus and fit) else None
     applied = {}
     cam = vp.camera  # build the FINAL camera on ONE object, assign once (no double move)
@@ -406,6 +352,7 @@ def _do_orient(design, orientation, focus, fit, projection="", perspective_angle
     # Orientation: set eye/target/up EXPLICITLY (camera.viewOrientation does not reliably move the
     # eye/target in this flow). Keep the current eye->target distance so framing is stable; fit
     # tightens it afterward.
+    standoff_fallback = None
     if orientation:
         key = orientation.strip().lower()
         if key not in _ORIENTATIONS:
@@ -413,9 +360,9 @@ def _do_orient(design, orientation, focus, fit, projection="", perspective_angle
         dx, dy, dz = _ORIENTATIONS[key]
         ux, uy, uz = _view_common.up_vector(key)
         dmag = math.sqrt(dx * dx + dy * dy + dz * dz) or 1.0
-        # distance from current camera (so we don't zoom wildly before the fit)
-        e0, t0 = cam.eye, cam.target
-        dist = math.sqrt((e0.x - t0.x) ** 2 + (e0.y - t0.y) ** 2 + (e0.z - t0.z) ** 2) or 10.0
+        # The shared standoff read, so this orient and view_screenshot's place the eye the same
+        # distance out and disclose the same fallback.
+        dist, standoff_fallback = _view_common.standoff_distance(cam)
         cam.target = target
         cam.eye = adsk.core.Point3D.create(target.x + dx / dmag * dist,
                                            target.y + dy / dmag * dist,
@@ -471,10 +418,9 @@ def _do_orient(design, orientation, focus, fit, projection="", perspective_angle
         # 22.62 deg default field of view (live-verified).
         cam.perspectiveAngle = math.radians(angle_deg)
 
-    # Flipping cameraType leaves the camera's extents inconsistent with the type it now carries:
-    # assigning such a camera raises "Camera type must be orthographic for extents" unless
-    # isFitView recomputes them (live-verified). So a projection change fits whether or not
-    # 'fit' asked for it.
+    # Flipping cameraType leaves the extents inconsistent with the type it now carries: assigning
+    # such a camera raises "Camera type must be orthographic for extents" unless isFitView
+    # recomputes them, so a projection change fits whether or not 'fit' asked for it.
     ratio = None
     if focus and fit and frame is None and not want_key:
         # Falling back to a whole-model fit here would answer a framing request with the very view
@@ -516,6 +462,11 @@ def _do_orient(design, orientation, focus, fit, projection="", perspective_angle
             note = (f"Camera re-aimed at '{applied.get('focus')}' WITHOUT zooming to it - "
                     "fit=false keeps the current eye-to-target distance. Pass fit=true (the "
                     "default) to frame it.")
+    if standoff_fallback is not None:
+        cm = f"{standoff_fallback:g}"
+        applied["standoff_fallback_cm"] = standoff_fallback
+        note += (f" standoff_fallback_cm={cm}: the camera's eye-target distance did not read as a "
+                 f"positive number, so {cm} cm stood in as the standoff for this orient.")
     if want_key:
         # None means the property was UNREADABLE, which is a different report from a read that
         # shows the change did not take.
@@ -532,11 +483,8 @@ def _do_orient(design, orientation, focus, fit, projection="", perspective_angle
             note += (" Changing the projection recomputes the camera extents, so the view was "
                      "fitted even though fit was false.")
     if angle_deg is not None:
-        # Read BACK off the camera. A written angle survives the assignment bit-exactly, and a
-        # 45 deg angle written WITH isFitView set reads back bit-exact too - the forced fit does
-        # not move it (both live-measured). So this comparison reports a write the platform
-        # dropped, not an expected fit artifact. None means the property was unreadable, which is
-        # NOT an angle of zero.
+        # Read BACK off the camera: a written angle survives the assignment bit-exactly, and the
+        # forced fit above does not move it. None means the property was unreadable, not zero.
         raw = safe(lambda: vp.camera.perspectiveAngle)
         if raw is None:
             # Name the projection only when it READS - an unreadable type has no name to report.
@@ -818,12 +766,9 @@ def _do_restore(design):
             restored_occ += 1
         else:
             failed.append(fp)
-    # restore the display-folder bulbs a 'display' toggle may have moved. Keyed on the same
-    # _common.native_identity the snapshot stored, so each component gets ITS OWN saved bulbs back -
-    # a bare token is shared by every document's root component, which would write one component's
-    # state onto all of them. An identity that does not read is None, which the snapshot never
-    # stored, so such a component is left alone; a bulb whose snapshot read was None is left alone
-    # too - unreadable then proves nothing about the wanted state.
+    # Restore the display-folder bulbs a 'display' toggle may have moved, keyed on the same
+    # _common.native_identity the snapshot stored. A component whose identity does not read, and a
+    # bulb whose snapshot read was None, are both left alone.
     folders = snap.get("folders") or {}
     if folders:
         for comp in _view_common.all_display_components(design):
@@ -881,15 +826,8 @@ def _named_views(design):
 
 
 def _do_save_view(design, view_name):
-    """Save the CURRENT camera as a persistent Named View in the document (survives reload; shows
-    in the browser's Named Views folder). Re-aim later with apply_view. Unlike snapshot (one
-    in-memory push/pop of camera+style+visibility), named views are a durable, multi-slot library
-    of camera angles.
-
-    SCOPE: a named view stores the CAMERA ONLY - not section state or visibility. It is a pure
-    camera bookmark. It does NOT reconstitute a section cut (Fusion allows one active section and a
-    NamedView can't carry that). To navigate between section perspectives, just re-issue
-    view_section(cut, plane=...): that re-cuts AND auto-aims at the cut face in one call."""
+    """Save the CURRENT camera as a persistent Named View in the document, re-aimed later with
+    apply_view. A named view stores the CAMERA ONLY - not section state or visibility."""
     name = (view_name or "").strip()
     if not name:
         return error("Provide 'view_name' to save the current camera as a named view.")
@@ -898,10 +836,8 @@ def _do_save_view(design, view_name):
         return error("This design does not expose Named Views.")
     vp = app.activeViewport
     # Overwrite an existing same-named view. itemByName THROWS when absent, so the guard wraps the
-    # LOOKUP only: a deleteMe() that returns false has to be reported, or the add below leaves two
-    # views answering to one name and no later apply_view can tell them apart. (design.namedViews
-    # enumerates only the USER views on this build - a 'Home' saved here is a new user view, not the
-    # built-in - so the refusal covers any declined delete, not one named class.)
+    # LOOKUP only: a declined deleteMe() has to be reported, or the add below leaves two views
+    # answering to one name and no later apply_view can tell them apart.
     try:
         ex = nvs.itemByName(name)
     except Exception:
@@ -1034,20 +970,12 @@ def handler(action: str = "", target=None, orientation: str = "", focus: str = "
 
 
 TOOL_DESCRIPTION = (
-    "View-state verbs to inspect the model from different angles, then restore - no geometry changes. "
-    "'snapshot' (save camera+style+all visibility; call before exploring) | 'restore' (put "
-    "them back to the last snapshot) | 'orient' ('orientation' and/or 'focus'=frame ONE "
-    "named occurrence or sketch; 'projection' sets the camera projection, 'perspective_angle_deg' its "
-    "field of view) | 'isolate'/'show'/'hide'/'clear_isolation' "
-    "('target'=occurrence(s); hide/show also take BODIES (root-level / one of a multi-body "
-    "component); ambiguous names refused; 'show' lights ancestors) | "
-    "'display' ('categories' + 'visible': toggle the NON-BODY folders - sketches / construction / "
-    "origins / joints - design-wide via each component's folder bulb, clearing construction "
-    "clutter from product shots without touching any entity's own bulb) | "
-    "'style' (visual style) | 'save_view'/'apply_view'/'list_views' ('view_name' = a persistent "
-    "Named View, camera only). snapshot/restore is in-memory (cleared on reload) and covers the "
-    "display folders. Pair with view_screenshot; for section views use view_section (a named view "
-    "won't restore a cut)."
+    "View-state verbs to inspect the model from different angles, then restore - no geometry "
+    "changes. 'snapshot' saves camera+style+all visibility and 'restore' puts them back - "
+    "in-memory, cleared on reload, covering the display folders too. 'show' also lights the "
+    "target's ancestors. 'display' toggles the NON-BODY folders design-wide. "
+    "A Named View ('save_view'/'apply_view'/'list_views') stores the camera only. Pair with "
+    "view_screenshot; for section views use view_section (a named view won't restore a cut)."
 )
 
 tool = (
@@ -1057,17 +985,16 @@ tool = (
     .add_required_input("action")
     .add_input_property(*_VIS_TARGET.as_property())
     .add_input_property("view_name", {"type": "string",
-            "description": "Name for save_view / apply_view (a persistent document Named View)."})
+            "description": "Name for save_view / apply_view."})
     .add_input_property(*_inputs.Choice("orientation", list(_ORIENTATIONS),
             description="Camera preset for 'orient'.").as_property())
     .add_input_property("focus", {"type": ["string", "array"], "items": {"type": "string"},
             "description": "Occurrence or sketch name to frame the view on (orient); a LIST frames "
-                           "their union, so a group of related parts stays on screen together."})
+                           "their union."})
     .add_input_property(*_inputs.Choice("projection", list(_PROJECTIONS),
             description="Camera projection for 'orient'.").as_property())
     .add_input_property("perspective_angle_deg", {"type": "number",
-            "description": "Field-of-view angle in degrees for a perspective 'orient' "
-                           "(1 to just under 150)."})
+            "description": "Field-of-view angle in degrees for a perspective 'orient'."})
     .add_input_property(*_inputs.Choice("style", list(_STYLES),
             description="Visual style for 'style'.").as_property())
     .add_input_property("fit", {"type": "boolean",
@@ -1076,7 +1003,7 @@ tool = (
             "items": {"type": "string", "enum": ["sketches", "construction", "origins", "joints"]},
             "description": "Display folders for action='display' (omit = all four)."})
     .add_input_property("visible", {"type": "boolean",
-            "description": "action='display': true shows the chosen categories, false hides them."})
+            "description": "Show (true) or hide (false) the chosen categories."})
     .strict_schema()
 )
 

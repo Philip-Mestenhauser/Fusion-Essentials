@@ -19,9 +19,8 @@ from . import _joints
 from . import _relations
 
 # Which actions each relation kind supports. Only a motion link carries a direction and a pair of
-# coupled values; all three carry isSuppressed and deleteMe (measured on the installed bindings).
-# set_occurrences stays in the rigid group's set so the caller meets the measured refusal below
-# rather than an unknown verb.
+# coupled values; all three carry isSuppressed and deleteMe. set_occurrences stays in the rigid
+# group's set so the caller meets the refusal below rather than an unknown verb.
 _KIND_ACTIONS = {
     "rigid_group": ("suppress", "unsuppress", "delete", "set_occurrences"),
     "motion_link": ("suppress", "unsuppress", "delete", "reverse", "set_values"),
@@ -31,15 +30,13 @@ _ACTIONS = ("suppress", "unsuppress", "delete", "set_occurrences", "reverse", "s
 
 _KIND = _inputs.Choice(
     "kind", list(_relations.KINDS), required=True,
-    description="Which relation to act on - the three live in separate namespaces.")
+    description="Which relation to act on.")
 _ACTION = _inputs.Choice(
     "action", list(_ACTIONS), required=True,
-    description="What to do: suppress/unsuppress and delete apply to every kind; reverse and "
-                "set_values re-couple a motion link; set_occurrences is refused by the platform "
-                "and answers with the delete-and-recreate path.")
+    description="suppress/unsuppress and delete apply to every kind; reverse and set_values "
+                "re-couple a motion link; set_occurrences is refused, naming the path that works.")
 _OCCURRENCES = _inputs.OccurrenceRefList(
-    "occurrences", description="set_occurrences: the members you want - the action is refused and "
-                               "names the path that works.")
+    "occurrences", description="set_occurrences: the members you want.")
 
 
 def _flag(obj, prop):
@@ -227,12 +224,12 @@ def _do_set_values(ml, name, ratio):
     out = {"kind": "motion_link", "name": name, "ratio": r, "value_one": one, "value_two": two,
            "reversed": now_rev,
            "was_reversed": was_rev,
-           "note": "Coupling re-valued - 'interpreted' states how the ratio was read and the native "
-                   "pair sent to the API, and value_one/value_two are the link's own parameters "
-                   "READ BACK after the set. The SIGN of ratio SETS the direction - so a "
-                   "positive ratio CLEARS an existing reversal (was_reversed reports what it "
-                   "overwrote). To flip the direction without re-valuing, use action='reverse'. "
-                   "Drive ONE member (joint_drive) and read the partner back."}
+           "note": "Coupling re-valued - 'interpreted' states how the ratio was read, and "
+                   "value_one/value_two are the link's own parameters READ BACK after the set. The "
+                   "SIGN of ratio SETS the direction, so a positive ratio CLEARS an existing "
+                   "reversal (was_reversed reports what it overwrote); action='reverse' flips the "
+                   "direction without re-valuing. Drive ONE member (joint_drive) and read the "
+                   "partner back."}
     # The codec's three keys, published identically by the create path (joint_motion_link), so one
     # ratio reads the same whichever writer applied it.
     out.update(ratio_facts)
@@ -279,13 +276,8 @@ TOOL_DESCRIPTION = (
     "Edit or remove an existing assembly relation - a rigid group, a motion link, or an assembly "
     "constraint - by name (from assembly_get(include=['relations']); a repeated name is refused, "
     "not guessed). 'suppress'/'unsuppress' park one without deleting it, reporting any feature the "
-    "change breaks; 'delete' removes it IRREVERSIBLY and re-lists to confirm. 'reverse' flips a "
-    "motion link's direction; 'set_values' re-couples it to 'ratio' (joint_two per unit of "
-    "joint_one, each in its own display unit; the SIGN sets direction, so a positive value clears "
-    "a reversal). 'set_occurrences' "
-    "is REFUSED - this build cannot edit a rigid group's members after creation - and the error "
-    "names the path that works. Create relations with assembly_rigid_group / joint_motion_link / "
-    "assembly_constrain."
+    "change breaks; 'delete' removes it IRREVERSIBLY and re-lists to confirm. Create relations with "
+    "assembly_rigid_group / joint_motion_link / assembly_constrain."
 )
 
 tool = (
@@ -296,9 +288,9 @@ tool = (
     .add_input_property(*_ACTION.as_property())
     .add_input_property(*_OCCURRENCES.as_property())
     .add_input_property("include_children", {"type": "boolean",
-            "description": "set_occurrences: kept so the refused call is answered, not schema-rejected."})
+            "description": "set_occurrences: accepted so the refused call is answered, not schema-rejected."})
     .add_input_property("ratio", {"type": "number",
-            "description": "set_values: joint_two's motion per ONE unit of joint_one, in each joint's DISPLAY unit - deg for a rotating DOF, mm for a sliding one; the SIGN sets the direction, so a positive value clears an existing reversal."})
+            "description": "set_values: joint_two's motion per ONE unit of joint_one, in each joint's DISPLAY unit - deg for a rotating DOF, mm for a sliding one. The SIGN sets the direction."})
     .strict_schema()
 )
 item = Item.create_tool_item(

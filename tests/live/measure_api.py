@@ -152,6 +152,68 @@ def make_box(des, name):
     b.name = name
     return b
 
+def make_placed_box(des, name):
+    """(the native box body of a component named `name`, the ONE occurrence placing it)."""
+    root = des.rootComponent
+    occ = root.occurrences.addNewComponent(adsk.core.Matrix3D.create())
+    comp = occ.component
+    comp.name = name
+    sk = comp.sketches.add(comp.xYConstructionPlane)
+    sk.sketchCurves.sketchLines.addTwoPointRectangle(
+        adsk.core.Point3D.create(0.0, 0.0, 0.0), adsk.core.Point3D.create(1.0, 1.0, 0.0))
+    comp.features.extrudeFeatures.addSimple(
+        sk.profiles.item(0), adsk.core.ValueInput.createByReal(1.0),
+        adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+    b = comp.bRepBodies.item(0)
+    b.name = name + "Body"
+    return b, occ
+
+def make_mesh_rig(app, name):
+    """(a fresh document, one component's tetrahedron MESH, and the TWO occurrences placing it)."""
+    doc = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    d = adsk.fusion.Design.cast(doc.products.itemByProductType("DesignProductType"))
+    d.designType = adsk.fusion.DesignTypes.DirectDesignType
+    root = d.rootComponent
+    first = root.occurrences.addNewComponent(adsk.core.Matrix3D.create())
+    comp = first.component
+    comp.name = name
+    comp.meshBodies.addByTriangleMeshData(
+        [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        [0, 2, 1, 0, 1, 3, 1, 2, 3, 2, 0, 3], [], [])
+    mesh = comp.meshBodies.item(0)
+    mesh.name = name + "Mesh"
+    off = adsk.core.Matrix3D.create()
+    off.translation = adsk.core.Vector3D.create(5.0, 0.0, 0.0)
+    second = root.occurrences.addExistingComponent(comp, off)
+    return doc, mesh, first, second
+
+def cam_measure_setup():
+    """(the active document's CAM product, its MeasureSetup or None when the world is not up)."""
+    cam = adsk.cam.CAM.cast(
+        adsk.core.Application.get().activeDocument.products.itemByProductType("CAMProductType"))
+    for i in range(cam.setups.count):
+        if cam.setups.item(i).name == "MeasureSetup":
+            return cam, cam.setups.item(i)
+    return cam, None
+
+def cam_sample_tool():
+    """The first tool of the bundled 'Milling Tools (Metric)' library, None when it is absent."""
+    libs = adsk.cam.CAMManager.get().libraryManager.toolLibraries
+    for a in libs.childAssetURLs(
+            libs.urlByLocation(adsk.cam.LibraryLocations.Fusion360LibraryLocation)):
+        if "Milling Tools (Metric)" in a.leafName:
+            lib = libs.toolLibraryAtURL(a)
+            return lib.item(0) if lib.count else None
+    return None
+
+def cam_add_face_op(setup, tool, name):
+    """A face operation added to `setup` carrying `tool`, renamed to `name` - ungenerated."""
+    opin = setup.operations.createInput("face")
+    opin.tool = tool
+    op = setup.operations.add(opin)
+    op.name = name
+    return op
+
 def run(context):
     app = adsk.core.Application.get()
     des = adsk.fusion.Design.cast(app.activeProduct)
@@ -563,6 +625,39 @@ ROWS = [
     emit(verbatim,
          "joint-revolute-value-stored-verbatim: commanded 750/30/100/390 read back "
          + str(reads) + " (expect the same four values)")
+""",
+    },
+    {
+        "id": "joint-revolute-value-tenth-degree-grid",
+        "claim": ("A revolute jointMotion.rotationValue lands on a 0.1 deg GRID: an angle that is "
+                  "not a multiple of 0.1 deg reads back at the nearest tenth, so such a command "
+                  "cannot be stored exactly (12.34, 20.103, 0.03 and 45.55 all read back on-grid)"),
+        "encoded_in": ("commands/mcpServer/tools/joint_drive.py _ANGLE_GRID_DEG / _ANGLE_BAND_DEG "
+                       "(the half-step landing band) and the off-grid note; "
+                       "tests/unit/test_joint_drive.py TestTheAngleBandIsHalfTheStoreGrid"),
+        "body": """
+    import math
+    root = des.rootComponent
+    anchor = root.occurrences.addNewComponent(adsk.core.Matrix3D.create())
+    anchor.component.name = "GridAnchor"
+    off = adsk.core.Matrix3D.create()
+    off.translation = adsk.core.Vector3D.create(0.0, -8.0, 0.0)
+    spinner = root.occurrences.addNewComponent(off)
+    spinner.component.name = "GridRotor"
+    anchor.isGroundToParent = True
+    geo = adsk.fusion.JointGeometry.createByPoint(
+        spinner.component.originConstructionPoint.createForAssemblyContext(spinner))
+    ji = root.asBuiltJoints.createInput(spinner, anchor, geo)
+    ji.setAsRevoluteJointMotion(adsk.fusion.JointDirections.ZAxisJointDirection)
+    j = root.asBuiltJoints.add(ji)
+    reads = []
+    for want in (12.34, 20.103, 0.03, 45.55):
+        j.jointMotion.rotationValue = math.radians(want)
+        reads.append(round(math.degrees(j.jointMotion.rotationValue), 9))
+    on_grid = all(abs(r - round(r * 10.0) / 10.0) < 1e-9 for r in reads)
+    emit(on_grid,
+         "joint-revolute-value-tenth-degree-grid: commanded 12.34/20.103/0.03/45.55 read back "
+         + str(reads) + " (expect every read-back a multiple of 0.1 deg)")
 """,
     },
     {
@@ -1028,6 +1123,64 @@ ROWS = [
 """,
     },
     {
+        "id": "mesh-export-component-descends-into-children",
+        "claim": ("An STL export whose geometry is a COMPONENT writes that component's own bodies, "
+                  "its MESH bodies, AND the bodies of the occurrences below it, BRep tessellated "
+                  "in. Three legs, each with a floor: the child component's own file is 12 (a box), "
+                  "the root's own box is another 12, and a tetrahedron mesh cannot tessellate below "
+                  "its 4 faces - so this rig's file is 12 + 12 + 4 = 28 and the gate is that lower "
+                  "bound. The total is a property of the RIG, not of the API: swap the tetrahedron "
+                  "for a 12-triangle box mesh and the same three legs make 36. The triangle count "
+                  "is the binary STL's own header field - bytes 80..84, little-endian uint32 - not "
+                  "a count the exporter reported"),
+        "encoded_in": ("mesh_export.py's redirect head - a MESH target is exported through its "
+                       "owning component, and the note says the file holds every body below it; "
+                       "tests/unit/test_mesh_export.py "
+                       "test_the_redirect_note_names_the_brep_bodies_and_the_children_the_file_"
+                       "carries"),
+        "body": """
+    import os, struct, tempfile
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        des = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        # Direct design: meshBodies.add* needs a BaseFeature scope in a parametric one.
+        des.designType = adsk.fusion.DesignTypes.DirectDesignType
+        root = des.rootComponent
+        make_box(des, "RootBox")                      # 12 triangles of the root's OWN body
+        child_body, child_occ = make_placed_box(des, "Child")
+        # A tetrahedron mesh on the root, the sibling rows' way of making a mesh body.
+        root.meshBodies.addByTriangleMeshData(
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            [0, 2, 1, 0, 1, 3, 1, 2, 3, 2, 0, 3], [], [])
+        em = des.exportManager
+
+        def tri_count(geom, leaf):
+            # An earlier run's file at the same path would be counted as this one's, so it goes
+            # first: the header read below is then THIS export's or nothing.
+            path = os.path.join(tempfile.gettempdir(), leaf)
+            if os.path.exists(path):
+                os.remove(path)
+            if not em.execute(em.createSTLExportOptions(geom, path)) or not os.path.exists(path):
+                return None
+            with open(path, "rb") as fh:
+                head = fh.read(84)
+            return struct.unpack("<I", head[80:84])[0] if len(head) == 84 else None
+
+        n_child = tri_count(child_body.parentComponent, "measure_child_only.stl")
+        n_root = tri_count(root, "measure_root_descend.stl")
+        # +12+4, not +12: the child's leg alone plus the root box would pass at 24 while the MESH
+        # body was silently dropped, and the mesh riding is half of what this row measures.
+        emit(n_child == 12 and n_root is not None and n_root >= n_child + 12 + 4,
+             "mesh-export-component-descends-into-children: child component alone="
+             + repr(n_child) + " root=" + repr(n_root) + " vs floor "
+             + repr(None if n_child is None else n_child + 16)
+             + " (child " + repr(n_child) + " + root box 12 + tetrahedron mesh 4)"
+             + "; child occurrence " + child_occ.name)
+    finally:
+        tmp.close(False)
+""",
+    },
+    {
         "id": "enum-mesh-refinement-collides-with-factory",
         "claim": "MeshRefinementSettings.MeshRefinementMedium == 1 AND a freshly created STLExportOptions reads meshRefinement == 1 - the MEDIUM member is the factory value, and medium is mesh_export's DEFAULT refinement, so a set-then-read-back cannot bite on the most-travelled request. MeshRefinementHigh == 0 is a FALSY member, so a `not member` guard rejects the highest density. This read DOES determine the written file, measured here on a CURVED body exported both ways: on STL as BYTES (untouched, explicit-MEDIUM and a second medium export are byte-identical; high and low each differ from medium and from each other), and on OBJ as the TESSELLATION - vertex and face line counts - because the OBJ text embeds its own output filename in an mtllib line, so byte-identity cannot hold across differently-named files (measured: the only bytes separating two medium exports are that line): untouched, medium and medium-again tessellate identically, high and low each differently - which is why refinement publishes no verification flag. (unitType is the opposite case and is measured by stl-export-unittype-is-sticky-session-state; this row reads no unitType.) The automatic enum sweep cannot see this family - its name ends in none of the suffixes the scrape matches - so it is pinned here or nowhere",
         "encoded_in": "mesh_export.py _REFINEMENTS + _apply_refinement (which drops the pair's 'changed' half on the strength of this); _export.py applied_pair's per-knob note; tests/unit/test_mesh_export.py _refine_member",
@@ -1103,6 +1256,41 @@ ROWS = [
              + " obj=" + str(determines["obj"])
              + " bytes(untouched,medium,medium-again,high,low) stl=" + str(sizes["stl"])
              + " obj=" + str(sizes["obj"]))
+    finally:
+        tmp.close(False)
+""",
+    },
+    {
+        "id": "fusion-archive-execute-bool-vs-landed-file",
+        "claim": "createFusionArchiveExportOptions(path, <component>) is judged by the file on disk, not by ExportManager.execute(): the row PASSes on a landed non-empty .f3d whatever the bool is, and PRINTS the bool so each build's shape is on the record",
+        "encoded_in": "design_export.py _landed (the disk decides; a false bool is disclosed as execute_returned_false); tests/unit/test_design_export.py TestFileExistenceGate",
+        "body": """
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        des = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        root = des.rootComponent
+        # A COMPONENT, not the whole design: the two legs answer differently, and the component
+        # leg is the one design_export._landed is built for.
+        comp = root.occurrences.addNewComponent(adsk.core.Matrix3D.create()).component
+        sk = comp.sketches.add(comp.xYConstructionPlane)
+        sk.sketchCurves.sketchLines.addTwoPointRectangle(
+            adsk.core.Point3D.create(0.0, 0.0, 0.0), adsk.core.Point3D.create(2.0, 2.0, 0.0))
+        comp.features.extrudeFeatures.addSimple(
+            sk.profiles.item(0), adsk.core.ValueInput.createByReal(1.0),
+            adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+        import os, tempfile
+        path = os.path.join(tempfile.gettempdir(), "measure_f3d_component.f3d")
+        if os.path.isfile(path):
+            os.remove(path)
+        em = des.exportManager
+        did = em.execute(em.createFusionArchiveExportOptions(path, comp))
+        landed = os.path.isfile(path)
+        size = os.path.getsize(path) if landed else 0
+        if landed:
+            os.remove(path)
+        emit(landed and size > 0,
+             "fusion-archive-execute-bool-vs-landed-file: execute()=" + str(bool(did))
+             + " landed=" + str(landed) + " size_bytes=" + str(size))
     finally:
         tmp.close(False)
 """,
@@ -2310,6 +2498,348 @@ ROWS = [
 """,
     },
     {
+        "id": "vector3d-transformby-mutates-in-place",
+        "claim": ("Vector3D.transformBy(matrix) MUTATES the receiver and answers a TRUE value: "
+                  "(1,2,3) through a +90 deg rotation about Z reads back (-2,1,3) on the SAME "
+                  "object - a receiver still reading (1,2,3) would say the call answers a new "
+                  "vector instead. copy() is independent BOTH ways: a copy taken before the "
+                  "transform still reads (1,2,3), and transforming a copy leaves the receiver "
+                  "where the first transform put it"),
+        "encoded_in": ("_assembly_detail._world_axes, which copies each axis vector before "
+                       "transformBy and then publishes the RECEIVER; tests/conftest.py FakeVector3D"),
+        "body": """
+    import math
+    v = adsk.core.Vector3D.create(1.0, 2.0, 3.0)
+    before = v.copy()
+    rot = adsk.core.Matrix3D.create()
+    rot.setToRotation(math.pi / 2.0, adsk.core.Vector3D.create(0.0, 0.0, 1.0),
+                      adsk.core.Point3D.create(0.0, 0.0, 0.0))
+    returned = v.transformBy(rot)
+    moved = (round(v.x, 9), round(v.y, 9), round(v.z, 9))
+    copy_held = (before.x, before.y, before.z) == (1.0, 2.0, 3.0)
+    # the other direction: the COPY is transformed, and the receiver must not follow it
+    twin = v.copy()
+    twin.transformBy(rot)
+    receiver_held = (round(v.x, 9), round(v.y, 9), round(v.z, 9)) == moved
+    emit(bool(returned) and moved == (-2.0, 1.0, 3.0) and copy_held and receiver_held,
+         "vector3d-transformby-mutates-in-place: returned=" + repr(returned)
+         + " receiver (1.0,2.0,3.0)->" + str(moved) + " (expect (-2.0,1.0,3.0))"
+         + " pre-transform copy still (1,2,3)=" + repr(copy_held)
+         + " receiver unmoved while its copy transformed=" + repr(receiver_held))
+""",
+    },
+    {
+        "id": "meshbody-assembly-context-proxy",
+        "claim": ("MeshBody.createForAssemblyContext(occ) mints a WORKING proxy: the object it "
+                  "returns has type name MeshBody, keeps the native's name, reads assemblyContext "
+                  "as the occurrence it was asked for, and its nativeObject ties back to the "
+                  "native by a byte-equal entityToken - while the NATIVE's own assemblyContext "
+                  "reads None. Two placements of one component answer two proxies whose contexts "
+                  "are DIFFERENT fullPathNames; one shared context, or a proxy answering nothing, "
+                  "refutes"),
+        "encoded_in": ("_inputs._placed_meshes_named and _placement_refusal - the mesh half of the "
+                       "'<occurrence>:<mesh>' address, which LIFTS the placed component's mesh into "
+                       "the named occurrence and refuses only a lift that hands nothing back"),
+        "body": """
+    doc, mesh, occ_a, occ_b = make_mesh_rig(app, "MeshCtx")
+    try:
+        pa = mesh.createForAssemblyContext(occ_a)
+        pb = mesh.createForAssemblyContext(occ_b)
+        kinds = [type(pa).__name__, type(pb).__name__]
+        names_kept = pa.name == mesh.name and pb.name == mesh.name
+        ctx_a, ctx_b = pa.assemblyContext, pb.assemblyContext
+        paths = [None if ctx_a is None else ctx_a.fullPathName,
+                 None if ctx_b is None else ctx_b.fullPathName]
+        want = [occ_a.fullPathName, occ_b.fullPathName]
+        ctx_ok = paths == want and want[0] != want[1]
+        native_ctx = mesh.assemblyContext
+        back = [None if pa.nativeObject is None else pa.nativeObject.entityToken,
+                None if pb.nativeObject is None else pb.nativeObject.entityToken]
+        ties = back == [mesh.entityToken, mesh.entityToken]
+        emit(kinds == ["MeshBody", "MeshBody"] and names_kept and ctx_ok and ties
+             and native_ctx is None,
+             "meshbody-assembly-context-proxy: types=" + ",".join(kinds)
+             + " name kept=" + repr(names_kept) + " contexts=" + str(paths)
+             + " (expect " + str(want) + ") nativeObject ties to the native token="
+             + repr(ties) + " native assemblyContext=" + repr(native_ctx))
+    finally:
+        doc.close(False)
+""",
+    },
+    {
+        "id": "meshbody-proxy-token-differs",
+        "claim": ("A mesh assembly-context proxy's OWN entityToken DIFFERS from its native's AND "
+                  "from the other placement's proxy token, while proxy.nativeObject.entityToken is "
+                  "byte-equal to the native's - so an identity keys on (nativeObject or self)."
+                  "entityToken, and a handle minted in one placement cannot resolve to the other. "
+                  "A proxy token equal to the native's, or two placements sharing one, refutes"),
+        "encoded_in": ("conftest._MeshProxy - the shared MeshBody fake's lift, whose per-placement "
+                       "token is what keeps _common.native_identity from merging two placements"),
+        "body": """
+    doc, mesh, occ_a, occ_b = make_mesh_rig(app, "TokComp")
+    try:
+        pa = mesh.createForAssemblyContext(occ_a)
+        pb = mesh.createForAssemblyContext(occ_b)
+        pa_eq_native = pa.entityToken == mesh.entityToken
+        pb_eq_native = pb.entityToken == mesh.entityToken
+        pa_eq_pb = pa.entityToken == pb.entityToken
+        back = [None if pa.nativeObject is None else pa.nativeObject.entityToken,
+                None if pb.nativeObject is None else pb.nativeObject.entityToken]
+        ties = back == [mesh.entityToken, mesh.entityToken]
+        ctx_a, ctx_b = pa.assemblyContext, pb.assemblyContext
+        paths = [None if ctx_a is None else ctx_a.fullPathName,
+                 None if ctx_b is None else ctx_b.fullPathName]
+        want = [occ_a.fullPathName, occ_b.fullPathName]
+        emit(not pa_eq_native and not pb_eq_native and not pa_eq_pb and ties and paths == want,
+             "meshbody-proxy-token-differs: pa_eq_native=" + repr(pa_eq_native)
+             + " pb_eq_native=" + repr(pb_eq_native) + " pa_eq_pb=" + repr(pa_eq_pb)
+             + " (expect all False) nativeObject ties to the native token=" + repr(ties)
+             + " contexts=" + str(paths) + " (expect " + str(want) + ")")
+    finally:
+        doc.close(False)
+""",
+    },
+    {
+        "id": "mesh-combine-tool-lands-where-placed",
+        "claim": ("A mesh COMBINE takes its tool geometry WHERE THE TOOL'S OCCURRENCE PLACES IT: "
+                  "with A's mesh at local x 0..1, B's mesh at local x 2..3 and B's OCCURRENCE "
+                  "placed 5 cm further out, the merged target reads max x 8.0 - the tool's WORLD "
+                  "position. Max x 3.0 (B's component-local position) refutes it, and 1.0 says "
+                  "nothing merged. The tool is handed over as B's assembly-context PROXY, the "
+                  "object an '<occurrence>:<mesh>' address resolves to, so the placement is in "
+                  "front of the API rather than hidden from it"),
+        "encoded_in": ("mesh_combine.py's note - the where-placed sentence; "
+                       "tests/unit/test_mesh_combine.py TestNoteStatesTheReach"),
+        "body": """
+    doc = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        des = adsk.fusion.Design.cast(doc.products.itemByProductType("DesignProductType"))
+        des.designType = adsk.fusion.DesignTypes.DirectDesignType
+        root = des.rootComponent
+        tris = [0, 2, 1, 0, 1, 3, 1, 2, 3, 2, 0, 3]
+        comp_a = root.occurrences.addNewComponent(adsk.core.Matrix3D.create()).component
+        comp_a.name = "MeshLocalA"
+        comp_a.meshBodies.addByTriangleMeshData(
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0], tris, [], [])
+        # B's mesh sits at LOCAL x 2..3 and its occurrence is placed 5 cm out, so the two candidate
+        # answers - local 3.0 and world 8.0 - cannot be confused with each other, nor with the 1.0
+        # that means nothing merged at all.
+        off = adsk.core.Matrix3D.create()
+        off.translation = adsk.core.Vector3D.create(5.0, 0.0, 0.0)
+        occ_b = root.occurrences.addNewComponent(off)
+        comp_b = occ_b.component
+        comp_b.name = "MeshLocalB"
+        comp_b.meshBodies.addByTriangleMeshData(
+            [2.0, 0.0, 0.0, 3.0, 0.0, 0.0, 2.0, 1.0, 0.0, 2.0, 0.0, 1.0], tris, [], [])
+        before = round(comp_a.meshBodies.item(0).boundingBox.maxPoint.x, 3)
+        tool = comp_b.meshBodies.item(0).createForAssemblyContext(occ_b)
+        feats = comp_a.features.meshCombineFeatures
+        inp = feats.createInput(comp_a.meshBodies.item(0), [tool])
+        # MERGE, not join: two DISJOINT meshes merge into one body holding both shells, so the
+        # result's bounding box is the union - which is what the position question is asked of.
+        inp.meshCombineOperationType = adsk.fusion.MeshCombineOperationTypes.MergeMeshCombineType
+        err = ""
+        try:
+            feats.add(inp)
+        except Exception as e:
+            err = " add raised: " + str(e)
+        box = comp_a.meshBodies.item(0).boundingBox
+        got = round(box.maxPoint.x, 3)
+        local = abs(got - 3.0) < 0.05
+        world = abs(got - 8.0) < 0.05
+        emit(world and not local,
+             "mesh-combine-tool-lands-where-placed: target max x before=" + str(before)
+             + " after=" + str(got) + " (local=3.0 world=8.0 unmerged=1.0) local=" + repr(local)
+             + " world=" + repr(world) + " aabb min=(" + str(round(box.minPoint.x, 3)) + ","
+             + str(round(box.minPoint.y, 3)) + "," + str(round(box.minPoint.z, 3)) + ") max=("
+             + str(got) + "," + str(round(box.maxPoint.y, 3)) + ","
+             + str(round(box.maxPoint.z, 3)) + ")" + err)
+    finally:
+        doc.close(False)
+""",
+    },
+    {
+        "id": "meshbodyvector-shape",
+        "claim": ("An Occurrence's meshBodies is a MeshBodyVector, NOT a counted collection: len() "
+                  "answers 1 for a component holding one mesh and ITERATING it yields "
+                  "assembly-context proxies (each assemblyContext reads that occurrence), while "
+                  ".count and .item(i) - the two members every counted walk here uses - BOTH raise "
+                  "AttributeError. A .count answering a number, or an iteration yielding natives, "
+                  "refutes"),
+        "encoded_in": ("_inputs._bodies_named_in's MeshBodyVector note and _component_bodies, "
+                       "which asks the PLACED COMPONENT for meshes instead of the occurrence"),
+        "body": """
+    doc, mesh, occ_a, occ_b = make_mesh_rig(app, "MeshVec")
+    try:
+        coll = occ_a.meshBodies
+        kind = type(coll).__name__
+        n = len(coll)
+        ctxs = []
+        for b in coll:
+            c = b.assemblyContext
+            ctxs.append(None if c is None else c.fullPathName)
+        reads = []
+        try:
+            coll.count
+            reads.append("count=NO RAISE")
+        except Exception as e:
+            reads.append("count=" + type(e).__name__)
+        try:
+            coll.item(0)
+            reads.append("item=NO RAISE")
+        except Exception as e:
+            reads.append("item=" + type(e).__name__)
+        emit(kind == "MeshBodyVector" and n == 1 and ctxs == [occ_a.fullPathName]
+             and reads == ["count=AttributeError", "item=AttributeError"],
+             "meshbodyvector-shape: type=" + kind + " len=" + str(n)
+             + " iterated contexts=" + str(ctxs) + " (expect ["
+             + repr(occ_a.fullPathName) + "]) " + ", ".join(reads)
+             + " (expect AttributeError on both)")
+    finally:
+        doc.close(False)
+""",
+    },
+    {
+        "id": "entity-proxy-token-shared",
+        "claim": ("SIX reads of ONE placed body - three createForAssemblyContext(occ) calls and "
+                  "three reads off that occurrence's bRepBodies - hand back six DISTINCT Python "
+                  "wrappers (no two are the same object) that all carry ONE byte-identical "
+                  "entityToken: identity never answers 'same entity', the token does. Two reads "
+                  "answering the SAME object, or two tokens differing, refutes"),
+        "encoded_in": ("tests/conftest.py entity_proxy / _EntityProxy, which hands a distinct "
+                       "Python object per reference while every read delegates to one entity"),
+        "body": """
+    body, occ = make_placed_box(des, "ProxyTok")
+    made = [body.createForAssemblyContext(occ) for _ in range(3)]
+    read = [occ.bRepBodies.item(0) for _ in range(3)]
+    wrappers = made + read
+    tokens = [w.entityToken for w in wrappers]
+    one_token = len(set(tokens)) == 1
+    same_object = []
+    for i in range(len(wrappers)):
+        for j in range(i + 1, len(wrappers)):
+            if wrappers[i] is wrappers[j]:
+                same_object.append(str(i) + "/" + str(j))
+    emit(one_token and bool(tokens[0]) and not same_object,
+         "entity-proxy-token-shared: 6 wrappers, distinct tokens=" + str(len(set(tokens)))
+         + " (expect 1) pairs that are the SAME object=" + (",".join(same_object) or "none")
+         + " (expect none) token=" + repr(tokens[0][:24]))
+""",
+    },
+    {
+        "id": "body-proxy-token-differs",
+        "claim": ("A body's occurrence PROXY and its NATIVE answer DIFFERENT entityTokens, so one "
+                  "physical body reached both ways reads as two entities under a token key: the "
+                  "proxy's nativeObject ties back to the native (byte-equal token) while the "
+                  "native's own nativeObject reads None, and each wrapper re-reads its own token "
+                  "unchanged. Equal tokens on the two, or a native answering a nativeObject, "
+                  "refutes"),
+        "encoded_in": ("tests/conftest.py body_proxy / _OccurrenceProxy, whose token is folded per "
+                       "placement; _inputs._body_key, which keys on (nativeObject or self)"),
+        "body": """
+    native, occ = make_placed_box(des, "ProxySplit")
+    proxy = native.createForAssemblyContext(occ)
+    tok_native = native.entityToken
+    tok_proxy = proxy.entityToken
+    back = proxy.nativeObject
+    back_token = None if back is None else back.entityToken
+    native_back = native.nativeObject
+    ctx = proxy.assemblyContext
+    stable = proxy.entityToken == tok_proxy and native.entityToken == tok_native
+    emit(tok_proxy != tok_native and back_token == tok_native and native_back is None
+         and ctx is not None and stable,
+         "body-proxy-token-differs: proxy token differs from native="
+         + repr(tok_proxy != tok_native) + " proxy.nativeObject token == native token="
+         + repr(back_token == tok_native) + " native.nativeObject=" + repr(native_back)
+         + " (expect None) proxy context="
+         + repr(None if ctx is None else ctx.fullPathName)
+         + " each token re-reads unchanged=" + repr(stable))
+""",
+    },
+    {
+        "id": "objectcollection-duplicate-add-takes",
+        "claim": ("ObjectCollection.add TAKES a duplicate: adding the SAME Point3D twice answers "
+                  "True both times and leaves count 2 - the collection de-dupes nothing, so a "
+                  "False from add() is a genuine refusal of that object and never 'it was already "
+                  "in there'. A second add answering False, or a count still 1, refutes"),
+        "encoded_in": ("tests/conftest.py _FakeObjectCollection.add, whose False is reserved for "
+                       "its `refuse` list"),
+        "body": """
+    p = adsk.core.Point3D.create(1.0, 2.0, 3.0)
+    oc = adsk.core.ObjectCollection.create()
+    first = oc.add(p)
+    after_first = oc.count
+    second = oc.add(p)
+    after_second = oc.count
+    emit(first is True and second is True and after_first == 1 and after_second == 2,
+         "objectcollection-duplicate-add-takes: add=" + repr(first) + " count=" + str(after_first)
+         + ", duplicate add=" + repr(second) + " count=" + str(after_second)
+         + " (expect True/1 then True/2)")
+""",
+    },
+    {
+        "id": "cam-template-asset-index-alignment",
+        "claim": ("In every folder of the Fusion360 and Local template libraries the walk reaches, "
+                  "childAssetURLs and childTemplates are INDEX-ALIGNED: "
+                  "templateAtURL(childAssetURLs(f)[i]).name == childTemplates(f)[i].name for every "
+                  "i, and no folder holds two templates of one name - which is what lets a "
+                  "template whose stored leafName spells something else (the shipped hole "
+                  "templates: 'Countersink Drill Tap.f3dhsm-template' against the name 'Drill & "
+                  "Tap Countersink Hole') be addressed by its position"),
+        "encoded_in": ("cam_templates._walk_library's by_position pairing and its url_basis "
+                       "'folder_position' row key; tests/unit/test_cam_templates.py "
+                       "TestWalkLibrary, whose fake library answers one asset per template"),
+        "body": """
+    lib = adsk.cam.CAMManager.get().libraryManager.templateLibrary
+    roots = [adsk.cam.LibraryLocations.Fusion360LibraryLocation,
+             adsk.cam.LibraryLocations.LocalLibraryLocation]
+    folders = []
+    for loc in roots:
+        u = lib.urlByLocation(loc)
+        if u is not None:
+            folders.append(u)
+    seen = 0
+    capped = False
+    # BFS over the GROWING list, so the walk reaches every depth the listing walk does; the folder
+    # cap is what bounds it, and a walk that hit the cap says so.
+    for f in folders:
+        if len(folders) > 60:
+            capped = True
+            break
+        for sub in (lib.childFolderURLs(f) or []):
+            folders.append(sub)
+    misaligned = []
+    dup_names = []
+    pairs = 0
+    for f in folders:
+        assets = list(lib.childAssetURLs(f) or [])
+        temps = list(lib.childTemplates(f) or [])
+        names = [t.name for t in temps]
+        if len(set(names)) != len(names):
+            dup_names.append(lib.displayName(f))
+        if len(assets) != len(temps):
+            misaligned.append(lib.displayName(f) + " counts " + str(len(assets)) + "/"
+                              + str(len(temps)))
+            continue
+        seen += 1
+        for i in range(len(temps)):
+            at = lib.templateAtURL(assets[i])
+            pairs += 1
+            if at is None or at.name != names[i]:
+                misaligned.append(lib.displayName(f) + "[" + str(i) + "] "
+                                  + str(at.name if at else None) + " != " + str(names[i]))
+    emit(pairs > 0 and not misaligned and not dup_names,
+         "cam-template-asset-index-alignment: " + str(pairs) + " index pairs across "
+         + str(seen) + "/" + str(len(folders)) + " folders"
+         + (" (folder cap hit - deeper folders unmeasured)" if capped else "")
+         + (" MISALIGNED: " + "; ".join(misaligned[:5]) if misaligned else "")
+         + (" DUP-NAME FOLDERS: " + ", ".join(dup_names[:5]) if dup_names else ""))
+""",
+    },
+    # CAM rows: cam-ncprogram-operations-hold-containers creates a SETUP-scoped NC program (the
+    # fact it measures), which arms a modal "no tool selected" dialog on the next operation add in
+    # the document - so every row that ADDS a tool-less op runs BEFORE it and deletes its op.
+    {
         "id": "cam-alloperations-shape",
         "claim": "Setup.allOperations FLATTENS folder-nested ops into the collection and DROPS the folder objects; counted and iterable. setup.operations holds only top-level ops; folders hang off setup.folders",
         "encoded_in": "tests/unit/test_cam_delete.py (matches); test_cam_show_toolpath.py + test_cam_edit_folders.py (contradictory encodings); _cam_common.walk_operations",
@@ -2434,6 +2964,40 @@ ROWS = [
 """,
     },
     {
+        "id": "cam-empty-toolpath-times-zero",
+        "claim": "An operation whose toolpath generated EMPTY reads getMachiningTime(op, 100.0, 10.58, 1.5).machiningTime as EXACTLY 0.0 while hasToolpath reads True and operationState reads IsValid (0) - the flags alone read it as a finished pass, so the time is the only signal that separates it from one that cut. An operation reading hasToolpath False is the OTHER empty shape and the same call RAISES '3 : Machining time could not be calculated.' on it, which is why the time is asked only where hasToolpath is True. This row measures the RAISE leg on the rig's own ungenerated operation; the exact-zero leg needs an operation that generated an empty toolpath, which the MeasureSetup box cannot produce - the measured specimen is a swarf operation on a drafted wall (rails on the non-cutting side), and the leg reports NOT EXERCISED rather than passing when no such operation is in the document",
+        "encoded_in": "_cam_common.is_empty_toolpath + _machining_time; tests/unit/test__cam_common.py TestIsEmptyToolpathTimeShape",
+        "needs": "cam",
+        "body": """
+    cam = adsk.cam.CAM.cast(app.activeDocument.products.itemByProductType("CAMProductType"))
+    raised = None
+    zero_rows = []
+    cut_rows = []
+    for i in range(cam.setups.count):
+        s = cam.setups.item(i)
+        for j in range(s.allOperations.count):
+            op = adsk.cam.Operation.cast(s.allOperations.item(j))
+            if op is None:
+                continue
+            if not op.hasToolpath and raised is None:
+                try:
+                    cam.getMachiningTime(op, 100.0, 10.58, 1.5).machiningTime
+                    raised = "NO RAISE"
+                except Exception as e:
+                    raised = str(e)
+            if op.hasToolpath and op.operationState == 0:
+                t = cam.getMachiningTime(op, 100.0, 10.58, 1.5).machiningTime
+                (zero_rows if repr(t) == "0.0" else cut_rows).append(op.name + "=" + repr(t))
+    # The raise leg is the one this rig can construct; the zero leg is reported, never assumed.
+    raise_ok = raised is not None and "could not be calculated" in raised
+    zero_leg = ("exact 0.0 on " + ", ".join(zero_rows)) if zero_rows else "NOT EXERCISED"
+    emit(raise_ok,
+         "cam-empty-toolpath-times-zero: hasToolpath-False raise=" + repr(raised)
+         + " | empty-with-toolpath zero leg: " + zero_leg
+         + " | generated ops that timed above zero: " + (", ".join(cut_rows) or "(none)"))
+""",
+    },
+    {
         "id": "cam-children-tree",
         "claim": "Setup.children interleaves top-level Operations and folder objects whose type name is 'CAMFolder'; folder.allOperations and folder.children expose the folder's contents",
         "encoded_in": "tests/unit/test_cam_show_toolpath.py FakeSetup/CAMFolder; cam_show_toolpath._find_folder_ops type-name branch",
@@ -2533,7 +3097,7 @@ ROWS = [
                   "generated op, and clearing the flag again leaves hasToolpath False - suppressing "
                   "DISCARDS the toolpath rather than hiding it, and the op carries none until it is "
                   "regenerated"),
-        "encoded_in": "cam_inspect_toolpaths.py _split_suppressed + the three wire sentences on the ACTIVE default",
+        "encoded_in": "cam_inspect_toolpaths.py _split_suppressed + the include_suppressed input description, the DISCARD fact's one wire home",
         "needs": "cam",
         "body": """
     import time as _t
@@ -2890,6 +3454,37 @@ ROWS = [
 """,
     },
     {
+        "id": "cam-tool-dimension-parameter-names",
+        "claim": ("A milling tool's cutting geometry is carried by four CAMParameters reachable "
+                  "through Tool.parameters.itemByName under exactly these names - tool_diameter, "
+                  "tool_fluteLength, tool_cornerRadius, tool_overallLength - each answering a "
+                  ".value.value that is a number in Fusion's internal cm. A square-ended tool "
+                  "still CARRIES tool_cornerRadius, reading 0, so an absent parameter and a zero "
+                  "radius are different answers"),
+        "encoded_in": ("_cam_common.tool_dimensions - the four names cam_get(include=['tool']) "
+                       "publishes as 'dimensions'; tests/unit/test_cam_get.py "
+                       "TestToolSliceDimensions"),
+        "needs": "cam",
+        "body": """
+    tool = cam_sample_tool()
+    if tool is None:
+        emit(False, "cam-tool-dimension-parameter-names: no bundled sample milling library"
+             " - inconclusive")
+        return
+    names = ["tool_diameter", "tool_fluteLength", "tool_cornerRadius", "tool_overallLength"]
+    exprs = {}
+    numeric = {}
+    for n in names:
+        p = tool.parameters.itemByName(n)
+        exprs[n] = None if p is None else p.expression
+        v = None if p is None else p.value.value
+        numeric[n] = isinstance(v, float) and not isinstance(v, bool)
+    emit(all(exprs[n] is not None for n in names) and all(numeric[n] for n in names),
+         "cam-tool-dimension-parameter-names: " + repr(exprs) + " numeric=" + repr(numeric)
+         + " of " + str(tool.parameters.count) + " parameters on the tool")
+""",
+    },
+    {
         "id": "cam-op-spindle-speed-vs-machine-max",
         "claim": ("An operation's tool_spindleSpeed CAMParameter reads as a NUMBER through "
                   ".value.value, in the same rpm unit as MachineSpindle.maxSpeed: setting the "
@@ -3087,6 +3682,104 @@ ROWS = [
 """,
     },
     {
+        "id": "cam-advanced-swarf-surface-set-editable",
+        "claim": ("A fresh advanced_swarf operation reads advancedSwarfSurfaces isEditable True, "
+                  "while swarfUpperContour reads isEditable False and checkSurfaceSelection does "
+                  "not resolve through itemByName at all. Nor does ANY of the six names "
+                  "cam_select_geometry probes for a curve selection (contours, pockets, "
+                  "swarfContours, edgeSel, machiningBoundarySel, stockContours). So this strategy "
+                  "is reachable through its ONE settable surface set, and through no curve "
+                  "selection at all - the six ABSENT names are why, not the contour reads, whose "
+                  "isEditable is recorded as read and decides nothing. The op carries a tool and "
+                  "sits in a FRESH setup: a tool-less op added under the harness raises a modal "
+                  "'Failed to generate toolpath - no tool selected' dialog that parks the thread"),
+        "encoded_in": ("cam_select_geometry._SURFACE_TARGET_PARAM's 'swarf' entry "
+                       "(advancedSwarfSurfaces) with _surface_params' isEditable filter, which "
+                       "make surface_target='swarf' the one settable role here; and _apply_curve's "
+                       "no-curve-parameter refusal, which is what a chain/face selection meets on "
+                       "this strategy and which hands back the surface set instead"),
+        "needs": "cam",
+        "body": """
+    cam, setup = cam_measure_setup()
+    # The pre-flight the no-blocked-op rule requires: creating an op on a strategy this flag reads
+    # False for raises a modal licence dialog that parks the main thread.
+    allowed = None
+    for s in setup.operations.compatibleStrategies:
+        if s.name == "advanced_swarf":
+            allowed = s.isGenerationAllowed
+    if allowed is not True:
+        emit(False, "cam-advanced-swarf-surface-set-editable: advanced_swarf reads"
+             " isGenerationAllowed=" + repr(allowed) + " - not created, inconclusive")
+        return
+    si = cam.setups.createInput(adsk.cam.OperationTypes.MillingOperation)
+    si.models = list(setup.models)
+    own = cam.setups.add(si)
+    own.name = "MeasureAdvSwarfSetup"
+    tool = cam_sample_tool()
+    if tool is None:
+        emit(False, "cam-advanced-swarf-surface-set-editable: no bundled sample milling library"
+             " - inconclusive")
+        return
+    opin = own.operations.createInput("advanced_swarf")
+    opin.tool = tool
+    op = own.operations.add(opin)
+    op.name = "MeasureAdvSwarf"
+    drive = op.parameters.itemByName("advancedSwarfSurfaces")
+    upper = op.parameters.itemByName("swarfUpperContour")
+    check = op.parameters.itemByName("checkSurfaceSelection")
+    drive_editable = None if drive is None else drive.isEditable
+    upper_editable = None if upper is None else upper.isEditable
+    # _CURVE_PARAM_CANDIDATES, in the tool's own probe order: a name resolving here would mean a
+    # chain/face selection lands somewhere on this op rather than reaching the refusal.
+    curve_hits = [nm for nm in ("contours", "pockets", "swarfContours", "edgeSel",
+                                "machiningBoundarySel", "stockContours")
+                  if op.parameters.itemByName(nm) is not None]
+    emit(drive is not None and drive_editable is True and upper is not None
+         and upper_editable is False and check is None and not curve_hits,
+         "cam-advanced-swarf-surface-set-editable: advancedSwarfSurfaces present="
+         + str(drive is not None) + " isEditable=" + repr(drive_editable)
+         + " | swarfUpperContour present=" + str(upper is not None) + " isEditable="
+         + repr(upper_editable) + " | checkSurfaceSelection resolves=" + str(check is not None)
+         + " | curve-probe names that resolve=" + str(curve_hits) + " (expect none)")
+""",
+    },
+    {
+        "id": "cam-ncprogram-operations-hold-containers",
+        "claim": ("NCProgram.operations holds what was ASSIGNED - a setup assigned to the program "
+                  "reads back as an element whose objectType is adsk::cam::Setup, NOT its "
+                  "operations - while NCProgram.filteredOperations holds adsk::cam::Operation "
+                  "elements. So len(NCProgram.operations) is an ITEM count and the operations "
+                  "figure is the filtered read"),
+        "encoded_in": ("cam_post._program_counts (program_operation_count off filteredOperations, "
+                       "program_item_count off operations) and _cam_read.get_nc_programs_handler's "
+                       "operation_count/item_count pair; tests/unit/test_cam_post.py _NCProgram, "
+                       "whose filteredOperations expands the stored containers"),
+        "needs": "cam",
+        "body": """
+    cam = adsk.cam.CAM.cast(app.activeDocument.products.itemByProductType("CAMProductType"))
+    setup = None
+    for i in range(cam.setups.count):
+        if cam.setups.item(i).name == "MeasureSetup":
+            setup = cam.setups.item(i)
+    nc_input = cam.ncPrograms.createInput()
+    nc_input.displayName = "MeasureNCItems"
+    # The SETUP itself is what a scoped post assigns - the shape cam_post sends.
+    nc_input.operations = [setup]
+    prog = cam.ncPrograms.add(nc_input)
+    try:
+        stored = [x.objectType for x in prog.operations]
+        posted = [x.objectType for x in prog.filteredOperations]
+        walked = len([x for x in setup.allOperations])
+        emit(len(stored) == 1 and stored[0].endswith("Setup") and len(posted) >= 1
+             and all(t.endswith("Operation") for t in posted),
+             "cam-ncprogram-operations-hold-containers: operations=" + str(stored)
+             + " filteredOperations=" + str(len(posted)) + "x" + str(sorted(set(posted)))
+             + " setup walks " + str(walked) + " operations")
+    finally:
+        prog.deleteMe()
+""",
+    },
+    {
         "id": "cam-template-library-deleteasset",
         "claim": ("templateLibrary.importTemplate stores a template built from live operations "
                   "into the Local location under a leafName whose STEM is the template's name; "
@@ -3217,7 +3910,7 @@ ROWS = [
                   "operation reached through the setup walk: operationId matches and == is True "
                   "for every filtered op paired by name with its walked twin, while wrapper "
                   "identity 'is' does not carry it"),
-        "encoded_in": ("_cam_read._program_posted_ops position note - filteredOperations hands "
+        "encoded_in": ("_cam_read._program_held_ops position note - filteredOperations hands "
                        "back Operations with no walk, and operationId is the measured tie a "
                        "breadcrumb beside the position discriminator would run on"),
         "needs": "cam",
@@ -3279,6 +3972,385 @@ ROWS = [
              + str(id_ties) + " eq-ties=" + str(eq_ties) + " wrapper-is-ties=" + str(is_ties))
     finally:
         prog.deleteMe()
+""",
+    },
+    {
+        "id": "cam-inspection-results-count-zero",
+        "claim": ("A CAM product that has never recorded a probing result reads inspectionResults "
+                  "as a CAMInspectionResults whose count is 0 - NOT None - while a document "
+                  "carrying no CAM product never reaches that read at all: "
+                  "products.itemByProductType('CAMProductType') RAISES '3 : failed to find "
+                  "product' on a fresh design document. A None inspectionResults, or a "
+                  "no-CAM-product document answering None instead of raising, refutes"),
+        "encoded_in": ("tests/conftest.py make_inspection_cam, whose measures=None models the "
+                       "property answering None; cam_inspect_toolpaths' inspection reads"),
+        "needs": "cam",
+        "body": """
+    cam, _setup = cam_measure_setup()
+    results = cam.inspectionResults
+    kind = type(results).__name__
+    n = None if results is None else results.count
+    # the OTHER document shape, in its own scratch: a design that never entered manufacture
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    answered = "NO RAISE"
+    try:
+        try:
+            got = tmp.products.itemByProductType("CAMProductType")
+            answered = "returned " + repr(got)
+        except Exception as e:
+            answered = type(e).__name__ + ": " + (str(e).strip().splitlines() or [""])[0][:60]
+    finally:
+        tmp.close(False)
+    emit(kind == "CAMInspectionResults" and n == 0 and "failed to find product" in answered,
+         "cam-inspection-results-count-zero: inspectionResults type=" + kind + " count="
+         + repr(n) + " (expect CAMInspectionResults / 0); a document with no CAM product: "
+         + answered + " (expect the 'failed to find product' raise)")
+""",
+    },
+    {
+        "id": "cam-generate-all-skips-suppressed",
+        "claim": ("CAM.generateAllToolpaths(True) SKIPS a suppressed operation: with one op "
+                  "suppressed (hasToolpath already False, since suppressing DISCARDS the "
+                  "toolpath), the sweep runs to isGenerationCompleted and that op still reads "
+                  "hasToolpath False, operationState 2 and isSuppressed True. A hasToolpath True "
+                  "or an operationState 0 on it afterwards would say the sweep regenerated it"),
+        "encoded_in": ("cam_generate.py's all-scope arm and tests/unit/test_cam_generate.py; "
+                       "_cam_common.op_primary_state, which buckets a suppressed op before it "
+                       "reads any toolpath flag"),
+        "needs": "cam",
+        "body": """
+    import time as _t
+    cam, setup = cam_measure_setup()
+    op = None
+    for x in setup.allOperations:
+        o = adsk.cam.Operation.cast(x)
+        if o is not None and o.name == "Face2":
+            op = o
+    op.isSuppressed = True
+    try:
+        before_path = op.hasToolpath
+        future = cam.generateAllToolpaths(True)
+        waited = 0
+        while not future.isGenerationCompleted and waited < 900:
+            adsk.doEvents()
+            _t.sleep(0.1)
+            waited += 1
+        if not future.isGenerationCompleted:
+            emit(False, "cam-generate-all-skips-suppressed: the sweep did not complete in 90s"
+                 " - inconclusive, rerun")
+            return
+        after_path = op.hasToolpath
+        after_state = op.operationState
+        after_flag = op.isSuppressed
+    finally:
+        op.isSuppressed = False
+    emit(before_path is False and after_path is False and after_state == 2
+         and after_flag is True,
+         "cam-generate-all-skips-suppressed: suppressed op hasToolpath " + repr(before_path)
+         + " -> " + repr(after_path) + " across the sweep (expect False on both sides),"
+         + " operationState " + str(after_state) + " (expect 2), isSuppressed "
+         + repr(after_flag) + " (expect True)")
+""",
+    },
+    {
+        "id": "cam-suppress-clears-fault-channel",
+        "claim": ("Suppressing an ERRORED operation CLEARS its fault channel: an op faulted by a "
+                  "bottom height above its top reads hasError True with operationState 3, and "
+                  "with isSuppressed set True the same op reads hasError False, error '' and "
+                  "operationState 2 - the error text is gone from the op, not carried beside the "
+                  "suppression. A hasError still True under suppression refutes. The row restores "
+                  "the op: the fault is corrected and regenerated clean before it returns"),
+        "encoded_in": ("_cam_common.op_primary_state / op_state_facts, which bucket a suppressed "
+                       "op before reading its error; cam_inspect_toolpaths' suppressed split"),
+        "needs": "cam",
+        "body": """
+    import time as _t
+    cam, setup = cam_measure_setup()
+    op = None
+    for x in setup.allOperations:
+        o = adsk.cam.Operation.cast(x)
+        if o is not None and o.name == "Face1":
+            op = o
+    def _generate(o):
+        f = cam.generateToolpath(o)
+        n = 0
+        while not f.isGenerationCompleted and n < 600:
+            adsk.doEvents()
+            _t.sleep(0.1)
+            n += 1
+        return f.isGenerationCompleted
+    # A bottom offset ABOVE the top height is the fault the generator rejects - the same rig the
+    # errored-state row runs on, so this measures the SUPPRESSION and not a new fault shape.
+    op.parameters.itemByName("bottomHeight_offset").expression = "50 mm"
+    if not _generate(op):
+        op.parameters.itemByName("bottomHeight_offset").expression = "0 mm"
+        _generate(op)
+        emit(False, "cam-suppress-clears-fault-channel: fault generation did not complete in 60s"
+             " - inconclusive (fault restored), rerun")
+        return
+    faulted = (op.hasError, op.operationState, (op.error or "").strip().splitlines() or [""])
+    op.isSuppressed = True
+    cleared = (op.hasError, op.error, op.operationState, op.isSuppressed)
+    op.isSuppressed = False
+    op.parameters.itemByName("bottomHeight_offset").expression = "0 mm"
+    if not _generate(op):
+        emit(False, "cam-suppress-clears-fault-channel: restore generation did not complete in"
+             " 60s - Face1 LEFT ERRORED, rerun before any machining-time row")
+        return
+    clean = op.hasError is False and op.operationState == 0 and op.hasToolpath is True
+    emit(faulted[0] is True and faulted[1] == 3 and cleared[0] is False and cleared[1] == ""
+         and cleared[2] == 2 and cleared[3] is True and clean,
+         "cam-suppress-clears-fault-channel: faulted=(hasError " + repr(faulted[0])
+         + ", state " + str(faulted[1]) + ", error " + repr(faulted[2][0][:40])
+         + ") suppressed=(hasError " + repr(cleared[0]) + ", error " + repr(cleared[1])
+         + ", state " + str(cleared[2]) + ", isSuppressed " + repr(cleared[3])
+         + ") (expect False / '' / 2 / True) restored_clean=" + repr(clean))
+""",
+    },
+    {
+        "id": "cam-deleted-machine-keeps-setup-copy",
+        "claim": ("A setup KEEPS its own copy of an assigned machine after that machine is "
+                  "deleted from the library: deleteAsset(url) returns True and the asset is gone "
+                  "from the Local walk, while Setup.machine still reads the same label it read "
+                  "before the delete. A Setup.machine answering None, or a label that changed, "
+                  "refutes. Self-cleaning: the Local machine this row imports is the one it "
+                  "deletes, and it touches no other library asset"),
+        "encoded_in": ("cam_delete_machine.py's asset-walk read-back, which is what a delete is "
+                       "confirmed by; cam_edit_setup's machine assignment (Setup.machine takes a "
+                       "transient copy)"),
+        "needs": "cam",
+        "body": """
+    cam, setup = cam_measure_setup()
+    lib = adsk.cam.CAMManager.get().libraryManager.machineLibrary
+    local = lib.urlByLocation(adsk.cam.LibraryLocations.LocalLibraryLocation)
+    machine = adsk.cam.Machine.createFromTemplate(adsk.cam.MachineTemplate.Generic3Axis)
+    machine.description = "MeasureKeepsCopy"
+    machine.model = "MeasureKeepsCopy"
+    url = lib.importMachine(machine, local, "MeasureKeepsCopy")
+    if not url:
+        emit(False, "cam-deleted-machine-keeps-setup-copy: importMachine stored nothing"
+             " - inconclusive")
+        return
+    leaf = url.leafName
+    stored = lib.machineAtURL(url)
+    if stored.hasSimulationModel:
+        stored.clearSimulationModel()
+    setup.machine = stored
+    label_before = None if setup.machine is None else setup.machine.description
+    deleted = lib.deleteAsset(url)
+    listed = [u.leafName for u in lib.childAssetURLs(local)]
+    label_after = None if setup.machine is None else setup.machine.description
+    emit(label_before == "MeasureKeepsCopy" and deleted is True and leaf not in listed
+         and label_after == "MeasureKeepsCopy",
+         "cam-deleted-machine-keeps-setup-copy: assigned label=" + repr(label_before)
+         + " deleteAsset=" + repr(deleted) + " asset " + repr(leaf) + " gone from the Local walk="
+         + repr(leaf not in listed) + " setup.machine label after the delete="
+         + repr(label_after) + " (expect the same label; None or a changed label refutes)")
+""",
+    },
+    {
+        "id": "cam-operation-strategy-vector-shape",
+        "claim": ("Setup.operations.compatibleStrategies is a raw std::vector binding: len() and "
+                  "[i] answer while hasattr(vec, 'count') and hasattr(vec, 'item') are both False, "
+                  "so it is walked by ITERATION. Its elements carry name/title/isGenerationAllowed "
+                  "and all ELEVEN long classification spellings _STRATEGY_FLAGS reads "
+                  "(is2DStrategy ... isSuppressible); the short ones (isCutting, is2D, "
+                  "isDrilling) raise AttributeError, so a row reading them would publish nothing"),
+        "encoded_in": ("cam_create_operation._compatible_strategies (list() over the vector) and "
+                       "_STRATEGY_FLAGS, the wire-key -> API-property table cam_get's strategies "
+                       "slice publishes; tests/unit/test_cam_create_operation.py's vector fake"),
+        "needs": "cam",
+        "body": """
+    cam, setup = cam_measure_setup()
+    vec = setup.operations.compatibleStrategies
+    n = len(vec)
+    has_count = hasattr(vec, "count")
+    has_item = hasattr(vec, "item")
+    if not n:
+        emit(False, "cam-operation-strategy-vector-shape: the vector is empty - inconclusive")
+        return
+    first = vec[0]
+    long_reads = []
+    # every API property _STRATEGY_FLAGS publishes, so a spelling the table gets wrong shows up
+    # here as <AttributeError> instead of as a silently absent wire key
+    for prop in ("is2DStrategy", "is3DStrategy", "isDrillingStrategy", "isMillingStrategy",
+                 "isRotaryStrategy", "isTurningStrategy", "isFinishingStrategy",
+                 "isAdditiveStrategy", "isCuttingStrategy", "isSupportStrategy",
+                 "isSuppressible"):
+        try:
+            long_reads.append(prop + "=" + repr(getattr(first, prop)))
+        except AttributeError:
+            long_reads.append(prop + "=<AttributeError>")
+    short_answered = []
+    for prop in ("isCutting", "is2D", "isDrilling"):
+        try:
+            getattr(first, prop)
+            short_answered.append(prop)
+        except AttributeError:
+            pass
+    emit(n > 0 and has_count is False and has_item is False and not short_answered
+         and "<AttributeError>" not in " ".join(long_reads),
+         "cam-operation-strategy-vector-shape: len=" + str(n) + " [0].name="
+         + repr(first.name) + " isGenerationAllowed=" + repr(first.isGenerationAllowed)
+         + " hasattr count=" + str(has_count) + " item=" + str(has_item) + " | "
+         + ", ".join(long_reads) + " | short spellings that answer=" + str(short_answered))
+""",
+    },
+    {
+        "id": "cam-operation-input-generation-mode",
+        "claim": ("OperationInput carries a generationMode property that takes an "
+                  "AutomaticGenerationModes member and reads the assigned member back, and the "
+                  "family carries exactly three int members (ForceGeneration, SkipGeneration, "
+                  "UserPreference). The message records the FACTORY value the input arrives with - "
+                  "the mode a create that assigns nothing runs under. Measured on an input that is "
+                  "never added, so this row creates no operation"),
+        "encoded_in": ("cam_create_operation's SkipGeneration assignment on the non-generating "
+                       "path (its read-back publishes payload key generation_mode_note only on a "
+                       "disagreement) and cam_templates._GEN_MODES, the "
+                       "friendly-key -> member table cam_apply_template sets on "
+                       "CreateFromCAMTemplateInput.mode; tests/unit/test_cam_create_operation.py's "
+                       "OperationInput fake"),
+        "needs": "cam",
+        "body": """
+    cam, setup = cam_measure_setup()
+    M = adsk.cam.AutomaticGenerationModes
+    dump_enum("cam.AutomaticGenerationModes", M)
+    members = sorted(n for n in dir(M) if not n.startswith("_") and isinstance(getattr(M, n), int))
+    # READ ONLY: the input is built and never added, so no operation is created here and no
+    # generation can be attempted off it.
+    opin = setup.operations.createInput("face")
+    if not hasattr(opin, "generationMode"):
+        emit(False, "cam-operation-input-generation-mode: OperationInput carries no"
+             " generationMode on this build")
+        return
+    factory = opin.generationMode
+    opin.generationMode = M.SkipGeneration
+    after = opin.generationMode
+    emit(after == M.SkipGeneration and len(members) == 3
+         and M.SkipGeneration != M.ForceGeneration and M.SkipGeneration != M.UserPreference,
+         "cam-operation-input-generation-mode: factory generationMode=" + repr(factory)
+         + " after assigning SkipGeneration=" + repr(after) + " | members=" + str(members)
+         + " Force=" + str(M.ForceGeneration) + " Skip=" + str(M.SkipGeneration)
+         + " UserPreference=" + str(M.UserPreference))
+""",
+    },
+    {
+        "id": "cam-blocked-strategy-op-facts",
+        "claim": ("The entitlement flag ANSWERS per strategy: 'chamfer' in a milling setup's "
+                  "compatibleStrategies reads a bool for isGenerationAllowed rather than null, and "
+                  "on this install it reads False. The message records which value this run saw - "
+                  "True is an entitled install with no blocked strategy to measure, not a "
+                  "refutation; only a flag that does not read refutes. MEASURED BY HAND, and "
+                  "deliberately NOT re-measured by any row: an op on a blocked "
+                  "strategy is created normally (operations.add lands it) and reads hasToolpath "
+                  "False, operationState 3 (NoToolpath), isValid True, error '' and warning '' - "
+                  "the pre-generate shape cam_generate's entitlement arm EXCLUDES rather than "
+                  "launching. No row creates one, because on 2705.1.4 creating a blocked-strategy "
+                  "op raises a modal licence dialog at the next event pump that parks Fusion's "
+                  "main thread until a human closes it"),
+        "encoded_in": ("cam_select_geometry._BLOCKED_GENERATE and cam_generate's entitlement "
+                       "pre-flight, both gated on strategy_generation_allowed; cam_get's "
+                       "strategies note"),
+        "needs": "cam",
+        "body": """
+    cam, setup = cam_measure_setup()
+    # READ ONLY: nothing is created here. Creating an op on a strategy this flag reads False for
+    # raises a modal dialog that parks the main thread, so the flag is where the row stops.
+    allowed = None
+    seen = False
+    for s in setup.operations.compatibleStrategies:
+        if s.name == "chamfer":
+            seen = True
+            allowed = s.isGenerationAllowed
+    emit(seen and isinstance(allowed, bool),
+         "cam-blocked-strategy-op-facts: 'chamfer' offered by the setup=" + str(seen)
+         + " isGenerationAllowed=" + repr(allowed)
+         + " (False = blocked on this install, the case the wire strings describe; True = an"
+         + " entitled install, so there is no blocked op to read create-time facts off)")
+""",
+    },
+    {
+        "id": "cam-name-collisions",
+        "claim": ("Two CAM name writes, each read back off the object written. A second SETUP "
+                  "cannot take the name a sibling setup carries: the write reads back as some "
+                  "OTHER name (an exact match on the first setup's name refutes). An OPERATION "
+                  "renamed onto a sibling's name under one setup is recorded as it reads - both "
+                  "the taken and the deduped shape pass, and the receipt carries which one this "
+                  "run got; a name that does not read back at all refutes. The renamed operation "
+                  "is LEFT IN PLACE: Operation.deleteMe on an op the platform just deduped, in the "
+                  "same script, kills the Fusion process (measured six times); the twin setup and "
+                  "the never-renamed operation are deleted"),
+        "encoded_in": ("_cam_common.resolve_cam_node's ambiguity refusal and its '<name>#<n>' "
+                       "addresses, which exist for same-named CAM nodes; cam_create_operation's "
+                       "operation report"),
+        "needs": "cam",
+        "body": """
+    cam, setup = cam_measure_setup()
+    tool = cam_sample_tool()
+    if tool is None:
+        emit(False, "cam-name-collisions: no bundled sample milling library - inconclusive")
+        return
+    first = cam_add_face_op(setup, tool, "MeasureNameA")
+    second = cam_add_face_op(setup, tool, "MeasureNameB")
+    second.name = "MeasureNameA"
+    sibling_name = first.name
+    op_read = second.name
+    si = cam.setups.createInput(adsk.cam.OperationTypes.MillingOperation)
+    twin = cam.setups.add(si)
+    setup_name = setup.name
+    twin.name = setup_name
+    setup_read = twin.name
+    twin.deleteMe()
+    first.deleteMe()
+    emit(isinstance(op_read, str) and isinstance(setup_read, str) and setup_read != setup_name,
+         "cam-name-collisions: an operation renamed onto its sibling's name reads back "
+         + repr(op_read) + " (the sibling reads " + repr(sibling_name) + ", shares it="
+         + repr(op_read == sibling_name) + "); a second setup named " + repr(setup_name)
+         + " reads back " + repr(setup_read) + " (expect NOT that name); the renamed op "
+         + repr(op_read) + " is left in the setup")
+""",
+    },
+    {
+        "id": "cam-empty-name-write",
+        "claim": ("Assigning an EMPTY STRING to the name of an operation, a folder and a setup "
+                  "reads back a string from each: the empty string, the prior name, or a name the "
+                  "platform substitutes (a folder reads back '1') - the receipt records which, "
+                  "plus the refusal text where one raised. A name that does not read back as a "
+                  "string refutes. The writes are provoked in their OWN row: a raise or a "
+                  "rolled-back transaction costs this measurement and no other. The three nodes "
+                  "are LEFT IN PLACE (deleteMe on a node the platform just renamed, in the same "
+                  "script, kills Fusion - measured); the run closes the scratch document after "
+                  "this last row"),
+        "encoded_in": ("_cam_common._segment / _UNREAD_SEGMENT, the breadcrumb's empty-name "
+                       "branch; cam_edit_folders' name read-backs"),
+        "needs": "cam",
+        "body": """
+    cam, setup = cam_measure_setup()
+    tool = cam_sample_tool()
+    if tool is None:
+        emit(False, "cam-empty-name-write: no bundled sample milling library - inconclusive")
+        return
+    op = cam_add_face_op(setup, tool, "MeasureEmptyOp")
+    folder = setup.folders.addFolder("MeasureEmptyFolder")
+    si = cam.setups.createInput(adsk.cam.OperationTypes.MillingOperation)
+    own = cam.setups.add(si)
+    own.name = "MeasureEmptySetup"
+    reads = []
+    clean = []
+    for label, obj in (("operation", op), ("folder", folder), ("setup", own)):
+        prior = obj.name
+        why = ""
+        try:
+            obj.name = ""
+        except Exception as e:
+            why = " refused " + type(e).__name__ + ": " + (
+                str(e).strip().splitlines() or [""])[0][:40]
+        after = obj.name
+        clean.append(isinstance(after, str))
+        reads.append(label + " " + repr(prior) + " -> " + repr(after) + why)
+    emit(len(reads) == 3 and all(clean),
+         "cam-empty-name-write: " + "; ".join(reads)
+         + " | each read back a string=" + str(clean))
 """,
     },
 ]
@@ -3357,8 +4429,15 @@ def _build_cam_world():
 
 def _compose(row):
     box_line = ""
+    if row.get("needs") == "cam":
+        # A platform generation the previous row left in flight fails on an op added under it
+        # with a MODAL dialog that parks the main thread, so a CAM row pumps ~2 s before its body.
+        box_line = ("    import time as _settle_t\n"
+                    "    for _ in range(20):\n"
+                    "        adsk.doEvents()\n"
+                    "        _settle_t.sleep(0.1)\n")
     if row.get("need_box"):
-        box_line = '    body = make_box(des, "PB_{0}")\n'.format(row["id"].replace("-", "_"))
+        box_line += '    body = make_box(des, "PB_{0}")\n'.format(row["id"].replace("-", "_"))
     body = row["body_fn"]() if "body_fn" in row else row["body"]
     return _TEMPLATE.format(box_line=box_line, body=body.strip("\n") + "\n")
 

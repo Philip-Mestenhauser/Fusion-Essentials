@@ -30,29 +30,27 @@ _ACTION = _inputs.Choice("action", list(_ACTIONS), default="into_sketch",
 # edges). require="any" so faces, edges, and vertices are all accepted; the Sketch method rejects
 # anything it can't take and that surfaces as the mutation error.
 _ENTITIES = _inputs.GeometryHandleList("entities", require="any", required=True,
-    description="into_sketch: the handle(s) to project in (a face projects all of its edges). "
-                "intersect: the geometry to cross with the sketch plane.")
+    description="What to project in (a face gives all its edges), or to cross the sketch plane.")
 
 # projectToSurface's first argument is typed std::vector<BRepFace>, so a non-face here is a SWIG
 # TypeError rather than a wrong-but-working call.
 _TARGET_FACES = _inputs.GeometryHandleList("target_faces", require="face", required=True,
-    description="to_surface: the face(s) the curves are projected ONTO.")
+    description="The face(s) curves are projected ONTO.")
 
 _CURVE_HANDLES = _inputs.GeometryHandleList("curve_handles", require="edge",
-    description="to_surface: model edge(s) to project onto 'target_faces'.")
+    description="Model edge(s) to project onto 'target_faces'.")
 
 _BODIES = _inputs.BodyRefList("bodies",
-    description="intersect: the bodies to cut with the sketch plane.")
+    description="The bodies to cut with the sketch plane.")
 
 _PROJECT_TYPE = _inputs.Choice("project_type", ["closest_point", "along_vector"],
     default="closest_point",
-    description="to_surface: closest_point uses the nearest point of the face; along_vector "
-                "follows 'direction'.")
+    description="Nearest point of the face, or along 'direction'.")
 
 # projectToSurface wants an ENTITY for directionEntity (a ConstructionAxis is accepted), so
 # entity_only refuses a face handle - a face resolves to a direction VECTOR the call cannot consume.
 _DIRECTION = _inputs.AxisRef("direction", entity_only=True,
-    description="to_surface with project_type='along_vector': the direction to project along.")
+    description="project_type='along_vector': the direction to project along.")
 
 # The sketch-entity ref kinds sketch_constrain / sketch_dimension can address ('<type>:<index>') -
 # _common.ENTITY_REF_KINDS is the single source of truth; defer to it instead of a local copy that can
@@ -148,10 +146,8 @@ def _flag_tally(items, attr):
 
 def _landed_flag(yes: int, no: int, unknown: int):
     """read_flag semantics over a whole created set, from its _flag_tally counts: True/False when
-    every created entity agrees, None otherwise. None covers the three cases that support no single
-    claim - nothing was returned to read, the field would not read, and the entities disagree - so a
-    payload publishes null rather than the value the request asked for. The three are DIFFERENT
-    observations, which is why the note is worded from the counts and not from this verdict."""
+    every created entity agrees, None when nothing was returned, the field would not read, or the
+    entities disagree."""
     n = yes + no + unknown
     if not n or unknown:
         return None
@@ -164,9 +160,7 @@ def _landed_flag(yes: int, no: int, unknown: int):
 
 def _link_note(landed, requested: bool, yes: int, no: int, unknown: int) -> str:
     """The sentence about a project2 result's linkage, worded from the isLinked read-back on the
-    created curves - each branch states only what it observed. An empty return, a flag that would
-    not read, and curves that disagree are three different states, and none of them is the
-    requested value confirmed."""
+    created curves - each branch states only what it observed."""
     asked = "true" if requested else "false"
     if landed is True:
         return "Linked: the curves read back as LINKED, so they update when the source moves."
@@ -240,20 +234,11 @@ def _resolve_curve(sketch, ref, label):
 
 
 def _same_sketch(a, b):
-    """True when two sketch reads denote the SAME sketch, False when they denote DIFFERENT ones, and
-    None when the comparison COULD NOT BE MADE. A sketch read twice hands back a fresh proxy, so
-    identity alone cannot answer it - it is kept only as a free short-circuit.
-
-    The key is ``_common.native_identity``, never a bare entityToken. A token is DOCUMENT-LOCAL and a
-    Sketch reaches its source document through parentComponent (measured, live_api_facts.SHAPES), so
-    two components brought in by two references of ONE source design read byte-identical tokens and
-    the sketches they hold read them the same way: a token compare answers "same sketch" for two
-    demonstrably different sketches. The urn half of the identity is what tells them apart.
-
-    Both sides go through the None gate before the compare: two identities that BOTH failed to read
-    are not evidence they are one sketch. Callers branch on the three states explicitly - a bare
-    ``if _same_sketch(...)`` reads the unknown as the "different sketches" answer nothing was read
-    to support."""
+    """True when two sketch reads denote the SAME sketch, False for DIFFERENT ones, None when the
+    comparison COULD NOT BE MADE - so callers branch on all three states."""
+    # An entityToken is DOCUMENT-LOCAL: two components brought in by two references of ONE source
+    # design read byte-identical tokens, so a token compare answers "same sketch" for two different
+    # ones. ``_common.native_identity`` carries the urn half that tells them apart.
     if a is None or b is None:
         return None
     if a is b:
@@ -308,23 +293,17 @@ def _source_component(ent):
 
 
 def _refuse_foreign_context(sketch, sources, labels) -> str:
-    """The error naming a source the sketch's component cannot section, or ''.
-
-    MEASURED: intersectWithSketchPlane accepts only entities owned by the sketch's OWN component
-    context. A root-context sketch handed an occurrence PROXY body creates nothing and does not raise
-    (the silent zero this refusal replaces) even when the body crosses the plane; handed a foreign
-    component's NATIVE body it raises '2 : InternalValidationError : Utils::getObjectPath(...)'. A
-    sketch inside the component sections that component's own body normally. Refusing here names the
-    real cause up front instead of blaming the plane afterwards. A component that will not read is
-    left alone - an unreadable owner is evidence of nothing."""
+    """The error naming a source the sketch's component cannot section, or ''; a component that will
+    not read is left alone."""
+    # intersectWithSketchPlane accepts only entities owned by the sketch's OWN component context: an
+    # occurrence PROXY body creates nothing and does not raise, and a foreign component's NATIVE
+    # body raises '2 : InternalValidationError : Utils::getObjectPath(...)'.
     sk_comp = safe(lambda: sketch.parentComponent)
     if sk_comp is None:
         return ""
     for ent, label in zip(sources, labels):
         comp = _source_component(ent)
-        # `is not False`: the refusal STATES the source lives in another component, so only a proven
-        # difference raises it - an identity that did not read is evidence of nothing, exactly as an
-        # unreadable owner already is.
+        # `is not False`: only a PROVEN difference refuses; an identity that did not read is not one.
         if comp is None or _common.same_component(comp, sk_comp) is not False:
             continue
         owner = safe(lambda comp=comp: comp.name) or "another component"
@@ -444,11 +423,9 @@ def _into_sketch(sketch, entities, link) -> dict:
     # for isReference - so it is the landed state, never the request echoed at the caller.
     link_yes, link_no, link_unknown = _flag_tally(items, "isLinked")
     linked = _landed_flag(link_yes, link_no, link_unknown)
-    # MEASURED: project2 honours its isLinked argument exactly - link=true creates curves reading
-    # isLinked True (and isReference True), link=false reads both False. So a set that UNANIMOUSLY
-    # reads the opposite of the request is the call failing to do what it was asked, not a quirk to
-    # narrate in a note. The split / unreadable / empty results stay disclosed in the note instead:
-    # none of them supports one claim about the created set, so none is a measured contradiction.
+    # project2 honours its isLinked argument exactly, so a set that UNANIMOUSLY reads the opposite
+    # of the request is the call failing. Split / unreadable / empty results support no such claim
+    # and stay disclosed in the note instead.
     if linked is not None and linked != requested:
         return error(
             f"link={'true' if requested else 'false'} was requested, but all {created_count} "
@@ -670,17 +647,11 @@ def handler(entities="", sketch_name: str = "", link: bool = None, action: str =
 
 
 TOOL_DESCRIPTION = (
-    "Create sketch curves from existing model geometry. action='into_sketch' (default) is Fusion's "
-    "Project: 'entities' (find_geometry handles at edges, faces, or vertices) become curves on the "
-    "sketch plane, and 'link'=true keeps them linked to the source. action='to_surface' projects "
-    "curves ONTO 'target_faces'; the curves come from 'curve_refs' (ids in 'source_sketch', which "
-    "must NOT be the sketch being projected into) and/or 'curve_handles'. They land on the face, "
-    "off the sketch plane, so they do not close a profile. action='intersect' sections 'bodies' "
-    "and/or 'entities' with the sketch plane; anything missing the plane adds nothing, and when "
-    "Fusion reports each curve's source the result names the entities that contributed nothing. "
-    "'sketch_name' is the sketch written into (omit = most recent). to_surface and intersect create "
-    "reference curves linked to their source, and every action reports the created "
-    "'<type>:<index>' refs for sketch_constrain / sketch_dimension.\n"
+    "Create sketch curves from existing model geometry. into_sketch (default) is Fusion's Project: "
+    "'entities' become curves on the sketch plane. to_surface projects 'curve_refs'/'curve_handles' "
+    "onto 'target_faces' - they land ON the face, off the sketch plane, so they do not close a "
+    "profile. intersect sections 'bodies'/'entities' with the sketch plane. Every action reports "
+    "the created '<type>:<index>' refs for sketch_constrain / sketch_dimension.\n"
     + _outputs.produces_block(RETURNS)
 )
 
@@ -689,18 +660,17 @@ tool = (
     .add_input_property(*_ACTION.as_property())
     .add_input_property("entities", _ENTITIES.schema())
     .add_input_property("sketch_name", {"type": "string",
-            "description": "Sketch to project INTO (omit = most recently created sketch)."})
+            "description": "Sketch to project INTO (omit = most recent)."})
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
     .add_input_property("link", {"type": "boolean",
-            "description": "into_sketch: keep the projected curves linked to the source geometry (default true); false = static copy."})
+            "description": "Keep the curves linked to the source. Default true."})
     .add_input_property(*_TARGET_FACES.as_property())
     .add_input_property("source_sketch", {"type": "string",
-            "description": "to_surface: the sketch 'curve_refs' are read against - not the receiving sketch."})
+            "description": "The sketch 'curve_refs' are read against; not the receiving one."})
     .add_input_property("source_component", {"type": "string",
-            "description": "The component holding 'source_sketch', when two components carry that "
-                           "name - same forms as 'component'. Scopes the source only."})
+            "description": "Component holding 'source_sketch'; same forms as 'component'."})
     .add_input_property("curve_refs", {"type": "array", "items": {"type": "string"},
-            "description": "to_surface: '<type>:<index>' curve ids in 'source_sketch' to project."})
+            "description": "'<type>:<index>' curve ids in 'source_sketch'."})
     .add_input_property(*_CURVE_HANDLES.as_property())
     .add_input_property(*_PROJECT_TYPE.as_property())
     .add_input_property(*_DIRECTION.as_property())

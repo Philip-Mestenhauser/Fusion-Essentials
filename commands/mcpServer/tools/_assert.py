@@ -1,25 +1,11 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Typed POSTCONDITION kinds: the state-side mirror of ``_outputs.OutputKind``.
-
-An Edit tool declares ``postconditions=[...]`` at registration (Item.create_tool_item); the kernel
-runs capture -> handler -> verify and converts an ok() whose declared effect did not take into an
-error - the platform can return success while changing nothing. Severities: "hard" (reason ->
-isError; and a capture/verify that RAISES fails CLOSED - the honest "mutation may have succeeded,
-verification could not run" error, never a possible no-op passed as ok) and "soft" (payload marked
-unconfirmed, for effects that legitimately lag the call). A verification read that is merely
-UNAVAILABLE (a safe() read answering None) is the third case: where failing closed would refuse a
-legitimate degraded path - a direct-modelling design with no timeline, a document whose flag will not
-read - the kind publishes an explicit could-not-verify marker instead. Each kind names its own
-marker key (feature_health_confirmed / sketch_curves_confirmed / child_geometry_move_verified /
-version_confirmed / references_confirmed); the kernel's soft-severity path writes '<name>_confirmed'
-from the kind's name. Silence is never an option: an evidence key is absent only when the gate
-actually RAN. Evidence a verify reads is folded into
-the payload via setdefault, so a declared RETURNS key can be SUPPLIED by its postcondition rather
-than computed twice. A Postcondition NEVER mutates: capture/verify are safe() reads. See
-tools/CLAUDE.md for the authoring rule.
-"""
+"""Typed POSTCONDITION kinds: an Edit tool declares ``postconditions=[...]`` at registration and the
+kernel runs capture -> handler -> verify, turning an ok() whose declared effect did not take into an
+error. 'hard' fails the call (a capture/verify that RAISES fails CLOSED); 'soft' marks the payload
+unconfirmed. A verification read that is merely UNAVAILABLE publishes a could-not-verify marker, so
+an evidence key is absent only when the gate ran. capture/verify are safe() READS, never mutations."""
 
 import json
 
@@ -30,36 +16,24 @@ from ._common import measured, safe
 
 app = adsk.core.Application.get()
 
-# One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
 MAP_BLURB = ("POSTCONDITION kinds (VersionAdvanced/ReferencesFresh/FileLanded/...) - declare an Edit "
              "tool's verify-the-effect once; wired via Item.create_tool_item(postconditions=[...])")
 
 
 class Postcondition:
-    """One declared 'this must be true after the mutation'. Subclasses implement capture()/verify();
-    ``name`` keys the evidence and the lint inventory; ``severity`` is 'hard' (fail the call) or
-    'soft' (mark unconfirmed - for async cloud effects that may lag the call)."""
+    """One declared 'this must be true after the mutation' - subclasses implement capture()/verify()."""
 
     name = "postcondition"
     severity = "hard"
-    # Handler PARAMETER names this kind reads out of kwargs. wrap() checks them against the
-    # handler's own signature, so a kind pointed at a parameter the handler does not take fails at
-    # registration instead of silently reading None and verifying the wrong thing.
-    input_keys = ()
-    # The MCP read tool that re-reads THIS postcondition's ground truth, if one exists. Named in the
-    # honest error when verification itself could not run (capture/verify raised) so the caller knows
-    # where to re-check the state. None = no single read tool reveals it (e.g. a file on disk).
-    read_tool = None
+    input_keys = ()        # handler PARAMETER names this kind reads; wrap() checks them
+    read_tool = None       # the MCP read that re-reads this ground truth, named in a failed verify
 
     def capture(self, kwargs):
-        """Ground truth BEFORE the handler runs (kwargs = the handler's arguments). Return any value;
-        it is handed back to verify(). Default: nothing to capture."""
+        """Ground truth BEFORE the handler runs, handed back to verify()."""
         return None
 
     def verify(self, kwargs, payload, before):
-        """Re-read ground truth AFTER an ok() result. Returns (reason, evidence): reason '' = the
-        effect is confirmed; a non-empty reason names the observed fact that contradicts success.
-        evidence is a dict folded into the payload (setdefault - the handler's own values win)."""
+        """(reason, evidence) after an ok(): '' confirms, a reason names the contradicting fact."""
         return "", {}
 
     def describe(self) -> str:
@@ -68,12 +42,10 @@ class Postcondition:
 
 
 class VersionAdvanced(Postcondition):
-    """After a save: the active document is no longer modified. Catches the observed platform lie
-    where Document.save() returns True while versioning NOTHING (document demoted to non-top-level -
-    e.g. a design open behind its drawing, or a stale duplicate instance)."""
+    """After a save: the active document is no longer modified."""
 
     name = "version_advanced"
-    read_tool = "doc_get"        # active.is_modified + include=['versions'] re-read the save state
+    read_tool = "doc_get"
 
     def capture(self, kwargs):
         return bool(safe(lambda: app.activeDocument.isModified, False))
@@ -83,9 +55,6 @@ class VersionAdvanced(Postcondition):
             return "", {}                    # clean-doc no-op: nothing was supposed to change
         still = safe(lambda: app.activeDocument.isModified)
         if still is None:
-            # The read that would confirm the save is unavailable. DISCLOSED, not failed closed: the
-            # save may well have taken, and the marker is what the caller acts on (re-read with
-            # doc_get). Never a silent pass - a payload without this key means the gate DID run.
             return "", {"version_confirmed": False}
         if still:
             return ("save reported success but the document is STILL modified - Fusion created no "
@@ -95,25 +64,19 @@ class VersionAdvanced(Postcondition):
         return "", {"version_confirmed": True}
 
 
-# The refresh SETTLES asynchronously: measured live, the verify read taken right after
-# updateAllReferences returned reported a reference still out of date, while a second drawing_update
-# moments later found every reference already current - the refresh had taken, the first read just
-# raced it. So the re-read is a CLOCK-BOUNDED doEvents pump (the settle only advances while the main
-# thread runs), not a single sample. The budget matches doc_save_milestone's version-settle wait
-# (_VERSION_DEADLINE_S) and the poll interval drawing_export's landing wait (_LAND_POLL_SLEEP).
+# The refresh settles asynchronously and only advances while the main thread runs, so the re-read is
+# a clock-bounded doEvents pump rather than a single sample.
 _REFERENCE_SETTLE_S = 8.0
 _REFERENCE_SETTLE_POLL_SLEEP = 0.25
 
 
 class ReferencesFresh(Postcondition):
-    """After a reference refresh: no DocumentReference on the active document is still out of date.
-    Gates on the per-reference isOutOfDate walk - DrawingDocument.isUpToDate reports True even while
-    a reference is stale (observed live), so it is deliberately not consulted. The walk is re-read
-    under a bounded settle wait, so the call fails only on references that stayed stale for the whole
-    budget - never on the first sample of a refresh still landing."""
+    """After a reference refresh: no DocumentReference is still out of date after a settle wait."""
 
     name = "references_fresh"
-    read_tool = "doc_get"        # include=['xref_tree'] re-reads per-reference freshness/stale_count
+    read_tool = "doc_get"
+    # DrawingDocument.isUpToDate reads True while a reference is stale, so the per-reference
+    # isOutOfDate walk below is the gate instead.
 
     def _stale_count(self):
         refs = safe(lambda: app.activeDocument.documentReferences)
@@ -134,17 +97,12 @@ class ReferencesFresh(Postcondition):
 
         def probe():
             stale = self._stale_count()
-            # None means the walk could not be read at all: not a staleness verdict, and not the race
-            # this waits out - it ends the wait and is reported unconfirmed rather than spending the
-            # budget on a read that is failing for another reason.
+            # None is an unreadable walk, not a staleness verdict, so it ends the wait too.
             return stale is None or stale == 0, stale
 
         _settled, stale = _export.pump_until(probe, _REFERENCE_SETTLE_S,
                                              _REFERENCE_SETTLE_POLL_SLEEP)
         if stale is None:
-            # The per-reference walk would not read, so freshness is unknown - DISCLOSED with the
-            # marker rather than failed closed (a refresh whose read-back is unavailable is not
-            # evidence the refresh failed) and never a silent pass.
             return "", {"references_confirmed": False}
         if stale:
             return (f"refresh ran but {stale} reference(s) are STILL out of date - the references did "
@@ -153,12 +111,8 @@ class ReferencesFresh(Postcondition):
 
 
 class FileLanded(Postcondition):
-    """After an export: a non-empty file exists at the payload's path key. execute()/postProcess()
-    returning true is NOT proof a file was written (observed live) - the file on disk is. Supplies
-    size_bytes/file_exists as evidence so handlers don't re-stat.
-
-    It proves the file EXISTS; proving THIS call wrote it needs the pre-write state, which only the
-    handler holds (_export.snapshot before the write, fed to _export.verify_written)."""
+    """After an export: a non-empty file EXISTS at the payload's path key (proving THIS call wrote it
+    needs the pre-write state, which only the handler holds)."""
 
     name = "file_landed"
 
@@ -181,16 +135,8 @@ class FileLanded(Postcondition):
 
 
 class DeliverablesExist(Postcondition):
-    """REDUNDANT gate for export tools whose handler builds its own deliverables list: every file the
-    payload CLAIMS - each entry of a 'files' list (by its path_key) or a single 'file_path' - must
-    exist non-empty on disk. The handler's inline verification stays (it constructs the payload);
-    this catches a claim that drifted from reality (a handler bug, a path typo between stat and
-    payload, a file gone between). An ok payload claiming NEITHER key is itself a failure - an export
-    that reports success with no deliverable claim is exactly a false success - and an EMPTY list
-    claims none, so it fails on the same footing rather than passing a walk over nothing.
-
-    It proves the claimed files EXIST; proving THIS call wrote them is the handler's job, since only
-    the handler holds the pre-write state (_export.verify_written's `before`)."""
+    """Every file an export payload CLAIMS - each 'files' entry by its path_key, or a single
+    'file_path' - exists non-empty on disk; claiming neither key, or an EMPTY list, fails."""
 
     name = "deliverables_exist"
 
@@ -203,8 +149,6 @@ class DeliverablesExist(Postcondition):
         from . import _export
         paths = []
         entries = payload.get(self.list_key)
-        # An EMPTY list is not "a list of deliverables to walk" - it names none, which is the false
-        # success this kind exists to catch, so it falls through to the refusal below.
         if isinstance(entries, list) and entries:
             for i, it in enumerate(entries):
                 p = it.get(self.path_key) if isinstance(it, dict) else None
@@ -228,23 +172,14 @@ class DeliverablesExist(Postcondition):
         return f"{self.name}({self.list_key}|{self.single_key})"
 
 
-# Fusion joins the sentences of errorOrWarningMessage with this marker plus the feature's own name,
-# and REPEATS the whole run: one broken joint measured 684 characters carrying the same conflict
-# sentence four times over. A prefix of that blob lands mid-word and reads like a sentence Fusion
-# never finished, so every unhealthy message on the wire is condensed through the reader below.
+# errorOrWarningMessage joins its sentences with this marker and repeats the whole run.
 _COMPUTE_FAILED_MARKER = "Compute Failed"
-
-# Ceiling for one condensed message. The measured conflict sentence is 149 characters, so a real
-# Fusion failure crosses whole; the cap only bounds a message no one has seen yet.
 _MESSAGE_LIMIT = 240
 
 
 def compute_failure_message(raw, limit=_MESSAGE_LIMIT):
-    """The ONE readable sentence out of a Fusion compute-failure message: the text before the first
-    'Compute Failed' marker, whitespace-collapsed (the raw string carries embedded newlines), and
-    bounded - a cut is marked with a trailing ' ...' so a shortened message never reads as a complete
-    one. '' when there is nothing to say. The single home for this condensation: every surface that
-    republishes a failed compute reads through it, so none of them re-rolls a raw slice."""
+    """The one readable sentence of a Fusion compute failure: the text before the first 'Compute
+    Failed' marker, whitespace-collapsed and bounded, a cut marked with a trailing ' ...'."""
     text = " ".join((raw or "").split(_COMPUTE_FAILED_MARKER)[0].split())
     if len(text) > limit:
         return text[:limit].rstrip() + " ..."
@@ -253,14 +188,8 @@ def compute_failure_message(raw, limit=_MESSAGE_LIMIT):
 
 def compute_failure(entity):
     """('error' | 'warning', condensed message) when `entity` carries a FAILED compute state, else
-    None.
-
-    BOTH states count as failed: Fusion marks a warning-state feature 'Compute Failed' too, and
-    _common.timeline_health / assembly_get's broken_joints already class the two alike - measured, a
-    joint whose healthState read WARNING was the same joint assembly_get listed under broken_joints.
-    The STATE is what is read, never the message text. errorOrWarningMessage is read ONLY on the
-    unhealthy branch: the getter RAISES on some HEALTHY items (measured on a fresh AssemblyConstraint),
-    and a caught adsk error has measured rollback risk in a script context."""
+    None - the STATE is read, never the message text."""
+    # errorOrWarningMessage RAISES on some healthy items, so it is read only on the unhealthy branch.
     if entity is None:
         return None
     states = adsk.fusion.FeatureHealthStates
@@ -277,33 +206,15 @@ def compute_failure(entity):
 
 
 def health_state_read(entity):
-    """True when `entity` ANSWERED a compute state - the half of compute_failure's contract its None
-    hides.
-
-    compute_failure returns None for two different things: a state it deliberately does not flag
-    (Healthy, Suppressed, a collapsed group's rollup) and an entity carrying no healthState at all -
-    measured, an AsBuiltJoint raises AttributeError on both healthState and errorOrWarningMessage.
-    A caller that PUBLISHES a health verdict asks this before turning that None into 'healthy', so
-    "read it, it is fine" stays distinguishable from "could not read it"."""
+    """True when `entity` ANSWERED a compute state - what tells compute_failure's 'not flagged' None
+    apart from its 'carries no healthState' None."""
     return entity is not None and safe(lambda: entity.healthState) is not None
 
 
 def compute_state(entity):
-    """('broken' | 'healthy' | 'unknown', the compute_failure pair or None) for ONE entity - the ONE
-    dispatch over the two readers above, so every surface publishing a health verdict reaches the
-    same one on the same entity.
-
-    BOTH the entity and its timelineObject are asked, ENTITY FIRST, and the first failure found
-    decides: 'broken' carries that failure's ('error' | 'warning', condensed message) pair, so a
-    caller republishing the text states the failure the verdict was taken from rather than a second
-    read of its own. The pairing is what makes an answer readable at all for two classes - MEASURED,
-    an AsBuiltJoint and a RigidGroup each raise AttributeError on healthState AND
-    errorOrWarningMessage while the TimelineObject beside them answers both.
-
-    'healthy' means a source ANSWERED a state compute_failure does not flag - Healthy, Suppressed
-    (the author parked that entity), or a collapsed group's rollup. 'unknown' means NEITHER source
-    answered: an unread state is not a clean bill of health, so it is neither 'broken' nor 'healthy'
-    and each caller counts it apart or withholds its flag. A READ - it never mutates."""
+    """('broken' | 'healthy' | 'unknown', the compute_failure pair or None) for ONE entity: the
+    entity and its timelineObject are asked, entity first, and 'unknown' means neither answered."""
+    # An AsBuiltJoint or RigidGroup raises on healthState while its TimelineObject answers.
     sources = (entity, safe(lambda: entity.timelineObject))
     for src in sources:
         failure = compute_failure(src)
@@ -315,15 +226,11 @@ def compute_state(entity):
 
 
 class FeatureHealthy(Postcondition):
-    """After a feature-creating Edit: every timeline item the handler ADDED computed cleanly. A
-    feature can be add()ed successfully - a truthy feature object returned - yet FAIL to compute
-    (healthState error: the timeline's yellow/red mark), so the returned object is not proof. Walks
-    only the items added between capture and verify. A design with no timeline (direct modeling) or
-    a call that added no timeline items is skipped, not failed; a compute WARNING is folded as
-    evidence rather than failing the call."""
+    """After a feature-creating Edit: every timeline item added between capture and verify computed
+    cleanly. No timeline or no added item is skipped; a WARNING is folded as evidence."""
 
     name = "feature_healthy"
-    read_tool = "design_get"      # the default projection carries the timeline health rollup
+    read_tool = "design_get"
 
     def _timeline(self):
         from ._common import design
@@ -338,11 +245,7 @@ class FeatureHealthy(Postcondition):
         tl = self._timeline()
         count = safe(lambda: tl.count) if tl is not None else None
         if tl is None or before is None or count is None:
-            # No timeline to walk, or it would not count. DISCLOSED with a marker rather than failed
-            # closed: a DIRECT-modelling design legitimately has no timeline, so failing closed here
-            # would turn every direct-mode feature edit into an error. The marker says the health
-            # gate did not run - a payload carrying neither it nor features_verified means the call
-            # added nothing to gate.
+            # A direct-modelling design legitimately has no timeline, so this discloses, not fails.
             return "", {"feature_health_confirmed": False}
         if count <= before:
             return "", {}                    # nothing new on the timeline - nothing to gate
@@ -352,8 +255,6 @@ class FeatureHealthy(Postcondition):
             if item is None:
                 continue
             nm = safe(lambda: item.name) or "the created feature"
-            # The shared classifier reads the state and condenses the message - both branches below
-            # publish a WHOLE sentence, never a raw prefix of Fusion's repeating blob.
             failure = compute_failure(item)
             if failure is None:
                 continue
@@ -381,15 +282,8 @@ def _xyz(point):
 
 
 def entity_position(entity):
-    """A position fingerprint for ONE sketch entity: its bounding-box corners in cm PLUS its
-    start/end sketch-point coordinates when it has them. Measured: a sketch point carries a
-    (degenerate) boundingBox too, so the box alone covers every sketch entity - but a box is
-    INVARIANT under any symmetry of the thing it bounds, so a line rotated 180 degrees about its own
-    midpoint reads identical while Fusion really did move it. The endpoints break exactly that tie
-    (they swap), which is why both go into the fingerprint. This is the one sampler a sketch-move's
-    own coordinate read-back and SketchCurvesChanged's fingerprint share, so the handler's verdict
-    and the declared postcondition read the same ground truth. None when nothing can be read.
-    A READ - it never mutates."""
+    """A position fingerprint for ONE sketch entity - bbox corners in cm PLUS start/end sketch-point
+    coordinates, which break the tie a bbox misses on a 180-degree rotation about the midpoint."""
     marks = []
     bb = safe(lambda: entity.boundingBox)
     for get_pt in (lambda: bb.minPoint, lambda: bb.maxPoint):
@@ -405,25 +299,9 @@ def entity_position(entity):
 
 
 class SketchCurvesChanged(Postcondition):
-    """After a sketch edit: the target sketch's entity set differs. Keyed entityToken ->
-    (length in cm, position), over the sketch's CURVES and its POINTS - a point-only edit (moving
-    'point:0') touches no curve at all, so a curves-only walk would call it a no-op. An in-place
-    extend (same curve, longer) registers as readily as an add or a delete, a spline split registers
-    even though the count is unchanged, and so does a pure TRANSLATION, which changes neither the
-    token nor the length. ``keys`` names the handler kwargs holding the sketch to read, in priority
-    order: a copy into another sketch must verify its TARGET, since the source it copied FROM is left
-    untouched. Resolves through the same name-or-most-recent contract the handler uses. NEVER
-    mutates - capture/verify are safe() reads.
-
-    ``scope_keys`` pairs each of those name keys with the handler's component-SCOPE kwarg for the
-    SAME reference: the fingerprint reads the sketch the handler's own scope resolved. It is the
-    companion of that scope, not a guard against it - a handler with no component input pairs
-    nothing and both sides run the same design-wide walk. An UNPAIRED scope reads a different
-    sketch: the handler narrows a shared name to one component and lands its edit while this walk,
-    seeing every component, resolves none and reports 'sketch_curves_confirmed: false'.
-
-    The pairing is positional and each scope may be '', because a tool with two sketch references
-    carries two scopes and neither may borrow the other's component."""
+    """After a sketch edit: the target sketch's curves AND points differ, keyed entityToken ->
+    (length in cm, position). ``keys`` names the sketch kwargs in priority order, and ``scope_keys``
+    pairs each POSITIONALLY with the handler's component-scope kwarg for the same reference."""
 
     name = "sketch_curves_changed"
     read_tool = "sketch_get"
@@ -431,8 +309,6 @@ class SketchCurvesChanged(Postcondition):
     def __init__(self, keys=("sketch_name",), scope_keys=()):
         self.keys = tuple(keys)
         self.scope_keys = tuple(scope_keys)
-        # the handler parameters this kind reads; wrap() refuses a name the handler does not take,
-        # so a typo'd key cannot silently fall through to the most-recent sketch.
         self.input_keys = self.keys + tuple(k for k in self.scope_keys if k)
 
     def _fingerprint(self, kwargs):
@@ -443,8 +319,7 @@ class SketchCurvesChanged(Postcondition):
             return None
         wanted, scope = "", ""
         for i, key in enumerate(self.keys):
-            # name and scope are taken from the SAME position, and both are carried past a blank
-            # name: an empty name means "the most recent sketch", and the scope decides whose.
+            # A blank name means "the most recent sketch", and its paired scope decides whose.
             wanted = (kwargs.get(key) or "").strip()
             scope = ((kwargs.get(self.scope_keys[i]) or "").strip()
                      if i < len(self.scope_keys) and self.scope_keys[i] else "")
@@ -468,7 +343,7 @@ class SketchCurvesChanged(Postcondition):
             p = safe(lambda i=i: points.item(i))
             if p is None:
                 continue
-            # a SketchPoint carries no .length (measured), so position is its whole fingerprint
+            # a SketchPoint carries no .length, so position is its whole fingerprint
             marks[("point", safe(lambda p=p: p.entityToken) or f"#{i}")] = (None, entity_position(p))
         return {"marks": marks, "curves": n}
 
@@ -481,10 +356,6 @@ class SketchCurvesChanged(Postcondition):
     def verify(self, kwargs, payload, before):
         after = self._fingerprint(kwargs)
         if before is None or after is None:
-            # The sketch would not read on one side of the call, so changed cannot be told from
-            # unchanged. DISCLOSED with a marker rather than failed closed: a legitimate edit can
-            # leave the named sketch unresolvable on one side (a sketch deleted by the call, a
-            # design that closed under it), and a payload without this key means the gate DID run.
             return "", {"sketch_curves_confirmed": False}
         if after["marks"] == before["marks"]:
             return ("the edit reported success but the sketch's entities are unchanged - nothing was "
@@ -493,27 +364,18 @@ class SketchCurvesChanged(Postcondition):
 
 
 class ChildGeometryMoved(Postcondition):
-    """After a joint mutation: a part the joint REPOSITIONED carried its NESTED geometry with it. A
-    transform is a CLAIM; a body vertex/bbox corner is EVIDENCE. Per top-level occurrence, this captures
-    its transform translation plus a WORLD-space point on its DEEPEST owned body (the nested child if
-    one exists); after the mutation, an occurrence whose transform TRANSLATED while that geometry point
-    stayed frozen is a reposition that did not propagate into the nested geometry - failed, naming the
-    direct-':origin'-snap workaround. A part that did not move (expected-zero) passes, but its flag is
-    null rather than True: with nothing repositioned there is no move to verify, and
-    'repositioned_occurrences' names the parts that did move. Reads geometry back, never a status flag
-    or the transform itself. NEVER mutates - capture/verify are safe() reads."""
+    """After a joint mutation: a part whose transform TRANSLATED carried its deepest nested body
+    geometry with it. The flag is null - no verdict - when nothing was repositioned, and
+    'repositioned_occurrences' names the parts that did move."""
 
     name = "child_geometry_moved"
-    read_tool = "find_geometry"          # re-read the GEOMETRY (a vertex/bbox), not assembly_get's transform
+    read_tool = "find_geometry"
 
     _MOVE_TOL_CM = 0.01                   # 0.1 mm - below this a "move" is joint-solver noise
 
     def _translation(self, occ):
-        """The occurrence's WORLD translation. transform2, not transform: measured on a nested proxy
-        under a rotated+translated parent, .transform reads the LOCAL matrix (parent not composed in)
-        while .transform2 reads the composed world matrix - and this postcondition compares that
-        translation against a WORLD-space geometry point, so a local matrix would read "moved" against
-        geometry that did not, or the reverse. .transform is the fallback for a build without it."""
+        """The occurrence's WORLD translation, compared below against a world-space geometry point."""
+        # .transform on a nested proxy is the LOCAL matrix; .transform2 composes the parent in.
         m = safe(lambda: occ.transform2) or safe(lambda: occ.transform)
         t = safe(lambda: m.translation) if m is not None else None
         if t is None:
@@ -522,11 +384,8 @@ class ChildGeometryMoved(Postcondition):
                 safe(lambda: t.z, 0.0) or 0.0)
 
     def _deep_body_point(self, occ):
-        """A WORLD-space bbox-min corner of a body on occ's DEEPEST descendant occurrence that owns one
-        (else occ's own first body). The nested child is the propagation the observed defect dropped, so
-        the deepest owned body is the discriminating sample; a world bbox corner registers a translation
-        OR a rotation as movement, so a legitimate reposition never reads frozen. None if no body is
-        reachable (nothing to gate)."""
+        """A WORLD-space bbox-min corner of a body on occ's DEEPEST descendant occurrence that owns
+        one, else occ's own first body; None when no body is reachable."""
         best, best_depth = None, -1
         stack = [(occ, 0)]
         while stack:
@@ -552,8 +411,7 @@ class ChildGeometryMoved(Postcondition):
                 safe(lambda: mn.z, 0.0) or 0.0)
 
     def _top_occurrences(self):
-        """The root's top-level occurrences - or None when the walk itself could not be read, which is
-        NOT the same fact as a design that holds none (nothing to gate)."""
+        """The root's top-level occurrences, or None when the walk itself could not be read."""
         from ._common import design
         d = design()
         root = safe(lambda: d.rootComponent) if d else None
@@ -584,9 +442,6 @@ class ChildGeometryMoved(Postcondition):
 
     def verify(self, kwargs, payload, before):
         if before is None:
-            # The occurrence walk was unreadable, so nothing was sampled before the mutation.
-            # DISCLOSED with a marker rather than failed closed: an unreadable READ of the assembly
-            # is not evidence the joint failed, and the flag says the propagation gate did not run.
             return "", {"child_geometry_move_verified": False}
         if not before:
             return "", {}                     # no occurrence carried a body to gate
@@ -597,8 +452,6 @@ class ChildGeometryMoved(Postcondition):
             tr1 = self._translation(occ)
             pt1 = self._deep_body_point(occ)
             if tr1 is None or pt1 is None:
-                # This part cannot be re-read, so the gate did not cover it - named in the payload
-                # below rather than skipped in silence.
                 unverified.append(safe(lambda occ=occ: occ.name) or "an unnamed occurrence")
                 continue
             parent_moved = self._dist(tr0, tr1)
@@ -619,27 +472,18 @@ class ChildGeometryMoved(Postcondition):
                         "directly does not work - joint_create repositions the top-most free "
                         "ancestor, stranding deeper geometry."), {}
         if unverified:
-            # The flag reports whether the CHECK ran, not whether a part moved: an occurrence that
-            # could not be re-read leaves this call's propagation only partly gated, so the flag goes
-            # False and the payload names exactly which parts were never checked.
+            # The flag reports whether the CHECK ran, not whether a part moved.
             return "", {"child_geometry_move_verified": False,
                         "child_geometry_unverified": unverified}
         if not repositioned:
-            # NOTHING was repositioned, so there was no move to verify. The flag is tri-state for
-            # exactly this: True claimed a VERIFIED MOVE on a call that moved nothing - measured on a
-            # joint that computed broken and left its part where it stood, whose payload then read
-            # created:true + child_geometry_move_verified:true. null is "no verdict", not "no move
-            # happened"; 'repositioned_occurrences' carries the fact the flag no longer overstates.
+            # Nothing moved, so there is no verdict to give - null, not True.
             return "", {"child_geometry_move_verified": None, "repositioned_occurrences": []}
         return "", {"child_geometry_move_verified": True,
                     "repositioned_occurrences": repositioned}
 
 
 def _verification_failed(post, ex):
-    """The HONEST fail-closed result when a HARD postcondition's capture or verify RAISED, so the
-    effect could not be checked. The mutation may have taken; its VERIFICATION did not run - reported
-    as an error (never a possible no-op passed as ok), naming the exception and, when the kind knows
-    one, the read tool that re-reads the state."""
+    """The fail-closed error result when a HARD postcondition's capture or verify RAISED."""
     detail = str(ex)[:160]
     tool = getattr(post, "read_tool", None)
     reread = (f"Re-read with {tool} and retry only if the change did not take."
@@ -653,10 +497,8 @@ def _verification_failed(post, ex):
 
 
 def _check_input_keys(handler, posts):
-    """Refuse a postcondition pointed at a handler parameter that does not exist. Such a key reads
-    None out of kwargs and the kind falls back to its own default target - here, the most recently
-    created sketch - so the call would verify the WRONG state and still report success. Raised at
-    registration (import time), where it is a loud wiring bug rather than a silent wrong verdict."""
+    """Raise at registration when a postcondition names a handler parameter that does not exist -
+    such a key reads None and the kind would verify its default target instead."""
     import inspect
     try:
         params = set(inspect.signature(handler).parameters)
@@ -672,15 +514,9 @@ def _check_input_keys(handler, posts):
 
 
 def wrap(handler, postconditions):
-    """Wrap an Edit handler with capture -> handler -> verify. Runs verify only on a JSON ok() result;
-    error results and non-JSON payloads pass through untouched. Applied INSIDE _write_guard.wrap (the
-    guard stamps acted_on on whatever this returns).
-
-    Fail-CLOSED for HARD postconditions: a capture that RAISED (so the before/after baseline is gone)
-    or a verify that RAISED (so ground truth is unreadable) means verification is IMPOSSIBLE - the call
-    returns isError with honest wording, never a possible no-op passed as ok. SOFT postconditions keep
-    the non-fatal annotation. The mutation is never rolled back - the error reports the uncertainty
-    honestly and points at the re-read instead."""
+    """Wrap an Edit handler with capture -> handler -> verify, running verify only on a JSON ok().
+    A raising capture or verify fails the call for a HARD kind and annotates for a SOFT one; the
+    mutation is never rolled back. Applied INSIDE _write_guard.wrap."""
     posts = list(postconditions or [])
     if not posts:
         return handler

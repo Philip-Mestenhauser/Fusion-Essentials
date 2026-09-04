@@ -14,24 +14,19 @@ import adsk.core
 
 from ._common import safe
 
-# The "what to reuse from here" catalog line for the generated CLAUDE.md helper map (see
-# tests/gen_manifest.py): each symbol with the one clause that says WHEN to reach for it. The
-# mechanism behind a clause lives at the symbol itself, in its test, or in VERIFIED_API_FACTS.md.
 MAP_BLURB = (
-    "the cloud data-model substrate (hub/project/folder/URN). resolve_file_reference - the ONE "
-    "URN-or-name-in-a-project DataFile resolver, which REFUSES a name matching several files; "
-    "navigate_folder_path - the ONE folder-PATH walk from a project root, creating nothing: the "
-    "folder and its cleaned path, or the miss triple each caller words its own refusal from; "
-    "FUSION_NATIVE_EXTENSIONS/name_extension - the download-refusal fact that the NAME carries the "
-    "true extension, fileExtension does not")
+    "the cloud data-model substrate: resolve_file_reference - the ONE "
+    "URN-or-name-in-a-project DataFile resolver, a name matching several files REFUSED; "
+    "navigate_folder_path - the folder-PATH walk from a project root, creating nothing, and the "
+    "miss triple each caller words its own refusal from; FUSION_NATIVE_EXTENSIONS/name_extension "
+    "- the NAME carries the true extension, fileExtension does not")
 
 app = adsk.core.Application.get()
 
 _UNREAD = object()      # a collection read that RAISED - distinct from one that came back empty
 
-# Every save made through this server is authored by an AI agent, not a human. Document.save/saveAs
-# has no author field, so the version description carries the attribution. _agent_description() is the
-# single chokepoint - reuse it wherever a version description is written so the marker is never lost.
+# Document.save/saveAs has no author field, so the version description carries the attribution every
+# save made through this server needs. _agent_description() is the one chokepoint that writes it.
 AI_AGENT_SAVE_MARKER = "[AI agent]"
 
 
@@ -80,14 +75,10 @@ def _split_path(path):
 
 
 def _child_folder_by_name(folder, name):
-    """Return the immediate child folder matching name (case-insensitive), or None.
-
-    First match is CORRECT here: folder names are UNIQUE within a container, so the first match is
-    the only match. `dataFolders.add()` with a name a sibling already carries raises
-    `3 : CB_NAE - Another object with the same name already exists in this container` - the
-    container itself enforces it, below this server's own pre-check. A FILE name carries no such
-    rule: see doc_lifecycle._file_in_folder_by_name, which refuses that ambiguity instead.
-    """
+    """The immediate child folder matching name (case-insensitive), or None. First match is CORRECT
+    here: folder names are UNIQUE within a container - dataFolders.add() with a name a sibling
+    carries raises 'CB_NAE - Another object with the same name already exists in this container'.
+    A FILE name carries no such rule (doc_lifecycle._file_in_folder_by_name refuses that)."""
     want = (name or "").strip().lower()
     try:
         for f in folder.dataFolders.asArray():
@@ -111,35 +102,22 @@ def _resolve_folder_path(root, segments):
 
 
 def navigate_folder_path(root, path):
-    """Walk a raw folder PATH string from `root`, creating nothing - the ONE folder-path navigation
-    every cloud tool scopes a project read/move through.
-
-    Returns (folder, path_string, miss). On success `folder` is the deepest folder and `path_string`
-    its cleaned path ("" for `root` itself), miss None. On a miss `folder`/`path_string` are None and
-    `miss` carries the facts a refusal names: {'segment' - the segment that did not resolve, 'at' -
-    the path of the deepest folder that DID ("(project root)" for `root`), 'available' - that
-    folder's subfolder names, or None when the enumeration RAISED}. Each caller words its own refusal
-    from them, so one walk serves the file listing, the by-name file resolver and a move destination
-    without their nouns converging.
-
-    available=None and available=[] are DIFFERENT answers and no caller may render them alike: a
-    folder whose dataFolders enumeration failed is a hole in the search space (the segment may well
-    be there), while an empty list means the walk looked and the folder is genuinely childless. The
-    same distinction _walk_folder draws with truncated['unread'].
-    """
+    """Walk a raw folder PATH string from `root`, creating nothing: (folder, cleaned path, None) on
+    success, else (None, None, {'segment', 'at', 'available'}) for the caller to word its own
+    refusal from. available=None and available=[] are DIFFERENT answers - None is an enumeration
+    that RAISED (the segment may be there), [] a folder that is genuinely childless."""
     cur, cur_path = root, ""
     for seg in _split_path(path):
         nxt = _child_folder_by_name(cur, seg)
         if nxt is None:
             # _child_folder_by_name answers None for BOTH 'no such child' and 'the enumeration
-            # raised', so the sibling read is taken here with its own sentinel to tell them apart.
+            # raised', so the sibling read is retaken here with a sentinel to tell them apart.
             folders = safe(lambda: cur.dataFolders.asArray(), _UNREAD)
             names = (None if folders is _UNREAD
                      else [n for n in (safe(lambda f=f: f.name) for f in folders) if n])
             return None, None, {"segment": seg, "at": cur_path or "(project root)",
                                 "available": names}
-        # The folder's OWN name, not the segment as typed: the match is case-insensitive, and the
-        # path this returns is published as the folder the walk landed in.
+        # The folder's OWN name, not the segment as typed - the match is case-insensitive.
         cur_path = f"{cur_path}/{safe(lambda n=nxt: n.name) or seg}" if cur_path else (
             safe(lambda n=nxt: n.name) or seg)
         cur = nxt
@@ -147,12 +125,10 @@ def navigate_folder_path(root, path):
 
 
 def _ensure_folder_path(root, segments, created_out=None):
-    """Walk a folder path from `root`, creating any missing segments (mkdir -p).
-    Returns (deepest_folder, created_names_list) or raises on failure.
-
-    Pass `created_out` (a list the caller owns) to receive each created name AS it is created: the
-    return value is lost when a later segment raises, and the folders already made are real
-    mutations the caller has to disclose."""
+    """Walk a folder path from `root`, creating any missing segments (mkdir -p): (deepest_folder,
+    created_names) or raises. Pass `created_out` (a list the caller owns) to receive each name AS it
+    is created - the return value is lost when a later segment raises, and the folders already made
+    are real mutations the caller has to disclose."""
     cur = root
     created = created_out if created_out is not None else []
     for seg in segments:
@@ -198,12 +174,9 @@ def _b64url_decode(segment):
 
 
 def _urn_candidates(raw):
-    """List URN candidates to try for a raw identifier (a URN, or a Fusion web URL).
-
-    For a web URL, the lineage URN is one of the path segments, base64url-encoded
-    (e.g. '.../data/<folderURN_b64>/<fileURN_b64>'). Each segment is decoded and any that
-    decode to a 'urn:adsk...' string are kept. The raw value itself is always tried first.
-    """
+    """The URN candidates to try for a raw identifier, the raw value first. In a Fusion web URL the
+    lineage URN is a base64url-encoded path segment, so each segment is decoded and kept when it
+    decodes to a 'urn:adsk...' string."""
     raw = (raw or "").strip()
     seen = []
 
@@ -240,8 +213,8 @@ def _resolve_data_file(raw):
     return None, None, candidates
 
 
-# Fusion-NATIVE data. The download binding is explicit: DataFile.download handles only non-Fusion
-# data and FAILS for an F3D; a design leaves through design_export, a drawing through drawing_export.
+# DataFile.download handles only non-Fusion data and FAILS for these: a design leaves through
+# design_export, a drawing through drawing_export.
 FUSION_NATIVE_EXTENSIONS = frozenset({"f3d", "f2d", "f3z"})
 
 # How many sibling names an ambiguity/miss error lists before it says "and N more".
@@ -249,11 +222,9 @@ _NAME_HINT_LIMIT = 12
 
 
 def name_extension(name):
-    """The extension a DataFile's NAME carries, lowercased ('' when it carries none).
-
-    The name is the trustworthy source: DataFile.fileExtension is measured WRONG for a non-CAD
-    upload (an uploaded .txt read 'sql'), while its name stayed 'probe_note.txt'.
-    """
+    """The extension a DataFile's NAME carries, lowercased ('' when it carries none). The name is the
+    trustworthy source: DataFile.fileExtension reads WRONG for a non-CAD upload (an uploaded .txt
+    read 'sql' while its name stayed 'probe_note.txt')."""
     base = (name or "").strip()
     return base.rsplit(".", 1)[-1].lower() if "." in base else ""
 
@@ -277,14 +248,10 @@ def _name_hint(names):
 
 
 def resolve_file_reference(raw, project="", project_id="", folder=""):
-    """Resolve ONE DataFile from `raw`: a lineage URN / Fusion web URL, or a file NAME scoped to a
-    project (optionally to a folder path within it). Returns (data_file, meta, err) - exactly one of
-    data_file / err is set; meta carries how it resolved ({matched_by, urn, folder_path}).
-
-    A NAME is NOT unique across a project's folders (two folders may each hold a 'notes.txt'), so a
-    name matching several files is REFUSED with every candidate's folder path and URN - never the
-    first hit. Matching is case-insensitive EXACT on the whole name; a miss lists what IS there.
-    """
+    """Resolve ONE DataFile from `raw` - a lineage URN / Fusion web URL, or a file NAME scoped to a
+    project (optionally a folder path in it): (data_file, meta, err), exactly one of data_file/err
+    set. A NAME is not unique across a project's folders, so a name matching several files is
+    REFUSED with each candidate's folder path and URN; matching is case-insensitive EXACT."""
     from . import _data_read              # deferred: _data_read imports this module
 
     ident = (raw or "").strip()

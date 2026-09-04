@@ -52,6 +52,13 @@ def _restore_resolver():
 
 
 @pytest.fixture(autouse=True)
+def _entitled(monkeypatch):
+    """Every test runs against an installation reading the operation's strategy as allowed to
+    generate; the entitlement tests patch this same seam with their own answer."""
+    monkeypatch.setattr(cg, "strategy_generation_allowed", lambda name: True)
+
+
+@pytest.fixture(autouse=True)
 def _clean_generations():
     """A launch registers a future in _cam_common._GENERATIONS (shared, session-lived) - clear it
     around each test so entries never leak into test_cam_generate's registry assertions."""
@@ -162,6 +169,18 @@ class _ClampingDepth(_Selection):
         pass
 
 
+class _UnreadableOpenRail(_Selection):
+    """A rail the operation reports back with no readable isOpen - the shape a selection class that
+    carries no such property has, and the one a coerced read publishes as 'closed'."""
+    @property
+    def isOpen(self):
+        raise RuntimeError("isOpen is unreadable on this rail")
+
+    @isOpen.setter
+    def isOpen(self, _v):
+        pass
+
+
 class _InertLoopType(_Selection):
     """A selection that SWALLOWS a loopType assignment and keeps its default - the SWIG behaviour a
     set-then-read-back exists to catch."""
@@ -212,9 +231,12 @@ class _HoleParamValue:
 
 
 class _Param:
-    def __init__(self, value):
+    def __init__(self, value, editable=True):
         self.value = value
         self.expression = None
+        # read for SURFACE sets only, where a False is what leaves the deprecated
+        # checkSurfaceSelection out; the curve params route by presence and never consult it
+        self.isEditable = editable
 
 
 class _Params:
@@ -233,13 +255,14 @@ class _Future:
 
 
 class _Op:
-    def __init__(self, name, params, has_tp=True, valid=True, warning=""):
+    def __init__(self, name, params, has_tp=True, valid=True, warning="", strategy="contour2d"):
         self.name = name
         self.parameters = _Params(params)
         self.hasToolpath = has_tp
         self.isToolpathValid = valid
         self.warning = warning
         self.isGenerating = False
+        self.strategy = strategy     # what the entitlement pre-flight reads before a launch
 
 
 class _Coll:
@@ -448,6 +471,31 @@ class TestHandleKindRequirement:
         assert res["isError"] is True
         assert "must be a face" in res["message"] and "_Edge" in res["message"]
         assert op.parameters.itemByName("contours").value.applied == 0
+
+    def test_surfaces_refuses_an_edge_handle_naming_the_type_it_got(self, monkeypatch):
+        # A surface set takes FACES. Every other surfaces test stubs the resolver seam, so this is
+        # the one place the require= that kind is wired with decides anything: an edge resolved
+        # through would be assigned into the operation's surface parameter as the wrong type.
+        op = _geodesic_op()
+        cam = _CAM([_Setup([op])])
+        monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
+        self._resolves_to(monkeypatch, _Edge())
+        res = cg.handler(operation="Geodesic1", selection="surfaces", handles=["h"], generate=False)
+        assert res["isError"] is True
+        assert "must be a face" in res["message"] and "_Edge" in res["message"]
+        assert op.parameters.itemByName("driveSurfaces").value.value == []
+
+    def test_surfaces_takes_a_face_handle_through_the_same_kind(self, monkeypatch):
+        # the refusal above must come from the require=, not from this fixture refusing everything.
+        op = _geodesic_op()
+        cam = _CAM([_Setup([op])])
+        monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
+        face = _Face()
+        self._resolves_to(monkeypatch, face)
+        out = _payload(cg.handler(operation="Geodesic1", selection="surfaces", handles=["h"],
+                                  generate=False))
+        assert out["selections"] == 1
+        assert op.parameters.itemByName("driveSurfaces").value.value == [face]
 
     def test_the_matching_handle_kind_still_resolves(self, monkeypatch):
         # The two refusals above must come from the require=, not from the real kind refusing
@@ -1232,12 +1280,13 @@ class _ThirdValueHeightParam(_Param):
 
 
 class _QuotedStoreHeightParam(_Param):
-    """Stores the SINGLE-QUOTED form of whatever is written - the shape a CAM string parameter's
-    stored expression carries (receipt cam-parameter-expressions, whose probe reads 'context' and
-    'strategy' back starting with a quote). A height _mode is a string parameter this tool writes
-    UNQUOTED, so a byte compare against the read-back convicts a store that did what it was asked."""
+    """Starts holding nothing and stores the SINGLE-QUOTED form of whatever is written - the shape a
+    CAM string parameter's stored expression carries (receipt cam-parameter-expressions reads
+    'context' and 'strategy' back starting with a quote). Holding nothing, it takes the request
+    unwrapped, so its read-back differs from what was written by the wrapper alone."""
     def __init__(self):
         super().__init__(None)
+        self.__dict__["_expr"] = None      # holding nothing yet - not the quoted spelling of None
 
     @property
     def expression(self):
@@ -1439,3 +1488,1051 @@ class TestGenerate:
                                   generate=False))
         assert "launched" not in out and cam.generated == []
         assert _cam._GENERATIONS == {}
+
+
+class TestGenerateEntitlement:
+    """The inline generate runs the pre-flight cam_generate's launch runs, off the same
+    _cam_common.strategy_generation_allowed seam: an operation whose strategy reads
+    isGenerationAllowed false is not launched, because such a launch parks with nothing to poll."""
+
+    def _run(self, monkeypatch, allowed, **kw):
+        op = _curve_op(strategy="swarf")
+        cam = _CAM([_Setup([op])], future=_Future(complete=False))
+        _install(monkeypatch, cam, [_Edge()])
+        monkeypatch.setattr(cg, "strategy_generation_allowed", lambda name: allowed)
+        return cam, cg.handler(operation="2D Contour1", selection="chain", handles=["h"], **kw)
+
+    def test_a_blocked_strategy_keeps_the_selection_and_launches_nothing(self, monkeypatch):
+        cam, res = self._run(monkeypatch, False)
+        out = _payload(res)
+        assert out["selections"] == 1                 # the selection is this tool's own job
+        assert cam.generated == [] and _cam._GENERATIONS == {}
+        assert out["launched"] is False and "handle" not in out
+        assert out["entitlement_blocked"] == {"operation": "2D Contour1", "strategy": "swarf"}
+        assert "swarf" in out["note"] and "isGenerationAllowed false" in out["note"]
+
+    def test_an_allowed_strategy_launches_and_publishes_no_entitlement_key(self, monkeypatch):
+        cam, res = self._run(monkeypatch, True)
+        out = _payload(res)
+        assert out["launched"] is True and cam.generated
+        assert "entitlement_blocked" not in out and "entitlement_checked" not in out
+
+    def test_an_unread_flag_still_launches_and_says_so(self, monkeypatch):
+        # None is no verdict at all, so refusing on it would invent one - the launch happens and the
+        # payload states that no pre-flight backed it.
+        cam, res = self._run(monkeypatch, None)
+        out = _payload(res)
+        assert out["launched"] is True and cam.generated
+        assert out["entitlement_checked"] is False and "did not read" in out["note"]
+
+    def test_a_blocked_launch_keeps_the_rail_order_and_drops_the_triage_pointer(self, monkeypatch):
+        # The triage reads a toolpath that generated VALID but EMPTY; this call launched nothing, so
+        # pointing at it would send the caller to a state the operation cannot reach - while the
+        # order the rails were taken in is a fact about the selection that landed, and still publishes.
+        op = _swarf_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge(), _Edge()])
+        monkeypatch.setattr(cg, "strategy_generation_allowed", lambda name: False)
+        out = _payload(cg.handler(operation="Swarf1", selection="chain", handles=["lo", "hi"]))
+        assert out["launched"] is False
+        assert "rails_order" in out and "rail_triage" not in out["note"]
+
+    def test_a_selection_only_call_asks_the_seam_nothing(self, monkeypatch):
+        # The pre-flight belongs to the LAUNCH: generate=false on a blocked strategy is a complete
+        # success, and a verdict published there would read as a refusal of the selection.
+        asked = []
+        op = _curve_op(strategy="swarf")
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        monkeypatch.setattr(cg, "strategy_generation_allowed",
+                            lambda name: asked.append(name) or False)
+        out = _payload(cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
+                                  generate=False))
+        assert asked == [] and out["selections"] == 1
+        assert "entitlement_blocked" not in out and "launched" not in out
+
+
+# ── the 3D machining-boundary engage (boundaryMode 'silhouette' -> 'selection') ───────────────
+#
+# A selection landing on a 3D op's machiningBoundarySel parameter is INERT while boundaryMode holds
+# its default 'silhouette' - the op ignores the selection and machines the silhouette surface set
+# (measured live: a 3D parallel op fed a boundary chain read boundaryMode 'silhouette' and machined
+# the part's underside). The tool flips boundaryMode to 'selection' in the SAME call and reports it.
+# The discriminator is the resolved curve param: a 2D contour/pocket op resolves to 'contours'/
+# 'pockets' first and never reaches machiningBoundarySel, and the holes family never builds a curve
+# selection at all - so neither engages. boundaryMode is a CAM STRING parameter, stored single-quoted.
+
+
+class _BoundaryModeParam:
+    """boundaryMode as a CAM string parameter: starts at 'silhouette' (the inert default) and stores
+    whatever expression is written, single-quoted the way a CAM string parameter reads back."""
+    def __init__(self, start="silhouette"):
+        self._expr = "'" + start + "'"
+
+    @property
+    def expression(self):
+        return self._expr
+
+    @expression.setter
+    def expression(self, v):
+        self._expr = v
+
+
+class _DeafBoundaryMode:
+    """Accepts the mode write and keeps the value it started on - the swallowed engage that leaves the
+    selection inert. Only the read-back reveals it."""
+    def __init__(self, start="silhouette"):
+        self._expr = "'" + start + "'"
+
+    @property
+    def expression(self):
+        return self._expr
+
+    @expression.setter
+    def expression(self, _v):
+        pass
+
+
+class _RaisingBoundaryMode:
+    """Refuses the boundaryMode assignment outright (the expression setter raises)."""
+    @property
+    def expression(self):
+        return "'silhouette'"
+
+    @expression.setter
+    def expression(self, _v):
+        raise RuntimeError("boundaryMode is read-only here")
+
+
+class _UnreadableBoundaryMode:
+    """Takes the write; nothing reads back off boundaryMode afterwards."""
+    def __init__(self):
+        self._written = False
+
+    @property
+    def expression(self):
+        if self._written:
+            raise RuntimeError("boundaryMode is unreadable")
+        return "'silhouette'"
+
+    @expression.setter
+    def expression(self, _v):
+        self._written = True
+
+
+class _RefusingEnumerationMode(_BoundaryModeParam):
+    """Refuses the write with Fusion's own words for a value outside a CAM enumeration's set."""
+    @_BoundaryModeParam.expression.setter
+    def expression(self, _v):
+        raise RuntimeError("3 : Invalid enumeration value.")
+
+
+class _RefusingEnumerationHeight:
+    """A height parameter holding a QUOTED expression that refuses the write the same way."""
+    def __init__(self, held):
+        self.value = None
+        self._held = held
+
+    @property
+    def expression(self):
+        return self._held
+
+    @expression.setter
+    def expression(self, _v):
+        raise RuntimeError("3 : Invalid enumeration value.")
+
+
+class _BareBoundaryMode(_BoundaryModeParam):
+    """A mode parameter whose stored expression carries NO quotes - the current spelling that decides
+    whether this call wraps the request."""
+    def __init__(self, start="silhouette"):
+        super().__init__(start)
+        self._expr = start
+
+
+class _EvalErrorBoundaryMode(_BoundaryModeParam):
+    """Stores 'selection' but reports the failure through .error - the CAM parameter store's shape for
+    an expression that does not evaluate (see _cam_common.expression_error)."""
+    @property
+    def error(self):
+        return "Failed to evaluate expression."
+
+
+def _boundary_op(name="Parallel1", boundary_mode=None, **kw):
+    """A 3D surfacing op: its curve param is 'machiningBoundarySel' (NO contours/pockets, so the
+    probe order resolves to it), plus the boundaryMode string knob and the height group."""
+    return _Op(name, {"machiningBoundarySel": _Param(_CurveParamValue()),
+                      "boundaryMode": boundary_mode if boundary_mode is not None else _BoundaryModeParam(),
+                      "topHeight_mode": _Param(None), "topHeight_offset": _Param(None),
+                      "bottomHeight_mode": _Param(None), "bottomHeight_offset": _Param(None)}, **kw)
+
+
+def _boundary_selection_of(op):
+    return op.parameters.itemByName("machiningBoundarySel").value.getCurveSelections().item(0)
+
+
+class TestBoundaryEngage:
+    def test_chain_on_a_3d_boundary_engages_boundary_mode(self, monkeypatch):
+        op = _boundary_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge(), _Edge()])
+        out = _payload(cg.handler(operation="Parallel1", selection="chain", handles=["a", "b"],
+                                  generate=False))
+        # boundaryMode is flipped off its inert default in the same call
+        assert cg.unquote_expression(op.parameters.itemByName("boundaryMode").expression) == "selection"
+        assert out["boundary_engaged"] is True
+        assert out["boundary_mode"] == "selection"
+        # the selection itself landed on the machining-boundary param
+        assert out["selections"] == 1 and len(_boundary_selection_of(op).inputGeometry) == 2
+
+    def test_a_2d_contour_feed_does_not_engage_boundary_mode(self, monkeypatch):
+        # the discriminator is the resolved curve param: a 2D op resolves to 'contours', so the
+        # engage never fires and no boundary key is published.
+        op = _curve_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        out = _payload(cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
+                                  generate=False))
+        assert "boundary_engaged" not in out and "boundary_mode" not in out
+
+    def test_a_holes_feed_does_not_engage_boundary_mode(self, monkeypatch):
+        # the holes family sets holeFaces directly - it never builds a curve selection, so the
+        # boundary seam is unreachable from it.
+        op = _drill_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face(0.3)])
+        out = _payload(cg.handler(operation="Drill1", selection="holes", handles=["a"],
+                                  generate=False))
+        assert "boundary_engaged" not in out and "boundary_mode" not in out
+
+    def test_a_boundary_mode_that_will_not_take_is_an_error(self, monkeypatch):
+        # a swallowed boundaryMode leaves the exact inert selection this guard prevents, so it fails
+        # the call rather than reporting a boundary engaged - and names the value it still reads.
+        op = _boundary_op(boundary_mode=_DeafBoundaryMode())
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        res = cg.handler(operation="Parallel1", selection="chain", handles=["h"], generate=False)
+        assert res["isError"] is True
+        assert "boundaryMode" in res["message"] and "did not take" in res["message"]
+        assert "silhouette" in res["message"]
+
+    def test_a_boundary_mode_set_that_raises_is_an_error(self, monkeypatch):
+        op = _boundary_op(boundary_mode=_RaisingBoundaryMode())
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        res = cg.handler(operation="Parallel1", selection="chain", handles=["h"], generate=False)
+        assert res["isError"] is True
+        assert "Could not set boundaryMode" in res["message"] and "read-only here" in res["message"]
+
+    def test_an_op_without_boundary_mode_is_disclosed_not_claimed_engaged(self, monkeypatch):
+        # machiningBoundarySel present, boundaryMode absent: the engage cannot be confirmed, so it is
+        # disclosed - never a false boundary_engaged claiming an effect no read backs.
+        op = _Op("Parallel1", {"machiningBoundarySel": _Param(_CurveParamValue())})
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        res = cg.handler(operation="Parallel1", selection="chain", handles=["h"], generate=False)
+        assert res["isError"] is True
+        assert "boundaryMode" in res["message"] and "cannot confirm" in res["message"]
+
+    def test_a_boundary_mode_that_cannot_be_read_back_is_unconfirmed(self, monkeypatch):
+        op = _boundary_op(boundary_mode=_UnreadableBoundaryMode())
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        res = cg.handler(operation="Parallel1", selection="chain", handles=["h"], generate=False)
+        assert res["isError"] is True and "UNCONFIRMED" in res["message"]
+
+    def test_a_boundary_mode_that_does_not_evaluate_is_an_error(self, monkeypatch):
+        op = _boundary_op(boundary_mode=_EvalErrorBoundaryMode())
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        res = cg.handler(operation="Parallel1", selection="chain", handles=["h"], generate=False)
+        assert res["isError"] is True and "not engaged" in res["message"]
+        assert "Failed to evaluate expression." in res["message"]
+
+    def test_zero_selections_on_a_boundary_op_does_not_engage(self, monkeypatch):
+        # nothing landed to engage, so boundaryMode is left untouched and the handler's own
+        # 0-selections error is what fires - not a phantom boundary flip.
+        op = _boundary_op()
+        pv = op.parameters.itemByName("machiningBoundarySel").value
+        pv.applyCurveSelections = lambda cs: setattr(pv, "_cs", _CurveSelections())   # -> 0 selections
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        res = cg.handler(operation="Parallel1", selection="chain", handles=["h"], generate=False)
+        assert res["isError"] is True and "0 selection" in res["message"]
+        assert cg.unquote_expression(op.parameters.itemByName("boundaryMode").expression) == "silhouette"
+
+
+class TestQuotingMatchesWhatTheParameterStores:
+    """Every expression this tool writes goes through _cam_common.matched_quoting: the wrap is
+    decided by the CURRENT expression, and a wrap this call added is published under 'quoted'."""
+
+    def _engage(self, monkeypatch, boundary_mode):
+        op = _boundary_op(boundary_mode=boundary_mode)
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        return op, _payload(cg.handler(operation="Parallel1", selection="chain", handles=["h"],
+                                       generate=False))
+
+    def test_a_quoted_mode_takes_the_wrapped_spelling_and_the_wrap_is_published(self, monkeypatch):
+        op, out = self._engage(monkeypatch, _BoundaryModeParam())      # holds "'silhouette'"
+        assert op.parameters.itemByName("boundaryMode").expression == "'selection'"
+        assert out["quoted"] == ["boundaryMode"] and out["boundary_mode"] == "selection"
+
+    def test_a_bare_mode_takes_the_bare_spelling_and_publishes_no_wrap(self, monkeypatch):
+        # The other side of the same decision: a parameter storing an unquoted expression is written
+        # unquoted, and a call that always wrapped would leave "'selection'" here.
+        op, out = self._engage(monkeypatch, _BareBoundaryMode())       # holds "silhouette"
+        assert op.parameters.itemByName("boundaryMode").expression == "selection"
+        assert "quoted" not in out and out["boundary_mode"] == "selection"
+
+    def test_a_refused_mode_names_the_expression_that_was_WRITTEN(self, monkeypatch):
+        # Fusion's enumeration refusal is about the expression this call sent, not the request the
+        # caller typed - so a wrapped write has to name the wrapped spelling, or the remedy points
+        # at a string the parameter never saw.
+        op, res = self._refused_by_enumeration(monkeypatch, _RefusingEnumerationMode())
+        assert res["isError"] is True
+        assert "the expression written was 'selection'" in res["message"]
+        assert cg._PARAM_READ in res["message"]
+
+    def test_a_refused_height_names_the_expression_that_was_WRITTEN(self, monkeypatch):
+        op = _curve_op()
+        op.parameters._d["bottomHeight_mode"] = _RefusingEnumerationHeight("'from stock top'")
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        res = cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
+                         bottom_mode="from contour", generate=False)
+        assert res["isError"] is True
+        assert "the expression written was 'from contour'" in res["message"]
+        assert cg._PARAM_READ in res["message"]
+
+    def test_a_non_enumeration_refusal_carries_no_remedy(self, monkeypatch):
+        # The clause belongs to the refusal that names an enumeration; on any other platform message
+        # it would assert a cause nothing read.
+        op, res = self._refused_by_enumeration(monkeypatch, _RaisingBoundaryMode())
+        assert res["isError"] is True and "read-only here" in res["message"]
+        assert "the expression written" not in res["message"]
+
+    def _refused_by_enumeration(self, monkeypatch, mode):
+        op = _boundary_op(boundary_mode=mode)
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        return op, cg.handler(operation="Parallel1", selection="chain", handles=["h"],
+                              generate=False)
+
+    def test_a_height_mode_is_wrapped_to_match_the_expression_it_holds(self, monkeypatch):
+        # A height _mode is a string parameter: on a store already keeping a quoted string, the bare
+        # spelling is the enumeration value Fusion refuses, so the request is wrapped to match.
+        op = _curve_op()
+        held = _Param(None)
+        held.expression = "'from stock top'"
+        op.parameters._d["bottomHeight_mode"] = held
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        out = _payload(cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
+                                  bottom_mode="from contour", generate=False))
+        assert held.expression == "'from contour'"
+        assert out["heights_set"] == ["bottomHeight_mode='from contour'"]
+        assert out["quoted"] == ["bottomHeight_mode"]
+
+
+# ── the extension strategies' DRIVE parameters (swarf rails, deburr edges) ───────────────────
+#
+# A chain routes to whichever curve parameter the strategy carries, probed in _CURVE_PARAM_CANDIDATES
+# order, and the order IS the routing. Measured per strategy on 2705.1.4 by dumping every CadContours2d
+# parameter of one freshly created op each: swarf carries ONLY swarfContours; deburr carries edgeSel
+# AND machiningBoundarySel AND edgeExcludeSel; multiaxis_roughing carries machiningBoundarySel AND
+# stockContours; no 2D strategy carries swarfContours or edgeSel. So a drive parameter has to be probed
+# before machiningBoundarySel (or a deburr feed lands on the boundary and the op is driven by nothing)
+# and after contours/pockets (or a 2D feed changes route).
+#
+# swarf's rails are inert the same way a 3D boundary is: a fresh swarf op reads swarfSelectionMode
+# 'surfaces' and generating with rails under that mode reported 'Surfaces: No valid geometry selected.'
+# Deburr needs NO engage - measured: edges on edgeSel with edgeDefinitionType left at its default
+# 'automatic' and boundaryMode at 'none' generated a valid toolpath in 3.2s.
+
+
+def _swarf_op(name="Swarf1", mode=None, **kw):
+    """A swarf op: swarfContours is its ONLY curve parameter, and swarfSelectionMode - the mode that
+    decides whether the rails are read at all - starts at 'surfaces' on a fresh op (measured)."""
+    return _Op(name, {"swarfContours": _Param(_CurveParamValue()),
+                      "swarfSelectionMode": mode if mode is not None else _BoundaryModeParam("surfaces"),
+                      "bottomHeight_mode": _Param(None), "bottomHeight_offset": _Param(None)}, **kw)
+
+
+def _deburr_op(name="Deburr1", **kw):
+    """A deburr op: edgeSel is the DRIVE selection and machiningBoundarySel sits beside it, so this op
+    is the one the probe ORDER is decided on (measured - deburr carries both)."""
+    return _Op(name, {"edgeSel": _Param(_CurveParamValue()),
+                      "machiningBoundarySel": _Param(_CurveParamValue()),
+                      "boundaryMode": _BoundaryModeParam("none"),
+                      "topHeight_mode": _Param(None), "topHeight_offset": _Param(None)}, **kw)
+
+
+def _ma_roughing_op(name="Multi-Axis Roughing1", **kw):
+    """A multi-axis roughing op: machiningBoundarySel AND stockContours (measured), so stockContours
+    staying LAST in the probe order is what routes its chain to the boundary."""
+    return _Op(name, {"machiningBoundarySel": _Param(_CurveParamValue()),
+                      "stockContours": _Param(_CurveParamValue()),
+                      "boundaryMode": _BoundaryModeParam("none")}, **kw)
+
+
+def _selection_on(op, param):
+    return op.parameters.itemByName(param).value.getCurveSelections()
+
+
+class TestDriveParamRouting:
+    def test_a_swarf_chain_lands_on_swarf_contours_and_engages_the_mode(self, monkeypatch):
+        op = _swarf_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge(), _Edge()])
+        out = _payload(cg.handler(operation="Swarf1", selection="chain", handles=["lower", "upper"],
+                                  generate=False))
+        cs = _selection_on(op, "swarfContours")
+        assert cs.count == 2                    # one selection per rail
+        assert cg.unquote_expression(
+            op.parameters.itemByName("swarfSelectionMode").expression) == "contours"
+        assert out["swarf_engaged"] is True and out["swarf_mode"] == "contours"
+
+    def test_a_deburr_chain_lands_on_the_drive_edges_not_the_machining_boundary(self, monkeypatch):
+        # deburr carries BOTH: routing to machiningBoundarySel would leave the op's drive selection
+        # empty and the toolpath driven by nothing, while the payload reported a landed selection.
+        op = _deburr_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge(), _Edge()])
+        out = _payload(cg.handler(operation="Deburr1", selection="chain", handles=["a", "b"],
+                                  generate=False))
+        assert _selection_on(op, "edgeSel").count == 1
+        assert _selection_on(op, "machiningBoundarySel").count == 0
+        assert out["selections"] == 1
+
+    def test_a_deburr_chain_engages_no_mode(self, monkeypatch):
+        # measured: edges on edgeSel generate a valid toolpath with boundaryMode left at 'none', so
+        # flipping it here would change a setting nothing asked for and claim an engage that is not
+        # this parameter's.
+        op = _deburr_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        out = _payload(cg.handler(operation="Deburr1", selection="chain", handles=["a"],
+                                  generate=False))
+        assert cg.unquote_expression(op.parameters.itemByName("boundaryMode").expression) == "none"
+        assert "boundary_engaged" not in out and "swarf_engaged" not in out
+
+    def test_stock_contours_stays_last_so_a_roughing_chain_lands_on_the_boundary(self, monkeypatch):
+        # multiaxis_roughing carries machiningBoundarySel AND stockContours; stockContours is never a
+        # drive, so a chain landing there would be inert and no boundary would be engaged.
+        op = _ma_roughing_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        out = _payload(cg.handler(operation="Multi-Axis Roughing1", selection="chain",
+                                  handles=["a"], generate=False))
+        assert _selection_on(op, "machiningBoundarySel").count == 1
+        assert _selection_on(op, "stockContours").count == 0
+        assert out["boundary_engaged"] is True
+
+    def test_a_2d_contour_op_resolves_contours_first(self, monkeypatch):
+        # the drive params sit AFTER contours/pockets, so a 2D feed resolves contours and engages
+        # nothing.
+        op = _curve_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        out = _payload(cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
+                                  generate=False))
+        assert _selection_of(op).kind == "chain"
+        assert "swarf_engaged" not in out and "boundary_engaged" not in out
+
+    def test_a_swarf_mode_that_will_not_take_is_an_error(self, monkeypatch):
+        # a swallowed swarfSelectionMode leaves the rails unread - the op asks for surfaces instead -
+        # so it fails the call rather than reporting an engage, naming the value it still reads.
+        op = _swarf_op(mode=_DeafBoundaryMode("surfaces"))
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge(), _Edge()])
+        res = cg.handler(operation="Swarf1", selection="chain", handles=["a", "b"], generate=False)
+        assert res["isError"] is True
+        assert "swarfSelectionMode" in res["message"] and "did not take" in res["message"]
+        assert "surfaces" in res["message"]
+
+    def test_a_swarf_op_without_the_mode_param_is_disclosed_not_claimed_engaged(self, monkeypatch):
+        op = _Op("Swarf1", {"swarfContours": _Param(_CurveParamValue())})
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge(), _Edge()])
+        res = cg.handler(operation="Swarf1", selection="chain", handles=["a", "b"], generate=False)
+        assert res["isError"] is True
+        assert "swarfSelectionMode" in res["message"] and "cannot confirm" in res["message"]
+
+    def test_the_curve_param_miss_names_the_drive_params_it_looked_for(self, monkeypatch):
+        # the refusal lists the candidates, so a strategy whose drive param is not routed yet is
+        # diagnosable from the message alone.
+        op = _Op("Ghost1", {})
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        res = cg.handler(operation="Ghost1", selection="chain", handles=["a"], generate=False)
+        assert res["isError"] is True
+        assert "swarfContours" in res["message"] and "edgeSel" in res["message"]
+
+
+# ── swarf's rail PAIR: one CurveSelection per rail ──────────────────────────────────────────
+#
+# Measured on 2705.1.4, the two failure shapes are distinct. 'Invalid contours.' at generate is the
+# STRUCTURAL one: one contour on swarfContours, closed rails, or two rails fed to a single
+# CurveSelection - which the chain walker returned as ONE 6-segment path, so one selection cannot
+# carry a pair. Wrong ORDER is the SILENT one: the pair applied lower-rail-first produced passes,
+# while the same pair applied upper-first produced a valid but EMPTY toolpath on both otherSide
+# settings. Hence one selection per rail, open by default, and the order published and triaged.
+
+
+class TestSwarfRailPair:
+    def test_each_rail_gets_its_own_selection(self, monkeypatch):
+        op = _swarf_op()
+        cam = _CAM([_Setup([op])])
+        edges = [_Edge(), _Edge()]
+        _install(monkeypatch, cam, edges)
+        out = _payload(cg.handler(operation="Swarf1", selection="chain", handles=["lo", "hi"],
+                                  generate=False))
+        cs = _selection_on(op, "swarfContours")
+        assert cs.count == 2
+        assert cs.item(0).inputGeometry == [edges[0]] and cs.item(1).inputGeometry == [edges[1]]
+        assert out["selections"] == 2
+
+    def test_one_rail_is_refused_with_the_operation_still_holding_what_it_had(self, monkeypatch):
+        # the refusal is decided BEFORE the collection is cleared: a call that cannot produce a legal
+        # pair must not leave the operation holding a selection its strategy rejects.
+        op = _swarf_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        res = cg.handler(operation="Swarf1", selection="chain", handles=["only"], generate=False)
+        assert res["isError"] is True
+        assert "RAIL PAIR" in res["message"] and "LOWER rail first" in res["message"]
+        pv = op.parameters.itemByName("swarfContours").value
+        assert pv.applied == 0 and pv._cs.cleared == 0
+
+    def test_a_refused_rail_count_engages_no_mode(self, monkeypatch):
+        op = _swarf_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        cg.handler(operation="Swarf1", selection="chain", handles=["only"], generate=False)
+        assert cg.unquote_expression(
+            op.parameters.itemByName("swarfSelectionMode").expression) == "surfaces"
+
+    def test_a_rail_defaults_to_open(self, monkeypatch):
+        # a closed rail pair was refused by the strategy where the same pair open was not, so the
+        # tool picks open when the caller says nothing - and publishes which way it went.
+        op = _swarf_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge(), _Edge()])
+        out = _payload(cg.handler(operation="Swarf1", selection="chain", handles=["lo", "hi"],
+                                  generate=False))
+        cs = _selection_on(op, "swarfContours")
+        assert cs.item(0).isOpen is True and cs.item(1).isOpen is True
+        assert out["rails_open"] is True
+
+    def test_an_explicit_closed_rail_is_honoured_and_published(self, monkeypatch):
+        # the default is a default, not an override: a caller who asks for closed rails gets them,
+        # and the payload says so rather than repeating the tool's own preference.
+        op = _swarf_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge(), _Edge()])
+        out = _payload(cg.handler(operation="Swarf1", selection="chain", handles=["lo", "hi"],
+                                  is_open=False, generate=False))
+        cs = _selection_on(op, "swarfContours")
+        assert cs.item(0).isOpen is False and cs.item(1).isOpen is False
+        assert out["rails_open"] is False
+
+    def test_a_non_rail_param_keeps_ONE_selection_over_every_handle(self, monkeypatch):
+        # the split belongs to the rail-pair parameter alone: a 2D contour fed four edges is one
+        # chain, and splitting it would apply four contours where the caller asked for one.
+        op = _curve_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge(), _Edge(), _Edge(), _Edge()])
+        out = _payload(cg.handler(operation="2D Contour1", selection="chain",
+                                  handles=["a", "b", "c", "d"], generate=False))
+        cs = op.parameters.itemByName("contours").value.getCurveSelections()
+        assert cs.count == 1 and len(cs.item(0).inputGeometry) == 4
+        assert out["selections"] == 1 and "rails_open" not in out
+
+    def test_rails_open_states_what_the_OPERATION_reads_not_what_was_written(self, monkeypatch):
+        # applyCurveSelections hands the operation a collection of its own, so the objects written to
+        # and the ones it then reports are not the same rails. A payload built from the written value
+        # would call these rails open while the operation holds them closed - the shape the strategy
+        # refuses, published as the shape it accepts.
+        op = _swarf_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge(), _Edge()])
+        pv = op.parameters.itemByName("swarfContours").value
+
+        def _swap_in_closed_rails(cs):
+            swapped = _CurveSelections()
+            for i in range(cs.count):
+                clone = swapped._make(cs.item(i).kind)
+                clone.inputGeometry = cs.item(i).inputGeometry
+                clone.isOpen = False
+            pv._cs = swapped
+        pv.applyCurveSelections = _swap_in_closed_rails
+        out = _payload(cg.handler(operation="Swarf1", selection="chain", handles=["lo", "hi"],
+                                  generate=False))
+        assert out["selections"] == 2
+        assert out["rails_open"] is False
+
+    def test_rails_open_is_withheld_where_no_rail_answers_isOpen(self, monkeypatch):
+        # A rail whose isOpen will not read answers NOTHING, and 'nothing' is not 'closed': coercing
+        # the unread value would publish rails_open false - a verified-state claim - on exactly the
+        # selection class that carries no such property.
+        op = _swarf_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge(), _Edge()])
+        pv = op.parameters.itemByName("swarfContours").value
+
+        def _swap_in_unreadable_rails(cs):
+            swapped = _CurveSelections()
+            for i in range(cs.count):
+                rail = _UnreadableOpenRail(cs.item(i).kind)
+                rail.inputGeometry = cs.item(i).inputGeometry
+                swapped._sels.append(rail)
+            pv._cs = swapped
+        pv.applyCurveSelections = _swap_in_unreadable_rails
+        out = _payload(cg.handler(operation="Swarf1", selection="chain", handles=["lo", "hi"],
+                                  generate=False))
+        assert out["selections"] == 2 and "rails_open" not in out
+        assert out["rails_order"] == cg._RAILS_ORDER      # the order still reports
+
+    def test_rails_open_is_withheld_where_the_rails_disagree(self, monkeypatch):
+        # one bool cannot state a collection holding one open rail and one closed, and picking
+        # either would be a claim about the other - so the key is left off.
+        op = _swarf_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge(), _Edge()])
+        pv = op.parameters.itemByName("swarfContours").value
+
+        def _swap_in_mixed_rails(cs):
+            swapped = _CurveSelections()
+            for i in range(cs.count):
+                clone = swapped._make(cs.item(i).kind)
+                clone.inputGeometry = cs.item(i).inputGeometry
+                clone.isOpen = (i == 0)
+            pv._cs = swapped
+        pv.applyCurveSelections = _swap_in_mixed_rails
+        out = _payload(cg.handler(operation="Swarf1", selection="chain", handles=["lo", "hi"],
+                                  generate=False))
+        assert out["selections"] == 2 and "rails_open" not in out
+        assert out["rails_order"] == cg._RAILS_ORDER      # the order still reports
+
+    def test_the_rail_order_contract_is_published(self, monkeypatch):
+        # The order is the caller's and getting it wrong fails SILENTLY - an upper-first pair
+        # generates valid and EMPTY - so the order this call used is stated in the payload instead
+        # of being left for the caller to infer from a toolpath that cut nothing.
+        op = _swarf_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge(), _Edge()])
+        out = _payload(cg.handler(operation="Swarf1", selection="chain", handles=["lo", "hi"],
+                                  generate=False))
+        assert out["rails_order"] == cg._RAILS_ORDER
+        assert "LOWER" in out["rails_order"]
+
+    def test_the_launched_note_sends_a_rail_pair_to_the_status_triage(self, monkeypatch):
+        # the empty rail toolpath shows up at cam_get_status, not here - this call's note names the
+        # key that triages it there instead of carrying 300 chars of triage on every success.
+        op = _swarf_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge(), _Edge()])
+        out = _payload(cg.handler(operation="Swarf1", selection="chain", handles=["lo", "hi"]))
+        assert out["launched"] is True and "rails_triage" not in out
+        assert "cam_get_status" in out["note"] and "rail_triage" in out["note"]
+
+    def test_the_worst_composed_launched_note_fits_the_wire_budget(self, monkeypatch):
+        # the note is assembled at run time from the base, the operation's own NAME, the rail
+        # pointer and the unread-entitlement clause, so test_prose_budget measures none of the
+        # compositions - all four ride together on a long-named rail op whose flag would not read.
+        op = _swarf_op(name="Op 2 - Finishing Ruled Flank Pass")
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge(), _Edge()])
+        monkeypatch.setattr(cg, "strategy_generation_allowed", lambda name: None)
+        out = _payload(cg.handler(operation="Op 2 - Finishing Ruled Flank Pass", selection="chain",
+                                  handles=["lo", "hi"]))
+        assert out["launched"] is True and out["entitlement_checked"] is False
+        assert "rail_triage" in out["note"] and "isGenerationAllowed" in out["note"]
+        assert len(out["note"]) <= 400, len(out["note"])   # test_prose_budget.NOTE_BUDGET_CHARS
+
+    def test_a_selection_only_call_points_at_no_triage(self, monkeypatch):
+        # nothing was launched, so there is no toolpath to come back empty and nothing to triage.
+        op = _swarf_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge(), _Edge()])
+        out = _payload(cg.handler(operation="Swarf1", selection="chain", handles=["lo", "hi"],
+                                  generate=False))
+        assert out["rails_order"] == cg._RAILS_ORDER and "rail_triage" not in out["note"]
+
+    def test_a_non_rail_selection_carries_neither_the_key_nor_the_pointer(self, monkeypatch):
+        # the pointer is about a rail pair; on a 2D contour it would send the caller to a triage of
+        # inputs that operation has not got.
+        op = _curve_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        out = _payload(cg.handler(operation="2D Contour1", selection="chain", handles=["h"]))
+        assert "rails_order" not in out and "rail_triage" not in out["note"]
+
+    def test_three_rails_are_applied_rather_than_refused(self, monkeypatch):
+        # only the measured floor is guarded: one contour was refused by the strategy, more than two
+        # was never measured, so the tool applies them and lets the strategy speak for itself.
+        op = _swarf_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge(), _Edge(), _Edge()])
+        out = _payload(cg.handler(operation="Swarf1", selection="chain", handles=["a", "b", "c"],
+                                  generate=False))
+        assert out["selections"] == 3
+
+
+# ── the read-back covers EVERY applied selection, not just the first ─────────────────────────
+
+
+class TestRailReadBack:
+    def _rails(self, monkeypatch, prepare):
+        op = _swarf_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge(), _Edge()])
+        pv = op.parameters.itemByName("swarfContours").value
+        real_make = pv._cs._make
+        made = []
+
+        def _prepared(kind):
+            sel = real_make(kind)
+            made.append(sel)
+            prepare(len(made) - 1, sel)
+            return sel
+        pv._cs._make = _prepared
+        return cg.handler(operation="Swarf1", selection="chain", handles=["lo", "hi"],
+                          generate=False)
+
+    def test_the_resolved_counts_sum_over_every_rail(self, monkeypatch):
+        def prep(i, sel):
+            sel.outputGeometry = [_Path(2 + i)]
+            sel._value = [object()] * (3 + i)
+        out = _payload(self._rails(monkeypatch, prep))
+        assert out["resolved"] == {"curve_paths": 2, "curve_segments": 5, "entities": 7}
+
+    def test_an_error_on_the_SECOND_rail_fails_the_call(self, monkeypatch):
+        # a read-back that only inspected selection 0 would publish a clean apply while Fusion had
+        # rejected the second rail, leaving the operation holding a pair it refused half of.
+        def prep(i, sel):
+            if i == 1:
+                sel.hasError = True
+                sel.error = "The selected contour is not on a wall."
+        res = self._rails(monkeypatch, prep)
+        assert res["isError"] is True and "not on a wall" in res["message"]
+
+    def test_a_warning_on_the_SECOND_rail_is_surfaced(self, monkeypatch):
+        def prep(i, sel):
+            if i == 1:
+                sel.hasWarning = True
+                sel.warning = "Rail was extended."
+        out = _payload(self._rails(monkeypatch, prep))
+        assert out["selection_warning"] == "Rail was extended."
+
+    def test_two_warnings_are_both_named(self, monkeypatch):
+        def prep(i, sel):
+            sel.hasWarning = True
+            sel.warning = f"Rail {i} was extended."
+        out = _payload(self._rails(monkeypatch, prep))
+        assert out["selection_warning"] == "Rail 0 was extended., Rail 1 was extended."
+
+
+# ── the 'surfaces' selection: a strategy's surface SET (a CadObject parameter) ───────────────
+#
+# The surface-driven strategies hold their drive/floor/wall/ceiling/check surfaces in the same
+# CadObjectParameterValue shape the hole faces use - assign a list of faces to .value. One op can carry
+# SEVERAL at once (measured 2705.1.4: multiaxis_finishing floor AND wall, multiaxis_roughing floor AND
+# ceiling, geodesic drive AND check), so which set the faces are is an INPUT, and a set the op does not
+# carry is refused naming the ones it does rather than guessed at.
+#
+# The op's 'model' parameter is the same class and is deliberately NOT a target: assigning a face list
+# to it raises '3 : Parameter is not available through the API.' (measured), so the ops faked below
+# carry one and no vocabulary or refusal listing may name it.
+#
+# The assignment itself proves nothing - the read-back COUNT off the parameter is the gate.
+
+
+class _ShortSurfaceParam:
+    """Accepts the assignment and keeps only the first face - a read-back that is a wrong COUNT, the
+    swallow a bare 'the assignment did not raise' gate reports as applied."""
+    def __init__(self):
+        self._v = []
+
+    @property
+    def value(self):
+        return self._v
+
+    @value.setter
+    def value(self, v):
+        self._v = list(v)[:1]
+
+
+class _UnreadableSurfaceParam:
+    """Takes the assignment; nothing reads back off the parameter afterwards."""
+    def __init__(self):
+        self._written = False
+
+    @property
+    def value(self):
+        if self._written:
+            raise RuntimeError("the surface set is unreadable")
+        return []
+
+    @value.setter
+    def value(self, _v):
+        self._written = True
+
+
+class _RefusingSurfaceParam:
+    """Refuses the assignment outright."""
+    @property
+    def value(self):
+        return []
+
+    @value.setter
+    def value(self, _v):
+        raise RuntimeError("the surface set is read-only here")
+
+
+def _geodesic_op(name="Geodesic1", drive=None, **kw):
+    """A geodesic op: driveSurfaces + checkSurfaceSelection + model are its surface sets and
+    machiningBoundarySel its curve one (measured)."""
+    return _Op(name, {"machiningBoundarySel": _Param(_CurveParamValue()),
+                      "boundaryMode": _BoundaryModeParam("automatic"),
+                      "driveSurfaces": _Param(drive if drive is not None else _HoleParamValue()),
+                      "checkSurfaceSelection": _Param(_HoleParamValue()),
+                      "model": _Param(_HoleParamValue())}, **kw)
+
+
+def _chamfer_op(name="3D Chamfer1", **kw):
+    """A 3D chamfer op: its one surface set is the DEPRECATED checkSurfaceSelection, which reads
+    isEditable False and raises '3 : Parameter is deprecated' on assignment (measured)."""
+    return _Op(name, {"checkSurfaceSelection": _Param(_HoleParamValue(), editable=False)}, **kw)
+
+
+def _advanced_swarf_op(name="Advanced Swarf1", **kw):
+    """A fresh advanced_swarf op: advancedSwarfSurfaces is its ONE surface set and reads editable,
+    its swarf contour parameters read isEditable False (inert - never probed), and none of the six
+    names in the curve-parameter probe order resolves on it
+    (cam-advanced-swarf-surface-set-editable)."""
+    return _Op(name, {"advancedSwarfSurfaces": _Param(_HoleParamValue()),
+                      "swarfUpperContour": _Param(_CurveParamValue(), editable=False),
+                      "swarfLowerContour": _Param(_CurveParamValue(), editable=False)}, **kw)
+
+
+def _ma_finishing_op(name="Multi-Axis Finishing1", **kw):
+    """A multi-axis finishing op: floorSurfaces + wallSurfaces + model, and NO driveSurfaces
+    (measured) - the shape an omitted surface_target has nothing to default to on."""
+    return _Op(name, {"machiningBoundarySel": _Param(_CurveParamValue()),
+                      "boundaryMode": _BoundaryModeParam("none"),
+                      "floorSurfaces": _Param(_HoleParamValue()),
+                      "wallSurfaces": _Param(_HoleParamValue()),
+                      "model": _Param(_HoleParamValue())}, **kw)
+
+
+class TestSurfaceSelection:
+    def test_faces_land_on_drive_surfaces_by_default(self, monkeypatch):
+        op = _geodesic_op()
+        cam = _CAM([_Setup([op])])
+        faces = [_Face(), _Face(), _Face()]
+        _install(monkeypatch, cam, faces)
+        out = _payload(cg.handler(operation="Geodesic1", selection="surfaces",
+                                  handles=["a", "b", "c"], generate=False))
+        assert op.parameters.itemByName("driveSurfaces").value.value == faces
+        assert out["selections"] == 3
+        assert out["surface_target"] == "drive" and out["surface_param"] == "driveSurfaces"
+
+    def test_the_target_routes_the_faces_to_that_set(self, monkeypatch):
+        op = _ma_finishing_op()
+        cam = _CAM([_Setup([op])])
+        faces = [_Face(), _Face()]
+        _install(monkeypatch, cam, faces)
+        out = _payload(cg.handler(operation="Multi-Axis Finishing1", selection="surfaces",
+                                  handles=["a", "b"], surface_target="wall", generate=False))
+        assert op.parameters.itemByName("wallSurfaces").value.value == faces
+        assert op.parameters.itemByName("floorSurfaces").value.value == []
+        assert out["surface_param"] == "wallSurfaces"
+
+    def test_a_read_back_count_short_of_the_assignment_is_an_error(self, monkeypatch):
+        # the assignment not raising is not evidence: a parameter that keeps one of three faces
+        # would otherwise be published as three surfaces selected.
+        op = _geodesic_op(drive=_ShortSurfaceParam())
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face(), _Face(), _Face()])
+        res = cg.handler(operation="Geodesic1", selection="surfaces", handles=["a", "b", "c"],
+                         generate=False)
+        assert res["isError"] is True and "did not take" in res["message"]
+        assert "3 face(s) were assigned" in res["message"] and "reads back 1" in res["message"]
+
+    def test_a_surface_set_that_cannot_be_read_back_is_unconfirmed(self, monkeypatch):
+        op = _geodesic_op(drive=_UnreadableSurfaceParam())
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="Geodesic1", selection="surfaces", handles=["a"], generate=False)
+        assert res["isError"] is True and "UNCONFIRMED" in res["message"]
+        assert "driveSurfaces" in res["message"]
+
+    def test_an_assignment_that_raises_is_an_error(self, monkeypatch):
+        op = _geodesic_op(drive=_RefusingSurfaceParam())
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="Geodesic1", selection="surfaces", handles=["a"], generate=False)
+        assert res["isError"] is True
+        assert "Could not set driveSurfaces" in res["message"] and "read-only here" in res["message"]
+
+    def test_an_omitted_target_is_refused_where_there_is_no_drive_set_to_default_to(self, monkeypatch):
+        # multi-axis finishing carries floor AND wall: defaulting to either would silently machine
+        # the wrong one, and both read back the same count.
+        op = _ma_finishing_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="Multi-Axis Finishing1", selection="surfaces", handles=["a"],
+                         generate=False)
+        assert res["isError"] is True and "surface_target" in res["message"]
+        # The listing is compared WHOLE, not for the presence of the two it should name: a listing
+        # built from the vocabulary instead of the sets this op carries contains those two as well,
+        # and would send the caller at drive/ceiling/check parameters the op has not got. The op HAS
+        # a 'model' parameter, and the platform refuses a face-list write to it, so that one is out
+        # of the vocabulary and cannot appear either.
+        assert "It carries floor, wall - pass" in res["message"]
+        assert "model" not in res["message"]
+        assert op.parameters.itemByName("floorSurfaces").value.value == []
+        assert op.parameters.itemByName("wallSurfaces").value.value == []
+
+    def test_a_target_the_operation_does_not_carry_is_refused_naming_what_it_does(self, monkeypatch):
+        op = _ma_finishing_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="Multi-Axis Finishing1", selection="surfaces", handles=["a"],
+                         surface_target="ceiling", generate=False)
+        assert res["isError"] is True
+        assert "ceilingSurfaces" in res["message"] and "ceiling" in res["message"]
+        # whole-listing compare, for the same reason as the refusal above: the sets this op carries,
+        # not the vocabulary it was asked from.
+        assert res["message"].endswith("It carries floor, wall.")
+        assert "model" not in res["message"]
+
+    def test_the_model_parameter_is_not_an_offered_target(self, monkeypatch):
+        # Every milling op carries a 'model' CadObject parameter, but assigning a face list to it
+        # raises '3 : Parameter is not available through the API.' - so it is outside the vocabulary
+        # and the Choice refuses it, rather than the handler reaching a write that cannot land.
+        op = _geodesic_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="Geodesic1", selection="surfaces", handles=["a"],
+                         surface_target="model", generate=False)
+        assert res["isError"] is True and "model" in res["message"]
+        assert op.parameters.itemByName("model").value.value == []
+
+    def test_an_operation_with_no_surface_sets_at_all_is_refused(self, monkeypatch):
+        op = _curve_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="2D Contour1", selection="surfaces", handles=["a"],
+                         generate=False)
+        assert res["isError"] is True and "none of the surface sets" in res["message"]
+
+    def test_a_surface_set_that_is_not_editable_is_not_offered(self, monkeypatch):
+        # offering a set whose parameter is not editable sends the caller at an assignment that
+        # raises - so the listing names only what a face list can actually land on.
+        op = _Op("Geodesic1", {"driveSurfaces": _Param(_HoleParamValue()),
+                               "checkSurfaceSelection": _Param(_HoleParamValue(), editable=False)})
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="Geodesic1", selection="surfaces", handles=["a"],
+                         surface_target="check", generate=False)
+        assert res["isError"] is True
+        # not "has no 'checkSurfaceSelection' parameter": it has one, and cannot take faces
+        assert "carries 'checkSurfaceSelection' but it did not read isEditable true" in res["message"]
+        assert res["message"].endswith("It carries drive.")
+        assert op.parameters.itemByName("checkSurfaceSelection").value.value == []
+
+    def test_an_operation_whose_only_surface_set_is_not_editable_carries_none(self, monkeypatch):
+        op = _chamfer_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="3D Chamfer1", selection="surfaces", handles=["a"],
+                         generate=False)
+        assert res["isError"] is True and "no SETTABLE surface set" in res["message"]
+        assert "checkSurfaceSelection did not read isEditable true" in res["message"]
+        assert op.parameters.itemByName("checkSurfaceSelection").value.value == []
+
+    def test_the_swarf_target_routes_the_faces_to_the_advanced_swarf_set(self, monkeypatch):
+        op = _advanced_swarf_op()
+        cam = _CAM([_Setup([op])])
+        faces = [_Face(), _Face()]
+        _install(monkeypatch, cam, faces)
+        out = _payload(cg.handler(operation="Advanced Swarf1", selection="surfaces",
+                                  handles=["a", "b"], surface_target="swarf", generate=False))
+        assert op.parameters.itemByName("advancedSwarfSurfaces").value.value == faces
+        assert out["surface_param"] == "advancedSwarfSurfaces" and out["selections"] == 2
+
+    def test_an_omitted_target_on_the_swarf_op_names_the_one_set_it_can_take(self, monkeypatch):
+        # its non-editable floor/check sets stay out of the listing, so the caller is sent at the
+        # only set an assignment lands on.
+        op = _advanced_swarf_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="Advanced Swarf1", selection="surfaces", handles=["a"],
+                         generate=False)
+        assert res["isError"] is True and "It carries swarf - pass" in res["message"]
+        assert "floor" not in res["message"] and "check" not in res["message"]
+
+    def test_a_curve_selection_on_a_surface_driven_operation_names_its_surface_sets(self, monkeypatch):
+        # the dead end an agent otherwise meets: no curve parameter AND no pointer to the kind that
+        # does reach this strategy's geometry.
+        op = _advanced_swarf_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        res = cg.handler(operation="Advanced Swarf1", selection="chain", handles=["a"],
+                         generate=False)
+        assert res["isError"] is True and "no curve-selection parameter" in res["message"]
+        assert "It carries the surface set(s) swarf - pass selection='surfaces'" in res["message"]
+
+    def test_a_curve_selection_on_an_operation_whose_surface_sets_are_blocked_says_so(
+            self, monkeypatch):
+        # the full dead end: no curve parameter AND a surface set that cannot take faces - the
+        # refusal names the read that closed the door instead of sending the caller at drilling.
+        op = _chamfer_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        res = cg.handler(operation="3D Chamfer1", selection="chain", handles=["a"],
+                         generate=False)
+        assert res["isError"] is True and "no curve-selection parameter" in res["message"]
+        assert "checkSurfaceSelection did not read isEditable true" in res["message"]
+        assert "drilling" not in res["message"]
+
+    def test_a_bad_target_value_is_refused_by_the_choice(self, monkeypatch):
+        op = _geodesic_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="Geodesic1", selection="surfaces", handles=["a"],
+                         surface_target="rooftop", generate=False)
+        assert res["isError"] is True and "rooftop" in res["message"]
+
+    def test_surface_target_on_another_selection_kind_is_refused(self, monkeypatch):
+        # a knob silently dropped leaves the caller believing they routed the faces somewhere.
+        op = _curve_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        res = cg.handler(operation="2D Contour1", selection="chain", handles=["a"],
+                         surface_target="drive", generate=False)
+        assert res["isError"] is True
+        assert "surface_target" in res["message"] and "'chain'" in res["message"]
+
+    def test_the_surfaces_kind_takes_its_geometry_from_handles(self, monkeypatch):
+        op = _geodesic_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="Geodesic1", selection="surfaces", bodies=["Carrier"],
+                         generate=False)
+        assert res["isError"] is True and "'handles'" in res["message"]
+
+    def test_a_surfaces_feed_engages_no_curve_mode(self, monkeypatch):
+        # geodesic also carries machiningBoundarySel; writing a surface set is not a boundary feed,
+        # so boundaryMode must be left exactly as found.
+        op = _geodesic_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        out = _payload(cg.handler(operation="Geodesic1", selection="surfaces", handles=["a"],
+                                  generate=False))
+        assert cg.unquote_expression(
+            op.parameters.itemByName("boundaryMode").expression) == "automatic"
+        assert "boundary_engaged" not in out

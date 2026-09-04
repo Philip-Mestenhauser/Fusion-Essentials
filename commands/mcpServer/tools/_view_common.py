@@ -1,13 +1,7 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Shared camera-orientation table for the standard named views (top/bottom/front/back/left/right
-plus the four iso corners; Fusion is Z-up). VIEW_DIRECTIONS is the eye-target direction; consumers
-that instead need the opposite-sign LOOK direction (target-eye) call look_direction(). The table
-exists because assigning camera.viewOrientation does not reliably move the eye/target - consumers
-set explicit vectors instead. apply_named_view/capture_png_b64 are the shared orient-then-grab
-mechanics the screenshot tools sit on.
-"""
+"""Camera-orientation table for the standard named views, plus the shared capture mechanics."""
 
 import base64
 import os
@@ -18,18 +12,15 @@ import adsk.core
 from . import _common
 
 MAP_BLURB = (
-    "view_direction/look_direction/up_vector + the true-orthographic-face set - the "
-    "camera-orientation table for the standard named views; apply_named_view/capture_png_b64 - "
-    "the orient + refresh-then-grab capture mechanics; DISPLAY_FOLDERS/all_display_components - "
-    "the category -> Component folder-bulb map and the deduped component walk, for any toggle of "
-    "non-body clutter; keep_visible/isolate_for_fit/restore_message - the ONE "
-    "frame-on-one-occurrence isolate and its restore-with-disclosure, for a viewport fit that must "
-    "frame the target rather than the whole scene")
+    "view_direction/look_direction/up_vector/is_ortho_face - camera vectors for a named view; "
+    "apply_named_view/capture_png_b64 - orient and grab the viewport; "
+    "standoff_distance/STANDOFF_FALLBACK_CM - the eye-target standoff an orient rebuilds from; "
+    "DISPLAY_FOLDERS/all_display_components - toggling non-body clutter; "
+    "keep_visible/isolate_for_fit/restore_message - framing on one occurrence")
 
 
-# Display category -> the Component FOLDER bulb that controls it (one switch per component; the
-# folder bulb is separate from each entity's own bulb, so toggling it never disturbs per-entity
-# state). The ONE map every non-body visibility control reads.
+# Display category -> the Component FOLDER bulb controlling it. The folder bulb is separate from
+# each entity's own bulb, so toggling it never disturbs per-entity state.
 DISPLAY_FOLDERS = {
     "sketches": "isSketchFolderLightBulbOn",
     "construction": "isConstructionFolderLightBulbOn",
@@ -39,18 +30,10 @@ DISPLAY_FOLDERS = {
 
 
 def all_display_components(design):
-    """Every component ONCE (root + allComponents) - the walk a design-wide folder-bulb toggle runs.
-
-    De-duplicated by _common.native_identity, the (token, source-document urn) pair, because the two
-    simpler keys are each wrong in one direction. Python identity SPLITS: allComponents holds a root
-    proxy distinct from rootComponent, so the root would be toggled twice. The bare entityToken
-    MERGES: a token is DOCUMENT-LOCAL and every document's ROOT component carries the same one -
-    MEASURED on a CAM job assembled from 7 source documents, where 7 distinct root components read
-    one byte-identical token. Keyed on that token those 7 collapse to 1 entry, and the folder bulbs
-    of the other 6 are never written at all.
-
-    The `or id(c)` last resort keys an identity-less component apart from every other one: it
-    over-counts, never merges."""
+    """Every component ONCE (root + allComponents), keyed by _common.native_identity."""
+    # entityToken is document-local: every document's root component carries the same one, so a
+    # bare-token key merges the roots of distinct source documents. native_identity pairs the token
+    # with the source-document urn; `or id(c)` over-counts an identity-less component, never merges.
     root = _common.safe(lambda: design.rootComponent)
     comps = ([root] if root is not None else []) + list(
         _common.safe(lambda: design.allComponents, []) or [])
@@ -65,11 +48,9 @@ def all_display_components(design):
 
 
 def keep_visible(o_path, target_path):
-    """Keep an occurrence visible during a frame-on-one isolate if it IS the target, an ANCESTOR of it,
-    or a DESCENDANT of it. Hiding an ancestor hides the nested target (BLANK view); hiding a descendant
-    drops part of the target's own subtree. Nesting is by fullPathName ('Frame:1+Pedestal:1', '+' per
-    level). Comparison is by PATH, never Python `is` - the API mints a fresh occurrence proxy on each
-    access, so `o is target` is never true across two walks and would hide the target itself."""
+    """True if an occurrence path IS the target path, an ANCESTOR of it, or a DESCENDANT of it."""
+    # Nesting reads off fullPathName ('Frame:1+Pedestal:1', '+' per level). The API mints a fresh
+    # occurrence proxy on each access, so Python `is` is never true across two walks.
     if not o_path or not target_path:
         return False
     return (o_path == target_path
@@ -78,29 +59,19 @@ def keep_visible(o_path, target_path):
 
 
 def isolate_for_fit(name, ref):
-    """Temporarily hide every occurrence that is NOT the named one, its ancestors, or its descendants,
-    so a viewport fit frames just the named one. 'ref' is the caller's own OccurrenceRef (its name
-    words the errors). Returns (restore_callable, target_occurrence, error) - error is set (and the
-    other two None) when the occurrence didn't resolve (including an ambiguous name, which names the
-    candidates); the target feeds the bodies-only camera fit.
-
-    The restore callable returns the NAMES of the occurrences whose bulb it could not put back
-    (empty when everything was restored): framing mutates visibility, so a restore that silently
-    failed would leave the document changed by a call that only meant to move the camera.
-    """
+    """Hide every occurrence outside the named one's subtree so a fit frames it; 'ref' is the
+    caller's OccurrenceRef. Returns (restore, target, error) - restore() answers the names whose
+    bulb it could not put back."""
     design = _common.design()
     root = _common.safe(lambda: design.rootComponent) if design else None
     if not root:
         return None, None, f"{ref.name}: no active design to resolve '{name}' against."
-    # Resolve via the caller's OccurrenceRef kind (fullPathName-preferring, ambiguity-refusing) so an
-    # ambiguous name doesn't silently frame the wrong instance.
     target, err = ref.resolve(name)
     if target is None:
         return None, None, err
     target_path = _common.safe(lambda: target.fullPathName)
-    # The shared census, not a bare root.allOccurrences: that property RAISES on a design holding an
-    # unresolved external reference, and an empty walk would hide NOTHING while the view is published
-    # as framed on the target.
+    # root.allOccurrences RAISES on a design holding an unresolved external reference; the shared
+    # census survives it.
     occs = _common.all_occurrences(design)
     prev = []
     for o in occs:
@@ -111,11 +82,8 @@ def isolate_for_fit(name, ref):
             prev.append(o)
             _common.safe(lambda o=o: setattr(o, "isLightBulbOn", False))
 
-    # ALSO hide non-body geometry design-wide for the fit: Viewport.fit() frames every VISIBLE entity,
-    # and construction geometry owned by the fitted component (measured: a datum plane) blows the
-    # frame to the whole scene while the occurrence isolation holds. The per-component display
-    # FOLDER bulbs (DISPLAY_FOLDERS) switch sketches/construction/origins/joints off in one write
-    # each without touching any entity's own bulb.
+    # Viewport.fit() frames every VISIBLE entity, so construction geometry outside the isolated
+    # subtree still blows the frame open; the folder bulbs switch that clutter off design-wide.
     folder_prev = []                       # (component, attr) - only bulbs we moved
     for comp in all_display_components(design):
         for attr in DISPLAY_FOLDERS.values():
@@ -140,10 +108,7 @@ def isolate_for_fit(name, ref):
 
 def restore_message(restore, label, purpose):
     """Run an isolate_for_fit restore and return the sentence naming what it could NOT put back, or
-    None. A restore that did not take leaves the document changed by a call that only framed the
-    camera, and the caller is the only one who can undo it - so EVERY exit that reaches the isolate
-    runs this, not just the successful one. Returns None when there was nothing to restore or
-    everything came back."""
+    None when everything came back."""
     if not restore:
         return None
     try:
@@ -157,12 +122,9 @@ def restore_message(restore, label, purpose):
             "The document is left with those hidden - view_set(action='show', target=...) "
             "restores them.")
 
-# eye - target direction per named view. Not pre-normalized (the iso corners are (+-1, -1, +-1));
-# view_direction()/look_direction() normalize on read. An iso-bottom-* entry's z is NEGATIVE - the
-# camera sits UNDER the model and mirrors its iso-top-* twin across z. Fusion is Z-up, so a positive
-# z there aims the camera down at the TOP face: measured on 2705.1.4 against a plate carrying a
-# through-pocket on its underside, an eye-target of (1,1,1) rendered the top face and (1,-1,-1)
-# rendered the pocket.
+# eye - target direction per named view, not pre-normalized; view_direction() normalizes on read.
+# Fusion is Z-up: a positive z aims the camera down at the TOP face, so an iso-bottom-* entry
+# carries a NEGATIVE z and mirrors its iso-top-* twin across z.
 VIEW_DIRECTIONS = {
     "front": (0, -1, 0),
     "back": (0, 1, 0),
@@ -176,8 +138,7 @@ VIEW_DIRECTIONS = {
     "iso-bottom-left": (-1, -1, -1),
 }
 
-# Up vector per named view - the SAME for view_direction and look_direction (only the primary
-# direction flips sign between the two conventions; up does not).
+# Up vector per named view - the SAME for view_direction and look_direction.
 UP_VECTORS = {
     "front": (0, 0, 1), "back": (0, 0, 1),
     "top": (0, 1, 0), "bottom": (0, 1, 0),
@@ -186,8 +147,8 @@ UP_VECTORS = {
     "iso-bottom-right": (0, 0, 1), "iso-bottom-left": (0, 0, 1),
 }
 
-# The 6 true orthographic faces (force an orthographic camera for zero perspective parallax); the
-# iso corners keep whatever camera type is already active.
+# The 6 true orthographic faces - these force an orthographic camera; the iso corners keep
+# whatever camera type is already active.
 ORTHO_FACE_VIEWS = {"front", "back", "top", "bottom", "right", "left"}
 
 
@@ -223,19 +184,32 @@ def is_ortho_face(name):
     return name in ORTHO_FACE_VIEWS
 
 
+# The eye-target standoff used when the camera's own distance is UNUSABLE - it did not read, or it
+# read non-positive, which rebuilds the eye ON the target and leaves the view no direction at all.
+STANDOFF_FALLBACK_CM = 100.0
+
+
+def standoff_distance(cam):
+    """(the eye-target distance to rebuild the eye at, the fallback it stands in for or None) - the
+    camera's own distance, else STANDOFF_FALLBACK_CM. The ONE standoff read every orient shares."""
+    dist = _common.safe(lambda: cam.eye.distanceTo(cam.target))
+    if dist is None or dist <= 0:
+        return STANDOFF_FALLBACK_CM, STANDOFF_FALLBACK_CM
+    return dist, None
+
+
 def apply_named_view(vp, name):
-    """Point the viewport's camera at a named view and fit. The camera is set to EXACT world-axis
-    eye/target/up vectors so the view is GUARANTEED square to world (a rotate-toward/viewOrientation
-    assignment leaves a tilt that distorts an orthographic read); target keeps the current focus, eye
-    is placed along the exact look direction, and the 6 true faces force an orthographic camera.
-    Raises on failure (the caller words its own error); no-op for an unknown/'current' name."""
+    """Point the viewport's camera at a named view and fit; no-op for an unknown/'current' name.
+    Returns STANDOFF_FALLBACK_CM when the camera's eye-target distance did not read or read
+    non-positive, else None."""
+    # Exact eye/up vectors, not a viewOrientation assignment: that leaves a tilt off world axes.
     look = look_direction(name)
     if look is None:
-        return
+        return None
     up = up_vector(name)
     cam = vp.camera
     tgt = cam.target
-    dist = _common.safe(lambda: cam.eye.distanceTo(cam.target), 100.0) or 100.0
+    dist, fallback = standoff_distance(cam)
     cam.eye = adsk.core.Point3D.create(
         tgt.x - look[0] * dist, tgt.y - look[1] * dist, tgt.z - look[2] * dist)
     cam.upVector = adsk.core.Vector3D.create(*up)
@@ -243,18 +217,16 @@ def apply_named_view(vp, name):
         cam.cameraType = adsk.core.CameraTypes.OrthographicCameraType
     vp.camera = cam                   # assigning back applies the change
     vp.fit()
+    return fallback
 
 
 def _write_image(vp, path, width, height, transparent_background, anti_aliased):
-    """Render the viewport to 'path' at width x height. Both switches unset -> the plain
-    Viewport.saveAsImageFile(path, width, height) overload. Either set -> SaveImageFileOptions +
-    Viewport.saveAsImageFileWithOptions, the only overload carrying isBackgroundTransparent /
-    isAntiAliased. Returns (did, api_name) - api_name names which overload answered."""
+    """Render the viewport to 'path' at width x height; returns (did, name of the overload used)."""
+    # saveAsImageFileWithOptions is the only overload carrying isBackgroundTransparent/isAntiAliased.
     if transparent_background is None and anti_aliased is None:
         return bool(vp.saveAsImageFile(path, width, height)), "saveAsImageFile"
     opts = adsk.core.SaveImageFileOptions.create(path)
-    # A fresh options object starts at width/height 0 (live-measured:
-    # behavior.save_image_options_defaults), so the requested size is assigned explicitly.
+    # A fresh options object starts at width/height 0, so the size is assigned explicitly.
     opts.width = width
     opts.height = height
     if transparent_background is not None:
@@ -266,11 +238,9 @@ def _write_image(vp, path, width, height, transparent_background, anti_aliased):
 
 def capture_png_b64(vp, width, height, prefix="fe_mcp_shot", transparent_background=None,
                     anti_aliased=None):
-    """Grab the viewport as a base64 PNG string via a temp file (always removed). Forces a viewport
-    refresh FIRST - the capture can otherwise race an un-refreshed frame (a camera/visibility change
-    that hasn't drawn yet reads as blank). transparent_background/anti_aliased are tri-state: None
-    leaves the plain capture path untouched, True/False routes through the options overload.
-    Returns (b64, error)."""
+    """Grab the viewport as a base64 PNG via a temp file (always removed); returns (b64, error)."""
+    # The refresh below is required: a capture can otherwise race an un-refreshed frame and a
+    # camera or visibility change that has not drawn yet reads as blank.
     temp_path = None
     try:
         fd, temp_path = tempfile.mkstemp(prefix=prefix, suffix=".png")
@@ -281,8 +251,7 @@ def capture_png_b64(vp, width, height, prefix="fe_mcp_shot", transparent_backgro
             return None, f"Viewport capture failed ({api} returned false)."
         with open(temp_path, "rb") as f:
             raw = f.read()
-        # mkstemp already created the file, so existence proves nothing about the render - a
-        # zero-byte file is a capture that reported success and wrote no image.
+        # mkstemp already created the file, so existence proves nothing about the render.
         if not raw:
             return None, f"Viewport capture failed ({api} wrote a 0-byte file)."
         return base64.b64encode(raw).decode("ascii"), None

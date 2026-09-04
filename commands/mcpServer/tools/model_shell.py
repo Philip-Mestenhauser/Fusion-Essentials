@@ -5,9 +5,6 @@
 
   model_shell -> hollow a solid body to a wall thickness, optionally opening it by removing faces.
                  WRITES.
-
-The face(s) to remove and the body to shell go into ONE input collection (createInput's contract):
-when faces are passed the owning body is implied, so the body is NOT added alongside them.
 """
 
 import adsk.core
@@ -24,10 +21,8 @@ from . import _outputs
 
 app = adsk.core.Application.get()
 
-# Face-handle list: the faces to OPEN the shell on (omit = a fully closed hollow shell).
 _REMOVE_FACES = _inputs.GeometryHandleList("remove_faces", require="face", required=False,
     description="Faces to remove (open the shell on these); omit for a closed hollow shell.")
-# Body to hollow: a find_geometry handle (precise) OR a name; omit = most-recent solid body.
 _BODY = _inputs.BodyRef("body_name", kind="solid", required=False,
     description="Solid body to hollow (a handle or name; omit = most recent). Ignored when remove_faces is given.")
 _THICKNESS = _inputs.Distance("thickness", allow_zero=False, allow_negative=False, required=True,
@@ -35,7 +30,6 @@ _THICKNESS = _inputs.Distance("thickness", allow_zero=False, allow_negative=Fals
 _DIRECTION = _inputs.Choice("direction", ["inside", "outside", "both"], default="inside",
     description="Which way the wall is offset from the original surface.")
 
-# What this tool RETURNS (declared once; drives the PRODUCES: prose + the assert-present contract test).
 RETURNS = [
     _outputs.ReturnsName("feature", of="shell feature"),
 ]
@@ -153,12 +147,9 @@ def handler(body_name: str = "", thickness: float = 1.0, units: str = "mm",
 
 
 TOOL_DESCRIPTION = (
-    "Hollow a solid body into a thin-walled shell (Fusion's Shell feature). Give 'body_name' (a body "
-    "handle or name; omit = most recent solid body) to hollow it into a CLOSED shell, OR pass "
-    "'remove_faces' = face handles from find_geometry to OPEN the shell on those faces (the body is "
-    "then implied by the faces). 'thickness' is the wall thickness in 'units' (mm default); "
-    "'direction' offsets the wall from the original surface. Pair with view_section or "
-    "view_screenshot to inspect the resulting wall.\n"
+    "Hollow a solid body into a thin-walled shell (the Shell feature). 'body_name' alone gives a "
+    "CLOSED shell; 'remove_faces' OPENS it on those faces and implies the body. Pair with "
+    "view_section to inspect the resulting wall.\n"
     + _outputs.produces_block(RETURNS)
 )
 

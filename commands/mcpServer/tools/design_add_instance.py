@@ -20,16 +20,14 @@ from . import _common
 from . import _inputs
 from . import _outputs
 
-# The component to instance: one of its occurrences or its name. A body/face target is
-# not a component, so allow= keeps those kinds out and TargetRef names the kind it got when refusing.
-# collapse_ambiguous_occurrences: the target here IS the component, so a name matching several of its
-# instances is not an ambiguity to refuse - instancing a component that already HAS instances is this
-# tool's whole job. The flag is opt-in precisely because it widens what a call acts on.
+# collapse_ambiguous_occurrences is on because the target here IS the component: a name matching
+# several of its instances is not an ambiguity to refuse, since instancing a component that already
+# has instances is this tool's job.
 _COMPONENT = _inputs.TargetRef("component", allow=("occurrence", "component"), required=True,
         collapse_ambiguous_occurrences=True,
         description="Component to instance again: one of its occurrences, or the component name.")
 _INTO_COMPONENT = _inputs.OccurrenceRef("into_component",
-        description="Occurrence whose component receives the new instance; omit for root.")
+        description="Occurrence to nest the instance in; omit for root.")
 
 RETURNS = [
     _outputs.ReturnsName("full_path", of="new instance",
@@ -85,19 +83,16 @@ def handler(component: str = "", into_component: str = "", x: float = 0.0, y: fl
             return error("Could not reach the root component to instance into.")
         host_label = "the root component"
 
-    # A component cannot hold an instance of itself (nor of anything it already sits inside).
-    # Measured: the platform refuses this itself - addExistingComponent raises '3 : add operation
-    # failed' and the tree is unchanged. This guard is the earlier, named error, not a crash shield.
+    # A component cannot hold an instance of itself (nor of anything it already sits inside): the
+    # platform refuses it too, with '3 : add operation failed'. This guard is the named error.
     cycle = component_contains(comp, host)
     if cycle is True:
         return error(f"Refusing to instance '{comp_name}' into {host_label}: that target is "
                      f"'{comp_name}' itself or sits inside it, so the component would contain an "
                      "instance of itself. Pick a target outside it (omit 'into_component' for root).")
     if cycle is None:
-        # False is the claim "this instance is legal"; the walk answers None for several distinct
-        # reads - an unenumerable collection, a census holding an unresolved reference, or one
-        # occurrence whose component identity would not read. The wire says only what is common to
-        # all of them: no verdict was reached.
+        # The walk answers None for several distinct reads, so the wire says only what is common to
+        # them: no verdict was reached.
         return error(f"Refusing to instance '{comp_name}' into {host_label}: whether that target "
                      f"already sits inside '{comp_name}' could not be determined - the subtree could "
                      "not be searched to a verdict, so the instance could make the component contain "
@@ -151,16 +146,14 @@ def handler(component: str = "", into_component: str = "", x: float = 0.0, y: fl
         return error(f"The call reported an occurrence for '{comp_name}' but no new instance "
                      "appeared in the assembly tree. Re-read with design_get(include=['tree']).")
     # The instance the CALLER asked for sits under the host occurrence it named; the other new paths
-    # are the same instance under the host's OTHER instances (measured: a host with two instances
-    # lands 'Frame:1+Bolt:2' AND 'Frame:2+Bolt:2'), so prefer the requested one as the primary.
+    # are the same instance under the host's OTHER instances ('Frame:1+Bolt:2' AND 'Frame:2+Bolt:2'
+    # from one call), so the requested one is the primary.
     under_host = [p for p in new_paths if p.startswith(host_path + "+")] if host_path else new_paths
     full_path = (under_host or new_paths)[0]
     landed = full_path.split("+")[-1] or safe(lambda: occ.name)
 
-    # The remaining new paths mean two different things, and a composite case (a sub-assembly into a
-    # multi-instance host) produces BOTH at once - so count the host instances by their distinct
-    # PREFIXES (the path above the new instance's own segment), never by counting leftover paths:
-    # each host instance also contributes the new instance's children, which are not host instances.
+    # Host instances are counted by their distinct PREFIXES, never by counting leftover paths: each
+    # host instance also contributes the new instance's children, which are not host instances.
     children = [p for p in new_paths if p.startswith(full_path + "+")]
     host_instances = _host_prefixes(new_paths, landed) or {host_path}
 
@@ -170,17 +163,14 @@ def handler(component: str = "", into_component: str = "", x: float = 0.0, y: fl
             "editing either shows in both. Position it with assembly_move / joint_create; re-parent "
             "it with design_move_occurrence.")
     if children:
-        note += (f" '{comp_name}' holds sub-components, so {len(children)} child path(s) came with it "
-                 f"(measured: a child KEEPS its own number - '{children[0].split('+')[-1]}').")
+        note += (f" '{comp_name}' holds sub-components, so {len(children)} child path(s) came with "
+                 f"it - a child KEEPS its own number ('{children[0].split('+')[-1]}').")
     if len(host_instances) > 1:
         note += (f" The host has {len(host_instances)} instances, so the one call landed the instance "
                  "under each of them (see 'paths').")
-    # Measured on an x/y placement: it does NOT set the pending-position flag, so it cannot be
-    # captured - assembly_capture_position refuses with "Nothing to capture". The same placement
-    # SURVIVED a later as-built joint in a design holding no captured position markers, while two
-    # placements in a design that DID hold markers came back at the origin after a joint creation:
-    # the revert is a rollback to the marker state, which an instance born after the marker has no
-    # position in. The placement reads durable off the tree, so that has to be said here.
+    # An x/y placement sets no pending-position flag, so assembly_capture_position refuses it with
+    # "Nothing to capture", and in a design holding captured position markers a later joint creation
+    # reverts the instance to the origin.
     if x or y or z or rotate_deg:
         note += (" The placement cannot be captured - it sets no pending-position flag, so "
                  "assembly_capture_position refuses it. In a design that HOLDS captured position "
@@ -205,14 +195,11 @@ def handler(component: str = "", into_component: str = "", x: float = 0.0, y: fl
 
 
 TOOL_DESCRIPTION = (
-"Place another INSTANCE of a component that already exists in this design (a second bolt, a third "
-"bracket) - it shares the original's geometry, so an edit shows in all of them. Omit "
-"'into_component' for the root, or name an occurrence to nest the instance inside that component. "
-"Place it with x/y/z in 'units' plus an optional rotate_deg about rotate_axis, or position it later "
-"with assembly_move / joint_create. Fusion numbers the instance itself ('BasePlate:2') - the result "
-"publishes the name and path that LANDED, read back off the assembly, so refer to those, never to a "
-"guessed ':2'. For an EMPTY new component see model_create_component; for a part from another "
-"document, doc_insert_occurrence.\n"
+"Place another INSTANCE of a component that already exists in this design - it SHARES the "
+"original's geometry, so an edit shows in all of them. Fusion numbers the instance itself, so the "
+"result publishes the name and path that LANDED, read back off the assembly - refer to those, "
+"never to a guessed ':2'. Position it later with assembly_move / joint_create. For an EMPTY new "
+"component see model_create_component; for a part from another document, doc_insert_occurrence.\n"
 + _outputs.produces_block(RETURNS)
 )
 

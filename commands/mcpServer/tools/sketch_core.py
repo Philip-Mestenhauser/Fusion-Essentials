@@ -17,23 +17,17 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import apply_rename, error, ok, safe, scale, target_component
-from ._sketch_detail import COMPONENT_SCOPE, frame_space_note, sketch_world_frame
+from ._sketch_detail import (COMPONENT_SCOPE, DEFERRED_NOTE, compute_deferred, frame_space_note,
+                             sketch_world_frame)
 from . import _common
 from . import _inputs
 
 app = adsk.core.Application.get()
 
-# Declared INPUT KIND for sketch_create's face option (slice exemplar of the input-kind system):
-# one declaration drives resolution+validation (must be a PLANAR face), the schema, and the contract.
 _ON_FACE = _inputs.GeometryHandle("on_face", require="planar_face",
                                   description="Create the sketch ON this existing planar face.")
 
-# The plane sketch_create builds on. PlaneRef owns every reference form and every refusal: the
-# xy/xz/yz (top/front/right) origin aliases - and their '<alias> plane' spellings - against the
-# ACTIVE component, a construction-plane NAME resolved design-wide - a sub-component's datum proxied
-# into the occurrence that places it, a name several components share REFUSED with its qualified
-# candidates - the '<occurrence>:<plane>' form, a planar-face/plane handle, and the blank case, which
-# the kind resolves through this declared default.
+# The plane sketch_create builds on. PlaneRef owns every reference form and every refusal.
 _PLANE = _inputs.PlaneRef("plane", default="xy",
                           description="Default xy. Ignored when 'on_face' is given.")
 
@@ -52,7 +46,7 @@ def _plane_name(sketch) -> str:
 
 def _sketch_summary(sketch) -> dict:
     curves = safe(lambda: sketch.sketchCurves)
-    return {
+    row = {
     "name": safe(lambda: sketch.name),
     "plane": _plane_name(sketch),
     "line_count": safe(lambda: curves.sketchLines.count, 0) if curves else 0,
@@ -62,11 +56,16 @@ def _sketch_summary(sketch) -> dict:
     "profile_count": safe(lambda: sketch.profiles.count, 0),
     "is_visible": safe(lambda: sketch.isVisible),
     }
+    # While compute is deferred the profile_count above is the pre-deferral one, and no read of
+    # this sketch resumes compute.
+    if compute_deferred(sketch) is True:
+        row["compute_deferred"] = True
+        row["profiles_stale"] = True
+    return row
 
 
 def _shared_component_names(design) -> set:
-    """The lower-cased component names carried by MORE THAN ONE component. Empty for the ordinary
-    design, which is why a row only pays for a path when its own name cannot identify it."""
+    """The lower-cased component names carried by MORE THAN ONE component."""
     counts = {}
     for comp in _common.all_components(design):
         nm = (safe(lambda c=comp: c.name) or "").strip().lower()
@@ -76,24 +75,10 @@ def _shared_component_names(design) -> set:
 
 
 def get_sketches_handler(component: str = "") -> dict:
-    """List EVERY sketch in the design (all components), each tagged with its owning component -
-    so a sketch inside a sub-component is visible without activating it first (the by-name overview
-    resolves design-wide via find_sketch, and this list matches that reach). 'component' narrows the
-    list, taking the same component name / occurrence path / handle the by-name read scopes by.
-
-    A component NAME can be worn by two components at once (two inserted references each bring their
-    own 'Frame' - measured), and then two rows are identical in every field, 'component' included.
-    This walk does not tell those rows apart - it reads NAMES, and the name is what collided. It
-    claims nothing about whether anything else could: that is a question about component identity,
-    and nothing here reads one. (Measured on one host, same-named components also shared an
-    entityToken - but this handler never looks at a token, so the payload must not report that as
-    the reason.) Rather than tag each row with a set of paths that is really the union over every
-    same-named component - which is what a token-keyed grouping produced, each row claiming the
-    other's placement - the payload publishes 'placements' at the TOP level: every occurrence path
-    whose component wears one of the shared names THIS response's rows carry, each listed once,
-    straight off the walk. Each of those paths resolves to ONE component when passed back as
-    'component', so the caller narrows in one more call. The list still does not REFUSE an ambiguous
-    scope, since a read that can show the candidates should show them."""
+    """List EVERY sketch in the design, each tagged with its owning component; 'component' narrows
+    the list, taking the same component name / occurrence path / handle the by-name read scopes by.
+    Two components can wear one NAME, so the rows they own are identical - top-level 'placements'
+    carries the occurrence paths that tell them apart."""
     design = _common.design()
     if not design:
         return error("No active design (open or create a document with design geometry).")
@@ -111,11 +96,7 @@ def get_sketches_handler(component: str = "") -> dict:
     except Exception as e:
         return error(f"Could not read sketches: {e}")
     payload = {"sketch_count": len(sketches), "sketches": sketches}
-    # Only names actually worn twice earn the placement block - a design whose names already identify
-    # their components has nothing to disambiguate and pays nothing. And only the ambiguous names
-    # THIS RESPONSE's rows carry: a scoped call asking about 'Frame' has no use for Shaft's and
-    # Rotor's placements, and a design-wide block grows with the DESIGN rather than with the query.
-    # An unscoped call lands design-wide anyway, because then every row is in play.
+    # Only the ambiguous names THIS RESPONSE's rows carry earn the placement block.
     shared = _shared_component_names(design)
     listed = [r["component"] for r in sketches]
     ambiguous = sorted({n for n in listed if (n or "").strip().lower() in shared})
@@ -131,16 +112,14 @@ def get_sketches_handler(component: str = "") -> dict:
             "those rows apart. 'placements' lists every occurrence path placing a component of one "
             "of the names just listed, and no others; passing one back as 'component' reads THAT "
             "component's sketches.")
+    if any(r.get("compute_deferred") for r in sketches):
+        payload["note"] = (payload.get("note", "") + " " + DEFERRED_NOTE).strip()
     return ok(payload)
 
 
 def _detail_engine():
-    """The _sketch_detail engine, looked up in the module table at CALL time.
-
-    Kept out of the module-level imports so the delegation carries no load-order dependency, and
-    resolved by name rather than through the package attribute: that attribute is bound once, by
-    whichever module imported the engine first, so a caller that swaps the engine in the module
-    table would otherwise be bypassed."""
+    """The _sketch_detail engine, looked up in the module table by NAME at call time - the package
+    attribute is bound once, so swapping the engine in the module table would not reach it."""
     return importlib.import_module("._sketch_detail", __package__)
 
 
@@ -197,13 +176,8 @@ def create_sketch_handler(plane: str = "xy", name: str = "", on_face: str = "") 
 
     final_name, rename_warning = apply_rename(sketch, name)
 
-    # Encode the sketch's FRAME so the caller can place geometry on the first try instead of
-    # guess-and-screenshot. On a face (and on xz/yz) the sketch's (0,0) is NOT the face centre and its
-    # axes may not line up with world - report where sketch (0,0) sits and where +X/+Y point, in the
-    # space frame['space'] names: world when the frame resolved into the assembly, component-local
-    # when the sketch's component is instanced several times and no single world frame exists.
-    # The same block sketch_get publishes, from the same helper, so place and verify read alike.
-    # The design being built into is handed over, because that is the world 'world' names.
+    # On a face (and on xz/yz) the sketch's (0,0) is NOT the face centre and its axes need not line
+    # up with world, so the frame is what lets a caller place geometry by computed coords.
     frame = safe(lambda: sketch_world_frame(sketch, design))
 
     payload = {
@@ -278,13 +252,8 @@ _REF_LESS_NOTES = {
 
 
 # kind -> the '<type>:<index>' REF TOKEN whose collection its curves land in, where the kind's own
-# name is not that token. _common owns the token -> sub-collection mapping, so these resolve there.
-# The composite kinds are built BY a SketchLines factory (addTwoPointRectangle,
-# addCenterPointRectangle, addScribedPolygon, addByTwoPoints per polyline segment), so every one of
-# them lands its curves in 'line' - the collection whose delta verifies the draw and counts the
-# pieces the shape was built from. 'slot' lands there too: addCenterToCenterSlot builds a slot out
-# of 2 solid SketchLines + 1 CONSTRUCTION SketchLine (the centre-to-centre line) + 2 SketchArc end
-# caps, 5 sketch curves in all, so its line delta is 3.
+# name is not that token. The composite kinds are built by a SketchLines factory, so they land in
+# 'line'; addCenterToCenterSlot lands 2 solid lines + 1 construction line + 2 arcs, a line delta 3.
 _KIND_REF_TOKEN = {"cv_spline": "cv_spline",
                    "center_point_arc_slot": "arc",
                    "three_point_arc_slot": "arc",
@@ -300,14 +269,9 @@ _KIND_REF_TOKEN = {"cv_spline": "cv_spline",
 
 def _kind_curve_collection(sketch, kind):
     """The sketch sub-collection this kind's factory adds to - the one the before/after count that
-    VERIFIES the draw is read from. None when no collection answers for the kind.
-
-    Both exception tables answer BEFORE the fall-through, and that order is what keeps the ref-less
-    kinds working: _common knows no token for conic/elliptical_arc, so reaching it first would
-    resolve them to None and drop their own collections. Every kind the tables do not name IS its
-    own ref token (line/circle/arc/ellipse/point/spline), so it resolves through _common - the one
-    owner of the token -> sub-collection map. Every kind this tool draws lands in a collection some
-    entry names, so the count gate runs for all of them."""
+    VERIFIES the draw is read from. None when no collection answers for the kind."""
+    # Both exception tables answer BEFORE the fall-through: _common knows no token for
+    # conic/elliptical_arc, so reaching it first would resolve those to None.
     token = _KIND_REF_TOKEN.get(kind)
     if token is not None:
         return _common.entity_collection(sketch, token)
@@ -325,13 +289,27 @@ def _kind_curve_count(sketch, kind):
     return safe(lambda: coll.count) if coll is not None else None
 
 
+def _center_point_ref(sketch, kind):
+    """The 'point:<index>' ref of the centre point the newest circle/arc owns, or None when the
+    centre or its index does not read."""
+    # A circle/arc's centre lands in sketchPoints, which is the collection a 'point:<index>' ref
+    # indexes - so drawing one shifts every later point's index. Proxy equality, not `is`.
+    coll = _kind_curve_collection(sketch, kind)
+    n = safe(lambda: coll.count, 0) if coll is not None else 0
+    center = safe(lambda: coll.item(n - 1).centerSketchPoint) if n else None
+    pts = _common.entity_collection(sketch, "point")
+    if center is None or pts is None:
+        return None
+    for i in range(safe(lambda: pts.count, 0)):
+        if safe(lambda i=i: pts.item(i) == center):
+            return f"point:{i}"
+    return None
+
+
 def _effective_spline_degree(sketch):
-    """The degree the newest control-point spline was actually BUILT at. add() accepts a degree it
-    cannot honor and SILENTLY CLAMPS it to controlPointCount - 1 (3 control points asked for degree
-    5 build a degree-2 curve). The spline carries TWO degree surfaces, measured: the `.degree`
-    PROPERTY answers the REQUESTED degree (5 in that case - reading it only echoes the request back),
-    while `.geometry.degree` - the NurbsCurve the sketch holds - answers the built degree (2). So the
-    geometry is what is read. None when it cannot be read."""
+    """The degree the newest control-point spline was actually BUILT at, or None."""
+    # add() accepts a degree it cannot honor and SILENTLY CLAMPS it to controlPointCount - 1. The
+    # `.degree` property echoes the REQUESTED degree back; `.geometry.degree` is the built one.
     coll = _kind_curve_collection(sketch, "cv_spline")
     n = safe(lambda: coll.count, 0) if coll is not None else 0
     if not n:
@@ -350,10 +328,8 @@ def _segment_text(a, b) -> str:
 
 
 class _ChainBroken(Exception):
-    """A polyline/closed_path chain that stopped part-way, carrying the segments that DID land.
-
-    Those segments are in the sketch and stay there, so a refusal naming none of them sends the
-    caller into a retry that draws them a second time."""
+    """A polyline/closed_path chain that stopped part-way, carrying the segments that DID land -
+    they stay in the sketch, so the refusal names them."""
 
     def __init__(self, kind, failed, total, points, cause=None):
         self.kind = kind
@@ -378,18 +354,11 @@ class _ChainBroken(Exception):
 
 
 def _draw_polyline(sketch, points, k, kind="polyline"):
-    """Draw a connected chain of lines through 'points' (a list of (x,y) in user units * k = cm).
-
-    Each segment STARTS at the previous segment's endSketchPoint (the same SketchPoint object), so
-    consecutive segments SHARE a point - the chain is continuous and parametric (drags as one shape),
-    not a set of independent segments. To CLOSE a loop, repeat the first point as the last: geometric
-    closure forms the profile with NO explicit closing coincident constraint. That constraint is what
-    the sketch solver rejects on many outlines (VCS_SKETCH_SOLVING_FAILED, live-verified), so
-    closed_path delegates to this repeated-first-point shape. Returns a label, or None if < 2 points.
-
-    A segment that does not draw raises _ChainBroken: the chain is not atomic, so the earlier
-    segments are already in the sketch and the failure carries them.
-    """
+    """Draw a connected chain of lines through 'points' ((x,y) in user units * k = cm), returning a
+    label or None for < 2 points; a segment that does not draw raises _ChainBroken."""
+    # Each segment starts at the previous one's endSketchPoint, so consecutive segments SHARE a
+    # point. Repeating the first point as the last closes the loop geometrically; an explicit
+    # closing coincident constraint is what the solver rejects (VCS_SKETCH_SOLVING_FAILED).
     pts = [(float(x), float(y)) for x, y in (points or [])]
     if len(pts) < 2:
         return None
@@ -411,7 +380,7 @@ def _draw_polyline(sketch, points, k, kind="polyline"):
 
 def _restore_clause(restore_error, sketch) -> str:
     """The sentence a result carries when the sketch could not be taken back OUT of deferred
-    compute, or ''. The sketch stays deferred, which the caller cannot see from the counts."""
+    compute, or ''."""
     if not restore_error:
         return ""
     return (f" The sketch '{safe(lambda: sketch.name)}' was left with compute DEFERRED - restoring "
@@ -442,17 +411,10 @@ def _minor_radius(p):
 
 
 def _slot_error(kind, p):
-    """The refusal a slot call needs BEFORE it reaches the API, or None.
-
-    Every tailed slot constructor's tail is POSITIONAL, and the ladders differ:
-    addCenterPointArcSlot takes radius (ValueInput), then angle (ValueInput), then three dimension
-    flags, and no overload accepts a bool in the radius or angle slot. addOverallSlot and
-    addCenterPointSlot take createWidthDimension FIRST, then their length and angle ValueInputs -
-    and passing those values IMPLIES the linear and angular dimensions, so neither has a flag of its
-    own. addThreePointArcSlot ends at createWidthDimension, and kind='slot' is called in its
-    three-argument form. A value or flag with nowhere to sit is named here rather than dropped
-    silently or left to raise a bare overload TypeError.
-    """
+    """The refusal a slot call needs BEFORE it reaches the API, or None."""
+    # Every tailed slot constructor's tail is POSITIONAL and the ladders differ, so a value or flag
+    # with nowhere to sit would otherwise raise a bare overload TypeError. Passing slot_length /
+    # angle_deg to a linear slot IMPLIES its linear and angular dimensions - no flag of their own.
     if float(p["radius"]) <= 0:
         return (f"'{kind}' radius is the slot's HALF-width (full width = radius*2) and must be > 0. "
                 f"Got radius={p['radius']}.")
@@ -518,18 +480,10 @@ def _slot_error(kind, p):
 
 
 def _draw_arc_slot(sketch, kind, p, k):
-    """Draw an arc slot. Both constructors are methods on the SKETCH and take 'width' as a
-    ValueInput holding the slot's FULL width (radius*2 - radius is the half-width, as for 'slot').
-
-    three_point_arc_slot is addThreePointArcSlot(startPoint, endPoint, pointOnArc, width,
-    createWidthDimension); the trailing flag is a plain bool.
-
-    center_point_arc_slot is addCenterPointArcSlot(centerPoint, startPoint, endPoint, width) with an
-    optional positional tail: radius (ValueInput), angle (ValueInput), then createWidthDimension,
-    createRadiusDimension, createAngleDimension - each flag gating its own dimension independently.
-    A supplied radius OVERRIDES the centre-to-start distance, leaving the start point to set
-    direction only. The angle argument takes a unit-bearing expression, not radians.
-    """
+    """Draw an arc slot; 'width' is the slot's FULL width (radius*2, radius being the half-width)."""
+    # addCenterPointArcSlot's optional positional tail is radius, angle, then the three dimension
+    # flags. A supplied radius OVERRIDES the centre-to-start distance, leaving the start point to
+    # set direction only; the angle argument takes a unit-bearing expression, not radians.
     width = adsk.core.ValueInput.createByReal(p["radius"] * 2 * k)
     if kind == "three_point_arc_slot":
         slot = sketch.addThreePointArcSlot(_pt(p["x1"], p["y1"], k), _pt(p["x2"], p["y2"], k),
@@ -561,17 +515,11 @@ def _draw_arc_slot(sketch, kind, p, k):
 
 
 def _draw_linear_slot(sketch, kind, p, k):
-    """Draw a straight slot through addOverallSlot / addCenterPointSlot: (pointA, pointB, width) plus
-    an optional positional tail - createWidthDimension, then the length ValueInput, then the angle
-    ValueInput. The flag sits BEFORE the two values, so a length or angle can only be sent with the
-    flag in front of it. 'width' is the FULL width (radius*2). Passing the length overrides the
-    second point's distance, leaving it to set direction only, and it CREATES the linear dimension
-    on its own - only the width dimension is gated on the flag. addCenterPointSlot's argument is the
-    HALF length (centre to cap centre), and its linear dimension carries that half value as passed,
-    so the length is forwarded unhalved. createByReal is centimetres for the length, as for the
-    width. Both return a BaseVector, which is never walked here - the sketch's own collection count
-    is what verifies the draw.
-    """
+    """Draw a straight slot through addOverallSlot / addCenterPointSlot, 'width' being the FULL
+    width (radius*2)."""
+    # The optional positional tail is createWidthDimension, then the length, then the angle - the
+    # flag sits BEFORE the values. A length overrides the second point's distance and creates the
+    # linear dimension on its own; addCenterPointSlot's is the HALF length, forwarded unhalved.
     factory = sketch.addOverallSlot if kind == "overall_slot" else sketch.addCenterPointSlot
     args = [_pt(p["x1"], p["y1"], k), _pt(p["x2"], p["y2"], k),
             adsk.core.ValueInput.createByReal(p["radius"] * 2 * k)]
@@ -640,10 +588,8 @@ def _draw(sketch, kind, p, k):
                                       adsk.core.Point3D.create(center.x, center.y + minor_u * k, 0))
         return f"ellipse c=({p['cx']},{p['cy']}) major={p['radius']} minor={minor_u:g}" if e else None
     if kind == "slot":
-        # a slot between two centers (x1,y1)-(x2,y2) with overall width = radius*2.
-        # addCenterToCenterSlot is a method on the SKETCH (not sketchLines - confirmed live), and
-        # 'width' must be a ValueInput (real -> cm), not a bare float. Don't wrap in safe(): a real
-        # failure must surface its message, not collapse to a misleading "check the parameters".
+        # addCenterToCenterSlot is a method on the SKETCH, not on sketchLines, and 'width' must be
+        # a ValueInput (real -> cm), not a bare float.
         p1, p2 = _pt(p["x1"], p["y1"], k), _pt(p["x2"], p["y2"], k)
         width = adsk.core.ValueInput.createByReal(p["radius"] * 2 * k)   # full width = radius*2
         slot = sketch.addCenterToCenterSlot(p1, p2, width)
@@ -664,10 +610,8 @@ def _draw(sketch, kind, p, k):
         sp = curves.sketchFittedSplines.add(pts)
         return f"spline through {pts.count} pts" if sp else None
     if kind == "cv_spline":
-        # SketchControlPointSplines.add takes controlPoints as a list[Base] - a plain Python list,
-        # NOT the ObjectCollection the FITTED spline's add() declares. The degree it was built with
-        # is read back into the payload (the API clamps it silently), so the label states the shape
-        # only.
+        # SketchControlPointSplines.add takes controlPoints as a plain Python list[Base], NOT the
+        # ObjectCollection the FITTED spline's add() declares.
         pts = [_pt(px, py, k) for (px, py) in (p.get("_points") or [])]
         deg = int(p["degree"])
         sp = curves.sketchControlPointSplines.add(
@@ -711,10 +655,9 @@ _REQUIRED = {
     # three_point_arc_slot; (x1,y1)/(x2,y2) are the two slot-end centres; radius is the half-width.
     "center_point_arc_slot": ["cx", "cy", "x1", "y1", "x2", "y2", "radius"],
     "three_point_arc_slot": ["x1", "y1", "x2", "y2", "cx", "cy", "radius"],
-    # straight slots, and the two point roles are NOT symmetric: overall_slot's (x1,y1)/(x2,y2) are
-    # the overall TIPS (the cap centres land inset by width/2, so the extent equals the distance
-    # between them), while center_point_slot's (x1,y1) is the slot centre and (x2,y2) is a CAP
-    # CENTRE - a cap lands exactly on it, and tip-to-tip is 2*half-length + width.
+    # straight slots, whose two point roles are NOT symmetric: overall_slot's (x1,y1)/(x2,y2) are
+    # the overall TIPS, while center_point_slot's (x1,y1) is the slot centre and (x2,y2) a CAP
+    # CENTRE - so tip-to-tip there is 2*half-length + width.
     "overall_slot": ["x1", "y1", "x2", "y2", "radius"],
     "center_point_slot": ["x1", "y1", "x2", "y2", "radius"],
     "point": ["cx", "cy"],
@@ -910,6 +853,13 @@ def add_sketch_geometry_handler(kind: str = "", sketch_name: str = "", units: st
                                 f"degree {effective}: the API silently clamps the degree to the "
                                 "control-point count minus one. Pass more 'points' to get the "
                                 "degree asked for.")
+    if kind in ("circle", "arc"):
+        center_ref = _center_point_ref(sketch, kind)
+        if center_ref:
+            out["center_point"] = center_ref
+            out["note"] = (f"{kind.capitalize()} drawn. Its centre is a sketch point of its own: "
+                           f"center_point={center_ref} - address points by that ref rather than by "
+                           "counting the ones you drew.")
     if kind in _ARC_SLOT_KINDS:
         out["note"] = ("Arc slot drawn out of SketchArcs - 'curves_added' counts them and each is "
                        "addressable as 'arc:<index>' for sketch_dimension / sketch_constrain "
@@ -1034,22 +984,19 @@ def draw_3d_line_handler(sketch_name: str = "", units: str = "mm",
 # ------------------------------------------------------------------------- tools
 
 _GET_DESC = (
-    "Read sketches by zoom level. WITHOUT 'sketch_name': a summary list of every sketch (name, plane, "
-    "entity + profile counts, visibility). WITH 'sketch_name': that sketch's OVERVIEW, in 'units' - "
-    "entity counts, is_fully_constrained, and a 'profiles' list (area, centroid, loop_count, and a "
+    "Read sketches by zoom level: a summary list of every sketch, or ONE sketch's overview - entity "
+    "counts, is_fully_constrained, and a 'profiles' list (area, centroid, loop_count, and a "
     "'handle' to pass as a ProfileRef to model_extrude / model_revolve / model_loft - pick a region "
     "by area/position, not a guessed index). The overview also carries 'frame' - where sketch (0,0) "
     "sits in world plus the unit +X/+Y/normal directions - the map from these sketch-LOCAL "
-    "coordinates to world. Add include_entities=true for the full per-entity/"
-    "constraint/dimension X-ray (heavier - only when editing the sketch). Entity ids match "
-    "sketch_constrain's. 'component' scopes either shape to one component."
+    "coordinates to world. Entity ids match sketch_constrain's."
 )
 sketch_get_tool = (
     Tool.create_simple(name="sketch_get", description=_GET_DESC)
     .add_input_property("sketch_name", {"type": "string",
             "description": "Omit for a summary list of all sketches; give a name for that sketch's overview (counts + profiles)."})
     .add_input_property("component", {"type": "string",
-            "description": "Read the sketch of that name inside THIS component (Fusion numbers sketches per component, so several can hold a 'Sketch1'); with no 'sketch_name', list only its sketches. A component name, or - when two inserted references both bring a 'Frame' - an occurrence fullPathName/handle from design_get(include=['tree'])."})
+            "description": "Read the sketch of that name inside THIS component; with no 'sketch_name', list only its sketches. A component name, or an occurrence fullPathName/handle from design_get(include=['tree'])."})
     .add_input_property("include_entities", {"type": "boolean",
             "description": "Also return the full per-entity/constraint/dimension X-ray (default false - heavier; for editing geometry)."})
     .add_input_property(*_inputs.UNITS.as_property())
@@ -1059,13 +1006,11 @@ sketch_get_item = Item.create_tool_item(tool=sketch_get_tool, write="read", hand
                                         run_on_main_thread=True)
 
 _CREATE_DESC = (
-                                        "Create a new sketch on a plane OR on an existing planar face. Give 'plane', OR 'on_face' = a "
-                                        "planar-face handle from find_geometry to sketch directly ON a part's face - on_face takes "
-                                        "precedence. An on_face sketch AUTO-PROJECTS the face's boundary edges into it, so re-read "
-                                        "sketch_get and pick the region by its area/centroid handle, not a guessed index. "
-                                        "'frame.space' says whether that frame is world or component-local - a "
-                                        "component instanced several times has no single world frame. Then draw on it with "
-                                        "sketch_add_geometry. Requires an open design (see doc_new)."
+    "Create a new sketch on a plane OR on an existing planar face. An on_face sketch AUTO-PROJECTS "
+    "the face's boundary edges into it, so re-read sketch_get and pick the region by its "
+    "area/centroid handle, not a guessed index. 'frame.space' says whether that frame is world or "
+    "component-local - a component instanced several times has no single world frame. Then draw on "
+    "it with sketch_add_geometry. Requires an open design (see doc_new)."
 )
 create_sketch_tool = (
     Tool.create_simple(name="sketch_create", description=_CREATE_DESC)
@@ -1084,21 +1029,19 @@ create_sketch_item = Item.create_tool_item(
                       "::test_a_swallowed_rename_is_disclosed_beside_the_actual_name"))
 
 _ADD_DESC = (
-                                           "Draw one geometry entity on a sketch (coords/sizes in 'units' = mm [default]/cm/in; "
-                                           "angles in degrees). Non-obvious roles: conic takes cx,cy as the APEX, closed_path "
-                                           "scales to large outlines, and center_rectangle adds NO center/symmetry constraints "
-                                           "- constrain/dimension it after. Every slot kind takes x1,y1 / x2,y2 + radius, but "
-                                           "the point roles DIFFER: overall_slot's two are the overall TIPS, center_point_slot's "
-                                           "are the centre and a CAP CENTRE, and the arc slots add cx,cy = the arc centre "
-                                           "(center_point_arc_slot) or a point ON the arc (three_point_arc_slot). "
-                                           "Pair with view_screenshot to view what was drawn."
+    "Draw one geometry entity on a sketch; coords/sizes in 'units', angles in degrees. "
+    "center_rectangle adds NO center/symmetry constraints - constrain/dimension it after. "
+    "Every slot kind takes x1,y1 / x2,y2 + radius, but the point roles DIFFER: overall_slot's two "
+    "are the overall TIPS, center_point_slot's are the centre and a CAP CENTRE, and the arc slots "
+    "add cx,cy = the arc centre (center_point_arc_slot) or a point ON the arc "
+    "(three_point_arc_slot). Pair with view_screenshot to view what was drawn."
 )
 add_geometry_tool = (
     Tool.create_simple(name="sketch_add_geometry", description=_ADD_DESC)
     .add_input_property(*_KIND.as_property())
     .add_required_input("kind")
     .add_input_property("points", {"type": "array",
-            "description": "For polyline/closed_path/spline/cv_spline: list of [x,y] points (in 'units'). polyline/closed_path share endpoints (coincident) for a parametric loop; spline fits a smooth curve THROUGH them; cv_spline treats them as the control polygon.",
+            "description": "For polyline/closed_path/spline/cv_spline: [x,y] points in 'units'. polyline/closed_path share endpoints; spline fits a smooth curve THROUGH them; cv_spline treats them as the control polygon.",
             "items": {"type": "array"}})
     .add_input_property("sketch_name", {"type": "string", "description": "Sketch to draw on (default: most recent)."})
     .add_input_property(*COMPONENT_SCOPE)
@@ -1107,21 +1050,21 @@ add_geometry_tool = (
     .add_input_property("y1", {"type": "number", "description": "Y of point 1 / start (line, rectangle, arc)."})
     .add_input_property("x2", {"type": "number", "description": "X of point 2 (line, rectangle); center_rectangle: HALF-width from center."})
     .add_input_property("y2", {"type": "number", "description": "Y of point 2 (line, rectangle); center_rectangle: HALF-height from center."})
-    .add_input_property("cx", {"type": "number", "description": "Center X (circle, arc, polygon, center_rectangle, arc slots); point X for kind='point'."})
-    .add_input_property("cy", {"type": "number", "description": "Center Y (circle, arc, polygon, center_rectangle, arc slots); point Y for kind='point'."})
+    .add_input_property("cx", {"type": "number", "description": "Center X (circle, arc, polygon, center_rectangle, arc slots); point X for kind='point'; conic APEX X."})
+    .add_input_property("cy", {"type": "number", "description": "Center Y (circle, arc, polygon, center_rectangle, arc slots); point Y for kind='point'; conic APEX Y."})
     .add_input_property("radius", {"type": "number", "description": "Radius (circle, polygon); ellipse MAJOR; slot HALF-width (full width = radius*2)."})
     .add_input_property("minor", {"type": "number", "description": "Ellipse MINOR radius (optional; default = major/2)."})
     .add_input_property("sweep_deg", {"type": "number", "description": "Arc sweep in degrees (CCW positive)."})
     .add_input_property("start_deg", {"type": "number", "description": "elliptical_arc start angle in degrees, measured from the major axis (default 0)."})
-    .add_input_property("rho", {"type": "number", "description": "Conic rho: greater than 0 and less than 1 (how far the curve pulls toward the apex)."})
-    .add_input_property("degree", {"type": "integer", "description": "cv_spline degree - 3 or 5 (default 3); the API accepts no other degree at creation, and CLAMPS the degree to the control-point count minus one (the built degree is reported back)."})
+    .add_input_property("rho", {"type": "number", "description": "Conic rho (how far the curve pulls toward the apex)."})
+    .add_input_property("degree", {"type": "integer", "description": "cv_spline degree - 3 or 5 (default 3)."})
     .add_input_property("sides", {"type": "integer", "description": "Polygon side count (>=3)."})
     .add_input_property("arc_radius", {"type": "number", "description": "center_point_arc_slot: the arc radius. Overrides the x1,y1 distance to cx,cy, which then sets direction only."})
-    .add_input_property("slot_length", {"type": "number", "description": "overall_slot: the tip-to-tip length; center_point_slot: the centre-to-cap-centre HALF length (tip-to-tip = 2*slot_length + width). Overrides the x2,y2 distance, which then sets direction only, and dimensions itself."})
-    .add_input_property("angle_deg", {"type": "number", "description": "Slot angle in degrees. Needs arc_radius (center_point_arc_slot) or slot_length."})
+    .add_input_property("slot_length", {"type": "number", "description": "overall_slot: the tip-to-tip length; center_point_slot: the centre-to-cap-centre HALF length (tip-to-tip = 2*slot_length + width). Overrides the x2,y2 distance, which then sets direction only."})
+    .add_input_property("angle_deg", {"type": "number", "description": "Slot angle in degrees."})
     .add_input_property("create_width_dimension", {"type": "boolean", "description": "Slot kinds: dimension the full width."})
-    .add_input_property("create_radius_dimension", {"type": "boolean", "description": "center_point_arc_slot: dimension arc_radius (needs both values)."})
-    .add_input_property("create_angle_dimension", {"type": "boolean", "description": "center_point_arc_slot: dimension angle_deg (needs both values)."})
+    .add_input_property("create_radius_dimension", {"type": "boolean", "description": "center_point_arc_slot: dimension arc_radius."})
+    .add_input_property("create_angle_dimension", {"type": "boolean", "description": "center_point_arc_slot: dimension angle_deg."})
     .add_input_property("is_construction", {"type": "boolean", "description": "Draw as CONSTRUCTION geometry (reference, not a profile edge). Default false."})
     .strict_schema()
 )
@@ -1134,13 +1077,10 @@ add_geometry_item = Item.create_tool_item(
                       "::test_a_line_that_never_lands_is_an_error"))
 
 _3DLINE_DESC = (
-                                          "Draw a line in 3D on a sketch, where the END point may be OFF the sketch plane (z != 0): "
-                                          "z is measured along the sketch's LOCAL normal, not world Z (sketch_add_geometry stays on "
-                                          "the x-y plane). The start defaults to the origin; "
-                                          "coincident_start_to_origin=true locks it there with a coincident constraint. "
-                                          "Coordinates in 'units' (mm default). Reports each "
-                                          "endpoint's resolved coordinates and whether the end is off-plane. "
-                                          "View from an iso angle with view_screenshot (a top view hides the out-of-plane component)."
+    "Draw a line in 3D on a sketch, where the END point may be OFF the sketch plane (z != 0): "
+    "z is measured along the sketch's LOCAL normal, not world Z (sketch_add_geometry stays on "
+    "the x-y plane). The start defaults to the origin. Reports each endpoint's resolved "
+    "coordinates and whether the end is off-plane."
 )
 draw_3d_line_tool = (
     Tool.create_simple(name="sketch_add_3d_line", description=_3DLINE_DESC)

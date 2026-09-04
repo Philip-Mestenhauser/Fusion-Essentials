@@ -103,11 +103,9 @@ def handler(scope: str = "", format: str = "html", output_folder: str = "") -> d
         return error(f"Fusion declined to generate the setup sheet (returned false) for "
                      f"{kind} scope '{want or 'document'}' - nothing was written.")
 
-    # True is NOT the deliverable: the sheet lands asynchronously and only advances while the main
-    # thread pumps (_export.pump_until does the pumping; the signal below is this tool's own).
-    # Judged by a NEW or MODIFIED sheet file - never by the bool - and the file must be NON-EMPTY
-    # and STABLE across two samples: it appears at 0 bytes first and is written after
-    # (live-measured), so breaking on appearance reports a 0-byte deliverable.
+    # The sheet lands asynchronously and only advances while the main thread pumps, and the file
+    # appears at 0 bytes before it is written - so the deliverable is judged by a new or modified
+    # file that is NON-EMPTY and stable across two samples, never by the bool.
     prev_sizes = None
 
     def probe():
@@ -149,11 +147,9 @@ def handler(scope: str = "", format: str = "html", output_folder: str = "") -> d
 
 
 TOOL_DESCRIPTION = (
-    "Generate a machinist SETUP SHEET document (format='html' default, or 'excel' on Windows) for "
-    "'scope' (a setup/folder/operation NAME; omit for every setup) into 'output_folder'. The file "
-    "is named after the DOCUMENT, so one call per folder - a second call overwrites it. Success is "
-    "gated on the sheet file landing on disk. Toolpaths should be generated first (cam_generate); "
-    "pair with cam_post for the NC program itself."
+    "Generate a machinist SETUP SHEET document for 'scope' into 'output_folder'. The file is named "
+    "after the DOCUMENT, so a second call to the same folder overwrites it. Toolpaths should be "
+    "generated first (cam_generate); pair with cam_post for the NC program itself."
     + _outputs.produces_block(RETURNS)
 )
 

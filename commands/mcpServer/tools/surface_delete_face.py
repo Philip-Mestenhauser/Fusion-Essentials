@@ -22,10 +22,8 @@ from . import _outputs
 
 app = adsk.core.Application.get()
 
-# What this tool RETURNS: the feature name + how many input bodies the delete FULLY consumed (deleting
-# every face of a body removes it - a caller must know that happened, not just see "deleted": true).
-# BOTH are read off the created feature's result bodies, so both are omitted on the direct-mode path
-# where no feature object comes back (see the measured note at the add() call).
+# Both are read off the created feature's result bodies, so both are omitted on the direct-mode
+# path where no feature object comes back.
 RETURNS = [
     _outputs.ReturnsName("feature", of="feature", absent_when="no_timeline_feature"),
     _outputs.ReturnsValue("bodies_consumed", "count of input bodies fully removed by the delete",
@@ -34,7 +32,7 @@ RETURNS = [
 
 _FACES = _inputs.GeometryHandleList(
     "faces", require="face", required=True,
-    description="The faces to delete (find_geometry face handles). Deleting every face removes the body.")
+    description="The faces to delete; deleting every face removes the body.")
 
 
 def delete_face_handler(faces=None, heal=False) -> dict:
@@ -50,9 +48,8 @@ def delete_face_handler(faces=None, heal=False) -> dict:
     if not face_ents:
         return error("'faces' resolved to no faces. Pass find_geometry face handles.")
 
-    # Record each owning body, its NAME and its face count BEFORE. The names are captured here
-    # because a delete can consume the body outright, and the count is the feature-independent
-    # signal the direct-mode path is graded on.
+    # The names are captured BEFORE because a delete can consume the body outright; the face count
+    # is the feature-independent signal the direct-mode path is graded on.
     bodies = _geom.owning_bodies(face_ents)
     body_names = [safe(lambda b=b: b.name) for b in bodies]
     counts_before = _geom.face_counts(bodies)
@@ -70,10 +67,9 @@ def delete_face_handler(faces=None, heal=False) -> dict:
             return error(f"Delete-face (heal) failed: {e}. The opening could not be healed - retry "
                          "with heal=false to just remove the faces (a solid then becomes a surface).")
         return error(f"Delete-face failed: {e}.")
-    # MEASURED: deleteFaceFeatures.add returns None in a DIRECT design while the delete LANDS - a
-    # fillet face on a box was healed away and the body's face count read 7 -> 6. The verdict below
-    # is the face-count delta on the OWNING BODIES, which needs no feature object, so in direct mode
-    # fall through to it; in parametric a None feature is unmeasured as a success and stays an error.
+    # deleteFaceFeatures.add returns None in a DIRECT design while the delete LANDS, so direct mode
+    # falls through to the face-count delta below, which needs no feature object. In parametric a
+    # None feature stays an error.
     direct_no_feature = _common.direct_feature_absence(design, feature)
     if not feature and not direct_no_feature:
         if heal:
@@ -93,13 +89,10 @@ def delete_face_handler(faces=None, heal=False) -> dict:
 
     if direct_no_feature:
         # No feature, so no result-body list and no bodies_consumed - both are read off the feature.
-        # The face-count delta on the INPUT bodies is the only evidence there is.
+        # The face-count delta on the INPUT bodies is the only evidence there is, so an unreadable
+        # count means UNVERIFIED here rather than success.
         delta, readable = _geom.face_count_delta(bodies, counts_before)
         if not readable:
-            # In parametric the feature object is itself evidence, so an unreadable count may pass;
-            # here it is the ONLY evidence, so unreadable means unverified, not success. A body the
-            # delete consumed OUTRIGHT may also read this way - which of the two it is, is exactly
-            # what the read below settles.
             return error("Delete-face ran in a DIRECT design, which returns no feature object, and "
                          "no input body's face count could be read back - so whether the faces were "
                          "deleted is UNVERIFIED. The body may also have been fully consumed (every "
@@ -112,12 +105,8 @@ def delete_face_handler(faces=None, heal=False) -> dict:
         payload["no_timeline_feature"] = True
         payload["faces_after"] = faces_before_total + delta
         payload["faces_delta"] = delta
-        # Everything here is built from the MEASURED delta, never from the request. len(face_ents)
-        # is how many faces were ASKED for; the count that moved is the only thing read back, and on
-        # a heal the two need not agree (healing can re-merge neighbours, so 3 requested faces can
-        # net -1). The request is reported as a request, in parentheses, and nothing claims which
-        # faces went. `heal` likewise is an input flag, so the note says the heal was REQUESTED - an
-        # add() that did not raise is not a read-back of the opening being closed.
+        # Built from the MEASURED delta, never the request: on a heal the two need not agree, since
+        # healing can re-merge neighbours. `heal` is an input flag, so the note says REQUESTED.
         healed = " (heal requested)" if heal else ""
         if delta > 0:
             headline = "The edit landed%s; body face count %d -> %d (%d face(s) requested)." % (
@@ -130,9 +119,8 @@ def delete_face_handler(faces=None, heal=False) -> dict:
             "object - check the bodies with design_get(include=['tree'])."
             % (headline, _common.DIRECT_FEATURE_NOTE))
         if delta > 0:
-            # A delete that RAISES the face count is not something this tool has measured, so it is
-            # neither passed off as normal nor refused as a failure: the count moved, which is proof
-            # the edit landed, and the surprise is handed to the caller to look at.
+            # A delete that RAISES the face count is neither passed off as normal nor refused: the
+            # count moved, so the edit landed, and the surprise is handed to the caller.
             payload["warning"] = (
                 "The face count ROSE by %d - unexpected for a delete, which normally lowers it. The "
                 "edit did land (the count moved), but the requested face(s) may not be what was "
@@ -141,17 +129,13 @@ def delete_face_handler(faces=None, heal=False) -> dict:
             payload["note"] += " " + payload["warning"]
         return ok(payload)
 
-    # AFTER: read result bodies off the feature. Fewer result bodies than input bodies means a delete
-    # consumed a whole body (every face gone) - surface that as a warning, never fake success.
+    # AFTER: read result bodies off the feature. Fewer result bodies than input bodies means a
+    # delete consumed a whole body (every face gone) - a warning below, never fake success.
     result = [{
         "name": safe(lambda b=b: b.name),
-        # counted, never safe(..., 0): a result body whose faces collection will not enumerate is
-        # not a body with zero faces. Summed as 0 it drops the after-total by that body's whole
-        # count, and the verdict below then reads the largest possible delete (26 -> 0) off a
-        # number nobody measured.
+        # counted, never safe(..., 0): a faces collection that will not enumerate is not zero faces.
         "faces": _common.counted(lambda b=b: b.faces.count),
-        # read_flag: informational here (no gate reads it), so a flag that will not read publishes
-        # null rather than calling a body a surface the delete may not have opened.
+        # read_flag: informational here, so a flag that will not read publishes null.
         "is_solid": _common.read_flag(lambda b=b: b.isSolid),
     } for b in _common.result_bodies(feature)]
 
@@ -171,9 +155,7 @@ def delete_face_handler(faces=None, heal=False) -> dict:
         payload["note"] = payload["warning"]
         return ok(payload)
 
-    # The other half of the direct path's contract: there, an unreadable face count is UNVERIFIED
-    # rather than a success, because the count is the evidence. Same here for the AFTER side - a
-    # result body that will not report its faces leaves the delta unmeasurable, so the verdict is
+    # A result body that will not report its faces leaves the delta unmeasurable, so the verdict is
     # refused rather than rendered on a coerced zero.
     if faces_after_total is None:
         return error("Delete-face reported no error, but the face count of %d result body(ies) (%s) "
@@ -183,9 +165,8 @@ def delete_face_handler(faces=None, heal=False) -> dict:
                      % (len(unreadable_after),
                         ", ".join(n or "unnamed" for n in unreadable_after)))
 
-    # Same gate the direct path runs, on the same evidence: a face count that did not move means
-    # nothing was deleted, whatever the feature object says. Skipped only when no input body's
-    # count could be read at all (total 0), where the delta is not evidence of anything.
+    # A face count that did not move means nothing was deleted, whatever the feature object says.
+    # Skipped when no input body's count could be read at all, where the delta is evidence of none.
     delta = faces_after_total - faces_before_total
     if faces_before_total and delta == 0:
         return error("Delete-face reported no error but no input body's face count changed "
@@ -193,10 +174,8 @@ def delete_face_handler(faces=None, heal=False) -> dict:
                      % (faces_before_total, faces_after_total)
                      + _common.failed_effect_remedy(design, feature))
     payload["faces_delta"] = delta
-    # Built from the MEASURED delta, never from the request: len(face_ents) is how many faces were
-    # ASKED for, and on a heal the two need not agree (healing re-merges neighbours, so 3 requested
-    # faces can net -1). `heal` is an input flag, so the note says it was REQUESTED - an add() that
-    # did not raise is not a read-back of the opening being closed.
+    # Built from the MEASURED delta, never the request: on a heal the two need not agree, since
+    # healing can re-merge neighbours. `heal` is an input flag, so the note says REQUESTED.
     healed = " (heal requested)" if heal else ""
     verb = "The delete landed" if delta < 0 else "The edit landed"
     payload["note"] = ("%s%s; body face count %d -> %d (%d face(s) requested)."
@@ -212,11 +191,8 @@ def delete_face_handler(faces=None, heal=False) -> dict:
 
 
 _DESC = (
-"Delete faces from their bodies, optionally HEALING the opening. 'faces' are find_geometry face "
-"handles. 'heal'=true fills/heals the gap (DeleteFaceFeature - a solid stays solid, and it fails if "
-"the body cannot be healed); 'heal'=false just removes the faces (SurfaceDeleteFaceFeature - a solid "
-"becomes a surface). Reports the body face-count delta and 'bodies_consumed' - deleting every face of "
-"a body removes it, and that is reported, never hidden behind a bare success.\n"
+"Delete faces from their bodies. 'heal'=true fills the opening and a solid stays a solid; "
+"'heal'=false leaves it open, turning a solid into a surface.\n"
 + _outputs.produces_block(RETURNS)
 )
 

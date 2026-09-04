@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 187  |  **description breadcrumbs:** 703  |  **note/error breadcrumbs:** 493
+**Tools:** 187  |  **description breadcrumbs:** 642  |  **note/error breadcrumbs:** 482
   |  **guidance smells flagged:** 4
 ## Blindspots to engineer
 
@@ -14,11 +14,11 @@ close orphans, factor duplicated guards into shared helpers.
 - none - every named breadcrumb resolves to a real tool.
 
 ### Orphans (no breadcrumb leads here - reachable only via workspace_orient / search)
-**Read/Acquire (6)** - higher concern, a check-your-work tool nothing points to:
-  `cam_inspect_toolpaths`, `drawing_get`, `model_compute_holder`, `model_measure_relation`, `sys_get_api_doc`, `view_screenshot_multi`
+**Read/Acquire (4)** - higher concern, a check-your-work tool nothing points to:
+  `cam_inspect_toolpaths`, `drawing_get`, `model_compute_holder`, `sys_get_api_doc`
 
-**Edit (31)** - usually leaf actions, scan for genuine gaps:
-  `cam_activate_setup`, `cam_delete`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `design_configure`, `design_remove_feature`, `design_set_name`, `doc_insert_derive`, `drawing_add_sketch`, `drawing_dimension`, `mesh_repair`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_draft`, `model_pipe`, `model_replace_face`, `model_scale`, `model_set_material`, `model_thread`, `sketch_edit_curve`, `sketch_project`, `surface_create_ruled`, `surface_delete_face`, `surface_fill`, `surface_untrim`, `sys_reload_addin`
+**Edit (33)** - usually leaf actions, scan for genuine gaps:
+  `assembly_edit_contacts`, `cam_activate_setup`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `design_configure`, `design_remove_feature`, `design_set_name`, `doc_insert_derive`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_dimension`, `drawing_update`, `mesh_delete`, `mesh_repair`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_draft`, `model_replace_face`, `model_scale`, `model_set_material`, `model_thread`, `sketch_edit_curve`, `sketch_project`, `surface_create_ruled`, `surface_delete_face`, `surface_fill`, `surface_untrim`, `sys_reload_addin`
 
 ### Duplicated guard strings (>=4 copies = factor into a shared _common helper)
 - **53x** across 40 module(s): "No active design. Create or open a document first (see doc_new)."
@@ -35,17 +35,17 @@ close orphans, factor duplicated guards into shared helpers.
 
 ### Hubs (most breadcrumbs lead here - the connective tissue)
 - `doc_new`  <- 95  (desc 10, note 85)
-- `find_geometry`  <- 88  (desc 61, note 27)
-- `view_screenshot`  <- 56  (desc 22, note 34)
-- `design_get`  <- 45  (desc 20, note 25)
-- `design_delete_feature`  <- 41  (desc 20, note 21)
-- `cam_get`  <- 37  (desc 22, note 15)
+- `find_geometry`  <- 59  (desc 32, note 27)
+- `view_screenshot`  <- 49  (desc 18, note 31)
+- `design_get`  <- 44  (desc 19, note 25)
+- `design_delete_feature`  <- 39  (desc 18, note 21)
 - `sketch_create`  <- 36  (desc 19, note 17)
+- `cam_get`  <- 34  (desc 20, note 14)
 - `data_get`  <- 33  (desc 19, note 14)
 - `sketch_get`  <- 32  (desc 14, note 18)
 - `assembly_get`  <- 25  (desc 12, note 13)
-- `model_inspect`  <- 25  (desc 8, note 17)
 - `doc_open`  <- 24  (desc 7, note 17)
+- `model_extrude`  <- 24  (desc 21, note 3)
 
 ## The guidance surface (every note the agent can be told)
 
@@ -65,6 +65,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - body(ies) of this occurrence do NOT carry the new appearance (
 - ) - each still reads the one named in 'bodies_not_reached'; color those directly (target = the body).
 - body(ies) could not be compared, so the color is UNCONFIRMED there - see 'unverified_bodies'.
+- The color was written to
+- but could not be compared with a read-back there, so the appearance's own color is UNCONFIRMED.
 - No active design with geometry.
 - is outside 0-100. It is a PERCENT - the browser's Opacity Control - not a 0-255 color alpha.
 - has no bodies to color.
@@ -96,8 +98,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - after) - the position was not captured.
 - Capture reported success (Fusion named the marker '
 - ') but taking it MOVED
-- . The pending pose was REVERTED rather than recorded, so the marker holds the PRE-move position - it is NOT the pose you captured. The marker REMAINS: remove it with assembly_capture_position(actio...
-- '), then re-apply the move. Read the positions back with assembly_get or model_inspect before and after any retry - this call cannot tell you whether a retry will stick.
+- . The marker does NOT hold the pose you captured, and it REMAINS: remove it with assembly_capture_position(action='delete', marker='
+- '), re-apply the move, and read the positions back with assembly_get before and after any retry.
 - Nothing to discard - there is no pending position change.
 - Fusion declined to discard the pending position change (revertPendingSnapshot returned false) - the move still stands.
 - Discard ran, but the pending-position flag could not be re-read - the confirming read could not be taken, so the move may or may not have been thrown away. Call action='status' before acting on thi...  **[hedge]**
@@ -197,7 +199,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 ### `assembly_edit_relations`
 - ' does not apply to a
 - No active design with components.
-- Coupling re-valued - 'interpreted' states how the ratio was read and the native pair sent to the API, and value_one/value_two are the link's own parameters READ BACK after the set. The SIGN of rati...
+- Coupling re-valued - 'interpreted' states how the ratio was read, and value_one/value_two are the link's own parameters READ BACK after the set. The SIGN of ratio SETS the direction, so a positive ...
 - 'ratio' must be non-zero (a 0 ratio links no motion).
 - ' does not report both coupled motions (motionOne/motionTwo), so its values cannot be re-set without guessing which degrees of freedom it links.
 - Fusion declined to re-value motion link '
@@ -231,7 +233,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not set isReversed on motion link '
 
 ### `assembly_get`
-- Structured kinematic state. CHECK is_healthy FIRST - false means a joint, relation or feature FAILED TO COMPUTE (the 'Compute Failed' a user sees in the timeline before any test; a wired-but-mis-ax...
+- Structured kinematic state. CHECK is_healthy FIRST - false means a joint, relation or feature FAILED TO COMPUTE, or the design holds an occurrence whose external reference does not resolve; broken_...
 - '. Use mm, cm, or in.
 - No active design. Open or create a document first (see doc_new).
 
@@ -297,6 +299,10 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Operations were added to the setup. If generation_mode was 'skip', the toolpaths are not yet generated. Use cam_get(include=['operations']) or view_screenshot to verify, and cam_compare_operations ...
 - Invalid template URL: '
 - No template found at URL:
+- 'template_url' loads the template '
+- ', but 'template_name' says '
+- ' - nothing was applied. Pass the url alone to apply '
+- ', or the name alone to search for '
 - Failed to apply template:
 
 ### `cam_compare_operations`
@@ -326,9 +332,9 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ' in the Local machine library failed:
 
 ### `cam_create_operation`
-- No toolpath yet: select the geometry it cuts with cam_select_geometry, THEN compute it (cam_generate, or generate=true here). Generating a selection-driven strategy before its geometry is selected ...
+- No toolpath yet: select the geometry it cuts with cam_select_geometry, THEN compute it (cam_generate, or generate=true here). Generating before the geometry is selected leaves it reading valid with...
 - ' isn't compatible with setup '
-- Provide 'tool_index' (with 'tool_scope=document' for this doc's library, or 'tool_library_url' for a shared one) - both from cam_edit_tools.
+- The setup offers no compatible strategies at all.
 - operations.add returned no operation.
 - operations.add returned '
 - ' but the setup's operation count could not be read
@@ -342,10 +348,10 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not assign the tool to a '
 
 ### `cam_create_setup`
+- Setup created (no operations yet). Add toolpaths with cam_apply_template (a COMPATIBLE template - a milling setup needs a milling template), then cam_generate. Be in the Manufacture workspace befor...
 - No active design. Open or create a document first (see doc_new).
 - No bodies to machine. The root component holds no bodies - add geometry first, or pass 'models' = body handles/names (a body inside a sub-component is not in the default set).
 - Setup creation returned nothing.
-- Setup created (no operations yet). Add toolpaths with cam_apply_template (a COMPATIBLE template - a milling setup needs a milling template), then cam_generate. Be in the Manufacture workspace befor...
 - setups.add returned '
 - ' but it does not appear when the setups are re-listed - the setup did not land.
 
@@ -449,20 +455,22 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 
 ### `cam_edit_operation`
 - Provide 'operation' - the CAM operation name to edit (see cam_get(include=['operations'])).
-- Provide 'parameters' - at least one name=value to set (e.g. {'tool_feedCutting': '3000', 'maximumStepdown': '1.5'}) - or 'suppressed' true/false to park or restore the operation.
+- Provide 'parameters' - at least one name=value to set (e.g. {'tool_feedCutting': '3000'}) - or 'preset', a preset on this operation's tool, 'tool_index' (with 'tool_scope=document' or 'tool_library...
 - ' has no parameter(s):
-- . Read the operation's parameter names first (the tool only sets existing ones).
-- ': expression did not evaluate -
-- parameter(s); no change was applied. (An operation expression must reference existing parameters and resolve to a value - check names and units.)
-- (Parameters already applied:
+- . cam_get(include=['parameters'], operation=...) lists this operation's own parameter names; only a name it lists can be set.
+- ' does not accept a write to:
+- (isEditable reads False on each). Nothing was applied. cam_get(include=['parameters'], operation=...) marks each refusing row editable false; set a row it does not mark. For a cutting-TOOL dimensio...
+- parameter(s); no change was applied.
 
 ### `cam_edit_setup`
 - Setup edited. Existing toolpaths are now OUT OF DATE - regenerate with cam_generate. A WCS bound via 'wcs' is a LIVE reference to the selected geometry or Joint Origin (bound_entities), so the WCS ...
 - Provide 'setup' - the CAM setup name (see cam_get).
-- Nothing to do. Provide 'parameters' {name: expression}, 'models'/'fixtures'/'stock' body lists, a 'machine', and/or a 'wcs' binding.
+- Nothing to do. Provide 'parameters' {name: expression}, 'models'/'fixtures'/'stock' body lists, a 'machine', a 'wcs' binding, and/or 'rename'.
 - ' has no parameter(s):
 - . (Read the setup's parameter names first; only existing ones are settable.)
-- parameter(s); no change was applied. (A CAM stock/setup expression must reference existing parameters and resolve to a value - check names and units.)
+- ' does not accept a write to:
+- (isEditable reads False on each). Nothing was applied. A setup exposes many parameters it takes no write to; set one it does - cam_get(include=['parameters'], setup=...) marks each refusing row edi...
+- parameter(s); no change was applied.
 - - the assignment did not take.
 - Machine assignment did not take on setup '
 - ' but the setup now reports '
@@ -470,6 +478,10 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ' has no WCS mode parameter '
 - bound no geometry - '
 - ' reads back empty after the set. The handle may not be a valid WCS reference for this setup.
+- Set the name of setup '
+- ' but Setup.name does not read back, so the rename is UNCONFIRMED. Re-read it with cam_get. Every other change in this call was applied and is NOT rolled back.
+- ' did not take - Setup.name still reads
+- . Every other change in this call was applied and is NOT rolled back.
 - Could not switch setup '
 - ' to from-solid stock (SolidStock mode):
 - Could not strip the simulation model from '
@@ -529,10 +541,12 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 
 ### `cam_generate`
 - Generation launch returned no future (nothing to generate?).
-- Generation is launched and runs in the background at its own pace - the compute is often minutes. Check cam_get_status(handle) at whatever cadence you need the progress, until completed=true. The o...
-- Failed to launch generation for
 - Omit 'target' to generate the whole document.
+- Failed to launch generation for
 - Pass skip_valid=false to force-regenerate it.
+- No generation launched in
+- : every operation outside the
+- that read isGenerationAllowed false failed to launch (
 
 ### `cam_generate_setup_sheet`
 - Setup sheet written. The file is named after the DOCUMENT, not the scope, so another call into this folder OVERWRITES it - use a distinct output_folder per sheet you want to keep.
@@ -548,13 +562,17 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Setup-sheet generation failed:
 
 ### `cam_get`
-- . Scope then deepen: include=['operations'] ('setup' filters) -> include=['parameters'] or ['tool'] with 'operation'=<name> for one op's settings/tool -> 'preset'=<name> for a preset's feeds/speeds.
-- Setups orientation slice. Pull deeper with include=
 - Operation rows capped at
-- . Pass 'setup' to scope to one setup, or read the per-setup operation_count in the default slice.
+- . Pass 'setup' to scope to one setup, or add 'default' to include for the per-setup operation_count.
+- rows; 'setup' scopes the read, strategy_count is the true total.
 - include=['parameters'] needs 'operation' - the operation whose settings to read (scope first with cam_get(setup=..., include=['operations'])); or 'setup' alone for that SETUP's own parameters (stoc...
 - include=['tool'] needs 'operation' - the operation whose tool to read.
-- ' on this tool. Available:
+- '. Valid: mm, cm, in.
+- ' on this tool. Presets on this tool:
+- This tool carries no presets at all, so '
+- ' names none. cam_edit_tools(action='add_preset') authors one on a library tool.
+- preset(s) but none of their names read, so '
+- ' cannot be matched against them.
 
 ### `cam_get_status`
 - No generation with handle '
@@ -562,8 +580,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - 'latest' resolves to handle '
 - ', which is not registered - a generation is dropped from the registry once it completes. Active handles:
 - . Omit 'handle' to read the ACTIVE document's live state, or pass 'target' (a setup/operation name) to read an inline generation by name.
+- cam_get(include=['operations']) for per-op detail.
 - No operations are still generating in scope.
-- cam_get(include=['operations']) for the per-op detail.
 - Still generating in the background - check again later.
 - Generation complete (
 - The per-op tallies could not be read (
@@ -576,15 +594,16 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 ### `cam_post`
 - Post did not report clean success - review before running.
 - ' posted AS-IS from its stored configuration -
-- No operations/post/output-folder settings were changed.
-- Only valid toolpaths were posted (out-of-date/errored ops are omitted); cam_get(include=['nc_programs']) shows the program, cam_get(include=['operations']) any ops that were skipped.
+- file(s), nothing reconfigured. Read 'readiness' for the job's health.
+- file(s). Read 'readiness' for the job's health.
 - Provide 'program_name' - the NC Program name or number (some posts require a number).
 - Provide 'output_folder' - the directory where the NC file(s) will be written.
+- Pass 'scope' or 'setups', not both - 'scope' names ONE setup/folder/operation and 'setups' names the several setups one program holds.
 - No valid toolpaths to post - every operation is out-of-date, errored, or ungenerated. Run cam_generate (in the Manufacture workspace) first. (
-- Omit 'scope' to post the whole document.
+- Omit both to post the whole document.
 - ' already exists, but its stored operations cannot be compared with what 'scope' resolves to:
-- requested operation(s) have no readable operationId, so whether reconfiguring would overwrite a machinist-curated program is unknown. Omit 'scope', 'post', and 'output_folder' to post it exactly as...
-- ' already exists and its stored operations differ from what 'scope' resolves to - reconfiguring would overwrite a program that may be machinist-curated. Omit 'scope', 'post', and 'output_folder' to...
+- requested operation(s) have no readable operationId, so whether reconfiguring would overwrite a machinist-curated program is unknown. Omit 'scope', 'setups', 'post', and 'output_folder' to post it ...
+- ' already exists and its stored operations differ from what 'scope' resolves to - reconfiguring would overwrite a program that may be machinist-curated. Omit 'scope', 'setups', 'post', and 'output_...
 - ' output folder to post as-is against - configure it once with 'output_folder' and 'post'.
 - (the API returned null).
 - The NC Program has no '
@@ -592,6 +611,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - '. Unresolved parameters:
 - Post processing raised:
 - ; check the post matches the machine/operations.)
+- Omit 'scope' to post the whole document.
 
 ### `cam_reorder`
 - Provide 'entity' (to move) and 'reference' (to move it relative to).
@@ -630,8 +650,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not create destination folder '
 
 ### `cam_select_geometry`
-- Selection applied; generation is launched and runs in the background at its own pace - check cam_get_status(target='
-- ') at whatever cadence you need the progress, until completed=true. If it completes with has_toolpath False the op produced no path - the warning channel can be silent there; check the heights (a z...
+- Selection applied; generation is launched - check cam_get_status(target='
+- ') until completed=true. has_toolpath False on completion means no path was produced, and the warning channel can be silent there - check the heights and the selection.
 - Selection applied; pass generate=true (or cam_generate) to compute the toolpath.
 - Selection applied but generation failed to launch:
 - . The selection is saved - fix the cause, then run cam_generate(target='
@@ -752,7 +772,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 
 ### `data_get`
 - Active hub + its projects. Pass project=<name|id> to list its FILES (add 'folder' to scope, or include=['folders'] for the tree); 'file'=<name|URN> reads ONE file's full record. include=['hubs'] li...
-- One file's record: metadata, version state and LINK state. Dates are UNIX epoch seconds (the API's own form) with the UTC ISO string beside each. 'file_extension' is the DataFile property and is un...
+- One file's record: metadata, version state and LINK state. Dates are UNIX epoch seconds with the UTC ISO string beside each. 'file_extension' is unreliable for a non-CAD upload - the file NAME carr...
 - Files in the project (each with its lineage URN + openable fusionWebURL). 'folder'=<path> scopes to one folder; include=['folders'] shows the folder tree instead; 'file'=<name|URN> reads ONE file's...
 - All hubs (is_active flags the current one). Switch from the Fusion data panel - Data.activeHub is read-only in the API. Then pass project=<name> to list files.
 - Folder tree of the project. Pass a 'folder' path + drop include=['folders'] to list that folder's FILES. (Cloud read - see 'truncated'.)
@@ -852,7 +872,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - The active design is not yet a configured design. Run action='create' first.
 - Save the document first (doc_save_as), THEN run create. Converting an unsaved document builds the table only in memory - it won't materialize as a configured design (no DataFile to carry it, and th...
 - createConfiguredDesign() returned no table.
-- Design converted to a configured design (one configuration so far). Add columns (add_parameter/add_suppress/add_visibility/set_appearance/add_material) and configurations (add_configuration). THEN ...
+- Design converted to a configured design (one configuration so far). Add columns (add_parameter/add_suppress/add_visibility/set_appearance/add_material) and configurations (add_configuration). To se...
 - Design is already a configured design; reusing its configuration table. Add configurations with action='add_configuration' and columns with add_parameter / add_suppress / add_visibility / set_appea...
 - Configuration switched + rebuilt. Pair with view_screenshot to view it, or design_get(include=['timeline']) / param_get to see what changed.
 - Provide 'name' - the configuration to activate (a configuration name or id).
@@ -1052,6 +1072,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - - refusing rather than dropping it. Export as stl to bake the unit into the file, or omit 'stl_units'.
 - ) applies to format=stl only, and this call asked for format=
 - - refusing rather than dropping it. Export as stl to choose binary or ASCII, or omit 'stl_binary'.
+- ') and split_by_component=true cannot be combined: the split writes one file per TOP-LEVEL occurrence and would not narrow to that target - refusing rather than dropping it. Omit 'target' to split ...
 - Provide 'file_path' - the local output path (a file, or a DIRECTORY when split_by_component=true). The format extension is appended if missing.
 - No active design to export. Open or create a document first (see doc_new).
 - component(s) to separate
@@ -1059,19 +1080,20 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - top-level occurrence(s) exported to separate
 - produced NO file - see 'failed'.
 - ' not found. Pass a body/component NAME, an occurrence fullPathName (e.g. Bracket:2 - the precise way to pick one instance), or omit 'target' to export the whole design.
-- export reported success but
-- . execute() returned true but produced nothing - treating this as a failure, not a false success. Check the target geometry and the output path are valid.
+- ') does not apply to format=dxf, which writes the 2D geometry named by 'dxf_sketch' or 'dxf_face' - refusing rather than dropping it. Name the sketch or face instead, or omit 'target'.
+- 'split_by_component' (true) does not apply to format=dxf, which writes one sketch or face to one file - refusing rather than dropping it. Call design_export once per sketch/face, or omit 'split_by_...
 - The root component's occurrences did not read, so which components this split would write one file each for is unknown - refusing rather than reporting a zero-file export. Export without split_by_c...
 - No top-level occurrences to split - the design has no component instances. Export without split_by_component to write the whole design as one file.
 - split export wrote NO files - all
 - occurrence(s) failed:
+- ' (true) applies to the 3D formats only, and this call asked for format=dxf, whose source is one named sketch or face - refusing rather than dropping it. Export as a 3D format, or omit '
 - Could not create output directory '
 - Provide 'file_path' - the local .dxf output path.
 - Pass only one of 'dxf_sketch' or 'dxf_face' for format=dxf, not both.
 - format=dxf needs either 'dxf_sketch' (a sketch NAME) or 'dxf_face' (a find_geometry planar-face handle) to know what 2D geometry to write.
 
 ### `design_get`
-- (e.g. include=['tree'] for the full component tree, ['timeline'] for the feature list, ['mode'] for the capability map, ['configurations'] for configs, ['materials'] or ['appearances'] for the assi...
+- . 'max_depth'/'component'/'tree_bodies' scope the tree; 'group'/'include_suppressed'/'timeline_params' the timeline; 'library'/'name_filter'/'max_results' the catalog; 'attribute_group' (required)/...
 - Orientation slice. Pull deeper with include=
 - contents.occurrences_walk='unreadable': NEITHER root.allOccurrences nor the component.occurrences fallback enumerated, so the occurrence count is missing because it is UNKNOWN, not because the desi...
 - No active design. Open or create a document first (see doc_new).
@@ -1153,7 +1175,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - . (A shared name needs a lineage URN or the 'open:N' index from doc_get.)
 - ' matches more than one OPEN document - refusing to guess which to
 - . Candidates, each with the document id it answered:
-- . Retry with the address a candidate carries: a document id standing ALONE reaches that one and no other. A row carrying an 'open:N' index as well is one no URN reaches - it answered no id, or anot...
+- . Retry with the address a candidate carries: a document id standing ALONE reaches that one and no other; a row carrying an 'open:N' index as well is reachable only by that index, which doc_get pub...
 
 ### `doc_close`
 - No document was closed.
@@ -1166,7 +1188,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - . (A shared name needs a lineage URN or the 'open:N' index from doc_get.)
 - ' matches more than one OPEN document - refusing to guess which to
 - . Candidates, each with the document id it answered:
-- . Retry with the address a candidate carries: a document id standing ALONE reaches that one and no other. A row carrying an 'open:N' index as well is one no URN reaches - it answered no id, or anot...
+- . Retry with the address a candidate carries: a document id standing ALONE reaches that one and no other; a row carrying an 'open:N' index as well is reachable only by that index, which doc_get pub...
 
 ### `doc_copy`
 - The copy preserves external references: each referenced component still points at its ORIGINAL source file - the references are not re-copied. This tool does not offer a Document.saveAs-based copy ...
@@ -1201,9 +1223,9 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not prepare destination path '
 
 ### `doc_get`
-- active = the focused document (document_id is its lineage URN, for doc_copy/doc_open). open_documents is a SUPERSET of visible tabs - referenced/dependency docs load as real Documents (is_visible=t...
 - No active document. Open or create one first (doc_open / doc_new).
-- Version metadata LAGS a just-completed save: measured, a fresh read shows the new tip at 2.9-4.4s, and after doc_save_milestone the milestone flag and the Milestones collection arrive TOGETHER at 1...
+- active = the focused document (document_id is its lineage URN, for doc_copy/doc_open). open_documents is a SUPERSET of visible tabs - referenced/dependency docs load as real Documents (is_visible=t...
+- Version metadata LAGS a just-completed save by up to ~20 s - re-read before concluding. A row the Milestones collection lists while its flag still reads false is is_milestone=true with flag_lagging...
 - The active document has no cloud DataFile (never saved to the cloud); no version history exists. Save it first (doc_save_as).
 - Covers three link kinds: kind='xref' (referenced occurrences), kind='derive' (derive features) and kind='unresolved' (an occurrence whose referenced component could not be loaded). all_current is a...
 - No active Design (the active product is not a design); the xref walk needs a design document.
@@ -1275,7 +1297,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - addByInsert returned nothing (the insert did not produce an occurrence).
 - addByInsert returned an occurrence but it reads isValid=false - the insert did not land.
 - Insert landed but the occurrence is NOT an external reference (isReferencedComponent=false) - the associative link did not form. Confirm the source and host share a project, then retry.
-- Inserted at the requested placement. This is the source's last SAVED cloud version - unsaved in-session edits in the source are NOT reflected here (save the source, then doc_update_xref). A joint p...
+- Inserted at the requested placement, from the source's last SAVED cloud version - unsaved source edits are not here (save the source, then doc_update_xref). Refine with joint_create to mate it to s...
 - ' has no component to insert into.
 - Unknown rotate_axis '
 - ) was refused - the placement rotation could not be built, so nothing was inserted or removed.
@@ -1437,7 +1459,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - The active document is not a drawing, so it has no sheets. Open the drawing (doc_open by file_id) and make it active, then retry.
 - Provide 'sheet_size' - the preset size to give the sheet.
 - Provide 'orientation' - landscape or portrait.
-- Sheet added after the active sheet, inheriting its size and orientation, and it is now the ACTIVE sheet. It lands DIRECTLY AFTER the active sheet, not at the end, so every sheet below it moves down...
+- Sheet added DIRECTLY AFTER the active sheet, not at the end, inheriting its size and orientation and becoming the ACTIVE sheet: every sheet below moves down one and its export index shifts with it,...
 - The drawing's sheets could not be read - cannot add a sheet.
 - Sheets.add returned nothing - no sheet was added.
 - Sheets.add returned a sheet but the drawing still holds
@@ -1453,7 +1475,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Fusion refused to delete sheet '
 - ' (deleteMe returned false). The sheet is still there.
 - Fusion accepted the delete (deleteMe returned true), which cannot be undone. The count of
-- above and 'sheets_still_read' beside it are what the drawing still reports inside this call - a drawing delete is not visible in the call that makes it, so neither is a verification, and the delete...
+- above and 'sheets_still_read' beside it are what the drawing still reports inside this call - a drawing delete is not visible in the call that makes it, so neither is a verification and the deleted...
 - Provide 'new_name' - the name to give the sheet.
 - ' but the sheet name could not be read back, so the rename is unverified.
 - The rename did not take - the sheet still reads '
@@ -1496,7 +1518,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not create output directory '
 
 ### `drawing_get`
-- The drawing family's READ. export_index is 1-based - the address drawing_export's sheet_range and drawing_edit_sheet take. Sheet width/height are ALWAYS mm; a custom-size sheet reads sheet_size nul...
+- export_index is 1-based - the address drawing_export's sheet_range and drawing_edit_sheet take. Sheet width/height are ALWAYS mm; a custom-size sheet reads sheet_size null. include=['views'] adds p...
 - Unknown include value(s):
 - . This read offers: views.
 - The active document is not a 2D drawing. Activate the drawing document first (doc_activate), then read it.
@@ -1534,8 +1556,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - updateAllReferences failed:
 
 ### `find_geometry`
-- Narrow with kind / radius / nearest_to when a part has many similar faces. A match on a body that is not visible carries hidden:true (visible bodies' records omit it).
-A planar face's 'frame' is th...
+- A match on a body that is not visible carries hidden:true.
+A planar face's 'frame' is that plane in world space: the point at local (u, v) is frame.origin + u*frame.x_world + v*frame.y_world, and f...
 - '. Use mm, cm, or in.
 - No active design (open or create a document first).
 
@@ -1558,7 +1580,7 @@ A planar face's 'frame' is th...
 - setter returned false
 - joints.add returned nothing.
 - - it does not position the parts. It REMAINS in the timeline: remove it with design_delete_feature(name='
-- '), or fix its inputs with joint_edit. A part locked by assembly_ground(ground_to_parent=true) - the part itself or an ancestor of it - conflicts with a joint that would move it; read the current s...
+- '), or fix its inputs with joint_edit. A part locked by assembly_ground(ground_to_parent=true), itself or an ancestor, conflicts with a joint that would move it - read the state back with assembly_...
 - ' WAS CREATED but FAILED to compute (health state:
 - (it reports no message)
 - Could not create joint input:
@@ -1599,7 +1621,7 @@ A planar face's 'frame' is th...
 - . Rename it in the browser, or remove it with design_delete_feature and retry with a different name.
 
 ### `joint_create_origin`
-- Joint origin created. frame_axes shows the resulting Z/X/Y directions. For an oriented frame: anchor='bbox_center' (Z = orient_axis) / 'face_center' (Z = face normal) / a sketch line (draw it with ...
+- Joint origin created. frame_axes shows the resulting Z/X/Y directions. For an oriented frame: anchor='bbox_center' (Z = orient_axis) / 'face_center' (Z = face normal) / a sketch line. anchor='coord...
 - No active design. Open or create a document first (see doc_new).
 - '. Valid: mm, cm, in.
 - Could not build joint geometry from the given anchor.
@@ -1621,7 +1643,7 @@ A planar face's 'frame' is th...
 - cm). Rolled the origin back; nothing changed.
 
 ### `joint_drive`
-- Joint driven (the Drive Joints command) - the mechanism followed along this joint's DOF. This pose is TRANSIENT: a recompute resets it unless captured. Call assembly_capture_position (action='captu...
+- Joint driven (the Drive Joints command). This pose is TRANSIENT: a recompute resets it unless captured, so call assembly_capture_position (action='capture') to write it into the timeline as a Posit...
 - Provide 'angle_deg' (revolute/cylindrical) and/or 'distance' (slider/cylindrical) to drive the joint to.
 - '. Use mm, cm, or in.
 - No active design with components.
@@ -1630,9 +1652,9 @@ A planar face's 'frame' is th...
 - ' is a slider - it has no rotation. Use 'distance', not 'angle_deg'.
 - ' is a revolute - it has no slide. Use 'angle_deg', not 'distance'.
 - Could not read the motion of joint '
-- ' (delete+recreate, a new token) clears this refusal.
+- ' (a new token) clears this refusal.
 - ' is motion-linked to '
-- ', which was already driven this session, and the pair did NOT read as wholly native: an occurrence read for one of the two joints did not come back POSITIVELY native - it reads as a REFERENCED com...
+- ', already driven this session, and the pair did NOT read as wholly native - an occurrence of one joint reads as a REFERENCED component, sits under one, did not answer isReferencedComponent, or did...
 - . Fusion IGNORES an out-of-range drive (the value stays where it was), so nothing would move. Command a value inside the limits (a command exactly AT a bound lands on it), or widen them with joint_...
 - Refused: the command lies beyond the enabled joint limits of '
 - Could not drive joint '
@@ -1665,7 +1687,7 @@ A planar face's 'frame' is th...
 - ' is an AS-BUILT joint, which exposes no offset/angle ModelParameter for ANY motion type - no expression can drive it. Delete it (design_delete_feature) and build the pair with joint_create instead.
 
 ### `joint_motion_link`
-- Joints linked - value_one/value_two are the link's own parameters READ BACK after the set, and 'interpreted' states how the ratio was read and the native pair sent to the API. Whether the link move...
+- Joints linked - value_one/value_two are the link's own parameters READ BACK after the set. Whether the link moves the partner is not claimed here: joint_drive ONE member and its receipt answers whe...
 - Provide 'joint_one' and 'joint_two' - the two joints to link.
 - joint_one and joint_two must be different joints.
 - ratio must be non-zero (a 0 ratio links no motion).
@@ -1679,7 +1701,7 @@ A planar face's 'frame' is th...
 - . (Two joints already coupled through the same kinematic chain cannot be linked - the platform refuses them here.)
 
 ### `mesh_combine`
-- Mesh bodies combined. 'enhanced' produces fewer triangles than 'legacy'. Inspect the result with model_inspect (mesh target), or convert with mesh_to_brep. Pair with view_screenshot to view it.
+- Mesh bodies combined ('enhanced' yields fewer triangles than 'legacy'). The edit lands on the COMPONENT, so EVERY instance carries it; a tool addressed '<occurrence>:<mesh>' lands where that occurr...
 - No active design. Create or open a document first (see doc_new).
 - REFUSED before combining: a
 - needs the tool to OVERLAP the target, and
@@ -1709,16 +1731,11 @@ A planar face's 'frame' is th...
 - Mesh delete failed (meshRemoveFeatures.add raised):
 
 ### `mesh_export`
-- Exported a MESH file to local disk (the design was not modified). To round-trip it into the cloud, upload it with data_upload_file; to re-import it as a mesh body, use mesh_insert.
-- component(s) to separate
-- mesh files - each top-level occurrence is one printable file.
-- Target was a MESH body, which ExportManager cannot write to a file on its own (it returns success but writes nothing). Exported its owning component instead - the file contains that component's mes...
 - ') applies to format=stl only, and this call asked for format=
 - - refusing rather than dropping it. Export as stl to bake the unit into the file, or omit 'stl_units'.
+- ') and split_by_component=true cannot be combined: the split writes one file per TOP-LEVEL occurrence and would not narrow to that target - refusing rather than dropping it. Omit 'target' to split ...
 - Provide 'file_path' - the local output path (a file, or a DIRECTORY when split_by_component=true). The format extension is appended if missing.
 - No active design to export. Open or create a document first (see doc_new).
-- top-level occurrence(s) exported to separate
-- produced NO file - see 'failed'.
 - ' not found. Pass a body HANDLE from find_geometry (precise), a body/mesh/component/occurrence NAME, or omit 'target' to export the whole design.
 - This design exposes no exportManager - cannot export.
 - This build's ExportManager has no
@@ -1730,8 +1747,8 @@ A planar face's 'frame' is th...
 - No top-level occurrences to split - the design has no component instances. Export without split_by_component to write the whole design as one file.
 - split export wrote NO files - all
 - occurrence(s) failed:
-- export wrote no file for this MESH target. Exporting an existing MESH body to a file via ExportManager writes nothing (a Fusion limitation - execute() returns True but no file lands), and the redir...
-- ) produced no file either (the component may hold no exportable mesh geometry). To get the mesh on disk, convert it first (mesh_to_brep) and export the resulting solid, or place it in a component t...
+- export wrote no file for this MESH target: the redirect to its owning component (
+- ) produced no file either. Convert the mesh with mesh_to_brep and export the resulting solid, or place it in a component that exports.
 - Could not create output directory '
 
 ### `mesh_generate_face_groups`
@@ -1930,7 +1947,7 @@ A planar face's 'frame' is th...
 - ) - each may still be OPEN, which keeps the design reading direct and the timeline inaccessible. Their handles are KEPT (an open base feature can be reached no other way), so model_base_feature(act...
 - No active design. Create or open a document first (see doc_new).
 - 'action' must be one of: start, finish (got '
-- Base-feature edit OPEN - geometry from subsequent tool calls lands in this scope. While it is open the design READS as 'direct' and the timeline is inaccessible - that is the open scope, NOT a real...
+- Base-feature edit OPEN - geometry from subsequent tool calls lands in this scope. While it is open the design READS as 'direct' and the timeline is inaccessible; that reverts on finish. ALWAYS pair...
 - This component has no baseFeatures collection - cannot create a base feature here.
 - BaseFeatures.add() returned nothing - could not create a base feature.
 - Could not enter base-feature edit (startEdit returned false).
@@ -1945,7 +1962,7 @@ A planar face's 'frame' is th...
 - was applied. For a variable-radius chain, the edges must be tangentially connected AND listed from one end of the chain to the other; otherwise check the edges really are corners at this radius, an...
 - created a feature Fusion reports as FAILED
 - (it reports no message)
-- Fillet reported success but rounded nothing - the created feature holds 0 faces (a no-op). A TANGENT edge does this: its two faces meet smoothly (zero dihedral) - e.g. a hole drilled tangent to a f...
+- Fillet reported success but rounded nothing - the created feature holds 0 faces. A TANGENT edge does this: its two faces meet smoothly (zero dihedral), e.g. a hole drilled tangent to a face with it...
 - (The inert fillet feature could not be auto-removed.)
 - reported success but only PARTIALLY applied:
 - edge(s) requested, but the created feature holds only
@@ -2075,8 +2092,8 @@ A planar face's 'frame' is th...
 - Fusion refused the to_object extent (setOneSideExtent returned false), so nothing was extruded. Check the target face is reachable from the profile in the extrude direction.
 - Could not scope to target_bodies:
 - Extrude reported success but extent=through_all removed no material from
-- - the cut ran the wrong way. through_all follows the sketch-plane normal, which on an on-face sketch points away from the body: pass the opposite 'distance' sign to cut into it. The failed feature '
-- ' remains in the timeline (this check reads only those bodies, so a design-wide effect is not ruled out) - remove it with design_delete_feature if unwanted.
+- . through_all follows the sketch-plane normal, which on an on-face sketch points away from the body - pass the opposite 'distance' sign. '
+- ' remains in the timeline (this check read only those bodies); remove it with design_delete_feature.
 - ' has no closed profile to extrude. Draw a closed region (e.g. a rectangle or circle) first, or pass as_surface=true to extrude an open path into a surface.
 - taper_deg is not supported with extent=through_all (a through-all extent carries no taper).
 - Fusion rejected a symmetric extent=through_all (setTwoSidesExtent returned false).
@@ -2100,7 +2117,7 @@ A planar face's 'frame' is th...
 - was applied. For a variable-radius chain, the edges must be tangentially connected AND listed from one end of the chain to the other; otherwise check the edges really are corners at this radius, an...
 - created a feature Fusion reports as FAILED
 - (it reports no message)
-- Fillet reported success but rounded nothing - the created feature holds 0 faces (a no-op). A TANGENT edge does this: its two faces meet smoothly (zero dihedral) - e.g. a hole drilled tangent to a f...
+- Fillet reported success but rounded nothing - the created feature holds 0 faces. A TANGENT edge does this: its two faces meet smoothly (zero dihedral), e.g. a hole drilled tangent to a face with it...
 - (The inert fillet feature could not be auto-removed.)
 - reported success but only PARTIALLY applied:
 - edge(s) requested, but the created feature holds only
@@ -2256,7 +2273,7 @@ A planar face's 'frame' is th...
 
 ### `model_move`
 - Geometry repositioned. To reposition a component instance instead, use assembly_move.
-- A move feature cannot move FACES - pass 'bodies'. createInput2 accepts a BRepFace collection and then raises InternalValidationError inside the kernel (measured in a parametric design). To push or ...
+- A move feature cannot move FACES - pass 'bodies'. createInput2 accepts a BRepFace collection and then raises InternalValidationError inside the kernel. To push or pull a face, use model_offset_face.
 - 'bodies' is required - the bodies to move.
 - No active design. Create or open a document first (see doc_new).
 - Move feature was created but failed to compute:
@@ -2387,10 +2404,13 @@ A planar face's 'frame' is th...
 
 ### `model_set_material`
 - ). model_inspect mass/density now reflects this material. This is NOT color - use appearance_set for cosmetic color.
-- failed - see 'failed'.
+- Empty target: assigned to the bodies of all
+- component(s) the design listed.
+- failed - see 'failed' ('<component>/<body>' names each).
 - No active design with geometry.
 - has no bodies to assign a material to.
 - Could not assign material '
+- Empty target: the design's component list did not read, so only the ROOT component's bodies were reached - a child component's bodies keep the material they had.
 
 ### `model_shell`
 - Body hollowed into a shell. Pair with view_section to inspect the wall thickness.
@@ -2590,7 +2610,9 @@ A planar face's 'frame' is th...
 - The extension set did not take (re-read
 - 'leader_extension' must be a number.
 - set_flags applies to hole/thread callouts only.
+- action='set_flags' needs a non-empty 'flags' - {threaded: true, through: false}.
 - set_values applies to hole/thread callouts only.
+- action='set_values' needs a non-empty 'values' - {diameter: 6.2} or {diameter: {value, tolerance: {type, ...}}}.
 - set_display applies to hole/thread callouts only.
 - action='set_display' needs 'display' - {precision, units, leading_zeros, trailing_zeros, unit_abbreviation, secondary: {...}}.
 - A suppressed PMI is expected to drop out of the pmi_get listing entirely (unconfirmed on this Fusion build) - pmi_edit(action='unsuppress') brings it back by name either way, and verifies it reappe...
@@ -2655,6 +2677,8 @@ A planar face's 'frame' is th...
 - No active design. Create or open a document first (see doc_new).
 - No sketch to draw on. Create one first with sketch_create.
 - returned no entity (check the parameters).
+- drawn. Its centre is a sketch point of its own: center_point=
+- - address points by that ref rather than by counting the ones you drew.
 - '. Use sketch_get to list them, or sketch_create first.
 - minor must be > 0 (got
 - ); omit it for major/2.
@@ -2828,7 +2852,7 @@ A planar face's 'frame' is th...
 - Sketch.move returned false yet the coordinates changed - this reports what the geometry shows, not the return value.
 - Fusion declined the move in sketch '
 - ' (Sketch.move returned false) and none of
-- read the same coordinates afterwards, so nothing in the sketch changed. Two things produce that: the transform is one this geometry is symmetric under (a circle rotated about its own centre lands o...
+- read the same coordinates afterwards, so nothing in the sketch changed. Either the transform is one this geometry is symmetric under (a circle rotated about its own centre), or a constraint refused...
 - No active design. Create or open a document first (see doc_new).
 - No sketch to transform. Draw one first with sketch_create + sketch_add_geometry.
 - 'entities' is required - comma-separated '<type>:<index>' refs (e.g. 'line:0,arc:1') from sketch_get(include_entities=true).
@@ -3236,7 +3260,7 @@ A planar face's 'frame' is th...
 
 ### `workspace_orient`
 - Document is UNSAVED - no URN/project yet; save before addressing it by id.
-- browser_digest is DEPTH-1: is_xref describes each top-level row ITSELF, so a reference nested below one leaves every flag false - doc_get(include=['xref_tree']) walks every depth. references.refere...
+- browser_digest is DEPTH-1: is_xref describes each row ITSELF, so a reference nested below one leaves every flag false - doc_get(include=['xref_tree']) walks every depth. references.referenced_docum...
 - Design is LARGE - prefer scoped calls.
 - A document is open but no Design product is active. Switch to the Design workspace, or use the CAM tools if has_cam is true.
 - No active document. Open or create one first (see doc_new / doc_open).

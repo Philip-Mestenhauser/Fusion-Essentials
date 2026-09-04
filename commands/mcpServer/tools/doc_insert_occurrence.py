@@ -25,9 +25,8 @@ from ._data_common import _b64url_decode, _resolve_data_file
 _INTO_COMPONENT = _inputs.OccurrenceRef("into_component",
         description="Occurrence whose component to insert into (default: root component).")
 _REMOVE_EXISTING = _inputs.OccurrenceRef("remove_existing",
-        description="Existing occurrence to delete first: its joints go with it, and MEASURED - a "
-                    "feature that referenced its geometry STAYS in the timeline carrying reference "
-                    "failures, neither deleted nor healthy.")
+        description="Existing occurrence to delete first: its joints go with it, and a feature that "
+                    "referenced its geometry stays in the timeline carrying reference failures.")
 
 
 def handler(document_id: str = "", into_component: str = "",
@@ -72,10 +71,8 @@ def handler(document_id: str = "", into_component: str = "",
         axis_vec = _inputs._AXIS_VECS.get((rotate_axis or "z").strip().lower())
         if not axis_vec:
             return error(f"Unknown rotate_axis '{rotate_axis}'. Use x, y, or z.")
-        # Rotate about the world origin; the translation set below places the occurrence. (Rotating
-        # about the placement point would only bake a pivot correction into the translation column
-        # that the next line overwrites anyway - net result is identical, so keep it explicit.)
-        # setToRotation answers a bool; a false is a rotation that never landed on the matrix, so
+        # Rotate about the world origin; the translation set below places the occurrence.
+        # setToRotation answers a bool, and a false is a rotation that never landed on the matrix -
         # the occurrence would insert UNROTATED while the payload echoed the request.
         did_rot = safe(lambda: transform.setToRotation(
             math.radians(float(rotate_deg)),
@@ -133,30 +130,21 @@ def handler(document_id: str = "", into_component: str = "",
         "removed_occurrence": removed,
         "placed_at": ({"x": x, "y": y, "z": z, "units": units} if (x or y or z) else "origin"),
         "rotate_deg": float(rotate_deg or 0.0),
-        "note": ("Inserted at the requested placement. This is the source's last SAVED cloud version "
-            "- unsaved in-session edits in the source are NOT reflected here (save the source, then "
-            "doc_update_xref). A joint pose the source only DROVE is transient and was never saved, "
-            "so the base pose is what arrived; capture it in the source and save to bring a pose "
-            "across. Refine with a joint (see joint_create) if it needs to mate to specific "
-            "geometry. If an occurrence was removed, its joints went with it and any feature that "
-            "referenced its geometry REMAINS in the timeline carrying reference failures - "
+        "note": ("Inserted at the requested placement, from the source's last SAVED cloud version - "
+            "unsaved source edits are not here (save the source, then doc_update_xref). Refine with "
+            "joint_create to mate it to specific geometry. If an occurrence was removed, any feature "
+            "that referenced its geometry REMAINS in the timeline carrying reference failures - "
             "re-point or delete those features."),
     })
 
 
 TOOL_DESCRIPTION = (
     "Insert a SAVED cloud document into the active design as a new component occurrence - the API "
-    "equivalent of Insert into Current Design. It comes in as an external reference that stays "
-    "linked to the source and tracks its version (never a severed embedded copy). 'document_id' is "
-    "the lineage URN (or web URL) of the document to insert. 'into_component' is the occurrence "
-    "whose component to insert into (default: the root component). Referencing between two SAVED "
-    "documents requires a shared project (an unsaved host references fine). Optional "
-    "'remove_existing' = an existing occurrence to delete first (its joints go with it). Place it "
-    "with x/y/z (in 'units') and an optional rotate_deg about rotate_axis, or refine later with a "
-    "joint. Inserts the source's last SAVED cloud version - unsaved in-session source edits are "
-    "not included (save the source first). MEASURED: a joint pose the source only DROVE is "
-    "transient and never reaches the saved version - capture it there "
-    "(assembly_capture_position) before saving, or the base pose is what arrives."
+    "equivalent of Insert into Current Design. It comes in as an external reference linked to the "
+    "source and tracking its version, and needs source and host in a shared project. Place it with "
+    "x/y/z (in 'units') and an optional rotate_deg about rotate_axis, or refine with joint_create. "
+    "Inserts the source's last SAVED cloud version, so save the source first - a joint pose only "
+    "DRIVEN there never reaches it (capture with assembly_capture_position)."
 )
 
 tool = (
@@ -168,11 +156,11 @@ tool = (
     )
     .add_input_property(*_INTO_COMPONENT.as_property())
     .add_input_property(*_REMOVE_EXISTING.as_property())
-    .add_input_property("x", {"type": "number", "description": "Placement X in 'units' (default 0)."})
-    .add_input_property("y", {"type": "number", "description": "Placement Y in 'units' (default 0)."})
-    .add_input_property("z", {"type": "number", "description": "Placement Z in 'units' (default 0)."})
+    .add_input_property("x", {"type": "number", "description": "Placement X in 'units'."})
+    .add_input_property("y", {"type": "number", "description": "Placement Y in 'units'."})
+    .add_input_property("z", {"type": "number", "description": "Placement Z in 'units'."})
     .add_input_property(*_inputs.UNITS.as_property())
-    .add_input_property("rotate_deg", {"type": "number", "description": "Orient: rotate this many degrees about 'rotate_axis' (default 0)."})
+    .add_input_property("rotate_deg", {"type": "number", "description": "Rotation about 'rotate_axis', in degrees."})
     .add_input_property(*_inputs.frame_axis("rotate_axis", default="z", description="World axis for orientation.").as_property())
     .strict_schema()
 )

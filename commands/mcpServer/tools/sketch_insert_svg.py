@@ -167,7 +167,7 @@ def handler(file_path: str = "", sketch_name: str = "", x=None, y=None, units: s
 
 
 TOOL_DESCRIPTION = (
-    "Import an SVG from LOCAL DISK into an EXISTING sketch, placed at (x,y) in the sketch's "
+    "Import an SVG from LOCAL DISK into an EXISTING sketch at (x,y) in the sketch's "
     "own frame. SIZE: width/height and viewBox in the file are IGNORED - 1 SVG user unit lands as "
     "1/96 inch times 'scale', so scale=3.7795 makes 1 user unit = 1 mm. PLACEMENT: SVG's y axis "
     "points DOWN and lands as NEGATIVE sketch y, so art imported at y=0 occupies y from -height "

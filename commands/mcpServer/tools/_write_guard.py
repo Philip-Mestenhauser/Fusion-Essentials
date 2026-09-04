@@ -1,24 +1,12 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Write-document binding: the shared guard wrapped around every WRITE tool's handler.
-
-The active document can change between an agent's read and its write (an async open, a human
-clicking another tab), so a write can hit the wrong document. Two contract pieces close that gap:
-'expect_document' (optional input) REFUSES the write with blocked_by:['active_document_changed']
-when the active document no longer matches the one the agent meant, and 'acted_on' stamps every
-write result with the document actually mutated {name, document_id}. A bare NAME shared by several
-open documents is REFUSED too (blocked_by:['ambiguous_document_name'], candidates listed) - a URN
-is always exact. Applied generically at registration (Item.create_tool_item) for write/destructive
-tools. MAIN-THREAD read tools get the lighter wrap_read: no guard, but every result is stamped with
-'active_document' - the document the read actually came from. Main-thread tools only - the identity
-read touches adsk, which a pure-Python off-thread handler must never do, so an off-main-thread read
-(sys_find_tool) carries no stamp.
-
-document_key asks the same identity question for a STORE that outlives one MCP call (a view
-snapshot, a driven-joint registry, a live generation), where a never-saved document still needs a
-key of its own.
-"""
+"""Write-document binding: the guard wrapped at registration around every WRITE tool's handler.
+'expect_document' REFUSES the write (blocked_by:['active_document_changed'], or
+'ambiguous_document_name' when a bare name several open documents share), and 'acted_on' stamps the
+document actually mutated; a main-thread read gets wrap_read's 'active_document' stamp instead.
+Main-thread tools only - the identity read touches adsk. document_key answers the same identity
+question for a STORE that outlives one MCP call."""
 
 import json
 
@@ -28,20 +16,12 @@ from . import _common
 
 app = adsk.core.Application.get()
 
-# The "what to reuse from here" catalog line for the generated CLAUDE.md helper map (see
-# tests/gen_manifest.py): each symbol with the one clause that says WHEN to reach for it. The
-# mechanism behind a clause lives at the symbol itself, in its test, or in VERIFIED_API_FACTS.md.
 MAP_BLURB = (
-    "_active_identity - the ONE active-document identity read ((name, urn), either may be None), "
-    "what a write guard stamps 'acted_on' from; one_open_document - the ONE test for whether "
-    "several open-document matches are really ONE document, since an assembly loads its "
-    "references as real Documents and a tab plus its own dependency instance repeat one name AND "
-    "lineage URN; document_key - the ONE key a store outliving one MCP call remembers a document "
-    "by: the data-file id where one reads, else a token minted per document INSTANCE and matched "
-    "by handle EQUALITY - never by NAME, which several open documents answer 'Untitled' to; None "
-    "when no document reads at all; prune_closed_documents/on_key_evicted/on_key_renamed - the "
-    "eviction pass and the two hooks a store registers at import, since the registry is SHARED: a "
-    "closed document's key is dropped, and a held document's CHANGED key announced")
+    "_active_identity - the ONE active-document identity read (name, urn); one_open_document - "
+    "whether several open-document matches are really ONE document; document_key - the key a "
+    "store outliving one MCP call remembers a document by (data-file id, else a per-INSTANCE "
+    "token matched by handle equality, never by name); prune_closed_documents + on_key_evicted/"
+    "on_key_renamed - eviction and its two hooks")
 
 
 def _active_identity():
@@ -67,70 +47,41 @@ def _active_identity():
     return name, urn
 
 
-# The documents this session has MINTED a key for, as (document, key) pairs - every entry created
-# because that document carried no readable data-file id when it was first seen. An entry OUTLIVES
-# that state: when the document later answers an id, the entry keeps its place and its key is
-# rewritten to that id (document_key below), which is what makes the change announceable instead of
-# silent. A scanned LIST rather than a dict because the match is `==`, not identity or hash: a
-# Document wrapper is not identity-stable - the same open document reads as a new wrapper on each
-# app.activeDocument access, so `is` reads False across two MCP calls while `==` reads True
-# (_open_documents below matches the active document off that same measurement). Cleared on reload.
-#
-# DO NOT "simplify" this to rootComponent.entityToken. A Document carries no entityToken of its
-# own (live API introspection: adsk.core.Document exposes no such member, and FusionDocument's
-# document-level reads are dataFile / isValid / name), so the component's token is the only one
-# reachable - and it does not identify the document. Live-measured on two distinct never-saved
-# documents: that token READS (it does not raise) and is BYTE-IDENTICAL across both - each
-# answered the same 24 characters, '/v4BAAEAAwAAAAAAAAAAAAAA'. It collides in exactly the place
-# doc.name collides, and it collides SILENTLY, because the read succeeds.
+# The (document, key) pairs this session minted a key for. A scanned LIST, not a dict, because the
+# match is `==`: a Document wrapper is not identity-stable - the same open document reads as a new
+# wrapper on each app.activeDocument access, so `is` reads False while `==` reads True.
+
+# A Document carries no entityToken of its own, and rootComponent's reads BYTE-IDENTICAL across two
+# distinct never-saved documents - it cannot key a document, and it collides silently.
 _UNSAVED_DOC_KEYS = []
 _UNSAVED_DOC_SEQ = 0
 
-# Consumers holding per-document state under these keys register here. A LIST of listeners rather
-# than a per-call callback because the registry is SHARED: whichever consumer's read happens to
-# trigger the prune must drop what EVERY consumer parked under that key, and a per-call callback
-# drops only the caller's own - leaving the others' state stranded under a key no live document
-# ever matches again.
+# A LIST of listeners, not a per-call callback: the registry is SHARED, so whichever consumer's
+# read triggers a prune must drop what EVERY consumer parked under that key.
 _KEY_EVICTION_LISTENERS = []
 
-# The same shape for the other thing that happens to a key: it CHANGES while its document stays
-# open. A LIST for the same reason - one consumer's read triggers the flip and every consumer's
-# parked state has to move with it, not just the caller's.
+# The same shape for a key that CHANGES while its document stays open.
 _KEY_RENAME_LISTENERS = []
 
 
 def on_key_evicted(callback):
-    """Register callback(key) for every key the prune drops - the key a CLOSED document held, which
-    is the key it last answered, not necessarily the token minted for it.
-    Call it at module import; a consumer holding state under that key drops it there."""
+    """Register callback(key) for every key the prune drops - the key a CLOSED document last
+    answered, not necessarily the token minted for it. Call it at module import."""
     _KEY_EVICTION_LISTENERS.append(callback)
 
 
 def on_key_renamed(callback):
-    """Register callback(old_key, new_key) for every key a HELD document re-keys onto.
-
-    Call it at module import; a consumer holding state under old_key MOVES it to new_key. Fired
-    only while the document stays open, so both keys name the same document and the move is a
-    re-address, never a merge of two documents' state. A consumer that keys per document (a view
-    snapshot) moves one entry; one that keys per (document, thing) (a driven-joint registry) moves
-    every entry whose document half matches.
-    """
+    """Register callback(old_key, new_key) for every key a HELD document re-keys onto. Call it at
+    module import; a consumer holding state under old_key MOVES it to new_key. Fired only while the
+    document stays open, so both keys name the same document."""
     _KEY_RENAME_LISTENERS.append(callback)
 
 
 def prune_closed_documents():
-    """Drop key-registry entries whose document is gone, telling every listener which key went.
-
-    A closed document's leftover wrapper reads isValid False (measured; .name on that same wrapper
-    raises "An API Object refers to a deleted Object"). Leaving it parks a Document wrapper per
-    scratch document for the life of the add-in session, plus whatever each consumer stored under
-    that key, and the listeners are told the key's document is GONE - a minted token no live
-    document matches again, and for an entry that has since re-keyed onto a data-file id, state
-    about a viewport and an occurrence set that closed with it. Only a definite False
-    evicts: an isValid that will not read proves nothing about the document, and a LIVE document
-    losing its key is the worse error of the two - it would be minted a second one and its own
-    saved state split in half.
-    """
+    """Drop key-registry entries whose document is gone, telling every listener which key went. A
+    closed document's leftover wrapper reads isValid False (.name on it raises); only a definite
+    False evicts, since an isValid that will not read proves nothing and a LIVE document losing its
+    key would be minted a second one with its saved state split in half."""
     # Walked BACKWARDS: deleting at i slides the next entry into i, and range() is sized before the
     # list starts shrinking - so a forward walk skips an entry and then indexes past the end.
     for i in range(len(_UNSAVED_DOC_KEYS) - 1, -1, -1):
@@ -142,30 +93,13 @@ def prune_closed_documents():
 
 
 def document_key():
-    """The key the ACTIVE document is remembered by across MCP calls - None when none reads at all.
-
-    A document with a cloud data file keys on that file's id. One with no readable id (never saved)
-    keys on a per-instance token minted on first sight of it and matched on later calls by document
-    handle EQUALITY - never by NAME, because several open documents named "Untitled" are ordinary
-    and a name key hands one document's stored state to another. A CLOSED document cannot hand its
-    key to a live one: its leftover wrapper compares UNEQUAL to every live document (measured - the
-    comparison answers False, it does not raise), and the entry is evicted on the isValid False it
-    does read. safe() covers a comparison that will not read at all, which is not a match either.
-
-    A document that was minted a token and LATER answers an id changes key without closing, and the
-    change is ANNOUNCED (on_key_renamed) rather than left for each consumer to discover, because
-    every store keyed on it parks state that no live document would key to again. The registry is
-    scanned before the id is preferred, so the announcement is possible at all: a document that
-    already holds a key is found by the handle scan before the id can be preferred.
-
-    None is not a key: no document read, so there is nothing to mint for and each caller words its
-    own placeholder.
-    """
+    """The key the ACTIVE document is remembered by across MCP calls - its data-file id, else a
+    per-instance token minted on first sight and matched by document handle EQUALITY, never by
+    NAME (several open documents answer "Untitled"). A token that LATER gives way to an id is
+    announced through on_key_renamed. None when no document reads at all."""
     global _UNSAVED_DOC_SEQ
-    # Pruned FIRST, before any branch can return. The read that finds a document CLOSED is usually
-    # taken while a DIFFERENT document is active, so a prune placed after a branch that returns
-    # early never runs in the very situation it exists for, and a closed scratch document's entry
-    # (plus whatever each consumer parked under its key) outlives the add-in session.
+    # Pruned FIRST, before any branch can return: the read that finds a document CLOSED is usually
+    # taken while a DIFFERENT document is active, so a later prune never runs when it is needed.
     prune_closed_documents()
     doc = _common.safe(lambda: app.activeDocument)
     if doc is None:
@@ -175,16 +109,13 @@ def document_key():
     for i, (known, held) in enumerate(_UNSAVED_DOC_KEYS):
         if not bool(_common.safe(lambda known=known: known == doc, False)):
             continue
-        # A held document that reads NO id keeps the key it holds: the id is what CHANGES a key,
-        # and an id that stopped reading is not evidence the document went back to having none -
-        # dropping to a fresh mint here would strand the state under the key it already answers.
+        # A held document that reads NO id keeps the key it holds: an id that stopped reading is not
+        # evidence the document went back to having none.
         if not did or did == held:
             return held
-        # The id does not arrive settled: through a save it may answer a path-form string before
-        # the lineage urn resolves, so ONE document can re-key more than once. The entry is kept
-        # (rewritten, not removed) so the SECOND flip is caught the same way as the first, and the
-        # freshly read handle replaces the stored one - the two are equal, this one is live.
-        # PROBE NEEDED (KEY-2): the transient path-form id is stated as mechanism, not a ledger fact.
+        # Through a save the id may answer a path-form string before the lineage urn resolves, so
+        # one document can re-key twice; the entry is rewritten, not removed, so the second flip is
+        # caught too. PROBE NEEDED (KEY-2): that path-form id is mechanism, not a ledger fact.
         _UNSAVED_DOC_KEYS[i] = (doc, did)
         for listener in _KEY_RENAME_LISTENERS:
             listener(held, did)
@@ -215,14 +146,9 @@ def _refusal(expect, name, urn):
 
 
 def _open_documents():
-    """Every document open in the session as {name, document_id(URN or None), open_index, is_active}.
-    Mirrors doc_get's open_index convention (the stable session address of an UNSAVED doc with no URN).
-    A slot whose document will not read is published as doc_get publishes it - {name: None,
-    readable: False}, carrying NO open_index, since that index addresses nothing a caller could act
-    on - so this listing counts what the session holds rather than one document fewer. It names no
-    name, so it is never a name-collision candidate.
-    Fully defensive: any read failure yields an empty list, never a raise - so the guard degrades to
-    the single-doc pass path rather than inventing a false ambiguity."""
+    """Every document open in the session as {name, document_id(URN or None), open_index, is_active},
+    a slot that will not read as {name: None, readable: False} (doc_get's convention). Any read
+    failure yields an empty list, never a raise."""
     out = []
     try:
         docs = app.documents
@@ -256,9 +182,8 @@ def _open_documents():
             pass
         is_active = False
         try:
-            # EQUALITY, never identity: Document wrappers are not identity-stable (measured live
-            # on 2705.0.87 - `d is active` reads False for the one open, active document while
-            # `d == active` reads True; the same wrapper trap _common.same_component documents).
+            # EQUALITY, never identity: Document wrappers are not identity-stable - `d is active`
+            # reads False for the one open, active document while `d == active` reads True.
             is_active = bool(d == active)
         except Exception:
             pass
@@ -298,17 +223,9 @@ def _collision_refusal(expect, candidates):
 
 def one_open_document(document_ids):
     """True when these open-document ids (dataFile.id values) are ONE document, not an ambiguity.
-
-    MEASURED: an assembly loads its references as REAL Documents, so a visible tab and the
-    dependency instance a referencing document loaded both sit in app.documents carrying the same
-    name AND the same lineage URN - one document listed twice (closing the referencing document
-    makes the second entry vanish). Ids that DIFFER are genuinely different candidates (two versions
-    of one lineage, one carrying a '?version=' suffix), and an id that did not read proves nothing -
-    both answer False.
-
-    Every resolver that must pick ONE open document out of several matches asks exactly this, so it
-    is asked in one place: _document_refusal below and doc_lifecycle._find_open_document both call
-    it rather than re-deciding what a repeated document looks like."""
+    An assembly loads its references as REAL Documents, so a visible tab and the dependency instance
+    a referencing document loaded repeat one name AND lineage URN. Ids that DIFFER, and an id that
+    did not read, both answer False."""
     ids = list(document_ids)
     return bool(ids) and all(ids) and len(set(ids)) == 1
 
@@ -328,10 +245,8 @@ def _document_refusal(expect, name, urn):
     # e matches the ACTIVE doc's NAME - a match only if that name is unique across the open session.
     same = [d for d in _open_documents() if d.get("name") == e]
     if len(same) > 1:
-        # One document listed twice (tab + dependency instance) is not an ambiguity - see
-        # one_open_document above. When every candidate is that one document AND it is the active
-        # one, the write lands exactly where the agent meant; only genuinely different candidates
-        # refuse.
+        # One document listed twice (tab + dependency instance) is not an ambiguity: when every
+        # candidate is that one document AND it is the active one, the write lands where meant.
         urns = [d.get("document_id") for d in same]
         if one_open_document(urns) and urn in urns:
             return None
@@ -369,11 +284,9 @@ def _stamp_acted_on(result, name, urn):
 
 
 def wrap_read(handler):
-    """Wrap a READ handler with the active_document stamp: every read result reports the document it
-    read from ({name, document_id}), so a read taken while the WRONG document is active is
-    distinguishable from a right one - without this, two tallies from two documents look identical.
-    No guard, no expect_document: reads stay safe to call blind. Only for main-thread tools (the
-    identity read touches adsk)."""
+    """Wrap a READ handler with the active_document stamp: every result reports the document it read
+    from ({name, document_id}). No guard, no expect_document. Main-thread tools only (the identity
+    read touches adsk)."""
     def stamped(**kwargs):
         result = handler(**kwargs)
         name, urn = _active_identity()
@@ -396,12 +309,8 @@ def wrap(handler):
                 return refusal                       # REFUSE - no handler call, no mutation
         result = handler(**kwargs)
         # Re-read identity AFTER the handler runs: a doc-switching write (doc_new/doc_open/
-        # doc_activate) makes a DIFFERENT document active, and acted_on must report that one.
-        # The post-call ACTIVE document is only the right answer for a write that targets the active
-        # document, so the stamp is FILL-IF-ABSENT: a handler whose write can target a NON-active
-        # document publishes acted_on itself and keeps it. Measured: doc_close closing an INACTIVE
-        # document leaves the active one untouched, and closing the ACTIVE one hands the foreground
-        # to a fallback document - the active read names an unclosed document either way.
+        # doc_activate) makes a DIFFERENT document active, and acted_on must report that one. The
+        # stamp is FILL-IF-ABSENT, so a write targeting a NON-active document keeps its own.
         name, urn = _active_identity()
         return _stamp_acted_on(result, name, urn)
     guarded.__name__ = getattr(handler, "__name__", "guarded")
@@ -412,5 +321,5 @@ def wrap(handler):
 # The input property advertised on every write tool (so an agent knows it can target a document).
 EXPECT_DOCUMENT_PROP = ("expect_document", {
     "type": "string",
-    "description": "Optional: doc (name or lineage URN, from doc_get) this write must land on; REFUSED if active doc differs. Omit to write the active doc.",
+    "description": "Doc name or URN this write must land on; REFUSED if it is not active.",
 })

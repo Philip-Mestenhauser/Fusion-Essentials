@@ -10,7 +10,7 @@ import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item, Verification
+from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, scale, target_component
 from . import _common
@@ -31,10 +31,8 @@ def _feature_operation(op_key):
 
 def _cut_check_bodies(comp):
     """The solid bodies a cut/intersect loft can act on: every solid directly in the feature's host
-    component. A loft takes no participant-body scoping, so there is no narrower sample.
-
-    Resolved ONCE, before the mutation, and the same objects re-read afterwards - that is the id()
-    keying precondition _geom.volumes documents."""
+    component, resolved ONCE before the mutation and re-read afterwards (_geom.volumes keys on
+    id()). A loft takes no participant-body scoping, so there is no narrower sample."""
     return [b for b in _common.iter_collection(safe(lambda: comp.bRepBodies))
             if safe(lambda b=b: b.isSolid)]
 
@@ -51,29 +49,28 @@ def _result_body_report(feature):
 
 # ── input declarations ──────────────────────────────────────────────────────
 
-# LOFT
-# scope_input: a {sketch, profile_index} element addresses a sketch BY NAME, and Fusion numbers
-# sketches per component from 1 - so the name two components carry is refused, with the remedy
-# spelled as this tool's own 'component' input, which the schema below declares.
+# LOFT. scope_input: a {sketch, profile_index} element addresses a sketch BY NAME, and Fusion
+# numbers sketches per component from 1, so a name two components carry is refused with the remedy
+# spelled as this tool's own 'component' input.
 _LOFT_PROFILES = _inputs.ProfileRefList("profiles", required=True, scope_input="component",
-    description="The profiles to loft through (>=2) - order is load-bearing, the loft runs through "
-                "them in the order given.")
+    description=">=2 profiles.")
 _LOFT_RAILS = _inputs.GeometryHandleList("rails", require="any", required=False,
-    description="Optional guide curves (rails) the loft follows. Mutually exclusive with 'centerline'.")
+    description="Guide curves; not with 'centerline'.")
 _LOFT_CENTERLINE = _inputs.GeometryHandle("centerline", require="any", required=False,
-    description="Optional single centerline curve. Mutually exclusive with 'rails'.")
+    description="Not with 'rails'.")
 
 # STITCH
 _STITCH_BODIES = _inputs.SurfaceBodyRefList("bodies", required=True,
-    description="The SURFACE bodies to stitch (>=2; each must be an open surface, not a solid).")
+    description="The SURFACE bodies to stitch (>=2; an open surface each, not a solid - run "
+                "model_unstitch on a solid first).")
 _STITCH_TOLERANCE = _inputs.Distance("tolerance", allow_zero=False, allow_negative=False, required=False,
     description="Gap-closing tolerance in 'units' (default ~0.01 mm).")
 
 # UNSTITCH - a whole body (BodyRef any) OR specific faces (GeometryHandleList).
 _UNSTITCH_BODY = _inputs.BodyRef("target", kind="any", required=False,
-    description="A whole body to fully explode into per-face surfaces.")
+    description="A whole body to explode.")
 _UNSTITCH_FACES = _inputs.GeometryHandleList("faces", require="face", required=False,
-    description="Specific faces to peel off (instead of a whole body).")
+    description="Faces to peel off instead of a whole body.")
 
 
 # ── LOFT ─────────────────────────────────────────────────────────────────────
@@ -194,10 +191,9 @@ def loft_handler(profiles=None, rails=None, centerline="", operation="new",
                          + _common.failed_effect_remedy(design, feature))
 
     body_names, _flags = _result_body_report(feature)
-    # An empty result set claims a loft the payload cannot show. The ONE case where it is not a
-    # failure is a cut/intersect PROVEN to have moved material: a body consumed whole, or a volume
-    # delta that READ and cleared the no-change band. Merely having SAMPLED a census proves nothing
-    # - a census whose volumes never read leaves the gate above silent, so it buys no exemption.
+    # An empty result set is a failure except for a cut/intersect PROVEN to have moved material: a
+    # body consumed whole, or a volume delta that READ and cleared the no-change band. A census
+    # whose volumes never read buys no exemption.
     moved = bool(consumed) or (readable and abs(delta) >= _common.NO_VOLUME_CHANGE_CM3)
     if not body_names and not moved:
         return error("Loft reported success but the feature owns no result body - nothing was "
@@ -286,14 +282,10 @@ def stitch_handler(bodies=None, tolerance=None, units="mm", operation="new") -> 
     if not feature:
         return error(_common.no_feature_error(design, "Stitch"))
 
-    # HONEST result: read each RESULT body's isSolid back. became_solid is true ONLY if every result
-    # body is a closed solid; gaps>tolerance leave an open surface and we say so - never fake success.
-    # A flag that would not read makes the verdict null, NOT false: all() over an unreadable flag
-    # would report "did not close" - a gap-diagnosis - off a flag nobody read.
+    # became_solid is true ONLY if every RESULT body reads a closed solid; a flag that would not
+    # read makes the verdict null, NOT false, since the false branch is a gap diagnosis.
     body_names, flags = _result_body_report(feature)
-    # An EMPTY result set is not evidence the surfaces stayed open: the false verdict below is a GAP
-    # diagnosis ("increase tolerance"), and that needs a body whose isSolid READ false. A stitch
-    # owning no result body built nothing at all - the same failure the loft above reports.
+    # An EMPTY result set is not that diagnosis either - it means nothing was stitched at all.
     if not flags:
         return error("Stitch reported success but the feature owns no result body - nothing was "
                      "stitched. " + _common.failed_effect_remedy(design, feature))
@@ -412,12 +404,8 @@ def unstitch_handler(target="", faces=None, chain=True) -> dict:
 # ── tool definitions / registration ───────────────────────────────────────────
 
 LOFT_DESCRIPTION = (
-"Loft a body through an ORDERED list of >=2 profiles (the loft runs through them in the order "
-"given - order is load-bearing), optionally shaped by 'rails' (guide curves) OR a single "
-"'centerline' (mutually exclusive). 'as_surface' forces "
-"a surface loft (isSolid=False). 'is_closed' closes the loft back on itself - the first profile is "
-"reused as the last. Reports 'is_solid' read back off the feature. "
-"Pair with model_stitch to close surfaces, or view_screenshot to view."
+"Loft a body through an ORDERED list of >=2 profiles, optionally shaped by 'rails' or a "
+"'centerline'. Pair with model_stitch to close a surface loft."
 )
 
 loft_tool = (
@@ -427,7 +415,7 @@ loft_tool = (
     .add_input_property("centerline", _LOFT_CENTERLINE.schema())
     .add_input_property(*_inputs.boolean_op(default="new").as_property())
     .add_input_property("as_surface", {"type": "boolean",
-            "description": "Force a SURFACE loft (isSolid=False). Default: the API's default (a solid is attempted)."})
+            "description": "Force a SURFACE loft."})
     .add_input_property("is_closed", {"type": "boolean",
             "description": "Close the loft ring back through the first profile."})
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
@@ -440,11 +428,7 @@ loft_item = Item.create_tool_item(tool=loft_tool, write="write", handler=loft_ha
 
 STITCH_DESCRIPTION = (
 "Join SURFACE bodies into a SOLID - iff they form a closed, watertight boundary within 'tolerance'. "
-"'bodies' is >=2 surface bodies (each must be an open surface, not a solid - run model_unstitch on "
-"a solid first). 'tolerance' is the gap-closing distance in 'units' (default ~0.01 mm). HONEST "
-"RESULT: if gaps exceed tolerance the result STAYS a surface and 'became_solid' is reported FALSE "
-"(never faked) - read 'became_solid' to know whether you got the solid you asked for. 'operation' "
-"only matters when the result closes into a solid."
+"Read 'became_solid': gaps beyond tolerance leave the result a surface, reported false."
 )
 
 stitch_tool = (
@@ -459,17 +443,12 @@ stitch_tool = (
 )
 stitch_item = Item.create_tool_item(
     tool=stitch_tool, write="write", handler=stitch_handler, run_on_main_thread=True,
-    verification=Verification(
-        kind="effect",
-        evidence_test="tests/unit/test_surface_ops.py::TestStitch"
-                      "::test_became_solid_false_when_gaps_remain"))
+    postconditions=[_assert.FeatureHealthy()])
 
 
 UNSTITCH_DESCRIPTION = (
-"Explode a body (or specific faces) into per-face SURFACE bodies - the inverse of model_stitch, so "
-"one face can be patched/trimmed/offset then re-stitched. Pass EITHER 'target' (a whole body, by "
-"handle or name, to fully explode) OR 'faces' (find_geometry face handles to peel off). 'chain' "
-"includes connected/adjacent faces (default true). Each result body is now an OPEN surface."
+"Explode a body (or specific 'faces') into per-face SURFACE bodies - the inverse of model_stitch. "
+"Edit a face, then model_stitch to re-close."
 )
 
 unstitch_tool = (

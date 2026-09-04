@@ -28,8 +28,8 @@ _UNITS = _inputs.UnitField()
 
 _SPEC = [_MESH, _THICKNESS, _UNITS]
 
-# The counts a shell moves. Measured: hollowing a 12-triangle box left 30,370 triangles, so the
-# re-triangulation is the loud half of the signal and the volume drop is the meaning of it.
+# The counts a shell moves: the re-triangulation is the loud half of the signal, the volume the
+# meaning of it.
 _COUNT_KEYS = ("triangle_count", "vertex_count")
 
 
@@ -39,12 +39,7 @@ def _counts(mb) -> dict:
 
 
 def _closed(mb):
-    """Whether `mb` is watertight NOW - True / False / None when the flag cannot be read.
-
-    Sampled at both ends because MeshBody.volume returns 0.0 on a body that is not closed
-    (measured): a body that stops reading watertight reports a full-magnitude negative delta, so the
-    flag is the only thing separating 'the material came out' from 'the body stopped enclosing
-    anything'. The sibling read is mesh_repair._facts."""
+    """Whether `mb` is watertight NOW - True / False / None when the flag cannot be read."""
     return safe(lambda: bool(mb.isClosed))
 
 
@@ -79,10 +74,9 @@ def handler(mesh: str = "", thickness=None, units: str = "mm") -> dict:
     if inp is None:
         return error("meshShellFeatures.createInput returned nothing.")
 
-    # thickness is a typed core.ValueInput speaking Fusion's internal cm - measured:
-    # createByReal(0.02) reads back off the created feature as value 0.02 with the expression
-    # '0.20 mm'. A ValueInput does NOT survive set_verified (a read-back hands out a different
-    # proxy), so it is confirmed off the feature's own ModelParameter after the add instead.
+    # thickness is a core.ValueInput speaking Fusion's internal cm. A ValueInput does NOT survive
+    # set_verified (the read-back hands out a different proxy), so it is confirmed off the feature's
+    # own ModelParameter after the add instead.
     try:
         inp.thickness = adsk.core.ValueInput.createByReal(thickness_cm)
     except Exception as e:
@@ -93,9 +87,9 @@ def handler(mesh: str = "", thickness=None, units: str = "mm") -> dict:
     except Exception as e:
         return error(f"Mesh shell failed (meshShellFeatures.add raised): {e}")
 
-    # Measured: meshShellFeatures.add returns a real MeshShellFeature at PLAIN parametric scope (no
-    # BaseFeature wrapper), and returns None in a DIRECT design while the hollow LANDS (12 -> 30,370
-    # triangles). So the census below is the verdict and the return value never is.
+    # meshShellFeatures.add returns a MeshShellFeature at PLAIN parametric scope (no BaseFeature
+    # wrapper) and None in a DIRECT design while the hollow lands, so the census below is the
+    # verdict and the return value never is.
     direct_no_feature = _common.direct_feature_absence(design, feature)
     if not feature and not direct_no_feature:
         return error(_common.no_feature_error(design, "Mesh shell"))
@@ -128,10 +122,9 @@ def handler(mesh: str = "", thickness=None, units: str = "mm") -> dict:
 
     units_key = (vals["units"] or "mm").strip().lower()
     inv_scale = _common.CM_TO_UNIT[units_key]
-    # A hollow is a volume DROP on a body that is STILL closed. A body that stops reading
-    # watertight reports the same drop for the opposite reason - it encloses nothing, so its
-    # volume reads 0.0 - and calling that a hollow would report the worst outcome as the best one.
-    # An unreadable closure flag cannot clear the body either: the flag has to SAY closed.
+    # A hollow is a volume DROP on a body that is STILL closed: a body that stops reading watertight
+    # reports the same drop because it encloses nothing (its volume reads 0.0), so the flag has to
+    # SAY closed - an unreadable one cannot clear the body.
     closure_lost = before_closed is True and after_closed is False
     hollowed = bool(volume_readable and volume_delta_cm3 < 0.0 and after_closed is True)
     payload = {
@@ -163,10 +156,6 @@ def handler(mesh: str = "", thickness=None, units: str = "mm") -> dict:
     if hollowed:
         note = "Mesh hollowed in place - the same body, re-triangulated. Re-read it with mesh_get."
     elif closure_lost:
-        # Both halves report what was READ. The volume clause is gated on the volume actually
-        # being readable and quotes the measured change, because a body whose volume could not be
-        # read at both ends has no number to explain - and no mechanism is named for the lost
-        # closure, only the flags.
         note = ("The shell left '" + str(mesh_name) + "' NO LONGER watertight (is_closed went true "
                 "-> false), so this is a loss of closure, NOT a hollow. ")
         if volume_readable:
@@ -198,13 +187,8 @@ def handler(mesh: str = "", thickness=None, units: str = "mm") -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Hollow a MESH body with the MeshShell feature (the BRep model_shell cannot reach a mesh). The "
-    "shell rewrites the SAME body in place - the name survives and it is re-triangulated - so there "
-    "are no new bodies to name. The effect is read back off the body (triangle and vertex counts "
-    "plus the enclosed volume) and a shell that moved none of them is an error; 'hollowed' needs "
-    "BOTH a volume drop and a still-watertight body, because a body that stops reading watertight "
-    "reports volume 0.0, so a volume drop alone is not a hollow; the thickness that actually "
-    "landed is read back off the feature, never echoed."
+    "Hollow a MESH body with the MeshShell feature - the BRep model_shell cannot reach a mesh. It "
+    "rewrites the SAME body in place, so there is no new body to name; re-read it with mesh_get."
 )
 
 tool = _inputs.apply_to_tool(

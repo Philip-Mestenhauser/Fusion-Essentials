@@ -76,15 +76,51 @@ every kind, plus the shared helpers to reuse — is the generated map in
 **Tool families** (187 tools — `sys_find_tool <kw>` to search, `TOOL_MANIFEST.md` for the full list): `model`(33) `surface`(12) `mesh`(15) `sketch`(13) `cam`(24) `assembly`(9) `joint`(7) `design`(13) `doc`(14) `data`(10) `drawing`(8) `param`(5) `pmi`(4) `view`(6) `find`(1) `workspace`(1) `appearance`(1) `save`(1) `sys`(10)
 <!-- END GENERATED FAMILIES -->
 
-## Tool descriptions and agent-facing strings — pure ASCII, verified claims only
+## Tool descriptions and agent-facing strings — pure ASCII, verified claims, budgeted
 
 A tool's **description** + the `note`/`error` it returns are the ONLY thing a connected agent knows
 about it, and they cross the wire JSON-serialized with `ensure_ascii` — so keep them pure ASCII (` - `
 not `—`, `...` not `…`, `->` not `→`, `deg` not `°`), enforced by `test_wire_ascii.py`. Every claim about
 an input's legal values must be backed by something that fails when it's false (a `Choice`/enum, a typed
-kind's `resolve()`, a guard) — if you can't back it, type the input instead of asserting it. Full rule
-(what crosses the wire, the docstring policy, the read-shape build rules):
-[commands/mcpServer/tools/CLAUDE.md](commands/mcpServer/tools/CLAUDE.md).
+kind's `resolve()`, a guard) — if you can't back it, type the input instead of asserting it.
+
+The wire is paid for on every call, so it is budgeted (`test_prose_budget.py`): a description says what
+the tool does and what to call next; a note says what was observed and the next step; an error names the
+offending value and the remedy. None of them says that something was measured, why the platform behaves
+that way, or how the code is built - that teaching goes in the error an agent meets at the moment it
+matters, once. A rich read's deep `include=` returns the slice asked for, not the default slice again.
+
+## What "done" means, and how much verification a change buys
+
+A change is done when its live sweep row passes on the real Fusion session, and its receipt is restamped.
+Mock unit tests prove handler logic and nothing about Fusion: they encode the builder's beliefs, and a
+wrong belief pinned by a test is the most confident way to ship a lie. So: one test per plausible bug,
+no test per function, no mutant theater in review (a reviewer runs a handful of mutants, not dozens), and
+the reviewer drives the live session to check API claims whenever it can. The three defects found on
+2026-09-02 (a false `ok` pinned by a test, a classifier whose docstring asserted the opposite of the
+live shape, an unconsumable remedy) all came from thirty minutes of using the tools, none from 11,000
+unit tests. Every wave ends with a cold eval run (`tests/live/evals/run_eval.py`) with NO skill
+appended, so the wire alone is what gets graded.
+
+## Enforcement is a closed list
+
+The files in `tests/lints/` ARE the closed list (36 on 2026-09-02): the wire contract (naming + verb/`write=`
+agreement, write-status, strict schema, input names, output contracts, ASCII, wire budget and shape, prose
+budget), the honesty contract (no fabricated fallbacks, bool returns checked, no first-match resolvers,
+postconditions declared, units, native identity keys, export knob pre-read, frame disclosure, material
+effect, rename adoption, no hand-cast product), and the structure (helper duplication denylist, no
+duplicate defs, dead code, autodiscovery, unit-coverage-complete, tool-verify-complete, generated docs
+current, doc citations, measured enums, fake shapes, evergreen). Adding a lint file needs the owner's
+word; a new duplication class gets a denylist ENTRY, not a file. No ratchets, no per-file baselines, no
+self-tests for lints, no lint that polices wording. The suite regrew twice after purges because every
+review finding became a lint - a finding becomes a ledger row, and a fix, and a live act.
+
+## Prose in code
+
+A docstring is one line saying what the function returns or does; a comment is at most three lines
+stating a present-tense fact the code cannot show (a platform trap at its point of use, with no history).
+A helper's catalog blurb is one line: its symbols and when to reach for it. Everything longer is cut, and
+`test_prose_budget.py` says where.
 
 ## Running commands — never `cd` to the repo root, never redirect stderr
 

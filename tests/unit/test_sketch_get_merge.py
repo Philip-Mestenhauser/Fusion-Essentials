@@ -317,6 +317,35 @@ class TestSketchSummaryWalk:
             "P2a-Gimbal:1+Frame:1", "P3-Gimbal:1+Frame:1"]
         assert "Bolt" not in payload["note"]
 
+    def _deferred_design(self, monkeypatch, deferred):
+        """One component holding one sketch whose compute flag reads `deferred` and whose
+        profile_count is the pre-deferral 3."""
+        sk = type("Sk", (), {"name": "Sketch1", "isComputeDeferred": deferred,
+                             "profiles": type("P", (), {"count": 3})()})()
+        root = type("R", (), {"name": "Root", "sketches": _Coll([sk]),
+                              "entityToken": "comp-root"})()
+        d = type("D", (), {"rootComponent": root, "activeComponent": root,
+                           "allComponents": _Coll([root])})()
+        monkeypatch.setattr(sketches._common, "design", lambda: d)
+
+    def test_a_deferred_row_is_flagged_and_the_note_names_the_remedy(self, monkeypatch):
+        # The list is where profile_count is met first, and a stale one reads exactly like a fresh
+        # one - so the row carries the flag and the payload note carries the way out.
+        self._deferred_design(monkeypatch, True)
+        payload = json.loads(sketches.get_sketches_handler("")["content"][0]["text"])
+        row = payload["sketches"][0]
+        assert row["compute_deferred"] is True and row["profiles_stale"] is True
+        assert row["profile_count"] == 3
+        assert "isComputeDeferred" in payload["note"]
+        assert "sketch_add_geometry" in payload["note"]
+
+    def test_a_sketch_computing_normally_carries_neither_flag_nor_note(self, monkeypatch):
+        self._deferred_design(monkeypatch, False)
+        payload = json.loads(sketches.get_sketches_handler("")["content"][0]["text"])
+        assert "compute_deferred" not in payload["sketches"][0]
+        assert "profiles_stale" not in payload["sketches"][0]
+        assert "note" not in payload
+
     def test_an_occurrence_path_narrows_the_list_to_one_of_them(self, monkeypatch):
         # the loop closes: the path the list published is a scope the same input accepts, and it
         # resolves to ONE component even though both report the same internal id

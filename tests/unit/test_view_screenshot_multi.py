@@ -270,6 +270,43 @@ class TestCameraRestore:
         assert "could NOT be put back" not in _texts(result)[0]
 
 
+class TestStandoffFallbackDisclosure:
+    """apply_named_view answers the standoff it fell back to when the camera's eye-target distance
+    did not read as a positive number: the eye is placed at that standoff before the fit. A sheet
+    where only some views did that must name WHICH, since silence means the camera's own distance."""
+
+    def test_only_the_views_framed_from_the_fallback_are_named(self, rig, monkeypatch):
+        def apply(viewport, name):
+            viewport.camera = f"cam-{name}"
+            return 100.0 if name == "top" else None
+
+        monkeypatch.setattr(cv._view_common, "apply_named_view", apply)
+        summary = _texts(cv.handler(views=["front", "top"]))[0]
+        assert "standoff_fallback_cm=100 on top:" in summary
+        # ONE rendering of the number, in both places it is spelled
+        assert "100 cm from the target" in summary and "100.0" not in summary
+        assert "front" not in summary.split("standoff_fallback_cm")[1]
+
+    def test_a_sheet_the_camera_framed_itself_adds_nothing(self, rig):
+        assert "standoff_fallback_cm" not in _texts(cv.handler(views=["front", "top"]))[0]
+
+    def test_a_view_that_fell_back_but_never_captured_is_not_claimed(self, rig, monkeypatch):
+        # 'top' orients off the fallback and then fails to grab - naming it would report a
+        # standoff for an image the sheet does not carry
+        monkeypatch.setattr(cv._view_common, "apply_named_view", lambda vp, name: 100.0)
+
+        calls = {"n": 0}
+
+        def flaky_capture(vp, w, h, prefix="fe_mcp_shot", **switches):
+            calls["n"] += 1
+            return ("B64DATA", None) if calls["n"] == 1 else (None, "saveAsImageFile returned false")
+
+        monkeypatch.setattr(cv._view_common, "capture_png_b64", flaky_capture)
+        summary = _texts(cv.handler(views=["front", "top"]))[0]
+        assert "standoff_fallback_cm=100 on front:" in summary
+        assert "top" not in summary.split("standoff_fallback_cm")[1]
+
+
 @pytest.fixture
 def rig_real_orient(monkeypatch):
     """Fake viewport but the REAL _view_common.apply_named_view, so the handler-to-helper

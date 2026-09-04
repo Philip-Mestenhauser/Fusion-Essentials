@@ -47,10 +47,9 @@ def handler(handle: str = "", file_name: str = "", folder: str = "") -> dict:
             return error(f"No upload with handle '{handle}'. Active handles: "
                          f"{', '.join(data_ops._UPLOADS.keys()) or '(none)'}.")
     elif key.lower() == "latest" or (not key and not file_name):
-        # 'latest' = the newest STILL-TRACKED upload, taken from the live dict (insertion order is
-        # mint order). The mint counter keeps climbing past entries popped at their terminal state,
-        # so deriving the handle from it names an upload that is already gone while an older one is
-        # still running. _UPLOADS is non-empty here - the guard above returned otherwise.
+        # 'latest' = the newest STILL-TRACKED upload, read from the live dict in insertion order:
+        # the mint counter climbs past entries popped at their terminal state, so a handle derived
+        # from it names an upload already gone while an older one is still running.
         key = list(data_ops._UPLOADS)[-1]
         entry = data_ops._UPLOADS[key]
 
@@ -66,10 +65,9 @@ def handler(handle: str = "", file_name: str = "", folder: str = "") -> dict:
                      "'file_name' to look up an upload.")
 
     future = entry["future"]
-    # DataFileFuture.uploadState: 0=UploadProcessing (still transferring bytes), 1=UploadFinished
-    # (transfer done - .dataFile becomes non-null), 2=UploadFailed. .dataFile.isComplete then
-    # separately reports whether CLOUD processing (e.g. STEP -> Fusion design translation) has
-    # finished - transfer finishing and cloud processing finishing are two different signals.
+    # DataFileFuture.uploadState: 0=UploadProcessing (transferring), 1=UploadFinished (.dataFile
+    # becomes non-null), 2=UploadFailed. .dataFile.isComplete separately reports whether CLOUD
+    # processing finished - transfer and cloud processing are two different signals.
     upload_state = safe(lambda: future.uploadState, None)
     df = safe(lambda: future.dataFile, None)
 
@@ -112,12 +110,10 @@ def handler(handle: str = "", file_name: str = "", folder: str = "") -> dict:
 
 TOOL_DESCRIPTION = (
     "Poll a data_upload_file upload for its ACTUAL state - never guess from re-listing data_get. "
-    "'handle' = the upload_handle from data_upload_file (or 'latest'); alternatively pass 'file_name' "
-    "(+ optional 'folder') to look up the most recent matching upload. Reports 'state': "
-    "'uploading' (bytes still transferring), 'processing' (transfer done, cloud is still translating/"
-    "finishing the file), 'complete' (the cloud confirms the file has fully landed - file_id/"
-    "version_id/fusion_web_url are included), or 'failed'. Bounded and NON-BLOCKING: reports the "
-    "current state and returns immediately, it never sleeps or waits for completion."
+    "'handle' = the upload_handle from data_upload_file (or 'latest'); or 'file_name' (+ optional "
+    "'folder') for the most recent match. 'state' is 'uploading', 'processing' (transfer done, cloud "
+    "still finishing), 'complete' (file_id/version_id/fusion_web_url included) or 'failed'. "
+    "NON-BLOCKING: it returns the current state immediately."
 )
 
 tool = (
@@ -125,9 +121,9 @@ tool = (
     .add_input_property("handle", {"type": "string",
             "description": "upload_handle from data_upload_file, or 'latest' for the most recent upload."})
     .add_input_property("file_name", {"type": "string",
-            "description": "Alternative to 'handle': the uploaded file's name, to look up its most recent tracked upload."})
+            "description": "The uploaded file's name, as an alternative to 'handle'."})
     .add_input_property("folder", {"type": "string",
-            "description": "With 'file_name': the destination folder path used at upload time, to disambiguate."})
+            "description": "With 'file_name': the destination folder used at upload time."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)

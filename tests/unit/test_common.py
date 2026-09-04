@@ -2238,6 +2238,35 @@ class TestApplyRename:
         assert final == "Pocket Outline" and warning is None
         assert ent.name == "Pocket Outline"
 
+    def test_the_name_it_already_reads_is_never_written_again(self):
+        # Writing the name an entity ALREADY carries makes the platform dedupe it against ITSELF
+        # (a CAM operation auto-named 'Face1' renamed to 'Face1' lands 'Face11', measured), so the
+        # write is skipped entirely - and it is a clean landing, not a warned dedupe.
+        class Deduping:
+            def __init__(self):
+                self._n = "Face1"
+                self.writes = 0
+
+            @property
+            def name(self):
+                return self._n
+
+            @name.setter
+            def name(self, v):
+                self.writes += 1
+                self._n = str(v) + "1"
+
+        ent = Deduping()
+        final, warning = common.apply_rename(ent, "Face1")
+        assert final == "Face1" and warning is None
+        assert ent.writes == 0 and ent.name == "Face1"
+
+    def test_a_different_name_is_still_written(self):
+        # the other side of the skip: it may only fire on the name already read, or renaming stops
+        ent = SimpleNamespace(name="Face1")
+        final, warning = common.apply_rename(ent, "Rough Pocket")
+        assert final == "Rough Pocket" and warning is None and ent.name == "Rough Pocket"
+
     def test_an_empty_request_renames_nothing_and_warns_nothing(self):
         ent = SimpleNamespace(name="Joint1")
         for req in ("", "   ", None):

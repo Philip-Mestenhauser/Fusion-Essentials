@@ -1,13 +1,9 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Cloud data-model READ cores: the project list, a project's file listing, and ONE file's facts.
-
-These are the cores behind data_get (the registered cloud rich read); data_get delegates to them so
-the cloud-error guards and enumeration caps live in one place. Each file is read in its own
-try/except and folder recursion is depth/count-capped, since these calls hit cloud data and a very
-large project could otherwise blow the main-thread time budget.
-"""
+"""Cloud data-model READ cores data_get delegates to: the project list, a project's file listing,
+and ONE file's facts. Each file is read in its own try/except and folder recursion is
+depth/count-capped, since these calls hit cloud data on the main thread."""
 
 import datetime
 import time
@@ -20,33 +16,24 @@ from ._data_common import (_find_project, _folder_path_string, navigate_folder_p
 
 app = adsk.core.Application.get()
 
-# One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
 MAP_BLURB = ("the three cloud READ cores data_get delegates to - list_projects_handler (the active "
              "hub's projects), list_project_files_handler (one project's files, optionally "
              "folder-scoped) and file_facts_handler (ONE file's metadata + link state) - over "
              "_walk_folder, the ONE capped/deadlined folder recursion, which records a folder "
              "whose enumeration RAISED so a hole is never reported as an empty folder")
 
-# Guard rails for enumeration of large/cloud-backed projects. Every DataFile property read and every
-# dataFolders/dataFiles enumeration is a synchronous cloud round-trip on Fusion's MAIN thread, so a
-# whole-project walk multiplies (files x ~6 properties) + (folders x 2 enumerations). These caps bound
-# the worst case; a bigger project is read a folder at a time (folder=<path>) - both are surfaced via
-# 'truncated' with the folder-scoping next step in data_get's note.
+# Every DataFile property read and every dataFolders/dataFiles enumeration is a synchronous cloud
+# round-trip on Fusion's MAIN thread, so these caps bound a whole-project walk; a bigger project is
+# read a folder at a time (folder=<path>), the next step data_get's 'truncated' note names.
 _MAX_FILES = 200
 _MAX_FOLDER_DEPTH = 25
-# Folder-visit budget for the whole-project/recursive walk: each visit enumerates one folder's files
-# AND subfolders (two main-thread round-trips), so an unbudgeted walk of a wide tree stalls even when
-# few files exist (the file cap never trips). Mirrors data_ops._LF_FOLDER_BUDGET, which bounded the
-# same class for the folder-tree read.
+# Each folder visit enumerates that folder's files AND subfolders, so a wide tree stalls a walk even
+# when the file cap never trips.
 _MAX_FOLDER_VISITS = 40
 
-# WALL-CLOCK budget for the whole walk (project listing OR the folder/file recursion), on top of the
-# item-count caps above: a single cloud round-trip can itself hang past normal latency on a transient
-# network stall (live-verified: individual data_get calls hanging >30s while Fusion's main thread is
-# stuck in one). The count caps never catch this - a stalled call can happen on item #1 of a small
-# project. Checked BETWEEN items only (an in-flight API call cannot be interrupted); a sibling to
-# 'truncated', never a replacement - 'time_truncated' flags a stall specifically, so a caller can tell
-# it apart from an ordinary size cap.
+# WALL-CLOCK budget over the whole walk, on top of the count caps: one cloud round-trip can hang past
+# normal latency on a network stall, which no count cap catches. Checked BETWEEN items (an in-flight
+# call cannot be interrupted) and published as 'time_truncated', apart from an ordinary size cap.
 _TIME_BUDGET_S = 20.0
 
 
@@ -188,24 +175,10 @@ def _note_unread(truncated, folder_path):
 
 
 def _walk_folder(folder, files: list, truncated: dict, depth: int, folder_path: str, deadline=None):
-    """Recursively collect files from a DataFolder into `files` (capped).
-
-    `folder_path` is the path of `folder` within the project ("" = project root), and
-    is recorded on each file so callers know where it lives without another lookup.
-
-    Bounded four ways, any of which sets truncated['value']: file count (_MAX_FILES), depth
-    (_MAX_FOLDER_DEPTH), folder VISITS (_MAX_FOLDER_VISITS) - the last caps the cloud fan-out on a
-    wide tree that the file cap would never catch - and a WALL-CLOCK `deadline` (a
-    time.monotonic() cutoff), checked BETWEEN items only since an in-flight dataFiles/dataFolders
-    call can't be interrupted. The deadline cut is flagged separately as truncated['time_truncated']
-    (a SIBLING of truncated['value'], never a replacement) plus truncated['time_truncated_at'] naming
-    the folder the walk was in when it stopped. The visit counter rides in `truncated['visits']`.
-
-    A folder whose dataFiles/dataFolders enumeration RAISES is recorded in `truncated['unread']`
-    (its path) rather than silently skipped: the listing this walk feeds is also what resolves a
-    file BY NAME, and a folder that never opened could hold a second file of that name - so a
-    swallowed failure turns an ambiguity into a confident unique match.
-    """
+    """Recursively collect files from a DataFolder into `files`, each stamped with `folder_path` ("" =
+    project root). Bounded four ways, any of which sets truncated['value']: file count, depth, folder
+    VISITS, and a wall-clock `deadline` (also truncated['time_truncated'/'time_truncated_at']). A
+    folder whose enumeration RAISES is recorded in truncated['unread'], never silently skipped."""
     if depth > _MAX_FOLDER_DEPTH or len(files) >= _MAX_FILES:
         truncated["value"] = True
         return
@@ -319,12 +292,8 @@ def _shared_link_facts(df):
 
 
 def _public_link_facts(df):
-    """The file's public link, or an honest 'not available' with the reason.
-
-    Measured live: reading publicLink RAISES ("No public link available. Use sharedLink.isShared to
-    create a public link.") while the file is unshared. Caught here - and the raised text is kept as
-    the reason rather than defaulted away - so an unshared file reports its state instead of sinking
-    the whole read."""
+    """The file's public link, or 'not available' with the reason. Reading publicLink RAISES while
+    the file is unshared, so the raised text is kept as the reason rather than sinking the read."""
     try:
         url = df.publicLink
     except Exception as e:

@@ -12,8 +12,8 @@ import adsk.cam
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
-from ._common import iter_collection, ok, error, safe
-from ._cam_common import get_cam, expression_error, library_assets
+from ._common import iter_collection, named_with_remainder, ok, error, safe
+from ._cam_common import get_cam, expression_error, library_assets, quote_expression
 from ._cam_presets import (_apply_preset_values, _persist_preset_change, _persisted_preset_names,
                            _preset_names, _preset_spec_error, _preset_tool, _presets_named)
 
@@ -31,17 +31,9 @@ _SHARED_LOCATIONS = {"local": "LocalLibraryLocation", "cloud": "CloudLibraryLoca
 # ── target abstraction: a uniform view over document-lib vs shared-lib ───────
 
 class _Target:
-    """Uniform interface the handler drives, hiding document-vs-shared differences.
-    persist() commits a shared library; document edits commit per-tool via update_tool().
-
-    Every persist read-back goes through ONE seam, refetch(), whose STRENGTH differs by target and is
-    what the payload's verified_in_memory_only / note must report:
-      - a SHARED library re-reads from its url, which returns stored state (measured: an unpersisted
-        in-memory edit on one fetch is invisible to the next) - that read proves the write PERSISTED;
-      - the DOCUMENT library has no url; its refetch is the document's own live library, so a
-        read-back there proves the change is PRESENT, never that anything was stored (doc_save does
-        the storing).
-    A refetch that comes back empty makes each reread_* return None, which proves neither."""
+    """Uniform interface the handler drives over a document or shared library: persist() commits a
+    shared library, update_tool() commits a document edit, and refetch() re-reads - from the url
+    for a shared library, which returns STORED state, from the live library for the document."""
     def __init__(self, lib, is_document, persist_fn=None, update_tool_fn=None, ops_fn=None,
                  refetch_fn=None):
         self._lib = lib
@@ -58,9 +50,8 @@ class _Target:
         self._tools = None
 
     def refetch(self):
-        """The library read again: for a shared target the stored library re-read from its url, for
-        the document target its own live library (None when neither can be read). See the class note
-        for what each of those two reads is evidence OF."""
+        """The library read again - the stored library for a shared target, the live one for the
+        document target; None when neither reads."""
         self._drop_tool_cache()
         return self._refetch_fn() if self._refetch_fn else None
 
@@ -82,19 +73,14 @@ class _Target:
         return safe(lambda: t.parameters.itemByName(name).expression) if t is not None else None
 
     def reread_preset_names(self, index):
-        """The preset names of one tool off the re-read library (None when it cannot be re-read) -
-        the same two rungs as reread_param, and the only read that covers a preset change at all:
-        updateTool/updateToolLibrary returning true proves nothing and no preset change moves the
-        library's tool COUNT."""
+        """The preset names of one tool off the re-read library, None when it cannot be re-read -
+        the only read that covers a preset change, which moves no tool COUNT."""
         return _persisted_preset_names(self._refetch_tool(index))
 
     def stored_tool_numbers(self):
         """Every tool_number the STORED library holds, re-read from its url (None when it cannot be
-        re-read) - the proof an auto-assigned number reached storage, which re-reading the in-memory
-        Tool object cannot show. Shared targets only: the document library has no url to re-read.
-        The numbers come back as the library's whole SET and the caller matches against that set, so
-        the check holds however a persist orders the tools; the add path already walks every tool's
-        number to pick free ones, so this is the same cost profile."""
+        re-read) - the SET a caller matches an auto-assigned number against, however a persist
+        orders the tools."""
         lib = self.refetch()
         if lib is None:
             return None
@@ -102,12 +88,9 @@ class _Target:
 
     @property
     def tools(self):
-        # A tool's INDEX is its address ('tool', 'remove_indices', reread_param all key on it), so
-        # this stays a positional walk: iter_collection drops an unreadable item, which would slide
-        # every later tool onto the wrong index.
-        # The walk costs one item() call per tool (a 266-tool cloud library is the measured high
-        # water mark) and a single action reads it several times, so the list is held until
-        # _drop_tool_cache() - which every mutating and re-reading method calls - clears it.
+        # A tool's INDEX is its address, so this stays a positional walk: iter_collection drops an
+        # unreadable item, which would slide every later tool onto the wrong index. The list is held
+        # until _drop_tool_cache(), which every mutating and re-reading method calls.
         if self._tools is None:
             self._tools = [safe(lambda i=i: self._lib.item(i))
                            for i in range(safe(lambda: self._lib.count, 0) or 0)]
@@ -219,11 +202,8 @@ def _resolve_target(scope, library):
 
 
 # library url string -> the ToolLibrary already fetched for it. Loading one is a cloud round-trip
-# costing seconds (measured: 1.4s for 66 tools, 6.7s for 266), and a type lookup reads the same
-# library twice - once to map its types, once to take the tool - inside a 30s handler budget.
-# The entries are LIVE ToolLibrary objects held for the life of the process, so the dict is bounded
-# (oldest insertion evicted) and a persist DROPS the library it wrote, since a cached pre-write copy
-# would hand the next call a library that no longer matches storage.
+# costing seconds, and a type lookup reads the same library twice. The entries are LIVE objects held
+# for the process life, so the dict is bounded and a persist DROPS the library it wrote.
 _LIBRARY_CACHE_MAX = 8
 _library_cache = {}
 
@@ -270,9 +250,8 @@ _json_loads = _json.loads
 _json_dumps = _json.dumps
 
 # Fusion sample libraries that, together, hold one of every common geometry type. 'center drill'
-# appears in NO Metric sample library (all of them walked live) and Hole Making Tools (Inch) provides
-# it - the one Inch library carrying a type its Metric twin lacks, which is why it is here and the
-# other Inch twins are not. Metric entries come first: the first library holding a type wins the key.
+# appears in no Metric sample library, which is why the one Inch library is here. Metric entries
+# come first: the first library holding a type wins the key.
 _SAMPLE_LIBS = ("Milling Tools (Metric)", "Hole Making Tools (Metric)", "Cutting Tools (Metric)",
                 "Turning Tools (Metric)", "Hole Making Tools (Inch)")
 _HOLDERS_LIB = "Holders (Metric)"
@@ -286,11 +265,13 @@ def _tool_from_json(json_str):
 
 
 def _quote(text):
-    """Quote a string as a Fusion parameter expression literal - the form tool_description's own
-    string parameter is stored in. Used for tool_productId/tool_vendor: createFromJson's JSON schema
-    silently drops those keys (verified live), so they are applied as expressions AFTER creation
-    instead (see _build_entry)."""
-    return "'" + str(text).replace("\\", "\\\\").replace("'", "\\'") + "'"
+    """The shared CAM expression codec, plus a doubled backslash for a value that holds one."""
+    s = str(text)
+    if "\\" not in s:
+        return quote_expression(s)
+    # The tool-parameter store's spelling for a BACKSLASH is unmeasured, so a value holding one is
+    # doubled here rather than sent through the shared codec, which passes it through as written.
+    return "'" + s.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
 def _fusion360_child(leaf_substr):
@@ -306,18 +287,9 @@ def _fusion360_child(leaf_substr):
 
 
 def _build_type_map(want=None):
-    """{tool_type -> (library_url, index)} from the sample libraries.
-
-    Each library is a CLOUD fetch: measured, the five together cost ~13s warm (604 tools), which is
-    most of the server's 30s handler budget - and the cache is per-process, so the first call after
-    a restart pays it. `want` stops as soon as that type is found, so adding a flat end mill reads
-    ONE library (~1.4s) instead of five. Libraries already read stay cached, and _scanned records
-    which, so a later call never re-fetches one.
-
-    ONLY a library that resolved AND was walked counts as scanned. A cloud fetch that comes back
-    empty is transient: recording it would truncate the type vocabulary for the whole process life
-    and short out the full-walk fallback _sample_for_type falls back to, so the next call retries it.
-    """
+    """{tool_type -> (library_url, index)} from the sample libraries, built incrementally: each one
+    is a cloud fetch of several seconds, `want` stops at the type it names, and only a library that
+    resolved AND was walked counts as scanned, so an empty transient fetch is retried."""
     global _type_map_cache
     if _type_map_cache is None:
         _type_map_cache = ({}, set())
@@ -393,9 +365,7 @@ def _holder_json(ref):
 
 # ── tool number: auto-assigned on add so multiple adds don't collide ──────────
 # A cloned sample keeps the sample's tool_number, so two adds land at the same number and cam_post
-# refuses ("Different tools have the same tool number"). On add we hand each new tool the next FREE
-# number. tool_number is an expression-settable integer parameter (cam_edit_tools' own edit path sets
-# it via .expression), read back via .value.value.
+# refuses. tool_number is an expression-settable integer parameter, read back via .value.value.
 _P_TOOL_NUMBER = "tool_number"
 
 
@@ -512,18 +482,9 @@ def _do_list_types():
 
 
 def _build_entry(ref):
-    """Build the Tool for one add entry, applying create/holder/preset/overrides. Returns (tool, None)
-    or (None, error). An entry is a dict:
-      {from_type: 'drill'}            -> clone a sample-library tool of that geometry type, OR
-      {library_url, index}            -> copy that existing tool
-      + optional 'description', 'diameter', 'product_id', 'vendor' overrides
-      + optional 'holder': {library_url, index}  -> assign that holder
-      + optional 'presets': [{name?, spindle_speed?, feed?}]  -> add presets after creation
-    Building goes through the tool's JSON so the holder swap + description override are clean; the
-    resulting Tool is created with _tool_from_json. product_id/vendor are NOT part of that JSON
-    schema (createFromJson silently drops them - verified live) so they are applied as quoted-string
-    expressions on tool_productId/tool_vendor AFTER creation, then read back. (All steps verified
-    live.)"""
+    """(tool, None) or (None, error) for one add entry - {from_type} clones a sample of that
+    geometry type, {library_url, index} copies an existing tool, and description / diameter /
+    product_id / vendor / holder / presets are applied over it."""
     if not isinstance(ref, dict):
         return None, f"Each add_tools entry must be an object; got {ref!r}."
 
@@ -541,8 +502,7 @@ def _build_entry(ref):
                       "'library_url'+'index' (copy an existing tool).")
 
     # 2) optional holder to ASSIGN (resolve before mutating). PRESENCE gates, not truthiness: an
-    # empty {} holder ref is a malformed request, and a truthy gate silently shipped the SAMPLE's
-    # holder as success (measured) - _holder_json words the refusal.
+    # empty {} holder ref is a malformed request, which a truthy gate ships as the sample's holder.
     holder_json = None
     if ref.get("holder") is not None:
         hd, herr = _holder_json(ref["holder"])
@@ -569,11 +529,9 @@ def _build_entry(ref):
             return None, "The tool has no 'tool_diameter' parameter - the requested diameter override cannot apply."
         p.expression = str(ref["diameter"])
 
-    # 3b) product_id / vendor: real tool parameters (tool_productId/tool_vendor), but NOT part of
-    # createFromJson's JSON schema - those keys are silently dropped there (the holder JSON's own
-    # 'product-id'/'vendor' keys are a different, unrelated concept; verified live). Apply
-    # as quoted-string expressions AFTER creation - the same form tool_description's own string value
-    # is stored in - then read the landed value back; a mismatch is an error, never a silent gap.
+    # 3b) product_id / vendor are real tool parameters but NOT part of createFromJson's schema,
+    # which drops those keys silently - so they are applied as quoted-string expressions after
+    # creation and read back.
     for field, pname in (("product_id", "tool_productId"), ("vendor", "tool_vendor")):
         val = ref.get(field)
         if val is None:
@@ -649,10 +607,8 @@ def _do_add(target, add_tools):
     if landed != assigned:
         return error(f"Auto-assigned tool numbers {assigned} but after the add they read back "
                      f"{landed} - the tool-number assignment did not persist.")
-    # Second rung, SHARED targets only: the numbers the STORED library holds, re-read from its url -
-    # the only read that can show a persist-side renumber (the count gate above cannot: the count is
-    # right either way). The document library has no url to re-read and doc_save is what stores it,
-    # so there the first rung is all the evidence there is.
+    # Second rung, SHARED targets only: the numbers the STORED library holds, the only read that
+    # shows a persist-side renumber. The document library has no url to re-read.
     in_memory_only = True
     if not target.is_document:
         stored_numbers = target.stored_tool_numbers()
@@ -693,13 +649,8 @@ def _do_remove(target, indices):
 
 
 def _formula_source(params, name, before_expr):
-    """If `before_expr` (a parameter's CURRENT expression, before this edit lands) is exactly another
-    parameter's NAME on the same tool, the value is formula-derived - it tracks that other parameter
-    (e.g. tool_shoulderLength's expression is the literal string 'tool_fluteLength') rather than
-    holding an independent literal. Returns the referenced name, or None for an ordinary literal/
-    numeric/quoted expression. Verified live: overwriting a formula-derived parameter
-    works syntactically but silently breaks the tool's own internal relationship, so the caller warns
-    instead of editing quietly."""
+    """The parameter `before_expr` tracks when it is exactly another parameter's NAME on this tool -
+    a formula-derived value an edit overwrites silently - else None."""
     ref = (before_expr or "").strip()
     if not ref or ref == name:
         return None
@@ -738,11 +689,8 @@ def _do_edit(target, tool_index, parameters):
         except Exception as e:
             return error(f"Could not set '{name}' = '{expr}': {e}. "
                          f"(Applied: {', '.join(c['name'] for c in changed) or 'none'}.)")
-        # A tool parameter STORES an expression it cannot evaluate: .expression echoes the string
-        # back verbatim, so the re-read below proves nothing on its own - .error is what reveals it
-        # (measured: 'NoSuchParamXyz * 2' read back verbatim with .error 'Failed to evaluate
-        # expression.', and the library later held 0.0). The read is valid on the in-memory tool,
-        # BEFORE the persist below (measured live).
+        # A tool parameter STORES an expression it cannot evaluate and echoes it back verbatim, so
+        # only .error reveals it - read here on the in-memory tool, before the persist below.
         eval_err, eval_warn = expression_error(p)
         rec = {"name": name, "before": before, "after": safe(lambda p=p: p.expression)}
         if eval_warn:
@@ -772,34 +720,34 @@ def _do_edit(target, tool_index, parameters):
         target.update_tool(tool)
     else:
         target.persist()
-    # Persist read-back (honesty contract): updateTool/updateToolLibrary returning is NOT proof the
-    # edit stored. An edit changes no tool COUNT (so the add/remove count gate can't cover it) - so
-    # re-fetch the tool from the library and confirm ONE edited expression actually landed.
+    # updateTool/updateToolLibrary returning is NOT proof the edit stored, and an edit moves no tool
+    # COUNT, so the tool is re-fetched and ONE edited expression is confirmed.
     check = changed[0]
     stored = target.reread_param(tool_index, check["name"])
     if stored is not None and str(stored) != str(check["after"]):
         return error(f"Edited '{check['name']}' to '{check['after']}' but the tool re-read from the "
                      f"library holds '{stored}' - the edit did not persist.")
-    # verified_in_memory_only = nothing proved the edit reached STORAGE: either the library could not
-    # be re-read, or this is the document library, whose read-back can only show presence (doc_save
-    # stores it). Never let a read that proves presence publish itself as a storage check.
+    # verified_in_memory_only = nothing proved the edit reached STORAGE: the library did not re-read,
+    # or this is the document library, whose read-back shows presence only.
     in_memory_only = target.is_document or stored is None
+    note = _persist_note(target, "Tool edited", stored is None)
+    if target.is_document:
+        note += " " + _OP_TOOL_COPY_NOTE
     out = {"edited": len(changed), "tool": tool_index, "changed": changed,
            "verified_in_memory_only": in_memory_only,
-           "note": _persist_note(target, "Tool edited", stored is None)}
+           "note": note}
     if warnings:
         out["warnings"] = warnings
     return ok(out)
 
 
+_OP_TOOL_COPY_NOTE = ("Operations already created keep their own copy of this tool - "
+                      "cam_edit_operation(tool_scope, tool_index) re-assigns one.")
+
+
 def _persist_note(target, act, in_memory_only):
-    """The note for a completed write - what the read-back actually PROVED, and the ONE place any of
-    the three rungs is worded. NO library read (none happened, or it came back empty) proves only
-    what the in-memory tool shows, so that rung is tested FIRST - a note may never describe a
-    read-back that did not happen. Otherwise: a SHARED library round-trips through updateToolLibrary
-    and reloads from its url, so the fresh read proves the write PERSISTED; the DOCUMENT library has
-    no url and its re-read returns the document's own live state, so there the read proves the change
-    is PRESENT and never that it was stored (doc_save does the storing)."""
+    """The note for a completed write - what the read-back PROVED: nothing where no library read
+    happened, storage for a shared library re-read from its url, presence for the document one."""
     if in_memory_only:
         return (f"{act}, but the library was not read back - confirmed on the in-memory tool only."
                 + (" doc_save stores the document." if target.is_document else ""))
@@ -860,7 +808,7 @@ def _do_remove_preset(target, tool_index, spec):
     if not matches:
         avail = [n for n in _preset_names(presets) if n]
         return error(f"The tool has no preset named '{name}'. Presets on this tool: "
-                     f"{', '.join(avail) if avail else '(none)'}.")
+                     f"{named_with_remainder(avail) if avail else '(none)'}.")
     if len(matches) > 1:
         return error(f"'{name}' names {len(matches)} presets on this tool (indices "
                      f"{', '.join(str(i) for i, _ in matches)}) - the removal is refused rather "
@@ -1039,25 +987,22 @@ def handler(action: str = "list", scope: str = "document", library: str = "",
 
 
 TOOL_DESCRIPTION = (
-    "Read & manage CAM TOOL LIBRARIES + their tools. 'scope': document / local / cloud / hub. "
-    "'action': list | list_types | parameters | add | remove | edit | add_preset | remove_preset | "
-    "where_used | create_library. "
-    "'list' with a shared scope and NO 'library' lists the libraries there, else that library's tools "
-    "(each carries a (library_url,index) reference); 'list_types' lists the from_type vocabulary; "
-    "'parameters' reads one tool's FULL parameter list (name/expression/value, flags formula-derived); "
-    "'add_preset'/'remove_preset' add or remove ONE named preset on the tool at 'tool'. "
-    "list/list_types/parameters/where_used are read-only; the rest write and persist. Hub is shared "
-    "TEAM data and network-slow; 'where_used' is document-scope only. 'add' auto-assigns each new "
-    "tool a free tool number (in assigned_tool_numbers; cam_post refuses duplicates)."
+    "Read & manage CAM TOOL LIBRARIES and their tools. 'list': the libraries at a shared scope "
+    "with no 'library', else that library's tools; 'list_types': the from_type vocabulary; "
+    "'parameters': one tool's FULL parameter list; 'where_used': the operations using a "
+    "DOCUMENT-library tool; 'add'/'remove': add or drop a library's tools; 'edit': one tool's "
+    "parameters; 'add_preset'/'remove_preset': ONE named preset on the tool at 'tool'; "
+    "'create_library': a new library at a shared scope, named by 'library'. "
+    "list/list_types/parameters/where_used are read-only; the rest write and persist."
 )
 
 tool = (
     Tool.create_simple(name="cam_edit_tools", description=TOOL_DESCRIPTION)
     .add_input_property("action", {"type": "string", "enum": list(_ACTIONS),
-            "description": "One of the enum values; each is described in the tool description."})
+            "description": "See the tool description."})
     .add_input_property("scope", {"type": "string", "enum": list(_SCOPES),
-            "description": "document / local / cloud / hub."})
-    .add_input_property("library", {"type": "string", "description": "Shared-library name or url (not for document scope)."})
+            "description": "Library location; hub is shared TEAM data."})
+    .add_input_property("library", {"type": "string", "description": "Shared-library name or url (not document scope)."})
     .add_input_property("add_tools", {"type": "array",
             "items": {"type": "object", "properties": {
                 "from_type": {"type": "string"}, "library_url": {"type": "string"}, "index": {"type": "integer"},
@@ -1068,18 +1013,18 @@ tool = (
                     "name": {"type": "string"},
                     "spindle_speed": {"type": ["number", "string"]},
                     "feed": {"type": ["number", "string"]}}}}}},
-            "description": "Tools to add/create. Each: {from_type:'drill'} (clone a sample of that type) OR {library_url,index} (copy); + optional description/diameter/product_id/vendor overrides, holder:{library_url,index}, presets:[{name,spindle_speed(rpm),feed(mm/min)}]."})
+            "description": "Tools to add. Each: {from_type:'drill'} clones a sample, {library_url,index} copies one."})
     .add_input_property("remove_indices", {"type": "array", "items": {"type": "integer"},
             "description": "Tool indices to remove."})
-    .add_input_property("tool", {"type": "integer", "description": "Tool index (edit / add_preset / remove_preset / where_used / parameters)."})
+    .add_input_property("tool", {"type": "integer", "description": "Tool index (edit / presets / where_used / parameters)."})
     .add_input_property("parameters", {"type": "object",
             "description": "Tool parameters to set (edit): {name: expression}."})
     .add_input_property("tool_type", {"type": "string",
-            "description": "Filter for list (substring on tool type, e.g. 'ball', 'drill')."})
+            "description": "Filter for list: tool-type substring (e.g. 'ball')."})
     .add_input_property("preset", {"type": "object", "properties": {
                 "name": {"type": "string"}, "spindle_speed": {"type": ["number", "string"]},
                 "feed": {"type": ["number", "string"]}},
-            "description": "The preset for add_preset / remove_preset, on the tool at 'tool': {name, spindle_speed?, feed?} to add, {name} to remove. A bare number is rpm / mm-per-min whatever units the document uses; pass a string to carry your own, e.g. '35in/min'."})
+            "description": "For add_preset / remove_preset: the preset spec; {name} alone removes it. A bare number is rpm / mm-per-min whatever the document's units; a string carries its own ('35in/min')."})
     .strict_schema()
 )
 item = Item.create_tool_item(

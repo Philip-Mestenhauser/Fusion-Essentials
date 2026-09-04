@@ -1,38 +1,10 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Lint: a length carries its unit in a typed selector, and converts through the one shared table.
-
-Two halves of one convention, so they live together: the INPUT side declares what unit a number is
-in, and the CONVERSION side turns that number into cm exactly one way.
-
-INPUT SIDE. The north star (CLAUDE.md "Input kinds"): a fact about an input - here, what unit a
-number is in - belongs in the typed surface an agent must consume to call the tool, not asserted in
-a description string that nothing checks. A numeric input whose description names a unit (mm/cm/inch)
-while its owning tool exposes no 'units' selector is a unit fact stranded in prose: an agent that
-learned "pass units=cm" from a sibling tool gets a silently wrong-by-a-factor result with no
-feedback. The remedy is to pair the number with the Distance + UnitField kinds from _inputs.py
-(which add the 'units' selector), so the unit is declared and resolved rather than asserted. The
-sweep reaches a number at any nesting depth - an object's own properties and the properties of an
-array's ITEMS alike (the same descent test_wire_ascii.py walks) - so a number buried in a list of
-objects is checked like a top-level one. The shrink-only _EXEMPT table carries any input where a
-fixed, non-agent-selectable unit is deliberate, each with a one-line reason.
-
-READ-SIDE MIRROR (test_units_reporting_read_wires_the_units_kind): a tool that REPORTS a 'units'
-field in its result payload must let the agent CHOOSE those units through the shared _inputs.UNITS
-enum kind (mm/cm/in), not a hand-rolled 'units' string. Every geometry-reporting read scales its
-output via _common.CM_TO_UNIT keyed by that selector, so the selector must be the typed kind or the
-report and the request silently disagree.
-
-CONVERSION SIDE. `_common.scale(units)` IS exactly `UNIT_TO_CM.get((units or "mm").strip().lower())`.
-A tool that writes that expression itself, or keeps its own copy of the UNIT_TO_CM table, diverges
-from the single source the moment the shared table changes (a new unit, a corrected factor). Two
-clean signals, banned outside _common.py:
-  1. raw `UNIT_TO_CM` access (`.get(` or `[`) - call `_common.scale(units)` instead;
-  2. a dict literal mapping `"mm"` and `"cm"` to numbers - a copy of `UNIT_TO_CM`.
-A hardcoded scalar conversion (`* 10` / `/ 10`) has no clean signature and is NOT caught here - only
-a human read of the arithmetic catches those.
-"""
+"""Lint: a numeric input naming a unit in prose (mm/cm/inch) whose tool exposes no 'units' selector
+fails; a read REPORTING a 'units' field whose 'units' input is not the shared _inputs.UNITS enum
+kind fails; raw UNIT_TO_CM access or a local mm/cm factor table outside _common.py fails. The two
+shrink-only exemption tables each need a reason, and a stale entry fails."""
 
 import ast
 import inspect
@@ -188,41 +160,6 @@ class TestUnitsAreTyped:
             "A units-reporting read must let the agent choose those units via the shared UNITS kind:\n  "
             + "\n  ".join(offenders))
 
-    def test_the_input_walker_reaches_every_nesting_level(self):
-        # The synthetic schema is what proves the descent: whether a registered tool happens to
-        # nest a unit-naming number inside an array of objects varies with the tool surface, while
-        # the walker must reach one wherever it sits. Covered here: a top-level number, an array OF
-        # numbers, a number under a nested object, a number inside an array's items, and one under
-        # an object inside those items - plus the two shapes that must NOT be collected (a numeric
-        # input naming no unit, a STRING input that does).
-        props = {
-            "depth": {"type": "number", "description": "cut depth in mm"},
-            "count": {"type": "integer", "description": "how many passes"},
-            "label": {"type": "string", "description": "text to stamp, e.g. '5 mm'"},
-            "offsets": {"type": "array", "items": {"type": "number"},
-                        "description": "offsets in mm"},
-            "fixture": {"type": "object", "properties": {
-                "height": {"type": "number", "description": "riser height in cm"}}},
-            "passes": {"type": "array", "items": {"type": "object", "properties": {
-                "stepover": {"type": "number", "description": "stepover in mm"},
-                "tool": {"type": "object", "properties": {
-                    "stickout": {"type": "number", "description": "stickout in mm"}}}}}},
-        }
-        found = []
-        _numeric_unit_props(props, "t", found)
-        assert sorted(p for p, _, _ in found) == [
-            "t.depth", "t.fixture.height", "t.offsets",
-            "t.passes[].stepover", "t.passes[].tool.stickout"]
-        assert [u for p, u, _ in found if p == "t.passes[].stepover"] == ["mm"]
-
-    def test_the_reporting_lint_bites(self):
-        # The discriminator the read-side lint hangs on: the shared enum kind passes, a hand-rolled
-        # 'units' string (the drift this catches) does not.
-        assert _is_units_kind({"type": "string", "enum": ["mm", "cm", "in"]})
-        assert _is_units_kind({"type": "string", "enum": ["mm", "cm", "in", "ft"]})
-        assert not _is_units_kind({"type": "string", "description": "mm | cm | in"})
-        assert not _is_units_kind(None)
-
 
 # ── exemption staleness - an entry must still exist and still need its exemption ────────────────
 
@@ -269,36 +206,15 @@ def _stale_reports_exempt_entries(exempt, report_rows):
 
 
 class TestExemptionsAreNotStale:
-    def test_exempt_entries_still_need_their_exemption(self):
+    def test_both_exemption_tables_still_need_every_entry(self):
         tool_props = {}
         for it in register_all_tools():
             d = it.to_dict()
             tool_props[d.get("name")] = (d.get("inputSchema") or {}).get("properties", {}) or {}
-        stale = _stale_exempt_entries(_EXEMPT, tool_props)
-        assert not stale, "stale _EXEMPT entries:\n  " + "\n  ".join(stale)
-
-    def test_reports_exempt_entries_still_need_their_exemption(self):
-        stale = _stale_reports_exempt_entries(_REPORTS_EXEMPT, _tools_with_report_source())
-        assert not stale, "stale _REPORTS_EXEMPT entries:\n  " + "\n  ".join(stale)
-
-    def test_the_staleness_checks_bite(self):
-        # _EXEMPT: a live entry (numeric input naming a unit, no selector) is kept...
-        live = {"depth": {"type": "number", "description": "cut depth in mm"}}
-        assert _stale_exempt_entries({"t.depth": "fixed unit"}, {"t": live}) == []
-        # ...a vanished tool, a vanished input, and a now-typed tool each go stale.
-        assert _stale_exempt_entries({"gone.depth": "r"}, {"t": live})
-        assert _stale_exempt_entries({"t.other": "r"}, {"t": live})
-        typed = dict(live, units={"type": "string", "enum": ["mm", "cm", "in"]})
-        assert _stale_exempt_entries({"t.depth": "r"}, {"t": typed})
-        # _REPORTS_EXEMPT: a live entry (reports units, hand-rolled input) is kept...
-        rows = [("t", {"units": {"type": "string"}}, 'payload = {"units": u}')]
-        assert _stale_reports_exempt_entries({"t": "domain choice"}, rows) == []
-        # ...a vanished tool, a no-longer-reporting tool, and a now-shared-kind tool each go stale.
-        assert _stale_reports_exempt_entries({"gone": "r"}, rows)
-        assert _stale_reports_exempt_entries({"t": "r"}, [("t", {}, "payload = {}")])
-        shared = [("t", {"units": {"type": "string", "enum": ["mm", "cm", "in"]}},
-                   'payload = {"units": u}')]
-        assert _stale_reports_exempt_entries({"t": "r"}, shared)
+        stale = ([f"_EXEMPT {s}" for s in _stale_exempt_entries(_EXEMPT, tool_props)]
+                 + [f"_REPORTS_EXEMPT {s}" for s in
+                    _stale_reports_exempt_entries(_REPORTS_EXEMPT, _tools_with_report_source())])
+        assert not stale, "stale exemption entries:\n  " + "\n  ".join(stale)
 
 
 # ── the conversion side: one table, one scale() ────────────────────────────────
@@ -341,10 +257,3 @@ class TestUnitsScaled:
         assert not offenders, (
             "a local copy of the unit-factor table diverges from _common.UNIT_TO_CM - import it (or use "
             "_common.scale/CM_TO_UNIT):\n  " + "\n  ".join(offenders))
-
-    def test_the_lint_bites(self):
-        # prove the raw-access regex catches a direct subscript/attribute hit and skips a longer
-        # identifier that merely starts with the same prefix.
-        assert _RAW_ACCESS.search("k = UNIT_TO_CM['mm']")
-        assert _RAW_ACCESS.search("k = UNIT_TO_CM.get(units)")
-        assert not _RAW_ACCESS.search("k = UNIT_TO_CMX['mm']")

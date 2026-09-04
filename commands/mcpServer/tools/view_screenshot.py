@@ -1,16 +1,9 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
-#
 # Adapted from Autodesk's Fusion MCP add-in sample (MIT-licensed).
 
-"""MCP building block: capture the Fusion viewport so the agent can visually review results.
-
-Returns the image as an MCP image content block (base64 PNG). Optionally reorients the camera first
-(top/front/iso/etc.) and fits the view; the camera is set to exact world-axis vectors because
-assigning camera.viewOrientation is unreliable. 'file_path' additionally writes the captured PNG to
-local disk - the raster writer a rendered view needs to reach a drawing sheet
-(drawing_insert_image).
-"""
+"""Capture the Fusion viewport as an MCP image content block, optionally reorienting the camera
+first and writing the PNG to local disk."""
 
 import base64
 
@@ -43,7 +36,8 @@ _HEIGHT_DEFAULT = 600
 _PNG_EXT = ".png"
 
 _FIT_TO = _inputs.OccurrenceRef("fit_to",
-        description="Occurrence to frame the camera on (isolates it for the shot, then restores).")
+        description="Occurrence to frame the camera on: hides the others for the shot, then "
+                    "restores them.")
 
 
 # The frame-on-one-occurrence isolate is shared with view_set(orient, focus=) - ONE visibility walk
@@ -80,12 +74,10 @@ def _restore_camera(vp, saved_camera):
 
 
 def _active_component_note(design):
-    """If a NON-root component is activated, Fusion renders everything outside it as dimmed/translucent
-    'ghosts'. Return a one-line warning naming the activated occurrence so the agent reads the
-    washed-out image as activation scope, not a lighting problem. Root detection is
-    design.activeOccurrence - null exactly when the root is active (API doc). An identity comparison
-    of activeComponent against rootComponent can never be true (each property access mints a NEW
-    proxy object), which made this warning fire at root."""
+    """A one-line warning naming the activated occurrence when a NON-root component is active, or
+    None - Fusion renders everything outside it dimmed."""
+    # design.activeOccurrence is null exactly when the root is active; comparing activeComponent
+    # against rootComponent can never be true, since each property access mints a new proxy.
     occ = safe(lambda: design.activeOccurrence) if design else None
     if occ is None:
         return None
@@ -95,11 +87,8 @@ def _active_component_note(design):
 
 
 def _write_png(b64, path):
-    """Write the captured PNG to 'path'. Returns (size_bytes, error).
-
-    The capture hands back base64, so the bytes are decoded here and the file that lands is READ
-    BACK for a non-zero size through the shared file-landed verifier - holding a base64 string is
-    not proof a file exists on disk."""
+    """Decode the captured base64 PNG onto 'path' and read the landed file back for a non-zero
+    size. Returns (size_bytes, error)."""
     try:
         raw = base64.b64decode(b64)
     except Exception as e:
@@ -156,11 +145,10 @@ def handler(view: str = "current", width: int = _WIDTH_DEFAULT, height: int = _H
     # the user's view as a side effect).
     zoom_warning = None
     camera_snapshot_warning = None
+    standoff_note = None
     if view != "current" or want_fit or (zoom and zoom != 1.0):
         # Captured OUTSIDE the try: a failure inside can already have moved the camera, and the
-        # failure exit below can only put it back if the snapshot was taken first. When the
-        # snapshot itself will not read, the move still happens - so the payload must SAY the
-        # viewport was left at the capture view instead of quietly not restoring it.
+        # failure exit below can only put it back if the snapshot was taken first.
         saved_camera = safe(lambda: vp.camera)
         if saved_camera is None:
             camera_snapshot_warning = (
@@ -168,10 +156,16 @@ def handler(view: str = "current", width: int = _WIDTH_DEFAULT, height: int = _H
                 "the capture view (no restore was possible) - view_set(orient) re-aims it.")
         try:
             if view != "current":
-                # Every named view resolves in the shared table (_VIEWS is built from it); the shared
-                # apply sets exact world-axis vectors (guaranteed square), forces ortho for the 6
-                # faces, and fits.
-                _view_common.apply_named_view(vp, view)
+                # Every named view resolves in the shared table (_VIEWS is built from it). The
+                # orient answers the standoff it FELL BACK to, or None when the camera's own
+                # eye-target distance was the one it placed the eye at.
+                fallback_cm = _view_common.apply_named_view(vp, view)
+                if fallback_cm is not None:
+                    cm = f"{fallback_cm:g}"
+                    standoff_note = (
+                        f"standoff_fallback_cm={cm}: the camera's eye-target distance did not read "
+                        f"as a positive number, so the eye was placed {cm} cm from the target along "
+                        "the view direction before the fit.")
             else:
                 vp.fit()
             # zoom: scale the camera-to-target distance after fitting (>1 zooms OUT, <1 zooms IN).
@@ -229,7 +223,11 @@ def handler(view: str = "current", width: int = _WIDTH_DEFAULT, height: int = _H
     # each failure is NAMED, never swallowed.
     cam_msg = _restore_camera(vp, saved_camera)
     stuck_msg = _restore_message(restore_fit_to)
-    extra = " ".join(m for m in (zoom_warning, camera_snapshot_warning, cam_msg, stuck_msg) if m)
+    # The standoff rides only a shot that produced an image: a failed capture placed an eye but
+    # returned no picture to describe. view_screenshot_multi records the same way.
+    placed = standoff_note if not result.get("isError") else None
+    extra = " ".join(m for m in (placed, zoom_warning, camera_snapshot_warning,
+                                 cam_msg, stuck_msg) if m)
     if extra:
         if result.get("isError"):
             return error(result.get("message", "") + " " + extra)
@@ -238,16 +236,10 @@ def handler(view: str = "current", width: int = _WIDTH_DEFAULT, height: int = _H
 
 
 TOOL_DESCRIPTION = (
-    "Capture a screenshot of the current Fusion viewport and return it as an image "
-    "so you can visually inspect the model and verify your work. Optionally set "
-    "'view' to reorient the camera (default 'current' = leave as-is). "
-    f"'width'/'height' set the pixel size (default {_WIDTH_DEFAULT}x{_HEIGHT_DEFAULT}, max {_MAX_DIM}). 'zoom' scales the view after "
-    "fitting (>1 zooms OUT, <1 zooms IN; default 1). 'fit_to' frames the camera on ONE occurrence "
-    "by name (hides the others for the shot, restores them after, names any it could not). "
-    "'transparent_background'/'anti_aliased' control the render; omit both for "
-    "Fusion's standard capture. 'file_path' also writes the PNG to local disk (the image still "
-    "returns inline) - the raster file drawing_insert_image takes. "
-    "Take a screenshot before editing to understand the model, and after to confirm changes."
+    "Capture the current Fusion viewport as an image. 'view' reorients the camera first, 'zoom' "
+    "scales after fitting, 'fit_to' frames ONE occurrence. 'file_path' also writes the PNG to "
+    "local disk (the image still returns inline) - the raster file drawing_insert_image takes. "
+    "view_screenshot_multi captures several views in one call."
 )
 
 tool = (

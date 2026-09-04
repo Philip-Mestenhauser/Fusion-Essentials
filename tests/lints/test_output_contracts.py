@@ -1,18 +1,7 @@
 """Lint: every tool that DECLARES outputs (a RETURNS spec) must honour the contract.
 
-The _outputs.py framework lets a producer declare the stable ids it mints (RETURNS = [...]). This lint
-holds the declaration to account so it can't drift from reality:
-
-  1. Each declared output's payload KEY must appear in the tool's source — a producer that renames
-     'handle'->'token' but forgets to update RETURNS (or vice-versa) fails here, instead of silently
-     lying to the ~18 consumers whose input notes reference it (architecture §10's enforcement gap).
-  2. The tool's description must carry the generated PRODUCES: block — so the chain prose is the
-     single-source-of-truth declaration, present on the producer's surface.
-  3. RETURNS entries are OutputKinds (not ad-hoc dicts).
-
-It also discovers EVERY tool module with a RETURNS, so adopting the framework on a new tool
-automatically opts it into these checks (no per-tool wiring).
-"""
+Each declared output's payload KEY appears in the tool's source, its PRODUCES: block appears in the
+description, and each RETURNS entry is an OutputKind. Every tools/*.py with a RETURNS is checked."""
 
 import os
 
@@ -52,7 +41,6 @@ class TestDeclaredOutputs:
         for name, mod in _tools_with_returns():
             src = _corpus.text(os.path.join(TOOLS_DIR, f"{name}.py"))
             for o in mod.RETURNS:
-                # The key must be written somewhere in the module (the payload that mints it).
                 if f'"{o.key}"' not in src and f"'{o.key}'" not in src:
                     offenders.append(f"{name}: declared output '{o.key}' never appears in source")
         assert not offenders, "\n".join(offenders)

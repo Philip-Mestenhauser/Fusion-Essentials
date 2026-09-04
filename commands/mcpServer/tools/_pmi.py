@@ -1,26 +1,12 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Shared PMI (Product Manufacturing Information) substrate: the design-wide annotation walk, the
-by-name resolver (ambiguity across components refused), the {symbol} text markup <-> PMISegment
-codec, and the light record every pmi_* tool reports through.
+"""PMI substrate: the annotation walk, the by-name resolver, the {symbol} markup codec and the
+light record every pmi_* tool reports through.
 
-No pmi_* tool reads Design.pmiSettings: the getter raises InternalValidationError when no settings
-object exists, so the substrate never touches it and nothing depends on which designs carry one.
-
-EXTENSION GATE: PMI CONTENT writes on Fusion 2705.0.87 raise "3 : Manufacturing or Design
-Extension is required" - the 2704.1.39 -> 2705 update gated the API, NOT the seat's license
-(authoring was live-verified on 2704.1.39 on this same seat: 12-annotation round-trip). The
-measured 2705 boundary: READS are free (the full pmi_get walk), NON-CONTENT writes are free
-(hide/show toggled and read back), CONTENT writes gate (leaderNotes.add and holeThreadNotes.add
-with plain text or GD&T, and set_text on an EXISTING annotation - reproduced across documents,
-geometry contexts, and sessions). So probes P0-P5 - can pmi_create succeed at all, is the
-leader-extension floor a constant or derived from the annotation size, does a below-floor
-extension brick every later assignment, does the annotation plane reject an off-plane text point,
-can two annotations in one component share a name, does markUpToDate() return a bool and clear
-isOutOfDate - cannot run on this build; re-run them the day a build or entitlement restores
-content writes. Every platform fact those probes would settle is UNMEASURED here, and the code
-below says so at each point of use: what the tools claim is what their own gates read back."""
+Design.pmiSettings is never read - the getter raises InternalValidationError when no settings
+object exists. PMI CONTENT writes raise "3 : Manufacturing or Design Extension is required" on
+2705.0.87; reads and non-content writes such as hide/show are free."""
 
 import re
 
@@ -30,21 +16,16 @@ import adsk.fusion
 from . import _common
 from ._common import safe
 
-MAP_BLURB = ("the PMI substrate. walk_annotations/find_annotation - the ONE design-wide walk and "
-             "the resolve-one over it, which REFUSES a name several components carry; "
-             "build_segments/segments_markup/annotation_record/kind_of/enum_label - the {symbol} "
-             "markup <-> PMISegment codec, the shared light record, and the label decoders; "
-             "build_tolerance/tolerance_record/build_display/display_record - the tolerance and "
-             "PMIDisplaySettings codecs; apply_note_format/apply_display/normalize_extension/"
-             "set_text_point/set_leader_target - the writers, every one re-read after the set "
-             "(normalize_extension lifts a below-floor value); PLANE_TYPES/H_ALIGN/V_ALIGN/"
-             "LEADER_EXT - the closed choice vocabularies and the extension floor")
+MAP_BLURB = ("the PMI substrate. walk_annotations/find_annotation - the design-wide walk and the "
+             "resolve-one REFUSING a shared name; build_segments/"
+             "segments_markup/annotation_record - the {symbol} markup codec and light record; "
+             "readable_warning - errorOrWarningMessage as one bounded line; "
+             "build_tolerance/build_display - the tolerance/display codecs; apply_*/"
+             "normalize_extension/set_* - the writers, each re-read")
 
-# The extension floor these tools refuse below, and the extension pmi_create pins onto an input
-# that arrives under it. Whether the platform's own floor is this constant or is derived from the
-# annotation size, and whether a note created below it can have its extension repaired in place at
-# all, are UNMEASURED on 2705 (probes P2/P3, blocked by the extension gate above). The behaviour
-# does not rest on either answer: normalize_extension tries the repair and reports the raise.
+# The leader extension these tools refuse below, and the value pmi_create pins onto an input
+# arriving under it. Whether the platform's own floor is this constant is unmeasured on 2705;
+# normalize_extension tries the repair and reports a raise either way.
 LEADER_EXT_FLOOR = 0.25
 LEADER_EXT_DEFAULT = 0.5
 
@@ -166,20 +147,14 @@ def segments_markup(ann):
 
 
 def walk_annotations(d, stats=None):
-    """Yield (component, annotation) across every component (root + subs) - the ONE design-wide
-    PMI walk. allComponents lists each component once, so no per-occurrence duplicates.
-
-    `stats`, when a dict is passed, is filled once the walk RUNS OUT with the holes it left behind:
-    'components_unreadable' (a component whose pmiAnnotations or whose count did not read) and
-    'items_unreadable' (an item(i) that did not read). A hole is not an absence - a caller
-    publishing tallies over this walk publishes these beside them, or it reports a partial design
-    as the whole one. A count of 0 IS an answer and is never a hole."""
+    """Yield (component, annotation) across every component. `stats`, when a dict is passed, is
+    filled once the walk runs out with 'components_unreadable' and 'items_unreadable' - the holes
+    it left behind, which a caller publishing tallies publishes beside them."""
     comps_unreadable = 0
     items_unreadable = 0
     for comp in _common.all_components(d):
         coll = safe(lambda c=comp: c.pmiAnnotations)
-        # counted(), not safe(read, 0): a count that raises is unknown, and scoring it 0 turns a
-        # component whose PMI could not be reached into a component holding no PMI.
+        # counted(), not safe(read, 0): a count that raises is unknown, not zero.
         n = _common.counted(lambda: coll.count) if coll is not None else None
         if n is None:
             comps_unreadable += 1
@@ -196,12 +171,10 @@ def walk_annotations(d, stats=None):
 
 
 def annotation_hits(d, name, component="", stats=None):
-    """([(annotation, component)], available_names): every case-insensitive EXACT name match across
-    the design (or only 'component' when given), with the names that exist in that scope. The raw
-    resolution find_annotation refuses on - a caller that needs to tell a MISS from an AMBIGUITY
-    (pmi_edit's suppressed-PMI re-check does) reads the hit count instead of the error text.
-    `stats` is walk_annotations' hole record, for a caller whose verdict rests on the walk being
-    COMPLETE: zero hits over an incomplete walk is not proof the name is absent."""
+    """([(annotation, component)], available_names): every case-insensitive EXACT name match in
+    the design (or only 'component' when given). A caller telling a MISS from an AMBIGUITY reads
+    the hit count here rather than find_annotation's error text; `stats` is the walk's hole record,
+    since zero hits over an incomplete walk is not proof the name is absent."""
     want = (name or "").strip()
     comp_want = (component or "").strip()
     hits, available = [], []
@@ -218,10 +191,8 @@ def annotation_hits(d, name, component="", stats=None):
 
 def find_annotation(d, name, component=""):
     """(annotation, component, error): case-insensitive EXACT name match across every component
-    (or only 'component' when given). Whether two annotations in ONE component can share a name is
-    UNMEASURED on 2705 (probe P4, blocked by the extension gate), so a name matching more than one
-    annotation is REFUSED naming each hit's component - pass component= to narrow. A miss lists the
-    names that exist."""
+    (or only 'component' when given). Several hits are REFUSED naming each hit's component; a miss
+    lists the names that exist."""
     want = (name or "").strip()
     if not want:
         return None, None, "'annotation' is required (a PMI name from pmi_get)."
@@ -591,13 +562,9 @@ def apply_hole_flags(note, flags):
 
 
 def apply_hole_values(note, values, f):
-    """Override a hole note's geometric values from a {wire_key: number} dict (display units;
-    countersink_angle_deg in degrees) and/or attach a tolerance: a value spec may also be
-    {value: n, tolerance: {...}}. A tolerance on the ANGLE field is refused. Every REFUSAL (bad
-    key, non-numeric value, angle tolerance, unreadable property, malformed tolerance spec) is
-    decided before the first write, so a refused call writes nothing; a platform FAILURE during
-    the writes (a set that raises, a value that will not read back) stops at that key, names it,
-    and leaves the keys already written. Each PMIGeometricValue is get-modify-set and re-read.
+    """Override a hole note's geometric values from a {wire_key: number or {value, tolerance}}
+    dict (display units, countersink_angle_deg in degrees). Every refusal is decided before the
+    first write; a failure DURING the writes stops at that key and leaves the earlier ones.
     Returns (applied_dict, error)."""
     import math
     if not isinstance(values, dict):
@@ -661,11 +628,9 @@ def apply_hole_values(note, values, f):
 
 def suppressed_pmi_features(d):
     """[(timeline_item, name)] for every SUPPRESSED timeline feature - the only handle a suppressed
-    PMI can be reached through, because a suppressed annotation is absent from the pmiAnnotations
-    collections and its timeline entity reads as a bare Feature, leaving the NAME as its whole
-    identity. That collection-exit behaviour is UNMEASURED on 2705 (it needs authored PMI, which
-    the extension gate blocks), so callers do not trust it: they verify the annotation reappears
-    in the collection after unsuppressing and roll the flip back when it does not."""
+    PMI can be reached through, since its timeline entity reads as a bare Feature whose NAME is its
+    whole identity. Callers verify the annotation reappears in pmiAnnotations after unsuppressing
+    rather than trusting this list."""
     out = []
     tl = safe(lambda: d.timeline)
     n = int(safe(lambda: tl.count, 0) or 0) if tl else 0
@@ -679,12 +644,32 @@ def suppressed_pmi_features(d):
     return out
 
 
+# A reference-failure message arrives with its count marked up in HTML, its sentences glued
+# together, and a title plus the annotation's own NAME after the last sentence:
+# 'Face 1 missingFace 2 missing<b>3 Reference Failures</b><br/>The model is... Lost' + 'ProbeNote'.
+_MARKUP = re.compile(r"<[^>]*>")
+_GLUED = re.compile(r"([a-z.])([A-Z])")
+_TERMINATORS = ".!?"
+_WARNING_LIMIT = 240
+
+
+def readable_warning(msg, limit=_WARNING_LIMIT):
+    """One readable line from a raw errorOrWarningMessage: markup dropped, the trailing title and
+    entity name cut at the LAST sentence terminator (kept whole when there is none), glued
+    sentences split on what remains, bounded with a trailing ' ...'. The ONE reader every consumer
+    of a PMI warning goes through."""
+    text = _MARKUP.sub(" ", msg or "")
+    end = max(text.rfind(c) for c in _TERMINATORS)
+    if end >= 0:
+        text = text[:end + 1]
+    text = " ".join(_GLUED.sub(r"\1 \2", text).split())
+    return text[:limit].rstrip() + " ..." if len(text) > limit else text
+
+
 def annotation_record(comp, ann):
     """The light per-annotation record every pmi_* read/verify reports: name, kind, component,
-    visibility, plus warning flags only when set. 'text' rides only when plainText READS - the
-    property lives on the two Fusion-authored classes (PMILeaderLineNote, PMIHoleThreadNote) and
-    on no imported PMI class, so publishing it unconditionally would print text:null on every
-    imported row against the description's promise."""
+    visibility, warning flags only when set, and 'text' only when plainText reads (the property
+    lives on PMILeaderLineNote and PMIHoleThreadNote, on no imported PMI class)."""
     rec = {
         "name": safe(lambda: ann.name),
         "kind": kind_of(ann),
@@ -698,7 +683,7 @@ def annotation_record(comp, ann):
         rec["out_of_date"] = True
     if safe(lambda: ann.isSuppressed, False):
         rec["suppressed"] = True
-    msg = safe(lambda: ann.errorOrWarningMessage, "") or ""
+    msg = readable_warning(safe(lambda: ann.errorOrWarningMessage, "") or "")
     if msg:
         rec["warning"] = msg
     return rec

@@ -46,11 +46,11 @@ _SURFACE = _inputs.SurfaceBodyRef("surface", required=True,
 _TRIM_TOOL = _inputs.GeometryHandle("trim_tool", require="face", required=True,
     description="A face / patch body that intersects the surface and divides it.")
 _EXTEND_EDGES = _inputs.EdgeLoopRef("edges", closed=False, required=True,
-    description="The OUTER open edges of ONE surface body to extend.")
+    description="The edges to extend.")
 _OFFSET_FACES = _inputs.GeometryHandleList("faces", require="face", required=True,
     description="The faces to offset (need not be one body).")
 _THICKEN_FACES = _inputs.GeometryHandleList("faces", require="face", required=True,
-    description="The faces (or patch-body faces) to thicken into a solid wall.")
+    description="The faces (or patch-body faces) to thicken.")
 
 
 
@@ -90,19 +90,12 @@ def _parse_keep_indices(keep, total):
 
 
 def _select_cells(trim_input, keep):
-    """Decide which BRepCells to KEEP (leave isSelected=False) vs REMOVE (set isSelected=True).
-
-    SEMANTICS (confirmed from BRepCell.isSelected doc): for a Trim feature a SELECTED cell is REMOVED.
-    So to KEEP a cell we leave isSelected=False; to REMOVE it we set isSelected=True. createInput does a
-    partial compute and populates input.bRepCells; with zero cells selected add() raises "No cells are
-    selected". Map 'keep' -> the set of cell indices to keep, then remove (select) everything else.
-
-    'keep' forms: omitted / "larger" -> keep the single largest cell by cellBody.area; "smaller" ->
-    keep the single smallest; an int/str index or a list of indices -> keep those. Anything else is
-    REFUSED naming the value.
-
-    Returns (kept_indices, kept_area, total, err). err is a complete refusal sentence.
-    """
+    """(kept_indices, kept_area, total, err) for 'keep': omitted / "larger" keeps the single largest
+    cell by cellBody.area, "smaller" the smallest, an int/str index or list of indices keeps those,
+    and anything else is REFUSED naming the value."""
+    # For a Trim feature a SELECTED cell is REMOVED, so a kept cell keeps isSelected=False.
+    # createInput does a partial compute to populate bRepCells, and with zero cells selected add()
+    # raises "No cells are selected".
     cells = trim_input.bRepCells
     total = int(safe(lambda: cells.count, 0) or 0)
     if total == 0:
@@ -139,38 +132,30 @@ def _select_cells(trim_input, keep):
 
 
 def _result_bodies(feature):
-    """(names, any_solid) for a feature's bodies - the tuple THIS tool's payloads want, collapsed
-    from the shared per-body {name, is_solid} projection. body_facts publishes each flag as
-    True/False/None, so the collapse is _solid_verdict, not any(): folding a None in would publish
-    'a surface' about a body whose flag nobody read."""
+    """(names, any_solid) for a feature's bodies, collapsed from the shared per-body
+    {name, is_solid} projection through _solid_verdict."""
     facts = _common.body_facts(_common.result_bodies(feature))
     return [f["name"] for f in facts], _solid_verdict([f["is_solid"] for f in facts])
 
 
 def _solid_verdict(flags):
     """The ONE any-solid collapse over True/False/None flags: True when any body reads solid, False
-    when a flag read and none did, None when no flag read at all (an empty list included). The
-    unknown stays unknown - a verdict that swallowed it would publish 'a surface' about a body
-    nothing was read from."""
+    when a flag read and none did, None when no flag read at all (an empty list included)."""
     if True in flags:
         return True
     return False if False in flags else None
 
 
 def _any_solid(bodies):
-    """_solid_verdict over bodies read HERE. read_flag rather than bool(safe(...)): a body whose
-    isSolid will not read is not a surface, and publishing it as one is the false claim this
-    returns None for."""
+    """_solid_verdict over bodies read HERE - read_flag, so a body whose isSolid will not read
+    answers None rather than 'a surface'."""
     return _solid_verdict([_common.read_flag(lambda b=b: b.isSolid) for b in bodies])
 
 
 def _landed_length(getter, want_cm, k, subject, field):
-    """(length in display units, error) read off the CREATED feature's own length parameter.
-
-    MEASURED: ExtendFeature.distance and ThickenFeature.thickness are both ModelParameters reading
-    CM, so the length published is the feature's own rather than the echoed request, and a length
-    disagreeing with the request is an error instead of a false ok. A length that cannot be read
-    comes back None, which the caller names in `unverified`."""
+    """(length in display units, error) read off the CREATED feature's own length parameter -
+    ExtendFeature.distance and ThickenFeature.thickness are ModelParameters reading CM. A length
+    that cannot be read comes back None, which the caller names in `unverified`."""
     got = safe(getter)
     if not isinstance(got, float):
         return None, ""
@@ -181,15 +166,10 @@ def _landed_length(getter, want_cm, k, subject, field):
 
 
 def _created_bodies(feature):
-    """(bodies, created_face_count, readable) over the faces the feature CREATED. feature.bodies also
-    lists the pre-existing SOURCE solid (live-verified: offsetting one face of solid Body1 reports
-    bodies [Body1, Body2]), so an isSolid read over it calls a genuine open surface 'solid'. The
-    faces the feature created - and the bodies that own them - are the actual product. readable=False
-    means feature.faces could not be read at all (nothing was checked).
-
-    The owning-body walk itself is _geom.owning_bodies - the same face -> body read, the same
-    skip-on-unreadable, the same _common.native_identity de-dup - so this adds only the face COUNT
-    and the readable flag on top of it."""
+    """(bodies, created_face_count, readable) over the faces the feature CREATED; readable=False
+    means feature.faces could not be read at all."""
+    # feature.bodies also lists the pre-existing SOURCE solid, so an isSolid read over it calls a
+    # genuine open surface 'solid'. The created faces, and the bodies owning them, are the product.
     faces = safe(lambda: feature.faces)
     if faces is None:
         return [], 0, False
@@ -214,10 +194,8 @@ def trim_handler(surface=None, trim_tool=None, keep=None) -> dict:
         return error(terr)
     area_before = safe(lambda: surf.area)
 
-    # CRITICAL: createInput opens a transaction. Commit via add or abort via cancel - explicitly,
-    # NOT under safe. On any exception (or a null feature) cancel the input before returning.
-    # createInput partial-computes and populates input.bRepCells; you MUST set isSelected on the cells
-    # to remove BEFORE add (selected == removed) or add raises "No cells are selected".
+    # createInput opens a transaction: commit via add or abort via cancel, explicitly and NOT under
+    # safe, including on an exception or a null feature.
     trim_input = None
     cell_info = None
     try:
@@ -230,15 +208,9 @@ def trim_handler(surface=None, trim_tool=None, keep=None) -> dict:
         cell_info = {"cells_total": total, "cells_kept": kept,
     "cells_removed": [i for i in range(total) if i not in set(kept)],
     "kept_area": kept_area}
-        # PHANTOM-CELL GATE (before the add). createInput takes only the tool, not the target, so its cells
-        # span every VISIBLE surface the tool crosses - a coincident/overlapping surface injects extra
-        # cells and 'keep larger' can latch onto one that isn't part of the target at all. A kept area
-        # LARGER than the target's own area proves that (a subset of the target can never exceed it).
-        # Cancel BEFORE add so no wrong feature lands. Live-verified: HIDING the overlapping surface
-        # drops the phantom cells and the trim is correct (the cell compute is visibility-governed).
-        # SCOPE, one-sided: passing this test proves nothing. A foreign cell that is larger than every
-        # cell of the target but smaller than the target's whole area sails through, so the payload
-        # publishes phantom_cell_guard naming exactly what was and was not checked.
+        # PHANTOM-CELL GATE, before the add. createInput takes only the tool, so its cells span
+        # every VISIBLE surface the tool crosses; a kept area LARGER than the target's own proves a
+        # cell from another surface got in. One-sided: a smaller foreign cell sails through.
         if kept_area is not None and area_before and kept_area > area_before * (1 + 1e-6):
             aborted = _abort(trim_input)
             return error(
@@ -499,13 +471,9 @@ def thicken_handler(faces=None, thickness: float = 0.0, units: str = "mm",
 
     thick_val = adsk.core.ValueInput.createByReal(float(thickness) * k)
     op = getattr(adsk.fusion.FeatureOperations, _common.OPERATIONS[op_key])
-    # For operation='join': the solids standing BEFORE the add, by _common.native_identity. A join
-    # that fused lands its created faces on one of THESE bodies; a join whose sheet touches no solid
-    # silently mints a NEW free-floating body instead (measured) - the diff below discloses that.
-    # The key is the identity PAIR, not the bare token: a token is document-local, while this census
-    # is taken on the FACE's own component (census_host) and the feature is added to the ACTIVE one,
-    # so the two sides of the diff are not guaranteed to be one document - and a created body whose
-    # token collided with a censused one would drop out of `loose`, suppressing the warning.
+    # For operation='join': the solids standing BEFORE the add. A join that fused lands its created
+    # faces on one of THESE bodies; a join whose sheet touches no solid silently mints a NEW
+    # free-floating body. The key is the identity PAIR - a bare token is document-local.
     join_host = (_common.census_host(safe(lambda: face_ents[0].body), comp)
                  if op_key == "join" and face_ents else None)
     before_keys = ({k for k in (_common.native_identity(b) for b in
@@ -585,10 +553,8 @@ def thicken_handler(faces=None, thickness: float = 0.0, units: str = "mm",
     if tt_key:
         payload["thicken_type"] = tt_key
     # join no-fuse disclosure: a created body whose identity was NOT among the pre-add solids is a
-    # NEW free-floating body - operation='join' merged nothing (the cut path refuses on its own;
-    # measured, the join path published operation:'join' with modified:[] and no disclosure). A body
-    # whose identity cannot be read answers None, which is never in the census either, so it lands in
-    # `loose` - a disclosed warning rather than a silently claimed fuse.
+    # NEW free-floating body, so operation='join' merged nothing. A body whose identity cannot be
+    # read answers None, which is never in the census either, so it lands in `loose` and is warned.
     if op_key == "join" and readable and created:
         loose = [safe(lambda b=b: b.name) for b in created
                  if _common.native_identity(b) not in before_keys]
@@ -606,11 +572,8 @@ def thicken_handler(faces=None, thickness: float = 0.0, units: str = "mm",
 # ── tool / item wiring ──────────────────────────────────────────────────────
 
 _TRIM_DESC = (
-"Trim an OPEN surface body against a tool that intersects it - remove the unwanted cell(s). "
-"'surface' is the surface (isSolid==false, validated); 'trim_tool' is a face / patch body that "
-"intersects and divides it; 'keep' optionally picks which cell(s) to keep (default the larger "
-"remainder). Cells span every VISIBLE surface the tool crosses - HIDE overlapping surfaces first "
-"(a kept area above the target's is rejected). A failed trim leaves the surface unchanged."
+"Trim an OPEN surface body against a tool that intersects and divides it - the unwanted cell(s) "
+"are removed."
 )
 surface_trim_tool = (
     Tool.create_simple(name="surface_trim", description=_TRIM_DESC)
@@ -627,11 +590,7 @@ surface_trim_item = Item.create_tool_item(tool=surface_trim_tool, write="write",
                                           postconditions=[_assert.FeatureHealthy()])
 
 _EXTEND_DESC = (
-                                          "Extend an OPEN surface outward from its OUTER open edges. 'edges' are the outer edges of ONE "
-                                          "surface body (a multi-body set is rejected); 'distance' is the extend amount in 'units'; "
-                                          "'extend_type' picks how the new surface is generated (tangent/perpendicular need edges connected "
-                                          "at endpoints); 'chaining' follows the connected chain (default true); 'extend_alignment' aligns "
-                                          "the extended side edges to the neighbouring surface (omit = free_edges)."
+"Extend an OPEN surface outward from its OUTER open edges by 'distance'."
 )
 surface_extend_tool = (
     Tool.create_simple(name="surface_extend", description=_EXTEND_DESC)
@@ -652,11 +611,7 @@ surface_extend_item = Item.create_tool_item(tool=surface_extend_tool, write="wri
                                             postconditions=[_assert.FeatureHealthy()])
 
 _OFFSET_DESC = (
-                                            "Offset faces by a distance into ANOTHER surface (positive = along the face normal). 'faces' need "
-                                            "not be one body; 'distance' in 'units'; chaining=true expands across TANGENT-connected faces "
-                                            "(reported as faces_offset). "
-                                            "An open-surface source produces a SURFACE (isSolid=false); offsetting a face of a "
-                                            "SOLID yields a body reading isSolid=true - check the payload's is_solid."
+"Offset faces by a distance into ANOTHER surface (positive = along the face normal)."
 )
 surface_offset_tool = (
     Tool.create_simple(name="surface_offset", description=_OFFSET_DESC)
@@ -674,12 +629,8 @@ surface_offset_item = Item.create_tool_item(tool=surface_offset_tool, write="wri
                                             postconditions=[_assert.FeatureHealthy()])
 
 _THICKEN_DESC = (
-                                            "Thicken faces into a SOLID wall - the surface->solid bridge (competes with stitch: thicken makes "
-                                            "a wall, stitch closes a watertight surface set). 'faces' (or patch bodies) need not be connected "
-                                            "or from one body; 'thickness' (non-zero) in 'units'; 'symmetric' thickens both sides; "
-                                            "'chaining' selects the connected face set (default true); 'thicken_type' picks the corner "
-                                            "treatment (omit = sharp). Produces "
-                                            "a SOLID (isSolid=true)."
+"Thicken faces into a SOLID wall - the surface->solid bridge. To close a watertight set of "
+"surfaces instead, use model_stitch."
 )
 surface_thicken_tool = (
     Tool.create_simple(name="surface_thicken", description=_THICKEN_DESC)

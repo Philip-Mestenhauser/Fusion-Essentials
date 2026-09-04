@@ -45,10 +45,9 @@ def _face_is_internal(face):
     dotting it with the face-point-to-axis-origin vector cancels the axial term and leaves the
     radial sign alone: a normal pointing AT the axis has the material outside it, which is a bore."""
     pt = safe(lambda: face.pointOnFace)
-    # MEASURED, both parameterizations: getNormalAtPoint returns the FACE's OUT-OF-MATERIAL normal
-    # and already accounts for isParamReversed. On a bore wall (isParamReversed True) the sample
-    # dots -1.0 with the outward radial direction - it points AT the axis; on a shaft wall
-    # (isParamReversed False) it dots +1.0. So the sign below needs no correction by isParamReversed.
+    # getNormalAtPoint returns the FACE's OUT-OF-MATERIAL normal and already accounts for
+    # isParamReversed: a bore wall's sample points AT the axis, a shaft wall's away from it, so the
+    # sign below needs no correction.
     nrm = _geom.evaluator_normal_at(face, pt)
     origin = safe(lambda: face.geometry.origin)
     if pt is None or nrm is None or origin is None:
@@ -200,12 +199,9 @@ def handler(faces=None, designation: str = "", modeled: bool = False, left_hande
         return error(f"The thread was created but carries designation '{got}', not the requested "
                      f"'{designation}'. Remove it with design_delete_feature (feature "
                      f"'{safe(lambda: feature.name)}').")
-    # A redundant SECOND witness, kept because it costs one read. MEASURED: the platform VALIDATES
-    # the ThreadInfo's internal flag against the face at add() and REFUSES a mismatch - an
-    # internal=False ThreadInfo on a bore face raises "3 : input face's externality is different
-    # from what's in the ThreadInfo". So a wrong bore/shaft classification from _face_is_internal
-    # surfaces as a loud add() raise (already reported above) and never as a wrong thread; by the
-    # time a feature exists, this flag cannot disagree with the face.
+    # A second witness that costs one read: the platform validates the ThreadInfo's internal flag
+    # against the face at add() and refuses a mismatch ("input face's externality is different from
+    # what's in the ThreadInfo"), so by the time a feature exists this flag agrees with the face.
     got_internal = safe(lambda: info.isInternal) if info is not None else None
     if isinstance(got_internal, bool) and got_internal != internal:
         return error(f"The thread was created as an {'internal' if got_internal else 'external'} "
@@ -292,9 +288,8 @@ def handler(faces=None, designation: str = "", modeled: bool = False, left_hande
 TOOL_DESCRIPTION = (
     "Thread an EXISTING cylindrical face - external on a shaft or boss, internal in a bore "
     "(model_hole taps the holes it drills). Bore-vs-shaft is read off each face, and one call "
-    "cannot mix the two. 'designation' is the call-out, e.g. 'M8x1.25' or '1/4-20 UNC'. Default is "
-    "a cosmetic thread - call-out recorded, geometry stays a plain cylinder; modeled=true cuts the "
-    "real helix. WRITES; verifies the feature computed and reads its designation back.\n"
+    "cannot mix the two. The default thread is cosmetic - the call-out is recorded and the geometry "
+    "stays a plain cylinder; modeled=true cuts the real helix.\n"
     + _outputs.produces_block(RETURNS)
 )
 

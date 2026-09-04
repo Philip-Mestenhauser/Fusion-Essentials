@@ -3,30 +3,9 @@
 
 """Lint: no dead module-level code under commands/mcpServer/, tests/, or the doc generators.
 
-Checks, with deliberately different matching strategies per corpus:
-
-- Unreferenced module-level DEFINITIONS (functions, classes, constants): a name is dead when it
-  is mentioned NOWHERE in the scanned corpus (all of commands/ + tests/) outside its own
-  definition site. Matching is by name across the whole corpus, so a dead symbol that happens to
-  share its name with a live one elsewhere is not flagged - name uniqueness is what makes
-  deadness statically provable, and this lint prefers missing a masked case over a false alarm.
-  Class methods are out of scope (instance reachability is not decidable at this cost).
-
-- Unused IMPORTS: an imported name is dead when its home module never mentions it. Tests may
-  legitimately reach a helper through the importing module's namespace (a test seam like
-  doc_open._b64url_decode); such seams are named in _IMPORT_SEAMS with a reason. The table only
-  shrinks - a new unused import is a defect, not an allowlist candidate.
-
-- TEST-FILE definitions are checked PER FILE (test files are self-contained, and fakes commonly
-  share names like FakeDesign across files, which would mask corpus-global matching). pytest
-  entry points are exempt by shape: test_*/Test* names are collected, fixture-decorated functions
-  are injected by argument name (so ast.arg counts as a reference everywhere). conftest.py and
-  the gen_*.py generators are corpus-global like the server code.
-
-The framework wires tools by direct attribute access (the pkgutil sweep calls register_tool,
-handlers are passed by reference, generators read MAP_BLURB/RETURNS/TOOL_DESCRIPTION), so every
-framework entry point is mentioned somewhere in the corpus and needs no special-casing.
-"""
+A module-level definition mentioned nowhere else across commands/ + tests/ fails, a test-file
+definition unused in its own file fails, and an import its home module never mentions fails.
+Class methods, dunders, pytest entry points (test_*/Test*, fixtures) and named seams are exempt."""
 
 import ast
 from functools import lru_cache
@@ -59,19 +38,12 @@ def _py_files(root):
 
 
 def _parse(path):
-    # The shared parse: this lint walks the same ~420-module corpus in four tests, and the imports
-    # test re-walks the server half. Every walk below is read-only, which is what lets one AST per
-    # file serve them all (_corpus).
     return _corpus.tree(path)
 
 
 @lru_cache(maxsize=None)
 def _mention_counts():
-    """name -> total mention sites across the corpus: every Name id, Attribute attr, import
-    alias, and identifier-shaped string passed to a *attr/monkeypatch-style call.
-
-    One index per process: the two tests that need it index the SAME corpus, and building it is
-    a full walk of every module. Read-only for callers - the dict is cached."""
+    """name -> total mention sites across the corpus; cached, so callers must not mutate it."""
     counts = {}
 
     def bump(name):
@@ -88,9 +60,8 @@ def _mention_counts():
 
 
 def _count_into(tree, bump):
-    """Feed every mention in one tree to bump(name): Name ids, Attribute attrs, import aliases
-    (both original and as-name), ARGUMENT names (pytest injects fixtures by arg name), and
-    identifier-shaped strings passed to *attr/monkeypatch-style calls."""
+    """Feed every mention in one tree to bump(name): Name ids, Attribute attrs, import aliases,
+    argument names (pytest injects fixtures by arg name), and identifier strings in *attr calls."""
     for node in ast.walk(tree):
         if isinstance(node, ast.Name):
             bump(node.id)
@@ -113,9 +84,8 @@ def _count_into(tree, bump):
 
 
 def _module_definitions(tree):
-    """(name, lineno, own_mentions) for each module-level def/class/assigned constant.
-    own_mentions counts the mentions the definition itself contributes to the corpus index
-    (its binding name; for an Assign, the target Name node)."""
+    """(name, lineno, own_mentions) per module-level def/class/assigned constant - own_mentions is
+    what the definition itself contributes to the index (0 for def/class, 1 for an Assign target)."""
     out = []
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -132,12 +102,9 @@ def _module_definitions(tree):
 
 @lru_cache(maxsize=None)
 def _local_counts(path):
-    """name -> mentions inside ONE module: Name ids and Attribute attrs, from a single walk.
-
-    An ast.alias is deliberately not a mention - the import statement that BINDS a name is what
-    makes an unused import detectable. One walk per file rather than one per name: the import check
-    asks about every name a file imports, and a walk apiece is what made this the slowest lint.
-    Read-only for callers; the dict is cached."""
+    """name -> mentions inside ONE module: Name ids and Attribute attrs. An ast.alias is
+    deliberately NOT a mention - the import that binds a name is what makes it detectable as
+    unused. Cached, so callers must not mutate it."""
     counts = {}
     for node in ast.walk(_corpus.tree(path)):
         if isinstance(node, ast.Name):
@@ -153,9 +120,8 @@ def _local_mentions(path, name):
 
 
 def _stale_definition_exemptions(table, counts, defined):
-    """Both staleness directions for a _DEFINITION_EXEMPT-shaped table: an entry must still NAME a
-    module-level definition (`defined`), and that definition must still be corpus-unreferenced
-    (`counts`) - either miss returns a remove-the-entry message."""
+    """Remove-the-entry messages for _DEFINITION_EXEMPT rows that no longer name a module-level
+    definition, or whose definition gained a corpus reference."""
     stale = []
     for name, reason in table.items():
         assert str(reason).strip(), f"_DEFINITION_EXEMPT: {name} needs a plain-English reason"
@@ -203,8 +169,6 @@ class TestNoUnusedImports:
         assert not offenders, "Unused imports (delete them, or name a test seam):\n" + "\n".join(offenders)
 
     def test_import_seam_table_matches_reality(self):
-        # every named seam must still exist AND still be locally unused - a seam that gained a
-        # local use (or vanished) is a stale table entry.
         stale = []
         for (fname, name), reason in _IMPORT_SEAMS.items():
             path = MCP_ROOT / "tools" / fname
@@ -244,8 +208,6 @@ class TestNoUnreferencedDefinitions:
                                + "\n".join(offenders))
 
     def test_definition_exempt_table_matches_reality(self):
-        # empty today, armed for its first entry: both staleness directions - an entry naming a
-        # definition that no longer exists fails, and one whose definition gained a reference fails.
         counts = _mention_counts()
         defined = set()
         for path in _py_files(MCP_ROOT) + sorted(TESTS.glob("gen_*.py")) + [TESTS / "conftest.py"]:
@@ -253,20 +215,8 @@ class TestNoUnreferencedDefinitions:
         stale = _stale_definition_exemptions(_DEFINITION_EXEMPT, counts, defined)
         assert not stale, "stale _DEFINITION_EXEMPT entries:\n  " + "\n  ".join(stale)
 
-    def test_the_staleness_check_bites(self):
-        # both directions against synthetic entries: a vanished definition trips, a referenced one
-        # trips, a live-but-unreferenced one (the only legitimate resident) passes clean.
-        counts = {"quiet_helper": 0, "busy_helper": 3}
-        defined = {"quiet_helper", "busy_helper"}
-        assert not _stale_definition_exemptions({"quiet_helper": "framework seam"}, counts, defined)
-        gone = _stale_definition_exemptions({"vanished_helper": "reason"}, counts, defined)
-        assert gone and "no such module-level definition" in gone[0]
-        hot = _stale_definition_exemptions({"busy_helper": "reason"}, counts, defined)
-        assert hot and "referenced now" in hot[0]
-
     def test_every_test_file_definition_is_referenced_in_its_file(self):
-        # Test files are self-contained, so deadness is decidable PER FILE - and must be, since
-        # fake names repeat across files and would mask a corpus-global match.
+        # per FILE, not corpus-global: fake names repeat across test files and would mask a match.
         offenders = []
         for path in sorted(TESTS.rglob("test_*.py")):
             tree = _parse(path)

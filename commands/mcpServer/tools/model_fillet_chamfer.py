@@ -5,8 +5,7 @@
 
   model_fillet  -> round edges: constant radius, variable radius, chord length, or a rule fillet.
   model_chamfer -> bevel edges: equal distance, two distances, or a distance and an angle.
-
-Target specific edges (a find_geometry edge-handle list) or all/filtered edges of a named body.
+  Target specific edges (a find_geometry edge-handle list) or all/filtered edges of a named body.
 """
 
 import math
@@ -26,11 +25,10 @@ from . import _assert
 
 # Edge-handle-list input (closes the 'fillet THESE specific edges' gap; takes precedence over edge_filter).
 _EDGES = _inputs.GeometryHandleList("edges", require="edge",
-                                    description="Specific edges to fillet/chamfer (overrides edge_filter).")
+                                    description="The edges to work on; overrides 'edge_filter'.")
 # Body input: a find_geometry handle (precise) OR a name; resolved/kind-checked by BodyRef.
 _BODY = _inputs.BodyRef("body_name", kind="solid", required=False,
-                        description="Body whose edges to fillet/chamfer (omit = most recent); "
-                                    "scope via edge_filter, or pass 'edges' instead.")
+                        description="Body whose edges to work on (omit = most recent).")
 
 _FILLET_TYPE = _inputs.Choice("fillet_type", ["constant", "variable", "chord_length", "rule"],
                               default="constant",
@@ -61,18 +59,16 @@ def _size_hint(platform_text: str, size_key: str) -> str:
             "corners and any chain is tangentially connected; the size is not necessarily the "
             "problem.)")
 _CORNER_TYPE = _inputs.Choice("corner_type", list(_CORNER_TYPES),
-    description="How a vertex where several chamfered edges meet is modelled: 'chamfer' patches "
-                "it, 'miter' extends the chamfer faces to intersect, 'blend' fits a blend "
-                "surface. Omit for Fusion's default.")
+    description="How a vertex where several chamfered edges meet is modelled. Omit for Fusion's "
+                "default.")
 
 app = adsk.core.Application.get()
 
 # edge_filter caveat (shared by both tools): convex/concave classify each edge by its LOCAL dihedral
 # only, so on a plate with holes every hole rim matches exactly like the outer perimeter - the filter
 # cannot mean "outer edges only". The 'edges' handle list is the precise path when the set matters.
-_EDGE_FILTER_DESC = ("REQUIRED when 'edges' is omitted: all/convex/concave (with body_name), by "
-    "per-edge dihedral - hole rims match like the outer perimeter, so use 'edges' handles to "
-    "isolate a specific set.")
+_EDGE_FILTER_DESC = ("REQUIRED when 'edges' is omitted; selects by per-edge dihedral, so hole rims "
+    "match like the outer perimeter - pass 'edges' handles to isolate a specific set.")
 
 
 def _qualified_body_name(body):
@@ -228,14 +224,9 @@ def _angle_spec(angle_deg, distance_two):
 
 
 def _chamfer_readback(feature, sz, k, angle, corner_key):
-    """(verified payload fields, unverified field names, error) read off the CREATED chamfer.
-
-    set_verified proves only that the INPUT took a value, and a chamfer offers no indirect signal -
-    a corner type the platform declined leaves no trace anywhere else - so the feature itself is
-    asked. The read-back shapes this checks against: feature.cornerType answers the member that was
-    set, and a distance-and-angle chamfer's chamferTypeDefinition is a
-    DistanceAndAngleChamferTypeDefinition whose .distance and .angle are ModelParameters carrying CM
-    and RADIANS, which is what the comparisons below convert to before comparing."""
+    """(verified payload fields, unverified field names, error) read off the CREATED chamfer. A
+    declined corner type leaves no trace anywhere else, and a distance-and-angle definition carries
+    .distance in CM and .angle in RADIANS, which the comparisons below convert to."""
     fields, unverified = {}, []
     if corner_key:
         cts = safe(lambda: adsk.fusion.ChamferCornerTypes)
@@ -311,12 +302,9 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
     k = scale(units)
     if k is None:
         return error(f"Unknown units '{units}'. Use mm, cm, or in.")
-    # A fillet RADIUS may arrive as a parameter EXPRESSION string ('WallT/2') instead of a number.
-    # The chamfer's distance stays literal because _chamfer_readback compares the created feature's
-    # own distance against that number; 'chord_length' stays literal too, and its schema says so.
-    # Only a LITERAL can be judged this early, before the design that resolves an expression is in
-    # hand - so the two guards below run on a literal, and the expression is guarded on the value
-    # the units engine evaluates it to, further down.
+    # A fillet RADIUS may arrive as a parameter EXPRESSION string ('WallT/2'); a chamfer distance
+    # and a chord_length stay literal, since their read-backs compare against that number. Only a
+    # LITERAL is judged this early, before the design that resolves an expression is in hand.
     as_expression = size_key == "radius" and _inputs.looks_like_expression(size)
     sz = None
     if not as_expression:
@@ -333,11 +321,9 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")
     comp = target_component(design)
-    # One ValueInput for both forms: a literal is scaled to internal cm, an expression crosses as a
-    # string once the design's units engine has evaluated it, so an unresolvable one is refused BY
-    # NAME. It sits here - before any edge resolution - so a bad size is reported before a bad edge
-    # scope. The evaluated cm is what puts an EXPRESSION under the same positivity guard a literal
-    # gets: without it '-1 mm' and '0 mm' reach filletFeatures.add and fail there instead.
+    # One ValueInput for both forms: a literal scaled to internal cm, an expression crossing as a
+    # string once the units engine evaluated it, so an unresolvable one is refused BY NAME. The
+    # evaluated cm puts an expression under the same positivity guard a literal gets.
     val, size_cm, verr = _inputs.length_value_input(size, k, design, size_key)
     if verr:
         return error(verr)
@@ -437,19 +423,17 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
     if not feature:
         return error(_common.no_feature_error(design, kind.capitalize()))
 
-    # Measured READ-BACK off the created feature - the input collection's count is only the request.
-    # A fillet/chamfer can consume fewer edges than handed in, so report what the feature says it
-    # holds, not what we asked for. feature.faces.count is the fillet FACES created: a real fillet
-    # reports >=1, and the 0-face no-op it distinguishes is gated separately below.
+    # READ-BACK off the created feature - the input collection's count is only the request, and a
+    # fillet/chamfer can consume fewer edges than handed in. feature.faces.count is the fillet FACES
+    # created: a real fillet reports >=1, and the 0-face no-op is gated separately below.
     faces_created = safe(lambda: feature.faces.count)
     # FilletFeature/ChamferFeature expose no .edges collection - "edges" is absent from dir() and
     # reading it raises AttributeError - so the created faces are the only per-edge effect read-back
     # the feature offers.
 
     # A feature can come back with an ERROR health state and no message at all: a variable-radius
-    # chain listed out of connected order does exactly that, and it reads 0 faces like a tangent
-    # no-op. The health state is what separates the two, so it is checked BEFORE the no-op gate
-    # rather than letting that gate assert a cause this observation cannot support.
+    # chain listed out of connected order does that, and it reads 0 faces like a tangent no-op. The
+    # health state separates the two, so it is checked BEFORE the no-op gate.
     health = safe(lambda: feature.healthState)
     if health == adsk.fusion.FeatureHealthStates.ErrorFeatureHealthState:
         detail = safe(lambda: feature.errorOrWarningMessage) or ""
@@ -463,29 +447,21 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
               "fresh handles."
             + ("" if removed else " (The failed feature could not be auto-removed.)"))
 
-    # Fillet NO-OP guard: a fillet on a TANGENT edge - two faces meeting smoothly (zero dihedral),
-    # e.g. a radial hole tangent to a flat face where its diameter equals the wall thickness - creates
-    # the feature but rounds nothing: feature.faces.count reads 0 and the body volume is unchanged
-    # (live-verified). Error instead of a false filleted:true, and remove the inert feature. Scoped to
-    # fillet, where the 0-face read-back is proven to mean no-op.
+    # Fillet NO-OP guard: a fillet on a TANGENT edge - two faces meeting smoothly - creates the
+    # feature but rounds nothing, reading 0 faces with the body volume unchanged. Scoped to fillet,
+    # where the 0-face read-back is proven to mean no-op.
     if kind == "fillet" and faces_created == 0:
         removed = safe(lambda: feature.deleteMe())
         return error(
-            "Fillet reported success but rounded nothing - the created feature holds 0 faces (a "
-            "no-op). A TANGENT edge does this: its two faces meet smoothly (zero dihedral) - e.g. a "
-            "hole drilled tangent to a face, its diameter equal to the wall thickness - so there is "
-            "no material corner to round. Make the corner non-tangent (a hole diameter strictly "
-            "less than the wall thickness), or fillet a genuinely convex/concave edge."
+            "Fillet reported success but rounded nothing - the created feature holds 0 faces. A "
+            "TANGENT edge does this: its two faces meet smoothly (zero dihedral), e.g. a hole "
+            "drilled tangent to a face with its diameter equal to the wall thickness. Make the "
+            "corner non-tangent (a smaller hole diameter), or fillet a convex/concave edge."
             + ("" if removed else " (The inert fillet feature could not be auto-removed.)"))
 
-    # Partial-application guard (both kinds): a handle can still resolve to SOME live entity (the
-    # locator fallback in _inputs._resolve_token_entity recovers a stale token by kind+position) yet
-    # not actually participate in the feature - consuming fewer edges than requested while the API
-    # still reports success, with the created feature's face count the only hint. A fully-applied
-    # fillet creates one face per requested edge even on a tangent LOOP: MEASURED, one seed edge of
-    # an 8-edge tangent chain (4 lines + 4 arcs, isTangentChain True) built a feature holding 8
-    # faces. So a face shortfall means at least one edge was dropped - roll the feature back rather
-    # than report a false blanket success.
+    # Partial-application guard (both kinds): a stale handle can resolve to SOME live entity through
+    # the locator fallback yet not participate in the feature. A fully-applied fillet creates one
+    # face per requested edge, even on a tangent LOOP, so a shortfall means an edge was dropped.
     applied = faces_created
     if applied is not None and applied < edges.count:
         removed = safe(lambda: feature.deleteMe())
@@ -657,9 +633,8 @@ def _rule_fillet(radius, units, faces, second_faces, topology):
     got_topo = safe(lambda: settings.topologyType) if settings is not None else None
     want_topo = safe(lambda: _topology_type(topo))
     # Both forms are compared: a literal against its own scaled number, an expression against the
-    # value the units engine evaluated it to; without that value nothing judges the applied radius.
-    # want_cm None means the evaluation itself did not answer a number - then there is nothing to
-    # compare against, and treating it as zero would roll a healthy fillet out.
+    # value the units engine evaluated it to. want_cm None means nothing answered a number, and
+    # treating that as zero would roll a healthy fillet out.
     if want_cm is not None and isinstance(got_r_cm, float) and abs(got_r_cm - want_cm) > 1e-6:
         asked = f"{round(want_cm / k, 6)} {units}"
         if as_expression:
@@ -696,21 +671,12 @@ def _rule_fillet(radius, units, faces, second_faces, topology):
 
 
 _FILLET_DESC = (
-    "Round (fillet) edges - for edges where a RADIUS is the design intent (the standard machined "
-    "edge break is model_chamfer). 'fillet_type' picks the shape: 'constant' (one radius); "
-    "'variable' (blends 'radius' to 'end_radius' along a tangent edge chain, with optional "
-    "intermediate 'positions'/'radii'); 'chord_length' (a fixed chord across the corner); 'rule' "
-    "(every edge of the given 'faces', or only the edges between 'faces' and 'second_faces'). "
-    "TARGET via 'edges' = find_geometry edge handles (takes precedence), OR 'body_name' (omit = "
-    "most recent) + 'edge_filter'. Lengths in 'units' (mm default); 'radius' also takes a parameter "
-    "EXPRESSION string ('WallT/2'). WRITES; a fillet that moves no measurable material is returned "
-    "as an error, not a success."
+    "Round (fillet) edges where a RADIUS is the design intent; model_chamfer bevels instead. "
+    "Target with 'edges' handles from find_geometry, or 'body_name' + 'edge_filter'."
 )
 _CHAMFER_DESC = (
-"Bevel (chamfer) edges - the machinist's default deburr/edge-break. 'distance' alone bevels "
-"equally; add 'distance_two' for an asymmetric bevel, or 'angle_deg' for distance-and-angle. "
-"TARGET via 'edges' = find_geometry edge handles (takes precedence), OR 'body_name' + "
-"'edge_filter'. Lengths in 'units' (mm default)."
+"Bevel (chamfer) edges - the machinist's default deburr/edge-break. Target with 'edges' handles "
+"from find_geometry, or 'body_name' + 'edge_filter'."
 )
 
 fillet_tool = (
@@ -750,9 +716,9 @@ chamfer_tool = (
     .add_input_property("distance", {"type": "number", "description": "Chamfer distance in 'units' (the first/only distance)."})
     .add_input_property("distance_two", {"type": "number", "description": "Second distance for an ASYMMETRIC two-distance chamfer (in 'units'); omit/0 = equal-distance."})
     .add_input_property("angle_deg", {"type": "number",
-        "description": "Distance-and-angle chamfer, in DEGREES: one leg of the bevel measures "
-                       "'distance', the other distance*tan(angle). Which face takes the 'distance' "
-                       "leg is not selectable here - check the result. Excludes 'distance_two'."})
+        "description": "Distance-and-angle chamfer in DEGREES: one leg measures 'distance', the "
+                       "other distance*tan(angle). Which face takes the 'distance' leg is not "
+                       "selectable - check the result. Excludes 'distance_two'."})
     .add_input_property(*_CORNER_TYPE.as_property())
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("edge_filter", {"type": "string", "enum": ["all", "convex", "concave"],

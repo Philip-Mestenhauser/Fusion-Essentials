@@ -1,14 +1,9 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: the COLD-BOOT orientation call - one cheap read that situates the agent.
-
-Returns one structured report of the open document: what it is (doc + units + mode), what it CONTAINS
-(component/body/sketch/joint counts + a depth-1 browser digest), its HEALTH (timeline errors, broken
-joints, stale references), whether CAM data exists (without switching to Manufacture), and
-budget-aware POINTERS naming the targeted tool to refine each area. Call this first on an open
-document; drill down with the pointers rather than dumping the whole design. Read-only.
-"""
+"""The COLD-BOOT orientation read: one report of the open document - what it is, what it contains
+(counts plus a depth-1 browser digest), its health, whether CAM data exists, and the pointers naming
+the targeted tool for each area."""
 
 import re
 
@@ -50,13 +45,9 @@ def _pointer_tool(text):
 
 
 def _drop_unregistered_pointers(pointers):
-    """Drop a pointer naming a tool that ISN'T registered - a disabled family's pointer would name a
-    tool that 404s (see GATEABLE_FAMILIES in mcp_primitives/registry.py).
-
-    An EMPTY registry means no live server is backing this call (the unit-test context, where tools
-    never call register_tool()) - filtering is skipped there so those tests see every pointer. In
-    production workspace_orient itself is always registered, so the registry is never empty then.
-    """
+    """Drop a pointer naming a tool that ISN'T registered - a gated-off family's pointer 404s."""
+    # An EMPTY registry means no live server backs this call (the unit-test context), so filtering
+    # is skipped there; in production this tool is itself registered.
     if not registry.get_tools():
         return pointers
     return {k: v for k, v in pointers.items()
@@ -70,14 +61,9 @@ def _design_mode(design):
 
 
 def _data_identity(doc):
-    """WHERE the active document lives in the data model: its lineage URN + version + web URL, and the
-    hub / project / folder that contain it - so an orienting agent knows its place in the data model
-    (and has the URN that doc_copy / doc_open / data_* need) WITHOUT a separate doc_get call.
-
-    An UNSAVED document has no DataFile yet, so the cloud identity is null and saved=false - surfaced
-    plainly rather than guessed. Every read is defensive: a missing/erroring folder or project field
-    just stays null (cloud reads fail in surprising ways) and never breaks the orient.
-    """
+    """WHERE the active document lives in the data model: lineage URN, version, web URL, and the
+    hub/project/folder holding it. An UNSAVED document has no DataFile, so every cloud field stays
+    null and saved_to_cloud false."""
     ident = {
         "saved_to_cloud": False,
         "document_id": None,          # lineage URN - the id doc_open / doc_copy / data_delete_file use
@@ -95,10 +81,8 @@ def _data_identity(doc):
         return ident       # never-saved doc: no data-model identity yet (saved_to_cloud stays false)
     ident["saved_to_cloud"] = True
     ident["document_id"] = safe(lambda: df.id)
-    # Both numbers come off the ONE DataFile handle this open document holds. Measured (see
-    # doc_save_milestone._refetch): that handle KEEPS its pre-save values while a fresh
-    # findFileById already reports the new tip - so after a save the two can disagree with each
-    # other and with the cloud. This read does not pay the refetch, so it says which handle it read.
+    # MEASURED: the ONE DataFile handle an open document holds KEEPS its pre-save values while a
+    # fresh findFileById already reports the new tip. This read does not pay that refetch.
     ident["version_number"] = safe(lambda: df.versionNumber)
     ident["latest_version_number"] = safe(lambda: df.latestVersionNumber)
     ident["version_lag_note"] = (
@@ -123,19 +107,16 @@ def _data_identity(doc):
 
 
 def _overall_bbox(root, design):
-    """The whole-design world-aligned bounding box: size (x/y/z) + center, in the design's display
-    units - the 'how big is this thing, and where is it relative to the origin' read every modelling
-    decision needs. None when there's no solid geometry yet (an empty/sketch-only design)."""
+    """The whole-design world-aligned bounding box - size and center in the design's display units,
+    or None when nothing measurable is modelled yet."""
     bb = safe(lambda: root.boundingBox)
     mn = safe(lambda: bb.minPoint) if bb is not None else None
     mx = safe(lambda: bb.maxPoint) if bb is not None else None
     if mn is None or mx is None:
         return None
     units = safe(lambda: design.unitsManager.defaultLengthUnits) or "cm"
-    # internal API length is cm; convert to display units via the units manager (robust to any unit).
-    # A FAILED conversion returns None, never the raw centimetre number - publishing that under the
-    # requested unit's label is a wrong measurement, not a fallback. Same for a coordinate that will
-    # not read: null, never a fabricated 0.
+    # Internal API length is cm; the units manager converts. A failed conversion returns None,
+    # never the raw centimetre number under the requested unit's label.
     def conv(v_cm):
         if v_cm is None:
             return None
@@ -230,12 +211,10 @@ def _selection_echo():
 
 
 def _timeline_rollup(design):
-    """(errors, warnings, suppressed, markers, total) feature COUNTS from the parametric timeline
-    (2 error / 1 warning / 3 suppressed) - the orientation rollup. A null/other healthState is a
-    non-computing MARKER (a Snapshot has no health state - it reads null, neither healthy nor error);
-    counted DISTINCTLY so it is not silently folded into an implied 'healthy' (the total reconciles as
-    errors+warnings+suppressed+markers+healthy). Distinct from _common.timeline_health, which returns
-    feature NAMES for the before/after edit guard. Empty errors == nothing broken."""
+    """(errors, warnings, suppressed, markers, total) timeline COUNTS by healthState (2/1/3). A
+    null/other state is a non-computing MARKER - a Snapshot has none - counted distinctly so it is
+    never folded into an implied healthy; the total reconciles as errors+warnings+suppressed+
+    markers+healthy."""
     errors = warnings = suppressed = markers = total = 0
     tl = safe(lambda: design.timeline)
     if tl is None:
@@ -255,16 +234,10 @@ def _timeline_rollup(design):
 
 
 def _joint_rollup(design):
-    """(joint_count, broken_joints[names], health_unknown count) over the FULL joint walk
-    (_joints.all_joints: root AND every sub-component, joints AND asBuiltJoints) - a root-only count
-    would hide a sub-component's joints and the design's as-built ones.
-
-    Each joint's state is read through _assert.compute_state - the ONE entity-plus-timelineObject
-    pairing assembly_get's rows and joint_create's read-back share - so an as-built joint, which
-    answers no healthState of its own, is counted off the timeline item that does answer, and the
-    orientation rollup and the deeper read cannot disagree on one design. A joint that answered
-    'unknown' is counted in the third value: never among the broken names, never folded into an
-    implied healthy."""
+    """(joint_count, broken_joints[names], health_unknown count) over the FULL joint walk, each
+    state read through _assert.compute_state - an as-built joint answers no healthState of its own
+    and is counted off the timeline item that does. An 'unknown' joint is neither broken nor
+    healthy."""
     broken, unknown = [], 0
     joints = _joints.all_joints(design)
     for idx, j in enumerate(joints):
@@ -277,12 +250,9 @@ def _joint_rollup(design):
 
 
 def _relation_rollup(design):
-    """(broken_relations[names], health_unknown count) over the shared relation walk
-    (_relations.all_relations - rigid groups, motion links and assembly constraints, root and every
-    sub-component). The same _assert.compute_state read as the joints, for the same reason: a
-    RigidGroup answers no healthState of its own and is readable only through its timeline item. A
-    relation that answered 'unknown' is counted in the second value, never as broken and never as
-    healthy."""
+    """(broken_relations[names], health_unknown count) over rigid groups, motion links and assembly
+    constraints - the same _assert.compute_state read as the joints, since a RigidGroup answers no
+    healthState of its own and is readable only through its timeline item."""
     broken, unknown = [], 0
     for kind in ("rigid_group", "motion_link", "constraint"):
         for rel, _owner in _relations.all_relations(design, kind):
@@ -303,9 +273,8 @@ def _grounded_count(root):
 
 
 def _unresolved_descendants(walk, name):
-    """How many unresolved references sit anywhere under the top-level occurrence `name`, read off the
-    ONE census. The walk records each broken row's parent path, which starts at the top-level
-    occurrence's own name, so a subtree is matched by that prefix."""
+    """How many unresolved references sit anywhere under the top-level occurrence `name`, matched
+    off the ONE census by each broken row's parent-path prefix."""
     if not name:
         return 0
     return sum(1 for b in walk.broken
@@ -313,14 +282,9 @@ def _unresolved_descendants(walk, name):
 
 
 def _browser_digest(root, walk):
-    """A DEPTH-1 digest of the top-level occurrences - name, component, child + body counts, grounded,
-    is-x-ref - NOT the full tree. The point is orientation ('what are the major pieces?'), not the
-    exhaustive structure (that's design_get(include=['tree'])'s job, on demand).
-
-    ``is_xref`` describes THAT ROW; a reference nested below it does not set the flag, which is why
-    the note names the depth. ``unresolved_descendants`` is the one subtree-wide number here, taken
-    from the shared census rather than a second walk, because an unresolved reference is a health
-    fact the orientation read must not need a deeper call to expose."""
+    """A DEPTH-1 digest of the top-level occurrences - name, component, child and body counts,
+    grounded, is_xref (which describes THAT ROW only) - plus unresolved_descendants, the one
+    subtree-wide number, read off the shared census rather than a second walk."""
     digest = []
     occs = safe(lambda: root.occurrences)
     count = safe(lambda: occs.count, 0) if occs else 0
@@ -346,15 +310,9 @@ def _browser_digest(root, walk):
 
 
 def _xref_health(doc):
-    """(xref_count, out_of_date[names]) for the document's external references - for ANY document.
-
-    Whenever a document references external components (an assembly of inserted parts, a CAM doc whose
-    models are X-refs, a template - any file with xrefs), a reference pointing at an OLDER version of
-    its source shows STALE geometry and misses newer features (a joint origin added after the reference
-    was made). DocumentReference.isOutOfDate is the authoritative flag (the same one doc_update_xref
-    acts on); surfacing it here means the orienting agent learns the external-component status up front
-    - on every open, not just templates - instead of acting on the wrong geometry. Read-only (we never
-    call getLatestVersion)."""
+    """(xref_count, out_of_date[names]) for ANY document's external references, off
+    DocumentReference.isOutOfDate - the flag doc_update_xref acts on. Read-only: getLatestVersion is
+    never called."""
     refs = safe(lambda: doc.documentReferences)
     n = safe(lambda: refs.count, 0) if refs is not None else 0
     ood = []
@@ -374,20 +332,10 @@ _MAX_BREADCRUMB_HOPS = 64
 
 
 def _op_breadcrumb(node):
-    """The walk's 'Setup / Folder / Operation' path for ONE operation node, or '' where ANY level of
-    it answered NOTHING or answered an EMPTY name.
-
-    What it returns is a WHOLE path: every segment of it is a name that read AND is non-empty, this
-    operation's own and each container up to its setup. Both of the withheld cases put a segment
-    that names no container into the address - the shared walk joins _cam_common._UNREAD_SEGMENT for
-    the level that did not read and the empty string itself for the level that read '' - and half an
-    address is no address for a row an agent is meant to pass back, so neither ships. The two are
-    still DIFFERENT reads, and only the walk keeps them apart; this is the one place they are
-    deliberately treated alike.
-
-    The chain is checked through the walk's own PARENT LINKS - each level's raw `name` read - never
-    by reading the joined string back, which is why a container literally named 'None' or
-    '(name unread)' passes unharmed. told_apart keeps the row's plain name for the ''."""
+    """The walk's 'Setup / Folder / Operation' path for ONE operation node, or '' where any level
+    of it answered nothing or an EMPTY name - half an address addresses nothing."""
+    # The chain is checked through the walk's own PARENT LINKS, each level's raw `name` read, never
+    # by reading the joined string back - so a container literally named 'None' passes unharmed.
     hop, hops = node, 0
     while hop is not None:
         if not hop.name or hops > _MAX_BREADCRUMB_HOPS:
@@ -398,18 +346,8 @@ def _op_breadcrumb(node):
 
 def _empty_labels(rows):
     """The discriminator each empty operation is told apart by, one for one over `rows`
-    ([(name, path, position)]) - what _common.told_apart substitutes for a repeated name.
-
-    The path is the container-preserving 'Setup / Folder / Operation' breadcrumb the shared CAM walk
-    builds. It separates every pair the tree itself separates - which the setup name alone does not,
-    since an operation name is unique only within a setup and folders nest inside one. Two
-    operations of one name in ONE container share even that path, so a row whose path another empty
-    row also carries takes the POSITION the operation holds in this read's walk beside it: the walk
-    numbers the operations it reaches in order, so no two rows carry the same one. That position is
-    what this read HOLDS - it addresses nothing outside this payload, which is why it is spent only
-    on the rows the path cannot separate.
-
-    A row whose path did not read gets '', and told_apart keeps its plain name for it."""
+    ([(name, path, position)]) - the breadcrumb, plus this read's own walk POSITION where two rows
+    share even that. A row whose path did not read gets '', and told_apart keeps its plain name."""
     per_path = {}
     for _name, path, _position in rows:
         per_path[path] = per_path.get(path, 0) + 1
@@ -426,37 +364,29 @@ def _empty_labels(rows):
 
 def _cam_summary(doc):
     """(has_cam, {setups, total_operations, ungenerated_operations, errored_operations,
-    suppressed_operations, empty_toolpath_operations, empty_toolpaths, operations_unread})
-    WITHOUT switching to Manufacture. itemByProductType('CAMProductType') is None when the
-    document has no CAM data.
-
-    Buckets through the shared op_primary_state, so every op lands in exactly one count and
-    "needs generating" means exactly the out-of-date and no-toolpath states. A missing hasToolpath
-    alone is NOT that: a SUPPRESSED op has no toolpath by design, and a generated op can finish
-    with an EMPTY one (state IsValid, isToolpathValid true, hasToolpath false) - measured together
-    as 65 suppressed + 13 empty on a job where nothing was ungenerated, which counting hasToolpath
-    alone reported as 78 needing generation. An ERRORED op is its own count: generating again will
-    not clear it.
-
-    Walks each setup through the shared _cam_common.tree_nodes rather than setup.allOperations:
-    allOperations flattens the folder-nested operations and DROPS the folder objects, so the
-    breadcrumb an empty row is named by exists only in the container-preserving walk. The setup's
-    own allOperations.count stays the census the walk is checked against."""
+    suppressed_operations, empty_toolpath_operations, unread_state_operations?, empty_toolpaths?,
+    operations_unread?}) WITHOUT switching to Manufacture, each op bucketed once through
+    op_primary_state - including 'unread', the op whose operationState did not answer."""
+    # MEASURED: a missing hasToolpath is NOT "needs generating" - a suppressed op has none by
+    # design, and a generated op can finish with an EMPTY toolpath (state IsValid, isToolpathValid
+    # true, hasToolpath false), which is why is_empty_toolpath is also handed the CAM product.
     cam, _ = _cam_common.get_cam()
     if not cam:
         return False, None
     setups = safe(lambda: cam.setups)
     n_setups = safe(lambda: setups.count, 0) if setups else 0
-    total_ops = ungenerated = errored = suppressed = empty = 0
+    total_ops = ungenerated = errored = suppressed = empty = unread_state = 0
     unread = 0
     unread_unknown = 0
     empty_rows = []
     position = 0
     for s in _common.iter_collection(setups):
         walked = 0
+        # tree_nodes, not setup.allOperations: allOperations flattens folder-nested operations and
+        # DROPS the folder objects, so an empty row's breadcrumb exists only in this walk.
         nodes = safe(lambda s=s: [n for n in _cam_common.tree_nodes(s) if n.kind == "operation"])
         for node in (nodes or []):
-            facts = _cam_common.op_state_facts(node.obj)
+            facts = _cam_common.op_state_facts(node.obj, cam)
             walked += 1
             position += 1
             state = _cam_common.op_primary_state(facts)
@@ -466,13 +396,16 @@ def _cam_summary(doc):
                 errored += 1
             elif state in ("out_of_date", "no_toolpath"):
                 ungenerated += 1
+            elif state == "unread":
+                # operationState did not answer for this op - it is in no lifecycle bucket, and
+                # counting it as generated would read as a clean job.
+                unread_state += 1
             elif _cam_common.is_empty_toolpath(facts):
                 empty += 1
                 empty_rows.append((facts["name"], _op_breadcrumb(node), position))
         total_ops += walked
-        # The census check: the walk SKIPS an item(i) that raises - and answers nothing at all when
-        # it raises outright - so a short walk is indistinguishable from a small setup without
-        # comparing against the setup's own flat count of the same operations.
+        # The census check: the walk SKIPS an item(i) that raises, so a short walk reads as a small
+        # setup unless it is compared against the setup's own flat count.
         declared = _common.counted(lambda s=s: s.allOperations.count)
         if declared is None:
             unread_unknown += 1
@@ -481,6 +414,10 @@ def _cam_summary(doc):
     out = {"setups": n_setups or 0, "total_operations": total_ops,
            "ungenerated_operations": ungenerated, "errored_operations": errored,
            "suppressed_operations": suppressed, "empty_toolpath_operations": empty}
+    if unread_state:
+        # Present only where one was found: a zero here would read as a checked-and-clean claim
+        # on every job that never met the state.
+        out["unread_state_operations"] = unread_state
     if empty_rows:
         # told_apart judges over EVERY empty operation and the cap is applied after, so a listed
         # name that repeats only outside the cap is still replaced by its own breadcrumb.
@@ -495,13 +432,13 @@ def _cam_summary(doc):
 
 
 def _cam_pointer(cam):
-    """The cam pointer's state clause: what to do next about the toolpaths, from the counts the
-    summary bucketed - the ERRORED ops first (generating again will not clear them), then the
-    ungenerated ones, then the generated-but-empty ones (which no amount of generating will fill),
-    then the parked ones. An incomplete census never reads as a clean bill."""
+    """The cam pointer's state clause - what to do next about the toolpaths, ERRORED ops first,
+    then ungenerated, then generated-but-empty, then parked. An incomplete census never reads as a
+    clean bill."""
     if not cam:
         return "toolpaths look generated."
-    unread = cam.get("operations_unread") or cam.get("setups_with_unreadable_operation_count")
+    unread = (cam.get("operations_unread") or cam.get("setups_with_unreadable_operation_count")
+              or cam.get("unread_state_operations"))
     incomplete = (" Some operations did not read - the counts are incomplete." if unread else "")
     if cam.get("errored_operations"):
         return (f"{cam['errored_operations']} operation(s) have ERRORS - cam_get("
@@ -526,6 +463,48 @@ def _cam_pointer(cam):
     return "toolpaths look generated." + parked
 
 
+# MEASURED: a base license reads 33 of 54 milling strategies allowed and the Machining Extension
+# 50, and these four sit in the 17 the extension adds. The probe needs no document, CAM product or
+# setup (64 probes measured at 0.7ms), so it rides every orient.
+_CAPABILITY_SENTINELS = (
+    "steep_and_shallow",      # advanced 3D steep-and-shallow finishing
+    "multiaxis_finishing",    # simultaneous 4/5-axis finishing (multi-axis)
+    "swarf",                  # swarf / flank multi-axis machining (multi-axis)
+    "probe_geometry",         # on-machine probing
+)
+
+_CAPABILITY_NOTE = (
+    "observed_generation[strategy] is that strategy's isGenerationAllowed flag, probed with no "
+    "document or setup - it describes the INSTALLATION, not the open document. false = the "
+    "entitlement reads absent (measured: creation still succeeds, then generation silently "
+    "declines); null = the probe could not read it. No license tier or SKU is asserted (Fusion "
+    "exposes no license API).")
+
+# Appended only where cam_get is registered: cam is a gateable family, and a tool named mid-note
+# bypasses _drop_unregistered_pointers, which only sees the 'pointers' dict.
+_CAPABILITY_POINTER = (
+    " cam_get(include=['strategies']) lists the full per-setup map (needs a CAM setup).")
+
+
+def _capability_note():
+    """The note, with the cam_get pointer kept only where that tool is registered (an EMPTY
+    registry is the unit-test context and keeps every pointer)."""
+    if registry.get_tools() and not registry.has_tool("cam_get"):
+        return _CAPABILITY_NOTE
+    return _CAPABILITY_NOTE + _CAPABILITY_POINTER
+
+
+def _capability_block():
+    """One observed_generation entry per sentinel (see _CAPABILITY_SENTINELS), plus the note. The
+    flag is read through the shared _cam_common seam - the same one cam_generate's launch pre-flight
+    excludes on, so the two cannot disagree about one strategy."""
+    return {
+        "observed_generation": {name: _cam_common.strategy_generation_allowed(name)
+                                for name in _CAPABILITY_SENTINELS},
+        "note": _capability_note(),
+    }
+
+
 def handler() -> dict:
     """See TOOL_DESCRIPTION."""
     out = {
@@ -547,12 +526,14 @@ def handler() -> dict:
     "data_model": _data_identity(doc),
     }
 
-    # Camera state (what a screenshot will show - reframe or not?) and the user's current selection
-    # (the cheapest bridge from human intent to a handle) are document-independent - report on EVERY
-    # path, including a non-Design document.
+    # Camera state and the user's selection are document-independent - reported on EVERY path,
+    # a non-Design document included.
     out["view"] = _view_state()
     sel_count, sel = _selection_echo()
     out["selection"] = {"count": sel_count, "selected": sel}
+    # Keyed machining_capabilities, not bare 'capabilities': that word already means the SERVER's
+    # tool families here (sys_capability_map).
+    out["machining_capabilities"] = _capability_block()
 
     design = _common.design()
     pointers = {}
@@ -576,18 +557,16 @@ def handler() -> dict:
 
     root = safe(lambda: design.rootComponent)
     mode = _design_mode(design)
-    # The ONE design-wide census. root.allOccurrences.count RAISES on a design holding an unresolved
-    # external reference, and safe(read, 0) published that as total_occurrences:0 beside
-    # top_level_occurrences:5 - a read failure dressed as a fact. The walk falls back to
-    # component.occurrences and reports WHICH walk answered; total is null when neither did.
+    # The ONE design-wide census: root.allOccurrences.count RAISES on a design holding an
+    # unresolved external reference, so the walk falls back to component.occurrences and reports
+    # WHICH walk answered; total is null when neither did.
     occ_walk = _common.occurrence_walk(design)
     occ_total = occ_walk.total
     unresolved = [{"name": b["name"], "parent_path": b["parent_path"], "detail": b["detail"]}
                   for b in occ_walk.broken]
     unresolved_names = sorted({u["name"] for u in unresolved})
-    # Bodies and sketches are design-wide (every component, not just root): a sub-component's sketch or
-    # body must count, or a multi-part doc under-reports (a doc whose only sketches live in
-    # sub-components reads sketches:0 from a root-only count).
+    # Design-wide, not root-only: a doc whose only sketches live in sub-components reads
+    # sketches:0 from a root-only count.
     body_total, sketch_total = _common.design_wide_counts(design)
     param_total = safe(lambda: design.userParameters.count, 0) or 0
 
@@ -595,9 +574,8 @@ def handler() -> dict:
     marker_pos, marker_count = _common.timeline_marker(design)
     rolled_back = bool(marker_pos is not None and marker_count and marker_pos < marker_count)
     joint_count, broken_joints, joints_unknown = _joint_rollup(design)
-    # Relation health folded into the FIRST-CALL rollup (measured: a failed assembly constraint
-    # left this read healthy while only a deeper include=['relations'] slice named it - the
-    # orientation read must not under-report health a deeper read exposes).
+    # MEASURED: a failed assembly constraint left this read healthy while only a deeper
+    # include=['relations'] slice named it, so relation health rides the first call.
     broken_relations, relations_unknown = _relation_rollup(design)
     grounded = _grounded_count(root)
     digest, top_level = _browser_digest(root, occ_walk)
@@ -609,16 +587,12 @@ def handler() -> dict:
     "units": safe(lambda: design.unitsManager.defaultLengthUnits),
     "mode": mode,
     "top_level_occurrences": top_level,
-    # null, never 0, when neither walk enumerated: an unreadable census is UNKNOWN, and a
-    # fabricated 0 beside a non-zero top_level_occurrences is a contradiction an agent reads
-    # as an empty design.
+    # null, never 0, when neither walk enumerated: an unreadable census is UNKNOWN.
     "total_occurrences": occ_total,
     "occurrences_walk": occ_walk.method,
     "bodies": body_total,
     "sketches": sketch_total,
     "parameters": param_total,
-    # Overall world-aligned size + center: the 'how big, and where vs. the origin' read that governs
-    # every dimension chosen afterward. None for an empty/sketch-only design (no solid geometry).
     "overall_bbox": _overall_bbox(root, design),
     }
     out["health"] = {
@@ -626,50 +600,39 @@ def handler() -> dict:
     "timeline_errors": errors,
     "timeline_warnings": warnings,
     "timeline_suppressed": suppressed,
-    # Snapshot-like markers read null health (neither healthy nor error) - counted distinctly so the
-    # total reconciles and they are not folded into an implied 'healthy'.
+    # Snapshot-like markers read null health - counted distinctly so the total reconciles and they
+    # are not folded into an implied 'healthy'.
     "timeline_markers": markers,
         "joint_count": joint_count,
         "broken_joints": broken_joints,
         "broken_relations": broken_relations,
         "grounded_occurrences": grounded,
-        # A rolled-back marker means features after it are NOT in the current model (they revert to
-        # home) - the state a non-restoring in-place edit leaves behind; a health problem, surfaced.
+        # Features after a rolled-back marker are NOT in the current model - they revert to home.
         "timeline_rolled_back": rolled_back,
-        # Out-of-date references are a HEALTH problem - a template with stale parts shows the wrong
-        # geometry - so they count against is_healthy, alongside timeline errors and broken joints.
         "out_of_date_references": out_of_date,
-        # An occurrence whose referenced component cannot be loaded is a HEALTH fact, not an opt-in
-        # detail: measured, a template holding one read is_healthy:true under a note declaring the
-        # document clean. Disjoint from out_of_date_references - a broken reference has no
-        # DocumentReference at all, so no isOutOfDate read can ever carry it.
+        # Disjoint from out_of_date_references: a broken reference has no DocumentReference at all,
+        # so no isOutOfDate read can carry it (measured: a template holding one read is_healthy
+        # true under a note declaring the document clean).
         "unresolved_references": unresolved,
         "is_healthy": (errors == 0 and not broken_joints and not broken_relations
                        and not out_of_date and not rolled_back and not unresolved),
     }
     # Present only when a compute state did NOT read, so the two lists above are never taken for a
-    # complete census. A joint/relation whose state NEITHER it nor its timeline item answered is
-    # counted neither broken nor healthy, and is_healthy - a verdict over the entities that HAVE a
-    # state - makes no claim about it; reading its silence as broken would be a false alarm exactly
-    # where the read declines to make a claim.
+    # complete census - is_healthy is a verdict over the entities that HAVE a state.
     if joints_unknown:
         out["health"]["joints_health_unknown"] = joints_unknown
     if relations_unknown:
         out["health"]["relations_health_unknown"] = relations_unknown
-    # The noun is IN the key: this counts referenced DOCUMENTS (Document.documentReferences), while
-    # doc_get(include=['xref_tree']).reference_link_count counts reference LINKS (one per referencing
-    # occurrence plus one per derive feature) - the two legitimately differ on one document.
+    # The noun is IN the key: referenced DOCUMENTS (Document.documentReferences), while
+    # doc_get(include=['xref_tree']).reference_link_count counts reference LINKS.
     out["references"] = {"referenced_documents": xref_count, "out_of_date": out_of_date}
     out["has_cam"] = has_cam
     if cam:
         out["cam"] = cam
     out["browser_digest"] = digest
 
-    # ── POINTERS: the heart of progressive disclosure. Name the TARGETED tool for each area, and when
-    # the design is large, steer AWAY from whole-design dumps toward a scoped call. The agent reads
-    # these instead of guessing which family to probe - situational awareness without the round trips.
-    # An UNREADABLE census cannot be called large: it steers by the counts that DID read, so a null
-    # total never silently becomes a zero in a size comparison.
+    # ── POINTERS: the targeted tool per area, steering away from whole-design dumps on a large
+    # design. An UNREADABLE census cannot be called large - it steers by the counts that DID read.
     occ_known = occ_total if occ_total is not None else 0
     large = occ_known > _BIG_OCCURRENCES or body_total > _BIG_BODIES
     pointers["assembly_structure"] = (
@@ -701,16 +664,13 @@ def handler() -> dict:
             parts.append(f"a rolled-back marker ({marker_pos}/{marker_count} - features after it are reverted)")
         pointers["fix_health"] = "design_recompute() then re-orient - " + ", ".join(parts) + "."
     if broken_relations:
-        # A failed relation counts against is_healthy, so it gets its own pointer at the tool that
-        # repairs one - design_recompute (the fix_health remedy) does not mend a relation.
+        # design_recompute (the fix_health remedy) does not mend a relation.
         pointers["fix_relations"] = (
             f"assembly_get() - {len(broken_relations)} assembly relation(s) failed to compute "
             f"({', '.join(broken_relations[:5])}); assembly_edit_relations repairs or removes one.")
     if unresolved:
-        # No pointer to a repair TOOL: the API exposes no path from a broken occurrence to its source
-        # file, project or hub (component and documentReference both raise, and the ref is absent
-        # from Document.documentReferences), so nothing here can fetch or relink it. The pointer names
-        # the read that lists them and the one place the reason IS visible.
+        # No repair TOOL to point at: component and documentReference both raise on such a row, and
+        # it is absent from Document.documentReferences, so nothing here can fetch or relink it.
         pointers["unresolved_references"] = (
             f"design_get(include=['tree']) - {len(unresolved)} occurrence(s) "
             f"({', '.join(unresolved_names[:5])}) reference a component that could not be loaded; "
@@ -725,10 +685,6 @@ def handler() -> dict:
         pointers["cam"] = "cam_get() for the machining job; " + _cam_pointer(cam)
     out["pointers"] = _drop_unregistered_pointers(pointers)
 
-    # State the facts (what was found) and point at the check, rather than emitting an "unhealthy"
-    # verdict. is_healthy is a conservative OR; on a deliberately-configured doc (a fixture/CAM template
-    # with parked joints or pinned references) these conditions can be by design, so let the agent
-    # judge whether it's a problem here.
     # The gate matches is_healthy exactly, broken_relations included - a design whose only fault is
     # a failed assembly constraint must not read "No compute errors ..." beside is_healthy false.
     if errors or broken_joints or broken_relations or out_of_date or rolled_back or unresolved:
@@ -750,13 +706,12 @@ def handler() -> dict:
                    "deliberate mid-history roll; confirm before treating as broken. ")
     else:
         verdict = "No compute errors, failed joints, or stale references. "
-    # Warnings are surfaced DISTINCTLY (never folded into a clean 'all good') - a timeline warning is
-    # real and shows in the UI, but is softer than an error, so it is stated, not counted as unhealthy.
+    # A timeline warning is stated distinctly, never folded into a clean bill and never counted as
+    # unhealthy.
     if warnings:
         verdict += (f"{warnings} timeline WARNING(s) present (not errors) - "
                     "design_get(include=['timeline']) lists which. ")
-    # A withheld state is stated out loud: is_healthy is silent about it, so the count would
-    # otherwise read as part of a clean bill.
+    # A withheld state is stated out loud - is_healthy is silent about it.
     if joints_unknown or relations_unknown:
         unknown_bits = []
         if joints_unknown:
@@ -783,11 +738,10 @@ def handler() -> dict:
                     "was rebuilt from component.occurrences. ")
     out["note"] = (
         verdict +
-        "browser_digest is DEPTH-1: is_xref describes each top-level row ITSELF, so a reference "
-        "nested below one leaves every flag false - doc_get(include=['xref_tree']) walks every "
-        "depth. references.referenced_documents counts referenced DOCUMENTS; xref_tree's "
-        "reference_link_count counts reference LINKS, so the two differ by design. "
-        "Use 'pointers' to drill down with scoped calls instead of whole-design dumps."
+        "browser_digest is DEPTH-1: is_xref describes each row ITSELF, so a reference nested below "
+        "one leaves every flag false - doc_get(include=['xref_tree']) walks every depth. "
+        "references.referenced_documents counts DOCUMENTS; xref_tree's reference_link_count counts "
+        "LINKS. Use 'pointers' to drill down with scoped calls."
         + (" Design is LARGE - prefer scoped calls." if large else "")
         + ("" if out["document"]["data_model"]["saved_to_cloud"] else
            " Document is UNSAVED - no URN/project yet; save before addressing it by id."))

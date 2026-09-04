@@ -15,8 +15,8 @@ from ._common import iter_collection, named_with_remainder, ok, error, safe
 # The shared CAM substrate: the ONE bounded library folder walk (and its collect-the-assets
 # projection), plus the ONE leafName-or-stem asset matcher every library DELETE addresses its
 # target with - the same reads cam_delete_machine resolves on.
-from ._cam_common import (asset_key, asset_leaf, assets_named, get_cam, find_setup, library_assets,
-                          library_children, walk_library_folders)
+from ._cam_common import (asset_key, asset_leaf, asset_leaf_keys, assets_named, get_cam, find_setup,
+                          library_assets, library_children, walk_library_folders)
 from . import _inputs
 
 app = adsk.core.Application.get()
@@ -51,13 +51,17 @@ _LOCATION = _inputs.Choice("location", options=list(_LOCATION_MEMBERS), default=
 
 _MAX_NODES = 1500
 
+_TREE_NOTE = (
+    "A row's 'url' is what cam_apply_template(template_url=...) takes. url_basis "
+    "'folder_position' means the asset at that template's INDEX in its folder - how the shipped "
+    "hole templates are addressed, their leafNames spelling other than their names; alignment "
+    "measured on 2705.1.4 (measure_api cam-template-asset-index-alignment). 'templates_collided' "
+    "counts arrivals dropped as already listed.")
+
 
 def _template_library():
-    """Return (templateLibrary, None) or (None, reason).
-
-    The library manager lives on the CAMManager singleton (CAMManager.get()), NOT on
-    the CAM product object.
-    """
+    """(templateLibrary, None) or (None, reason) - the library manager lives on the CAMManager
+    singleton, not on the CAM product."""
     try:
         mgr = adsk.cam.CAMManager.get()
     except Exception as e:
@@ -118,7 +122,44 @@ def list_cam_templates_handler(location: str = "cloud", url: str = "", max_depth
     "node_count": counter["n"],
     "truncated": counter["truncated"],
     "tree": tree,
+    "note": _TREE_NOTE,
     })
+
+
+def _asset_index(lib, folder_url):
+    """(urls, by_name) for ONE folder's child assets: the url strings in library order, and every
+    url each lowercased name answers to - asset_leaf_keys is the shared leafName/stem reading."""
+    assets = library_children(lib, folder_url, "childAssetURLs")
+    urls = []
+    by_name = {}
+    for u in assets:
+        text = safe(lambda u=u: u.toString())
+        if not text:
+            continue
+        urls.append(text)
+        for key in asset_leaf_keys(u):
+            by_name.setdefault(key, []).append(text)
+    return urls, by_name
+
+
+def _folder_templates(lib, folder_url, by_name):
+    """(rows, collided) for one folder - [(name, template, url_or_None)] keyed on the ASSET a name
+    resolves to, so two arrivals of ONE asset become one row (counted in `collided`) while a name
+    ONE asset does not answer keeps every arrival."""
+    rows, seen, collided = [], set(), 0
+    for t in library_children(lib, folder_url, "childTemplates"):
+        name = safe(lambda t=t: t.name)
+        urls = by_name.get((name or "").lower()) or []
+        # One asset answering the name IS this row's identity. Several (or none) leave the arrivals
+        # unidentified, and two unidentified arrivals are not shown to be one template.
+        url = urls[0] if len(urls) == 1 else None
+        if url is not None and url in seen:
+            collided += 1
+            continue
+        if url is not None:
+            seen.add(url)
+        rows.append((name, t, url))
+    return rows, collided
 
 
 def _walk_library(lib, folder_url, depth, max_depth, counter):
@@ -130,41 +171,32 @@ def _walk_library(lib, folder_url, depth, max_depth, counter):
     "folders": [],
     }
 
-    # Templates directly in this folder. Pair each with its asset URL (from
-    # childAssetURLs) so callers can address it precisely (apply / future overwrite).
-    asset_urls = []
-    try:
-        asset_urls = [u.toString() for u in (lib.childAssetURLs(folder_url) or [])]
-    except Exception:
-        asset_urls = []
-
-    def _asset_url_for(name):
-        if not name:
-            return None
-        # Asset URLs look like "<folder>/<name>.f3dhsm-template"; match by the name part.
-        for au in asset_urls:
-            base = au.rstrip("/").rsplit("/", 1)[-1]
-            stem = base.rsplit(".", 1)[0] if "." in base else base
-            if stem == name:
-                return au
-        return None
-
-    try:
-        for t in (lib.childTemplates(folder_url) or []):
-            if counter["n"] >= _MAX_NODES:
-                counter["truncated"] = True
-                break
-            counter["n"] += 1
-            tname = safe(lambda: t.name)
-            node["templates"].append({
-            "name": tname,
-            "description": safe(lambda: t.description),
-            "is_valid": safe(lambda: t.isValidTemplate),
-            "is_hole_template": safe(lambda: t.isHoleTemplate),
-            "url": _asset_url_for(tname),
-            })
-    except Exception:
-        pass
+    # A CAMTemplate carries no url of its own, so the folder's child ASSET urls are the only address
+    # cam_apply_template(template_url=...) can be given - carried here beside each template.
+    asset_urls, by_name = _asset_index(lib, folder_url)
+    templates, collided = _folder_templates(lib, folder_url, by_name)
+    # Position pairs a template with its asset where NO name in the folder resolved one and the two
+    # lists are the same length (measure_api row cam-template-asset-index-alignment).
+    by_position = len(templates) == len(asset_urls) and not any(u for _n, _t, u in templates)
+    for i, (tname, t, url) in enumerate(templates):
+        if counter["n"] >= _MAX_NODES:
+            counter["truncated"] = True
+            break
+        counter["n"] += 1
+        positioned = by_position and i < len(asset_urls)
+        row = {
+        "name": tname,
+        "description": safe(lambda t=t: t.description),
+        "is_valid": safe(lambda t=t: t.isValidTemplate),
+        "is_hole_template": safe(lambda t=t: t.isHoleTemplate),
+        "url": asset_urls[i] if positioned else url,
+        }
+        if positioned:
+            row["url_basis"] = "folder_position"
+        node["templates"].append(row)
+    if collided:
+        # Arrivals that resolved to an asset already listed here - dropped as the same template.
+        node["templates_collided"] = collided
 
     # Subfolders.
     if depth + 1 < max_depth:
@@ -204,12 +236,8 @@ _GEN = _inputs.Choice("generate", options=list(_GEN_MODES), default="skip",
 def apply_template_to_setup_handler(setup: str = "", template_url: str = "",
                                     template_name: str = "", location: str = "cloud",
                                     generate: str = "skip") -> dict:
-    """Apply a CAM template to a setup, recreating its operations there. WRITES.
-
-    Identify the template by 'template_url' (precise) or 'template_name' (searched
-    within 'location'). 'generate' is skip (default - just create the operations) or
-    generate (also compute the toolpaths).
-    """
+    """Apply a CAM template to a setup, recreating its operations there - identified by
+    'template_url' or by 'template_name' within 'location'."""
     if not (setup or "").strip():
         return error("Provide 'setup' - the name of the setup to apply the template to.")
     if not (template_url.strip() or template_name.strip()):
@@ -246,6 +274,15 @@ def apply_template_to_setup_handler(setup: str = "", template_url: str = "",
         template = safe(lambda: lib.templateAtURL(u))
         if not template:
             return error(f"No template found at URL: {template_url}")
+        # Both given: the url is an ADDRESS and the name is what the caller believes is there. A
+        # url published by folder position is only as good as that pairing, so a disagreement is
+        # refused rather than applying whichever the url reached.
+        resolved = (safe(lambda: template.name) or "").strip()
+        if template_name.strip() and resolved.lower() != template_name.strip().lower():
+            return error(f"'template_url' loads the template '{resolved}', but 'template_name' says "
+                         f"'{template_name.strip()}' - nothing was applied. Pass the url alone to "
+                         f"apply '{resolved}', or the name alone to search for "
+                         f"'{template_name.strip()}'.")
     else:
         template, where = _find_template_by_name(lib, loc_key, template_name.strip())
         if not template:
@@ -320,8 +357,11 @@ def _find_template_by_name(lib, location, name):
     # The shared bounded folder walk; the LEAF op (read this folder's templates, record every name,
     # keep the matches) is this search's own.
     def visit(folder_url):
-        for t in library_children(lib, folder_url, "childTemplates"):
-            tn = safe(lambda t=t: t.name)
+        # _folder_templates collapses two arrivals of ONE asset, so a listing that hands the same
+        # template back twice resolves; a name TWO assets in the folder answer stays two rows here
+        # and is refused below.
+        _urls, by_name = _asset_index(lib, folder_url)
+        for tn, t, _url in _folder_templates(lib, folder_url, by_name)[0]:
             if tn:
                 seen_names.append(tn)
             if tn and tn.lower() == want:
@@ -345,13 +385,8 @@ def _find_template_by_name(lib, location, name):
 # ---------------------------------------------------------------------------
 
 def _as_cam_template(result):
-    """Normalise createFromOperations' result to a CAMTemplate (or None).
-
-    The live API annotation is list[Operation] but the docstring claims a CAMTemplate - so be robust:
-      - already a CAMTemplate (or casts to one) -> use it directly;
-      - a list/collection -> try its single element, else CAMTemplate.cast on the collection;
-      - anything else -> None (caller reports it honestly rather than crashing on .name later).
-      """
+    """Normalise createFromOperations' result to a CAMTemplate, or None - its annotation says
+    list[Operation] while its own documentation says CAMTemplate, so both shapes are handled."""
     cast = safe(lambda: adsk.cam.CAMTemplate.cast(result))
     if cast:
         return cast
@@ -374,13 +409,8 @@ def _as_cam_template(result):
 def save_operations_as_template_handler(template_name: str = "", operations: str = "",
                                         setup: str = "", location: str = "cloud",
                                         folder: str = "", description: str = "") -> dict:
-    """Bundle a subset of a setup's operations into a NEW library template. WRITES.
-
-    'operations' is a comma-separated list of operation names (within 'setup'). The
-    template is saved into 'folder' (a top-level folder name under 'location'), which
-    is created if it doesn't exist. Overwriting an existing template is not supported
-    (see note); this always creates a new template.
-    """
+    """Bundle a setup's named 'operations' into a NEW library template, saved into 'folder' under
+    'location' and created there; this never overwrites an existing template."""
     template_name = (template_name or "").strip()
     if not template_name:
         return error("Provide 'template_name' for the new template.")
@@ -397,9 +427,6 @@ def save_operations_as_template_handler(template_name: str = "", operations: str
     if err:
         return error(err)
 
-    # Find the setup.
-    # The resolver's own refusal is returned verbatim: it is the one place that knows whether the
-    # name was ABSENT or AMBIGUOUS, and only it can say which.
     target_setup, _names, serr = find_setup(cam, setup)
     if not target_setup:
         return error(serr)
@@ -430,10 +457,8 @@ def save_operations_as_template_handler(template_name: str = "", operations: str
         return error(f"Operations not found in '{setup}': {', '.join(missing)}. "
                       f"Available: {', '.join(available_ops[:25]) or '(none)'}")
 
-    # Build the template from the operations. NOTE the live API is self-contradictory here:
-    # CAMTemplate.createFromOperations' docstring says "Returns the newly created template" but its
-    # type annotation says -> list[Operation]. So the result may be EITHER a CAMTemplate OR a list -
-    # normalise to a real CAMTemplate before set .name / importTemplate, or a list-return breaks the save.
+    # createFromOperations may hand back EITHER a CAMTemplate or a list - its documentation and its
+    # annotation disagree - so the result is normalised before .name or importTemplate touch it.
     try:
         result = adsk.cam.CAMTemplate.createFromOperations(selected)
     except Exception as e:
@@ -545,10 +570,8 @@ def delete_template_handler(name: str = "", confirm_name: str = "") -> dict:
     if err:
         return error(err)
 
-    # ONE resolve, LOCAL-only, through the SAME by-name search cam_apply_template runs: a name
-    # several templates answer to is REFUSED with that search's own candidate list rather than
-    # resolved to whichever folder was walked first. A template in any other location is simply not
-    # found here - this tool deletes from the Local library alone.
+    # ONE resolve, LOCAL-only, through the same by-name search cam_apply_template runs: a name
+    # several templates answer to is REFUSED rather than resolved to the first folder walked.
     template, where = _find_template_by_name(lib, "local", name)
     if template is None:
         # An ambiguity hint is already a complete message - it WAS found, in more than one place.
@@ -569,13 +592,8 @@ def delete_template_handler(name: str = "", confirm_name: str = "") -> dict:
     if assets is None:
         return error("Could not resolve the Local template library location, so the template's "
                      "asset cannot be addressed. Nothing was deleted.")
-    # The ONE match set, used by the pre-delete search AND the post-delete read-back: searching the
-    # two reads with different sets is how a delete reports "gone" against a set that never
-    # contained the asset it just deleted. Here it holds a single name - the by-name search above
-    # matched a template whose own name equals the request bar case, so the resolved label IS the
-    # request - and it stays a SET because that is the shape assets_named takes, and the shape
-    # cam_delete_machine's read-backs need, where a machine's label and the name it was reached by
-    # are genuinely two different strings.
+    # The ONE match set for the pre-delete search AND the post-delete read-back: two reads searched
+    # with different sets is how a delete reports "gone" against a set it never covered.
     wanted_names = {label.lower()}
     hits = assets_named(assets, wanted_names)
     if not hits:
@@ -611,12 +629,9 @@ def delete_template_handler(name: str = "", confirm_name: str = "") -> dict:
                      f"not '{label}' - refusing to delete an asset that is not the template that "
                      "was confirmed.")
 
-    # deleteAsset is the Library method the template library carries alongside the tool and machine
-    # ones, and it is what addresses a stored asset by url. MEASURED on THIS library (measure_api
-    # cam-template-library-deleteasset): importTemplate stores a template under a leafName whose STEM
-    # is the template's name, templateAtURL loads it back, deleteAsset(url) returns True, and a
-    # re-walk of childAssetURLs no longer lists the asset. A False is still reported as the refusal
-    # it is, and the read-backs below are what the claim is made from.
+    # deleteAsset addresses a stored asset by url; importTemplate stores a template under a leafName
+    # whose STEM is the template's name. A False is reported as the refusal it is, and the
+    # read-backs below are what the claim is made from.
     try:
         did = lib.deleteAsset(url)
     except Exception as e:
@@ -640,16 +655,9 @@ def delete_template_handler(name: str = "", confirm_name: str = "") -> dict:
         return error(f"deleteAsset returned true but the Local template library still lists "
                      f"'{still_listed[0]}' - the delete did not take. Re-read with "
                      "cam_get(include=['templates'], template_location='local').")
-    # The second leg, on the very address the delete was aimed at: a template still LOADING from
-    # that url contradicts the walk above, and two reads that disagree are not a confirmed delete.
-    # The read MUST be safe()-wrapped: templateAtURL does not honour its own docstring's "Returns
-    # null if the specified template does not exist" - on a url whose asset was just deleted it
-    # RAISES RuntimeError '3 : Given URL does not point to a template' (measure_api
-    # cam-templateaturl-raises-on-deleted-url, which catches the raise and gates on its message;
-    # that row's expectation also accepts a script-level abort, so a PASS does not say which of the
-    # two the run saw). safe() contains that raise wherever it is catchable. The raise cannot tell
-    # absence from a url the library will not answer for, which is why the asset walk, not this, is
-    # what the claim rests on.
+    # The second leg, on the address the delete was aimed at. The read MUST be safe()-wrapped:
+    # templateAtURL RAISES '3 : Given URL does not point to a template' on a url whose asset was
+    # just deleted, rather than returning null as its documentation says.
     loads_after = safe(lambda: lib.templateAtURL(url)) is not None
     if loads_after:
         return error(f"deleteAsset returned true and '{label}' is gone from the Local template "
@@ -679,11 +687,9 @@ _apply_tool = (
         name="cam_apply_template",
         description=(
             "Apply a CAM toolpath template to a setup, recreating the template's operations "
-            "in that setup. Identify the template by 'template_url' (the precise asset URL "
-            "from cam_get(include=['templates'])) or 'template_name' (searched under 'location'). "
-            "'generate' controls toolpath generation: 'skip' (default - just create "
-            "operations) or 'generate' (also compute the toolpaths), adding operations to the "
-            "setup. Note: with generate='generate' a large template can exceed the 30s call "
+            "in that setup. Identify the template by 'template_url' or 'template_name' "
+            "(cam_get(include=['templates']) lists both). "
+            "Note: with generate='generate' a large template can exceed the 30s call "
             "limit and return a timeout even though the work is still running - do NOT blindly "
             "retry; verify with cam_get(include=['operations']) / view_screenshot first."
         ),
@@ -740,9 +746,7 @@ DELETE_TOOL_DESCRIPTION = (
     "(case-insensitively) against the Local library's templates (see "
     "cam_get(include=['templates'], template_location='local')); a name several templates answer "
     "to is refused, not guessed, and a template in any other location is not reached. GUARDED and "
-    "IRREVERSIBLE: 'confirm_name' must EXACTLY match the RESOLVED template name. The asset is "
-    "loaded back and matched to the confirmed template before it goes, and the delete is verified "
-    "by re-walking the library's own asset list."
+    "IRREVERSIBLE: 'confirm_name' must EXACTLY match the RESOLVED template name."
 )
 
 _delete_tool = (

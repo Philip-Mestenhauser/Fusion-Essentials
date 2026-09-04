@@ -104,10 +104,8 @@ _CREATOR_KINDS = ("offset", "rect_pattern", "circ_pattern")
 _TWO_ENTITY_KINDS = ("two_curve", "point_curve", "two_point")
 
 # constraint -> (entity_one takes a point anchor, entity_two takes one). An anchored ref
-# ('circle:0:center', 'line:1:end' - _common.parse_anchor_ref, the grammar sketch_dimension reads)
-# resolves to that entity's OWN SketchPoint, which is exactly what these slots take; every other
-# constraint takes whole entities, so an anchor there is refused rather than resolved to something
-# the add* would reject.
+# ('circle:0:center' - _common.parse_anchor_ref) resolves to that entity's OWN SketchPoint; every
+# other constraint takes whole entities, so an anchor there is refused.
 _ANCHOR_SLOTS = {
     "coincident": (True, True),
     "midpoint": (True, False),              # entity_two is the curve the point rides
@@ -122,23 +120,20 @@ _ANCHOR_FORMS = "/".join(f"':{a}'" for a in _common.SKETCH_ANCHORS if a != "midp
 
 
 # ── 'text:<i>' - a SketchText, an operand for fix/unfix ONLY ────────────────
-# A SketchText's anchor degree of freedom lives on the four rectangle lines of its definition, and
-# no geometric constraint takes a SketchText as an operand - so without this route a text-bearing
-# sketch can never read fully constrained. MEASURED (2705.0.87): fixing all four rectangleLines
-# flips Sketch.isFullyConstrained from false to true. definition.rectangleLines is a SketchLineVector
-# that iterates PLAINLY - it carries no .count/.item - so it is list()ed, never indexed.
+
+# No geometric constraint takes a SketchText as an operand; its anchor degree of freedom lives on
+# the four rectangle lines of its definition, and fixing all four flips isFullyConstrained true.
+# definition.rectangleLines carries no .count/.item, so it is list()ed, never indexed.
 
 
 def _is_text_ref(ref):
-    """Whether this ref uses the 'text:<i>' grammar (_inputs owns that parse - the same address
-    sketch_get publishes and sketch_set_text/sketch_delete_entity edit by)."""
+    """Whether this ref uses the 'text:<i>' grammar (_inputs owns that parse)."""
     return _inputs._split_text_ref(ref) is not None
 
 
 def _text_at_ref(sketch, ref):
-    """(SketchText, error) for a 'text:<index>' ref, indexed in the sketch this call already
-    resolved. A sketch-qualified address is refused rather than half-honored: this tool constrains
-    the ONE sketch 'sketch_name' names."""
+    """(SketchText, error) for a 'text:<index>' ref, indexed in the sketch this call resolved; a
+    sketch-qualified address is refused."""
     sname, idx = _inputs._split_text_ref(ref)
     if sname:
         return None, (f"'{ref}': name the sketch in 'sketch_name', not in the ref - this tool "
@@ -213,14 +208,9 @@ _RESULT_OPTION = _inputs.Choice("result_option", list(_RESULT_OPTIONS), default=
                                 description="auto: option1 thorough, option2 faster, option3 "
                                             "may MOVE geometry within tolerance.")
 
-# autoConstrain's four dimensioning knobs. Each carries the same binding caveat - "This preference
-# may be ignored if not applicable to the geometry" - so every one is published as REQUESTED and
-# never as applied. Each family also carries a Default* member, which is what a fresh
-# AutoConstrainInput already holds: leaving the knob unset is how the platform is left to choose,
-# so no option maps to it and nothing is assigned for it. The four AutoConstrainInput properties
-# are stamped "not officially supported" in the live API doc (2705.0.87) and their setters can
-# raise "not currently available" on a build that gates them - set_verified surfaces that raise
-# as this tool's honest error, so the knobs stay published for builds that accept them.
+# autoConstrain's four dimensioning knobs. The bindings say a preference "may be ignored if not
+# applicable to the geometry", so each is published as REQUESTED, never as applied. Each family's
+# Default* member is what a fresh AutoConstrainInput holds, so no option maps to it.
 _DIMENSION_STRATEGIES = {
     "chain": "ChainDimensionStrategyType",
     "baseline": "BaselineDimensionStrategyType",
@@ -248,7 +238,7 @@ _STRATEGY_KNOBS = (
 )
 _STRATEGY_CHOICES = (
     _inputs.Choice("dimension_strategy", list(_DIMENSION_STRATEGIES),
-                   description="auto: dimension layout; Fusion ignores one that does not apply."),
+                   description="auto: dimension layout."),
     _inputs.Choice("inter_loop_strategy", list(_INTER_LOOP_STRATEGIES),
                    description="auto: layout BETWEEN loops; multi-loop sketches only."),
     _inputs.Choice("symmetric_strategy", list(_SYMMETRIC_STRATEGIES),
@@ -265,13 +255,10 @@ _KNOB_KINDS = {"suppressed": ("rectangular_pattern", "circular_pattern"),
 
 
 def _cm_value(value_cm):
-    """A ValueInput for a length already in internal centimetres, as an expression that CARRIES its
-    unit. MEASURED: GeometricConstraints' pattern input reads a ValueInput.createByReal as a number
-    in the DOCUMENT'S DEFAULT LENGTH UNIT rather than in centimetres - createByReal(9.0) on a
-    millimetre document produced 9 mm of spacing (distanceOne.expression '9 mm', value 0.9 cm), a
-    10x error - while the same call on an extrude or a model-level pattern is centimetres as usual
-    ('90.00 mm' for createByReal(9.0)). An explicit-unit expression means the same length under
-    either reading, so every length this file hands to GeometricConstraints goes through here."""
+    """A ValueInput for a length already in internal centimetres, as an expression carrying 'cm'."""
+    # GeometricConstraints' pattern input reads a ValueInput.createByReal as a number in the
+    # DOCUMENT'S DEFAULT LENGTH UNIT, not centimetres, so every length this file hands it needs an
+    # explicit unit - which means the same length under either reading.
     return adsk.core.ValueInput.createByString(f"{float(value_cm)} cm")
 
 
@@ -303,11 +290,8 @@ def _knob_guard(cname, passed):
 
 def _suppressed_flags(raw, instances, cname):
     """(flags, error) - the per-instance suppression list for a pattern of `instances` instances,
-    or (None, None) when none was asked for. One flag per instance with the ORIGINAL not counting -
-    a 4x4 rectangular pattern takes 15, a 4-instance circular pattern takes 3, both measured. The
-    rectangular binding additionally fixes the order as row-column; the circular one states no
-    order, so nothing here claims one for it. A list of another length is refused naming expected
-    vs got rather than handed to a property whose index rule it does not match."""
+    or (None, None) when none was asked for: one flag per instance with the ORIGINAL not counting,
+    in row-column order for a rectangular pattern. Another length is refused."""
     if raw is None or raw == "" or raw == []:
         return None, None
     items = raw
@@ -339,14 +323,11 @@ def _suppression_applied(constraint):
 
 def _apply_rect_pattern(gc, ents, dir_one, dir_two, qty_one, qty_two, dist_one_cm, dist_two_cm,
                         dist_type, symmetric, suppressed):
-    """A sketch rectangular pattern, as (constraint, error). BOTH direction entities are required:
-    the binding documents a null as "the sketch X axis" / "90 degrees to direction one", but live it
-    raises "3 : invalid argument directionOneEntity" (and directionTwoEntity) - the guard in the
-    handler refuses the call before it gets here. 'entities' is a PLAIN LIST here - the sibling
-    createCircularPatternInput was measured raising TypeError "argument 2 of type
-    'std::vector<...SketchEntity...>'" on an ObjectCollection, the opposite container from the one
-    Sketch.move/copy demand. The quantities are counts and pass as plain reals; the DISTANCES carry
-    their unit (see _cm_value)."""
+    """A sketch rectangular pattern, as (constraint, error); BOTH direction entities are required
+    and 'ents' is a PLAIN LIST."""
+    # A null direction entity raises "3 : invalid argument directionOneEntity" despite the binding
+    # documenting it as the sketch X axis; the handler's guard refuses the call before it gets here.
+    # An ObjectCollection raises TypeError "argument 2 of type 'std::vector<...SketchEntity...>'".
     pin = gc.createRectangularPatternInput(ents, dist_type)
     if pin.setDirectionOne(dir_one, adsk.core.ValueInput.createByReal(qty_one),
                            _cm_value(dist_one_cm)) is False:
@@ -362,10 +343,8 @@ def _apply_rect_pattern(gc, ents, dir_one, dir_two, qty_one, qty_two, dist_one_c
             if serr:
                 return None, serr
     if suppressed is not None:
-        # After both directions: the binding requires quantityOne and quantityTwo to hold valid
-        # values before isSuppressed means anything. MEASURED: the getter echoes a TUPLE, so the
-        # flags are handed over (and verified) in that form - a list would read back unequal and
-        # be refused as a set that did not take.
+        # After both directions: quantityOne and quantityTwo must hold valid values before
+        # isSuppressed means anything. The getter echoes a TUPLE, so the flags are set in that form.
         serr = _common.set_verified(pin, "isSuppressed", tuple(suppressed), "suppressed",
                                     "rectangular_pattern")
         if serr:
@@ -592,10 +571,6 @@ def handler(constraint: str = "", sketch_name: str = "", entity_one: str = "",
     design = _common.design()
     if not design:
         return error("No active design.")
-    # Resolve across the whole design (every component, no preference among them) so a sketch in an activated
-    # sub-component is constrainable, not only one in the root component. A name SEVERAL components'
-    # sketches carry is refused with them named, rather than constraining an arbitrary one - and the
-    # refusal names 'component', the scope that narrows the walk to one component's own sketches.
     wanted = (sketch_name or "").strip()
     sketch, refusal = _sketch_detail.scoped_sketch(design, wanted, component)
     if refusal:
@@ -830,16 +805,10 @@ def handler(constraint: str = "", sketch_name: str = "", entity_one: str = "",
         "symmetry_line": symmetry_line or None,
         "note": "Geometric constraint applied - the sketch is now parametric for this relationship.",
     }
-    # addCoincident(point, curve) SUCCEEDS on the wrong geometry: it lands the point ON the curve.
-    # The caller who meant "centre this circle here" gets a clean ok and a circle hanging off its
-    # own rim, so the trap is stated on the SUCCESS path, where that caller actually is - with the
-    # anchor that expresses the other intent, which is the one THIS curve kind has. The '<type>'
-    # half of the entity_two ref says whether the operand was a curve or a point; an ANCHORED ref
-    # already resolved to a point.
+    # addCoincident(point, curve) SUCCEEDS on the wrong geometry: it lands the point ON the curve,
+    # so a caller who meant "centre this circle here" gets a clean ok and a circle on its own rim.
+    # The note on the success path carries the anchor that expresses the other intent.
     if text_obj is not None:
-        # What the lock was WORTH is the sketch's own constrained state, read back after it: the
-        # anchor is one DOF among however many the sketch holds, so this says whether the text was
-        # the last of them rather than implying it.
         fully = _common.read_flag(lambda: sketch.isFullyConstrained)
         payload["anchor_lines_fixed"] = len(anchor_lines)
         payload["is_fully_constrained"] = fully
@@ -890,13 +859,10 @@ def handler(constraint: str = "", sketch_name: str = "", entity_one: str = "",
 
 
 TOOL_DESCRIPTION = (
-    "Apply a geometric CONSTRAINT to sketch entities - the Sketch Constrain menu - so the sketch "
-    "captures design intent. Entities are '<type>:<index>' refs within 'sketch_name', "
-    "from sketch_get(include_entities=true); a constraint given the wrong ones names "
-    "what it takes. constraint='auto' constrains the WHOLE sketch and takes no entity refs. The "
-    "offset and pattern kinds CREATE curves - re-read "
-    "sketch_get for the new refs. Remove a wrong constraint with "
-    "sketch_delete_entity(target='constraint:<index>')."
+    "Apply a geometric CONSTRAINT to sketch entities. Entities are '<type>:<index>' refs within "
+    "'sketch_name', from sketch_get(include_entities=true). constraint='auto' takes no entity refs. "
+    "The offset and pattern kinds CREATE curves - re-read sketch_get for the new refs. Remove one "
+    "with sketch_delete_entity(target='constraint:<index>')."
 )
 
 tool = (
@@ -905,8 +871,8 @@ tool = (
             description="The relationship to apply.").as_property())
     .add_input_property("sketch_name", {"type": "string", "description": "The sketch to constrain."})
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
-    .add_input_property("entity_one", {"type": "string", "description": "First entity ref; a POINT for midpoint/coincident and circular_pattern's centre, a direction LINE for rectangular_pattern. Point slots take an anchor, e.g. 'circle:0:center'; fix/unfix also take 'text:<i>'."})
-    .add_input_property("entity_two", {"type": "string", "description": "Second entity ref; rectangular_pattern's second direction LINE."})
+    .add_input_property("entity_one", {"type": "string", "description": "First entity ref. A point slot takes an anchor ('circle:0:center'); fix/unfix also take 'text:<i>'."})
+    .add_input_property("entity_two", {"type": "string", "description": "Second entity ref."})
     .add_input_property("symmetry_line", {"type": "string", "description": "Axis line for 'symmetry'."})
     .add_input_property("entities", {"type": "string", "description": "Comma-separated refs for polygon/offset/pattern."})
     .add_input_property(*_SURFACE.as_property())
@@ -917,7 +883,7 @@ tool = (
     .add_input_property("angle", {"type": "number", "description": "circular_pattern total angle in degrees."})
     .add_input_property(*_DISTANCE_TYPE.as_property())
     .add_input_property("symmetric", {"type": "boolean", "description": "Mirror the pattern about its original."})
-    .add_input_property("suppressed", {"type": "array", "items": {"type": "boolean"}, "description": "Pattern instances to drop, original NOT counted (a 4x2 takes 7); rectangular runs row-column."})
+    .add_input_property("suppressed", {"type": "array", "items": {"type": "boolean"}, "description": "Pattern instances to drop; the ORIGINAL does not count, and rectangular runs row-column."})
     .add_input_property(*_RESULT_OPTION.as_property())
     .add_input_property(*_STRATEGY_CHOICES[0].as_property())
     .add_input_property(*_STRATEGY_CHOICES[1].as_property())

@@ -423,7 +423,7 @@ class TestCapturePosition:
         snaps.add = reverting_add
         res = ja.capture_position_handler(action="capture")
         assert res["isError"] is True
-        assert "REVERTED" in res["message"]
+        assert "does NOT hold the pose you captured" in res["message"]
         assert "PartB:1" in res["message"]
         assert "25.0 mm" in res["message"]                  # the snap-back, in mm
         assert "action='delete'" in res["message"]          # the stale marker is named for removal
@@ -472,7 +472,7 @@ class TestCapturePosition:
     def test_a_snap_back_just_over_the_tolerance_is_a_revert(self):
         res = self._capture_after_shift(ja._MOVE_TOL_CM * 1.001)
         assert res["isError"] is True
-        assert "REVERTED" in res["message"]
+        assert "does NOT hold the pose you captured" in res["message"]
 
     def test_capture_with_nothing_pending_errors(self):
         _install([], pending=False)

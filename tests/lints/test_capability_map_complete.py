@@ -4,14 +4,7 @@
 """Lint: sys_capability_map's authored _FAMILY rows cover EXACTLY the registry's families, and
 every entry tool they name is a registered tool.
 
-The capability map is the runtime discovery surface - the first thing a cold agent reads to learn
-what this server can do. Its handler keeps an unmapped family visible with a generic fallback row,
-so a gap here is not invisibility; it is a family the server ships without an authored one-line
-summary or a chosen entry tool, which is a discovery surface quietly degrading. A hand-written
-enumeration of a registry population gets a gate against that population: a NEW family is red here
-until its authored row exists, a REMOVED family is red until its row dies, and a renamed or
-deleted entry tool is red the moment the registry stops carrying it.
-"""
+Red three ways: a family with no row, a row outliving its family, a row naming no registered tool."""
 
 from conftest import load_tool, register_all_tools
 

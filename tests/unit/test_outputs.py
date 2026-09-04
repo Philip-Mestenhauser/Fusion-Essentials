@@ -29,6 +29,13 @@ class TestProducesNote:
         assert note.startswith("became_solid:")
         assert "->" not in note
 
+    def test_the_article_matches_the_required_kind(self):
+        # 'any' names no kind at all, so the label drops it rather than reading "a any 'handle'".
+        assert out.ReturnsHandle("handle", require="any").produces_note().startswith(
+            "handle: a 'handle' (entityToken")
+        assert "an edge 'handle'" in out.ReturnsHandle("handle", require="edge").produces_note()
+        assert "a face 'handle'" in out.ReturnsHandle("handle", require="face").produces_note()
+
     def test_urn_and_name_labels(self):
         assert "URN" in out.ReturnsUrn("document_id").produces_note()
         assert "occurrence name" in out.ReturnsName("occurrence_one", of="occurrence").produces_note()

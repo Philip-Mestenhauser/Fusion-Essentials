@@ -46,14 +46,10 @@ def _find_version(df, version_number, version_id):
 
 
 def _confirm_new_tip(lineage, df, latest_before):
-    """Re-read the tip version until it passes latest_before, bounded by _VERSION_DEADLINE_S.
-    Returns the LAST reading either way, so a tip that never advanced is reported as read, not as a
-    failure to read.
-
-    The DataFile is re-fetched FRESH on every attempt (the handle promote() was issued on can keep
-    its pre-call latestVersionNumber); the held handle is read only when there is no lineage URN to
-    re-fetch by. latest_before=None means there is no baseline to settle against, so the probe
-    settles on its first reading rather than spending the whole deadline."""
+    """Re-read the tip version until it passes latest_before, bounded by _VERSION_DEADLINE_S, and
+    return the LAST reading either way. The DataFile is re-fetched FRESH each attempt - the handle
+    promote() was issued on can keep its pre-call latestVersionNumber - and latest_before=None
+    settles on the first reading, there being no baseline to settle against."""
     def probe():
         if lineage:
             fresh = safe(lambda: app.data.findFileById(lineage))
@@ -141,20 +137,19 @@ def handler(version_number=None, version_id: str = "") -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Roll the ACTIVE cloud document back to a prior version. Give the version to restore by "
-    "version_number (integer) or version_id (from doc_get include=['versions']). This PROMOTES that "
-    "version to be the latest - it does NOT erase history; a NEW tip version is created whose content "
-    "matches the restored one. Reports the latest version number before/after and confirms the new tip "
-    "actually appeared (or flags 'pending' when the tip had not advanced within the wait). The active in-session "
-    "document keeps showing its currently-open version until reopened."
+    "Roll the ACTIVE cloud document back to a prior version, named by version_number or version_id "
+    "(from doc_get include=['versions']). PROMOTES that version to latest - history is NOT erased; a "
+    "NEW tip version is created whose content matches the restored one. Confirms the new tip appeared, "
+    "or flags 'pending' when the tip had not advanced within the wait. The in-session document keeps "
+    "showing its open version until reopened."
 )
 
 tool = (
     Tool.create_simple(name="doc_restore_version", description=TOOL_DESCRIPTION)
     .add_input_property("version_number", {"type": "integer",
-            "description": "The version number to restore/promote to latest (from doc_get include=['versions'])."})
+            "description": "Version number to promote to latest."})
     .add_input_property("version_id", {"type": "string",
-            "description": "Alternative to version_number: the version's id (versionId) to restore."})
+            "description": "The version's id (versionId), as an alternative to version_number."})
     .strict_schema()
 )
 

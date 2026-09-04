@@ -174,9 +174,11 @@ class TestModelSelection:
         assert "'models'" in msg and "sub-component" in msg
 
     def test_the_description_claims_the_same_default_set_as_the_walk(self):
-        # The wire claim and the walk are one fact - a description promising SOLID bodies while the
-        # walk returns every BRep body is the mismatch a caller cannot see.
-        assert "omit for EVERY body in the root component" in cs.TOOL_DESCRIPTION
+        # The wire claim and the walk are one fact - a wire string promising SOLID bodies while the
+        # walk returns every BRep body is the mismatch a caller cannot see. The claim rides on the
+        # 'models' input, the value it describes.
+        assert "omit = every root-component body" in cs._MODELS.schema()["description"]
+        assert "solid" not in cs._MODELS.schema()["description"].lower()
         assert "solid" not in cs.TOOL_DESCRIPTION.lower()
 
 
@@ -196,6 +198,44 @@ class TestNamingAndGuards:
         out = _payload(cs.handler(name="   "))
         assert cam.setups.added[-1].name == "Setup1"
         assert out["setup_name"] == "Setup1"
+
+    def test_a_name_a_setup_already_answers_to_is_refused_before_the_add(self, monkeypatch):
+        # Measured: Setup.name dedupes like Operation.name - 'LegSetup' with one taken landed
+        # 'LegSetup1'. The name is refused before the add so the caller never gets a setup under a
+        # name it did not ask for.
+        _, cam, _ = _install(monkeypatch)
+        _payload(cs.handler(name="LegSetup"))                 # the first one takes the name
+        res = cs.handler(name="LegSetup")
+        assert res["isError"] is True
+        assert "already answer to 'LegSetup'" in res["message"]
+        assert "dedupes rather than refusing" in res["message"]
+        assert cam.setups.count == 1                          # the second one was never added
+
+    def test_a_free_setup_name_still_creates(self, monkeypatch):
+        # the other side of the clash gate: a name no setup carries is not refused
+        _, cam, _ = _install(monkeypatch)
+        out = _payload(cs.handler(name="LegSetup"))
+        assert out["setup_name"] == "LegSetup" and cam.setups.count == 1
+
+    def test_a_declined_name_is_disclosed_not_published_as_requested(self, monkeypatch):
+        # The setup LANDED, so a name the platform declines (or dedupes) is a disclosure, not a
+        # failed create - and the payload publishes the name Setup.name reads back.
+        _, cam, _ = _install(monkeypatch)
+        class StubbornSetup(FakeSetup):
+            @property
+            def name(self):
+                return "Setup1"
+            @name.setter
+            def name(self, value):
+                pass
+        def add(inp):
+            s = StubbornSetup(inp)
+            cam.setups.added.append(s)
+            return s
+        cam.setups.add = add
+        out = _payload(cs.handler(name="Op10 Mill"))
+        assert out["setup_name"] == "Setup1"
+        assert "Op10 Mill" in out["rename_warning"] and "did not take" in out["rename_warning"]
 
     def test_no_cam_product_errors(self, monkeypatch):
         _install(monkeypatch, has_cam=False)

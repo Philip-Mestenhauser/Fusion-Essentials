@@ -1,7 +1,7 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""ACT rows: the parametric skeleton, and the sketch tools on scratch sketches of their own.
+"""ACT rows: the machined part's parametric skeleton, and the sketch tools on scratch sketches.
 
 Both run before anything is solid - which is the order the work is done in - so these rows read
 sketch geometry and user parameters, never bodies.
@@ -9,69 +9,64 @@ sketch geometry and user parameters, never bodies.
 
 from verify_core import (
     EXPORT_DIR, SVG96_PATH, SVG_PATH, _datum_plane, _dim_measures, _extruded, _made_component,
-    _param_added, _param_favorited, _params_listed, _svg96_extent, _watch, _watch_all)
+    _param_added, _param_favorited, _params_listed, _svg96_extent, _watch_all)
 from verify_layout import _px, _py
 
 
-# --- ACT 1: SKELETON + PARAMETERS - parametric skeleton, sketch-only (mirrors scenario S1) -----
+# --- ACT 1: PARAMETERS + THE PART'S SKETCHES - the bracket, drawn before anything is solid -----
 _SKELETON = [
-    # one driving diameter; every ring/rotor radius derives from it so ACT 6's resize propagates.
-    # Each derived parameter's expected value is what the DESIGN evaluates the expression to off the
-    # 120 mm driver above it - so the read-back proves Fusion resolved the reference, not that the
-    # expression text was accepted (the CAM parameter store accepts a bogus name unevaluated).
-    ("param_add", {"name": "GimbalDia", "expression": "120 mm",
-                   "comment": "The one driver: every ring, bore and pin below derives from it"},
-     _param_added("GimbalDia", 120), None),
-    ("param_add", {"name": "RotorR", "expression": "GimbalDia / 5"}, _param_added("RotorR", 24), None),
-    # A RULE, not a ratio: the radial band each ring is cut from scales with the gimbal but stops
-    # at a floor, so shrinking the driver thins the rings only until they reach a width that can
-    # still be made and still hold a pin bore. Every bore below is the ring's OD less this band, so
-    # the section is stated once and the two rings cannot drift to different widths.
-    ("param_add", {"name": "RingBand", "expression": "max(GimbalDia * 0.05; 4 mm)",
-                   "comment": "Radial width of a gimbal ring - floored so it stays makeable"},
-     _param_added("RingBand", 6), None),
-    ("param_add", {"name": "InnerOD", "expression": "GimbalDia * 0.3"}, _param_added("InnerOD", 36), None),
-    ("param_add", {"name": "InnerBoreR", "expression": "InnerOD - RingBand",
-                   "comment": "Inner ring bore - its OD less one band"},
-     _param_added("InnerBoreR", 30), None),
-    ("param_add", {"name": "OuterOD", "expression": "GimbalDia * 0.4"}, _param_added("OuterOD", 48), None),
-    ("param_add", {"name": "OuterBoreR", "expression": "OuterOD - RingBand",
-                   "comment": "Outer ring bore - its OD less one band"},
-     _param_added("OuterBoreR", 42), None),
-    ("param_add", {"name": "FrameOpenR", "expression": "GimbalDia * 0.45"}, _param_added("FrameOpenR", 54), None),
-    ("param_add", {"name": "FramePlateR", "expression": "GimbalDia * 0.55"}, _param_added("FramePlateR", 66), None),
-    ("param_set_favorite", {"name": "GimbalDia", "favorite": True}, _param_favorited("GimbalDia"), None),
-    ("param_get", {}, _params_listed("GimbalDia", "RotorR", "RingBand", "InnerBoreR", "InnerOD",
-                                     "OuterBoreR", "OuterOD", "FrameOpenR", "FramePlateR"), None),
-    # THE EIGHT-PART CAST, BUILT AS THE NESTED CHAIN IT IS. A stage owns its own parts: the pedestal
-    # belongs to the frame, the inner ring hangs inside the outer, the shaft is carried by the inner
-    # ring and the rotor spins on the shaft. Nesting at CREATION rather than re-parenting afterwards
-    # costs nothing and moves nothing - a child created with no placement of its own inherits its
-    # parent's frame, and every part here is built on the world origin - while a flat row of eight
-    # siblings would say the mechanism has no stages at all.
-    # It also collapses what ACT 8 has to strip: deleting InnerRing:1 takes the shaft and the rotor
-    # with it, and Frame:1 takes the pedestal.
-    # Carrier stays at the ROOT deliberately - it is the part the vise grips and the one survivor of
-    # ACT 8, so it must not be inside anything that gets deleted.
-    ("model_create_component", {"name": "Frame", "activate": True}, _made_component, None),
-    ("model_create_component", {"name": "Pedestal", "parent": "Frame", "activate": True},
-     _made_component, None),
-    ("model_create_component", {"name": "Carrier", "activate": True}, _made_component, None),
-    ("model_create_component", {"name": "OuterRing", "activate": True}, _made_component, None),
-    ("model_create_component", {"name": "InnerRing", "activate": True}, _made_component, None),
-    # A JOINT YOU INTEND TO DRIVE WANTS TWO SIBLINGS. Measured twice on this mechanism: nesting the
-    # rotor inside the shaft it turns on left CrankAxis reading -0.0 against a commanded 30 deg
-    # through its motion link, and nesting the inner ring inside the outer left PivotInner reading
-    # back 25 at the drive and 0 at the next assembly_get - the solver put it back. So the rings stay
-    # siblings and the inner ring keeps its own parts (rotor and shaft) instead.
-    ("model_create_component", {"name": "RotorShaft", "parent": "InnerRing", "activate": True},
-     _made_component, None),
-    ("model_create_component", {"name": "Rotor", "parent": "InnerRing", "activate": True},
-     _made_component, None),
-    ("model_create_component", {"name": "Crank", "activate": True}, _made_component, None),
-    # the SHARED SKELETON on the root: two in-plane axes (construction) + the yaw axis as a 3D line.
+    # ONE driving length, two independent extents (width, height), and the features derived from
+    # the section they are cut into. Each derived parameter's expected value is what the
+    # DESIGN evaluates the expression to off the 120 mm driver above it - so the read-back proves
+    # Fusion resolved the reference, not that the expression text was accepted (the CAM parameter
+    # store accepts a bogus name unevaluated).
+    ("param_add", {"name": "PartLen", "expression": "120 mm",
+                   "comment": "The driving length: the pocket length and corner radius follow it"},
+     _param_added("PartLen", 120), None),
+    # The part's OTHER two extents are their own parameters, not ratios of the length: a bracket
+    # that is made longer is not made wider and taller with it, and the resize act reads exactly
+    # that - one axis follows the driver while the other two hold.
+    ("param_add", {"name": "PartWid", "expression": "80 mm"}, _param_added("PartWid", 80), None),
+    ("param_add", {"name": "PartHt", "expression": "40 mm"}, _param_added("PartHt", 40), None),
+    # Everything the part is FEATURED with derives from the height or the width it is cut into.
+    ("param_add", {"name": "StepDrop", "expression": "PartHt / 4",
+                   "comment": "How far the low half of the stepped top sits under the high half"},
+     _param_added("StepDrop", 10), None),
+    ("param_add", {"name": "BoreDia", "expression": "PartHt * 0.3"},
+     _param_added("BoreDia", 12), None),
+    ("param_add", {"name": "PocketLen", "expression": "PartLen / 4"},
+     _param_added("PocketLen", 30), None),
+    ("param_add", {"name": "PocketWid", "expression": "PartWid * 0.55"},
+     _param_added("PocketWid", 44), None),
+    ("param_add", {"name": "PocketDepth", "expression": "PartHt * 0.4"},
+     _param_added("PocketDepth", 16), None),
+    ("param_add", {"name": "PocketRad", "expression": "PartLen / 15",
+                   "comment": "Pocket corner radius - what a cutter has to clear the corner with"},
+     _param_added("PocketRad", 8), None),
+    ("param_add", {"name": "BossDia", "expression": "PartHt / 2"},
+     _param_added("BossDia", 20), None),
+    ("param_add", {"name": "MountDia", "expression": "PartHt * 0.15"},
+     _param_added("MountDia", 6), None),
+    # A RULE, not a ratio: the edge break scales with the section but stops at a floor, so thinning
+    # the part thins the break only until it reaches one that can still be cut.
+    ("param_add", {"name": "EdgeBreak", "expression": "max(PartHt * 0.075; 2 mm)",
+                   "comment": "Break on a handled edge - floored so it stays cuttable"},
+     _param_added("EdgeBreak", 3), None),
+    ("param_set_favorite", {"name": "PartLen", "favorite": True}, _param_favorited("PartLen"), None),
+    ("param_get", {}, _params_listed("PartLen", "PartWid", "PartHt", "StepDrop", "BoreDia",
+                                     "PocketLen", "PocketWid", "PocketDepth", "PocketRad",
+                                     "BossDia", "MountDia", "EdgeBreak"), None),
+    # THE PART, cast as its own component at the ROOT: the vise is built around it and the CAM setup
+    # names it, so it is never nested inside anything that could carry it somewhere else.
+    ("model_create_component", {"name": "Bracket", "activate": True}, _made_component, None),
+    # the SHARED SKELETON on the root: two in-plane axes (construction) + the height as a 3D line.
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    ("sketch_create", {"plane": "xy", "name": "Skeleton"}, "ok", None),
+    # 'sketch_name' is the name READ BACK off the sketch (Fusion dedupes a taken one, and every step
+    # after this names 'Skeleton'), and the frame's normal is computed from the created sketch's own
+    # axes - an XY sketch's is the Z axis.
+    ("sketch_create", {"plane": "xy", "name": "Skeleton"},
+     lambda p: (p["sketch_name"] == "Skeleton" and bool(p["plane"])
+                and abs(p["frame"]["normal"][2]) > 0.999), None),
     # 'curves_added' is the LINE collection's own delta, so a single line reads 1 - the floor the
     # composite kinds (rectangle 4, polygon 6, slot 3) are counted against.
     ("sketch_add_geometry", {"kind": "line", "x1": -70, "y1": 0, "x2": 70, "y2": 0,
@@ -79,143 +74,92 @@ _SKELETON = [
      lambda p: p.get("curves_added") == 1, None),
     ("sketch_add_geometry", {"kind": "line", "x1": 0, "y1": -70, "x2": 0, "y2": 70,
                              "sketch_name": "Skeleton", "is_construction": True}, "ok", None),
+    # start/end are the created line's own SketchPoints read back in mm: a z that came back at a
+    # different scale is the unit conversion, and a zero one is a line flattened onto the plane.
     ("sketch_add_3d_line", {"x1": 0, "y1": 0, "z1": -70, "x2": 0, "y2": 0, "z2": 70,
-                            "sketch_name": "Skeleton"}, "ok", None),
+                            "sketch_name": "Skeleton"},
+     lambda p: (abs(p["start"]["z"] + 70) < 1e-6 and abs(p["end"]["z"] - 70) < 1e-6
+                and p["end_is_off_plane"] is True), None),
     # the camera has been fitted to an EMPTY document since the overture - the skeleton is the
     # first thing in the world worth looking at.
     _watch_all(),
     ("sketch_constrain", {"constraint": "horizontal", "entity_one": "line:0",
                           "sketch_name": "Skeleton"}, "ok", None),
     ("sketch_dimension", {"dim_type": "distance", "entity_one": "point:0", "entity_two": "point:1",
-                          "sketch_name": "Skeleton", "value": "GimbalDia"}, "ok", None),
+                          "sketch_name": "Skeleton", "value": "PartLen"}, "ok", None),
     ("sketch_get", {"sketch_name": "Skeleton"}, "ok", None),
     # draw a helper constraint then delete it - the count drop is the read-back.
     ("sketch_delete_entity", {"sketch_name": "Skeleton", "target": "constraint:0"}, "ok", None),
-    # the carrier hub's plane sits BELOW the rotor sweep (vertical zoning) - construction proves here.
-    ("model_construction", {"kind": "plane", "plane": "xy", "offset": -40, "name": "CarrierHubPlane"},
-     _datum_plane("xy"), None),
-    # Concentric ring bands on ONE plane, which is what a gimbal looks like AT REST - the rings
-    # only leave that plane when a pivot is driven. What makes them a gimbal rather than a stack of
-    # washers is the PINS below: each ring hangs from its parent on an axis lying IN the ring plane,
-    # and the two pin axes are perpendicular (X for the outer, Y for the inner). A prior eval's
-    # visual review found rings that could not nest, and the cause was VERTICAL pins - the inner
-    # ring swung in-plane like a door instead of tilting - not the shared plane.
-    # Each band is dimensioned to a PARAMETER so the resize walks them.
-    ("design_activate_component", {"occurrence": "OuterRing:1"}, "ok", None),
-    ("sketch_create", {"plane": "xy", "name": "OuterRingSketch"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 48, "sketch_name": "OuterRingSketch"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 42, "sketch_name": "OuterRingSketch"}, "ok", None),
-    ("sketch_dimension", {"dim_type": "radius", "entity_one": "circle:0", "sketch_name": "OuterRingSketch", "value": "OuterOD"}, "ok", None),
-    ("sketch_dimension", {"dim_type": "radius", "entity_one": "circle:1", "sketch_name": "OuterRingSketch", "value": "OuterBoreR"}, "ok", None),
-    ("design_activate_component", {"occurrence": "InnerRing:1"}, "ok", None),
-    ("sketch_create", {"plane": "xy", "name": "InnerRingSketch"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 36, "sketch_name": "InnerRingSketch"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 30, "sketch_name": "InnerRingSketch"}, "ok", None),
-    ("sketch_dimension", {"dim_type": "radius", "entity_one": "circle:0", "sketch_name": "InnerRingSketch", "value": "InnerOD"}, "ok", None),
-    ("sketch_dimension", {"dim_type": "radius", "entity_one": "circle:1", "sketch_name": "InnerRingSketch", "value": "InnerBoreR"}, "ok", None),
-    # the frame plate with an OPEN central opening the rings nest inside.
-    ("design_activate_component", {"occurrence": "Frame:1"}, "ok", None),
-    ("sketch_create", {"plane": "xy", "name": "FrameSketch"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 66, "sketch_name": "FrameSketch"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 54, "sketch_name": "FrameSketch"}, "ok", None),
-    ("sketch_dimension", {"dim_type": "radius", "entity_one": "circle:0", "sketch_name": "FrameSketch", "value": "FramePlateR"}, "ok", None),
-    ("sketch_dimension", {"dim_type": "radius", "entity_one": "circle:1", "sketch_name": "FrameSketch", "value": "FrameOpenR"}, "ok", None),
-    _watch_all(),                       # the three concentric ring bands are drawn
-    # THE PIVOT PINS - what turns three concentric bands into a gimbal. Each pair lies IN the ring
-    # plane and bridges the gap between one band's OD and its parent's ID, and the two pairs are
-    # PERPENDICULAR: X carries the outer ring in the frame, Y carries the inner ring in the outer.
-    # Sketched on the plane NORMAL to their own axis (yz for an X pin, xz for a Y pin) and extruded
-    # along it, so the pin is a rod on the axis its joint turns about - a pin standing along Z
-    # instead lets a ring swing in-plane like a door, which is the failure a prior eval's review
-    # traced. Each spans its gap EXACTLY, band face to band face: a pin that reaches INTO the bands
-    # is how a graded model seats one, but that needs a bore in each, and undrilled bands would
-    # simply read as interference.
-    ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    ("model_create_component", {"name": "PinOuterXpos", "activate": True}, _made_component, None),
-    ("model_construction", {"kind": "plane", "plane": "yz", "offset": "OuterOD", "name": "PinOXpPlane"},
-     _datum_plane("yz"), None),
-    ("sketch_create", {"plane": "PinOXpPlane", "name": "PinOXpS"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 3,
-                             "sketch_name": "PinOXpS"}, "ok", None),
-    ("model_extrude", {"sketch_name": "PinOXpS", "profile_index": 0,
-                   "distance": "FrameOpenR - OuterOD"}, _extruded, None),
-    ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    ("model_create_component", {"name": "PinOuterXneg", "activate": True}, _made_component, None),
-    ("model_construction", {"kind": "plane", "plane": "yz", "offset": "-OuterOD", "name": "PinOXnPlane"},
-     _datum_plane("yz"), None),
-    ("sketch_create", {"plane": "PinOXnPlane", "name": "PinOXnS"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 3,
-                             "sketch_name": "PinOXnS"}, "ok", None),
-    ("model_extrude", {"sketch_name": "PinOXnS", "profile_index": 0,
-                   "distance": "-(FrameOpenR - OuterOD)"}, _extruded, None),
-    ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    ("model_create_component", {"name": "PinInnerYpos", "activate": True}, _made_component, None),
-    ("model_construction", {"kind": "plane", "plane": "xz", "offset": "InnerOD", "name": "PinIYpPlane"},
-     _datum_plane("xz"), None),
-    ("sketch_create", {"plane": "PinIYpPlane", "name": "PinIYpS"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 3,
-                             "sketch_name": "PinIYpS"}, "ok", None),
-    ("model_extrude", {"sketch_name": "PinIYpS", "profile_index": 0,
-                   "distance": "OuterBoreR - InnerOD"}, _extruded, None),
-    ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    ("model_create_component", {"name": "PinInnerYneg", "activate": True}, _made_component, None),
-    ("model_construction", {"kind": "plane", "plane": "xz", "offset": "-InnerOD", "name": "PinIYnPlane"},
-     _datum_plane("xz"), None),
-    ("sketch_create", {"plane": "PinIYnPlane", "name": "PinIYnS"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 3,
-                             "sketch_name": "PinIYnS"}, "ok", None),
-    ("model_extrude", {"sketch_name": "PinIYnS", "profile_index": 0,
-                   "distance": "-(OuterBoreR - InnerOD)"}, _extruded, None),
-    ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    _watch(["PinOuterXpos:1", "PinInnerYpos:1"]),
-    # the rotor EDGE-ON: a half-section on a plane containing the spin axis (X), for a revolve.
-    ("design_activate_component", {"occurrence": "Rotor:1"}, "ok", None),
-    ("sketch_create", {"plane": "xz", "name": "RotorSketch"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "rectangle", "x1": -2, "y1": 0, "x2": 2, "y2": 24, "sketch_name": "RotorSketch"}, "ok", None),
-    ("sketch_dimension", {"dim_type": "vertical_distance", "entity_one": "point:0", "entity_two": "point:2", "sketch_name": "RotorSketch", "value": "RotorR"}, "ok", None),
-    # the rotor shaft along the spin axis.
-    ("design_activate_component", {"occurrence": "RotorShaft:1"}, "ok", None),
-    ("sketch_create", {"plane": "yz", "name": "ShaftSketch"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 3, "sketch_name": "ShaftSketch"}, "ok", None),
-    # the carrier yoke, BELOW the rotor's swing (the rotor disc reaches z=-24): a bar plus a round
-    # hub that carries the machinable detail (center bore, bolt circle, end pivot bores - cut in
-    # ACT 2). Sitting at z=-32..-26 it clears the rings (z=+/-2) and the spinning rotor.
-    ("design_activate_component", {"occurrence": "Carrier:1"}, "ok", None),
-    ("model_construction", {"kind": "plane", "plane": "xy", "offset": -32, "name": "CarrierPlane"},
-     _datum_plane("xy"), None),
-    ("sketch_create", {"plane": "CarrierPlane", "name": "CarrierSketch"}, "ok", None),
+    # THE BRACKET, drawn: the base footprint, the raised half of the stepped top, the pocket, and
+    # the boss on the finished top. Every profile's SPANS are dimensioned to parameters, so the
+    # resize act walks all of them; what stays authored is where each feature sits on the block -
+    # the boss centre and the pocket's corner - which no dimension here pins.
+    # 'active_component' is design.activeComponent read AFTER the activate; the handler's mismatch
+    # guard is skipped when that read declines, so a null here is an activation nobody confirmed.
+    ("design_activate_component", {"occurrence": "Bracket:1"},
+     lambda p: bool(p["active_component"]) and p["active_component"] == p["component"], None),
+    ("sketch_create", {"plane": "xy", "name": "BracketBody"}, "ok", None),
     # a rectangle is built BY a SketchLines factory, so its four sides are the delta counted.
-    ("sketch_add_geometry", {"kind": "rectangle", "x1": -50, "y1": -8, "x2": 50, "y2": 8, "sketch_name": "CarrierSketch"},
+    ("sketch_add_geometry", {"kind": "rectangle", "x1": -60, "y1": -40, "x2": 60, "y2": 40,
+                             "sketch_name": "BracketBody"},
      lambda p: p.get("curves_added") == 4, None),
-    ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 14, "sketch_name": "CarrierSketch"}, "ok", None),
-    # the pedestal base + a smaller top profile on an offset plane, for a base-to-post LOFT -
-    # entirely BELOW the carrier (top at z=-32 meets the carrier's underside).
-    ("design_activate_component", {"occurrence": "Pedestal:1"}, "ok", None),
-    ("model_construction", {"kind": "plane", "plane": "xy", "offset": -60, "name": "PedBasePlane"},
+    # EACH SPAN DIMENSIONED ACROSS ONE EDGE'S OWN TWO ENDPOINTS. A bare 'point:N' is refused as an
+    # anchor by sketch_dimension's own contract - point:0 is the sketch ORIGIN - and an
+    # origin-anchored span drives a CORNER's distance from the origin, not the width of the
+    # rectangle. Anchored on the edge, whichever endpoint the solver frees, the span it leaves IS
+    # the parameter. line:0 is the first line addTwoPointRectangle draws (the y1 edge, horizontal)
+    # and line:1 the next (the x2 edge, vertical).
+    ("sketch_dimension", {"dim_type": "horizontal_distance", "entity_one": "line:0:start",
+                          "entity_two": "line:0:end", "sketch_name": "BracketBody",
+                          "value": "PartLen"}, "ok", None),
+    ("sketch_dimension", {"dim_type": "vertical_distance", "entity_one": "line:1:start",
+                          "entity_two": "line:1:end", "sketch_name": "BracketBody",
+                          "value": "PartWid"}, "ok", None),
+    # the step floor: the low half of the stepped top, and the face the pocket is cut down from.
+    ("model_construction", {"kind": "plane", "plane": "xy", "offset": "PartHt - StepDrop",
+                            "name": "StepFloor"}, _datum_plane("xy"), None),
+    ("sketch_create", {"plane": "StepFloor", "name": "BracketStep"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "rectangle", "x1": -10, "y1": -40, "x2": 60, "y2": 40,
+                             "sketch_name": "BracketStep"}, "ok", None),
+    # The raised half's WIDTH follows the part; its LENGTH stays authored on purpose. A driven
+    # length changes the block's span but not which end the solver grows it from, and a step whose
+    # length moved with it could take the low shelf out from under the holes drilled into it.
+    ("sketch_dimension", {"dim_type": "vertical_distance", "entity_one": "line:1:start",
+                          "entity_two": "line:1:end", "sketch_name": "BracketStep",
+                          "value": "PartWid"}, "ok", None),
+    # THE POCKET IS DRAWN ON ITS OWN FLOOR, not on the face it opens through: the cut then runs
+    # UPWARD out of solid material, which is the direction that has a body in it. Measured: the
+    # same profile on the step floor cutting down answers '3 : No target body found to cut'.
+    ("model_construction", {"kind": "plane", "plane": "xy",
+                            "offset": "PartHt - StepDrop - PocketDepth", "name": "PocketFloor"},
      _datum_plane("xy"), None),
-    ("sketch_create", {"plane": "PedBasePlane", "name": "PedBase"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 15, "sketch_name": "PedBase"}, "ok", None),
-    ("model_construction", {"kind": "plane", "plane": "xy", "offset": -32, "name": "PedTopPlane"},
-     _datum_plane("xy"), None),
-    ("sketch_create", {"plane": "PedTopPlane", "name": "PedTop"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 8, "sketch_name": "PedTop"}, "ok", None),
-    # the crank: a path + a profile for a swept handle.
-    ("design_activate_component", {"occurrence": "Crank:1"}, "ok", None),
-    ("sketch_create", {"plane": "xz", "name": "CrankPath"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 60, "y1": 0, "x2": 60, "y2": 40, "sketch_name": "CrankPath"}, "ok", None),
-    ("sketch_create", {"plane": "xy", "name": "CrankProf"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "circle", "cx": 60, "cy": 0, "radius": 4, "sketch_name": "CrankProf"}, "ok", None),
-    _watch_all(),                       # the skeleton is complete, crank and pedestal included
-    # the engraved nameplate cameo.
-    ("design_activate_component", {"occurrence": "Frame:1"}, "ok", None),
-    ("sketch_create", {"plane": "xy", "name": "NamePlate"}, "ok", None),
+    ("sketch_create", {"plane": "PocketFloor", "name": "BracketPocket"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "rectangle", "x1": -50, "y1": -22, "x2": -20, "y2": 22,
+                             "sketch_name": "BracketPocket"}, "ok", None),
+    ("sketch_dimension", {"dim_type": "horizontal_distance", "entity_one": "line:0:start",
+                          "entity_two": "line:0:end", "sketch_name": "BracketPocket",
+                          "value": "PocketLen"}, "ok", None),
+    ("sketch_dimension", {"dim_type": "vertical_distance", "entity_one": "line:1:start",
+                          "entity_two": "line:1:end", "sketch_name": "BracketPocket",
+                          "value": "PocketWid"}, "ok", None),
+    # the boss stands on the FINISHED top, so its plane is the part's full height.
+    ("model_construction", {"kind": "plane", "plane": "xy", "offset": "PartHt",
+                            "name": "TopFloor"}, _datum_plane("xy"), None),
+    ("sketch_create", {"plane": "TopFloor", "name": "BracketBoss"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": 45, "cy": 0, "radius": 10,
+                             "sketch_name": "BracketBoss"}, "ok", None),
+    ("sketch_dimension", {"dim_type": "diameter", "entity_one": "circle:0",
+                          "sketch_name": "BracketBoss", "value": "BossDia"}, "ok", None),
+    # the engraved nameplate, on the high half of the stepped top.
+    ("sketch_create", {"plane": "TopFloor", "name": "NamePlate"}, "ok", None),
     ("sketch_set_text", {"text": "FUSION ESSENTIALS", "sketch_name": "NamePlate", "create": True,
-                         "height": 6, "x": -60, "y": 72}, "ok", None),
+                         "height": 5, "x": -5, "y": -32}, "ok", None),
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    _watch_all(),                       # the whole part is drawn
 ]
 
-# --- ACT 4: DETAILS - fillet/chamfer the rings, section through the gimbal center (mirrors S4) -
-# The sketch TOOLS, as their own act: every sketch-tool beat that needs no solid, so the run
-# draws before it builds. What is missing from here is only what cannot be sketched in an empty
+# --- the sketch TOOLS, as their own act: every beat that needs no solid, so the run draws before
+# it builds. What is missing from here is only what cannot be sketched in an empty
 # document - a dimension MEASURED to a model face, a text path REFUSED a model edge - and those
 # few beats stay in _DETAILS, next to the bodies they read.
 _SKETCHWORK = [

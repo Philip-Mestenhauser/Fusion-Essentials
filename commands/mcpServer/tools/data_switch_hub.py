@@ -1,14 +1,9 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: list the user's Autodesk data hubs and SWITCH the active one.
-
-  data_switch_hub(action="list")                  -> every hub (name, id, is_active)
-  data_switch_hub(action="switch", hub=<name|id>) -> attempt to set the active hub (best-effort)
-
-'switch' is best-effort: Data.activeHub is getter-only, so the assignment is verified by
-re-reading it, and a switch that takes closes every open document.
-"""
+"""MCP building block: list the user's Autodesk data hubs (action='list') and SWITCH the active one
+(action='switch', hub=<name|id>). The switch is best-effort - Data.activeHub is getter-only, so the
+assignment is verified by re-reading it, and a switch that takes closes every open document."""
 
 import adsk.core
 
@@ -82,10 +77,8 @@ def handler(action: str = "list", hub: str = "") -> dict:
         "note": f"'{tname}' is already the active hub - nothing to do.",
         })
 
-    # Data.activeHub is documented GETTER-ONLY ("Gets the active DataHub") - there is no public
-    # setter. The assignment below may raise, OR silently no-op. So we don't TRUST it: we attempt it,
-    # then VERIFY the active hub's id actually became the target. If it didn't change, report the API
-    # limitation honestly instead of a false switched:True over a hub that never switched.
+    # Data.activeHub is GETTER-ONLY, so the assignment below may raise OR silently no-op: it is
+    # attempted, then the active hub's id is re-read to verify it became the target.
     assign_error = None
     try:
         data.activeHub = th
@@ -115,11 +108,10 @@ def handler(action: str = "list", hub: str = "") -> dict:
 
 TOOL_DESCRIPTION = (
     "Attempt to SWITCH the active Autodesk data hub (to LIST hubs, use data_get(include=['hubs'])). "
-    "Pass 'hub' (a hub name - case-insensitive - or id) to set the active hub, BUT Fusion's API "
-    "exposes Data.activeHub getter-only (no public setter), so the switch is best-effort: it verifies "
-    "the hub actually changed and returns an honest error if not (switch from the Fusion data panel "
-    "instead). When a switch DOES take effect it CLOSES open documents and URNs are hub-scoped - so "
-    "save first, then re-resolve projects/URNs (data_get) and reopen what you need."
+    "Fusion exposes Data.activeHub getter-only, so the switch is best-effort: it verifies the hub "
+    "actually changed and errors honestly if not - switch from the Fusion data panel instead. A "
+    "switch that DOES take effect CLOSES open documents and URNs are hub-scoped, so save first and "
+    "re-resolve projects/URNs with data_get."
 )
 
 tool = (

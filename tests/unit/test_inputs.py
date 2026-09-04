@@ -14,7 +14,7 @@ import types
 import pytest
 
 from conftest import (load_tool, make_design, _make_object_collection, _NamedCollection, BRepBody,
-                      FakePoint, FakeVector3D, MakeComp, body_proxy, entity_proxy,
+                      FakePoint, FakeVector3D, MakeComp, MeshBody, body_proxy, entity_proxy,
                       make_source_document)
 
 inp = load_tool("_inputs")
@@ -782,6 +782,19 @@ class TestPlaneRef:
         val, err = k.resolve("qq")
         assert val is None and "not an origin alias" in err
 
+    def test_the_miss_refusal_carries_the_whole_vocabulary_the_note_no_longer_spells(self):
+        # The note names the shapes; the refusal is where an agent that got one wrong learns the
+        # alias set, the handle's source, and that an angled plane must come as a handle. Each
+        # assertion is a fact that lives ONLY here now, so it is pinned against a silent reword.
+        _install_planes()
+        _val, err = inp.PlaneRef("plane").resolve("qq")
+        assert "top/front/right" in err
+        assert "planar-face/construction-plane handle from find_geometry" in err
+        assert "arbitrary or angled" in err
+        # ...and none of the three rode along in the note, which is what made the refusal the home
+        note = inp.PlaneRef("plane").contract_note()
+        assert "find_geometry" not in note and "angled" not in note
+
     def test_long_construction_plane_name_not_mistaken_for_handle(self):
         # same heuristic bug for planes: a >60-char construction-plane name must resolve by NAME
         long_name = "Mid-Span-Reference-Plane-For-The-Left-Outrigger-Pivot-Datum-A"
@@ -792,8 +805,12 @@ class TestPlaneRef:
         assert err is None and val is cp
 
     def test_contract_note_mentions_all_three_sources(self):
+        # All three vocabularies, in one wire clause: the alias set, the construction-plane name and
+        # the face handle. Where a handle comes from is the miss refusal's job, tested below.
         note = inp.PlaneRef("plane").contract_note()
-        assert "origin" in note and "construction" in note.lower() and "find_geometry" in note
+        assert "xy/xz/yz" in note and "top/front/right" in note
+        assert "construction-plane name" in note and "handle" in note
+        assert len(note) <= 90, note
 
     def test_non_string_raw_does_not_crash(self):
         # PlaneRef.resolve must isinstance-guard before `.strip()`: a non-string plane arg returns a
@@ -1074,6 +1091,12 @@ def _install_axis_face(handle_map):
 
 
 class TestAxisRefFace:
+    def test_the_note_states_what_a_face_resolves_to_since_no_refusal_can(self):
+        # Both face forms SUCCEED (the two tests below), so no error ever teaches them - the note
+        # is their only home, and it must keep naming both halves.
+        note = inp.AxisRef("axis").contract_note()
+        assert "planar = normal" in note and "round = axis" in note
+
     def test_planar_face_gives_the_normal_as_direction(self):
         f = _FakePlanarAxisFace((0, 0, 1))
         _install_axis_face({"F": f})
@@ -1460,6 +1483,23 @@ class TestSharedInputs:
         assert name == "units"
         assert sch["enum"] == ["mm", "cm", "in"]
 
+    def test_brief_drops_the_contract_note_and_keeps_the_tools_own_description(self):
+        # The short form for a tool carrying one kind several times (model_construction's
+        # plane/plane2/plane3): the repeat still says which slot it is, the shared clause rides once.
+        k = inp.PlaneRef("plane2", description="2nd plane (see 'mode').")
+        full = k.as_property()[1]["description"]
+        brief = k.as_property(brief=True)[1]["description"]
+        assert brief == "2nd plane (see 'mode')."
+        assert k.contract_note() in full and k.contract_note() not in brief
+
+    def test_brief_reaches_the_kinds_that_override_schema(self):
+        # every override has to thread the flag - one that forgot would ship its note on the repeat
+        for k in (inp.OccurrenceRefList("occs", description="Move these."),
+                  inp.ProfileRefList("profiles", description="Loft through these."),
+                  inp.Choice("mode", ["a", "b"], default="a", description="How."),
+                  inp.UnitField(description="Display units.")):
+            assert k.as_property(brief=True)[1]["description"] == k.description, k.name
+
     def test_units_property_factory(self):
         name, sch = inp.units_property(description="Display units.")
         assert name == "units" and sch["enum"] == ["mm", "cm", "in"]
@@ -1586,18 +1626,12 @@ class FakeBRep:
             self.entityToken = entity_token
 
 
-class FakeMesh:
-    """Stands in for adsk.fusion.MeshBody — a DIFFERENT type, lives in meshBodies."""
-    def __init__(self, name="Mesh1"):
-        self.name = name
-
-
 def _install_kind_bodies(brep_named=None, mesh_named=None, handle_map=None):
     """Install fakes for the kind axis: BRepBody/MeshBody types wired for isinstance, a component with
     BOTH bRepBodies and meshBodies collections, and a handle resolver."""
     import adsk.fusion
     adsk.fusion.BRepBody = FakeBRep
-    adsk.fusion.MeshBody = FakeMesh
+    adsk.fusion.MeshBody = MeshBody
     brep_named = brep_named or {}
     mesh_named = mesh_named or {}
     handle_map = handle_map or {}
@@ -1665,20 +1699,17 @@ class _MeshOnlyColl:
 
 
 def _install_occurrence_scope(comp_name="MeshComp", brep_name="Body1", mesh_name="CompMesh",
-                              placements=1, occ_mesh_read="empty"):
+                              placements=1, occ_mesh_read="empty", lifts=True):
     """A component holding ONE BRep and ONE mesh, placed `placements` times.
 
-    `occ_mesh_read` is the shape of the OCCURRENCE-level meshBodies read, and BOTH live-plausible
-    shapes are modelled because which one Fusion does is PROBE NEEDED:
-      "empty"  - the read answers an EMPTY collection (the default: this is what the live server
-                 exhibits, since the qualified mesh address missed while nothing raised);
-      "raises" - the read throws.
-    Either way the occurrence never surfaces the component's mesh, which is the fact the walk is
-    written against. Returns (occurrences, brep, mesh)."""
+    `occ_mesh_read` is the shape of the OCCURRENCE-level meshBodies read (meshbodyvector-shape says
+    the counted walk gets nothing off it, so both spellings of "nothing" are modelled): "empty" -
+    the read answers an EMPTY collection; "raises" - the read throws. `lifts` is MeshBody's
+    createForAssemblyContext knob. Returns (occurrences, brep, mesh)."""
     import adsk.fusion
     adsk.fusion.BRepBody = FakeBRep
-    adsk.fusion.MeshBody = FakeMesh
-    brep, mesh = FakeBRep(brep_name, is_solid=True), FakeMesh(mesh_name)
+    adsk.fusion.MeshBody = MeshBody
+    brep, mesh = FakeBRep(brep_name, is_solid=True), MeshBody(mesh_name, lifts=lifts)
 
     class _Comp:
         name = comp_name
@@ -1751,7 +1782,7 @@ class TestBodyKind:
 
     def test_solid_kind_rejects_a_mesh_with_redirect(self):
         # the headline redirect: solid asked, MESH given -> name the mesh + point at mesh_* / convert
-        m = FakeMesh("M")
+        m = MeshBody("M")
         _install_kind_bodies(handle_map={"H": m})
         val, err = inp.BodyRef("target", kind="solid").resolve("H")
         assert val is None
@@ -1770,7 +1801,7 @@ class TestBodyKind:
         assert val is None and "must be an OPEN SURFACE body" in err and "SOLID body" in err
 
     def test_mesh_kind_resolves_a_mesh(self):
-        m = FakeMesh("M")
+        m = MeshBody("M")
         _install_kind_bodies(handle_map={"H": m})
         val, err = inp.MeshBodyRef("body").resolve("H")
         assert err is None and val is m
@@ -1784,7 +1815,7 @@ class TestBodyKind:
 
     def test_mesh_resolves_by_name_from_meshBodies(self):
         # name lookup searches meshBodies too - a mesh name must never be an invisible miss
-        m = FakeMesh("ScanData")
+        m = MeshBody("ScanData")
         _install_kind_bodies(mesh_named={"ScanData": m})
         val, err = inp.MeshBodyRef("body").resolve("ScanData")
         assert err is None and val is m
@@ -1796,8 +1827,8 @@ class TestBodyKind:
         # occ.meshBodies exactly as live does, so a resolver that leaned on the occurrence fails here.
         import adsk.fusion
         adsk.fusion.BRepBody = FakeBRep
-        adsk.fusion.MeshBody = FakeMesh
-        m = FakeMesh("Occ_Scan")
+        adsk.fusion.MeshBody = MeshBody
+        m = MeshBody("Occ_Scan")
 
         class _Coll:
             """bRepBodies-style: HAS itemByName."""
@@ -1861,14 +1892,21 @@ class TestBodyKind:
     @pytest.mark.parametrize("occ_mesh_read", ["empty", "raises"])
     def test_a_singly_placed_occurrence_address_reaches_the_component_mesh(self, occ_mesh_read):
         # '<occurrence>:<body>' is the spelling that picks ONE instance's body out of a shared name.
-        # The occurrence never surfaces the mesh of the component it places - live it ANSWERS and
-        # answers nothing, and it may also raise - so a scope read off its own collections alone
-        # reports a mesh it places as absent, then lists the BReps, which reads as "no such mesh".
-        # Both separators, and BOTH read shapes, resolve: the fallback is gated on the empty answer.
+        # The counted walk gets nothing off an occurrence's MeshBodyVector - the read may answer
+        # empty or raise - so the mesh comes off the placed component and is LIFTED into the
+        # placement, which is the body carrying the assembly context the address named.
         _occs, _brep, mesh = _install_occurrence_scope(occ_mesh_read=occ_mesh_read)
         for spec in ("MeshComp:1/CompMesh", "MeshComp:1:CompMesh"):
             val, err = inp.BodyRef("body", kind="mesh").resolve(spec)
-            assert err is None and val is mesh, (spec, occ_mesh_read, err)
+            assert err is None, (spec, occ_mesh_read, err)
+            assert val.nativeObject is mesh
+            assert val.assemblyContext.fullPathName == "MeshComp:1"
+
+    def test_a_lift_that_hands_nothing_back_falls_to_the_native_under_one_placement(self):
+        # One placement, so the component's own mesh IS that instance's - no ambiguity to refuse
+        _occs, _brep, mesh = _install_occurrence_scope(lifts=False)
+        val, err = inp.BodyRef("body", kind="mesh").resolve("MeshComp:1/CompMesh")
+        assert err is None and val is mesh
 
     def test_the_same_occurrence_scope_still_resolves_its_brep_proxy(self):
         # the BRep half must keep coming from the OCCURRENCE, which carries the assembly context the
@@ -1894,17 +1932,58 @@ class TestBodyKind:
         assert val is None and "holds no body named 'Ghost'" in err
         assert "'Body1'" in err and "'CompMesh'" in err
 
-    def test_a_multiply_placed_component_refuses_the_instance_qualified_mesh(self):
-        # A mesh reached through the placed component carries NO placement of its own, so with two
-        # instances 'MeshComp:1/CompMesh' and 'MeshComp:2/CompMesh' would answer the same body while
-        # the BRep half of the very same address answers per instance. Refused, naming both
-        # placements and the component-scoped spelling that honestly names that one body.
-        _install_occurrence_scope(placements=2)
+    def test_each_placement_of_a_twice_placed_component_gets_its_own_mesh(self):
+        # The mesh half of '<instance>:<body>' now answers per instance the way the BRep half does:
+        # each address lifts the component's mesh into ITS occurrence, so the two calls hand back
+        # two proxies over one native rather than one shared body.
+        _occs, _brep, mesh = _install_occurrence_scope(placements=2)
+        got = []
+        for spec in ("MeshComp:1/CompMesh", "MeshComp:2/CompMesh"):
+            val, err = inp.BodyRef("body", kind="mesh").resolve(spec)
+            assert err is None, (spec, err)
+            assert val.nativeObject is mesh
+            got.append(val.assemblyContext.fullPathName)
+        assert got == ["MeshComp:1", "MeshComp:2"]
+
+    def test_a_multiply_placed_mesh_that_will_not_lift_is_still_refused(self):
+        # Without the lift the component's own body is all there is, so both addresses would answer
+        # ONE body while the BRep half of the same address answers per instance. Refused, naming
+        # both placements and the component-scoped spelling that honestly names that one body.
+        _install_occurrence_scope(placements=2, lifts=False)
         for spec in ("MeshComp:1/CompMesh", "MeshComp:2/CompMesh"):
             val, err = inp.BodyRef("body", kind="mesh").resolve(spec)
             assert val is None, spec
+            assert "did not lift" in err and "no assembly context" in err
             assert "placed 2 times" in err and "'MeshComp:1'" in err and "'MeshComp:2'" in err
             assert "'MeshComp:CompMesh'" in err          # the remedy that does resolve
+
+    def test_two_placements_of_one_mesh_carry_distinct_tokens_over_one_identity(self):
+        # MEASURED (meshbody-proxy-token-differs): each placement's proxy token differs from the
+        # native's and from the other's, while nativeObject ties both back - so a de-dup keying on
+        # (nativeObject or self).entityToken still sees ONE physical body, and a handle minted in
+        # one instance cannot resolve to the other.
+        _occs, _brep, mesh = _install_occurrence_scope(placements=2)
+        proxies = []
+        for spec in ("MeshComp:1/CompMesh", "MeshComp:2/CompMesh"):
+            val, err = inp.BodyRef("body", kind="mesh").resolve(spec)
+            assert err is None, (spec, err)
+            proxies.append(val)
+        a, b = proxies
+        assert a.entityToken != mesh.entityToken and b.entityToken != mesh.entityToken
+        assert a.entityToken != b.entityToken
+        assert a.nativeObject.entityToken == mesh.entityToken
+        assert inp._common.native_identity(a) == inp._common.native_identity(mesh)
+        assert inp._common.native_identity(b) == inp._common.native_identity(mesh)
+
+    def test_a_lifted_mesh_is_a_view_onto_the_native_not_a_copy_of_it(self):
+        # One body seen from an occurrence: a change made to the native after the lift reads back
+        # through the proxy. A copy would answer the state captured at lift time forever.
+        _occs, _brep, mesh = _install_occurrence_scope()
+        val, err = inp.BodyRef("body", kind="mesh").resolve("MeshComp:1/CompMesh")
+        assert err is None and val.nativeObject is mesh
+        mesh.isClosed = False
+        mesh.name = "Rescanned"
+        assert val.isClosed is False and val.name == "Rescanned"
 
     def test_the_brep_half_of_a_two_placement_address_still_resolves_per_instance(self):
         # the refusal above is about the MESH only - the BRep proxy vocabulary is untouched
@@ -1913,9 +1992,9 @@ class TestBodyKind:
         assert err is None and val is not None
 
     def test_an_unreadable_placement_census_refuses_rather_than_guessing_one_instance(self):
-        # nothing established that this instance is the only one, so the address is not answered
-        # with a component-wide body in silence
-        _install_occurrence_scope()
+        # the lift handed nothing back AND nothing established that this instance is the only one,
+        # so the address is not answered with a component-wide body in silence
+        _install_occurrence_scope(lifts=False)
         root = inp._common.design().rootComponent
         root.allOccurrencesByComponent = lambda c: None
         val, err = inp.BodyRef("body", kind="mesh").resolve("MeshComp:1/CompMesh")
@@ -1942,7 +2021,7 @@ class TestBodyKind:
         assert err is None and val is mesh
 
     def test_any_kind_accepts_solid_surface_and_mesh(self):
-        s, surf, m = FakeBRep("S", True), FakeBRep("Surf", False), FakeMesh("M")
+        s, surf, m = FakeBRep("S", True), FakeBRep("Surf", False), MeshBody("M")
         _install_kind_bodies(handle_map={"S": s, "U": surf, "M": m})
         for h, want in (("S", s), ("U", surf), ("M", m)):
             val, err = inp.BodyRef("body", kind="any").resolve(h)
@@ -1950,7 +2029,7 @@ class TestBodyKind:
 
     def test_list_kind_checks_every_element_before_returning(self):
         # one wrong-kind element fails the WHOLE list (so no partial mutation downstream), with its index
-        s1, m = FakeBRep("S1", True), FakeMesh("M")
+        s1, m = FakeBRep("S1", True), MeshBody("M")
         _install_kind_bodies(handle_map={"S1": s1, "M": m})
         val, err = inp.BodyRefList("bodies", kind="solid").resolve(["S1", "M"])
         assert val is None and "[1]" in err and "must be a SOLID body" in err
@@ -1985,7 +2064,7 @@ class TestBodyBrepKind:
 
     def test_brep_rejects_a_mesh_with_redirect(self):
         # 'brep' = solid OR surface but EXCLUDES a mesh -> a mesh is redirected, not accepted
-        m = FakeMesh("M")
+        m = MeshBody("M")
         _install_kind_bodies(handle_map={"H": m})
         val, err = inp.BodyRef("target", kind="brep").resolve("H")
         assert val is None
@@ -1999,7 +2078,7 @@ class TestBodyBrepKind:
 
 class TestRedirectNamesWhatWasPassed:
     def test_a_name_sourced_wrong_kind_says_NAME_and_quotes_it(self):
-        m = FakeMesh("ScanData")
+        m = MeshBody("ScanData")
         _install_kind_bodies(mesh_named={"ScanData": m})
         val, err = inp.BodyRef("target", kind="solid").resolve("ScanData")
         assert val is None
@@ -2007,7 +2086,7 @@ class TestRedirectNamesWhatWasPassed:
         assert "handle points at" not in err
 
     def test_a_handle_sourced_wrong_kind_still_says_HANDLE(self):
-        m = FakeMesh("M")
+        m = MeshBody("M")
         _install_kind_bodies(handle_map={"tok-mesh": m})
         val, err = inp.BodyRef("target", kind="solid").resolve("tok-mesh")
         assert val is None
@@ -2017,7 +2096,7 @@ class TestRedirectNamesWhatWasPassed:
     def test_a_face_handle_walked_to_its_body_is_still_HANDLE_sourced(self):
         # a find_geometry FACE handle resolves through the owning-body walk - the caller still gave
         # a handle, so naming a "name" there would describe a string that was never typed
-        m = FakeMesh("M")
+        m = MeshBody("M")
         face = FakePlanarFace()
         face.body = m
         _install_kind_bodies(handle_map={"tok-face": face})
@@ -2033,7 +2112,7 @@ class TestRedirectNamesWhatWasPassed:
         assert "the name 'MeshComp:1/CompMesh' resolves to a MESH body" in err
 
     def test_the_list_form_carries_the_same_wording_per_element(self):
-        m = FakeMesh("ScanData")
+        m = MeshBody("ScanData")
         _install_kind_bodies(mesh_named={"ScanData": m})
         val, err = inp.BodyRefList("bodies", kind="solid").resolve(["ScanData"])
         assert val is None
@@ -2051,7 +2130,7 @@ def _install_ambiguous_bodies(*, handle_map=None, occ_bodies=()):
     handle_map feeds the precise-handle path."""
     import adsk.fusion
     adsk.fusion.BRepBody = FakeBRep
-    adsk.fusion.MeshBody = FakeMesh
+    adsk.fusion.MeshBody = MeshBody
     handle_map = handle_map or {}
 
     class _BColl:
@@ -2095,7 +2174,7 @@ def _install_native_and_proxy(comp_bodies=(), occ_bodies=(), comp_name="Probe"):
     a name has."""
     import adsk.fusion
     adsk.fusion.BRepBody = BRepBody
-    adsk.fusion.MeshBody = FakeMesh
+    adsk.fusion.MeshBody = MeshBody
     comp = types.SimpleNamespace(name=comp_name, bRepBodies=_NamedCollection(comp_bodies))
     for b in comp_bodies:
         b.parentComponent = comp
@@ -2545,15 +2624,19 @@ class FakeProfile:
         self.tag = tag
 
 
-def _profile_sketch_fake(name, profs, ntexts=0):
+def _profile_sketch_fake(name, profs, ntexts=0, compute_deferred=None):
     """One sketch as the profile resolvers read it: `name`, the counted `profiles` collection an
     index selector addresses, and the counted `sketchTexts` behind the 'text:<i>' address space.
-    Each text is tagged '<sketch>#<i>' so a test can tell WHICH one resolved."""
-    return types.SimpleNamespace(
+    Each text is tagged '<sketch>#<i>' so a test can tell WHICH one resolved. `compute_deferred`
+    sets isComputeDeferred; left None the member is ABSENT, so the read raises."""
+    sk = types.SimpleNamespace(
         name=name,
         profiles=_NamedCollection(list(profs)),
         sketchTexts=_NamedCollection([types.SimpleNamespace(tag=f"{name}#{i}")
                                       for i in range(ntexts)]))
+    if compute_deferred is not None:
+        sk.isComputeDeferred = compute_deferred
+    return sk
 
 
 def _install_profiles(handle_map=None, sketches=None, monkeypatch=None):
@@ -2628,6 +2711,52 @@ class TestProfileRef:
         assert val is None
         assert err == f"'profile': {refusal}"
         assert "no sketch named" not in err
+
+
+class TestProfileRefComputeDeferred:
+    """A sketch whose compute is DEFERRED answers `profiles` with the set from before the deferral,
+    so a handle minted off that read - or an index into it - can name a region that is not the one
+    the caller saw. Both forms are refused naming the flag and the two ways to resume compute."""
+
+    def test_a_handle_off_a_deferred_sketch_is_refused(self, monkeypatch):
+        p0 = FakeProfile("p0")
+        comp = _install_profiles(handle_map={"PROF": p0},
+                                 sketches=[("Stale", [p0], 0, True)], monkeypatch=monkeypatch)
+        p0.parentSketch = comp.sketches.itemByName("Stale")
+        val, err = inp.ProfileRef("profile").resolve("PROF")
+        assert val is None
+        assert "isComputeDeferred=true" in err and "'Stale'" in err
+        assert "sketch_add_geometry" in err and "sys_execute_script" in err
+
+    def test_an_index_into_a_deferred_sketch_is_refused(self, monkeypatch):
+        # the silent path: profile_index=0 hands back whichever profile is first in a set the
+        # caller never saw, and the cut lands on it without a word
+        _install_profiles(sketches=[("Stale", [FakeProfile("p0")], 0, True)],
+                          monkeypatch=monkeypatch)
+        val, err = inp.ProfileRef("profile").resolve({"sketch": "Stale", "profile_index": 0})
+        assert val is None and "isComputeDeferred=true" in err
+
+    def test_a_sketch_computing_normally_still_resolves(self, monkeypatch):
+        p0 = FakeProfile("p0")
+        comp = _install_profiles(handle_map={"PROF": p0},
+                                 sketches=[("Fine", [p0], 0, False)], monkeypatch=monkeypatch)
+        p0.parentSketch = comp.sketches.itemByName("Fine")
+        assert inp.ProfileRef("profile").resolve("PROF") == (p0, None)
+
+    def test_an_unreadable_flag_is_not_a_refusal(self, monkeypatch):
+        # read_flag answers None for a read that raised; coerced True it would block every handle
+        # whose sketch simply does not carry the member
+        p0 = FakeProfile("p0")
+        comp = _install_profiles(handle_map={"PROF": p0}, sketches=[("Fine", [p0])],
+                                 monkeypatch=monkeypatch)
+        p0.parentSketch = comp.sketches.itemByName("Fine")
+        assert inp.ProfileRef("profile").resolve("PROF") == (p0, None)
+
+    def test_a_handle_whose_owning_sketch_will_not_read_still_resolves(self, monkeypatch):
+        # parentSketch absent is not evidence of a deferral either
+        p0 = FakeProfile("p0")
+        _install_profiles(handle_map={"PROF": p0}, monkeypatch=monkeypatch)
+        assert inp.ProfileRef("profile").resolve("PROF") == (p0, None)
 
 
 class TestProfileRefSchema:
@@ -2714,6 +2843,26 @@ class TestProfileHandleLocator:
         val, err = inp.ProfileRef("profile").resolve(h)
         assert val is None and "did not resolve" in err
 
+    def test_a_locator_missing_inside_a_deferred_sketch_names_the_deferral(self):
+        # The measured shape: a handle minted before a deferral, whose region the pre-deferral
+        # profile set no longer carries. Left unset, the miss reads as a stale handle and offers
+        # "re-run find_geometry for a fresh handle" - a remedy no read can supply while deferred.
+        old = FakeAreaProfile("old", centroid=(0.0, 0.0, 0.0), area=78.5398)
+        _install_profiles(sketches=[("Stale", [old], 0, True)])
+        h = "DEADTOKEN|@profile[Stale~27.2690]:0.000000,0.000000,0.000000"
+        val, err = inp.ProfileRef("profile").resolve(h)
+        assert val is None
+        assert "isComputeDeferred=true" in err and "'Stale'" in err
+        assert "fresh handle" in err and "handle did not resolve" in err
+
+    def test_a_miss_in_a_sketch_computing_normally_still_reads_as_a_stale_handle(self):
+        # the other side of the branch: the deferral sentence must not attach to an ordinary miss
+        old = FakeAreaProfile("old", centroid=(0.0, 0.0, 0.0), area=78.5398)
+        _install_profiles(sketches=[("Fine", [old], 0, False)])
+        err = inp.ProfileRef("profile").resolve(
+            "DEADTOKEN|@profile[Fine~27.2690]:0.000000,0.000000,0.000000")[1]
+        assert "isComputeDeferred" not in err and "did not resolve" in err
+
     def test_an_unnamed_locator_scans_the_design_wide_component_walk(self):
         # A locator whose bracket carries NO sketch name has no name to resolve, so _refind_profile
         # gathers its candidates from `all_components` and NOTHING else - there is no active-component
@@ -2724,6 +2873,30 @@ class TestProfileHandleLocator:
         val, err = inp.ProfileRef("profile").resolve(
             "DEADTOKEN|@profile:1.000000,2.000000,3.000000")
         assert err is None and val is p
+
+    def test_an_unnamed_locator_does_not_blame_an_unrelated_deferred_sketch(self):
+        # A nameless locator scans EVERY sketch, so a deferred sketch holding no profile anywhere
+        # near the recorded point would otherwise be named as the cause of this miss.
+        far = FakeAreaProfile("far", centroid=(9.0, 9.0, 9.0), area=10.0)
+        other = FakeAreaProfile("other", centroid=(5.0, 5.0, 5.0), area=10.0)
+        _install_profiles(sketches=[("Unrelated", [far], 0, True), ("Working", [other], 0, False)])
+        val, err = inp.ProfileRef("profile").resolve(
+            "DEADTOKEN|@profile:1.000000,2.000000,3.000000")
+        assert val is None and "did not resolve" in err
+        assert "isComputeDeferred" not in err and "Unrelated" not in err
+
+    def test_the_deferred_sketch_at_the_recorded_point_is_the_one_named(self):
+        # The signal the scoping keeps: this deferred sketch DOES hold a profile at the locator's
+        # point and only its area disagrees, while the other deferred one is somewhere else.
+        elsewhere = FakeAreaProfile("elsewhere", centroid=(9.0, 9.0, 9.0), area=10.0)
+        at_point = FakeAreaProfile("at_point", centroid=(1.0, 2.0, 3.0), area=78.5398)
+        _install_profiles(sketches=[("Elsewhere", [elsewhere], 0, True),
+                                    ("AtThePoint", [at_point], 0, True)])
+        val, err = inp.ProfileRef("profile").resolve(
+            "DEADTOKEN|@profile[~27.2690]:1.000000,2.000000,3.000000")
+        assert val is None and "isComputeDeferred=true" in err
+        assert "'AtThePoint'" in err and "Elsewhere" not in err
+
 
 class TestProfileRefComponentScope:
     """SKETCH-6: a {sketch, profile_index} selector addresses a sketch BY NAME, and Fusion numbers
@@ -3783,7 +3956,7 @@ def _install_target(*, handle_map=None, occurrences=(), components=(), brep_name
     allComponents (component), bRepBodies/meshBodies (body-by-name)."""
     import adsk.fusion
     adsk.fusion.BRepBody = FakeBRep
-    adsk.fusion.MeshBody = FakeMesh
+    adsk.fusion.MeshBody = MeshBody
     adsk.fusion.BRepFace = (FakePlanarFace, FakeCylFace)
     handle_map = handle_map or {}
     brep_named = brep_named or {}
@@ -3858,7 +4031,7 @@ class TestTargetRef:
         assert err is None and kind == "face"
 
     def test_handle_to_mesh(self):
-        m = FakeMesh("M1")
+        m = MeshBody("M1")
         _install_target(handle_map={"H": m})
         (ent, kind), err = inp.TargetRef("target").resolve("H")
         assert err is None and kind == "mesh" and ent is m
@@ -4039,6 +4212,13 @@ class TestTargetRefList:
     """The CAM-setup selector: a list of bodies AND/OR component occurrences/components. A component
     maps to its single occurrence (the CAM API wants the Occurrence, not the Component)."""
 
+    def test_the_note_states_what_naming_an_occurrence_selects(self):
+        # Both spellings SUCCEED, so no error carries the difference: naming an occurrence selects
+        # the component, naming a body selects that body. The note is the only home.
+        note = inp.TargetRefList("models").contract_note()
+        assert "occurrence selects the whole component, not one body" in note
+        assert inp.TargetRefList("models", contract="Just these.").contract_note() == "Just these."
+
     def test_body_handles_pass_through(self):
         b1 = FakeBRep("Body1", is_solid=True)
         b2 = FakeBRep("Body2", is_solid=True)
@@ -4114,7 +4294,7 @@ def _install_target_ext(handle_map):
     ConstructionAxis / ConstructionPlane types the new isinstance branches check."""
     import adsk.fusion
     adsk.fusion.BRepBody = FakeBRep
-    adsk.fusion.MeshBody = FakeMesh
+    adsk.fusion.MeshBody = MeshBody
     adsk.fusion.BRepFace = (FakePlanarFace, FakeCylFace)
     adsk.fusion.BRepEdge = FakeEdge
     adsk.fusion.ConstructionAxis = _FakeConstructionAxis

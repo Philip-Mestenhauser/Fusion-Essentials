@@ -41,12 +41,28 @@ class _Curve:
         self.endSketchPoint = type("SP", (), {})()
 
 
-class _Coll:
+class _SketchPoint:
+    """A SketchPoint the sketch owns - the 'point:<index>' address space sketchPoints indexes."""
     def __init__(self):
+        self.isConstruction = False
+
+
+class _Coll:
+    def __init__(self, centres_into=None):
         self._items = []
         self.last = None
+        # A circle's/arc's CENTRE is a SketchPoint the sketch owns: the constructor lands it in
+        # sketchPoints, so every later point's index sits one further along per curve drawn.
+        self._centres_into = centres_into
     def _make(self, *a):
-        c = _Curve(); self._items.append(c); self.last = a; return c
+        c = _Curve(); self._items.append(c); self.last = a
+        if self._centres_into is not None:
+            c.centerSketchPoint = self._centres_into._land_point()
+        return c
+    def _land_point(self):
+        p = _SketchPoint()
+        self._items.append(p)
+        return p
     def _land(self, n=1, construction=False):
         """n curves landing in this collection WITHOUT a factory call on it - what a Sketch-level
         constructor (addCenterToCenterSlot, the slot constructors) does. 'last' stays untouched, so
@@ -117,15 +133,15 @@ class FakeSketch:
         self.isComputeDeferred = False
         self.isVisible = True
         self.geometricConstraints = _GeomConstraints()
+        self.sketchPoints = _Coll()
         self.sketchLines = _Coll()
-        self.sketchCircles = _Coll()
-        self.sketchArcs = _Coll()
+        self.sketchCircles = _Coll(centres_into=self.sketchPoints)
+        self.sketchArcs = _Coll(centres_into=self.sketchPoints)
         self.sketchEllipses = _Coll()
         self.sketchFittedSplines = _Coll()
         self.sketchControlPointSplines = _Coll()
         self.sketchConicCurves = _Coll()
         self.sketchEllipticalArcs = _Coll()
-        self.sketchPoints = _Coll()
         self._colls = [self.sketchLines, self.sketchCircles, self.sketchArcs,
                        self.sketchEllipses, self.sketchFittedSplines,
                        self.sketchControlPointSplines, self.sketchConicCurves,
@@ -319,6 +335,35 @@ class TestNewKinds:
         s = FakeSketch(); _install_draw(monkeypatch, s)
         _payload(sk.add_sketch_geometry_handler(kind="point", cx=5, cy=5))
         assert s.sketchPoints.count == 1
+
+    def test_a_circle_publishes_the_index_its_centre_point_landed_at(self, monkeypatch):
+        # The centre joins sketchPoints, so 'point:<index>' counted by hand runs one short per
+        # circle already drawn. The payload names the index the sketch itself gave it.
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        s.sketchPoints._land_point()                       # a point drawn earlier holds index 0
+        out = _payload(sk.add_sketch_geometry_handler(kind="circle", cx=0, cy=0, radius=5))
+        assert out["center_point"] == "point:1"
+        assert "center_point=point:1" in out["note"]
+
+    def test_a_second_circle_publishes_its_own_centre_not_the_first_ones(self, monkeypatch):
+        # The read must follow the NEWEST circle: two circles in one sketch land two centres, and
+        # naming the first one's index for the second is exactly the off-by-N this key exists for.
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        first = _payload(sk.add_sketch_geometry_handler(kind="circle", cx=0, cy=0, radius=5))
+        second = _payload(sk.add_sketch_geometry_handler(kind="circle", cx=20, cy=0, radius=5))
+        assert first["center_point"] == "point:0"
+        assert second["center_point"] == "point:1"
+
+    def test_an_arc_publishes_its_centre_point_too(self, monkeypatch):
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        out = _payload(sk.add_sketch_geometry_handler(kind="arc", cx=0, cy=0, x1=5, y1=0,
+                                                      sweep_deg=90))
+        assert out["center_point"] == "point:0"
+
+    def test_a_kind_with_no_centre_publishes_no_centre_point(self, monkeypatch):
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        out = _payload(sk.add_sketch_geometry_handler(kind="line", x1=0, y1=0, x2=10, y2=0))
+        assert "center_point" not in out
 
     def test_spline(self, monkeypatch):
         s = FakeSketch(); _install_draw(monkeypatch, s)
@@ -1429,7 +1474,8 @@ class TestCreateSketchPlaneRef:
         prop = sk.create_sketch_tool.to_dict()["inputSchema"]["properties"]["plane"]
         assert prop["description"] == sk._PLANE.schema()["description"]
         assert "top/front/right" in prop["description"]     # the aliases the tool has always taken
-        assert "find_geometry" in prop["description"]       # plus the handle form the kind adds
+        assert "handle" in prop["description"]              # plus the handle form the kind adds
+        # where a handle comes from is the miss refusal's job (asserted above), not this schema's
 
 
 class TestCreateFrameParity:

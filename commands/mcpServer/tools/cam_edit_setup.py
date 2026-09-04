@@ -11,11 +11,13 @@ import adsk.cam
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe
+from ._common import apply_rename, ok, error, read_flag, safe
 # The machine catalog read + the by-name machine resolver are the shared CAM substrate's (one home,
 # so cam_get's catalog, this assignment and cam_create_machine's reachability gate cannot drift).
-from ._cam_common import (get_cam, find_setup, expression_error, machine_catalog, machine_label,
-                          parse_parameters, resolve_machine, unquote_expression)
+from ._cam_common import (get_cam, find_setup, enumeration_remedy, expression_error,
+                          machine_catalog, machine_label, matched_quoting, parse_parameters,
+                          resolve_machine, unquote_expression)
+from .cam_create_setup import setup_name_clash
 from . import _inputs
 
 app = adsk.core.Application.get()
@@ -32,19 +34,18 @@ _BODY_COLLECTIONS = {
 # (Setup.models/fixtures/stockSolids accept Occurrence, BRepBody, or MeshBody).
 _TARGETS = _inputs.TargetRefList("bodies", required=False)
 
-# WCS geometry-binding: each key drives one CadObjectParameterValue plus the choice-mode it needs. A
-# selected entity means the WCS follows that geometry, so a design edit that moves it invalidates the
-# ops (the associativity the shop-template vision needs). {key: (mode_param, mode_value, cad_param,
-# handle-requirement)}. origin accepts any point-ish geometry; the axes want a face (normal) or edge.
+_PARAM_READ = "cam_get(include=['parameters'], setup=...)"
+
+# WCS geometry-binding, {key: (mode_param, mode_value, cad_param, handle-requirement)}: each key
+# drives one CadObjectParameterValue plus the choice-mode it needs. A bound WCS follows that
+# geometry, so a design edit moving it invalidates the ops.
 _WCS_BINDINGS = {
     "origin":  ("wcs_origin_mode",      "'point'",  "wcs_origin_point",         "any"),
     "z_axis":  ("wcs_orientation_mode", "'axesZX'", "wcs_orientation_axisZ",    "any"),
     "x_axis":  ("wcs_orientation_mode", "'axesZX'", "wcs_orientation_axisX",    "any"),
 }
-# origin resolves through a single-handle kind; the axes too. One handle each. A WCS value may ALSO be a
-# JOINT ORIGIN - the self-centering frame a template ships for exactly this (bind the WCS to it so it
-# re-centres when stock size changes) - by the handle assembly_get(include=['joint_origins']) mints OR by
-# name. JointOriginRef recognises both (and refuses an ambiguous name).
+# One handle each. A WCS value may also be a JOINT ORIGIN, by the handle
+# assembly_get(include=['joint_origins']) mints or by name - JointOriginRef recognises both.
 _WCS_HANDLE = _inputs.GeometryHandle("wcs_handle", require="any")
 _WCS_JO = _inputs.JointOriginRef("wcs_jo")
 
@@ -138,7 +139,8 @@ def _bind_cad_param(setup, cad_param_name, entity):
 
 
 def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=None,
-            machine: str = "", machine_strip_simulation: bool = False, wcs=None) -> dict:
+            machine: str = "", machine_strip_simulation: bool = False, wcs=None,
+            rename: str = "") -> dict:
     """See TOOL_DESCRIPTION."""
     if not (setup or "").strip():
         return error("Provide 'setup' - the CAM setup name (see cam_get).")
@@ -154,10 +156,12 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
                  if v not in (None, "", [])}
     want_machine = (machine or "").strip()
     want_wcs = wcs not in (None, "", {}, [])
+    want_rename = (rename or "").strip()
 
-    if not wanted and not body_args and not want_machine and not want_wcs:
+    if not wanted and not body_args and not want_machine and not want_wcs and not want_rename:
         return error("Nothing to do. Provide 'parameters' {name: expression}, "
-                     "'models'/'fixtures'/'stock' body lists, a 'machine', and/or a 'wcs' binding.")
+                     "'models'/'fixtures'/'stock' body lists, a 'machine', a 'wcs' binding, "
+                     "and/or 'rename'.")
 
     cam, cerr = get_cam()
     if cerr:
@@ -169,6 +173,10 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
         return error(serr)
 
     # ── validate EVERYTHING before applying anything (no half-edited setup) ──
+    if want_rename:
+        clash = setup_name_clash(cam, want_rename, safe(lambda: target.name) or setup)
+        if clash:
+            return error(clash)
     sp = safe(lambda: target.parameters)
     resolved_params = {}
     missing = []
@@ -181,6 +189,18 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
     if missing:
         return error(f"Setup '{setup}' has no parameter(s): {', '.join(missing)}. "
                      "(Read the setup's parameter names first; only existing ones are settable.)")
+
+    # A parameter reading isEditable False takes the assignment without raising and keeps the
+    # expression it held (measured: 274 of a setup's 304 read False), so refuse before any write.
+    # read_flag, not safe(..., True): a flag that reads None did not answer, and cannot refuse.
+    locked = [name for name, p in resolved_params.items()
+              if read_flag(lambda p=p: p.isEditable) is False]
+    if locked:
+        return error(f"Setup '{setup}' does not accept a write to: {', '.join(locked)} "
+                     "(isEditable reads False on each). Nothing was applied. A setup exposes many "
+                     "parameters it takes no write to; set one it does - "
+                     "cam_get(include=['parameters'], setup=...) marks each refusing row "
+                     "editable false.")
 
     resolved_bodies = {}
     for arg, names in body_args.items():
@@ -207,19 +227,27 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
     eval_failures = []
     no_takes = []
     unreadable = []
+    written_of = {}
     for name, expr in wanted.items():
         p = resolved_params[name]
         before = safe(lambda p=p: p.expression)
+        # A parameter already holding a QUOTED expression stores a string, and Fusion refuses the
+        # bare spelling ('3 : Invalid enumeration value.'), so the request is wrapped to match.
+        written, quoted = matched_quoting(before, expr)
+        written_of[name] = written
         try:
-            p.expression = str(expr)
+            p.expression = written
         except Exception as e:
             return error(f"Could not set '{name}' = '{expr}' on setup '{setup}': {e}. "
-                         f"(Already applied: {', '.join(c['name'] for c in changed) or 'none'}.)")
+                         f"(Already applied: {', '.join(c['name'] for c in changed) or 'none'}.)"
+                         + enumeration_remedy(str(e), written, _PARAM_READ))
         # Read the expression BACK for its evaluation state: the platform stores an unresolvable
         # expression silently (edited==true, .expression echoes the text) - only .error exposes it.
         eval_err, eval_warn = expression_error(p)
         after = safe(lambda p=p: p.expression)
         rec = {"name": name, "before": before, "after": after}
+        if quoted:
+            rec["quoted"] = True            # absent = the request was written as it was sent
         if eval_warn:
             rec["warning"] = eval_warn
         changed.append(rec)
@@ -227,22 +255,15 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
             unreadable.append((name, str(expr)))
         elif eval_err:
             eval_failures.append((name, str(expr), eval_err))
-        elif unquote_expression(after) != unquote_expression(str(expr)):
-            # Receipt cam-parameter-expressions measured two things about this store: a NUMERIC
-            # parameter's expression reads back the text written ('777 mm/min'), and a STRING
-            # parameter's stored expression is single-quoted (its probe reads 'context' and
-            # 'strategy' back starting with a quote). A setup takes string parameters too
-            # (wcs_origin_boxPoint), which a caller may send either spelling of, so the compare runs
-            # both sides through the shared codec instead of over bytes. A read-back that differs
-            # THERE is a write this setup did not take - whether it kept the expression it held or
-            # stored a third value.
+        elif unquote_expression(after) != unquote_expression(written):
+            # A numeric parameter reads its expression back as written, while a STRING parameter
+            # (a setup carries those too) stores it single-quoted - so both sides go through the
+            # shared codec rather than comparing bytes.
             no_takes.append((name, str(expr), after))
 
     # A stored-but-unevaluated expression is a swallowed no-op the platform reports as success, and
-    # so is a parameter that reads back anything but what was written - including a parameter whose
-    # expression will not read at all, which leaves the write unconfirmed. Roll EVERY parameter we
-    # set back to its prior expression - nothing else is touched yet - and fail, naming what each
-    # offending one did, so the setup is left exactly as found.
+    # so is one reading back anything but what was written. Every parameter set here is rolled back
+    # to its prior expression, so the setup is left exactly as found.
     if eval_failures or no_takes or unreadable:
         for rec in changed:
             safe(lambda rec=rec: setattr(resolved_params[rec["name"]], "expression", rec["before"]))
@@ -257,9 +278,19 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
             detail = "; ".join(f"'{n}' = '{e}'" for n, e in unreadable)
             parts.append("the expression cannot be read back, so the change is UNCONFIRMED - "
                          + detail)
+        if eval_failures:
+            remedy = ("(A CAM stock/setup expression must reference existing parameters and "
+                      "resolve to a value - check names and units.)")
+            remedy += next((c for c in (enumeration_remedy(why, written_of[n], _PARAM_READ)
+                                        for n, _e, why in eval_failures) if c), "")
+        elif no_takes:
+            remedy = ("(Every row in this call passed the isEditable check, so a locked parameter "
+                      "is not the reason - re-read the setup with cam_get(include=['parameters'], "
+                      "setup=...).)")
+        else:
+            remedy = "(Re-read the setup with cam_get(include=['parameters'], setup=...).)"
         return error(f"Setup '{setup}': {'; '.join(parts)}. Rolled back all "
-                     f"{len(changed)} parameter(s); no change was applied. (A CAM stock/setup expression "
-                     "must reference existing parameters and resolve to a value - check names and units.)")
+                     f"{len(changed)} parameter(s); no change was applied. {remedy}")
 
     result = {
         "edited": True,
@@ -299,19 +330,9 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
     if resolved_machine is not None:
         m_obj, m_label = resolved_machine
         if machine_strip_simulation:
-            # Setup.machine REFUSES a machine whose hasSimulationModel is True ('currently not
-            # supported') - measured (measure_api
-            # cam-machine-uncleared-simulation-assignment-refused) on the library machine the
-            # measuring run picks, and only when that machine carries a simulation model.
-            # Stripping it from the TRANSIENT resolved copy (the library asset is untouched) then
-            # lets the assignment land, with the spindle maximum and every axis range reading back
-            # identically through Setup.machine (measure_api cam-machine-spindle-max-readable).
-            # Whether EVERY simulation-ready machine is
-            # refused, from every library location, and whether the platform error's copy-to-local
-            # advice works through the API, are NOT measured (PROBE NEEDED: assign an uncleared
-            # simulation-ready machine from the Local library and one from the Fusion360 library,
-            # recording whether both raise; then copy one to Local as that error advises and assign
-            # the copy uncleared).
+            # Measured on ONE simulation-ready library machine (Fusion 2705.1.4): Setup.machine
+            # refused it, and stripping the simulation model from the TRANSIENT resolved copy (the
+            # library asset untouched) let it land with spindle maximum and axis ranges unchanged.
             try:
                 m_obj.clearSimulationModel()
             except Exception as e:
@@ -358,7 +379,39 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
                             "bound_entities": bound}
         result["wcs_set"] = wcs_set
 
-    result["note"] = ("Setup edited. Existing toolpaths are now OUT OF DATE - regenerate with "
+    # The rename runs LAST, its name clash already refused above. Setup.name DEDUPES rather than
+    # refusing, so a landed name matching neither the request nor the name it held is the setup's
+    # new address; only an unmoved name is a declined rename.
+    renamed_note = ""
+    if want_rename and want_rename == result["setup"]:
+        # A rename onto the name it already reads is a NO-OP: writing it again makes the platform
+        # dedupe the setup against itself ('LegSetup' -> 'LegSetup1', measured).
+        result["renamed"] = False
+        result["name_unchanged"] = True
+        renamed_note = f" Setup.name already reads '{result['setup']}' - nothing was written."
+    elif want_rename:
+        was = result["setup"]
+        final, _declined = apply_rename(target, want_rename)
+        # An unread name settles NOTHING - neither the declined case nor the deduped one - and
+        # publishing it would hand back 'None' as the setup's address.
+        if final is None:
+            return error(f"Set the name of setup '{was}' to '{want_rename}' but Setup.name does "
+                         "not read back, so the rename is UNCONFIRMED. Re-read it with cam_get. "
+                         "Every other change in this call was applied and is NOT rolled back.")
+        if final == was:
+            return error(f"Renaming setup '{was}' to '{want_rename}' did not take - Setup.name "
+                         f"still reads {final!r}. Every other change in this call was applied and "
+                         "is NOT rolled back.")
+        result["setup"] = final
+        result["was_setup"] = was
+        result["renamed"] = True
+        renamed_note = f" Setup.name now reads '{final}' (was '{was}')."
+        if final != want_rename:
+            result["name_deduped"] = True   # absent = the name landed exactly as requested
+            renamed_note += f" Address the setup as '{final}' from here."
+
+    result["note"] = (renamed_note.strip() + (" " if renamed_note else "")
+                      + "Setup edited. Existing toolpaths are now OUT OF DATE - regenerate with "
                       "cam_generate. A WCS bound via 'wcs' is a LIVE reference to the selected geometry "
                       "or Joint Origin (bound_entities), so the WCS re-derives from it - a self-centering "
                       "Joint Origin keeps the WCS centered as its anchor updates; a design edit that "
@@ -367,26 +420,19 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
 
 
 TOOL_DESCRIPTION = (
-    "Edit a CAM SETUP - the setup-level companion to cam_edit_operation, one call per concern. 'setup' = "
-    "setup name. 'machine' = a machine library entry ('vendor|model', e.g. 'Haas|VF-2') to assign (the "
-    "prerequisite a job needs before posting; exact name wins over a shared prefix; browse names with "
-    "cam_get(include=['machines'])). 'stock'/'fixtures'/"
-    "'models' = lists of bodies (find_geometry handles or names) OR component occurrence names "
-    "that REPLACE that collection: 'stock' switches to from-solid stock, 'fixtures' auto-enables fixtures. "
-    "Select the COMPONENT occurrence (not the body inside) so the setup keeps its selection when contents are swapped "
-    "(the shop-template pattern). 'wcs' binds the WCS to a find_geometry handle or Joint Origin as a "
-    "live reference (see its own description) - a self-centering Joint Origin keeps the WCS "
-    "centered as its anchor updates. 'parameters' = {name: expression} for "
-    "any other setup parameter (box-point WCS, stock size); validated all-before-any - a "
-    "non-evaluating expression is rejected and rolled back. Every write is read back. Regenerate "
-    "toolpaths after with cam_generate."
+    "Edit a CAM SETUP: its machine, its model/fixture/stock selections, its WCS, any other setup "
+    "parameter, or its name. 'machine' is the prerequisite a job needs before posting; browse "
+    "names with cam_get(include=['machines']). 'stock' switches the setup to from-solid stock and "
+    "'fixtures' auto-enables fixtures. Select the COMPONENT occurrence, not the body inside, so a "
+    "swapped part keeps the selection. A 'parameters' expression that does not evaluate rolls the "
+    "whole call back. Regenerate toolpaths with cam_generate."
 )
 
 tool = (
     Tool.create_simple(name="cam_edit_setup", description=TOOL_DESCRIPTION)
     .add_input_property("setup", {"type": "string", "description": "Setup name (from cam_get)."})
     .add_input_property("parameters", {"type": "object",
-            "description": "Setup parameters to set: {name: expression} (or 'name=value,...'). e.g. {'wcs_origin_boxPoint': \"'top center'\", 'stockZHigh': '2.5'}."})
+            "description": "Setup parameters to set: {name: expression} (or 'name=value,...'). e.g. {'wcs_origin_boxPoint': \"'top center'\", 'stockZHigh': '2.5'}. One it takes no write to is refused by name."})
     .add_input_property("models", {"type": "array", "items": {"type": "string"},
             "description": "What to machine: bodies (handles/names) or component occurrence names - REPLACES the model set."})
     .add_input_property("fixtures", {"type": "array", "items": {"type": "string"},
@@ -396,9 +442,11 @@ tool = (
     .add_input_property("machine", {"type": "string",
             "description": "Machine to assign: 'vendor|model' (or a bare model) from the machine library (browse: cam_get include=['machines'])."})
     .add_input_property("machine_strip_simulation", {"type": "boolean",
-            "description": "With 'machine': assign a simulation_ready machine by stripping the simulation model from the resolved copy first - assigning one can be REFUSED. The assigned copy then carries no simulation model, and its spindle maximum and axis ranges read back unchanged through the setup."})
+            "description": "With 'machine': strip the simulation model from the resolved copy before assigning."})
     .add_input_property("wcs", {"type": "object",
             "description": "Bind the WCS: {origin/z_axis/x_axis: a find_geometry handle OR a Joint Origin (handle/name from assembly_get)}. Binds as a live reference (bound_entities read back); the WCS re-derives from it (associative)."})
+    .add_input_property("rename", {"type": "string",
+            "description": "New name for the setup; a name another setup already carries is refused before the write."})
     .strict_schema()
 )
 item = Item.create_tool_item(

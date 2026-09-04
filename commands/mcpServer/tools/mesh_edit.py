@@ -29,7 +29,7 @@ app = adsk.core.Application.get()
 _FG_MESH = _inputs.MeshBodyRef("mesh", required=True,
                                description="The mesh body to segment into face groups.")
 _FG_METHOD = _inputs.Choice("method", ["fast", "accurate"], default="accurate",
-                            description="Segmentation method.")
+                            description="Segmentation method - 'accurate' is slower and cleaner.")
 
 
 def mesh_generate_face_groups_handler(mesh: str = "", method: str = "accurate") -> dict:
@@ -71,17 +71,14 @@ def mesh_generate_face_groups_handler(mesh: str = "", method: str = "accurate") 
                              f"method='{meth}'", "MeshGenerateFaceGroupsFeatureInput")
         if merr:
             return error(merr)
-        # Mutation - direct call, no safe() around it. A falsy return is NOT a failure: this add()
-        # method "Return nothing in the case where the feature is non-parametric" (a DIRECT design OR
-        # an add inside the BaseFeature scope run_in_base_feature opens). SUCCESS is observed on the
-        # mesh itself (its faceGroups now exist), not via the (None) feature object.
+        # add() returns nothing for a non-parametric feature (a direct design, or an add inside the
+        # base-feature scope), so success is the mesh's own faceGroups, not this return.
         try:
             feat = feats.add(inp)
         except Exception as e:
             return error(f"Generate face groups failed "
                          f"(meshGenerateFaceGroupsFeatures.add raised): {e}")
-        # The open BaseFeature can never be re-found once the scope closes, so its name is captured
-        # HERE - it is what explains a null feature to the caller.
+        # The open BaseFeature cannot be re-found once the scope closes, so capture its name here.
         return {"feat": feat,
     "base_feature_name": safe(lambda: base_feature.name) if base_feature else None}
 
@@ -124,16 +121,16 @@ def mesh_generate_face_groups_handler(mesh: str = "", method: str = "accurate") 
 _CUT_MESH = _inputs.MeshBodyRef("mesh", required=True, description="The mesh body to cut.")
 _CUT_PLANE = _inputs.PlaneRef("plane", required=True, description="The cutting plane.")
 _CUT_TYPE = _inputs.Choice("cut_type", ["trim", "split_body", "split_faces"], default="trim",
-                           description="What the cut does.")
+                           description="trim keeps one side; split_body makes two mesh bodies; "
+                                       "split_faces cuts the triangulation in place.")
 _CUT_FILL = _inputs.Choice("fill", ["none", "minimal", "uniform"], default="minimal",
                            description="How the cut opening is filled.")
 
-# The cut types that re-triangulate the SAME mesh instead of adding a body: their effect is the
-# target's own triangle count, which is what gates them. split_body is gated on the body count.
+# The cut types that re-triangulate the SAME mesh instead of adding a body, so the target's own
+# triangle count is what gates them; split_body is gated on the body count.
 _IN_PLACE_CUTS = ("trim", "split_faces")
 
-# What a plane that missed the mesh would have done, per cut type - the pre-flight refusal's payoff
-# clause, so a caller reads the consequence of the plane it actually passed.
+# What a plane that missed the mesh would have done, per cut type - the pre-flight refusal quotes it.
 _MISS_EFFECT = {
     "trim": ("a trim by a plane the mesh does not straddle either keeps everything or DESTROYS the "
              "whole mesh (flip picks which), and a destroyed mesh is not recoverable through this "
@@ -142,47 +139,29 @@ _MISS_EFFECT = {
     "split_body": "split_body would leave one body, since the plane separates nothing",
 }
 
-# MEASURED: an emptied mesh is NOT recovered by removing the timeline entry that wrapped the cut, so
-# no disposition sentence may point a caller at design_delete_feature to get the geometry back.
-_NO_RECOVERY = ("MEASURED: removing the timeline entry does NOT bring the mesh data back - a "
+# An emptied mesh is not recovered by removing the timeline entry that wrapped the cut, so no
+# disposition sentence points a caller at design_delete_feature to get the geometry back.
+_NO_RECOVERY = ("Removing the timeline entry does NOT bring the mesh data back - a "
                 "design_delete_feature on the wrapping base feature returned deleted:true while the "
                 "mesh still read 0 triangles. Recover the mesh from the document's own history "
                 "(Fusion's undo, or doc_restore_version), not from a tool call.")
 
-# A corner within this band counts as ON the plane, not to one side of it: 1e-7 cm is a nanometre, far
-# below real geometry and far above the float noise of a cm-scale dot product.
+# A corner within this band counts as ON the plane, not to one side of it: 1e-7 cm is a nanometre.
 _ON_PLANE_CM = 1e-7
 
 
 def _plane_misses_mesh(mesh, plane_entity, plane_geom):
-    """(missed, clearance_cm): does the cutting plane fail to STRADDLE the mesh's bounding box, so no
-    part of the mesh lies on the side the cut would work on? clearance_cm is the nearest corner's
-    distance to the plane - how far the plane must move to reach the mesh - and None when the box
-    merely TOUCHES the plane (tangency: refused too, with its own wording).
-
-    The test is "no corner strictly on one side", not "all corners strictly on one side": if no AABB
-    corner is strictly on a side, no facet is either, so a trim's discarded side holds nothing (it
-    returns everything or nothing) and split_faces/split_body have nothing to split. So refusing
-    tangency cannot false-refuse a real cut - MEASURED: a plane exactly on a cube mesh's top face took
-    a trim from 20 triangles to 0.
-
-    (None, None) whenever the question cannot be answered from reads actually taken - an unreadable
-    box/origin/normal, or a mesh and a plane that are not in ONE coordinate space. MEASURED: a
-    ConstructionPlane's .geometry is COMPONENT-LOCAL (its origin z reads 1.0 inside a component offset
-    +10 cm in Z, not 11.0), and a native body's .boundingBox is component-local too while an occurrence
-    proxy's box is root-space - so the two only compare when the mesh AND the plane are natives of one
-    component (_geom.aabb_gap's precondition: one frame, or no answer).
-
-    A box the plane genuinely crosses proves nothing, because a non-convex mesh can sit entirely on one
-    side of it - that case is what the post-cut triangle-count gates are for."""
+    """(missed, clearance_cm): does the cutting plane fail to STRADDLE the mesh's bounding box?
+    clearance_cm is the nearest corner's distance to the plane, None when the box merely touches it,
+    and (None, None) whenever the reads taken cannot answer."""
+    # A ConstructionPlane's .geometry is COMPONENT-LOCAL, and a native body's .boundingBox is
+    # component-local while an occurrence proxy's is root-space - so the two compare only when the
+    # mesh AND the plane are natives of ONE component. Any other pairing answers (None, None).
     if safe(lambda: mesh.assemblyContext) is not None:
         return None, None
     if safe(lambda: plane_entity.assemblyContext) is not None:
         return None, None
     owner, host = _inputs.entity_component(plane_entity), safe(lambda: mesh.parentComponent)
-    # `is not True`: same_component answers None where an owner's identity did not read, and this
-    # gate licenses subtracting a plane from a box - an unproven pair joins the unreadable ones on
-    # the (None, None) "no answer from reads actually taken" path.
     if owner is None or host is None or _common.same_component(owner, host) is not True:
         return None, None
 
@@ -220,15 +199,8 @@ def _av_phrase(before, after) -> str:
 
 def _rollback_state(design, feat, mesh) -> str:
     """What the model holds after a refused cut: the rollback attempt's outcome plus the remedy for
-    whatever is still there.
-
-    The proof a rollback took is the TIMELINE count dropping, not deleteMe()'s own answer and not the
-    mesh's triangle count (which on the unchanged-count refusal equals its pre-cut value either way,
-    so it can prove nothing there). The same read is used on both refusals so they cannot diverge on
-    the same question, and a deleteMe() that RAISES is reported as a raise, never as a decline. A cut
-    that came back without a feature object has no handle to delete, so it claims no rollback at all.
-    The remedy is chosen by what the mesh READS afterward: an emptied mesh gets _NO_RECOVERY, since
-    the timeline-entry remedy is measured not to restore mesh data. Mirrors model_extrude._roll_back."""
+    whatever is still there. The proof a rollback took is the TIMELINE count dropping, not
+    deleteMe()'s own answer."""
     def _disposition():
         now = _tri_count(mesh)
         reads = "no readable triangle count" if now is None else f"{now} triangles"
@@ -305,9 +277,8 @@ def mesh_plane_cut_handler(mesh: str = "", plane: str = "", cut_type: str = "tri
     plane_label = safe(lambda: pl.name) or (plane or "").strip() or "the requested plane"
 
     # PRE-FLIGHT: a plane the mesh's bounding box does not straddle cannot cut it, and running the
-    # feature anyway is what destroys the mesh - so this refusal happens BEFORE any mutation. It is
-    # skipped whenever the geometry cannot be read or the two are not in one frame: a guard may never
-    # refuse on an input it did not read.
+    # feature anyway destroys the mesh - so this refusal happens BEFORE any mutation, and is skipped
+    # whenever the geometry could not be read.
     missed, clearance = _plane_misses_mesh(mb, pl, cut_plane)
     if missed:
         where = (f"only TOUCHES mesh '{mesh_name}' - its bounding box lies against the plane with no "
@@ -367,25 +338,21 @@ def mesh_plane_cut_handler(mesh: str = "", plane: str = "", cut_type: str = "tri
             if xerr:
                 return error(xerr)
 
-        # Snapshot the component's mesh bodies AND the target's triangle count and area/volume BEFORE
-        # the add, so the cut is detected by side effect rather than by the (often None) feature
-        # object. Captured INSIDE inner_op so all of them are taken in the same scope the add runs in
-        # (valid in both direct and base-feature modes).
+        # The pre-cut readings, taken inside inner_op so they share the add's scope: the cut is
+        # detected by side effect, not by the (often None) feature object.
         def _mesh_count():
             return safe(lambda: comp.meshBodies.count)
         before_mesh_count = _mesh_count()
         before_tri = _tri_count(mb)
         before_av = _area_volume(mb)
 
-        # Mutation - direct call, no safe() around it. A falsy return is NOT a failure: this add()
-        # method "Return nothing in the case where the feature is non-parametric" (DIRECT design OR an
-        # add inside the BaseFeature scope). SUCCESS is the changed mesh body set, not the feature.
+        # add() returns nothing for a non-parametric feature (a direct design, or an add inside the
+        # base-feature scope), so success is the changed mesh body set, not this return.
         try:
             feat = feats.add(inp)
         except Exception as e:
             return error(f"Mesh plane cut failed (meshPlaneCutFeatures.add raised): {e}")
-        # The open BaseFeature can never be re-found once the scope closes, so its name is captured
-        # HERE - it is what explains a null feature to the caller.
+        # The open BaseFeature cannot be re-found once the scope closes, so capture its name here.
         return {"feat": feat, "before_mesh_count": before_mesh_count, "before_tri": before_tri,
     "before_area_volume": before_av,
     "after_mesh_count": _mesh_count(), "fill_applied": fill_applied,
@@ -407,10 +374,8 @@ def mesh_plane_cut_handler(mesh: str = "", plane: str = "", cut_type: str = "tri
     bodies = ([{"name": safe(lambda b=b: b.name), "handle": safe(lambda b=b: b.entityToken)}
                for b in _common.result_bodies(feat)] if feat else [])
 
-    # trim and split_faces re-triangulate the SAME mesh, so its triangle count IS the headline effect
-    # that separates a real cut from the two silent failures below. The count alone cannot carry the
-    # unchanged case, though: a cut whose fill adds exactly as many triangles as it removed lands with
-    # the count flat, so the mesh's own area/volume is read as a second, independent signal.
+    # A cut whose fill adds exactly as many triangles as it removed lands with the triangle count
+    # flat, so the mesh's own area/volume is read as a second, independent signal.
     before_tri = result["before_tri"]
     before_av = result["before_area_volume"]
     result_mesh = (_result_mesh_of(feat, mb) if feat else mb) if ct in _IN_PLACE_CUTS else None
@@ -419,10 +384,8 @@ def mesh_plane_cut_handler(mesh: str = "", plane: str = "", cut_type: str = "tri
     count_flat_but_moved = False
     if ct in _IN_PLACE_CUTS and before_tri and after_tri is not None:
         if after_tri == 0:
-            # The whole mesh was consumed: the body survives as an empty husk, which is a destructive
-            # failure, never a cut. MEASURED: a trim by a plane 200 mm clear of a 20 mm cube mesh
-            # removes all 12 triangles, leaving a body reading 0 triangles / 0 volume, and the add
-            # raises nothing - the triangle count is the only signal that this happened.
+            # A trim by a plane clear of the mesh removes every triangle and raises nothing, leaving
+            # an empty husk of a body - the triangle count is the only signal that this happened.
             if ct == "trim":
                 cause = (f"The likely cause is that '{plane_label}' does not pass through the mesh: "
                          "trim keeps ONE side of the plane, and every triangle was on the discarded "
@@ -430,11 +393,10 @@ def mesh_plane_cut_handler(mesh: str = "", plane: str = "", cut_type: str = "tri
                          "or move the plane so it passes through the mesh (mesh_get reports its "
                          "bounding box).")
             else:
-                # MEASURED: split_faces splits facets in place and only ADDS triangles (352 -> 368 on
-                # an intersecting plane), so zero cannot be a split_faces outcome - flip does not
-                # choose a kept side here and naming it would misdescribe the operation.
-                cause = ("split_faces splits facets in place and never removes triangles (MEASURED: "
-                         "an intersecting plane took a mesh 352 -> 368), so zero is not a "
+                # split_faces only ADDS triangles, so flip does not choose a kept side here and
+                # naming it would misdescribe the operation.
+                cause = ("split_faces splits facets in place and never removes triangles (an "
+                         "intersecting plane took a mesh 352 -> 368), so zero is not a "
                          "split_faces outcome at all - the mesh was destroyed rather than cut. Read "
                          "the design back with design_get before retrying.")
             return error(
@@ -442,20 +404,16 @@ def mesh_plane_cut_handler(mesh: str = "", plane: str = "", cut_type: str = "tri
                 "removed and the mesh body now reads 0 triangles, so no geometry of it is left. "
                 + cause + " " + _rollback_state(design, feat, mb))
         if after_tri == before_tri:
-            # The count alone cannot refuse here: a cut whose fill adds exactly as many triangles as
-            # it removed lands with the count flat, and rolling that back would destroy real geometry.
-            # So the refusal needs the second signal to AGREE that nothing moved; a moved area/volume
-            # over a flat count is a landed cut, reported as success with both readings. An unreadable
-            # second signal leaves the count as the only evidence there is, so the refusal stands on
-            # it and says so.
+            # A flat count alone cannot refuse: the refusal needs the second signal to AGREE that
+            # nothing moved, since a moved area/volume over a flat count is a landed cut.
             moved = _mesh_moved(before_av, after_av)
             if moved is not True:
                 if ct == "trim":
                     why = (f"'{plane_label}' cut no triangles off it, which is what a plane that does "
                            "not pass through the mesh does.")
                 else:
-                    why = (f"split_faces ADDS triangles where the plane crosses the facets (MEASURED: "
-                           f"352 -> 368 on an intersecting plane), so an unchanged count means "
+                    why = (f"split_faces ADDS triangles where the plane crosses the facets (an "
+                           f"intersecting plane took a mesh 352 -> 368), so an unchanged count means "
                            f"'{plane_label}' does not cross the mesh.")
                 second = (f"Its area and volume did not move either ({_av_phrase(before_av, after_av)})."
                           if moved is False else
@@ -493,14 +451,12 @@ def mesh_plane_cut_handler(mesh: str = "", plane: str = "", cut_type: str = "tri
     "mesh_bodies_before": before_mesh_count,
     }
 
-    # The magnitudes a caller reads WHICH side survived from: a trim that kept the small side reports
-    # a small triangles_after. Published only for the in-place cuts, where both numbers describe the
-    # same body (split_body's second piece is a body of its own, counted by mesh_body_count).
+    # Published only for the in-place cuts, where both numbers describe the same body (split_body's
+    # second piece is a body of its own, counted by mesh_body_count).
     if ct in _IN_PLACE_CUTS:
         payload["triangles_before"] = before_tri
         payload["triangles_after"] = after_tri
-        # The second signal, published beside the count so a caller can judge the cut on the geometry
-        # too - null for a signal this build could not read, never a stand-in 0.
+        # The second signal - null where the build could not read it, never a stand-in 0.
         payload["area_before_cm2"], payload["area_after_cm2"] = before_av[0], after_av[0]
         payload["volume_before_cm3"], payload["volume_after_cm3"] = before_av[1], after_av[1]
         if count_flat_but_moved:
@@ -515,10 +471,8 @@ def mesh_plane_cut_handler(mesh: str = "", plane: str = "", cut_type: str = "tri
                      "either side cannot show what the cut removed - read the mesh back with "
                      "mesh_get.")
 
-    # split_body separates the mesh only when the body count rises. On a non-watertight (open)
-    # mesh the cut applies but yields one body - the API does not split it. `became_split` reports
-    # that, so cut:true is not mistaken for a completed separation. trim/split_faces never add
-    # bodies, so only split_body is gated this way.
+    # split_body separates the mesh only when the body count rises: on a non-watertight mesh the cut
+    # applies but yields one body, which `became_split` reports so cut:true is not read as a split.
     if ct == "split_body":
         before = before_mesh_count if before_mesh_count is not None else 0
         after = after_mesh_count if after_mesh_count is not None else 0
@@ -550,12 +504,8 @@ mesh_generate_face_groups_tool = (
     _inputs.apply_to_tool(
         Tool.create_simple(
             name="mesh_generate_face_groups",
-            description=("Segment a MESH body into planar FACE GROUPS - required before a PRISMATIC "
-                         "mesh_to_brep, which otherwise fails with 'MESH_FAILED_BREP - Use Generate "
-                         "Face Groups'. Run this first, then mesh_to_brep(method='prismatic'). "
-                         "method='accurate' (default) is slower but cleaner; 'fast' is quicker. In a "
-                         "PARAMETRIC design the feature runs inside a BaseFeature edit scope (handled "
-                         "for you); DIRECT needs none.")),
+            description=("Segment a MESH body into planar FACE GROUPS - required before "
+                         "mesh_to_brep(method='prismatic'). Run this first, then convert.")),
         _FG_SPEC)
     .strict_schema()
 )
@@ -572,11 +522,8 @@ mesh_plane_cut_tool = (
     _inputs.apply_to_tool(
         Tool.create_simple(
             name="mesh_plane_cut",
-            description=("Cut a MESH body with a plane. cut_type='trim' (default) keeps one side; "
-                "'split_body' makes two separate mesh bodies; 'split_faces' cuts the triangulation "
-                "in place. fill: none | minimal (default) | uniform. flip keeps/cuts the OTHER side. "
-                "In PARAMETRIC the cut runs inside a BaseFeature scope (handled for you); DIRECT "
-                "needs none.")),
+            description=("Cut a MESH body with a plane - trim it, split it into two bodies, or "
+                "split the triangulation in place.")),
         _CUT_SPEC)
     .add_input_property("flip", {"type": "boolean",
             "description": "Keep/cut the OTHER side of the plane (default false)."})

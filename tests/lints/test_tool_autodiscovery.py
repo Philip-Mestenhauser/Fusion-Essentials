@@ -1,16 +1,7 @@
 """Lint/contract for the AUTO-DISCOVERED tool registration (entry.py::_collect_items).
 
-Adding a tool is now just dropping a ``<name>.py`` with a ``register_tool()`` into tools/ — entry.py
-sweeps the package with pkgutil instead of a hand-maintained list. This test guards the discovery
-contract WITHOUT importing entry.py (which needs the live Fusion add-in host):
-
-  1. Sweeping the package the way entry.py does registers EVERY non-helper, non-gated tool module —
-     the count matches the modules that expose register_tool(). No tool is silently left unregistered.
-  2. Tool names are unique (the registry's collision guard would otherwise raise).
-  3. The gated sys_execute_script is NOT registered by the sweep (it's opt-in, handled separately).
-  4. Helper modules (_common/_inputs/_outputs/_data_common) expose no register_tool() (so the sweep's
-     "skip _-prefixed" rule and "call register_tool if present" rule agree).
-"""
+Sweeping tools/ the way entry.py does - without importing entry.py, which needs the live add-in
+host - registers every non-helper module under a unique name, gated and helper modules excluded."""
 
 import os
 
@@ -45,10 +36,9 @@ def _sweep_register():
 
 class TestAutoDiscovery:
     def test_every_swept_module_registers_a_tool(self):
-        # The discovery invariant: every non-gated, non-underscore module the sweep sees exposes
-        # register_tool() - else it's a tool silently left unregistered. (Shared engines/helpers are
-        # _-prefixed and so are skipped by both _tool_module_names() and the real sweep - that is how a
-        # read CORE behind a Get, like _sketch_detail / _data_read, declares "I am not a tool".)
+        # Shared engines/helpers are _-prefixed, so both _tool_module_names() and the real sweep
+        # skip them - that is how a read CORE behind a Get, like _sketch_detail / _data_read,
+        # declares "I am not a tool".
         names = [n for n in _tool_module_names() if n not in _GATED]
         without = [n for n in names if not callable(getattr(load_tool(n), "register_tool", None))]
         assert not without, (f"non-gated, non-underscore modules missing register_tool() (would be "
@@ -76,12 +66,9 @@ class TestAutoDiscovery:
                 f"{helper} should be a helper, not a tool (no register_tool)")
 
     def test_explicitly_referenced_modules_are_importable_with_their_entry_points(self):
-        # entry._collect_items() references three modules OUTSIDE the sweep and must import them
-        # explicitly (NOT as bound attributes of the tools package — the sweep may not have imported
-        # them). A `tools.<name>` attribute access on a module the sweep skips (the gated
-        # sys_execute_script) raises AttributeError at startup, so the server never binds its port
-        # and /health 404s. Pin that each explicitly-referenced module loads and exposes the entry
-        # point entry.py calls on it.
+        # entry._collect_items() references three modules OUTSIDE the sweep and imports them
+        # explicitly: a `tools.<name>` attribute access on a module the sweep skips raises
+        # AttributeError at startup, so the server never binds its port and /health 404s.
         assert callable(getattr(load_tool("sys_execute_script"), "register_tool", None)), \
             "gated sys_execute_script must expose register_tool() (entry.py calls it when enabled)"
         reload_mod = load_tool("sys_reload_addin")
@@ -91,11 +78,8 @@ class TestAutoDiscovery:
             "sys_reload_addin must expose install_reload_event() (entry.py installs its event)"
 
     def test_entry_does_not_attribute_access_swept_or_gated_modules(self):
-        # With the sweep emptying tools/__init__.py, a module is only a bound attribute of the
-        # `tools` package if something imported it. Referencing `tools.<name>.foo()` for a module
-        # the sweep SKIPS (gated) raises AttributeError and aborts server startup. entry.py must
-        # import these modules explicitly (`from .tools import <name>`), never reach them as
-        # `tools.<name>`.
+        # A module is a bound attribute of the `tools` package only if something imported it, so
+        # `tools.<name>.foo()` for a module the sweep SKIPS (gated) aborts server startup.
         import os
         entry = os.path.join(os.path.dirname(TOOLS_DIR), "entry.py")
         src = _corpus.text(entry)

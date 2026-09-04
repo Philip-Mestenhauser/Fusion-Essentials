@@ -74,10 +74,8 @@ def handler(name: str = "", confirm_name: str = "") -> dict:
     if assets is None:
         return error("Could not resolve the Local machine library location, so the machine's asset "
                      "cannot be addressed. Nothing was deleted.")
-    # The ONE match set, used by the pre-delete search AND the post-delete read-back: an asset's leaf
-    # name can equal the machine's label (its description) OR the name it was reached by, and the two
-    # differ whenever description is not model. Searching the two reads with different sets is how a
-    # delete reports "gone" against a set that never contained the asset it just deleted.
+    # The ONE match set for the pre-delete search AND the post-delete read-back: an asset's leaf
+    # name can equal the machine's label or the name it was reached by, which differ.
     wanted_names = {name.lower(), (label or "").lower()}
     hits = assets_named(assets, wanted_names)
     if not hits:
@@ -124,13 +122,9 @@ def handler(name: str = "", confirm_name: str = "") -> dict:
         return error(f"Fusion declined to delete '{label}' from the Local machine library "
                      "(deleteAsset returned false) - it is still there.")
 
-    # The LOAD-BEARING read-back is the library's own asset walk. MEASURED: the machine-library query
-    # is keyed on (vendor, model) and does NOT reach a stored machine by a description that is not
-    # its model - createQuery(local, '', 'ProbeMachQ') returned 0 hits for a machine whose
-    # description was 'ProbeMachQ' and model 'TT120', while the model query returned it and the walk
-    # listed it. So a re-resolve answering NOTHING is no evidence of a delete; only the asset list is.
-    # A walk that could not answer, or did not finish, leaves the delete UNCONFIRMED rather than
-    # letting an empty match pass for proof.
+    # The read-back is the library's own asset walk: the machine-library query is keyed on
+    # (vendor, model) and does not reach a machine by a description that is not its model, so a
+    # re-resolve answering nothing is no evidence of a delete.
     after, after_truncated = _local_assets(lib)
     if after is None or after_truncated:
         return error(f"deleteAsset returned true for '{label}', but the Local library "
@@ -188,9 +182,7 @@ TOOL_DESCRIPTION = (
     "cam_edit_setup(machine=...) assigns by (see cam_get(include=['machines'])); a name several "
     "machines answer to is refused, not guessed. GUARDED and IRREVERSIBLE: 'confirm_name' must "
     "EXACTLY match the RESOLVED machine name. A machine reached from the bundled fusion360 library "
-    "is refused - only the Local library is deleted from. The asset is loaded back and matched to "
-    "the confirmed machine before it goes, and the delete is verified by re-walking the library's "
-    "own asset list."
+    "is refused - only the Local library is deleted from."
 )
 
 tool = (

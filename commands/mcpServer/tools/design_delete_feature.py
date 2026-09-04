@@ -27,21 +27,15 @@ from ._common import timeline_health as _timeline_health
 
 
 def _find_object(timeline, want):
-    """(TimelineObject, error_text) for the ONE object named `want`, through the shared timeline
-    by-name resolver - the same match and the same refusal design_edit_timeline and the FeatureRef
-    kind answer this input with. A DELETE gets no laxer contract than they do: the match is EXACT
-    (case-insensitive), never a substring, so 'Fillet' cannot delete 'Fillet12'; a repeated name is
-    refused with the 'name@index' candidates, which is the form that targets one of them."""
+    """(TimelineObject, error_text) for the ONE object named `want`, through the shared by-name
+    resolver: an EXACT case-insensitive match, a repeated name refused with its candidates."""
     return _inputs.resolve_timeline_object(_inputs._timeline_objects(timeline), want,
                                            "the feature to delete")
 
 
 def _name_hits(timeline, name):
-    """How many timeline objects carry `name` right now - through the SAME shared matcher the
-    resolver targeted the delete with, so the before/after census and the resolution can never
-    disagree about what the name means. None when the timeline itself cannot be read, which is not
-    a count of zero: the walk under _timeline_objects degrades an unreadable collection to an EMPTY
-    one, so its size is only evidence once the collection has reported a size of its own."""
+    """How many timeline objects carry `name` right now, through the same matcher the delete was
+    resolved with - None when the timeline itself could not be read, which is not a count of zero."""
     if timeline is None or _common.counted(lambda: timeline.count) is None:
         return None
     return len(_inputs._match_timeline_objects(_inputs._timeline_objects(timeline), name))
@@ -68,13 +62,8 @@ def _occurrence_present(design, path):
 
 
 def handler(feature: str = "") -> dict:
-    """Delete one timeline feature by name. WRITES (destructive).
-
-    feature: the timeline object's name (as shown by design_get(include=['timeline'])). An ambiguous name is refused
-    (with the candidates), and a timeline GROUP is refused (it has no deletable entity). The result
-    reports the timeline health before/after, since deleting a feature whose geometry a later feature
-    consumes can leave that downstream feature in error.
-    """
+    """Delete one timeline feature by name (design_get(include=['timeline']) lists them), reporting
+    the timeline health before and after. WRITES (destructive)."""
     want = (feature or "").strip()
     if not want:
         return error("Provide 'feature' - the timeline object name to delete (see design_get(include=['timeline'])).")
@@ -104,12 +93,9 @@ def handler(feature: str = "") -> dict:
         return error(f"'{name}' has no associated entity to delete (it may be a group or an "
                      "unsupported timeline object).")
 
-    # An Occurrence .entity does not say WHICH kind of timeline object this is (both live-verified):
-    # a Remove FEATURE that took out an occurrence reports the REMOVED occurrence, whose deleteMe()
-    # raises "2 : InternalValidationError", while an occurrence CREATE reports the LIVE instance,
-    # whose deleteMe() succeeds. What identifies a Remove feature is the NAME LOOKUP below - the
-    # feature resolving by this object's name out of a component's features.removeFeatures. With no
-    # such feature the entity is deleted exactly as the timeline handed it over.
+    # An Occurrence .entity does not say WHICH kind of timeline object this is: a Remove FEATURE
+    # reports the REMOVED occurrence (whose deleteMe() raises "2 : InternalValidationError") and an
+    # occurrence CREATE the LIVE one, so the name lookup below is what tells them apart.
     remove_feature, removed_path = None, None
     occ_type = safe(lambda: adsk.fusion.Occurrence)
     if occ_type is not None and safe(lambda: isinstance(entity, occ_type), False):
@@ -119,15 +105,13 @@ def handler(feature: str = "") -> dict:
             return error(f"'{name}' names a RemoveFeature in {len(hits)} components ({where}) - "
                          "refusing to guess which one this timeline object belongs to.")
         if hits:
-            # IDENTITY, not the name alone: the 'name@index' form deliberately targets ONE of
-            # several same-named timeline objects, so a RemoveFeature that merely shares the name
-            # is not this object. RemoveFeature.timelineObject is the feature's own timeline object
-            # - accept the reroute only when it sits at the index that was resolved. A mismatch or
-            # an unreadable index falls through to the entity, the same safe default as no hit.
+            # IDENTITY, not the name alone: a RemoveFeature that merely shares the name is not this
+            # object, so the reroute is accepted only when the feature's own timelineObject sits at
+            # the index that was resolved.
             feat_index = safe(lambda: hits[0][0].timelineObject.index)
             if index is not None and feat_index is not None and feat_index == index:
-                # Deleting the Remove feature puts the occurrence back (live-verified), so its path
-                # is captured here to read that restoration back after the delete.
+                # Deleting the Remove feature puts the occurrence back, so its path is captured here
+                # to read that restoration back after the delete.
                 remove_feature = hits[0][0]
                 removed_path = safe(lambda: entity.fullPathName)
                 entity = remove_feature
@@ -195,11 +179,9 @@ def handler(feature: str = "") -> dict:
 
 _DESC = (
 "Delete one timeline feature by name (from design_get(include=['timeline'])) - e.g. a botched "
-"pattern/mirror, which removes all the instances it created. An ambiguous name is refused (candidates "
-"listed; pick one with the 'name@index' form, e.g. 'Extrude1@4'); a timeline group is refused; the "
-"result reports if the delete left a downstream feature in error. Timeline indices shift after every "
-"delete - in a batch, re-read the timeline before each 'name@index' rather than reusing cached "
-"positions. Undo in Fusion if unintended."
+"pattern/mirror, which removes every instance it created. Timeline indices SHIFT after each "
+"delete, so in a batch re-read the timeline before each 'name@index' rather than reusing a cached "
+"position. Undo in Fusion if unintended."
 )
 
 tool = (

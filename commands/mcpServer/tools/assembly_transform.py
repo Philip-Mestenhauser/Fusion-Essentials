@@ -63,20 +63,14 @@ def _occ_translation_mm(occ):
 
 
 # Only isGroundToParent is settable here. The other grounding flag, isGrounded (the UI Ground/Fix),
-# is deliberately NOT exposed: the platform deprecates it and the parent lock is the supported way
-# to fix a part. Consequence for reads: assembly_get's grounded_occurrences lists only the UI flag,
-# so an agent-grounded build reads it EMPTY by design - check the per-occurrence ground_to_parent
-# flag instead.
+# is NOT exposed: the platform deprecates it and the parent lock is the supported way to fix a
+# part. assembly_get's grounded_occurrences therefore reads EMPTY for an agent-grounded build.
 
 
 def ground_handler(occurrence: str = "", ground_to_parent=None) -> dict:
-    """Set an occurrence's isGroundToParent flag (the stateless parent lock).
-
-    true RE-LOCKS the part at its timeline-defined placement, DISCARDING any free move - captured or
-    not (live-verified: a moved+captured occurrence snapped back the moment the flag was set); the
-    position read-back below turns that silent snap into a reported one. false frees the part to
-    move/joint. Both grounding flags are read back and reported. WRITES.
-    """
+    """Set an occurrence's isGroundToParent flag (the stateless parent lock). true RE-LOCKS the
+    part at its timeline-defined placement, DISCARDING any free move, captured or not; false frees
+    it to move/joint. Both grounding flags are read back and reported. WRITES."""
     if ground_to_parent is None:
         return error("Specify 'ground_to_parent' (true/false). true locks the occurrence to its "
                      "timeline placement; false releases it.")
@@ -101,8 +95,7 @@ def ground_handler(occurrence: str = "", ground_to_parent=None) -> dict:
     if bool(now) != bool(ground_to_parent):
         return error(f"Assignment was accepted but '{safe(lambda: occ.name)}' still reads "
                      f"isGroundToParent={bool(now)} - the flag did not take.")
-    # Report BOTH flags distinctly - isGrounded is read-only context (a human may have set it in the
-    # UI; this tool never writes it), and null rather than False when it cannot be read.
+    # isGrounded is read-only context here, and null rather than False when it cannot be read.
     out = {
         "occurrence": safe(lambda: occ.name),
         "isGroundToParent": bool(now),
@@ -113,8 +106,8 @@ def ground_handler(occurrence: str = "", ground_to_parent=None) -> dict:
                 "per-occurrence ground_to_parent flag instead. To fix a part at a moved position, "
                 "leave it FREE and assembly_move + assembly_capture_position.",
     }
-    # Grounding to the parent lock snaps the part back to its timeline placement (live-verified),
-    # silently discarding free moves; report that move with numbers.
+    # The parent lock snaps the part back to its timeline placement, silently discarding free
+    # moves; report that move with numbers.
     pos_after = _occ_translation_mm(occ)
     if (pos_before is not None and pos_after is not None
             and any(abs(a - b) > 0.01 for a, b in zip(pos_before, pos_after))):
@@ -134,11 +127,7 @@ def ground_handler(occurrence: str = "", ground_to_parent=None) -> dict:
 # -------------------------------------------------------------- assembly_move
 
 def _occurrence_joint_names(occ):
-    """Names of the joints an occurrence participates in (empty if none/unreadable).
-
-    A free transform move on a JOINTED occurrence corrupts the joint solve (the joints
-    recompute against the new pose and break), so the move guard refuses unless forced.
-    """
+    """Names of the joints an occurrence participates in (empty if none/unreadable)."""
     out = []
     for j in _common.iter_collection(safe(lambda: occ.joints)):
         nm = safe(lambda j=j: j.name)
@@ -152,20 +141,9 @@ def move_handler(occurrence: str = "", dx: float = 0.0, dy: float = 0.0, dz: flo
                  rotate_x: float = 0.0, rotate_y: float = 0.0, rotate_z: float = 0.0,
                  quiet: bool = False) -> dict:
     """Translate (and optionally rotate) an occurrence by editing its transform - a free move.
-
-    occurrence: the occurrence to move. dx/dy/dz: translation in 'units' (mm default). rotate_deg /
-    rotate_axis: a SINGLE rotation about a world axis (x/y/z) or a straight-edge handle, through the
-    occurrence's current position. rotate_x / rotate_y / rotate_z: compose a MULTI-AXIS orientation in
-    one call (applied X then Y then Z, about the occurrence's current origin) - use these OR
-    rotate_deg, not both. One-shot reposition (no joint). WRITES.
-
-    JOINTED PARTS: moving an occurrence that participates in JOINTS is how you POSE a mechanism along
-    its free DOF (e.g. spin a part on its revolute axis) - this is the sanctioned path. AFTER the move,
-    call assembly_capture_position to record the pose into the timeline (otherwise it is transient), and
-    assembly_get to confirm the joints stayed healthy: a move that FIGHTS the joints (e.g. rotating a
-    rigidly-jointed member off its mate) over-constrains the solve. When the target is jointed, the
-    result includes a 'jointed_warning' naming the joints + this next step (set quiet=true to suppress).
-    """
+    rotate_deg/rotate_axis is a SINGLE rotation about a world axis or edge handle; rotate_x/y/z
+    compose a MULTI-AXIS orientation (applied X then Y then Z). A jointed target gets a
+    'jointed_warning' naming the joints unless quiet=true. WRITES."""
     k = scale(units)
     if k is None:
         return error(f"Unknown units '{units}'. Use mm, cm, or in.")
@@ -222,11 +200,9 @@ def move_handler(occurrence: str = "", dx: float = 0.0, dy: float = 0.0, dz: flo
                     r.setToRotation(math.radians(float(ang)), adsk.core.Vector3D.create(*vec), origin)
                     mat.transformBy(r)
             axis_desc = "multi"
-        # translation - COMPOSE it as its own matrix, never assign mat.translation directly. When mat
-        # already holds a rotation about a non-origin pivot, setToRotation baked a pivot-correction term
-        # into mat's translation column; `mat.translation = vec` would OVERWRITE that column and the part
-        # would rotate about the WORLD origin instead of its own. Composing a separate translation matrix
-        # preserves the pivot (same pattern the multi-rotation path above uses).
+        # translation - COMPOSE it as its own matrix, never assign mat.translation directly:
+        # setToRotation bakes a pivot-correction term into that column, and overwriting it rotates
+        # the part about the WORLD origin instead of its own.
         if dx or dy or dz:
             vec = adsk.core.Vector3D.create(float(dx) * k, float(dy) * k, float(dz) * k)
             tmat = adsk.core.Matrix3D.create()
@@ -296,11 +272,8 @@ def move_handler(occurrence: str = "", dx: float = 0.0, dy: float = 0.0, dz: flo
 # ------------------------------------------------------------------ assembly_rigid_group
 
 def rigid_group_handler(occurrences: str = "", include_children: bool = False) -> dict:
-    """Lock two or more occurrences together as one rigid unit.
-
-    occurrences: occurrence name(s) (comma-separated, or list). include_children: also rigidly
-    include the children of those occurrences. WRITES.
-    """
+    """Lock two or more occurrences together as one rigid unit; include_children also takes in
+    their children. WRITES."""
     design = _common.design()
     if not design:
         return error("No active design with components.")
@@ -335,8 +308,8 @@ _GROUND_DESC = (
 "part at its TIMELINE placement, DISCARDING any free move (the snap is reported as position_reset); "
 "false frees it to move/joint. The UI Ground/Fix flag (isGrounded) is NOT settable here - the "
 "platform treats it as legacy - so assembly_get's grounded_occurrences (which lists only that flag) "
-"stays EMPTY for agent-grounded builds; read the per-occurrence ground_to_parent flag instead. BOTH "
-"flags are reported back. To fix a part at a moved position: leave it FREE and assembly_move + capture."
+"stays EMPTY for agent-grounded builds; read the per-occurrence ground_to_parent flag instead. "
+"To fix a part at a moved position: leave it FREE and assembly_move + capture."
 )
 ground_tool = (
     Tool.create_simple(name="assembly_ground", description=_GROUND_DESC)
@@ -352,13 +325,12 @@ ground_item = Item.create_tool_item(
 
 _MOVE_DESC = (
 "Move an occurrence by editing its transform - a free reposition with NO joint created (use "
-"joint_create/assembly_constrain for a maintained relationship). 'dx'/'dy'/'dz' translate "
-"in 'units' (mm default); 'rotate_deg' + 'rotate_axis' (x/y/z) rotate about a world "
-"axis through the current position. The part must be free to move (assembly_ground: "
-"ground_to_parent=false). The new pose is TRANSIENT, jointed or not - a later joint creation ANYWHERE "
-"or a recompute silently REVERTS an uncaptured move, so assembly_capture_position it to bake the pose "
-"into the timeline. A pattern/mirror FEATURE also re-derives its instances every recompute, "
-"overwriting a free move of that occurrence - position those through the owning feature instead."
+"joint_create/assembly_constrain for a maintained relationship). 'rotate_deg' + 'rotate_axis' "
+"rotate about an axis through the current position. The new pose is TRANSIENT, jointed or not - a "
+"later joint creation ANYWHERE or a recompute silently REVERTS an uncaptured move, so "
+"assembly_capture_position bakes the pose into the timeline. A pattern/mirror FEATURE also "
+"re-derives its instances every recompute, overwriting a free move of that occurrence - position "
+"those through the owning feature instead."
 )
 move_tool = (
     Tool.create_simple(name="assembly_move", description=_MOVE_DESC)
@@ -368,11 +340,11 @@ move_tool = (
     .add_input_property("dz", {"type": "number", "description": "Translation Z in 'units'."})
     .add_input_property("rotate_deg", {"type": "number", "description": "Optional rotation in degrees about 'rotate_axis'."})
     .add_input_property("rotate_axis", _ROTATE_AXIS.schema())
-    .add_input_property("rotate_x", {"type": "number", "description": "Multi-axis: degrees about world X (composed X->Y->Z). Use instead of rotate_deg."})
+    .add_input_property("rotate_x", {"type": "number", "description": "Multi-axis: degrees about world X (composed X->Y->Z)."})
     .add_input_property("rotate_y", {"type": "number", "description": "Multi-axis: degrees about world Y."})
     .add_input_property("rotate_z", {"type": "number", "description": "Multi-axis: degrees about world Z."})
     .add_input_property(*_inputs.UNITS.as_property())
-    .add_input_property("quiet", {"type": "boolean", "description": "Suppress the jointed_warning when moving a JOINTED occurrence (default false). The warning reminds you to assembly_capture_position the transient pose + assembly_get its health."})
+    .add_input_property("quiet", {"type": "boolean", "description": "Suppress the jointed_warning when moving a JOINTED occurrence."})
     .strict_schema()
 )
 move_item = Item.create_tool_item(
@@ -383,9 +355,7 @@ move_item = Item.create_tool_item(
                       "::test_move_that_does_not_take_bites"))
 
 _RIGID_DESC = (
-"Lock two or more component occurrences together as a single rigid unit (Rigid Group). "
-"'occurrences' = the occurrence name(s) (comma-separated, or a list). 'include_children' also "
-"rigidly includes their children."
+"Lock two or more component occurrences together as a single rigid unit (Rigid Group)."
 )
 rigid_tool = (
     Tool.create_simple(name="assembly_rigid_group", description=_RIGID_DESC)

@@ -128,13 +128,9 @@ def _do_move(setup, folder, operations):
                 f"({', '.join(n for n in after if n) or 'none'}) against {len(members)} before this "
                 f"move, and the moved item reads its name back as {landed!r}. "
                 f"(Moved so far: {', '.join(moved) or 'none'}.)")
-        # What the compare measures is the folder's count under the moved item's OWN name, before
-        # this move and after it - never which item is which, since the membership is a row of
-        # names. One MORE says something joined the folder here, which is what a move is counted
-        # on. No growth says nothing joined it, and against a name the folder ALREADY listed that
-        # reads identically whether the item was one of the items already listed under it or its
-        # moveInto did nothing - so it is disclosed, neither counted as a move nor refused as a
-        # no-take.
+        # The membership is a row of NAMES, so the compare counts the moved item's own name before
+        # and after. No growth against a name the folder already listed cannot say whether the move
+        # took, so that row is disclosed rather than counted or refused.
         held, now = members.count(landed), after.count(landed)
         if now > held:
             moved.append(landed)
@@ -187,9 +183,8 @@ def handler(action: str = "list", setup: str = "", name: str = "", folder: str =
 
 TOOL_DESCRIPTION = (
     "Manage a CAM setup's folders: list them, create one, rename one, or move operations into one. "
-    "'action': 'list' (folders + their operation/pattern/subfolder counts), 'create' (new folder by "
-    "'name'), 'rename' ('folder' -> 'new_name'), 'move' ('operations' names into 'folder'). 'setup' is "
-    "the setup name throughout. Only 'list' is read-only. Patterns (mirror/linear/rotary) can be read "
+    "'setup' is the setup name throughout; only 'list' is read-only. "
+    "Patterns (mirror/linear/rotary) can be read "
     "and have their parameters edited (via cam_edit_operation) but cannot be created through the API - "
     "create those in the Manufacture UI."
 )

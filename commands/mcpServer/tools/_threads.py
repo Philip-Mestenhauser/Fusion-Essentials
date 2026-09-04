@@ -1,9 +1,7 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Thread-table lookup shared by model_hole (tapping a hole it drills) and model_thread (threading
-an existing cylinder). Fusion's thread tables are keyed type -> size -> designation, so a bare
-designation like 'M5x0.8' is only findable by walking every type's sizes."""
+"""Thread-table lookup shared by model_hole and model_thread."""
 
 from ._common import safe
 
@@ -13,9 +11,7 @@ MAP_BLURB = ("resolve_thread_info - the ONE thread-table walk turning a bare des
 
 
 def thread_types_for(tdq, designation):
-    """Every thread type whose table carries `designation`, in library order. Measured live: 540 of
-    1510 designations sit in more than one type - 'M5x0.8' is in the ANSI, GB and ISO metric
-    profiles - so a caller given only the chosen type cannot tell a pick from the only option."""
+    """Every thread type whose table carries `designation`, in library order."""
     hits = []
     for ttype in (safe(lambda: list(tdq.allThreadTypes), []) or []):
         for size in (safe(lambda t=ttype: list(tdq.allSizes(t)), []) or []):
@@ -49,18 +45,11 @@ def resolve_thread_info(comp, designation, internal=True, thread_type="", thread
             return None, hits, (f"Thread type '{thread_type}' does not carry '{designation}'. "
                                 f"Types that do: {', '.join(hits)}.")
     else:
-        # Library order. First-pick is safe here because same-designation hits are GEOMETRICALLY
-        # IDENTICAL: for 'M5x0.8' all three types carrying it (ANSI Metric M Profile, GB Metric
-        # profile, ISO Metric profile) build a ThreadInfo whose every scalar member is equal -
-        # majorDiameter 0.4901, minorDiameter 0.4007, pitchDiameter 0.4426, threadPitch 0.08,
-        # angle 60.0, class 4g6g - differing only in threadType itself. Any pick cuts the same
-        # thread, so refusing the ambiguity would cost a round trip without changing the geometry.
-        # The caller is still told which type was picked and what else carried the designation.
+        # Types sharing a designation build ThreadInfos equal in every scalar but threadType, so
+        # library order picks one; the caller is returned `hits` to see what else carried it.
         chosen = hits[0]
 
-    # The class carries the fit tolerance, so it is not interchangeable the way the standards
-    # sharing a designation are: 4g6g and 6g are different external fits of the same thread. Library
-    # order picks one, and the caller is told which and what else was on offer.
+    # A class is a fit tolerance, not interchangeable: 4g6g and 6g are different fits of one thread.
     classes = safe(lambda: list(tdq.allClasses(internal, chosen, designation)), []) or []
     want = (thread_class or "").strip()
     if want:

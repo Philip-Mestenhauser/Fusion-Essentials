@@ -1,13 +1,8 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""SET one APPLICATION preference (app.preferences), verified by reading it back.
-
-Preferences has no save/apply/commit: an assignment is immediate (it reads back at once), and
-there is no document to close unsaved, no timeline and no version history to undo it. So the write
-is read-first-or-refuse, assign, read back, and the payload publishes 'previous' beside 'now'. The
-member tier table lives in sys_get_preferences; this tool enforces it.
-"""
+"""SET one APPLICATION preference (app.preferences): read-first-or-refuse, assign, read back, and
+publish 'previous' beside 'now'. The member tier table lives in sys_get_preferences."""
 
 import math
 
@@ -22,7 +17,6 @@ from . import sys_get_preferences as _prefs
 
 app = adsk.core.Application.get()
 
-# What this tool RETURNS (declared once; drives the PRODUCES: prose + the assert-present contract test).
 RETURNS = [
     _outputs.ReturnsValue("previous", "the value read just before the write - pass it back here "
                                       "to restore"),
@@ -30,21 +24,14 @@ RETURNS = [
 
 _UNREAD = object()      # a getter that RAISED - distinct from a member that reads None
 
-# json.loads accepts NaN / Infinity / -Infinity, so either can arrive as 'value'. Neither is a
-# number a preference can hold, int() of one raises outright, and this write has no undo - so both
-# are refused before the assignment, naming the value that arrived.
+# json.loads accepts NaN / Infinity / -Infinity, so either can arrive as 'value'.
 _NOT_FINITE = ("'{name}' takes a finite number; got {value}. NaN and Infinity are not values a "
                "preference can hold.")
 
 
 def _resolve_member(path):
-    """(group_key, item_name, Member, '') for '<group>.<member>' - or '<group>.<item>.<member>' for
-    a collection group, where the product item is part of the address. ('', '', None, error_text)
-    on a miss.
-
-    Member paths are a CLOSED, scope-unique name space (the table in sys_get_preferences), so a
-    case-insensitive EXACT match is correct here; a miss lists what is available at that level
-    rather than guessing a near neighbour."""
+    """(group_key, item_name, Member, '') for '<group>.<member>', or '<group>.<item>.<member>' for a
+    collection group; ('', '', None, error_text) on a miss, which lists what is available there."""
     keys = _prefs.GROUP_KEYS
     parts = [p.strip() for p in (path or "").split(".")]
     shape = ("'<group>.<member>' (or '<group>.<product>.<member>' for "
@@ -180,10 +167,8 @@ def handler(member: str = "", value=None) -> dict:
     if coerce_error:
         return error(coerce_error + " Nothing was written.")
 
-    # No commit step exists - the assignment is immediate (dir(app.preferences) carries no
-    # save/apply/commit/reset). Measured on this build: an out-of-range value RAISES ("must be
-    # greater than 0"), while an out-of-enum int is accepted AND stored - which is why both are
-    # refused above, and why the read-back below still gates what actually landed.
+    # The assignment is immediate - app.preferences carries no save/apply/commit/reset - and an
+    # out-of-enum int is accepted AND stored, so the read-back below gates what landed.
     try:
         setattr(group_obj, target.name, wanted)
     except Exception as e:
@@ -212,10 +197,9 @@ def handler(member: str = "", value=None) -> dict:
 TOOL_DESCRIPTION = (
     "SET one APPLICATION preference (app.preferences), verified by a read-back. 'member' is the "
     "path sys_get_preferences reports it at; 'value' must match the current value's type (or an "
-    "enum member NAME). REFUSED BEFORE writing when the member is tier 'R', when its current "
-    "value cannot be read, or when the value is not one the member takes; a "
-    "read-back that differs from the request is an error naming all three values. No undo, no "
-    "version history: 'previous' comes back beside 'now' - pass it back to restore.\n"
+    "enum member NAME). REFUSED BEFORE writing when the member is tier 'R', its current value "
+    "cannot be read, or the value is not one it takes; a read-back that differs from the request "
+    "is an error naming all three values. No undo, no version history.\n"
     + _outputs.produces_block(RETURNS)
 )
 

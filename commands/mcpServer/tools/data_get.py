@@ -62,12 +62,10 @@ def handler(project: str = "", project_id: str = "", folder: str = "", recursive
         out["scope"] = "file"
         out["note"] = (
             "One file's record: metadata, version state and LINK state. Dates are UNIX epoch seconds "
-            "(the API's own form) with the UTC ISO string beside each. 'file_extension' is the "
-            "DataFile property and is unreliable for a non-CAD upload (an uploaded .txt reads 'sql') "
-            "- the file NAME carries the true extension. Link state is read-only here: CREATING a "
-            "share or a public link is deliberately not offered by this server, so an unshared file "
-            "reports public_link.available=false rather than making one. Next: data_download_file "
-            "(non-Fusion files; a design leaves through design_export), data_move_file, doc_open."
+            "with the UTC ISO string beside each. 'file_extension' is unreliable for a non-CAD "
+            "upload - the file NAME carries the true extension. Link state is read-only here, so an "
+            "unshared file reports public_link.available=false. Next: data_download_file (a design "
+            "leaves through design_export), data_move_file, doc_open."
         )
         if out.get("name_scope_truncated"):
             out["note"] += (" The name was matched inside a CAPPED listing - files beyond the cap "
@@ -148,14 +146,12 @@ def handler(project: str = "", project_id: str = "", folder: str = "", recursive
 
 
 TOOL_DESCRIPTION = (
-    "Read the CLOUD data model (Autodesk/Fusion Team) in one call, by scope. No 'project': the active "
-    "hub + its projects. project=<name|id>: that project's FILES (name, lineage URN, version, openable "
-    "fusionWebURL); 'folder'=<path> scopes to one folder, 'recursive' descends or not. "
-    "include=['folders'] (with a project): the folder TREE instead. include=['hubs']: all hubs. "
-    "'file'=<lineage URN or a name plus its project>: ONE file's full record - dates, authors, version "
-    "state, and read-only share/public-link state (creating a share is not offered). Every "
-    "call is a NETWORK read (can be slow / fail offline); results are capped (see 'truncated'). For the "
-    "in-memory open-document SESSION use doc_get instead."
+    "Read the CLOUD data model (Autodesk/Fusion Team) by scope. No 'project': the active hub + its "
+    "projects. project=<name|id>: that project's FILES (name, lineage URN, version, openable "
+    "fusionWebURL), 'folder'=<path> scoping to one. include=['folders'] with a project: the folder "
+    "TREE instead; include=['hubs']: all hubs. 'file'=<lineage URN, or a name plus its project>: ONE "
+    "file's full record, including its read-only link state. Every call is a NETWORK read; results "
+    "are capped ('truncated'). For the open-document SESSION use doc_get."
 )
 
 tool = (
@@ -163,17 +159,15 @@ tool = (
     .add_input_property("project", {"type": "string", "description": "Project name (case-insensitive) to scope to."})
     .add_input_property("project_id", {"type": "string", "description": "Project id (alternative to name)."})
     .add_input_property("folder", {"type": "string",
-            "description": "With a project: a folder PATH (e.g. 'Parts/Fixtures') to scope the file listing to."})
+            "description": "Folder PATH scoping the file listing, e.g. 'Parts/Fixtures'."})
     .add_input_property("recursive", {"type": "boolean",
-            "description": "With 'folder': descend into subfolders (default true) or list only immediate files (false)."})
+            "description": "Descend into subfolders (default true)."})
     .add_input_property("include", {"type": ["array", "string"],
-            "description": "Deeper scope: 'hubs' (all hubs) or 'folders' (a project's folder tree, with a project). "
-                           "A list or comma-string. Omit for projects (no project) or files (with a project)."})
+            "description": "'hubs' or 'folders'; a list or comma-string."})
     .add_input_property("max_depth", {"type": "integer",
-            "description": f"With include=['folders']: folder-tree depth cap (default {_MAX_DEPTH_DEFAULT})."})
+            "description": f"With include=['folders']: depth cap (default {_MAX_DEPTH_DEFAULT})."})
     .add_input_property("file", {"type": "string",
-            "description": "ONE file: its lineage URN (or Fusion web URL), or its name - a name needs "
-                           "'project' and is refused if several files there share it."})
+            "description": "ONE file: its lineage URN (or web URL), or its name - a name needs 'project'."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)

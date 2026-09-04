@@ -667,6 +667,28 @@ class TestOrient:
         up = iv.app.activeViewport.camera.upVector
         assert (up.x, up.y, up.z) == (0, 1, 0)
 
+    def test_a_readable_standoff_publishes_no_fallback(self, monkeypatch):
+        # The good path: the camera's own eye-target distance placed the eye, so there is no
+        # fallback to disclose and the payload must not carry the key.
+        _install(monkeypatch, [FakeOcc("Part", bbox=make_bbox((0, 0, 0), (2, 2, 2)))])
+        out = _payload(iv.handler(action="orient", orientation="front"))
+        assert "standoff_fallback_cm" not in out["applied"]
+        assert "standoff_fallback_cm" not in out["note"]
+
+    def test_an_eye_on_the_target_falls_back_to_the_shared_standoff_and_says_so(self, monkeypatch):
+        # eye == target reads a ZERO distance, which would rebuild the eye ON the target and leave
+        # the view no direction at all. The shared standoff stands in, and the payload discloses it.
+        _install(monkeypatch, [FakeOcc("Part", bbox=make_bbox((0, 0, 0), (2, 2, 2)))])
+        cam = iv.app.activeViewport.camera
+        cam.eye = FakePoint(0, 0, 0)
+        cam.target = FakePoint(0, 0, 0)
+        out = _payload(iv.handler(action="orient", orientation="front"))
+        assert out["applied"]["standoff_fallback_cm"] == iv._view_common.STANDOFF_FALLBACK_CM
+        assert "standoff_fallback_cm=100" in out["note"]
+        # the eye landed the fallback distance out along front's -Y, not on the target
+        moved = iv.app.activeViewport.camera.eye
+        assert (moved.x, moved.y, moved.z) == (0, -iv._view_common.STANDOFF_FALLBACK_CM, 0)
+
     def test_focus_only_translates_eye_by_target_delta(self, monkeypatch):
         # No orientation, just focus -> the eye is SHIFTED by the same vector the target moved, so the
         # view DIRECTION is preserved (camera tracks to the new center without rotating).

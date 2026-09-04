@@ -17,7 +17,9 @@ bucket each tool is in:
   proven, but NO effect was produced or read back. Not covered; the create/act path
   still needs a real step or a recorded gate reason.
 - skipped(reason): deliberately NOT driven unattended (cloud / interactive / irreversible
-  tier), each row naming why. Not verified - excused.
+  tier), or held back by the CAPABILITY tier - a step or act declaring an entitlement this
+  installation's capability probe did not read as granted. Each row names why. Not
+  verified - excused.
 - pending: no step drives it yet. UNVERIFIED, not known-good - it has never run in this
   sweep. Shrinking this bucket means scripting a real step, not relabelling it.
 
@@ -27,9 +29,9 @@ recomputes the hash and fails on any difference, so a green suite cannot ride on
 run that never saw the current code or a weakened predicate. Only a run with zero
 FAIL/blocked/pass* steps rewrites this file.
 
-Stamp: source 84e5f05c7df9319292b44ca9ec6a7e657e4bfed1959080d76a8131298ddb5e8b | Fusion 2705.1.4 | verified 2026-09-01
+Stamp: source ed60fe9e9af0b3027417920d4fb950d578aed83a836432c3100aacfaa8e0712d | Fusion 2705.1.4 | verified 2026-09-03
 
-127 covered / 23 called / 5 refusals-only / 32 skipped(reason) / 0 pending
+154 covered / 0 called / 2 refusals-only / 31 skipped(reason) / 0 pending
 
 | act | mode |
 |---|---|
@@ -41,51 +43,56 @@ Stamp: source 84e5f05c7df9319292b44ca9ec6a7e657e4bfed1959080d76a8131298ddb5e8b |
 | ACT 3 - SURFACES | narrative |
 | ACT 4 - MESH | narrative |
 | ACT 5 - DETAILS | narrative |
-| ACT 6 - MOTION | narrative |
-| ACT 7 - RESIZE | narrative |
-| ACT 7b - NESTING | narrative |
-| ACT 8 - REDUCE TO THE PART | narrative |
-| ACT 9 - VISE FIXTURE | narrative |
+| ACT 6 - RESIZE | narrative |
+| ACT 6b - NESTING | narrative |
+| ACT 7 - THE VISE | narrative |
+| ACT 7b - MOTION BENCH | narrative |
+| ACT 8 - SWARF CAMEO | narrative |
+| ACT 9 - THE SHOWCASE | narrative |
 | ACT 10a - CAM: JOB + GENERATE | narrative |
 | ACT 10b - CAM: DELIVERABLES | narrative |
+| ACT 10b2 - CAM: COMPONENT SCOPE | narrative |
+| ACT 10c - CAM: EXTENSION STRATEGIES | narrative |
+| ACT 10d - CAM: THE SECOND SETUP | narrative |
+| ACT 10e - CAM: MULTI-SETUP POST | narrative |
 | FINALE | narrative |
 
 | tool | status | step (the demo's shot list) |
 |---|---|---|
-| appearance_set | covered | give each gyroscope part its own color; then the occurrence FAN-OUT in the shape that discriminates - one body coloured directly, then the occurrence written in a DIFFERENT colour, so the body holding its own override comes back under 'bodies_not_reached' and not under applied_to (both colours are minted from one base asset and share an Appearance.id, so only comparing the id AND the name separates reached from kept); and the same shape where that body is the occurrence's only one, refused naming it |
+| appearance_set | covered | give the part, the billet and each vise component its own colour, with the billet half translucent so the part inside it stays visible; then the occurrence FAN-OUT in the shape that discriminates - one body coloured directly, then the occurrence written in a DIFFERENT colour, so the body holding its own override comes back under 'bodies_not_reached' and not under applied_to (both colours are minted from one base asset and share an Appearance.id, so only comparing the id AND the name separates reached from kept); and the same shape where that body is the occurrence's only one, refused naming it |
 | assembly_capture_position | covered | status, discard the pending pose, re-arm and capture |
 | assembly_constrain | covered | flush-constrain a scratch cameo pair through the single-pair shorthand; then the SET form - one constraint feature carrying two relationship rows of different inferred types, a face-to-face mate at a 2 mm offset with the normals flipped plus a concentric one on the same two discs, which is how Fusion's own Constrain dialog locates a part. The count read off the CREATED constraint is what says both rows live in the one feature - the tool refuses a constraint holding fewer than submitted |
 | assembly_edit_contacts | covered | build a contact set from two story parts, meet the single-member refusal, re-member it, rename it reading the landed name back, suppress round-trip, switch contact analysis on and back off, then delete it |
-| assembly_edit_relations | covered | suppress/unsuppress the frame lock, re-value the crank link with was_reversed disclosed, and meet the measured set_occurrences refusal in the words that make it a fact - the build it was measured on and the platform sentence it would raise - with the group's members re-read unchanged afterwards |
+| assembly_edit_relations | covered | suppress/unsuppress a scratch rigid group, re-value the bench link with was_reversed disclosed, and meet the measured set_occurrences refusal in the words that make it a fact - the build it was measured on and the platform sentence it would raise - with the group's members re-read unchanged afterwards |
 | assembly_get | covered | read the joint wiring, driven angles, and the StockCenter anchor back |
-| assembly_ground | covered | ground the frame so the mechanism has a base |
+| assembly_ground | covered | ground the vise base the jaw slides on, and the bench base every station's motion is read against |
 | assembly_inspect_interference | covered | check interference at rest and driven |
 | assembly_move | covered | pose a scratch cameo occurrence |
-| assembly_rigid_group | covered | rigid-group the frame and carrier base |
+| assembly_rigid_group | covered | rigid-group the vise base with its fixed jaw - one body as far as the machine is concerned - and a scratch pair for the relations lifecycle |
 | cam_activate_setup | covered | activate the setup |
-| cam_apply_template | covered | apply the template to a second setup |
+| cam_apply_template | covered | apply the run's own saved template to a second setup by NAME; then Fusion's shipped spotdrill/drill/counterbore hole bundle by the URL the templates slice published for it, with the name passed too - the tool's cross-check (the url must LOAD the template the name says) is what makes the pair one measurement instead of two hopes |
 | cam_compare_operations | covered | compare the two operations |
 | cam_create_machine | covered | build a run-stamped 3-axis machine into the Local library, find it in the catalog, assign it to the setup, and refuse the duplicate name |
-| cam_create_operation | covered | create the face, adaptive, silhouette, and drill operations |
-| cam_create_setup | covered | create the milling setup on the Carrier in the vise |
+| cam_create_operation | covered | build the job a shop would run on the bracket: face the top, rough it with the 3D adaptive, open the pocket with 2D offset roughing, contour the boss, break the stepped top's edges with a 2D chamfer, then the hole making - spot the two through bores, drill the counterbored mounting pattern, and bore the through holes to size - then face the underside and contour the counterbore backsides in the flip setup. The extension's own steep-and-shallow pass cuts the boss beside the 2D one where the licence allows it and is skipped where it does not, so the job reads the same either way. Then the three extension strategies on the drafted cameo - swarf, deburr and geodesic - and the refusal for a strategy the setup offers that this installation reads isGenerationAllowed false on, which creates nothing rather than minting an operation that never generates |
+| cam_create_setup | covered | create the milling setup on the bracket in the vise, and the FLIP setup that turns it over on its own WCS - the pair one NC program ends the sweep on; then the two setups on the drafted cameo |
 | cam_delete | covered | delete a scratch operation; count diff |
 | cam_delete_machine | covered | take the run's own machine back out of the Local library: the confirm_name mismatch refused while it still exists, then the delete proved by the library walk, the name re-resolve, and the catalog read that listed it when it arrived |
 | cam_delete_template | covered | take the run's own template back out of the Local library: the confirm_name mismatch refused while it still exists, then the delete proved by the library's asset walk and by nothing loading from the deleted url, and the templates slice that listed it when it arrived read back as no longer holding it |
-| cam_edit_folders | covered | organize the job into Milling and Drilling folders |
-| cam_edit_operation | covered | edit the face operation's feed; then park the drill operation and restore it - the suppression WRITE, with hasToolpath read back on both sides of the set so the discarded toolpath is reported, not implied |
-| cam_edit_setup | covered | real stock + vise fixture bodies; WCS bound to the stock-center JO (bound read back); Haas VF-2 assigned |
-| cam_edit_tools | covered | add mill/drill/turning/center-drill tools; preset add/remove round-trip with unit, refusal, and rollback gates; the summary census and the same census narrowed by tool type, one tool's full parameter list, and the LOCAL scope answering with libraries instead of tools; a fifth tool added and removed with the count read back; and once the job is generated, where_used naming the operations that cut with the mill and reporting NONE for the turning tool nothing selected. The document library refuses to host a new library and where_used refuses a shared scope - a shared library has no operations, so an empty list there would read as 'none' |
-| cam_generate | covered | generate the toolpaths against the real part in the real fixture. The tool takes no 'pump_seconds': CAM-7 confirms the kernel refuses to be pumped while a generation runs, so completion is certified by the bounded cam_get_status poll after this act, never by a sleep inside the call |
+| cam_edit_folders | covered | organize the job the way a shop sheet reads - the six milling passes into Milling and the three hole-making cycles into Drilling, each move counted by the destination folder's own re-read |
+| cam_edit_operation | covered | edit the face operation's feed; then park the drill operation and restore it - the suppression WRITE, with hasToolpath read back on both sides of the set so the discarded toolpath is reported, not implied. Then on the swarf operation: the PRESET arm, with the name read back off Operation.toolPreset beside the preset it ran before and a miss refused listing the tool's own; the cutting side written and read back off its parameter; and the isEditable pre-guard refusing a cutting-TOOL dimension by name before anything is applied |
+| cam_edit_setup | covered | real stock + vise fixture bodies; WCS bound to the stock-center JO (bound read back); Haas VF-2 assigned - then the same three on the FLIP setup, whose WCS binds a Joint Origin of its own rather than sharing the first setup's, which would be the same fixture twice |
+| cam_edit_tools | covered | stock the document library with the shop set this part is cut with - a 50 mm face mill, a 10 mm flat mill (10, not 12, because it has to fit inside the 12 mm bore it finishes), a 6 mm ball, a 6 mm drill and a chamfer mill, each given its own tool number because two sample clones that share one make the post refuse - then the turning and center-drill pair the from_type census stands on; preset add/remove round-trip with unit, refusal, and rollback gates; the summary census and the same census narrowed by tool type, one tool's full parameter list, and the LOCAL scope answering with libraries instead of tools; a fifth tool added and removed with the count read back; and once the job is generated, where_used naming the operations that cut with the mill and reporting NONE for the turning tool nothing selected. The document library refuses to host a new library and where_used refuses a shared scope - a shared library has no operations, so an empty list there would read as 'none'. Then the two tools the extension acts cut with - a 12 mm flat mill carrying its own preset and a 6 mm ball, added at the index the library's own count named - and the flute LENGTHENED on the mill with the expression read back off the tool, which is where a cutting-tool dimension is edited (the operation refuses that write) |
+| cam_generate | covered | generate the toolpaths against the real part in the real fixture. The tool takes no 'pump_seconds': CAM-7 confirms the kernel refuses to be pumped while a generation runs, so completion is certified by the bounded cam_get_status poll after this act, never by a sleep inside the call. Then one launch per extension setup - three operations of different strategies generated together, with the resolved node's KIND read back beside the name asked for |
 | cam_generate_setup_sheet | covered | write the machinist setup sheet with the file-landed gate |
-| cam_get | covered | read the CAM job structure, and the recorded-probing slice on a job nothing has probed: the empty state with its reason named, a scope that invents no measure, and the units refusal |
-| cam_get_status | covered | poll the generation to completion (empty toolpaths fail) |
+| cam_get | covered | read the CAM job structure, and the recorded-probing slice on a job nothing has probed: the empty state with its reason named, a scope that invents no measure, and the units refusal. Then the three reads the machining acts stand on - the strategy slice, read on every setup before a single operation is created (its allowed/blocked/unreadable tallies PARTITION the setup's own vocabulary, and each strategy the act goes on to create is named in it reading allowed, so a spelling this build does not carry reds on the read rather than inside a create); the time slice as the non-empty oracle, taken over the WHOLE job - every operation's own machining time above zero, which is the one read that tells a cutting toolpath from an empty one with hasToolpath reading true on both; and the operations census where the states tally and active_count partition one row set across a suppression. Plus the templates slice at the SHIPPED location, where the url the hole-drilling bundle is applied by comes from, with url_basis naming how it addresses the asset |
+| cam_get_status | covered | poll the generation to completion (empty toolpaths fail); and the read taken on the finished extension job, whose per-state tally and health counts describe the scope named beside them |
 | cam_inspect_toolpaths | covered | verdict false with named ops before generation, scoped check, bogus-scope refusal, an over-cap max_results clamped to the tool's own row ceiling, verdict true after generation, include_suppressed widening the tally while the verdict's own set is reported apart from it, a document-level answer taken with an empty setup present, and the FILTERING measured against a real suppression - the tally one operation shorter with the excluded count naming what it left out, then the same read widened to count it in its own bucket |
-| cam_post | covered | post the NC program to disk |
-| cam_reorder | called (payload echoes the request arguments; the move-allowed gate is what a bare ok already proves - the ORDER needs a cam_get read-back step) | reorder the adaptive before the face op |
+| cam_post | covered | post the setup's NC program to disk; then the LAST thing the sweep does - ONE program over the part's TWO setups, the job and its flip, with the setups asked for beside the program's own stored operations re-read after the post and every file stat'd on disk, the reconfigure down to one setup refused naming every input to omit, and the as-is re-post that changes nothing. The rail program is the other multi-setup post, and the one that meets the 5-axis refusal: it is REFUSED while the swarf toolpath is active, naming the machine configuration a 5-axis simultaneous toolpath needs, and posts once that operation is parked |
+| cam_reorder | covered | reorder the adaptive before the face op |
 | cam_save_template | covered | save the setup as a run-stamped local CAM template - the stamp is what keeps two overlapping runs off one name, since this tool always writes a NEW template |
-| cam_select_geometry | covered | select the stock-top face, both silhouette branches (setup models and named bodies), a whole scratch sketch and the bolt-circle holes; refusals for a knob on the wrong kind, geometry through the wrong input, and an edge where a face belongs. The pocket-recognition selection is NOT driven unattended (running it coincides with the Fusion process terminating); its 'pocket_filter_applied' publishes the diameter/depth bounds in the CALLER'S own units, with 'pocket_filter_units' naming them beside the numbers |
+| cam_select_geometry | covered | aim every operation at the feature it cuts: the stock-top face, the boss top and the stepped top through the FACE kind (which takes the loops that bound the face), the pocket FLOOR through the POCKET kind made for it, both silhouette branches (setup models and named bodies), a whole scratch sketch, and the holes three ways - the counterbored mounting bores through the diameter filter, the two through bores with no filter at all (the branch that machines exactly what it was given), and those same two faces again to the BORE, where one selection input reaches 'circularFaces' instead of the drill's 'holeFaces'; refusals for a knob on the wrong kind, geometry through the wrong input, and an edge where a face belongs. The pocket-recognition selection is NOT driven unattended (running it coincides with the Fusion process terminating); its 'pocket_filter_applied' publishes the diameter/depth bounds in the CALLER'S own units, with 'pocket_filter_units' naming them beside the numbers. Then the two routes a 'chain' takes on the drafted cameo: a swarf RAIL PAIR (one selection per rail, the open state read off the collection the operation hands back, the drive mode engaged in the same call and the rail order published, with a single contour refused as a pair) and a deburr edge whose payload carries none of those keys; plus the 'surfaces' selection with its face count read back off the named surface set, a role the operation does not carry refused naming the ones it does, and an omitted role refused where there is no drive set to default to. Then the COMPONENT SCOPE, on the scratch job's own silhouette: 'Body1' unscoped refused with the candidates and with the input that narrows them, then scoped to one component, where 'selected' is the qualified name of the body that reached inputGeometry |
 | cam_set_nc_comment | covered | stamp the NC program comment |
-| cam_show_toolpath | covered | leave the toolpath visible on camera |
+| cam_show_toolpath | covered | hide every path, then reveal one of each family alone long enough to watch, and leave the whole job on camera |
 | data_create_folder | skipped: cloud write (opt-in tier) |  |
 | data_create_project | skipped: cloud write to the operator's real hub (opt-in tier) |  |
 | data_delete_file | skipped: cloud destructive (opt-in tier) |  |
@@ -96,19 +103,19 @@ Stamp: source 84e5f05c7df9319292b44ca9ec6a7e657e4bfed1959080d76a8131298ddb5e8b |
 | data_move_file | skipped: cloud write - relocates a real file in the operator's hub (opt-in tier) |  |
 | data_switch_hub | skipped: changes the active hub, closes docs (opt-in tier) |  |
 | data_upload_file | skipped: cloud write (opt-in tier) |  |
-| design_activate_component | called | step into each part to build its sketch |
-| design_add_instance | covered | place two more crank instances and read the landed paths back, the second naming the component while two of it already stand; the self-nesting target refused |
+| design_activate_component | covered | step into each part to build its sketch |
+| design_add_instance | covered | place two more pin-cameo instances and read the landed paths back, the second naming the component while two of it already stand; the self-nesting target refused |
 | design_configure | skipped: configuration table needs a SAVED document (a DataFile to carry it); opt-in tier - the appearance/material columns need that document too, and a body's material reads back only after the geometry catches up with the activation |  |
-| design_delete_feature | called | add a wart feature then delete it; health diff |
-| design_delete_occurrence | called | delete a scratch occurrence |
+| design_delete_feature | covered | add a wart feature then delete it; health diff |
+| design_delete_occurrence | covered | delete a scratch occurrence |
 | design_edit_timeline | covered | roll the marker back a step and to the end, refuse a discard without the confirmation, refuse an unknown feature and a bad group range, and tag a feature with an attribute then delete it - the value and the design-wide count are read back both ways, and a second delete is refused; then the 'name@index' form a FeatureRef refusal hands back, resolved against each object's OWN .index (the index design_get publishes), with the neighbouring index refused as a miss. SKIPPED(rig): the AMBIGUOUS-name refusal itself needs two same-named timeline features, and no tool on this surface renames a feature, so the sweep cannot mint the pair |
 | design_export | covered | export the machined part to STEP, then the whole design SPLIT per component to STL with stl_binary read back off the options object the split path created for each file - the branch that would otherwise report a clean export while dropping the format knob; then every remaining format one file at a time, each measured ON DISK rather than trusted to the API's success bool, USD publishing the .usdz path Fusion appended for itself, STL with its units baked in, and a sketch out through the 2D DXF branch |
 | design_get | covered | final design read: the whole cast, stamped with the DOCUMENT it was read from (sys_find_tool, which never touches the design, carries no such stamp), the timeline slice the 'name@index' feature form is addressed from, plus the material/appearance catalog at both zoom levels - the library census and one paged library; an unloaded library name refused |
 | design_move_occurrence | covered | re-parent one of those instances under the frame, the new path and the held world position both read back; the root target and the self-nesting target refused |
-| design_recompute | called | recompute the assembly after motion |
+| design_recompute | covered | recompute the assembly after motion |
 | design_remove_feature | covered | remove a scratch body and its occurrence; deleting each Remove brings them back |
 | design_set_mode | skipped: irreversible parametric->direct conversion; not run unattended |  |
-| design_set_name | covered | rename the machined part and re-find it by the name that landed, rename a cameo occurrence with its instance name following, give a twin body the name its sibling holds so the deduped '(1)' is what gets published, and rename a MESH body - the kind reads 'mesh' and a fresh read of the component's meshes carries the new name; the empty target and the root component refused |
+| design_set_name | covered | rename a cameo component and re-find it by the name that landed, rename a cameo occurrence with its instance name following, give a twin body the name its sibling holds so the deduped '(1)' is what gets published, and rename a MESH body - the kind reads 'mesh' and a fresh read of the component's meshes carries the new name; the empty target and the root component refused |
 | doc_activate | skipped: needs a second open document (opt-in tier) |  |
 | doc_close | covered | discard the document on camera - clean teardown |
 | doc_copy | skipped: cloud write (opt-in tier) |  |
@@ -116,7 +123,7 @@ Stamp: source 84e5f05c7df9319292b44ca9ec6a7e657e4bfed1959080d76a8131298ddb5e8b |
 | doc_insert_derive | skipped: needs an ALREADY-OPEN saved cloud source to derive from (opt-in tier) |  |
 | doc_insert_import | covered | re-import that STEP from disk into the live design; then the DXF back onto a plane as sketches, an SVG into a sketch made for it, and IGES / SMT / f3d as solids - each with the format named explicitly, which is what makes the last row (a format contradicting its file's extension) a refusal instead of a silent mis-read |
 | doc_insert_occurrence | skipped: needs a saved cloud source in-project (opt-in tier) |  |
-| doc_new | covered | open the one document the whole gyroscope lives in |
+| doc_new | covered | open the one document the whole story lives in |
 | doc_open | skipped: opens cloud files; can wedge on CAM templates (opt-in tier) |  |
 | doc_restore_version | skipped: needs cloud version history (opt-in tier) |  |
 | doc_save | skipped: versions to the cloud; needs a saved doc (opt-in tier) |  |
@@ -133,43 +140,43 @@ Stamp: source 84e5f05c7df9319292b44ca9ec6a7e657e4bfed1959080d76a8131298ddb5e8b |
 | drawing_update | skipped: user-present tier (drawing docs) |  |
 | find_geometry | covered | acquire the face/edge/body handles the build consumes |
 | joint_at_geometry | covered | joint a pin in its bore via cylinder faces; then the motion vocabulary on its own cameo tree - a BALL on a real sphere face (the centre key point named in the payload, no axis and no axis sentence), a revolute on an explicit axis whose note says frame, NOT world, and points at the tool that sets a true world axis, and a rigid pair with the same axis-free report; an axis outside the Choice refused. A TORUS face joints at its own centre on a PARAMETRIC body, which is the case the keypoint guard must let through. SKIPPED(rig): the two base-feature halves of that guard (a torus inside a base feature hands back its component origin with no error) need a torus built INSIDE a base feature, and no tool on this surface builds one unattended |
-| joint_create | covered | revolute the yaw, ring pivots, spin, and crank |
-| joint_create_as_built | covered | seat the rotor shaft in the inner ring as-built; then a REVOLUTE as-built pair anchored on their shared face, read back through assembly_get and driven to prove the DOF, with the missing-anchor and rigid-plus-anchor refusals |
-| joint_create_origin | covered | place the crank mount and the stock-center WCS |
-| joint_drive | covered | drive every axis, the crank -> rotor 2:1, then ONE vise jaw (the link closes the other) |
-| joint_edit | covered | set rotation limits on the yaw; then walk one scratch joint through every motion the tool offers - rigid to revolute, slider, cylindrical, planar, ball and pin_slot - each retype witnessed by the design's own joint walk rather than by the writer, the mismatched pin_slot axis pair refused, and the bench left on a revolute that actually drives |
-| joint_motion_link | covered | couple the crank to the rotor spin at 2:1; the vise jaws at -1 (self-centering) |
+| joint_create | covered | slide the moving jaw on the vise base and turn the lead screw on it; then a station joint per bench motion, and the link's own fresh revolute |
+| joint_create_as_built | covered | seat the part inside the billet it is cut from, then the billet in the jaw that closed on it - both as-built, both where they stand; then a REVOLUTE as-built pair anchored on their shared face, read back through assembly_get and driven to prove the DOF, with the missing-anchor and rigid-plus-anchor refusals |
+| joint_create_origin | covered | place the stock-center WCS at the part's origin, a station per bench motion, the setup's own WCS at the billet's measured centre, and the flip setup's at the part's |
+| joint_drive | covered | drive the vise jaw OPEN and then closed onto the billet, the screw turning with it through the link; then the bench's revolute and slider stations, and every station that has a degree of freedom, home again afterwards |
+| joint_edit | covered | set travel limits on the vise's jaw slide and rotation limits on the bench's revolute station; then walk one scratch joint through every motion the tool offers - rigid to revolute, slider, cylindrical, planar, ball and pin_slot - each retype witnessed by the design's own joint walk rather than by the writer, the mismatched pin_slot axis pair refused, and the bench left on a revolute that actually drives |
+| joint_motion_link | covered | couple the vise's lead screw to its jaw at 45 deg of handle per mm of travel (6 mm of closing reads 270 deg - a full turn would read as no turn); and a bench revolute pair at 2:1 |
 | mesh_combine | covered | combine two mesh copies, the parametric mode and the base feature the write ran in both named; then merge two disjoint meshes into one body |
-| mesh_delete | called | delete a scratch mesh body with the design-wide survivor re-scan |
+| mesh_delete | covered | delete a scratch mesh body with the design-wide survivor re-scan |
 | mesh_export | covered | export a mesh to STL |
-| mesh_generate_face_groups | called | group the mesh faces |
+| mesh_generate_face_groups | covered | group the mesh faces |
 | mesh_get | covered | read the mesh back |
-| mesh_insert | called | re-import the STL mesh |
+| mesh_insert | covered | re-import the STL mesh |
 | mesh_plane_cut | covered | plane-cut a mesh copy |
-| mesh_reduce | called | reduce a dense mesh |
+| mesh_reduce | covered | reduce a dense mesh |
 | mesh_remesh | covered | remesh a copy |
 | mesh_repair | covered | one-touch-fix a healthy mesh (an honest no-op, not a failure), rebuild it with the density read back off the feature, stitch-and-remove a fresh mesh TWICE - the first welds its duplicate vertices, the second finds nothing of its kind to fix and the note has to say so rather than claim a repair - and refuse density on a non-rebuild; then every other rebuild method with its own density read back off the feature, 'offset' accepted by the accurate method and refused on the rest, and a shrink-wrap close. SKIPPED(rig): the close_holes refusal on a mesh that stays open needs an UNFIXABLE open mesh, which nothing in this document can build - every mesh here is watertight by construction |
 | mesh_reverse_normal | covered | flip an inside-out mesh - confirmed by the signed volume changing sign, not by is_closed |
 | mesh_separate | covered | split a two-shell mesh into its lumps - the pieces are the auto-named bodies read back from the component |
 | mesh_shell | covered | hollow a scratch mesh - the volume DROPS, the body still reads watertight and the thickness is read back off the feature, never echoed - then meet the platform's own MESH_FAILED_HOLLOW refusal at a thickness past the half-wall (measured: an over-thick shell does not quietly cut through, it fails) |
 | mesh_smooth | covered | smooth a scan-quality mesh: the triangle count HOLDS STILL and the node coordinates move, which is why a count census cannot judge it |
-| mesh_to_brep | called | convert a mesh to a base-feature BRep |
+| mesh_to_brep | covered | convert a mesh to a base-feature BRep |
 | model_arrange | covered | nest a square pad, a bar, a disc and a second pad inside a HEXAGON boundary, then scale the boundary and solve again - the same four parts re-nest, which is the arrangement being a function of the boundary rather than a one-time placement |
 | model_base_feature | covered | open and close a base-feature scope |
-| model_chamfer | covered | chamfer the frame edge, then a second one by distance-and-angle with a miter corner, both read back off the created feature |
+| model_chamfer | covered | break the step's outboard edge and a through-bore rim, then a mounting-bore rim by distance-and-angle with a miter corner, each read back off the created feature |
 | model_combine | covered | join two overlapping cameo pads |
 | model_compute_holder | covered | compute a CAM tool holder (read) |
-| model_construction | covered | offset the carrier hub plane below the rotor sweep; an AXIS on a cameo bore whose published handle the circular pattern turns about; a plane at 30 deg about the shaft's own axis (origin pinned to the axis) and a plane through a cap vertex; then the ON-PATH surface on one measured 30 mm cap edge - a proportional plane and point reading their ratio back with no extent published, an absolute placement inside the path, one before the start and one far past the end (both accepted, both disclosed against the measured length), the boundary exactly at the length, an expression placement whose model parameter is named for param_set, a to-object plane carrying distance AND offset off the path and a second one landing inside a two-edge chained path, and the summed length of that chain; the out-of-range proportional value and to_object on the point kind refused. Then the datum bench - one bored block carrying every reference the remaining modes read: a plane swung 30 deg about a top edge, one spanning three corners, one splitting the block at mid-height, one spanning two coplanar edges and one resting tangent on the bore wall; an axis on an edge, one spanning two corners and one along the top face's own normal; and points at the bore centre, at a corner where two edges meet, at the three world planes' shared origin and where an edge pierces XY. The world axis and the coordinate point are refused up front - both are setByLine/setByPoint, direct-edit-only, and this design is parametric |
-| model_create_component | covered | cast the eight parts, Pedestal nested in Frame |
+| model_construction | covered | offset the step floor the pocket is cut from and the top the boss stands on; an AXIS on a cameo bore whose published handle the circular pattern turns about; a plane at 30 deg about a bench bore's own axis (origin pinned to the axis) and a plane through a cap vertex; then the ON-PATH surface on one measured 30 mm cap edge - a proportional plane and point reading their ratio back with no extent published, an absolute placement inside the path, one before the start and one far past the end (both accepted, both disclosed against the measured length), the boundary exactly at the length, an expression placement whose model parameter is named for param_set, a to-object plane carrying distance AND offset off the path and a second one landing inside a two-edge chained path, and the summed length of that chain; the out-of-range proportional value and to_object on the point kind refused. Then the datum bench - one bored block carrying every reference the remaining modes read: a plane swung 30 deg about a top edge, one spanning three corners, one splitting the block at mid-height, one spanning two coplanar edges and one resting tangent on the bore wall; an axis on an edge, one spanning two corners and one along the top face's own normal; and points at the bore centre, at a corner where two edges meet, at the three world planes' shared origin and where an edge pierces XY. The world axis and the coordinate point are refused up front - both are setByLine/setByPoint, direct-edit-only, and this design is parametric |
+| model_create_component | covered | cast the part, the billet, the three vise parts and the lead screw |
 | model_draft | covered | draft a cameo face |
 | model_emboss | covered | raise then engrave a circular profile on a scratch block's top face, each checked against the volume direction; a zero depth refused |
-| model_extrude | covered | extrude the ring bands symmetric about the ring plane, then a three-bay frame with 'all' whose payload NAMES the regions enclosed by another selected one - the bays that filled with material |
-| model_fillet | covered | fillet the outer ring edge; then the two path fixtures - one box corner rounded into an OPEN tangent run, and all four rounded into a CLOSED tangent loop - that the chaining beats read their edge counts off |
+| model_extrude | covered | extrude the block, JOIN the stepped half and the boss onto it and CUT the pocket down from the step floor, each depth an expression off the driver; then a three-bay frame with 'all' whose payload NAMES the regions enclosed by another selected one - the bays that filled with material |
+| model_fillet | covered | round the pocket's four corners at the radius the parameter states, break the step's leading edge, blend the boss rim; then the two path fixtures - one box corner rounded into an OPEN tangent run, and all four rounded into a CLOSED tangent loop - that the chaining beats read their edge counts off |
 | model_hole | covered | drill a cameo mounting hole, then the three additive placements - centred on its rim, on an edge at middle and at start, and by plane offsets; a circular offset edge refused |
-| model_inspect | covered | read the rotor's volume back |
-| model_loft | covered | loft the pedestal base-to-post transition |
-| model_measure_between | covered | measure the outer-ring-to-inner-ring gap |
-| model_measure_relation | covered | read rotor/shaft coaxiality; then the rest of the vocabulary on the datum bench, each reporting its OWN measurement - the top face perpendicular to a wall it meets and touching it along that edge, flush with itself, the bore concentric with itself, and 20 mm clear of the floor below |
+| model_inspect | covered | read the part's own extent back, and the billet's against the allowance it was sized with; and a MESH addressed as '<occurrence>:<mesh>' inside a singly-placed component, answering with its own triangle count and volume rather than the solid it was cast from |
+| model_loft | covered | loft a base-to-post cameo between two profiles on stacked planes |
+| model_measure_between | covered | measure the boss wall to the bore inside it; then each jaw's grip face to the billet, which is what says the vise is closed |
+| model_measure_relation | covered | read the boss and its own bore coaxial; then the rest of the vocabulary on the datum bench, each reporting its OWN measurement - the top face perpendicular to a wall it meets and touching it along that edge, flush with itself, the bore concentric with itself, and 20 mm clear of the floor below |
 | model_mirror | covered | mirror a cameo body, then the emboss block's own timeline FEATURE with the body/volume census read back, then a join whose isCombine is read off the created feature, and meet the join-is-bodies-only refusal |
 | model_move | covered | translate, along-axis, rotate and point-to-point move features on a scratch block in a SINGLY placed component, each checked against the distance it was asked for; the same along-axis move on a component placed TWICE refused naming the count and both paths (each instance holds that body somewhere else, and no read-back tells a right instance from a wrong one); a face as the axis and any faces selection refused |
 | model_offset_face | covered | push a scratch block's top face outward |
@@ -178,64 +185,64 @@ Stamp: source 84e5f05c7df9319292b44ca9ec6a7e657e4bfed1959080d76a8131298ddb5e8b |
 | model_pattern_rectangular | covered | rectangular-pattern a cameo body |
 | model_pipe | covered | run a hollow pipe along its path with the wall read back off the feature (and NO capped_ends claim - the face collections that would answer that read empty on this build), then a half-path pipe whose bounding box proves the extent is a FRACTION, a CUT scoped to a named body where the note says the scope is what was REQUESTED because participantBodies cannot be read back, and the two chaining fixtures: ONE seed handle chains across TANGENT junctions and stops where that continuity breaks - several edges on an open run bounded by sharp corners, and all eight of a closed tangent loop (which reports itself closed) - so what a seed produces is the BUILT path's own count and nothing about the request predicts it; the reverse extent refused on an open path |
 | model_replace_face | covered | replace a scratch block's top face with an open sheet above it, the measured volume move pinning the effect; a solid face as the target refused |
-| model_revolve | covered | revolve the rotor disc about the spin axis, then about an off-origin cylinder FACE - the resolved label reads BRepFace and the ring's measured bounding box stands around x=30, not around the origin; a planar face as the axis refused |
+| model_revolve | covered | revolve a torus ring about the world z axis, then a ring about an off-origin cylinder FACE - the resolved label reads BRepFace and the ring's measured bounding box stands around x=30, not around the origin; a planar face as the axis refused |
 | model_scale | covered | uniform x8 and per-axis x*y*z scales with ratio read-backs; unresolvable, length, and angle expressions refused; a bare unitless parameter accepted; a vertex-anchored scale |
-| model_set_material | covered | assign the rotor a physical steel material |
+| model_set_material | covered | assign the bracket a physical steel material |
 | model_shell | covered | shell a scratch cap cameo |
 | model_split | covered | split a scratch pin by a plane |
 | model_stitch | covered | re-stitch two faces |
-| model_sweep | covered | sweep the crank handle along its path |
+| model_sweep | covered | sweep a round section along its own path |
 | model_thread | covered | thread a scratch post M10x1.5 over part of its length with the extent read back, an explicit thread standard with its alternatives disclosed, and a modeled thread on a second post proving it cut material; then the INTERNAL side on a real bore - 'internal' derived from the face's own out-of-material normal and checked against the face by the API at add() - and a partial thread measured from the LOW end, reading that end back off the feature; an unknown call-out, an offset with no length, and a modeled call-out too big for the cylinder all refused |
 | model_unstitch | covered | unstitch a scratch box's faces |
-| param_add | covered | add GimbalDia and the derived ring/rotor radii |
+| param_add | covered | add PartLen (the driving length), PartWid and PartHt (independent extents), and the feature parameters derived from them - step, bore, pocket depth and corner radius, boss, mounting bore, edge break |
 | param_delete | covered | delete a scratch parameter |
-| param_get | covered | read the parameter table; a fresh GimbalDia read sizes the CAM stock |
-| param_set | covered | bump GimbalDia +33%, then restore it |
-| param_set_favorite | covered | mark GimbalDia the favorite driving dimension |
-| pmi_create | refusals-only: every step is a guard refusal - no effect was produced or read back this run | aim a flatness note at the frame plate and a hole note at a carrier bore, and meet the extension gate PMI authoring sits behind on this build |
-| pmi_delete | refusals-only: every step is a guard refusal - no effect was produced or read back this run | meet the same lookup refusal for the delete |
-| pmi_edit | refusals-only: every step is a guard refusal - no effect was produced or read back this run | meet the name lookup on a design holding no PMI - it lists what exists instead of editing something else - and the blank-name guard. SKIPPED(gate): the ambiguous-name unsuppress refusal needs AUTHORED PMI, which is extension-gated on this build (pmi_create's own beats are that gate) |
+| param_get | covered | read the parameter table; then the pocket radius and the edge break the fillet and chamfer features are built at, and a fresh driver read sizes the CAM stock |
+| param_set | covered | bump PartLen +33%, measure the part grew with it, then restore it |
+| param_set_favorite | covered | mark PartLen the favorite driving dimension |
+| pmi_create | covered | author a flatness note on the pocket floor and a hole note on a mounting bore, each read back by name and markup |
+| pmi_delete | covered | delete the note and read the remaining PMI count |
+| pmi_edit | covered | rewrite the flatness note to a perpendicularity callout and read the markup back; the blank-name guard refuses |
 | pmi_get | covered | read the PMI back with segments and detail, and again with an over-cap max_results - pmi_get's own contract CLAMPS it rather than refusing, since every record it returns crosses the wire whole. SKIPPED(rig): the imported-row beats (no 'text' key on an imported annotation, no 'is_hole' when isHoleAnnotation will not read) need a PMI-BEARING import; the STEP this sweep round-trips carries none |
-| save_as_mesh | called | mesh a scratch solid (one per destructive op) |
-| sketch_add_3d_line | called | draw the yaw axis as the skeleton's 3D line |
-| sketch_add_geometry | covered | draw the concentric rings and part footprints; then the SLOT family, one scratch sketch per shape - a three-point arc slot with its five arcs and its profile, the centre-point arc slot in both its short and its full ladder with each dimension flag gated independently, an overall slot whose cap centres prove the tip-to-tip measure, the length/angle tail that adds the fourth line and its own dimensions, the centre-point slot's HALF length landing a cap on its second point, and the legacy centre-to-centre form; the angle with no length, the angle FLAG on a straight slot, each cross-kind input pointed at the kind that carries it, and a tail on the legacy form all refused - the legacy form's own census read twice over (its note names the 2 solid lines, the 1 construction line and the 2 arc caps behind a 'curves_added' of 3, and sketch_get finds exactly that); plus the line/rectangle/polygon floors the composite counts are read against |
+| save_as_mesh | covered | mesh a scratch solid (one per destructive op); then the same solid reached through the qualified '<occurrence>:<body>' address, with the bare 'Body1' refused as ambiguous and the refusal offering that very spelling |
+| sketch_add_3d_line | covered | draw the vertical axis as the skeleton's 3D line |
+| sketch_add_geometry | covered | draw the part's footprint, its step, its pocket and its boss; then the SLOT family, one scratch sketch per shape - a three-point arc slot with its five arcs and its profile, the centre-point arc slot in both its short and its full ladder with each dimension flag gated independently, an overall slot whose cap centres prove the tip-to-tip measure, the length/angle tail that adds the fourth line and its own dimensions, the centre-point slot's HALF length landing a cap on its second point, and the legacy centre-to-centre form; the angle with no length, the angle FLAG on a straight slot, each cross-kind input pointed at the kind that carries it, and a tail on the legacy form all refused - the legacy form's own census read twice over (its note names the 2 solid lines, the 1 construction line and the 2 arc caps behind a 'curves_added' of 3, and sketch_get finds exactly that); plus the line/rectangle/polygon floors the composite counts are read against |
 | sketch_constrain | covered | constrain the skeleton's X axis horizontal; then autoConstrain a loose rectangle to fully constrained and re-run it as a no-op, lay a rectangular pattern by total EXTENT with the landed centre measured, suppress two instances of a 3x2 pattern with the landed flags and the curve count both read back; the N-1 flag length, a knob on the wrong constraint, and the dimensioning strategies this build does not carry all refused. Then the second bench, carrying the kinds the first has no geometry for: vertical, collinear and concentric; a spline made curvature-continuous with the line it continues; the two point-pair kinds; a square told it is a polygon; fix and unfix on one curve; and the three CREATOR kinds - one-sided and two-sided offset, and a six-around circular pattern - each in a sketch of its own with the curves it drew counted |
 | sketch_copy | covered | copy a two-line chain to an offset position, its new refs and the endpoints in the returned collection both accounted for, then across into a second sketch, and again inside a COMPONENT sketch where the refs cross the occurrence-proxy seam |
-| sketch_create | called | draw each part's sketch on its plane |
+| sketch_create | covered | draw each part's sketch on its plane |
 | sketch_delete_entity | covered | delete a helper constraint; count drops - then a sketch text by its index, the deleted string reported back, and the empty index refused |
-| sketch_dimension | covered | drive ring/rotor radii by parameter expression; the wedge angle facing the sketch origin; offset against a non-parallel line (rotated, and the note says so) with linear_diameter refusing the same shape; line and point measured to a model face; then the dimension bench - a slanted line's horizontal span, a diameter, the gap between two circles on one centre, a line to a circle's near tangent, and an ellipse's two radii - each read back as a measured number, not a call that returned ok |
+| sketch_dimension | covered | drive the part's length, width and boss diameter by parameter expression; the wedge angle facing the sketch origin; offset against a non-parallel line (rotated, and the note says so) with linear_diameter refusing the same shape; line and point measured to a model face; then the dimension bench - a slanted line's horizontal span, a diameter, the gap between two circles on one centre, a line to a circle's near tangent, and an ellipse's two radii - each read back as a measured number, not a call that returned ok |
 | sketch_edit_curve | covered | trim, extend, split, fillet, chamfer and offset on one scratch sketch per action, with length read-backs; split's two halves must carry distinct ids; a chamfer across an offset pair refused |
-| sketch_get | covered | read the skeleton and ring profiles back |
+| sketch_get | covered | read the skeleton and the part's own profiles back |
 | sketch_insert_svg | covered | import the logo art into a fresh sketch, its landed width measured against the 1/96-inch-per-user-unit convention, then a 96-user-unit square at scale 1 whose measured extent pins BOTH halves of that landing - one inch square, and Y-DOWN from the sketch origin (min y -25.4 mm); the missing file refused |
 | sketch_move | covered | shift a line by a known offset and read the new coordinates back, then spin it 180 deg about its own midpoint - the swap only the endpoints show; the negative-scale mirror and the empty transform refused |
-| sketch_project | covered | project the machining boundary; then section the cap on a datum plane with per-source attribution naming the parallel face that contributed nothing, project the cap sketch's line onto the top face reading the reference linkage back, and meet the same-sketch and missing-direction refusals |
+| sketch_project | covered | project the machining boundary; then section the cap on a datum plane with per-source attribution naming the parallel face that contributed nothing, project the cap sketch's line onto the top face reading the reference linkage back, and meet the same-sketch and missing-direction refusals. SKIPPED(rig): the cross-document to_surface beat - a 'source_sketch' in a SECOND document carrying the same entityToken as a local one - needs that second document, and every tool that opens or references one (doc_open, doc_insert_derive, doc_insert_occurrence, doc_copy) is excluded here as cloud tier; this sweep runs one unsaved document |
 | sketch_set_text | covered | engrave the FUSION ESSENTIALS nameplate; then the path layouts - text along a line and wrapped around a closed circle, and fitted to a line - each checked against the created text's own definition objectType; a model edge as the path, the three cross-mode inputs, and a layout input on an edit all refused; then the FONT - named on a create and on an along-path create, read back off the landed text both times, then changed on an edit beside the string; an unknown name and its case variant refused on create with the text count proving nothing landed, the same name refused on an edit with the following read showing the string untouched, and a call with no font_name publishing no font key at all |
 | surface_create_ruled | covered | rule off a sheet's top rim - tangent, normal, along a direction entity and at an angle read off the feature - then off a SOLID box edge, where only the new sheet is the result; both misuse refusals |
-| surface_delete_face | called | open a bore by deleting a face |
+| surface_delete_face | covered | open a bore by deleting a face |
 | surface_extend | covered | extend a sheet edge with no alignment given (the payload carries no key, so nothing was written), then a second sheet extended with 'align_edges' read back |
 | surface_extrude | covered | extrude prep sheets |
 | surface_fill | covered | seal a closed revolved sphere surface into a solid, the volume measured off the result and every tool accounted for; and seal the joint cameo's sphere the same way, so the ball beat has a real sphere face to joint at; a cell index one past the end refused NAMING the range that exists, with the computing input cancelled and nothing created |
-| surface_offset | called | offset a ring face zero and nonzero |
+| surface_offset | covered | offset a sheet face zero and nonzero |
 | surface_patch | covered | close the opened bore with a patch, then the same rim at 'tangent' continuity and again through one interior RAIL whose landed count is read off the input; rails paired with the multi-loop form refused |
 | surface_reverse_normal | covered | flip a sheet normal |
-| surface_revolve | called | revolve a prep sheet; and the half-disc that closes into the ball joint's sphere |
+| surface_revolve | covered | revolve a prep sheet; and the half-disc that closes into the ball joint's sphere |
 | surface_thicken | covered | thicken the prep sheet, then a four-walled sheet with 'rounded' corners read back off the input |
 | surface_trim | covered | trim a sheet with a cylinder cutter |
 | surface_untrim | covered | untrim the internal hole loop |
-| sys_capability_map | called | survey the server's tool families at cold start |
+| sys_capability_map | covered | survey the server's tool families at cold start |
 | sys_execute_script | skipped: gated off by design; the sweep proves the typed surface suffices - and with it the beat for its DRAWING-document error tail (a raise inside a drawing ends with 'Re-read the sheets before assuming this call changed nothing.', a design one does not), which would need this tool driven against two document kinds |  |
 | sys_find_tool | covered | search the surface for the revolve verb - a registry read, so it carries no 'active_document' stamp (design_get's final read is the other half) |
-| sys_get_api_doc | called | read the RevolveFeatures API doc |
+| sys_get_api_doc | covered | read the RevolveFeatures API doc |
 | sys_get_guidance | covered | read the packaged design guidance as a tool-only client does - the section index, then the assemble section's rule records beside the content hash that versions them |
 | sys_get_preferences | covered | read the application's own configuration - the default projection, two decoded enum families, the compatibility group, and all three members the census found RAISING on this build, each published null and named in 'unreadable' with none of them miscategorised as a member the build does not carry |
 | sys_get_selection | refusals-only: every step is a guard refusal - no effect was produced or read back this run | expected refusal: nothing is selected yet |
-| sys_reload_addin | skipped: restarts the server mid-sweep |  |
+| sys_reload_addin | covered | the last beat of the run, once the document is discarded: reload the add-in, watch /health stop answering and answer again as this server, then read the restarted registry back through sys_find_tool. It restarts the server, so nothing can be dispatched after it - which is why it is a post-run beat and not a row in an act |
 | sys_request_selection | skipped: waits on a human pick (user-present tier) |  |
 | sys_set_preferences | covered | round-trip one invisible preference and restore it in the same act; the below-minimum value and a tier-R member refused |
-| view_list_workspaces | called | list the workspaces available |
-| view_screenshot | covered | capture the sectioned mechanism; write the same path twice to show the overwrite, and refuse a write against a document that is not active; and shoot view='current' - the no-move capture, the only way to keep a frame the camera already holds, since a NAMED view refits the whole model |
-| view_screenshot_multi | called | capture the front and top beauty shots; then a four-view contact sheet, the camera restored afterwards |
-| view_section | called | section cut through the gimbal center |
+| view_list_workspaces | covered | list the workspaces available |
+| view_screenshot | covered | capture the sectioned part, and the vise open before it closes; write the same path twice to show the overwrite, and refuse a write against a document that is not active; and shoot view='current' - the no-move capture, the only way to keep a frame the camera already holds, since a NAMED view refits the whole model |
+| view_screenshot_multi | covered | capture the front and top beauty shots; then a four-view contact sheet, the camera restored afterwards |
+| view_section | covered | section cut along the part's bore axis |
 | view_set | covered | orient the camera to the iso hero angle, with the perspective angle carried through to the camera and read back; then the whole verb set on the finished fixture - snapshot, a turntable through every camera preset (one framed orient sets the subject, the rest rotate about it with fit=false), every visual style, isolate/hide/show/clear_isolation, a persistent Named View saved, found in the document's own list and re-applied, and restore putting camera, style and every bulb back where the tour started. SKIPPED(rig): the snapshot/restore truncation beats (truncated + occurrence_cap) need an assembly with more occurrences than the cap, and the story document stays well under it |
-| view_switch_workspace | called | switch to Manufacture, then back to Design |
-| workspace_orient | called | orient: read the empty design before building |
+| view_switch_workspace | covered | switch to Manufacture, then back to Design |
+| workspace_orient | covered | orient: read the empty design before building; and the entitlement block as the CAM job opens - exactly the four sentinel strategies, each answering its own isGenerationAllowed flag rather than reading null. It is the same read the run's capability probe takes, which is what routes the extension acts to skipped(machining_extension not entitled) instead of into the refusal an unlicensed installation answers them with |
