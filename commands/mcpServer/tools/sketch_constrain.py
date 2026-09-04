@@ -211,7 +211,7 @@ _RESULT_OPTION = _inputs.Choice("result_option", list(_RESULT_OPTIONS), default=
 # autoConstrain's four dimensioning knobs. The bindings say a preference "may be ignored if not
 # applicable to the geometry", so each is published as REQUESTED, never as applied. Each family's
 # Default* member is what a fresh AutoConstrainInput holds, so no option maps to it.
-_DIMENSION_STRATEGIES = {
+_LAYOUT_STRATEGIES = {
     "chain": "ChainDimensionStrategyType",
     "baseline": "BaselineDimensionStrategyType",
     "edge_aligned": "EdgeAndAlignedDimensionStrategyType",
@@ -231,13 +231,13 @@ _LINEAR_DIAMETER = {"prefer": "PreferLinearDiameterDimensionPreferenceType",
 
 # input name -> (AutoConstrainInput property, member table).
 _STRATEGY_KNOBS = (
-    ("dimension_strategy", "dimensionStrategy", _DIMENSION_STRATEGIES),
+    ("dimension_strategy", "dimensionStrategy", _LAYOUT_STRATEGIES),
     ("inter_loop_strategy", "interLoopDimensionStrategy", _INTER_LOOP_STRATEGIES),
     ("symmetric_strategy", "symmetricDimensionStrategy", _SYMMETRIC_STRATEGIES),
     ("linear_diameter_dims", "linearDiameterDimensionPreference", _LINEAR_DIAMETER),
 )
 _STRATEGY_CHOICES = (
-    _inputs.Choice("dimension_strategy", list(_DIMENSION_STRATEGIES),
+    _inputs.Choice("dimension_strategy", list(_LAYOUT_STRATEGIES),
                    description="auto: dimension layout."),
     _inputs.Choice("inter_loop_strategy", list(_INTER_LOOP_STRATEGIES),
                    description="auto: layout BETWEEN loops; multi-loop sketches only."),

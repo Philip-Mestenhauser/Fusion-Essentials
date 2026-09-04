@@ -255,8 +255,8 @@ def _slice_templates(cam, template_location, template_url, template_depth):
     """The CAM toolpath TEMPLATE library tree (folders + templates by URL) for a location
     (cloud/local/fusion/...) or a specific folder 'template_url'. Apply/save stay on cam_apply_template
     / cam_save_template."""
-    from . import cam_templates
-    return _unwrap(cam_templates.list_cam_templates_handler(
+    from . import _cam_templates
+    return _unwrap(_cam_templates.list_cam_templates_handler(
         location=template_location or "cloud", url=template_url, max_depth=template_depth or 4))
 
 

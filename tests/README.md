@@ -17,7 +17,7 @@ Layout — the tree splits by KIND:
 ```bash
 py -3 tests/check_all.py                     # THE button: generator checks + suite + live gate
 py -3 tests/check_all.py --offline           # no Fusion here (skips the live gate, visibly)
-py -3 -m pytest tests/unit/test_sys_selection.py -v   # one tool, verbose (while iterating)
+py -3 -m pytest tests/unit/test_sys_get_selection.py -v   # one tool, verbose (while iterating)
 py -3 tests/gen_all.py                       # regenerate the docs under tests/generated/
 ```
 
@@ -54,9 +54,9 @@ in-Fusion integration layer (driven via the Fusion MCP server), not here.
 ### Triage when deciding whether a tool needs tests
 
 - **Tier 1 — test thoroughly.** Real logic: unit math, parsing, classification,
-  path/name resolution, state tallies. (model_inspect, sys_selection,
-  cam_get/_cam_common, data_ops/doc_lifecycle, param_ops, design_configure,
-  joint_create_edit, joint_create_origin, cam_templates, sketch_core.)
+  path/name resolution, state tallies. (model_inspect, sys_get_selection,
+  cam_get/_cam_common, _data_common/_doc_common, _param_common, design_configure,
+  joint_create, joint_create_origin, _cam_templates, sketch_add_geometry.)
 - **Tier 2 — test the one or two real helpers.** Mostly Fusion orchestration
   with a pure helper or two worth pinning. (doc_open URN parsing, quoting
   helpers, design_get tree/timeline slices,

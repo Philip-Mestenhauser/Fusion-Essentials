@@ -19,7 +19,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import (FakeBoundingBox3D, FakeOccurrence, FakePoint, install, load_tool,
+from conftest import (FakeBoundingBox3D, FakeOccurrence, FakePoint, Profile, install, load_tool,
                       make_design, make_occurrence)
 
 sd = load_tool("_sketch_detail")
@@ -176,22 +176,10 @@ class FakeDim:
         self.isDriving = driving
 
 
-class _FakeAreaProps:
-    def __init__(self, area, centroid):
-        self.area = area
-        self.centroid = centroid
-
-
-class FakeProfile:
+def _profile(tok, area, cx, cy, loops=1):
     """A sketch profile with the surface _profiles() reads: areaProperties() (area + centroid),
     profileLoops.count, and an entityToken (so _inputs.make_handle can build a handle)."""
-    def __init__(self, tok, area, cx, cy, loops=1):
-        self.entityToken = tok
-        self._ap = _FakeAreaProps(area, _Pt(cx, cy))
-        self.profileLoops = type("PL", (), {"count": loops})()
-
-    def areaProperties(self):
-        return self._ap
+    return Profile(entity_token=tok, area=area, centroid=(cx, cy), loops=loops)
 
 
 class FakeSketch:
@@ -574,8 +562,8 @@ class TestGuards:
 
 def _face_sketch():
     """A sketch-on-face shape: the ring (big area) + the drawn circle (small area), each a profile."""
-    ring = FakeProfile("tok_ring", area=11.71, cx=0.0, cy=0.0, loops=2)
-    circle = FakeProfile("tok_circle", area=0.28, cx=0.0, cy=0.0, loops=1)
+    ring = _profile("tok_ring", area=11.71, cx=0.0, cy=0.0, loops=2)
+    circle = _profile("tok_circle", area=0.28, cx=0.0, cy=0.0, loops=1)
     return FakeSketch("OnFace", circles=[FakeCircle("c", 0, 0, 0.3)], profiles=[ring, circle])
 
 
@@ -628,7 +616,7 @@ class TestComputeDeferredRead:
     withholds the handles instead."""
 
     def _deferred(self):
-        ring = FakeProfile("tok_ring", area=11.71, cx=0.0, cy=0.0, loops=2)
+        ring = _profile("tok_ring", area=11.71, cx=0.0, cy=0.0, loops=2)
         return FakeSketch("Stale", profiles=[ring], compute_deferred=True)
 
     def test_a_deferred_sketch_publishes_no_profile_handles(self):
@@ -657,7 +645,7 @@ class TestComputeDeferredRead:
     def test_an_unreadable_flag_publishes_neither_the_flag_nor_a_withheld_list(self):
         # read_flag answers None for a read that raised; a coerced False would be a confident "not
         # deferred", and a coerced True would withhold handles off a sketch that is perfectly fine
-        ring = FakeProfile("tok_ring", area=11.71, cx=0.0, cy=0.0, loops=2)
+        ring = _profile("tok_ring", area=11.71, cx=0.0, cy=0.0, loops=2)
         _install(FakeSketch("Unknown", profiles=[ring], compute_deferred="raises"))
         out = _payload(sd.handler(sketch_name="Unknown"))
         assert "compute_deferred" not in out and "profiles_stale" not in out
@@ -812,7 +800,7 @@ class TestUnitsScaling:
 
     def test_profile_centroid_scales_linearly(self):
         # centroid is a length (scales by f), NOT an area (f^2) - a distinct factor from 'area' above.
-        _install(FakeSketch("C", profiles=[FakeProfile("t", area=1.0, cx=2.0, cy=3.0)]))
+        _install(FakeSketch("C", profiles=[_profile("t", area=1.0, cx=2.0, cy=3.0)]))
         out = _payload(sd.handler(sketch_name="C"))
         assert out["profiles"][0]["centroid"] == [20.0, 30.0, 0.0]
 

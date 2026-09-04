@@ -442,8 +442,8 @@ def handler(target: str = "", include=None, units: str = "mm", accuracy: str = "
 
     # A MESH target is measured by mesh stats (it has no BRep bbox/mass the solid path computes).
     if kind == "mesh":
-        from . import mesh_ops
-        out, e = _unwrap(mesh_ops.mesh_measure_of_body(ent, units))
+        from . import _mesh_common
+        out, e = _unwrap(_mesh_common.mesh_measure_of_body(ent, units))
         if e:
             return e
         out["kind"] = "mesh"

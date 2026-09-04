@@ -742,9 +742,9 @@ class TestLibrarySlice:
         assert seen == {"vendor": "Haas", "machine_type": "milling"}
 
     def test_templates_slice_delegates_with_location(self, monkeypatch):
-        # _slice_templates forwards location/url/depth to cam_templates' list engine and unwraps it.
+        # _slice_templates forwards location/url/depth to _cam_templates' list engine and unwraps it.
         seen = {}
-        ct = load_tool("cam_templates")
+        ct = load_tool("_cam_templates")
         monkeypatch.setattr(ct, "list_cam_templates_handler",
                             lambda location, url, max_depth: (
                                 seen.update(location=location, url=url, max_depth=max_depth)
@@ -757,7 +757,7 @@ class TestLibrarySlice:
     def test_templates_slice_defaults_location_and_depth(self, monkeypatch):
         # empty location/depth default to cloud / 4 (the engine's contract).
         seen = {}
-        ct = load_tool("cam_templates")
+        ct = load_tool("_cam_templates")
         monkeypatch.setattr(ct, "list_cam_templates_handler",
                             lambda location, url, max_depth: (
                                 seen.update(location=location, max_depth=max_depth)

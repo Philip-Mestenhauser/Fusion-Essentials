@@ -1,11 +1,8 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building blocks for MESH export/tessellation - mesh_export (write a mesh file to local disk;
-never touches the design) and save_as_mesh (tessellate a BRep body into a persistent MeshBody - the
-inverse of mesh_to_brep). save_as_mesh's write runs through run_in_base_feature (design_mode.py) for
-the parametric base-feature scope requirement; its read-only tessellation step runs outside that
-scope.
+"""MCP building block: write geometry to a MESH file (STL / OBJ / 3MF) on local disk. The design is
+never modified; a written file is verified against a pre-write snapshot of the output path.
 """
 
 import os
@@ -14,14 +11,13 @@ import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item, Verification
+from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from . import _assert
 from . import _common
 from . import _export
 from . import _inputs
-from .design_mode import run_in_base_feature
 
 app = adsk.core.Application.get()
 
@@ -39,14 +35,6 @@ _REFINEMENTS = {
 "low": "MeshRefinementLow",
 }
 
-# quality -> the TriangleMeshQualityOptions enum member name (LOD for the tessellation calculator).
-_QUALITIES = {
-"low": "LowQualityTriangleMesh",
-"normal": "NormalQualityTriangleMesh",
-"high": "HighQualityTriangleMesh",
-"very_high": "VeryHighQualityTriangleMesh",
-}
-
 _EXPORT_TARGET = _inputs.BodyRef("target", kind="any", required=False,
                                  description="What to export; omit = the whole design.")
 _EXPORT_FORMAT = _inputs.Choice("format", options=list(_FORMATS), default="3mf",
@@ -59,12 +47,6 @@ _EXPORT_REFINE = _inputs.Choice("refinement", options=list(_REFINEMENTS), defaul
 _EXPORT_UNITS = _inputs.Choice("stl_units", options=list(_export.STL_UNIT_MEMBERS), default="mm",
                                description="format=stl only: the units baked into the file - pass "
                                            "the same to mesh_insert to re-import at size.")
-
-# save_as_mesh's source is a BRep body to tessellate (solid OR surface).
-_SAVE_BODY = _inputs.BodyRef("body", kind="any", required=True,
-                             description="The BRep solid/surface to tessellate into a mesh.")
-_SAVE_QUALITY = _inputs.Choice("quality", options=list(_QUALITIES), default="normal",
-                               description="Tessellation level of detail.")
 
 
 # ── mesh_export target resolution (broad: body handle/name, component/occurrence, whole design) ──
@@ -185,9 +167,9 @@ def _write_mesh_file(em, factory_name, fmt, geom, path, ref, unit_key):
     return size, applied, units, None
 
 
-def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
-                   refinement: str = "medium", stl_units: str = "",
-                   split_by_component: bool = False) -> dict:
+def handler(format: str = "3mf", file_path: str = "", target: str = "",
+            refinement: str = "medium", stl_units: str = "",
+            split_by_component: bool = False) -> dict:
     """Export 'target' (body/mesh/component/occurrence, or whole design) to 'file_path' as a mesh, or
     with split_by_component one file per top-level occurrence into the directory 'file_path'."""
     fmt, ferr = _EXPORT_FORMAT.resolve(format)
@@ -409,170 +391,18 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
     return ok(payload)
 
 
-# ── save_as_mesh: tessellate a BRep body -> persistent MeshBody (inverse of mesh_to_brep) ────────
-
-def _tessellate(body, quality_key):
-    """Run the body's mesh calculator: (TriangleMesh, the quality key that reached setQuality or None,
-    error). Read-only, so it runs outside the base-feature scope."""
-    mm = safe(lambda: body.meshManager)
-    if mm is None:
-        return None, None, error("This body has no meshManager - cannot tessellate it into a mesh.")
-    calc = safe(lambda: mm.createMeshCalculator())
-    if calc is None:
-        return None, None, error("meshManager.createMeshCalculator() returned nothing - cannot "
-                                 "tessellate.")
-
-    tmo = safe(lambda: adsk.fusion.TriangleMeshQualityOptions)
-    qual = safe(lambda: getattr(tmo, _QUALITIES[quality_key])) if tmo is not None else None
-    applied = None
-    if qual is not None:
-        # setQuality answers whether the quality took; a false leaves the DEFAULT tessellation,
-        # so the file would not be at the quality the payload reports.
-        if not safe(lambda: calc.setQuality(qual)):
-            return None, None, error(f"Fusion refused mesh quality '{quality_key}' (setQuality "
-                                     "returned false), so nothing was exported at that quality.")
-        applied = quality_key
-
-    # calculate is a real computation that can raise on a degenerate body - surface it, don't swallow.
-    try:
-        tm = calc.calculate()
-    except Exception as e:
-        return None, applied, error(f"Mesh tessellation (calculate) failed: {e}")
-    if tm is None:
-        return None, applied, error("Mesh calculator returned no TriangleMesh (tessellation produced "
-                                    "nothing).")
-    return tm, applied, None
-
-
-def _weld(coords, coord_idx):
-    """Merge vertices agreeing to 1e-6 cm and remap the indices: (welded_coords, welded_idx), or the
-    inputs unchanged when malformed. coords is flat [x0,y0,z0, ...], coord_idx per-corner."""
-    try:
-        n = len(coords)
-        if n == 0 or n % 3 != 0 or not coord_idx:
-            return coords, coord_idx
-        remap = {}                # rounded (x,y,z) -> new vertex index
-        new_coords = []
-        old_to_new = [0] * (n // 3)
-        for v in range(n // 3):
-            x, y, z = coords[3 * v], coords[3 * v + 1], coords[3 * v + 2]
-            key = (round(x, 6), round(y, 6), round(z, 6))
-            idx = remap.get(key)
-            if idx is None:
-                idx = len(new_coords) // 3
-                remap[key] = idx
-                new_coords.extend((x, y, z))
-            old_to_new[v] = idx
-        new_idx = [old_to_new[i] for i in coord_idx]
-        return new_coords, new_idx
-    except Exception:
-        return coords, coord_idx     # never let welding block the tessellation
-
-
-def save_as_mesh_handler(body: str = "", quality: str = "normal", name: str = "") -> dict:
-    """Tessellate a BRep solid/surface into a persistent MeshBody in the design. WRITES."""
-    design = _common.design()
-    if not design:
-        return error("No active design. Open or create a document first (see doc_new).")
-
-    src, berr = _SAVE_BODY.resolve(body)
-    if berr:
-        return error(berr)
-    if _inputs._is_mesh(src):
-        return error("'body' is already a MESH body - save_as_mesh tessellates a BRep solid/surface. "
-    "To re-triangulate an existing mesh use mesh_remesh; to copy/export it use "
-    "mesh_export.")
-    qual, qerr = _SAVE_QUALITY.resolve(quality)
-    if qerr:
-        return error(qerr)
-
-    # The component that owns the source body (so the new mesh lands beside it), falling back to root.
-    comp = safe(lambda: src.parentComponent) or safe(lambda: design.rootComponent)
-    if comp is None:
-        return error("Could not resolve a component to add the mesh body into.")
-
-    # 1) calculate - READ-ONLY, runs OUTSIDE the base-feature scope.
-    tm, applied_quality, terr = _tessellate(src, qual)
-    if terr:
-        return terr
-
-    coords = safe(lambda: tm.nodeCoordinatesAsDouble)
-    coord_idx = safe(lambda: tm.nodeIndices)
-    normals = safe(lambda: tm.normalVectorsAsDouble)
-    normal_idx = safe(lambda: tm.normalIndices)
-    if coords is None or coord_idx is None:
-        return error("Tessellation produced no coordinate/index data - cannot build a mesh body.")
-    tri_count = safe(lambda: tm.triangleCount)
-
-    # The calculator emits one node per triangle corner, so an unwelded mesh is topologically open
-    # (isClosed=false even for a watertight solid) and mesh_to_brep refuses it. The normals stay
-    # per-corner - the coordinate and normal index lists are independent.
-    coords, coord_idx = _weld(coords, coord_idx)
-    node_count = len(coords) // 3
-
-    # 2) addByTriangleMeshData - the WRITE, inside the base-feature scope when parametric.
-    def _add(_base_feature):
-        return comp.meshBodies.addByTriangleMeshData(coords, coord_idx, normals or [], normal_idx or [])
-
-    before_mb_count = safe(lambda: comp.meshBodies.count)
-    result, scope_err = run_in_base_feature(design, comp, _add)
-    if scope_err:
-        return scope_err
-    mb = result
-    if mb is None:
-        return error("meshBodies.addByTriangleMeshData returned nothing - no mesh body was created.")
-    # A returned body object is not proof it joined the component - the count is.
-    after_mb_count = safe(lambda: comp.meshBodies.count)
-    if (before_mb_count is not None and after_mb_count is not None
-            and after_mb_count <= before_mb_count):
-        return error("addByTriangleMeshData returned a mesh body but the component's mesh body "
-                     f"count did not increase ({before_mb_count} before, {after_mb_count} after) - "
-                     "the mesh body did not actually land.")
-
-    final_name, rename_warning = _common.apply_rename(mb, name)
-
-    mode = _inputs.current_design_type(design)
-    # 'quality' is what setQuality actually took, null when this build carried no enum member for the
-    # request (the calculator then ran at its own default) - the request is echoed separately so the
-    # two can never be confused.
-    quality_note = ("" if applied_quality is not None else
-                    f" Quality '{qual}' did NOT land: this build exposes no "
-                    "TriangleMeshQualityOptions member for it, so setQuality was never called and "
-                    "the tessellation ran at the calculator's default level of detail. 'quality' is "
-                    "null; 'quality_requested' is what was asked for.")
-    payload = {
-        "saved_as_mesh": True,
-        "name": final_name,
-        "handle": safe(lambda: mb.entityToken),
-        "source_body": safe(lambda: src.name),
-        "component": safe(lambda: comp.name),
-        "quality": applied_quality,          # what LANDED; null when setQuality was never called
-        "quality_requested": qual,
-        "triangle_count": tri_count,
-        "node_count": node_count,
-        "note": ("Tessellated the BRep body into a persistent MESH body. " + (
-            "Wrapped in a BaseFeature edit scope (parametric design requires it for a mesh write)."
-            if mode == _inputs.MODE_PARAMETRIC else
-            "Direct design - no base-feature scope needed.") + quality_note +
-            " Inspect it with model_inspect (mesh target), edit with mesh_reduce / mesh_remesh, or "
-            "export it with mesh_export."),
-    }
-    if rename_warning:
-        payload["rename_warning"] = rename_warning
-    return ok(payload)
-
-
 # ── tool registration ────────────────────────────────────────────────────────────────────────
 
+TOOL_DESCRIPTION = (
+    "Export geometry to a MESH file on local disk - for neutral BRep formats use "
+    "design_export. The design is not modified. Re-import a written file as a mesh "
+    "body with mesh_insert; upload it to the cloud with data_upload_file."
+)
+
 _EXPORT_SPEC = [_EXPORT_FORMAT, _EXPORT_REFINE, _EXPORT_UNITS, _EXPORT_TARGET]
-mesh_export_tool = (
+tool = (
     _inputs.apply_to_tool(
-        Tool.create_simple(
-            name="mesh_export",
-            description=(
-                "Export geometry to a MESH file on local disk - for neutral BRep formats use "
-                "design_export. The design is not modified. Re-import a written file as a mesh "
-                "body with mesh_insert; upload it to the cloud with data_upload_file.")),
+        Tool.create_simple(name="mesh_export", description=TOOL_DESCRIPTION),
         _EXPORT_SPEC)
     .add_input_property("file_path", {"type": "string",
             "description": "Local output path - a file, or a DIRECTORY when split_by_component=true. Extension appended if missing."})
@@ -583,32 +413,10 @@ mesh_export_tool = (
 )
 # DeliverablesExist re-stats every claimed deliverable (single file_path or split-mode files[]) - a
 # redundant gate; the handler's factored _write_mesh_file verification stays (it builds the payload).
-mesh_export_item = Item.create_tool_item(tool=mesh_export_tool, write="write", handler=export_handler,
-                                         run_on_main_thread=True,
-                                         postconditions=[_assert.DeliverablesExist()])
-
-_SAVE_SPEC = [_SAVE_BODY, _SAVE_QUALITY]
-save_as_mesh_tool = (
-    _inputs.apply_to_tool(
-        Tool.create_simple(
-            name="save_as_mesh",
-            description=(
-                "Tessellate a BRep solid/surface into a persistent MESH body IN the design - the "
-                "inverse of mesh_to_brep ('save as mesh'). The new mesh lands beside the source "
-                "body; inspect and edit it with the mesh_* tools.")),
-        _SAVE_SPEC)
-    .add_input_property("name", {"type": "string",
-            "description": "Optional name for the new mesh body."})
-    .strict_schema()
-)
-save_as_mesh_item = Item.create_tool_item(
-    tool=save_as_mesh_tool, write="write", handler=save_as_mesh_handler, run_on_main_thread=True,
-    verification=Verification(
-        kind="inline",
-        evidence_test="tests/unit/test_mesh_export.py::TestSaveAsMesh"
-                      "::test_phantom_body_that_never_lands_bites"))
+item = Item.create_tool_item(tool=tool, write="write", handler=handler,
+                             run_on_main_thread=True,
+                             postconditions=[_assert.DeliverablesExist()])
 
 
 def register_tool():
-    register(mesh_export_item)
-    register(save_as_mesh_item)
+    register(item)

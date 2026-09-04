@@ -44,7 +44,7 @@ object graph, or they are a rare branch). These are pinned by the mock unit suit
   `test_joint_motion_link.py` (the full joint walk).
 - **the design_export ambiguity REFUSAL and the design_get ambiguous-occurrence REFUSAL** -
   pinned by `test_design_export.py` / `test_design_get.py`.
-- **the template-generation-mode and library-location enums** - pinned by `test_cam_templates.py`.
+- **the template-generation-mode and library-location enums** - pinned by `test__cam_templates.py` / `test_cam_apply_template.py`.
 - **the CAM setup COMPONENT-selection kind** (ambiguity refusal) - pinned by
   `test_inputs.py::TestTargetRefList`; S8 exercises the happy path live.
 - **the design-intent auto-promote** - pinned by
@@ -57,7 +57,7 @@ object graph, or they are a rare branch). These are pinned by the mock unit suit
 - **sys_request_selection** - interactive by design: it holds for a HUMAN pick, and an eval never
   puts a human in the loop (run_eval.py hard-denies it; that affordance belongs to skills a human
   invoked). Its guards (nothing-to-select, wait bounds, single-pending) are pinned by
-  test_sys_selection.py; the pick path is verified owner-present at the tool level.
+  test_sys_request_selection.py; the pick path is verified owner-present at the tool level.
 
 ## Running
 

@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import load_tool, FakePoint
+from conftest import Camera, FakePoint, Viewport, load_tool
 
 cv = load_tool("view_screenshot_multi")
 
@@ -75,35 +75,10 @@ class TestParseViews:
 
 # ── handler fakes ───────────────────────────────────────────────────────────
 
-class FakeCamera:
-    def __init__(self):
-        self.eye = FakePoint(5, 0, 0)
-        self.target = FakePoint(0, 0, 0)
-        self.upVector = None
-        self.cameraType = "user-camera-type"
-
-
-class FakeViewport:
-    """The getter always returns the one camera object; every assignment is recorded so a test
-    can assert the handler's final ``finally`` restore (the last assignment is the saved camera)."""
-
-    def __init__(self):
-        self._cam = FakeCamera()
-        self.camera_assignments = []
-
-    @property
-    def camera(self):
-        return self._cam
-
-    @camera.setter
-    def camera(self, value):
-        self.camera_assignments.append(value)
-
-    def fit(self):
-        pass
-
-    def refresh(self):
-        pass
+def _viewport():
+    """The rig's viewport, its camera 5 cm out on X carrying a projection no named view uses -
+    so a capture that saw the USER's camera type is told apart from one an orient forced."""
+    return Viewport(camera=Camera(eye=(5, 0, 0), camera_type="user-camera-type"))
 
 
 @pytest.fixture
@@ -113,7 +88,7 @@ def rig(monkeypatch):
     The handler's own job is COMPOSITION (order views, size images, isolate per-view
     failures, restore the camera); the orient/capture mechanics are pinned in
     test__view_common.py, so they are stubbed here per the router-test idiom."""
-    vp = FakeViewport()
+    vp = _viewport()
     monkeypatch.setattr(cv, "app", SimpleNamespace(activeViewport=vp))
     applied, captures = [], []
 
@@ -237,7 +212,7 @@ class TestCameraRestore:
     def test_original_camera_is_reasserted_after_a_successful_run(self, rig):
         cv.handler(views=["front", "top"])
         # apply assigned per-view cameras; the finally must put the SAVED camera back last.
-        assert rig.vp.camera_assignments[-1] is rig.vp._cam
+        assert rig.vp._assigned[-1] is rig.vp._original_camera
 
     def test_original_camera_is_reasserted_even_when_a_capture_raises(self, rig, monkeypatch):
         def exploding_capture(viewport, width, height, prefix="fe_mcp_shot", **switches):
@@ -246,7 +221,7 @@ class TestCameraRestore:
         monkeypatch.setattr(cv._view_common, "capture_png_b64", exploding_capture)
         with pytest.raises(RuntimeError):
             cv.handler(views=["front"])
-        assert rig.vp.camera_assignments and rig.vp.camera_assignments[-1] is rig.vp._cam
+        assert rig.vp._assigned and rig.vp._assigned[-1] is rig.vp._original_camera
 
     def test_a_camera_restore_the_viewport_refuses_is_named_on_the_summary(self, rig,
                                                                            monkeypatch):
@@ -255,9 +230,9 @@ class TestCameraRestore:
         # The per-view orients still land; only putting the ORIGINAL camera back is refused, which
         # is the state that leaves the viewport moved after the call returns.
         def refuse_the_restore(self, value):
-            if value is self._cam:
+            if value is self._original_camera:
                 raise RuntimeError("viewport busy")
-            self.camera_assignments.append(value)
+            self._assigned.append(value)
         monkeypatch.setattr(type(rig.vp), "camera",
                             property(lambda s: s._cam, refuse_the_restore))
         result = cv.handler(views=["front", "top"])
@@ -313,7 +288,7 @@ def rig_real_orient(monkeypatch):
     composition that decides camera TYPE per view is exercised end to end. Point3D/Vector3D
     construction is redirected to plain fakes so the camera math runs on real floats."""
     import adsk.core
-    vp = FakeViewport()
+    vp = _viewport()
     monkeypatch.setattr(cv, "app", SimpleNamespace(activeViewport=vp))
     monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: FakePoint(x, y, z))
     monkeypatch.setattr(adsk.core.Vector3D, "create", lambda x, y, z: (x, y, z))

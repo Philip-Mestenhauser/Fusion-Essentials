@@ -14,8 +14,8 @@ import types
 import pytest
 
 from conftest import (load_tool, make_design, _make_object_collection, _NamedCollection, BRepBody,
-                      FakePoint, FakeVector3D, MakeComp, MeshBody, body_proxy, entity_proxy,
-                      make_source_document)
+                      FakePoint, FakeVector3D, MakeComp, MeshBody, Profile, body_proxy,
+                      entity_proxy, make_source_document)
 
 inp = load_tool("_inputs")
 
@@ -2359,7 +2359,7 @@ class TestBodyNameAmbiguity:
         assert err is None and val is not None and val.name == "Pin"
 
     def test_a_slash_qualified_label_resolves_like_the_colon_form(self):
-        # model_extrude / model_fillet_chamfer publish their body labels as '<scope>/<body>'; the
+        # model_extrude / model_fillet publish their body labels as '<scope>/<body>'; the
         # resolver accepts that spelling too, so a label a tool printed can be handed straight back.
         pin_a, pin_b = FakeBRep("Pin", is_solid=True), FakeBRep("Pin", is_solid=True)
         pin_a.assemblyContext = type("O", (), {"fullPathName": "Sub-A:1"})()
@@ -2619,11 +2619,6 @@ class TestModeGuard:
 
 # ── ProfileRef / ProfileRefList: stable handle first, legacy {sketch, index} fallback, ORDER-keeping ─
 
-class FakeProfile:
-    def __init__(self, tag):
-        self.tag = tag
-
-
 def _profile_sketch_fake(name, profs, ntexts=0, compute_deferred=None):
     """One sketch as the profile resolvers read it: `name`, the counted `profiles` collection an
     index selector addresses, and the counted `sketchTexts` behind the 'text:<i>' address space.
@@ -2644,7 +2639,7 @@ def _install_profiles(handle_map=None, sketches=None, monkeypatch=None):
     `sketches`, each owning a `profiles` counted collection. `handle_map` is its
     findEntityByToken table.
 
-    `sketches`: ordered list of (name, [FakeProfile, ...]) or (name, [...], text_count). The LAST is
+    `sketches`: ordered list of (name, [Profile, ...]) or (name, [...], text_count). The LAST is
     the 'most recent'.
 
     Built on conftest's `make_design`, so the design answers `rootComponent` and `allComponents` the
@@ -2653,7 +2648,7 @@ def _install_profiles(handle_map=None, sketches=None, monkeypatch=None):
     `all_components` and nothing else - a design missing those two reads answers that scan with an
     empty component list, so the locator can never find anything through it."""
     import adsk.fusion
-    adsk.fusion.Profile = FakeProfile
+    adsk.fusion.Profile = Profile
     comp = MakeComp(name="Root",
                     sketches=[_profile_sketch_fake(*row) for row in (sketches or [])])
     des = make_design(comp=comp, tokens=dict(handle_map or {}))
@@ -2668,7 +2663,7 @@ def _install_profiles(handle_map=None, sketches=None, monkeypatch=None):
 
 class TestProfileRef:
     def test_resolves_a_handle_first(self):
-        p = FakeProfile("P")
+        p = Profile("P")
         _install_profiles(handle_map={"PROF": p})
         val, err = inp.ProfileRef("profile").resolve("PROF")
         assert err is None and val is p
@@ -2680,31 +2675,31 @@ class TestProfileRef:
         assert val is None and "not a profile" in err
 
     def test_legacy_selector_by_sketch_and_index(self):
-        p0, p1 = FakeProfile("p0"), FakeProfile("p1")
+        p0, p1 = Profile("p0"), Profile("p1")
         _install_profiles(sketches=[("Sketch1", [p0, p1])])
         val, err = inp.ProfileRef("profile").resolve({"sketch": "Sketch1", "profile_index": 1})
         assert err is None and val is p1
 
     def test_legacy_selector_blank_sketch_uses_most_recent(self):
-        a, b = FakeProfile("a"), FakeProfile("b")
+        a, b = Profile("a"), Profile("b")
         _install_profiles(sketches=[("Old", [a]), ("New", [b])])
         val, err = inp.ProfileRef("profile").resolve({"profile_index": 0})
         assert err is None and val is b          # most-recent sketch
 
     def test_legacy_index_out_of_range(self):
-        _install_profiles(sketches=[("S", [FakeProfile("p0")])])
+        _install_profiles(sketches=[("S", [Profile("p0")])])
         val, err = inp.ProfileRef("profile").resolve({"sketch": "S", "profile_index": 5})
         assert val is None and "out of range" in err
 
     def test_legacy_unknown_sketch(self):
-        _install_profiles(sketches=[("S", [FakeProfile("p0")])])
+        _install_profiles(sketches=[("S", [Profile("p0")])])
         val, err = inp.ProfileRef("profile").resolve({"sketch": "Nope", "profile_index": 0})
         assert val is None and "no sketch named" in err
 
     def test_a_shared_sketch_name_is_refused_under_the_input_name(self, monkeypatch):
         # The selector's sketch lookup states what the design-wide walk READ: a name SEVERAL
         # sketches carry is the refusal naming each owner, never "no sketch named 'S'".
-        _install_profiles(sketches=[("S", [FakeProfile("p0")])])
+        _install_profiles(sketches=[("S", [Profile("p0")])])
         refusal = "2 sketches are named 'S' ('S' in Root, 'S' in Frame)"
         monkeypatch.setattr(inp._common, "find_or_recent_sketch", lambda d, n: (None, n, refusal))
         val, err = inp.ProfileRef("profile").resolve({"sketch": "S", "profile_index": 0})
@@ -2719,7 +2714,7 @@ class TestProfileRefComputeDeferred:
     the caller saw. Both forms are refused naming the flag and the two ways to resume compute."""
 
     def test_a_handle_off_a_deferred_sketch_is_refused(self, monkeypatch):
-        p0 = FakeProfile("p0")
+        p0 = Profile("p0")
         comp = _install_profiles(handle_map={"PROF": p0},
                                  sketches=[("Stale", [p0], 0, True)], monkeypatch=monkeypatch)
         p0.parentSketch = comp.sketches.itemByName("Stale")
@@ -2731,13 +2726,13 @@ class TestProfileRefComputeDeferred:
     def test_an_index_into_a_deferred_sketch_is_refused(self, monkeypatch):
         # the silent path: profile_index=0 hands back whichever profile is first in a set the
         # caller never saw, and the cut lands on it without a word
-        _install_profiles(sketches=[("Stale", [FakeProfile("p0")], 0, True)],
+        _install_profiles(sketches=[("Stale", [Profile("p0")], 0, True)],
                           monkeypatch=monkeypatch)
         val, err = inp.ProfileRef("profile").resolve({"sketch": "Stale", "profile_index": 0})
         assert val is None and "isComputeDeferred=true" in err
 
     def test_a_sketch_computing_normally_still_resolves(self, monkeypatch):
-        p0 = FakeProfile("p0")
+        p0 = Profile("p0")
         comp = _install_profiles(handle_map={"PROF": p0},
                                  sketches=[("Fine", [p0], 0, False)], monkeypatch=monkeypatch)
         p0.parentSketch = comp.sketches.itemByName("Fine")
@@ -2746,7 +2741,7 @@ class TestProfileRefComputeDeferred:
     def test_an_unreadable_flag_is_not_a_refusal(self, monkeypatch):
         # read_flag answers None for a read that raised; coerced True it would block every handle
         # whose sketch simply does not carry the member
-        p0 = FakeProfile("p0")
+        p0 = Profile("p0")
         comp = _install_profiles(handle_map={"PROF": p0}, sketches=[("Fine", [p0])],
                                  monkeypatch=monkeypatch)
         p0.parentSketch = comp.sketches.itemByName("Fine")
@@ -2754,7 +2749,7 @@ class TestProfileRefComputeDeferred:
 
     def test_a_handle_whose_owning_sketch_will_not_read_still_resolves(self, monkeypatch):
         # parentSketch absent is not evidence of a deferral either
-        p0 = FakeProfile("p0")
+        p0 = Profile("p0")
         _install_profiles(handle_map={"PROF": p0}, monkeypatch=monkeypatch)
         assert inp.ProfileRef("profile").resolve("PROF") == (p0, None)
 
@@ -2775,7 +2770,7 @@ class TestProfileRefSchema:
 
     def test_resolve_inputs_takes_the_object_AND_the_string_through_one_declaration(
             self, monkeypatch):
-        p0, p1 = FakeProfile("p0"), FakeProfile("p1")
+        p0, p1 = Profile("p0"), Profile("p1")
         _install_profiles(handle_map={"PROFTOK": p1}, sketches=[("Sketch1", [p0, p1])],
                           monkeypatch=monkeypatch)
         spec = [inp.ProfileRef("profile")]
@@ -2786,7 +2781,7 @@ class TestProfileRefSchema:
         assert err is None and by_string["profile"] is p1
 
     def test_a_list_takes_an_object_element_beside_a_string_one_in_ORDER(self, monkeypatch):
-        p0, p1 = FakeProfile("p0"), FakeProfile("p1")
+        p0, p1 = Profile("p0"), Profile("p1")
         _install_profiles(handle_map={"PROFTOK": p1}, sketches=[("Sketch1", [p0, p1])],
                           monkeypatch=monkeypatch)
         vals, err = inp.resolve_inputs(
@@ -2795,16 +2790,11 @@ class TestProfileRefSchema:
         assert err is None and vals["profiles"] == [p0, p1]
 
 
-class FakeAreaProfile(FakeProfile):
-    """A profile carrying areaProperties() - what the locator re-find reads."""
+class FakeAreaProfile(Profile):
+    """A profile carrying areaProperties() at the origin unless a centroid is given - what the
+    locator re-find reads."""
     def __init__(self, tag, centroid=(0.0, 0.0, 0.0), area=1.0):
-        super().__init__(tag)
-        self._c, self._a = centroid, area
-
-    def areaProperties(self):
-        c = type("C", (), {})()
-        c.x, c.y, c.z = self._c
-        return type("AP", (), {"centroid": c, "area": self._a})()
+        super().__init__(tag, centroid=centroid, area=area)
 
 
 class TestProfileHandleLocator:
@@ -2905,7 +2895,7 @@ class TestProfileRefComponentScope:
     the scope must SELECT, not merely soften the message."""
 
     def _two_components(self, monkeypatch):
-        alpha_p, beta_p = FakeProfile("alpha-region"), FakeProfile("beta-region")
+        alpha_p, beta_p = Profile("alpha-region"), Profile("beta-region")
         alpha = MakeComp(name="Alpha", sketches=[types.SimpleNamespace(
             name="Sketch1", profiles=_NamedCollection([alpha_p]))])
         beta = MakeComp(name="Beta", sketches=[types.SimpleNamespace(
@@ -2914,7 +2904,7 @@ class TestProfileRefComponentScope:
         monkeypatch.setattr(inp._common, "design", lambda: des)
         monkeypatch.setattr(inp._common, "target_component", lambda d: alpha)
         import adsk.fusion
-        monkeypatch.setattr(adsk.fusion, "Profile", FakeProfile)
+        monkeypatch.setattr(adsk.fusion, "Profile", Profile)
         return alpha_p, beta_p
 
     def test_the_scope_selects_the_named_components_own_profile(self, monkeypatch):
@@ -2950,7 +2940,7 @@ class TestProfileRefListComponentScope:
     a caller that named 'Beta' silently gets Alpha's region."""
 
     def _two_components(self, monkeypatch):
-        alpha_p, beta_p = FakeProfile("alpha-region"), FakeProfile("beta-region")
+        alpha_p, beta_p = Profile("alpha-region"), Profile("beta-region")
         alpha = MakeComp(name="Alpha", sketches=[types.SimpleNamespace(
             name="Sketch1", profiles=_NamedCollection([alpha_p]))])
         beta = MakeComp(name="Beta", sketches=[types.SimpleNamespace(
@@ -2959,7 +2949,7 @@ class TestProfileRefListComponentScope:
         monkeypatch.setattr(inp._common, "design", lambda: des)
         monkeypatch.setattr(inp._common, "target_component", lambda d: alpha)
         import adsk.fusion
-        monkeypatch.setattr(adsk.fusion, "Profile", FakeProfile)
+        monkeypatch.setattr(adsk.fusion, "Profile", Profile)
         return alpha_p, beta_p
 
     def test_the_scope_selects_the_named_components_own_profile(self, monkeypatch):
@@ -3008,7 +2998,7 @@ class TestProfileLocatorSharedSketchName:
         monkeypatch.setattr(inp._common, "design", lambda: des)
         monkeypatch.setattr(inp._common, "target_component", lambda d: comps[0])
         import adsk.fusion
-        monkeypatch.setattr(adsk.fusion, "Profile", FakeProfile)
+        monkeypatch.setattr(adsk.fusion, "Profile", Profile)
         return des
 
     def test_one_owner_still_resolves_to_that_exact_profile(self, monkeypatch):
@@ -3077,7 +3067,7 @@ class TestProfileLocatorTie:
         monkeypatch.setattr(inp._common, "design", lambda: des)
         monkeypatch.setattr(inp._common, "target_component", lambda d: comps[0])
         import adsk.fusion
-        monkeypatch.setattr(adsk.fusion, "Profile", FakeProfile)
+        monkeypatch.setattr(adsk.fusion, "Profile", Profile)
         return des
 
     # No sketch name in the locator - the design-wide scan. _sketch_detail._profiles mints this
@@ -3200,8 +3190,8 @@ class TestProfileSelectorSketchScope:
         # The sketch lives in a SUB-component while root is active: the {sketch, index} selector
         # must reach it (an active-component-scoped lookup reports 'no sketch named' instead).
         import adsk.fusion
-        adsk.fusion.Profile = FakeProfile
-        p = FakeProfile("sub-profile")
+        adsk.fusion.Profile = Profile
+        p = Profile("sub-profile")
 
         class _Profiles:
             count = 1
@@ -3247,33 +3237,33 @@ class TestProfileSelectorSketchScope:
 
 class TestProfileRefList:
     def test_resolves_handles_in_order(self):
-        p0, p1, p2 = FakeProfile("0"), FakeProfile("1"), FakeProfile("2")
+        p0, p1, p2 = Profile("0"), Profile("1"), Profile("2")
         _install_profiles(handle_map={"A": p0, "B": p1, "C": p2})
         val, err = inp.ProfileRefList("profiles").resolve(["A", "B", "C"])
         assert err is None and val == [p0, p1, p2]
 
     def test_order_is_PRESERVED_not_sorted(self):
         # loft order is load-bearing: a reversed input must come back reversed, no sort/dedupe
-        p0, p1, p2 = FakeProfile("0"), FakeProfile("1"), FakeProfile("2")
+        p0, p1, p2 = Profile("0"), Profile("1"), Profile("2")
         _install_profiles(handle_map={"A": p0, "B": p1, "C": p2})
         val, err = inp.ProfileRefList("profiles").resolve(["C", "A", "B"])
         assert err is None and val == [p2, p0, p1]
 
     def test_duplicates_are_NOT_deduped(self):
-        p = FakeProfile("0")
+        p = Profile("0")
         _install_profiles(handle_map={"A": p})
         val, err = inp.ProfileRefList("profiles").resolve(["A", "A"])
         assert err is None and val == [p, p]      # both kept — loft may revisit a section
 
     def test_mixed_handles_and_legacy_selectors(self):
-        ph = FakeProfile("h")
-        pl = FakeProfile("l")
+        ph = Profile("h")
+        pl = Profile("l")
         _install_profiles(handle_map={"H": ph}, sketches=[("S", [pl])])
         val, err = inp.ProfileRefList("profiles").resolve(["H", {"sketch": "S", "profile_index": 0}])
         assert err is None and val == [ph, pl]
 
     def test_one_bad_element_fails_with_index(self):
-        p = FakeProfile("0")
+        p = Profile("0")
         _install_profiles(handle_map={"A": p})
         val, err = inp.ProfileRefList("profiles").resolve(["A", "MISSING"])
         assert val is None and "[1]" in err
@@ -3330,7 +3320,7 @@ def _two_components_one_sketch_name(monkeypatch, name="Plate", shared=True):
     """Alpha and Beta each hold a sketch called `name`, each with one distinct profile. Returns
     (alpha_profile, beta_profile) - the two answers a scope has to choose between. shared=False
     leaves the name in Alpha ALONE, so the name identifies a sketch without any scope."""
-    pa, pb = FakeProfile("alpha"), FakeProfile("beta")
+    pa, pb = Profile("alpha"), Profile("beta")
     alpha = _ScopeComp("Alpha", [_ScopeSketch(name, [pa])])
     beta = _ScopeComp("Beta", [_ScopeSketch(name if shared else "Other", [pb])])
     comps = _ScopeProfiles([alpha, beta])
@@ -3473,7 +3463,7 @@ class TestProfileRefSketchText:
         assert "'Nameplate'" in err and "1 sketch text(s)" in err and "(text:0..text:0)" in err
 
     def test_a_sketch_holding_no_text_is_refused_by_name(self, monkeypatch):
-        _install_profiles(sketches=[("Plain", [FakeProfile("p0")], 0)], monkeypatch=monkeypatch)
+        _install_profiles(sketches=[("Plain", [Profile("p0")], 0)], monkeypatch=monkeypatch)
         val, err = inp.ProfileRef("p", allow_text=True).resolve("text:0")
         assert val is None and "'Plain' holds none" in err
 
@@ -3506,7 +3496,7 @@ class TestProfileRefSketchText:
         assert val is None and "Draw a closed region first." in err and "sketch text" not in err
 
     def test_a_list_keeps_order_across_a_profile_and_a_text(self, monkeypatch):
-        prof = FakeProfile("region")
+        prof = Profile("region")
         _install_profiles(handle_map={"H": prof}, sketches=[("Nameplate", [], 1)],
                           monkeypatch=monkeypatch)
         val, err = inp.ProfileRefList("profiles", allow_text=True).resolve(["text:0", "H"])
@@ -5230,7 +5220,7 @@ class TestRefusalListsDiscloseTheirRemainder:
         # _available_sketch_names, so the profile selector's miss and SketchRefList's miss cannot
         # differ in length on one design.
         n = inp._SKETCH_NAMES_LISTED + 1
-        _install_profiles(sketches=[(f"S{i:02d}", [FakeProfile(f"p{i}")]) for i in range(n)],
+        _install_profiles(sketches=[(f"S{i:02d}", [Profile(f"p{i}")]) for i in range(n)],
                           monkeypatch=monkeypatch)
         val, err = inp.ProfileRef("profile").resolve({"sketch": "Nope", "profile_index": 0})
         assert val is None and "no sketch named 'Nope'" in err
@@ -5239,7 +5229,7 @@ class TestRefusalListsDiscloseTheirRemainder:
 
     def test_the_profile_selectors_sketch_miss_names_every_sketch_AT_the_cap(self, monkeypatch):
         n = inp._SKETCH_NAMES_LISTED
-        _install_profiles(sketches=[(f"S{i:02d}", [FakeProfile(f"p{i}")]) for i in range(n)],
+        _install_profiles(sketches=[(f"S{i:02d}", [Profile(f"p{i}")]) for i in range(n)],
                           monkeypatch=monkeypatch)
         val, err = inp.ProfileRef("profile").resolve({"sketch": "Nope", "profile_index": 0})
         assert val is None and f"S{n - 1:02d}" in err

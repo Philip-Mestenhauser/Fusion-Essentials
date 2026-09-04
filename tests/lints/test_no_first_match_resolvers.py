@@ -272,7 +272,7 @@ def _first_match_loops(src):
 _FIRST_MATCH_ALLOWLIST = {
     # The loop widens to allParameters after userParameters.itemByName misses; both name spaces are
     # the one an expression resolves against.
-    "param_ops._find_parameter":
+    "_param_common._find_parameter":
         "parameter names are the identifiers expressions reference - unique by construction",
     # These two search the CLOUD data model. The FOLDER name space is measured unique; the PROJECT
     # one is not established, and that resolver returns the first sibling carrying the name.
@@ -366,15 +366,18 @@ class TestNoFirstMatchResolverAnywhere:
         assert not stale, "stale first-match allowlist entries:\n  " + "\n  ".join(stale)
 
 
-# Tools whose SINGLE-occurrence resolution was routed through _inputs._resolve_occurrence. The
+# Modules whose SINGLE-occurrence resolution was routed through _inputs._resolve_occurrence. The
 # frozen list is what stops a routed tool from passing the smell ban by ceasing to resolve
-# occurrences at all.
+# occurrences at all; the pattern tools declare theirs in the shared _pattern_common.
 _ROUTED_TOOLS = (
-    "assembly_transform",
-    "assembly_joints_advanced",
+    "assembly_ground",
+    "assembly_move",
+    "assembly_rigid_group",
+    "assembly_constrain",
+    "joint_create_as_built",
     "model_arrange",
-    "model_pattern",
-    "joint_create_edit",
+    "_pattern_common",
+    "_joint_inputs",
     "view_screenshot",
     "view_section",
 )

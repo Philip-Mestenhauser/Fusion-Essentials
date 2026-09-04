@@ -24,7 +24,7 @@ _TOOLS = _inputs.BodyRefList("tools", required=True, description="The tool bodie
 
 app = adsk.core.Application.get()
 
-_OPERATIONS = ("join", "cut", "intersect")   # combine needs an existing target; no "new"
+_OPERATION_KEYS = ("join", "cut", "intersect")   # combine needs an existing target; no "new"
 
 
 def _join_verdict(result_bodies, result_lumps, input_lumps, direct_no_feature,
@@ -64,7 +64,7 @@ def handler(target: str = "", tools=None, operation: str = "join",
             keep_tools: bool = False, new_component: bool = False) -> dict:
     """See TOOL_DESCRIPTION."""
     op_key = (operation or "join").strip().lower()
-    if op_key not in _OPERATIONS:
+    if op_key not in _OPERATION_KEYS:
         return error(f"Unknown operation '{operation}'. Use: join, cut, intersect.")
 
     design = _common.design()

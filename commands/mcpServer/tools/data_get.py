@@ -5,7 +5,7 @@
 
 Every call is a NETWORK round-trip (slow, can fail offline / signed-out / with no active hub) -
 deliberately separate from doc_get, which reads the in-memory session. Delegates to the
-data_read/data_ops/data_switch_hub handlers so the cloud-error guards and caps live in one place.
+_data_read cores and the data_switch_hub handler so the cloud-error guards and caps live in one place.
 """
 
 import json
@@ -80,10 +80,10 @@ def handler(project: str = "", project_id: str = "", folder: str = "", recursive
 
     # ── scoped to a project ──────────────────────────────────────────────────
     if have_project:
-        from . import data_ops, _data_read as data_read
+        from . import _data_read as data_read
         if "folders" in inc:
-            out, e = _unwrap(data_ops.list_folders_handler(project=project, project_id=project_id,
-                                                           max_depth=max_depth))
+            out, e = _unwrap(data_read.list_folders_handler(project=project, project_id=project_id,
+                                                            max_depth=max_depth))
             if e:
                 return e
             out["scope"] = "folders"
@@ -95,7 +95,7 @@ def handler(project: str = "", project_id: str = "", folder: str = "", recursive
                                 "descended. Lower max_depth, or list one subtree's files directly "
                                 "with 'folder'=<path>.")
             if out.get("time_truncated"):
-                out["note"] += (f" The walk stopped after its {int(data_ops._TIME_BUDGET_S)}s time "
+                out["note"] += (f" The walk stopped after its {int(data_read._TIME_BUDGET_S)}s time "
                                 "budget (a network stall, not the fetch-count cap) - results are "
                                 "PARTIAL. Retry, or list one subtree with 'folder'=<path>.")
             return ok(out)

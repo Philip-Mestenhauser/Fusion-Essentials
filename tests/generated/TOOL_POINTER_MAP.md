@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 187  |  **description breadcrumbs:** 648  |  **note/error breadcrumbs:** 481
+**Tools:** 187  |  **description breadcrumbs:** 394  |  **note/error breadcrumbs:** 471
   |  **guidance smells flagged:** 4
 ## Blindspots to engineer
 
@@ -17,35 +17,35 @@ close orphans, factor duplicated guards into shared helpers.
 **Read/Acquire (5)** - higher concern, a check-your-work tool nothing points to:
   `cam_compare_operations`, `cam_inspect_toolpaths`, `drawing_get`, `model_compute_holder`, `sys_get_api_doc`
 
-**Edit (33)** - usually leaf actions, scan for genuine gaps:
-  `assembly_edit_contacts`, `cam_activate_setup`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `design_configure`, `design_remove_feature`, `design_set_name`, `doc_insert_derive`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_dimension`, `drawing_update`, `mesh_delete`, `mesh_repair`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_draft`, `model_replace_face`, `model_scale`, `model_set_material`, `model_thread`, `sketch_edit_curve`, `sketch_project`, `surface_create_ruled`, `surface_delete_face`, `surface_fill`, `surface_untrim`, `sys_reload_addin`
+**Edit (46)** - usually leaf actions, scan for genuine gaps:
+  `assembly_edit_contacts`, `cam_activate_setup`, `cam_delete_template`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `data_create_project`, `data_delete_folder`, `design_configure`, `design_remove_feature`, `design_set_name`, `doc_insert_derive`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_dimension`, `drawing_update`, `joint_create_as_built`, `mesh_delete`, `mesh_generate_face_groups`, `mesh_plane_cut`, `mesh_repair`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_base_feature`, `model_draft`, `model_replace_face`, `model_scale`, `model_set_material`, `model_thread`, `param_delete`, `param_set_favorite`, `sketch_add_3d_line`, `sketch_edit_curve`, `sketch_project`, `surface_create_ruled`, `surface_delete_face`, `surface_extend`, `surface_fill`, `surface_offset`, `surface_revolve`, `surface_untrim`, `sys_reload_addin`
 
 ### Duplicated guard strings (>=4 copies = factor into a shared _common helper)
-- **53x** across 40 module(s): "No active design. Create or open a document first (see doc_new)."
-- **23x** across 18 module(s): "No active design. Open or create a document first (see doc_new)."
+- **50x** across 50 module(s): "No active design. Create or open a document first (see doc_new)."
+- **23x** across 23 module(s): "No active design. Open or create a document first (see doc_new)."
 - **9x** across 3 module(s): "' with design_delete_feature."
-- **8x** across 5 module(s): "No active design with components."
+- **8x** across 8 module(s): "No active design with components."
 - **6x** across 3 module(s): "Could not create output directory '"
-- **5x** across 4 module(s): "'. Use: new, join, cut, intersect."
+- **5x** across 5 module(s): "'. Use: new, join, cut, intersect."
 - **5x** across 5 module(s): "Fusion declined to delete '"
 - **5x** across 5 module(s): "is not available on this Fusion version."
 - **4x** across 1 module(s): "Edits already applied before the failure:"
-- **4x** across 3 module(s): "No active design (open a document with design geometry)."
+- **4x** across 4 module(s): "No active design (open a document with design geometry)."
 - **4x** across 1 module(s): "setMotionData reported success on '"
 
 ### Hubs (most breadcrumbs lead here - the connective tissue)
-- `doc_new`  <- 95  (desc 10, note 85)
-- `find_geometry`  <- 59  (desc 32, note 27)
-- `view_screenshot`  <- 48  (desc 18, note 30)
-- `design_get`  <- 44  (desc 19, note 25)
-- `design_delete_feature`  <- 39  (desc 18, note 21)
-- `sketch_create`  <- 36  (desc 19, note 17)
-- `cam_get`  <- 33  (desc 20, note 13)
-- `data_get`  <- 33  (desc 19, note 14)
-- `sketch_get`  <- 32  (desc 14, note 18)
-- `assembly_get`  <- 25  (desc 12, note 13)
+- `doc_new`  <- 83  (desc 1, note 82)
+- `find_geometry`  <- 52  (desc 26, note 26)
+- `view_screenshot`  <- 42  (desc 13, note 29)
+- `design_get`  <- 39  (desc 14, note 25)
+- `design_delete_feature`  <- 38  (desc 17, note 21)
+- `cam_get`  <- 31  (desc 18, note 13)
+- `sketch_get`  <- 31  (desc 13, note 18)
+- `data_get`  <- 26  (desc 12, note 14)
 - `doc_open`  <- 24  (desc 7, note 17)
-- `model_extrude`  <- 24  (desc 21, note 3)
+- `assembly_get`  <- 23  (desc 10, note 13)
+- `sketch_create`  <- 23  (desc 8, note 15)
+- `model_inspect`  <- 19  (desc 3, note 16)
 
 ## The guidance surface (every note the agent can be told)
 
@@ -1174,11 +1174,6 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Switch ACCEPTED but not yet active - activation is async and hasn't propagated. Call doc_get to confirm it took before acting on the new document.
 - Provide 'name' - the open document to activate (a display name, or a lineage URN / web URL to be unambiguous).
 - Activate failed for '
-- No open document matched '
-- . (A shared name needs a lineage URN or the 'open:N' index from doc_get.)
-- ' matches more than one OPEN document - refusing to guess which to
-- . Candidates, each with the document id it answered:
-- . Retry with the address a candidate carries: a document id standing ALONE reaches that one and no other; a row carrying an 'open:N' index as well is reachable only by that index, which doc_get pub...
 
 ### `doc_close`
 - No document was closed.
@@ -1187,11 +1182,6 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - No documents are open.
 - . No document was closed.
 - No active document to close.
-- No open document matched '
-- . (A shared name needs a lineage URN or the 'open:N' index from doc_get.)
-- ' matches more than one OPEN document - refusing to guess which to
-- . Candidates, each with the document id it answered:
-- . Retry with the address a candidate carries: a document id standing ALONE reaches that one and no other; a row carrying an 'open:N' index as well is reachable only by that index, which doc_get pub...
 
 ### `doc_copy`
 - The copy preserves external references: each referenced component still points at its ORIGINAL source file - the references are not re-copied. This tool does not offer a Document.saveAs-based copy ...
@@ -1955,42 +1945,6 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - BaseFeatures.add() returned nothing - could not create a base feature.
 - Could not enter base-feature edit (startEdit returned false).
 
-### `model_chamfer`
-- could NOT be read back off the feature, so the requested value is unconfirmed.
-- . Pair with view_screenshot.
-- are read back off the created feature, not echoed.
-- '. Use mm, cm, or in.
-- No active design. Create or open a document first (see doc_new).
-- (The failed feature could not be auto-removed.)
-- was applied. For a variable-radius chain, the edges must be tangentially connected AND listed from one end of the chain to the other; otherwise check the edges really are corners at this radius, an...
-- created a feature Fusion reports as FAILED
-- (it reports no message)
-- Fillet reported success but rounded nothing - the created feature holds 0 faces. A TANGENT edge does this: its two faces meet smoothly (zero dihedral), e.g. a hole drilled tangent to a face with it...
-- (The inert fillet feature could not be auto-removed.)
-- reported success but only PARTIALLY applied:
-- edge(s) requested, but the created feature holds only
-- face(s) - at least one requested edge was dropped (a stale handle recovered the wrong/dead geometry, or an edge the operation could not reach). The feature has been rolled back; re-run find_geometr...
-- (The partial feature could not be auto-removed.)
-- reported success but moved no material - the body's measured volume is unchanged after the
-- . The feature has been rolled back; check that the requested edges really are corners at this size, and re-run find_geometry for fresh handles.
-- feature could not be auto-removed.)
-- State the edge scope: pass 'edges' (find_geometry edge handles - the precise set to
-- ) or an explicit edge_filter ('all' | 'convex' | 'concave') to sweep the body. An omitted scope never means the whole body.
-- edge_filter must be: all | convex | concave.
-- ' could not be classified convex or concave (
-- ' set cannot be stated. The rest read
-- . Pass 'edges' handles from find_geometry to name the set, or edge_filter='all'.
-- No matching edges on '
-- The feature has been rolled back.
-- (The feature could not be auto-removed.)
-- or a parameter-expression string like 'WallT/2'.
-- Fusion refused a distance-and-angle chamfer of
-- deg, so nothing was chamfered.
-- Fusion refused a two-distance chamfer (
-- ), so nothing was chamfered.
-- Fusion refused an equal-distance chamfer of
-- , so nothing was chamfered.
-
 ### `model_combine`
 - Bodies combined. Pair with view_screenshot to view the result.
 - '. Use: join, cut, intersect.
@@ -2114,45 +2068,14 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 ### `model_fillet`
 - A variable-radius fillet needs 'edges' - find_geometry edge handles for a single edge, or a tangentially connected chain listed in order from its start end. An edge_filter sweep has no such order, ...
 - A chord-length fillet needs 'chord_length' - the straight-line distance across the rounded corner. 'radius' does not drive this type.
-- could NOT be read back off the feature, so the requested value is unconfirmed.
-- . Pair with view_screenshot.
-- are read back off the created feature, not echoed.
-- '. Use mm, cm, or in.
-- No active design. Create or open a document first (see doc_new).
-- (The failed feature could not be auto-removed.)
-- was applied. For a variable-radius chain, the edges must be tangentially connected AND listed from one end of the chain to the other; otherwise check the edges really are corners at this radius, an...
-- created a feature Fusion reports as FAILED
-- (it reports no message)
-- Fillet reported success but rounded nothing - the created feature holds 0 faces. A TANGENT edge does this: its two faces meet smoothly (zero dihedral), e.g. a hole drilled tangent to a face with it...
-- (The inert fillet feature could not be auto-removed.)
-- reported success but only PARTIALLY applied:
-- edge(s) requested, but the created feature holds only
-- face(s) - at least one requested edge was dropped (a stale handle recovered the wrong/dead geometry, or an edge the operation could not reach). The feature has been rolled back; re-run find_geometr...
-- (The partial feature could not be auto-removed.)
-- reported success but moved no material - the body's measured volume is unchanged after the
-- . The feature has been rolled back; check that the requested edges really are corners at this size, and re-run find_geometry for fresh handles.
-- feature could not be auto-removed.)
-- State the edge scope: pass 'edges' (find_geometry edge handles - the precise set to
-- ) or an explicit edge_filter ('all' | 'convex' | 'concave') to sweep the body. An omitted scope never means the whole body.
-- edge_filter must be: all | convex | concave.
-- ' could not be classified convex or concave (
-- ' set cannot be stated. The rest read
-- . Pass 'edges' handles from find_geometry to name the set, or edge_filter='all'.
-- No matching edges on '
-- The feature has been rolled back.
-- (The feature could not be auto-removed.)
-- or a parameter-expression string like 'WallT/2'.
-- Fusion refused a distance-and-angle chamfer of
-- deg, so nothing was chamfered.
-- Fusion refused a two-distance chamfer (
-- ), so nothing was chamfered.
-- Fusion refused an equal-distance chamfer of
-- , so nothing was chamfered.
 - Rule fillet created - the rounded edge set is defined by the selected FACES, not by individual edge handles. Pair with view_screenshot.
+- '. Use mm, cm, or in.
 - A rule fillet needs 'faces' - find_geometry face handles. Every edge of those faces is rounded; add 'second_faces' to round only the edges between the two sets.
+- No active design. Create or open a document first (see doc_new).
 - Provide a positive radius: the expression '
 - Rule fillet reported success but rounded nothing. topology '
 - ' may exclude every edge of the selected faces ('rounds_only' takes convex edges, 'fillets_only' concave ones), or the faces meet smoothly and have no corner to round. The feature has been rolled b...
+- (The inert fillet feature could not be auto-removed.)
 - The rule fillet was created but its radius reads back
 - ' with design_delete_feature.
 - The rule fillet was created but its topology is not the requested '
@@ -2758,14 +2681,6 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - entity(ies) but sketch '
 - curve(s) - nothing landed in it.
 - ' for 'target_sketch'. Available:
-- No active design. Create or open a document first (see doc_new).
-- No sketch to transform. Draw one first with sketch_create + sketch_add_geometry.
-- 'entities' is required - comma-separated '<type>:<index>' refs (e.g. 'line:0,arc:1') from sketch_get(include_entities=true).
-- 'scale_factor' must be greater than 0, got
-- . A uniform scale cannot mirror geometry - draw the mirrored curves instead.
-- Nothing to apply: give a 'dx'/'dy' translation, a 'rotation_deg', or a 'scale_factor' other than 1.
-- 'scale_factor' must be a number, got
-- 'rotation_deg' must be a number, got
 
 ### `sketch_create`
 - On the xz origin plane in particular the frame is NOT world-aligned: local +Y maps to world -Z (read the frame's own +Y axis for the exact per-plane axis directions). sketch_get(sketch_name) return...
@@ -2862,14 +2777,6 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - Fusion declined the move in sketch '
 - ' (Sketch.move returned false) and none of
 - read the same coordinates afterwards, so nothing in the sketch changed. Either the transform is one this geometry is symmetric under (a circle rotated about its own centre), or a constraint refused...
-- No active design. Create or open a document first (see doc_new).
-- No sketch to transform. Draw one first with sketch_create + sketch_add_geometry.
-- 'entities' is required - comma-separated '<type>:<index>' refs (e.g. 'line:0,arc:1') from sketch_get(include_entities=true).
-- 'scale_factor' must be greater than 0, got
-- . A uniform scale cannot mirror geometry - draw the mirrored curves instead.
-- Nothing to apply: give a 'dx'/'dy' translation, a 'rotation_deg', or a 'scale_factor' other than 1.
-- 'scale_factor' must be a number, got
-- 'rotation_deg' must be a number, got
 
 ### `sketch_project`
 - No active design. Create or open a document first (see doc_new).

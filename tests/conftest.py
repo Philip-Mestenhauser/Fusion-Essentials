@@ -235,12 +235,12 @@ def stub_tool_module(monkeypatch, module_name, stub):
       (``data_get``) - resolves through the tools PACKAGE ATTRIBUTE. ``_handle_fromlist`` checks
       ``hasattr(package, name)`` FIRST and skips the submodule import entirely when it holds, so
       the ATTRIBUTE patch is what routes this form, in either order. A genuine import elsewhere
-      binds that attribute too (``doc_get`` binds ``_data_read``; ``mesh_edit`` binds
-      ``mesh_ops``), and a sys.modules-only stub is then never consulted: the handler gets the real
-      module and the stub goes silently inert while the test still passes or fails on what the real
-      module does.
+      binds that attribute too (``doc_get`` binds ``_data_read``; ``mesh_plane_cut`` binds
+      ``_mesh_common``), and a sys.modules-only stub is then never consulted: the handler gets the
+      real module and the stub goes silently inert while the test still passes or fails on what the
+      real module does.
     * ``importlib.import_module(".<module_name>", __package__)`` at CALL time - what
-      ``sketch_core._detail_engine`` and ``sys_api_doc``'s module walk do - reads SYS.MODULES and
+      ``_sketch_detail._detail_engine`` and ``sys_get_api_doc``'s module walk do - reads SYS.MODULES and
       never the attribute, so the setitem is the only live seam for that shape.
 
     Both patches belong to ``monkeypatch``, so they unwind after the test - including the attribute,
@@ -1079,6 +1079,120 @@ class Circle3D:
         self.curveType = _api_facts.ENUMS["core.Curve3DTypes"]["Circle3DCurveType"]
 
 
+# ── viewport / camera / profile fakes ──────────────────────────────────────
+
+@fusion_fake(live_type="Camera",
+             facts=("shape-dump-design-world", "camera-viewextents-is-linear-not-area"))
+class Camera:
+    """A viewport camera: the eye/target/up an orient rewrites, the projection and perspective
+    angle an orient read-back gates on, and the LINEAR viewExtents a zoom scales. `eye`, `target`
+    and `up` take a FakePoint or an (x, y, z) tuple."""
+    def __init__(self, eye=(10.0, 10.0, 10.0), target=(0.0, 0.0, 0.0), up=None,
+                 camera_type=None, is_fit_view=False, perspective_angle=0.0,
+                 view_extents=100.0):
+        self.eye = FakePoint(*eye) if isinstance(eye, tuple) else eye
+        self.target = FakePoint(*target) if isinstance(target, tuple) else target
+        self.upVector = FakePoint(*up) if isinstance(up, tuple) else up
+        self.cameraType = (_api_facts.ENUMS["core.CameraTypes"]["OrthographicCameraType"]
+                           if camera_type is None else camera_type)
+        self.isFitView = is_fit_view
+        self.perspectiveAngle = perspective_angle
+        self.viewExtents = view_extents
+
+
+@fusion_fake(live_type="Viewport", facts=("shape-dump-design-world",))
+class Viewport:
+    """The viewport a view tool drives: its camera, visual style, pixel size, and the image saves
+    a capture makes. What the tool DID is recorded privately: `_assigned` every camera written
+    back (`_original_camera` is the one the viewport started with), `_calls` the refresh/save order,
+    `_fit_calls` the framing passes, `_options_used` the last save options object.
+
+    fit() and refresh() answer the bool the SDK declares them to; `fit_ok=False` is the fit the
+    platform declines, which cam_activate_setup gates on with `vp.fit() is not True`.
+
+    The camera is one shared mutable object here - a live viewport hands back a COPY
+    (live_api_facts.BEHAVIOR['viewport_camera_returns_copy']), which only the measurement row
+    camera-returns-copy checks."""
+    def __init__(self, camera=None, width=1516, height=757, visual_style=0,
+                 frame=(200.0, 100.0), fit_ok=True, save_ok=True, png=b"PNGBYTES"):
+        self._cam = Camera() if camera is None else camera
+        self._original_camera = self._cam
+        self._assigned = []
+        self._fit_calls = 0
+        self._calls = []
+        self._options_used = None
+        self._frame = frame
+        self._fit_ok = fit_ok
+        self._save_ok, self._png = save_ok, png
+        self.width, self.height = width, height
+        self.visualStyle = visual_style
+
+    @property
+    def camera(self):
+        return self._cam
+
+    @camera.setter
+    def camera(self, value):
+        self._assigned.append(value)
+        self._cam = value
+
+    def fit(self):
+        self._fit_calls += 1
+        return self._fit_ok
+
+    def refresh(self):
+        self._calls.append("refresh")
+        return True
+
+    def viewToModelSpace(self, pt):
+        """The model point under a screen point: the frame maps linearly onto the `frame`
+        rectangle, so the spans a framing pass measures come out exactly frame wide and high."""
+        import adsk.core
+        frame_w, frame_h = self._frame
+        return adsk.core.Point3D.create((pt.x / self.width - 0.5) * frame_w, 0.0,
+                                        -(pt.y / self.height - 0.5) * frame_h)
+
+    def saveAsImageFile(self, path, width, height):
+        self._calls.append("save")
+        return self._write_png(path)
+
+    def saveAsImageFileWithOptions(self, options):
+        self._calls.append("save_with_options")
+        self._options_used = options
+        return self._write_png(options.filename)
+
+    def _write_png(self, path):
+        if not self._save_ok:
+            return False
+        with open(path, "wb") as handle:
+            handle.write(self._png)
+        return True
+
+
+@fusion_fake(live_type="Profile", facts=("shape-dump-design-world",))
+class Profile:
+    """A sketch profile: the boundingBox and profileLoops a region walk reads, the
+    areaProperties() a profile handle's locator re-finds it by, and its entityToken. `tag` names
+    the instance in a failure message and is not a live member. `centroid` takes a FakePoint or an
+    (x, y, z) tuple; `loops` takes loop objects or a bare count."""
+    def __init__(self, tag=None, bbox=None, loops=(), area=None, centroid=None,
+                 entity_token=None, parent_sketch=None):
+        self._tag = tag
+        self._area = area
+        self._centroid = FakePoint(*centroid) if isinstance(centroid, tuple) else centroid
+        self.boundingBox = bbox
+        self.profileLoops = _NamedCollection([None] * loops if isinstance(loops, int)
+                                             else list(loops))
+        self.entityToken = entity_token
+        self.parentSketch = parent_sketch
+
+    def __repr__(self):
+        return f"Profile({self._tag!r})"
+
+    def areaProperties(self, accuracy=None):
+        return types.SimpleNamespace(area=self._area, centroid=self._centroid)
+
+
 # ── CAM tree fakes (setup / folder / operation) ────────────────────────────
 #
 # The shared object model for the CAM setup/operation tree every cam_* tool walks. The one
@@ -1421,7 +1535,8 @@ class _SimpleNamed:
         self.name = name
 
 
-@fusion_fake(live_type="BRepEdge", facts=("shape-dump-design-world",))
+@fusion_fake(live_type="BRepEdge", facts=("shape-dump-design-world",
+                                          "brepedge-evaluator-tangent-follows-curve-not-edge"))
 class BRepEdge:
     """Matches type(entity).__name__ == 'BRepEdge'. `geometry` is the curve. `point_on_edge`/
     `entity_token` are None by default (see BRepFace) - set them for a test that mints/asserts on a
@@ -1720,7 +1835,7 @@ def install(mod, design, *, cast_design=True, object_collection=True):
     if hasattr(mod, "_inputs") and hasattr(mod._inputs, "_common"):
         mod._inputs._common.design = lambda: design
         mod._inputs._common.target_component = target
-    # A tool that imported `target_component`/`design` bare as module globals (e.g. model_fillet_chamfer).
+    # A tool that imported `target_component`/`design` bare as module globals (e.g. model_fillet).
     if hasattr(mod, "target_component"):
         mod.target_component = target
     if hasattr(mod, "design"):

@@ -1,28 +1,13 @@
-"""Unit tests for ``mesh_export.py`` â€” the mesh-aware export (OBJ/3MF/STL) and the BRep->MeshBody
-tessellation (save_as_mesh).
-
-No live Fusion. Fakes mimic the small mesh slice the tools touch:
-  â€¢ ExportManager.createOBJ/C3MF/STLExportOptions(geom, path) + execute() -> True (writes a fake file),
-  â€¢ BRepBody.meshManager.createMeshCalculator() + setQuality + calculate() -> TriangleMesh,
-  â€¢ Component.meshBodies.addByTriangleMeshData(coords, idx, normals, normalIdx) -> MeshBody.
-
-Pinned (the DoD):
-  â€¢ mesh_export each format resolves the RIGHT create*Options + executes + reports file_exists.
-  â€¢ a bad format is rejected by the Choice (never reaches the exporter).
-  â€¢ save_as_mesh tessellates, adds a mesh body, and routes the WRITE through run_in_base_feature
-    (a base-feature scope is OPENED in parametric, NONE in direct).
-  â€¢ save_as_mesh reports triangle / node counts.
-"""
+"""Unit tests for mesh_export.py - the mesh file writer, its options and the split mode."""
 
 import json
-
 from conftest import load_tool
 
 mx = load_tool("mesh_export")
+
+
 inp = mx._inputs
 
-
-# â”€â”€ fakes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class BRepBody:
     """Stands in for adsk.fusion.BRepBody â€” the source for tessellation / a valid export target."""
@@ -39,40 +24,6 @@ class MeshBody:
     def __init__(self, name="Mesh1", token=None):
         self.name = name
         self.entityToken = token or f"MTOK::{name}"
-
-
-class TriangleMesh:
-    def __init__(self, tri=12, nodes=8):
-        self.nodeCoordinatesAsDouble = [0.0] * (nodes * 3)
-        self.nodeIndices = list(range(tri * 3))
-        self.normalVectorsAsDouble = [0.0] * (nodes * 3)
-        self.normalIndices = list(range(tri * 3))
-        self.triangleCount = tri
-        self.nodeCount = nodes
-
-
-class FakeMeshCalculator:
-    def __init__(self, tm, raise_on_calc=False):
-        self._tm = tm
-        self.raise_on_calc = raise_on_calc
-        self.quality = None
-
-    def setQuality(self, q):
-        self.quality = q
-        return True
-
-    def calculate(self):
-        if self.raise_on_calc:
-            raise RuntimeError("calculate blew up")
-        return self._tm
-
-
-class FakeMeshManager:
-    def __init__(self, calc):
-        self._calc = calc
-
-    def createMeshCalculator(self):
-        return self._calc
 
 
 class FakeMeshBodies:
@@ -353,14 +304,13 @@ def _payload(res):
     return json.loads(res["content"][0]["text"])
 
 
-# â”€â”€ mesh_export: format dispatch â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
 class TestExportFormatDispatch:
+
     def test_obj_uses_obj_options_and_executes(self, tmp_path):
         _wire_adsk()
         comp = FakeComp("Root", bodies=[BRepBody("Body1")])
         des = _install(FakeDesign(comp))
-        out = _payload(mx.export_handler(format="obj", file_path=str(tmp_path / "p.obj")))
+        out = _payload(mx.handler(format="obj", file_path=str(tmp_path / "p.obj")))
         assert out["exported"] is True
         assert des.exportManager.calls[-1].kind == "obj"
         assert des.exportManager.executed is not None
@@ -369,38 +319,37 @@ class TestExportFormatDispatch:
     def test_3mf_uses_c3mf_options(self, tmp_path):
         _wire_adsk()
         des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
-        out = _payload(mx.export_handler(format="3mf", file_path=str(tmp_path / "p.3mf")))
+        out = _payload(mx.handler(format="3mf", file_path=str(tmp_path / "p.3mf")))
         assert des.exportManager.calls[-1].kind == "3mf"
         assert out["format"] == "3mf"
 
     def test_stl_uses_stl_options(self, tmp_path):
         _wire_adsk()
         des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
-        _payload(mx.export_handler(format="stl", file_path=str(tmp_path / "p.stl")))
+        _payload(mx.handler(format="stl", file_path=str(tmp_path / "p.stl")))
         assert des.exportManager.calls[-1].kind == "stl"
 
     def test_default_format_is_3mf(self, tmp_path):
         _wire_adsk()
         des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
-        out = _payload(mx.export_handler(file_path=str(tmp_path / "p")))
+        out = _payload(mx.handler(file_path=str(tmp_path / "p")))
         assert des.exportManager.calls[-1].kind == "3mf"
         assert out["file_path"].lower().endswith(".3mf")   # extension auto-appended
 
     def test_bad_format_rejected_by_choice(self, tmp_path):
         _wire_adsk()
         _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
-        res = mx.export_handler(format="dwg", file_path=str(tmp_path / "p.dwg"))
+        res = mx.handler(format="dwg", file_path=str(tmp_path / "p.dwg"))
         assert res["isError"] is True and "format" in res["message"]
 
 
-# â”€â”€ mesh_export: target resolution â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
 class TestExportTarget:
+
     def test_whole_design_when_no_target(self, tmp_path):
         _wire_adsk()
         comp = FakeComp("Root", bodies=[BRepBody("Body1")])
         des = _install(FakeDesign(comp))
-        out = _payload(mx.export_handler(format="obj", file_path=str(tmp_path / "p.obj")))
+        out = _payload(mx.handler(format="obj", file_path=str(tmp_path / "p.obj")))
         # whole-design export passes the ROOT COMPONENT as the geometry
         assert des.exportManager.calls[-1].geom is comp
         assert "design" in out["target"].lower() or "root" in out["target"].lower()
@@ -409,7 +358,7 @@ class TestExportTarget:
         _wire_adsk()
         comp = FakeComp("Root", bodies=[BRepBody("Widget")])
         des = _install(FakeDesign(comp))
-        out = _payload(mx.export_handler(format="obj", target="Widget", file_path=str(tmp_path / "p.obj")))
+        out = _payload(mx.handler(format="obj", target="Widget", file_path=str(tmp_path / "p.obj")))
         assert des.exportManager.calls[-1].geom.name == "Widget"
         assert "Widget" in out["target"]
 
@@ -422,7 +371,7 @@ class TestExportTarget:
         m.parentComponent = comp
         comp.meshBodies = FakeMeshBodyColl([m])     # realistic: no itemByName
         des = _install(FakeDesign(comp), handle_map={"H": m})
-        out = _payload(mx.export_handler(format="3mf", target="H", file_path=str(tmp_path / "p.3mf")))
+        out = _payload(mx.handler(format="3mf", target="H", file_path=str(tmp_path / "p.3mf")))
         # the COMPONENT was exported, not the bare mesh — and a file actually landed
         assert des.exportManager.calls[-1].geom is comp
         assert out["redirected_from_mesh"] is True
@@ -438,7 +387,7 @@ class TestExportTarget:
         m.parentComponent = comp
         comp.meshBodies = FakeMeshBodyColl([m])     # realistic: no itemByName -> must iterate
         des = _install(FakeDesign(comp))
-        out = _payload(mx.export_handler(format="3mf", target="ScanByName",
+        out = _payload(mx.handler(format="3mf", target="ScanByName",
                                          file_path=str(tmp_path / "p.3mf")))
         assert des.exportManager.calls[-1].geom is comp
         assert out["redirected_from_mesh"] is True
@@ -453,7 +402,7 @@ class TestExportTarget:
         m.parentComponent = comp
         comp.meshBodies = FakeMeshBodyColl([m])
         des = _install(FakeDesign(comp), handle_map={"H": m})
-        out = _payload(mx.export_handler(format="stl", target="H",
+        out = _payload(mx.handler(format="stl", target="H",
                                          file_path=str(tmp_path / "p.stl")))
         assert des.exportManager.calls[-1].geom is comp
         note = out["note"]
@@ -469,7 +418,7 @@ class TestExportTarget:
         m.parentComponent = comp
         comp.meshBodies = FakeMeshBodyColl([m])
         _install(FakeDesign(comp), handle_map={"H": m})
-        out = _payload(mx.export_handler(format="stl", target="H",
+        out = _payload(mx.handler(format="stl", target="H",
                                          file_path=str(tmp_path / "p.stl")))
         # the three counts differ, so reading any census key off another collection goes red
         assert out["component_census"] == {"mesh_bodies": 1, "brep_bodies": 2,
@@ -491,7 +440,7 @@ class TestExportTarget:
         m.parentComponent = comp
         comp.meshBodies = FakeMeshBodyColl([m])
         _install(FakeDesign(comp), handle_map={"H": m})
-        out = _payload(mx.export_handler(format="stl", target="H",
+        out = _payload(mx.handler(format="stl", target="H",
                                          file_path=str(tmp_path / "p.stl")))
         assert out["component_census"] == {"mesh_bodies": 1, "brep_bodies": None,
                                            "child_occurrences": 2}
@@ -501,7 +450,7 @@ class TestExportTarget:
         _wire_adsk()
         comp = FakeComp("Root", bodies=[BRepBody("LegBox")])
         _install(FakeDesign(comp))
-        out = _payload(mx.export_handler(format="stl", target="LegBox",
+        out = _payload(mx.handler(format="stl", target="LegBox",
                                          file_path=str(tmp_path / "p.stl")))
         assert out["redirected_from_mesh"] is False
         assert "component_census" not in out
@@ -521,7 +470,7 @@ class TestExportTarget:
         des = _install(FakeDesign(comp), handle_map={"H": m})
         # execute() returns True without writing a file — the handler must verify the file exists.
         des.exportManager.execute = lambda opts: True
-        res = mx.export_handler(format="3mf", target="H", file_path=str(tmp_path / "p.3mf"))
+        res = mx.handler(format="3mf", target="H", file_path=str(tmp_path / "p.3mf"))
         assert res["isError"] is True
         assert "no file" in res["message"].lower() or "wrote no file" in res["message"].lower()
 
@@ -534,7 +483,7 @@ class TestExportTarget:
         target = tmp_path / "p.3mf"
         target.write_text("a 3MF written by an earlier call")
         des.exportManager.execute = lambda opts: True
-        res = mx.export_handler(format="3mf", file_path=str(target))
+        res = mx.handler(format="3mf", file_path=str(target))
         assert res["isError"] is True
         assert "already there before this call" in res["message"]
 
@@ -544,7 +493,7 @@ class TestExportTarget:
         _wire_adsk()
         comp = FakeComp("Root", bodies=[BRepBody("Body1")])
         des = _install(FakeDesign(comp))
-        out = _payload(mx.export_handler(format="3mf", target="Body1",
+        out = _payload(mx.handler(format="3mf", target="Body1",
                                          file_path=str(tmp_path / "p.3mf")))
         assert out["exported"] is True
         assert out["redirected_from_mesh"] is False
@@ -557,7 +506,7 @@ class TestExportTarget:
         root = FakeComp("Root", bodies=[BRepBody("Body1")])
         sub = FakeComp("SubPart", bodies=[BRepBody("Inner"), BRepBody("Outer")])
         des = _install(FakeDesign(root, all_comps=[root, sub]))
-        out = _payload(mx.export_handler(format="obj", target="SubPart",
+        out = _payload(mx.handler(format="obj", target="SubPart",
                                          file_path=str(tmp_path / "p.obj")))
         assert des.exportManager.calls[-1].geom is sub
         assert "component" in out["target"].lower() and "SubPart" in out["target"]
@@ -570,7 +519,7 @@ class TestExportTarget:
         inner = BRepBody("Inner")
         sub = FakeComp("SubPart", bodies=[inner])
         des = _install(FakeDesign(root, all_comps=[root, sub]))
-        out = _payload(mx.export_handler(format="obj", target="SubPart",
+        out = _payload(mx.handler(format="obj", target="SubPart",
                                          file_path=str(tmp_path / "p.obj")))
         assert des.exportManager.calls[-1].geom is inner
         assert "body" in out["target"].lower() and "Inner" in out["target"]
@@ -583,7 +532,7 @@ class TestExportTarget:
         a = FakeComp("SubPart", bodies=[BRepBody("Inner"), BRepBody("Outer")])
         b = FakeComp("SubPart", bodies=[BRepBody("Left"), BRepBody("Right")])
         des = _install(FakeDesign(root, all_comps=[root, a, b]))
-        res = mx.export_handler(format="obj", target="SubPart",
+        res = mx.handler(format="obj", target="SubPart",
                                 file_path=str(tmp_path / "p.obj"))
         assert res["isError"] is True
         assert "2 components match 'SubPart'" in res["message"]
@@ -599,7 +548,7 @@ class TestExportTarget:
         occ = FakeOcc("Arm:1", full_path="Root/Arm:1")
         comp = FakeComp("Root", bodies=[BRepBody("Body1")], occurrences=[occ])
         des = _install(FakeDesign(comp))
-        out = _payload(mx.export_handler(format="obj", target="Arm:1",
+        out = _payload(mx.handler(format="obj", target="Arm:1",
                                          file_path=str(tmp_path / "p.obj")))
         assert des.exportManager.calls[-1].geom is occ
         assert "occurrence" in out["target"].lower() and "Arm:1" in out["target"]
@@ -609,7 +558,7 @@ class TestExportTarget:
         occ = FakeOcc("Arm:1", full_path="Root/Sub/Arm:1")
         comp = FakeComp("Root", bodies=[BRepBody("Body1")], occurrences=[occ])
         des = _install(FakeDesign(comp))
-        out = _payload(mx.export_handler(format="obj", target="Root/Sub/Arm:1",
+        out = _payload(mx.handler(format="obj", target="Root/Sub/Arm:1",
                                          file_path=str(tmp_path / "p.obj")))
         assert des.exportManager.calls[-1].geom is occ
         assert "occurrence" in out["target"].lower()
@@ -624,7 +573,7 @@ class TestExportTarget:
         b = FakeOcc("Bolt:1", full_path="SubB:1+Bolt:1")
         comp = FakeComp("Root", bodies=[BRepBody("Body1")], occurrences=[a, b])
         des = _install(FakeDesign(comp))
-        res = mx.export_handler(format="obj", target="Bolt:1", file_path=str(tmp_path / "p.obj"))
+        res = mx.handler(format="obj", target="Bolt:1", file_path=str(tmp_path / "p.obj"))
         assert res["isError"] is True
         assert "2 occurrences" in res["message"]
         assert "SubA:1+Bolt:1" in res["message"] and "SubB:1+Bolt:1" in res["message"]
@@ -637,7 +586,7 @@ class TestExportTarget:
         b = FakeOcc("Bolt:1", full_path="SubB:1+Bolt:1")
         comp = FakeComp("Root", bodies=[BRepBody("Body1")], occurrences=[a, b])
         des = _install(FakeDesign(comp))
-        out = _payload(mx.export_handler(format="obj", target="SubB:1+Bolt:1",
+        out = _payload(mx.handler(format="obj", target="SubB:1+Bolt:1",
                                          file_path=str(tmp_path / "p.obj")))
         assert des.exportManager.calls[-1].geom is b       # the named instance, not the first hit
         assert out["exported"] is True
@@ -645,23 +594,39 @@ class TestExportTarget:
     def test_missing_named_target_errors(self, tmp_path):
         _wire_adsk()
         _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
-        res = mx.export_handler(format="obj", target="Nope", file_path=str(tmp_path / "p.obj"))
+        res = mx.handler(format="obj", target="Nope", file_path=str(tmp_path / "p.obj"))
         assert res["isError"] is True and "Nope" in res["message"]
 
     def test_missing_path_errors(self):
         _wire_adsk()
         _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
-        res = mx.export_handler(format="obj")
+        res = mx.handler(format="obj")
         assert res["isError"] is True and "file_path" in res["message"]
 
 
-# â”€â”€ mesh_export: refinement â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
 class TestExportRefinement:
+
+    def _no_refine_export(self, des, tmp_path, refinement="high"):
+        """Export through options that DROP the meshRefinement write (see _NoRefineOptions), so
+        _apply_refinement returns None - the density never landed."""
+        def _stl_opt(geom, path):
+            rec = _NoRefineOptions("stl", geom, path)
+            des.exportManager.calls.append(rec)
+            return rec
+        des.exportManager.createSTLExportOptions = _stl_opt
+        return _payload(mx.handler(format="stl", refinement=refinement,
+                                          file_path=str(tmp_path / "p.stl")))
+
+    def _refine_options_holding(self, des, member, drop_write=True):
+        """OBJ options whose factory meshRefinement ALREADY reads 'member' - the live 'medium'
+        shape. OBJ so the note carries the density prose alone, with no STL unit sentence in it."""
+        return _options_holding(des, "meshRefinement", member, "createOBJExportOptions", "obj",
+                                drop_write)
+
     def test_refinement_applied_when_supported(self, tmp_path):
         _wire_adsk()
         des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
-        out = _payload(mx.export_handler(format="obj", refinement="high",
+        out = _payload(mx.handler(format="obj", refinement="high",
                                          file_path=str(tmp_path / "p.obj")))
         # the options object carried the high refinement enum
         assert des.exportManager.calls[-1].meshRefinement == _refine_member("high")
@@ -672,19 +637,8 @@ class TestExportRefinement:
     def test_bad_refinement_rejected(self, tmp_path):
         _wire_adsk()
         _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
-        res = mx.export_handler(format="obj", refinement="ultra", file_path=str(tmp_path / "p.obj"))
+        res = mx.handler(format="obj", refinement="ultra", file_path=str(tmp_path / "p.obj"))
         assert res["isError"] is True and "refinement" in res["message"]
-
-    def _no_refine_export(self, des, tmp_path, refinement="high"):
-        """Export through options that DROP the meshRefinement write (see _NoRefineOptions), so
-        _apply_refinement returns None - the density never landed."""
-        def _stl_opt(geom, path):
-            rec = _NoRefineOptions("stl", geom, path)
-            des.exportManager.calls.append(rec)
-            return rec
-        des.exportManager.createSTLExportOptions = _stl_opt
-        return _payload(mx.export_handler(format="stl", refinement=refinement,
-                                          file_path=str(tmp_path / "p.stl")))
 
     def test_refinement_that_never_landed_is_published_null_not_as_the_request(self, tmp_path):
         # The request must never masquerade as the effect: the read-back did not equal the value set,
@@ -722,16 +676,10 @@ class TestExportRefinement:
         # the disclosure is conditional - a successful set must not warn about itself
         _wire_adsk()
         des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
-        out = _payload(mx.export_handler(format="obj", refinement="low",
+        out = _payload(mx.handler(format="obj", refinement="low",
                                          file_path=str(tmp_path / "p.obj")))
         assert out["refinement"] == "low"
         assert "did NOT land" not in out["note"]
-
-    def _refine_options_holding(self, des, member, drop_write=True):
-        """OBJ options whose factory meshRefinement ALREADY reads 'member' - the live 'medium'
-        shape. OBJ so the note carries the density prose alone, with no STL unit sentence in it."""
-        return _options_holding(des, "meshRefinement", member, "createOBJExportOptions", "obj",
-                                drop_write)
 
     def test_a_refinement_the_options_already_read_is_still_reported_as_landed(self, tmp_path):
         # The density the read-back cannot attribute to THIS assignment - the options object reads
@@ -742,7 +690,7 @@ class TestExportRefinement:
         _wire_adsk()
         des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
         self._refine_options_holding(des, _refine_member("medium"))
-        out = _payload(mx.export_handler(format="obj", refinement="medium",
+        out = _payload(mx.handler(format="obj", refinement="medium",
                                          file_path=str(tmp_path / "p.obj")))
         assert out["refinement"] == "medium"
         assert "refinement_verified" not in out
@@ -754,7 +702,7 @@ class TestExportRefinement:
         _wire_adsk()
         des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
         self._refine_options_holding(des, _refine_member("medium"), drop_write=False)
-        out = _payload(mx.export_handler(format="obj", refinement="high",
+        out = _payload(mx.handler(format="obj", refinement="high",
                                          file_path=str(tmp_path / "p.obj")))
         assert out["refinement"] == "high"
         assert des.exportManager.calls[-1].meshRefinement == _refine_member("high")
@@ -767,7 +715,7 @@ class TestExportRefinement:
         _wire_adsk()
         des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
         self._refine_options_holding(des, _refine_member("medium"))
-        out = _payload(mx.export_handler(format="obj", refinement="high",
+        out = _payload(mx.handler(format="obj", refinement="high",
                                          file_path=str(tmp_path / "p.obj")))
         assert out["refinement"] is None
         assert "did NOT land" in out["note"]
@@ -780,15 +728,14 @@ class TestExportRefinement:
         des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
         default = mx._EXPORT_REFINE.default
         self._refine_options_holding(des, _refine_member(default))
-        out = _payload(mx.export_handler(format="obj", file_path=str(tmp_path / "p.obj")))
+        out = _payload(mx.handler(format="obj", file_path=str(tmp_path / "p.obj")))
         assert out["refinement"] == default
         assert "refinement_verified" not in out
         assert "UNVERIFIED" not in out["note"] and "did NOT land" not in out["note"]
 
 
-# â”€â”€ mesh_export: split_by_component (one mesh file per top-level occurrence) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
 class TestExportStlUnits:
+
     """The STL file's UNIT. Measured, an STL whose unitType is left untouched is written in the unit
     of the LAST EXPLICIT unitType assignment made anywhere in the Fusion session, carried across
     documents (measure_api stl-export-unittype-is-sticky-session-state), and no read of the options
@@ -808,6 +755,11 @@ class TestExportStlUnits:
             return rec
         des.exportManager.createSTLExportOptions = _stl_opt
 
+    def _stl_options_holding(self, des, unit_member, drop_write=True):
+        """STL options whose factory unitType ALREADY reads 'unit_member' - the live 'mm' shape."""
+        return _options_holding(des, "unitType", unit_member, "createSTLExportOptions", "stl",
+                                drop_write)
+
     def test_an_omitted_unit_is_the_one_the_schema_advertises(self, tmp_path):
         # The schema's advertised default and the unit the writer ASSIGNS are one value: a handler
         # default drifting from the Choice's would advertise one unit while writing another, which
@@ -816,7 +768,7 @@ class TestExportStlUnits:
         assert f"Default {advertised}." in mx._EXPORT_UNITS.schema()["description"]
         _wire_adsk()
         des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
-        out = _payload(mx.export_handler(format="stl", file_path=str(tmp_path / "p.stl")))
+        out = _payload(mx.handler(format="stl", file_path=str(tmp_path / "p.stl")))
         assert des.exportManager.calls[-1].unitType is getattr(
             mx.adsk.fusion.DistanceUnits, mx._export.STL_UNIT_MEMBERS[advertised])
         assert out["options_applied"]["stl_units"] == advertised
@@ -828,7 +780,7 @@ class TestExportStlUnits:
         # export/import round trip that asks for nothing carries an unrelated export's.
         _wire_adsk()
         des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
-        out = _payload(mx.export_handler(format="stl", file_path=str(tmp_path / "p.stl")))
+        out = _payload(mx.handler(format="stl", file_path=str(tmp_path / "p.stl")))
         assert des.exportManager.calls[-1].unitType is mx.adsk.fusion.DistanceUnits.MillimeterDistanceUnits
         assert out["options_applied"]["stl_units"] == "mm"
         assert out["options_requested"]["stl_units"] == "mm"
@@ -841,7 +793,7 @@ class TestExportStlUnits:
         _wire_adsk()
         des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
         self._stl_options_holding(des, mx.adsk.fusion.DistanceUnits.MillimeterDistanceUnits)
-        out = _payload(mx.export_handler(format="stl", file_path=str(tmp_path / "p.stl")))
+        out = _payload(mx.handler(format="stl", file_path=str(tmp_path / "p.stl")))
         assert out["options_applied"]["stl_units"] == "mm"
         assert out["options_verified"]["stl_units"] is False
         assert "mesh_insert units='mm'" in out["note"]
@@ -851,7 +803,7 @@ class TestExportStlUnits:
         # that ignored 'stl_units' and always wrote its default would pass that test and fail this.
         _wire_adsk()
         des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
-        out = _payload(mx.export_handler(format="stl", stl_units="in",
+        out = _payload(mx.handler(format="stl", stl_units="in",
                                          file_path=str(tmp_path / "p.stl")))
         assert des.exportManager.calls[-1].unitType is mx.adsk.fusion.DistanceUnits.InchDistanceUnits
         assert out["options_applied"]["stl_units"] == "in"
@@ -861,7 +813,7 @@ class TestExportStlUnits:
         # the whole point of the row: the unit is on the wire, in the vocabulary mesh_insert takes.
         _wire_adsk()
         _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
-        out = _payload(mx.export_handler(format="stl", stl_units="mm",
+        out = _payload(mx.handler(format="stl", stl_units="mm",
                                          file_path=str(tmp_path / "p.stl")))
         assert "read back units 'mm'" in out["note"]
         assert "mesh_insert units='mm'" in out["note"]
@@ -869,7 +821,7 @@ class TestExportStlUnits:
     def test_bad_unit_rejected_by_the_choice(self, tmp_path):
         _wire_adsk()
         des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
-        res = mx.export_handler(format="stl", stl_units="parsecs",
+        res = mx.handler(format="stl", stl_units="parsecs",
                                 file_path=str(tmp_path / "p.stl"))
         assert res["isError"] is True and "stl_units" in res["message"]
         assert des.exportManager.calls == []               # nothing was exported
@@ -879,7 +831,7 @@ class TestExportStlUnits:
         # unit key or a unit sentence - a reported unit nothing was written from is a false claim.
         _wire_adsk()
         _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
-        out = _payload(mx.export_handler(format="obj", file_path=str(tmp_path / "p.obj")))
+        out = _payload(mx.handler(format="obj", file_path=str(tmp_path / "p.obj")))
         assert "options_applied" not in out and "options_requested" not in out
         assert "options_verified" not in out
         assert "units" not in out["note"]
@@ -889,7 +841,7 @@ class TestExportStlUnits:
         # input exists to close. The refusal names the value AND the format it was asked with.
         _wire_adsk()
         des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
-        res = mx.export_handler(format="obj", stl_units="mm", file_path=str(tmp_path / "p.obj"))
+        res = mx.handler(format="obj", stl_units="mm", file_path=str(tmp_path / "p.obj"))
         assert res["isError"] is True
         assert "'mm'" in res["message"] and "format=obj" in res["message"]
         assert des.exportManager.calls == []               # nothing was written
@@ -900,7 +852,7 @@ class TestExportStlUnits:
         assert "format=stl only" in mx._EXPORT_UNITS.schema()["description"]
         _wire_adsk()
         _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
-        res = mx.export_handler(format="3mf", stl_units="mm", file_path=str(tmp_path / "p.3mf"))
+        res = mx.handler(format="3mf", stl_units="mm", file_path=str(tmp_path / "p.3mf"))
         assert res["isError"] is True and "format=stl only" in res["message"]
 
     def test_an_omitted_unit_on_a_non_stl_format_is_not_refused(self, tmp_path):
@@ -908,7 +860,7 @@ class TestExportStlUnits:
         # that never mentioned a unit must still run.
         _wire_adsk()
         _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
-        out = _payload(mx.export_handler(format="obj", file_path=str(tmp_path / "p.obj")))
+        out = _payload(mx.handler(format="obj", file_path=str(tmp_path / "p.obj")))
         assert out["exported"] is True
 
     def test_a_unit_that_never_landed_is_published_null_not_as_the_request(self, tmp_path):
@@ -917,7 +869,7 @@ class TestExportStlUnits:
         _wire_adsk()
         des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
         self._stl_options_class(des, _NoUnitOptions)
-        out = _payload(mx.export_handler(format="stl", file_path=str(tmp_path / "p.stl")))
+        out = _payload(mx.handler(format="stl", file_path=str(tmp_path / "p.stl")))
         assert out["options_applied"]["stl_units"] is None
         assert out["options_requested"]["stl_units"] == "mm"
         assert out["options_verified"]["stl_units"] is False   # no landed value to be backed
@@ -930,15 +882,10 @@ class TestExportStlUnits:
         _wire_adsk()
         des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
         self._stl_options_class(des, _NoUnitOptions)
-        note = _payload(mx.export_handler(format="stl",
+        note = _payload(mx.handler(format="stl",
                                           file_path=str(tmp_path / "p.stl")))["note"].lower()
         for guess in ("inch", "factory default", "does not support", "carries no unittype"):
             assert guess not in note, guess
-
-    def _stl_options_holding(self, des, unit_member, drop_write=True):
-        """STL options whose factory unitType ALREADY reads 'unit_member' - the live 'mm' shape."""
-        return _options_holding(des, "unitType", unit_member, "createSTLExportOptions", "stl",
-                                drop_write)
 
     def test_a_unit_the_options_already_read_is_published_unverified(self, tmp_path):
         # THE VACUOUS GUARD. The options object reads the requested unit BEFORE the set and the
@@ -948,7 +895,7 @@ class TestExportStlUnits:
         _wire_adsk()
         des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
         self._stl_options_holding(des, mx.adsk.fusion.DistanceUnits.MillimeterDistanceUnits)
-        out = _payload(mx.export_handler(format="stl", stl_units="mm",
+        out = _payload(mx.handler(format="stl", stl_units="mm",
                                          file_path=str(tmp_path / "p.stl")))
         assert out["options_applied"]["stl_units"] == "mm"
         assert out["options_verified"]["stl_units"] is False
@@ -964,7 +911,7 @@ class TestExportStlUnits:
         des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
         self._stl_options_holding(des, mx.adsk.fusion.DistanceUnits.MillimeterDistanceUnits,
                                   drop_write=False)
-        out = _payload(mx.export_handler(format="stl", stl_units="in",
+        out = _payload(mx.handler(format="stl", stl_units="in",
                                          file_path=str(tmp_path / "p.stl")))
         assert out["options_applied"]["stl_units"] == "in"
         assert out["options_verified"]["stl_units"] is True
@@ -977,7 +924,7 @@ class TestExportStlUnits:
         _wire_adsk()
         des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
         self._stl_options_holding(des, mx.adsk.fusion.DistanceUnits.MillimeterDistanceUnits)
-        out = _payload(mx.export_handler(format="stl", stl_units="in",
+        out = _payload(mx.handler(format="stl", stl_units="in",
                                          file_path=str(tmp_path / "p.stl")))
         assert out["options_applied"]["stl_units"] is None
         assert out["options_verified"]["stl_units"] is False
@@ -989,7 +936,7 @@ class TestExportStlUnits:
         _wire_adsk()
         des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
         self._stl_options_holding(des, mx.adsk.fusion.DistanceUnits.MillimeterDistanceUnits)
-        note = _payload(mx.export_handler(format="stl", stl_units="mm",
+        note = _payload(mx.handler(format="stl", stl_units="mm",
                                           file_path=str(tmp_path / "p.stl")))["note"].lower()
         for guess in ("the file is in", "written in mm", "the file was written", "the writer used",
                       "landed"):
@@ -1002,7 +949,7 @@ class TestExportStlUnits:
         _wire_adsk()
         des = _install(FakeDesign(FakeComp("Root", occurrences=[FakeOcc("A:1"), FakeOcc("B:1")])))
         self._stl_options_holding(des, mx.adsk.fusion.DistanceUnits.MillimeterDistanceUnits)
-        out = _payload(mx.export_handler(format="stl", stl_units="mm", file_path=str(tmp_path),
+        out = _payload(mx.handler(format="stl", stl_units="mm", file_path=str(tmp_path),
                                          split_by_component=True))
         assert [f["options_applied"] for f in out["files"]] == [{"stl_units": "mm"},
                                                                 {"stl_units": "mm"}]
@@ -1017,7 +964,7 @@ class TestExportStlUnits:
         _wire_adsk()
         des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
         monkeypatch.setattr(mx._export, "stl_unit_enum", lambda key: None)
-        out = _payload(mx.export_handler(format="stl", file_path=str(tmp_path / "p.stl")))
+        out = _payload(mx.handler(format="stl", file_path=str(tmp_path / "p.stl")))
         assert not hasattr(des.exportManager.calls[-1], "unitType")
         assert out["options_applied"]["stl_units"] is None
         assert "did NOT land" in out["note"]
@@ -1025,7 +972,7 @@ class TestExportStlUnits:
     def test_each_split_stl_file_carries_the_unit_that_landed_for_it(self, tmp_path):
         _wire_adsk()
         des = _install(FakeDesign(FakeComp("Root", occurrences=[FakeOcc("A:1"), FakeOcc("B:1")])))
-        out = _payload(mx.export_handler(format="stl", stl_units="cm", file_path=str(tmp_path),
+        out = _payload(mx.handler(format="stl", stl_units="cm", file_path=str(tmp_path),
                                          split_by_component=True))
         assert [f["options_applied"] for f in out["files"]] == [{"stl_units": "cm"},
                                                                 {"stl_units": "cm"}]
@@ -1043,7 +990,7 @@ class TestExportStlUnits:
         _wire_adsk()
         des = _install(FakeDesign(FakeComp("Root", occurrences=[FakeOcc("A:1"), FakeOcc("B:1")])))
         self._stl_options_class(des, _NoUnitOptions, only_for=["B:1"])
-        out = _payload(mx.export_handler(format="stl", file_path=str(tmp_path),
+        out = _payload(mx.handler(format="stl", file_path=str(tmp_path),
                                          split_by_component=True))
         by_occ = {f["occurrence"]: f["options_applied"]["stl_units"] for f in out["files"]}
         assert by_occ == {"A:1": "mm", "B:1": None}
@@ -1057,18 +1004,31 @@ class TestExportStlUnits:
     def test_a_split_of_a_non_stl_format_reports_no_unit_at_all(self, tmp_path):
         _wire_adsk()
         _install(FakeDesign(FakeComp("Root", occurrences=[FakeOcc("A:1")])))
-        out = _payload(mx.export_handler(format="3mf", file_path=str(tmp_path),
+        out = _payload(mx.handler(format="3mf", file_path=str(tmp_path),
                                          split_by_component=True))
         assert "options_requested" not in out
         assert "options_applied" not in out["files"][0]
 
 
 class TestExportSplitByComponent:
+
+    def _split_dropping_refinement_for(self, des, drop_for=()):
+        """Point the STL options factory at _NoRefineOptions for the named occurrences only, so a
+        split export can have some files land the refinement and some not."""
+        drop = set(drop_for)
+
+        def _stl_opt(geom, path):
+            cls = _NoRefineOptions if getattr(geom, "name", "") in drop else FakeExportOptions
+            rec = cls("stl", geom, path)
+            des.exportManager.calls.append(rec)
+            return rec
+        des.exportManager.createSTLExportOptions = _stl_opt
+
     def test_one_file_per_occurrence(self, tmp_path):
         _wire_adsk()
         occs = [FakeOcc("Body:1"), FakeOcc("Wheels:1")]
         des = _install(FakeDesign(FakeComp("Root", occurrences=occs)))
-        out = _payload(mx.export_handler(format="stl", file_path=str(tmp_path), split_by_component=True))
+        out = _payload(mx.handler(format="stl", file_path=str(tmp_path), split_by_component=True))
         assert out["split_by_component"] is True
         assert out["file_count"] == 2
         geoms = [c.geom.name for c in des.exportManager.calls]
@@ -1077,13 +1037,13 @@ class TestExportSplitByComponent:
     def test_filenames_sanitized(self, tmp_path):
         _wire_adsk()
         _install(FakeDesign(FakeComp("Root", occurrences=[FakeOcc("Loader Arm:1")])))
-        out = _payload(mx.export_handler(format="3mf", file_path=str(tmp_path), split_by_component=True))
+        out = _payload(mx.handler(format="3mf", file_path=str(tmp_path), split_by_component=True))
         assert out["files"][0]["file_path"].replace("\\", "/").endswith("/Loader_Arm.3mf")
 
     def test_duplicate_stems_disambiguated(self, tmp_path):
         _wire_adsk()
         _install(FakeDesign(FakeComp("Root", occurrences=[FakeOcc("Wheel:1"), FakeOcc("Wheel:2")])))
-        out = _payload(mx.export_handler(format="stl", file_path=str(tmp_path), split_by_component=True))
+        out = _payload(mx.handler(format="stl", file_path=str(tmp_path), split_by_component=True))
         paths = [f["file_path"] for f in out["files"]]
         assert len(set(paths)) == 2
         assert any(p.endswith("Wheel.stl") for p in paths) and any(p.endswith("Wheel_2.stl") for p in paths)
@@ -1095,7 +1055,7 @@ class TestExportSplitByComponent:
         _wire_adsk()
         des = _install(FakeDesign(FakeComp("Root", occurrences=[FakeOcc("Body:1"),
                                                                 FakeOcc("Wheels:1")])))
-        res = mx.export_handler(format="stl", file_path=str(tmp_path), split_by_component=True,
+        res = mx.handler(format="stl", file_path=str(tmp_path), split_by_component=True,
                                 target="Wheels:1")
         assert res["isError"] is True
         assert "'target' ('Wheels:1')" in res["message"]
@@ -1108,14 +1068,14 @@ class TestExportSplitByComponent:
         # existing rather than on what was PASSED would refuse the ordinary split outright.
         _wire_adsk()
         _install(FakeDesign(FakeComp("Root", occurrences=[FakeOcc("Body:1")])))
-        out = _payload(mx.export_handler(format="stl", file_path=str(tmp_path),
+        out = _payload(mx.handler(format="stl", file_path=str(tmp_path),
                                          split_by_component=True, target=""))
         assert out["file_count"] == 1
 
     def test_no_occurrences_errors(self, tmp_path):
         _wire_adsk()
         _install(FakeDesign(FakeComp("Root", occurrences=[])))
-        res = mx.export_handler(format="stl", file_path=str(tmp_path), split_by_component=True)
+        res = mx.handler(format="stl", file_path=str(tmp_path), split_by_component=True)
         assert res["isError"] is True and "no top-level occurrences" in res["message"].lower()
 
     def test_an_unreadable_occurrence_collection_refuses_as_unread_not_as_empty(self, tmp_path):
@@ -1133,7 +1093,7 @@ class TestExportSplitByComponent:
 
         comp.occurrences = _Blind()
         _install(FakeDesign(comp))
-        res = mx.export_handler(format="stl", file_path=str(tmp_path), split_by_component=True)
+        res = mx.handler(format="stl", file_path=str(tmp_path), split_by_component=True)
         assert res["isError"] is True
         assert "did not read" in res["message"]
         assert "no top-level occurrences" not in res["message"].lower()
@@ -1151,7 +1111,7 @@ class TestExportSplitByComponent:
                 raise RuntimeError("write blew up")
             return real_execute(opts)
         des.exportManager.execute = _selective
-        out = _payload(mx.export_handler(format="stl", file_path=str(tmp_path),
+        out = _payload(mx.handler(format="stl", file_path=str(tmp_path),
                                          split_by_component=True))
         assert out["file_count"] == 1
         assert out["exported"] is True            # at least one landed
@@ -1163,24 +1123,12 @@ class TestExportSplitByComponent:
         assert out["partial"] is True
         assert "PARTIAL" in out["note"] and "1 of 2" in out["note"]
 
-    def _split_dropping_refinement_for(self, des, drop_for=()):
-        """Point the STL options factory at _NoRefineOptions for the named occurrences only, so a
-        split export can have some files land the refinement and some not."""
-        drop = set(drop_for)
-
-        def _stl_opt(geom, path):
-            cls = _NoRefineOptions if getattr(geom, "name", "") in drop else FakeExportOptions
-            rec = cls("stl", geom, path)
-            des.exportManager.calls.append(rec)
-            return rec
-        des.exportManager.createSTLExportOptions = _stl_opt
-
     def test_each_split_file_carries_the_refinement_that_landed_for_it(self, tmp_path):
         # The applied value _write_mesh_file read back is per FILE - the split payload publishes it
         # beside the one request, the same applied/requested pair the single-target export does.
         _wire_adsk()
         des = _install(FakeDesign(FakeComp("Root", occurrences=[FakeOcc("A:1"), FakeOcc("B:1")])))
-        out = _payload(mx.export_handler(format="stl", refinement="low", file_path=str(tmp_path),
+        out = _payload(mx.handler(format="stl", refinement="low", file_path=str(tmp_path),
                                          split_by_component=True))
         assert out["refinement_requested"] == "low"
         assert [f["refinement"] for f in out["files"]] == ["low", "low"]
@@ -1194,7 +1142,7 @@ class TestExportSplitByComponent:
         des = _install(FakeDesign(FakeComp("Root", occurrences=[FakeOcc("A:1"), FakeOcc("B:1")])))
         _options_holding(des, "meshRefinement", _refine_member("medium"),
                          "createSTLExportOptions", "stl")
-        out = _payload(mx.export_handler(format="stl", refinement="medium", file_path=str(tmp_path),
+        out = _payload(mx.handler(format="stl", refinement="medium", file_path=str(tmp_path),
                                          split_by_component=True))
         assert [f["refinement"] for f in out["files"]] == ["medium", "medium"]
         assert all("refinement_verified" not in f for f in out["files"])
@@ -1206,7 +1154,7 @@ class TestExportSplitByComponent:
         _wire_adsk()
         des = _install(FakeDesign(FakeComp("Root", occurrences=[FakeOcc("A:1")])))
         self._split_dropping_refinement_for(des, drop_for=["A:1"])
-        out = _payload(mx.export_handler(format="stl", refinement="high", file_path=str(tmp_path),
+        out = _payload(mx.handler(format="stl", refinement="high", file_path=str(tmp_path),
                                          split_by_component=True))
         assert out["files"][0]["refinement"] is None
         assert out["refinement_requested"] == "high"
@@ -1218,7 +1166,7 @@ class TestExportSplitByComponent:
         _wire_adsk()
         des = _install(FakeDesign(FakeComp("Root", occurrences=[FakeOcc("A:1"), FakeOcc("B:1")])))
         self._split_dropping_refinement_for(des, drop_for=["B:1"])
-        out = _payload(mx.export_handler(format="stl", refinement="medium", file_path=str(tmp_path),
+        out = _payload(mx.handler(format="stl", refinement="medium", file_path=str(tmp_path),
                                          split_by_component=True))
         by_occ = {f["occurrence"]: f["refinement"] for f in out["files"]}
         assert by_occ == {"A:1": "medium", "B:1": None}
@@ -1228,7 +1176,7 @@ class TestExportSplitByComponent:
         # the disclosure is conditional - a fully successful split must not warn about itself
         _wire_adsk()
         _install(FakeDesign(FakeComp("Root", occurrences=[FakeOcc("A:1"), FakeOcc("B:1")])))
-        out = _payload(mx.export_handler(format="stl", refinement="low", file_path=str(tmp_path),
+        out = _payload(mx.handler(format="stl", refinement="low", file_path=str(tmp_path),
                                          split_by_component=True))
         assert "did NOT land" not in out["note"]
 
@@ -1238,7 +1186,7 @@ class TestExportSplitByComponent:
         _wire_adsk()
         des = _install(FakeDesign(FakeComp("Root", occurrences=[FakeOcc("A:1"), FakeOcc("B:1")])))
         des.exportManager.execute = lambda opts: (_ for _ in ()).throw(RuntimeError("nope"))
-        res = mx.export_handler(format="stl", file_path=str(tmp_path), split_by_component=True)
+        res = mx.handler(format="stl", file_path=str(tmp_path), split_by_component=True)
         assert res["isError"] is True
         assert "wrote NO files" in res["message"]
         assert "A:1" in res["message"] and "B:1" in res["message"]
@@ -1246,6 +1194,7 @@ class TestExportSplitByComponent:
 
 
 class TestExportNoteBudget:
+
     """Both export paths hand ok() a note COMPOSED at run time, so test_prose_budget's _note_sites
     sees a bare Name and measures nothing - these two drive the worst composition instead."""
 
@@ -1281,7 +1230,7 @@ class TestExportNoteBudget:
         comp.meshBodies = FakeMeshBodyColl([m])
         des = _install(FakeDesign(comp), handle_map={"H": m})
         self._worst_options(des)
-        out = _payload(mx.export_handler(format="stl", stl_units="mm", target="H",
+        out = _payload(mx.handler(format="stl", stl_units="mm", target="H",
                                          file_path=str(tmp_path / "p.stl")))
         assert out["redirected_from_mesh"] is True and out["refinement"] is None
         assert out["options_verified"]["stl_units"] is False
@@ -1301,217 +1250,9 @@ class TestExportNoteBudget:
                 raise RuntimeError("write blew up")
             return real_execute(opts)
         des.exportManager.execute = _selective
-        out = _payload(mx.export_handler(format="stl", stl_units="mm", file_path=str(tmp_path),
+        out = _payload(mx.handler(format="stl", stl_units="mm", file_path=str(tmp_path),
                                          split_by_component=True))
         assert out["partial"] is True
         note = out["note"]
         assert "PARTIAL" in note and "did NOT land" in note and "UNVERIFIED" in note
         assert len(note) <= 400, len(note)          # test_prose_budget.NOTE_BUDGET_CHARS
-
-
-# â”€â”€ save_as_mesh: tessellate + add a mesh body + route through run_in_base_feature â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-def _mesh_source(name="SolidA", tri=12, nodes=8, parent_comp=None, raise_on_calc=False):
-    """A BRep body wired with a meshManager that yields a TriangleMesh of the given counts."""
-    tm = TriangleMesh(tri=tri, nodes=nodes)
-    calc = FakeMeshCalculator(tm, raise_on_calc=raise_on_calc)
-    return BRepBody(name, parent=parent_comp, mesh_manager=FakeMeshManager(calc))
-
-
-class TestSaveAsMesh:
-    def test_direct_tessellates_adds_mesh_no_scope(self):
-        _wire_adsk()
-        mb_coll = FakeMeshBodies(result=MeshBody("SavedMesh"))
-        bf = FakeBaseFeature()
-        comp = FakeComp("Comp", mesh_bodies=mb_coll, features=FakeFeatures(FakeBaseFeatures(made=bf)))
-        src = _mesh_source("SolidA", tri=12, nodes=8, parent_comp=comp)
-        _install(FakeDesign(comp, design_type=0), handle_map={"H": src})   # DIRECT
-        out = _payload(mx.save_as_mesh_handler(body="H", quality="normal"))
-        assert out["saved_as_mesh"] is True
-        assert out["name"] == "SavedMesh"
-        assert out["triangle_count"] == 12 and out["node_count"] == 8
-        assert mb_coll.add_args is not None            # the mesh was actually added
-        # DIRECT: run_in_base_feature ran the op with NO scope (the base feature was never started)
-        assert bf.started is False and bf.finished is False
-
-    def test_parametric_routes_through_base_feature_scope(self):
-        _wire_adsk()
-        mb_coll = FakeMeshBodies(result=MeshBody("SavedMesh"))
-        bf = FakeBaseFeature()
-        comp = FakeComp("Comp", mesh_bodies=mb_coll, features=FakeFeatures(FakeBaseFeatures(made=bf)))
-        src = _mesh_source("SolidA", parent_comp=comp)
-        _install(FakeDesign(comp, design_type=1), handle_map={"H": src})   # PARAMETRIC
-        out = _payload(mx.save_as_mesh_handler(body="H"))
-        assert out["saved_as_mesh"] is True
-        # PARAMETRIC: the write was wrapped in an OPEN/CLOSED base-feature scope
-        assert bf.started is True and bf.finished is True
-        assert mb_coll.add_args is not None
-
-    def test_phantom_body_that_never_lands_bites(self):
-        # a returned body object is not proof it joined the component - the count is
-        _wire_adsk()
-
-        class PhantomMeshBodies(FakeMeshBodies):
-            count = 3                                    # static: the add never actually lands
-
-        mb_coll = PhantomMeshBodies(result=MeshBody("Phantom"))
-        comp = FakeComp("Comp", mesh_bodies=mb_coll)
-        src = _mesh_source("SolidA", parent_comp=comp)
-        _install(FakeDesign(comp, design_type=0), handle_map={"H": src})
-        res = mx.save_as_mesh_handler(body="H")
-        assert res["isError"] is True
-        assert "did not increase" in res["message"]
-
-    def test_landed_body_grows_the_count_and_passes(self):
-        _wire_adsk()
-
-        class LandingMeshBodies(FakeMeshBodies):
-            def __init__(self, result=None):
-                super().__init__(result)
-                self.count = 3
-
-            def addByTriangleMeshData(self, *a):
-                out = super().addByTriangleMeshData(*a)
-                self.count += 1
-                return out
-
-        mb_coll = LandingMeshBodies(result=MeshBody("SavedMesh"))
-        comp = FakeComp("Comp", mesh_bodies=mb_coll)
-        src = _mesh_source("SolidA", parent_comp=comp)
-        _install(FakeDesign(comp, design_type=0), handle_map={"H": src})
-        out = _payload(mx.save_as_mesh_handler(body="H"))
-        assert out["saved_as_mesh"] is True
-
-    def test_quality_passed_to_calculator(self):
-        _wire_adsk()
-        comp = FakeComp("Comp")
-        src = _mesh_source("SolidA", parent_comp=comp)
-        _install(FakeDesign(comp, design_type=0), handle_map={"H": src})
-        out = _payload(mx.save_as_mesh_handler(body="H", quality="very_high"))
-        assert out["quality"] == "very_high"
-        assert out["quality_requested"] == "very_high"
-        # the calculator received the VeryHigh quality enum value
-        assert src.meshManager._calc.quality == 15
-
-    def _tessellate_without_the_quality_member(self, quality="high"):
-        """save_as_mesh on a build carrying no TriangleMeshQualityOptions member for the request -
-        setQuality is never called and the calculator runs at its own default level of detail."""
-        fusion = _wire_adsk()
-        delattr(fusion.TriangleMeshQualityOptions, "HighQualityTriangleMesh")
-        comp = FakeComp("Comp")
-        src = _mesh_source("SolidA", parent_comp=comp)
-        _install(FakeDesign(comp, design_type=0), handle_map={"H": src})
-        return _payload(mx.save_as_mesh_handler(body="H", quality=quality)), src
-
-    def test_quality_that_never_reached_setquality_is_published_null(self):
-        # the tessellation ran at the calculator's DEFAULT LOD, so publishing the requested key as
-        # 'quality' would report a level of detail the mesh does not have.
-        out, src = self._tessellate_without_the_quality_member()
-        assert src.meshManager._calc.quality is None      # setQuality was never called
-        assert out["quality"] is None
-        assert out["quality_requested"] == "high"
-
-    def test_an_unlanded_quality_says_so_on_the_wire(self):
-        out, _src = self._tessellate_without_the_quality_member()
-        assert "did NOT land" in out["note"] and "default level of detail" in out["note"]
-
-    def test_a_landed_quality_adds_no_did_not_land_note(self):
-        _wire_adsk()
-        comp = FakeComp("Comp")
-        src = _mesh_source("SolidA", parent_comp=comp)
-        _install(FakeDesign(comp, design_type=0), handle_map={"H": src})
-        out = _payload(mx.save_as_mesh_handler(body="H", quality="low"))
-        assert out["quality"] == "low"
-        assert "did NOT land" not in out["note"]
-
-    def test_optional_name_renames_the_mesh(self):
-        _wire_adsk()
-        comp = FakeComp("Comp")
-        src = _mesh_source("SolidA", parent_comp=comp)
-        _install(FakeDesign(comp, design_type=0), handle_map={"H": src})
-        out = _payload(mx.save_as_mesh_handler(body="H", name="MyMesh"))
-        assert out["name"] == "MyMesh"
-
-    def test_bad_quality_rejected(self):
-        _wire_adsk()
-        comp = FakeComp("Comp")
-        src = _mesh_source("SolidA", parent_comp=comp)
-        _install(FakeDesign(comp, design_type=0), handle_map={"H": src})
-        res = mx.save_as_mesh_handler(body="H", quality="ultra")
-        assert res["isError"] is True and "quality" in res["message"]
-
-    def test_mesh_source_rejected(self):
-        # passing an existing MESH body to save_as_mesh (it wants a BRep) -> honest refusal
-        _wire_adsk()
-        comp = FakeComp("Comp")
-        m = MeshBody("AlreadyMesh")
-        _install(FakeDesign(comp, design_type=0), handle_map={"H": m})
-        res = mx.save_as_mesh_handler(body="H")
-        assert res["isError"] is True and "already a MESH" in res["message"]
-
-    def test_calculate_failure_surfaces(self):
-        _wire_adsk()
-        comp = FakeComp("Comp")
-        src = _mesh_source("SolidA", parent_comp=comp, raise_on_calc=True)
-        _install(FakeDesign(comp, design_type=0), handle_map={"H": src})
-        res = mx.save_as_mesh_handler(body="H")
-        assert res["isError"] is True and "tessellation" in res["message"].lower()
-
-    def test_add_failure_surfaces_not_swallowed(self):
-        _wire_adsk()
-        mb_coll = FakeMeshBodies(raise_on_add=True)
-        comp = FakeComp("Comp", mesh_bodies=mb_coll)
-        src = _mesh_source("SolidA", parent_comp=comp)
-        _install(FakeDesign(comp, design_type=0), handle_map={"H": src})
-        # in DIRECT mode the add runs directly inside run_in_base_feature; the raise must propagate
-        try:
-            res = mx.save_as_mesh_handler(body="H")
-        except RuntimeError as e:
-            assert "add failed" in str(e)
-        else:
-            assert res["isError"] is True
-
-
-class TestWeld:
-    """_weld merges coincident vertices so a watertight solid tessellates to a watertight mesh. The
-    calculator emits one vertex per triangle corner; without welding the mesh is topologically open
-    (isClosed=false) and mesh_to_brep refuses it."""
-
-    def test_box_corners_merge_24_to_8(self):
-        # 8 distinct corners, each repeated 3x (one per adjacent face) = 24 emitted vertices.
-        corners = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0),
-                   (0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1)]
-        coords, idx = [], []
-        for i, c in enumerate(corners):
-            for _ in range(3):                       # emit each corner 3 times (unwelded)
-                idx.append(len(coords) // 3)
-                coords.extend(c)
-        wc, wi = mx._weld(coords, idx)
-        assert len(wc) // 3 == 8                      # 24 -> 8 unique vertices
-        # every welded index points at the right merged coordinate
-        for emitted, new in zip(idx, wi):
-            ex = coords[3 * emitted: 3 * emitted + 3]
-            got = wc[3 * new: 3 * new + 3]
-            assert ex == got
-
-    def test_distinct_vertices_are_preserved(self):
-        coords = [0, 0, 0, 1, 0, 0, 0, 1, 0]         # 3 distinct vertices, no duplicates
-        idx = [0, 1, 2]
-        wc, wi = mx._weld(coords, idx)
-        assert len(wc) // 3 == 3 and wi == [0, 1, 2]
-
-    def test_vertices_agreeing_to_the_quantization_merge(self):
-        # the merge keys on round(x, 6), not on equality: 1e-9 apart is ONE vertex.
-        wc, wi = mx._weld([0.0, 0.0, 0.0, 1e-9, 0.0, 0.0], [0, 1])
-        assert len(wc) // 3 == 1 and wi == [0, 0]
-
-    def test_vertices_beyond_the_quantization_stay_distinct(self):
-        # 1e-3 apart is two vertices - the quantization is a floor, not a modelling tolerance.
-        wc, wi = mx._weld([0.0, 0.0, 0.0, 1e-3, 0.0, 0.0], [0, 1])
-        assert len(wc) // 3 == 2 and wi == [0, 1]
-
-    def test_malformed_input_returned_unchanged(self):
-        # ragged coordinate list (not a multiple of 3) is passed through untouched, never raises
-        bad = [0.0, 1.0]
-        assert mx._weld(bad, [0]) == (bad, [0])
-        assert mx._weld([], []) == ([], [])

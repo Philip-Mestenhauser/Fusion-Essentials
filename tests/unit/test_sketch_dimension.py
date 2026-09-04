@@ -1010,7 +1010,7 @@ class TestGuards:
 
     def test_the_named_miss_lists_the_sketches_that_are_there(self, monkeypatch):
         # a miss that names only what is ABSENT leaves the caller guessing; the siblings
-        # (sketch_edit_curve, sketch_insert_svg, sketch_transform) all list what IS there.
+        # (sketch_edit_curve, sketch_insert_svg, sketch_move) all list what IS there.
         # the siblings all end the miss with a terminated next step (sketch_constrain and
         # sketch_delete_entity with ". Use sketch_get."), which is also the breadcrumb edge the
         # pointer map reads out of this error.

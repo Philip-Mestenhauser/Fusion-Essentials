@@ -48,15 +48,15 @@ def _unwrap(result):
 
 
 def _slice_mode(design):
-    """The modelling-mode + capability map (via design_mode.get_mode_handler)."""
-    from . import design_mode
-    return _unwrap(design_mode.get_mode_handler())
+    """The modelling-mode + capability map (via _design_common.get_mode_handler)."""
+    from . import _design_common
+    return _unwrap(_design_common.get_mode_handler())
 
 
 def _slice_health(design):
-    """The timeline health rollup (via design_ops.health_handler) - cheap; in the default slice."""
-    from . import design_ops
-    return _unwrap(design_ops.health_handler())
+    """The timeline health rollup (_design_common.health_handler) - cheap; in the default slice."""
+    from . import _design_common
+    return _unwrap(_design_common.health_handler())
 
 
 # ── component/occurrence tree ──────────────────────────────────────────────────────────────────────

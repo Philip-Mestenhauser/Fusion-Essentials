@@ -12,7 +12,7 @@ conftest), so the fake ops flow through unchanged.
 
 import json
 
-from conftest import load_tool, _NamedCollection
+from conftest import Camera, Viewport, load_tool, _NamedCollection
 from conftest import FakeOperation as FakeOp, FakeSetup, FakeCAMFolder as CAMFolder
 
 st = load_tool("cam_show_toolpath")
@@ -28,28 +28,6 @@ cc = load_tool("_cam_common")   # the shared get_cam seam st.get_cam is imported
 class FakeCAM:
     def __init__(self, setups):
         self.setups = _NamedCollection(setups)
-
-
-class FakeCamera:
-    isFitView = False
-
-
-class FakeViewport:
-    def __init__(self):
-        self._camera = FakeCamera()
-        self.camera_assignments = 0
-
-    @property
-    def camera(self):
-        return self._camera
-
-    @camera.setter
-    def camera(self, value):
-        self._camera = value
-        self.camera_assignments += 1
-
-    def refresh(self):
-        pass
 
 
 class FakeProducts:
@@ -68,7 +46,7 @@ class FakeDoc:
 class FakeApp:
     def __init__(self, cam):
         self.activeDocument = FakeDoc(cam)
-        self.activeViewport = FakeViewport()
+        self.activeViewport = Viewport()
 
 
 def _install(setups):
@@ -725,7 +703,7 @@ class TestFit:
         assert op1.isLightBulbOn is True
         vp = st.app.activeViewport
         assert vp.camera.isFitView is True     # the fit reached the camera...
-        assert vp.camera_assignments == 1      # ...and the camera was written back to the viewport
+        assert len(vp._assigned) == 1          # ...and the camera was written back to the viewport
 
     def test_show_without_fit_leaves_the_camera_alone(self):
         _simple_world()
@@ -733,19 +711,20 @@ class TestFit:
         assert out["fit"] is False
         vp = st.app.activeViewport
         assert vp.camera.isFitView is False
-        assert vp.camera_assignments == 0
+        assert vp._assigned == []
 
     def test_fit_api_refusal_raises_not_false_success(self):
         import pytest
 
         _simple_world()
 
-        class _RefusingCamera(FakeCamera):
+        class _RefusingCamera(Camera):
+            """A camera the platform lets be built but will not take a fit flag on."""
             def __setattr__(self, key, value):
-                if key == "isFitView":
+                if key == "isFitView" and hasattr(self, "isFitView"):
                     raise RuntimeError("fit refused")
                 super().__setattr__(key, value)
 
-        st.app.activeViewport._camera = _RefusingCamera()
+        st.app.activeViewport._cam = _RefusingCamera()
         with pytest.raises(RuntimeError, match="fit refused"):
             st.handler(action="show", operation="Rough Top", fit=True)

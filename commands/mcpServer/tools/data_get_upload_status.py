@@ -3,7 +3,7 @@
 
 """Poll a data_upload_file upload for its real uploading/processing/complete/failed state, so the
 caller never has to re-list files and guess when cloud translation finished. Reads the live
-DataFileFuture kept referenced in data_ops._UPLOADS. NON-BLOCKING: reports the CURRENT observed
+DataFileFuture kept referenced in _data_common._UPLOADS. NON-BLOCKING: reports the CURRENT observed
 state and returns immediately - never sleeps or hot-loops.
 """
 
@@ -13,18 +13,18 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
-from . import data_ops
+from . import _data_common
 
 
 def _find_by_name(file_name, folder):
-    """Search data_ops._UPLOADS (most-recent-first) for an entry matching source_file (+ folder if
+    """Search _data_common._UPLOADS (most-recent-first) for an entry matching source_file (+ folder if
     given). Returns (handle, entry) or (None, None)."""
     want_name = (file_name or "").strip().lower()
     want_folder = (folder or "").strip().lower()
     if not want_name:
         return None, None
-    for h in reversed(list(data_ops._UPLOADS.keys())):
-        entry = data_ops._UPLOADS[h]
+    for h in reversed(list(_data_common._UPLOADS.keys())):
+        entry = _data_common._UPLOADS[h]
         if (entry.get("source_file") or "").lower() != want_name:
             continue
         if want_folder and (entry.get("destination_folder") or "").lower() != want_folder:
@@ -35,30 +35,30 @@ def _find_by_name(file_name, folder):
 
 def handler(handle: str = "", file_name: str = "", folder: str = "") -> dict:
     """Report an upload's current state; see TOOL_DESCRIPTION."""
-    if not data_ops._UPLOADS:
+    if not _data_common._UPLOADS:
         return error("No uploads have been launched in this session. Call data_upload_file first.")
 
     key = (handle or "").strip()
     entry = None
 
     if key and key.lower() != "latest":
-        entry = data_ops._UPLOADS.get(key)
+        entry = _data_common._UPLOADS.get(key)
         if not entry:
             return error(f"No upload with handle '{handle}'. Active handles: "
-                         f"{', '.join(data_ops._UPLOADS.keys()) or '(none)'}.")
+                         f"{', '.join(_data_common._UPLOADS.keys()) or '(none)'}.")
     elif key.lower() == "latest" or (not key and not file_name):
         # 'latest' = the newest STILL-TRACKED upload, read from the live dict in insertion order:
         # the mint counter climbs past entries popped at their terminal state, so a handle derived
         # from it names an upload already gone while an older one is still running.
-        key = list(data_ops._UPLOADS)[-1]
-        entry = data_ops._UPLOADS[key]
+        key = list(_data_common._UPLOADS)[-1]
+        entry = _data_common._UPLOADS[key]
 
     if entry is None and file_name:
         key, entry = _find_by_name(file_name, folder)
         if not entry:
             where = f" folder='{folder}'" if folder else ""
             return error(f"No tracked upload matches file_name='{file_name}'{where}. Active "
-                         f"handles: {', '.join(data_ops._UPLOADS.keys()) or '(none)'}.")
+                         f"handles: {', '.join(_data_common._UPLOADS.keys()) or '(none)'}.")
 
     if entry is None:
         return error("Provide 'handle' (from data_upload_file's upload_handle, or 'latest') or "
@@ -94,11 +94,11 @@ def handler(handle: str = "", file_name: str = "", folder: str = "") -> dict:
         payload["fusion_web_url"] = safe(lambda: df.fusionWebURL)
         payload["note"] = ("Upload complete - the cloud confirms the file has fully landed and "
                             "processed. Use file_id with doc_open or data_get.")
-        data_ops._UPLOADS.pop(key, None)
+        _data_common._UPLOADS.pop(key, None)
     elif state == "failed":
         payload["note"] = ("Upload failed. Check the source file's format/permissions and retry "
                             "data_upload_file.")
-        data_ops._UPLOADS.pop(key, None)
+        _data_common._UPLOADS.pop(key, None)
     elif state == "uploading":
         payload["note"] = "Still transferring the file to the cloud - poll again."
     else:  # processing

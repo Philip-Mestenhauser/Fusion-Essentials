@@ -18,6 +18,16 @@ MAP_BLURB = (
     "DISPLAY_FOLDERS/all_display_components - toggling non-body clutter; "
     "keep_visible/isolate_for_fit/restore_message - framing on one occurrence")
 
+app = adsk.core.Application.get()
+
+
+def user_interface():
+    """The Fusion UI, raising when there is none - the ONE handle the workspace tools read."""
+    ui = app.userInterface
+    if not ui:
+        raise RuntimeError("No user interface available.")
+    return ui
+
 
 # Display category -> the Component FOLDER bulb controlling it. The folder bulb is separate from
 # each entity's own bulb, so toggling it never disturbs per-entity state.

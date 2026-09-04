@@ -12,7 +12,8 @@ import time
 import adsk.core
 import adsk.cam
 
-from ._common import (counted, measured, named_with_remainder, iter_collection, read_flag, safe)
+from ._common import (counted, measured, named_with_remainder, iter_collection, read_flag, safe,
+                      told_apart)
 from ._write_guard import _active_identity, document_key, on_key_renamed
 
 MAP_BLURB = (
@@ -260,6 +261,22 @@ def walk_cam_tree(cam):
 def operation_nodes(cam):
     """Every OPERATION node of the CAM tree - walk_cam_tree filtered to kind == 'operation'."""
     return [n for n in walk_cam_tree(cam) if n.kind == "operation"]
+
+
+def op_labels(nodes):
+    """What each operation row is NAMED by: its own name, or - where several rows in this list share
+    that name - its 'Setup / ... / op' path, plus the row's POSITION where that path repeats too.
+    The substitution is _common.told_apart: a name that already identifies one row is left alone."""
+    per_path = {}
+    for n in nodes:
+        per_path[n.path] = per_path.get(n.path, 0) + 1
+    rows = []
+    for position, n in enumerate(nodes, 1):
+        disc = n.path
+        if disc and per_path[disc] > 1:
+            disc = f"{disc} (operation {position})"
+        rows.append((n.name, disc))
+    return told_apart(rows)
 
 
 # The address that picks ONE of several nodes sharing a name: '<name>#<n>', n counting from 1 over

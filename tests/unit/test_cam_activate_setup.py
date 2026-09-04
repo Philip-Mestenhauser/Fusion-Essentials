@@ -9,7 +9,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from conftest import load_tool, payload, error_message
+from conftest import Viewport, load_tool, payload, error_message
 
 mod = load_tool("cam_activate_setup")
 
@@ -180,3 +180,19 @@ class TestViewFit:
         viewport(absent=True)
         out = payload(mod.activate_setup_handler(setup="Op10"))
         assert out["view_fit"] is False and "no active viewport" in out["fit_error"]
+
+    def test_the_shared_viewport_fake_satisfies_the_gate(self, wire, monkeypatch):
+        # conftest's Viewport is the fake other suites hand this handler; a fit() answering None
+        # there reports a declined fit on a viewport that framed fine.
+        wire(setup=FakeSetup(name="Op10"))
+        vp = Viewport()
+        monkeypatch.setattr(mod, "app", Mock(activeViewport=vp))
+        out = payload(mod.activate_setup_handler(setup="Op10"))
+        assert vp._fit_calls == 1
+        assert out["view_fit"] is True and "fit_error" not in out
+
+    def test_the_shared_viewport_fakes_declined_fit_reaches_the_gate(self, wire, monkeypatch):
+        wire(setup=FakeSetup(name="Op10"))
+        monkeypatch.setattr(mod, "app", Mock(activeViewport=Viewport(fit_ok=False)))
+        out = payload(mod.activate_setup_handler(setup="Op10"))
+        assert out["view_fit"] is False and "did not answer true" in out["fit_error"]

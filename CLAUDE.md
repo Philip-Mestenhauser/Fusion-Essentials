@@ -130,8 +130,8 @@ makes the permission layer ask the owner to approve the call by hand, **whatever
 it cannot tell where the redirect target resolves after the `cd`. That one habit is the single largest
 source of approval prompts in this repo, and every prompt is a human being interrupted.
 
-So: `py -3 -m pytest tests/unit/test_sketch_core.py -q`, not
-`cd c:\Source\Fusion-Essentials; py -3 -m pytest tests/unit/test_sketch_core.py -q 2>&1 | Select-String "passed|failed"`.
+So: `py -3 -m pytest tests/unit/test_sketch_add_geometry.py -q`, not
+`cd c:\Source\Fusion-Essentials; py -3 -m pytest tests/unit/test_sketch_add_geometry.py -q 2>&1 | Select-String "passed|failed"`.
 Pipe to a filter if you want one, just leave the `cd` and the `2>&1` out. Filter with `-q`/`--no-cov` and
 the tail of the output rather than a regex, and prefer the file tools (Read/Grep/Edit/Write) over shell
 equivalents for anything touching files.

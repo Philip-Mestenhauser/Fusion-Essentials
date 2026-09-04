@@ -13,16 +13,12 @@ import adsk.fusion
 
 from conftest import (load_tool, make_design, install, payload as _payload,
                       error_message, assert_no_active_design, BRepBody, BRepEdge, Line3D,
-                      _NamedCollection)
+                      Profile, _NamedCollection)
 
 sw = load_tool("model_sweep")
 
 
 # ── small sweep-shaped fakes ────────────────────────────────────────────────
-
-class FakeProfile:
-    pass
-
 
 class FakeOpenProfile:
     pass
@@ -107,7 +103,7 @@ def _install(*, closed_profiles=1, open_curves=0, body_names=("Body1",), tokens=
     comp.createOpenProfile = lambda coll, chain: FakeOpenProfile()
 
     sketches = [
-        FakeSketch("Prof", profiles=[FakeProfile() for _ in range(closed_profiles)],
+        FakeSketch("Prof", profiles=[Profile() for _ in range(closed_profiles)],
                    curves=open_curves),
         FakeSketch("PathSketch", curves=3),
     ]
@@ -383,11 +379,10 @@ class TestCutMovesMaterial:
 
 # ── cross-component hosting: the feature lands on the profile's OWNER ────────────────────────────
 
-class _OwnedProfile:
+def _owned_profile(owner):
     """A closed profile whose parentSketch.parentComponent names its OWNING component - the chain
-    profile_host_component reads to decide where the feature is built (mirrors the live Profile)."""
-    def __init__(self, owner):
-        self.parentSketch = type("Sk", (), {"parentComponent": owner})()
+    profile_host_component reads to decide where the feature is built."""
+    return Profile(parent_sketch=type("Sk", (), {"parentComponent": owner})())
 
 
 def _install_two_component(body_names=("Body1",)):
@@ -406,7 +401,7 @@ def _install_two_component(body_names=("Body1",)):
     sub.features = FakeFeatures(sub_sf)
     sub.createOpenProfile = lambda coll, chain: FakeOpenProfile()
     # The profile is OWNED by the sub-component; the path sketch lives there too.
-    prof_sketch = FakeSketch("Prof", profiles=[_OwnedProfile(sub)])
+    prof_sketch = FakeSketch("Prof", profiles=[_owned_profile(sub)])
     sub.sketches = _NamedCollection([prof_sketch, FakeSketch("PathSketch", curves=3)])
 
     design = make_design(comp=root, all_components=[root, sub])
@@ -438,7 +433,7 @@ def _install_same_name_in_two(sketch_name="Prof"):
         comp = MakeComp(name=name, bodies=())
         comp.features = FakeFeatures(sf)
         comp.createOpenProfile = lambda coll, chain: FakeOpenProfile()
-        comp.sketches = _NamedCollection([FakeSketch(sketch_name, profiles=[_OwnedProfile(comp)]),
+        comp.sketches = _NamedCollection([FakeSketch(sketch_name, profiles=[_owned_profile(comp)]),
                                           FakeSketch("PathSketch", curves=3)])
         made.append((sf, comp))
     (alpha_sf, alpha), (beta_sf, beta) = made

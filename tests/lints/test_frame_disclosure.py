@@ -23,7 +23,7 @@ _MINTS_FRAME = re.compile(
 # module -> (the keys inside its frame block, why the caller cannot guess this frame). The keys are
 # what the module's own note and description teach, so a rename that leaves either behind fails.
 _PUBLISHES_A_FRAME_BLOCK = {
-    "sketch_core": (
+    "sketch_create": (
         ("origin_mm", "normal", "space", "x_world", "y_world", "x_local", "y_local"),
         "sketch_create establishes the frame every later coordinate on that sketch is authored in, "
         "and sketch_get reads the same block back - on an xz/yz origin plane or on a face the local "
@@ -92,7 +92,7 @@ def _keys_in(tree):
 @functools.lru_cache(maxsize=1)
 def _minted_keys():
     """Every string used as a payload KEY anywhere in tools/, helpers included - a module may
-    publish its frame through a shared helper (sketch_core's block is built in _sketch_detail), so
+    publish its frame through a shared helper (sketch_create's block is built in _sketch_detail), so
     the keys live one file over."""
     found = set()
     for fn in sorted(os.listdir(TOOLS_DIR)):
@@ -139,7 +139,7 @@ class TestFrameBlocksMintTheKeysTheyClaim:
 class TestEveryPublishedFrameIsClassified:
     def test_at_least_the_known_publishers_are_found(self):
         # A floor, so the scan cannot pass vacuously if the regex or the directory walk breaks.
-        assert {"sketch_core", "find_geometry", "assembly_get", "model_inspect",
+        assert {"sketch_create", "find_geometry", "assembly_get", "model_inspect",
                 "joint_create_origin"} <= set(_minting_modules())
 
     def test_a_consumer_that_only_mentions_a_frame_is_not_treated_as_a_publisher(self):

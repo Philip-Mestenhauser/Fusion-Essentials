@@ -463,7 +463,7 @@ class TestFindSketch:
 
     def test_find_or_recent_sketch_ALSO_defaults_to_the_rename_sentence(self):
         # The sibling helper's own default, which six production callers consume - doc_insert_import,
-        # model_extrude, model_revolve, surface_create (twice) and the _inputs sketch kind. It is
+        # model_extrude, model_revolve, the two surface creators and the _inputs sketch kind. It is
         # reachable only by calling find_or_recent_sketch itself: every test above passes a remedy
         # explicitly, so a non-None default here would ship a remedy none of those six asked for.
         root = _comp_with_sketches("Root", ["Profile"])

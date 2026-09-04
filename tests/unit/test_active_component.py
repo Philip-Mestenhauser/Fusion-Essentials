@@ -1,4 +1,4 @@
-"""Unit tests for active-component targeting in sketch_core.py + model_extrude.py.
+"""Unit tests for active-component targeting in sketch_create.py + model_extrude.py.
 
 A component made active via model_create_component(activate=true) must receive new
 sketches/bodies, not the root component - hardcoding design.rootComponent would leak geometry
@@ -15,7 +15,7 @@ import pytest
 
 from conftest import MakeComp, MakeDesign, install, load_tool, payload
 
-sk = load_tool("sketch_core")
+sk = load_tool("sketch_create")
 ex = load_tool("model_extrude")
 
 
@@ -128,7 +128,7 @@ def extrude_design():
 class TestSketchCreateTargetsActiveComponent:
     def test_new_sketch_lands_in_the_active_component_not_root(self, sketch_design):
         _design, root, active = sketch_design
-        res = sk.create_sketch_handler(plane="xy")
+        res = sk.handler(plane="xy")
         assert payload(res)["sketch_name"] == "MastSketch1"
         assert [s.name for s in active.sketches.landed] == ["MastSketch1"]
         assert root.sketches.landed == [], "the sketch leaked into the root component"
@@ -137,7 +137,7 @@ class TestSketchCreateTargetsActiveComponent:
         # Each component owns its OWN xy origin plane, so a sketch built on root's plane is a
         # sketch in the wrong frame even when it lands in the right collection.
         _design, _root, active = sketch_design
-        res = sk.create_sketch_handler(plane="xy")
+        res = sk.handler(plane="xy")
         assert payload(res)["plane"] == "Mast XY"
         assert active.sketches.landed[0].referencePlane is active.xYConstructionPlane
 

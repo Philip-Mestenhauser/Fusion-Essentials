@@ -19,8 +19,7 @@ from ._common import error, ok, safe, scale, target_component
 from . import _common
 from . import _inputs
 from . import _assert
-from .surface_create import _curve_host_component, _open_profile_from_curves
-from .surface_edit import _solid_verdict
+from ._surface_common import _curve_host_component, _open_profile_from_curves, _solid_verdict
 
 app = adsk.core.Application.get()
 

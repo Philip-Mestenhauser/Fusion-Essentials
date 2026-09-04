@@ -3,7 +3,7 @@
 
 """MCP building block: boolean-combine MESH bodies (adsk.fusion.MeshBody) - the mesh analogue of
 model_combine. Every input is validated to be a MESH body before any mutation. The write runs
-through run_in_base_feature (design_mode.py) for the parametric base-feature scope requirement.
+through run_in_base_feature (_design_common.py) for the parametric base-feature scope requirement.
 WRITES.
 """
 
@@ -18,8 +18,8 @@ from . import _common
 from . import _geom
 from ._common import target_component as _target_component
 from . import _inputs
-from .design_mode import run_in_base_feature
-from .mesh_ops import _result_mesh_of, _tri_count
+from ._design_common import run_in_base_feature
+from ._mesh_common import _result_mesh_of, _tri_count
 
 app = adsk.core.Application.get()
 
@@ -39,7 +39,7 @@ _ALGORITHM = _inputs.Choice("algorithm", ["legacy", "enhanced"], default="enhanc
 _SPEC = [_TARGET, _TOOLS, _OPERATION, _ALGORITHM]
 
 # operation key -> the MeshCombineOperationTypes enum member name.
-_OPERATIONS = {
+_MESH_COMBINE_MEMBERS = {
                             "join": "JoinMeshCombineType",
                             "cut": "CutMeshCombineType",
                             "intersect": "IntersectMeshCombineType",
@@ -156,7 +156,7 @@ def handler(target: str = "", tools=None, operation: str = "join",
         ot = safe(lambda: adsk.fusion.MeshCombineOperationTypes)
         oerr2 = _common.set_verified(
             inp, "meshCombineOperationType",
-            safe(lambda: getattr(ot, _OPERATIONS[op_key])) if ot is not None else None,
+            safe(lambda: getattr(ot, _MESH_COMBINE_MEMBERS[op_key])) if ot is not None else None,
             f"operation='{op_key}'", _IN)
         if oerr2:
             return error(oerr2)

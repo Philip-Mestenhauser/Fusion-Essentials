@@ -2,8 +2,8 @@
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
 """Cloud data-model READ cores data_get delegates to: the project list, a project's file listing,
-and ONE file's facts. Each file is read in its own try/except and folder recursion is
-depth/count-capped, since these calls hit cloud data on the main thread."""
+its folder tree, and ONE file's facts. Each file is read in its own try/except and folder recursion
+is depth/count-capped, since these calls hit cloud data on the main thread."""
 
 import datetime
 import time
@@ -11,16 +11,16 @@ import time
 import adsk.core
 
 from ._common import ok, error, safe
-from ._data_common import (_find_project, _folder_path_string, navigate_folder_path,
+from ._data_common import (_data, _find_project, _folder_path_string, navigate_folder_path,
                            resolve_file_reference)
 
 app = adsk.core.Application.get()
 
-MAP_BLURB = ("the three cloud READ cores data_get delegates to - list_projects_handler (the active "
+MAP_BLURB = ("the cloud READ cores data_get delegates to - list_projects_handler (the active "
              "hub's projects), list_project_files_handler (one project's files, optionally "
-             "folder-scoped) and file_facts_handler (ONE file's metadata + link state) - over "
-             "_walk_folder, the ONE capped/deadlined folder recursion, which records a folder "
-             "whose enumeration RAISED so a hole is never reported as an empty folder")
+             "folder-scoped), list_folders_handler (a project's bounded folder TREE) and "
+             "file_facts_handler (ONE file's metadata + link state) - over _walk_folder, the "
+             "capped/deadlined recursion recording a folder whose enumeration RAISED")
 
 # Every DataFile property read and every dataFolders/dataFiles enumeration is a synchronous cloud
 # round-trip on Fusion's MAIN thread, so these caps bound a whole-project walk; a bigger project is
@@ -362,6 +362,106 @@ def file_facts_handler(file: str = "", project: str = "", project_id: str = "",
     })
 
 
-# list_projects_handler / list_project_files_handler / file_facts_handler are the project, file-list
-# and single-file read cores that data_get delegates to (data_get is the registered rich read; these
-# carry the cloud-error guards + caps). No register_tool() here - this module exposes cores, not tools.
+# ---------------------------------------------------------------------------
+# data_get(project=..., include=['folders']) core: the project's folder tree
+# ---------------------------------------------------------------------------
+
+_LF_MAX_DEPTH = 12
+
+# The folder walk's HARD budget, counting every dataFolders fetch. Each fetch is a cloud round-trip
+# on Fusion's MAIN thread (~0.45-0.8 s), so a bigger tree must be read shallow (max_depth) or a
+# folder at a time (data_get(project, folder=<path>)).
+_LF_FOLDER_BUDGET = 20
+
+
+def list_folders_handler(project: str = "", project_id: str = "", max_depth: int = 4) -> dict:
+    """Return a project's folder tree (name, id, path) to a bounded depth and folder budget."""
+    if not (project or project_id):
+        return error("Provide 'project' (name) or 'project_id'.")
+    try:
+        data = _data()
+    except Exception as e:
+        return error(str(e))
+
+    proj, available = _find_project(data, name=project or None, project_id=project_id or None)
+    if not proj:
+        ident = project_id or project
+        return error(f"Project not found: {ident}. Available: {', '.join(available) or '(none)'}")
+
+    try:
+        depth = max(1, min(int(max_depth), _LF_MAX_DEPTH))
+    except Exception:
+        depth = 4
+
+    try:
+        root = proj.rootFolder
+        tree, count, truncated, time_truncated = _folder_tree_bounded(root, depth)
+    except Exception as e:
+        return error(f"Could not read folder tree: {e}")
+
+    return ok({"project": safe(lambda: proj.name), "max_depth": depth,
+        "folder_count": count, "truncated": truncated, "time_truncated": time_truncated,
+        "folders": tree})
+
+
+def _folder_tree_bounded(root, max_depth):
+    """The nested folder tree under `root`, BREADTH-FIRST and bounded by _LF_FOLDER_BUDGET fetches
+    and _TIME_BUDGET_S: (tree, node_count, truncated, time_truncated). A node whose children were NOT
+    fetched carries folders_truncated=true for a budget cut, children_unknown=true at the depth cap;
+    `truncated` reports the budget cut only, the depth cap being visible as max_depth."""
+    tree = []
+    count = 0
+    fetches = 0
+    queue = [(root, tree, None, "", 0)]    # (folder, children-list in the output, its node, path, depth)
+    truncated = False
+    time_truncated = False
+    deadline = time.monotonic() + _TIME_BUDGET_S
+    while queue:
+        folder, children_out, node, path, depth = queue.pop(0)
+        stalled = time.monotonic() > deadline
+        if fetches >= _LF_FOLDER_BUDGET or stalled:
+            # budget exhausted (fetch count OR time): this folder's children are NOT enumerated -
+            # flag it, never guess.
+            truncated = True
+            if stalled:
+                time_truncated = True
+            if node is not None:
+                node.pop("folders", None)
+                node["folders_truncated"] = True
+            continue
+        fetches += 1
+        try:
+            children = folder.dataFolders.asArray()
+        except Exception:
+            continue
+        for f in children:
+            name = safe(lambda f=f: f.name)
+            child_path = (path + "/" + name) if path else name
+            child = {"name": name, "id": safe(lambda f=f: f.id), "path": child_path}
+            count += 1
+            children_out.append(child)
+            if depth + 1 < max_depth:
+                kids = []
+                child["folders"] = kids
+                queue.append((f, kids, child, child_path, depth + 1))
+            else:
+                # depth cap: whether this folder has subfolders is UNKNOWN (checking costs a
+                # round-trip) - say so instead of implying 'none'.
+                child["children_unknown"] = True
+    _prune_empty_folder_lists(tree)
+    return tree, count, truncated, time_truncated
+
+
+def _prune_empty_folder_lists(nodes):
+    """Drop empty 'folders' lists so a childless folder reads as a leaf, not an empty expansion."""
+    for n in nodes:
+        kids = n.get("folders")
+        if kids:
+            _prune_empty_folder_lists(kids)
+        elif kids is not None:
+            del n["folders"]
+
+
+# The four handlers above are the project, file-list, folder-tree and single-file read cores
+# data_get delegates to (data_get is the registered rich read; these carry the cloud-error guards
+# and caps). No register_tool() here - this module exposes cores, not tools.

@@ -70,13 +70,15 @@ _DENYLIST = {
     # surfaces reach DIFFERENT verdicts on one entity - an as-built joint whose state only its
     # timeline item answers reads broken in one payload and healthy in the next.
     "compute_state": ("_assert", "def"),
-    # The ONE any-True / False-if-any-False / else-None collapse over per-body is_solid flags -
-    # home is surface_edit (its first consumer); a re-roll is how one surface tool reads an
-    # unreadable flag as an open sheet while its sibling says unknown.
-    "_solid_verdict": ("surface_edit", "def"),
+    # The ONE any-True / False-if-any-False / else-None collapse over per-body is_solid flags, and
+    # the two projections over it (names + flags, names + that verdict); a re-roll is how one
+    # surface tool reads an unreadable flag as an open sheet while its sibling says unknown.
+    "_solid_verdict": ("_surface_common", "def"),
+    "_result_body_report": ("_surface_common", "def"),
+    "_body_names_and_solid": ("_surface_common", "def"),
     # The ONE identical-open-documents test (a visible tab and its dependency instance share the
     # name AND the lineage URN - that is ONE document, not an ambiguity; measured live). The write
-    # guard's expect_document check and doc_lifecycle's URN resolver both answer through it - a
+    # guard's expect_document check and _doc_common's URN resolver both answer through it - a
     # local re-roll is how the two resolvers drift into opposite verdicts on the same state.
     "one_open_document": ("_write_guard", "def"),
     # The ONE create-flow rename-with-disclosure: sets entity.name, reads it back, returns
@@ -416,7 +418,7 @@ _DENYLIST = {
     # kind and joint_create_as_built's pose pointer sends every other kind to assembly_move, so a
     # second copy is how one of them starts offering joint_drive for a motion the other refuses.
     "DRIVES_ANY": ("_joints", "assign"),
-    # The ONE JointOrigin walk + its leaf ops - the traversal joint_create_edit and model_inspect share
+    # The ONE JointOrigin walk + its leaf ops - the traversal _joint_inputs and model_inspect share
     # (resolve-one / collect-names / read-axes all sit on all_joint_origins).
     "all_joint_origins": ("_joints", "def"),
     "find_joint_origins_by_name": ("_joints", "def"),
@@ -444,24 +446,7 @@ _DENYLIST = {
 # test_allowlist_entries_still_exist_and_still_differ: the entry must still match the pattern in
 # that module AND its definition must still differ from the home module's - a local copy that
 # becomes identical to home is a true duplicate and loses its exemption.
-_ALLOWLIST = {
-    ("mesh_combine", "OPERATIONS"):
-        "operation key -> MeshCombineOperationTypes enum-member map (the mesh enum family), "
-        "not _common.OPERATIONS' name -> FeatureOperations map",
-    ("model_combine", "OPERATIONS"):
-        "legal-values tuple (combine needs an existing target, so no 'new'); the name->enum map "
-        "it resolves through IS _common.OPERATIONS",
-    ("surface_ops", "OPERATIONS"):
-        "legal-values tuple of the keys this tool accepts; the name->enum map it resolves "
-        "through IS _common.OPERATIONS",
-    ("sketch_constrain", "DIMENSION_STRATEGIES"):
-        "autoConstrain's SKETCH dimension-strategy family (edge_aligned / symmetric_chain / ... - "
-        "adsk.fusion members), a different enum family from _drawing_common's adsk.drawing "
-        "DimensionStrategyTypes map (overall / ordinate / ...); no member is shared",
-    ("surface_edit", "result_bodies"):
-        "projection over _common.result_bodies -> (names, any_solid); it delegates to the shared "
-        "walk rather than re-implementing it",
-}
+_ALLOWLIST = {}
 
 
 def _pattern(symbol, kind):

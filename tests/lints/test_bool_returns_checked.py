@@ -15,15 +15,15 @@ from _input_resolution import _iter_tool_files, input_scopes
 # Calls whose bool is genuinely uninteresting, keyed (file, the statement's own source text), each
 # with the reason. A text repeated in one file exempts each copy. Shrink-only.
 _ALLOWED = {
-    ("assembly_transform.py", "mat.setToRotation(math.radians(float(rotate_deg)), axis_dir, pt)"):
+    ("assembly_move.py","mat.setToRotation(math.radians(float(rotate_deg)), axis_dir, pt)"):
         "Matrix3D math on a LOCAL matrix - the resulting transform is written to the occurrence and "
         "read back, and an unchanged pose after a move is already an error",
-    ("assembly_transform.py", "mat.setToRotation(math.radians(float(rotate_deg)), "
+    ("assembly_move.py","mat.setToRotation(math.radians(float(rotate_deg)), "
                               "adsk.core.Vector3D.create(*axis_vec), origin)"): "as above",
-    ("assembly_transform.py", "r.setToRotation(math.radians(float(ang)), "
+    ("assembly_move.py","r.setToRotation(math.radians(float(ang)), "
                               "adsk.core.Vector3D.create(*vec), origin)"): "as above",
-    ("assembly_transform.py", "mat.transformBy(r)"): "as above",
-    ("assembly_transform.py", "mat.transformBy(tmat)"): "as above",
+    ("assembly_move.py","mat.transformBy(r)"): "as above",
+    ("assembly_move.py","mat.transformBy(tmat)"): "as above",
     ("model_create_component.py", "matrix.setToRotation(math.radians(float(rotate_deg)), "
                                   "adsk.core.Vector3D.create(*axis_vec), "
                                   "adsk.core.Point3D.create(0, 0, 0))"):

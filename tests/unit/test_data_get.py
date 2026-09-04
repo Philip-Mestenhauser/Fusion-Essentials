@@ -2,7 +2,7 @@
 
 Pins the ROUTER's scope dispatch: no project -> projects; project -> files; project+include=['folders']
 -> folder tree; include=['hubs'] -> hubs; and the unknown-include guard + cloud-error propagation. The
-delegated handlers (_data_read/data_ops/data_switch_hub) are swapped through conftest's
+delegated handlers (_data_read/data_switch_hub) are swapped through conftest's
 `stub_tool_module`, which holds under either import order (see TestDeferredImportSeam); their own
 cloud logic + caps are covered by their tests and by live validation.
 """
@@ -17,8 +17,8 @@ from conftest import load_tool, error_message, stub_tool_module
 
 dge = load_tool("data_get")
 # The real folder walk the router hands its depth to. Loaded here, before any test stubs
-# 'mcpServer.tools.data_ops' in sys.modules, so the depth test drives the walk and not a stub.
-dops = load_tool("data_ops")
+# 'mcpServer.tools._data_read' in sys.modules, so the depth test drives the walk and not a stub.
+dops = load_tool("_data_read")
 
 
 def _payload(result):
@@ -45,10 +45,10 @@ def stub(monkeypatch):
             "file_facts_handler": staticmethod(lambda **kw: _ok({"matched_by": "urn",
                                                                  "file": {"name": "notes.txt"},
                                                                  "seen": dict(kw)})),
+            "list_folders_handler": staticmethod(
+                lambda **kw: _ok({"project": kw.get("project"), "folder_count": 4,
+                                  "folders": ["f1", "f2"]})),
         }))
-    stub_tool_module(monkeypatch, "data_ops",
-        type("DO", (), {"list_folders_handler": staticmethod(
-            lambda **kw: _ok({"project": kw.get("project"), "folder_count": 4, "folders": ["f1", "f2"]}))}))
     stub_tool_module(monkeypatch, "data_switch_hub",
         type("DH", (), {"handler": staticmethod(
             lambda action="list", hub="": _ok({"hub_count": 2, "hubs": [{"name": "H1", "is_active": True}]}))}))
@@ -76,7 +76,7 @@ class TestScopeDispatch:
     def test_truncated_folder_walk_gets_the_budget_note(self, stub, monkeypatch):
         # a budget-cut walk must TEACH the narrower next step (lower max_depth / scope with
         # 'folder'), not just flag truncated=true.
-        stub_tool_module(monkeypatch, "data_ops",
+        stub_tool_module(monkeypatch, "_data_read",
             type("DO", (), {"list_folders_handler": staticmethod(
                 lambda **kw: _ok({"project": "P1", "folder_count": 20, "truncated": True,
                                   "folders": []}))}))
@@ -105,7 +105,7 @@ class TestScopeDispatch:
         assert "time budget" not in out["note"]
 
     def test_time_truncated_folder_tree_gets_the_time_note(self, stub, monkeypatch):
-        stub_tool_module(monkeypatch, "data_ops",
+        stub_tool_module(monkeypatch, "_data_read",
             type("DO", (), {
                 "list_folders_handler": staticmethod(lambda **kw: _ok({
                     "project": kw.get("project"), "folder_count": 1, "truncated": False,
@@ -237,7 +237,7 @@ class TestFolderDepthDefault:
     def test_the_default_depth_reaches_the_walk_and_is_the_depth_it_descends(self, stub,
                                                                              monkeypatch):
         seen = {}
-        stub_tool_module(monkeypatch, "data_ops",
+        stub_tool_module(monkeypatch, "_data_read",
             type("DO", (), {"list_folders_handler": staticmethod(
                 lambda **kw: (seen.update(kw)
                               or _ok({"project": "P1", "folder_count": 0, "folders": []})))}))
@@ -303,7 +303,7 @@ class TestDeferredImportSeam:
     def test_the_stub_answers_the_call_time_importlib_route_too(self, monkeypatch):
         # The OTHER seam, and the only one sys.modules serves: a sibling reached by
         # `importlib.import_module('.<name>', __package__)` at call time - what
-        # `sketch_core._detail_engine` and `sys_api_doc`'s module walk do - reads the module table
+        # `_sketch_detail._detail_engine` and `sys_get_api_doc`'s module walk do - reads the module table
         # and never the package attribute. Routing `from . import` is not enough for that shape.
         import importlib
         stub = self._stub(monkeypatch)

@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import load_tool
+from conftest import Viewport, load_tool
 
 gs = load_tool("view_screenshot")
 
@@ -320,7 +320,7 @@ class TestCameraRestore:
     """The camera this tool moves to take its picture is the USER's. Every exit puts it back, and a
     restore (or a zoom) the viewport refuses is NAMED, never swallowed."""
 
-    class _Viewport:
+    class _Viewport(Viewport):
         """A viewport whose camera READ or camera assignment can be made to raise, modelling a
         platform that refuses the snapshot, or refuses the restore after accepting the move."""
 
@@ -335,27 +335,23 @@ class TestCameraRestore:
                 raise RuntimeError("extents locked")
 
         def __init__(self, refuse_assign=False, zoom_raises=False, camera_unreadable=False):
+            super().__init__(camera=(self._StuckExtents() if zoom_raises
+                                     else SimpleNamespace(viewExtents=1.0)))
             self._refuse = refuse_assign
             self._unreadable = camera_unreadable
-            self._camera = (self._StuckExtents() if zoom_raises
-                            else SimpleNamespace(viewExtents=1.0))
-            self.assigned = []
 
         @property
         def camera(self):
             if self._unreadable:
                 raise RuntimeError("camera unavailable")
-            return self._camera
+            return self._cam
 
         @camera.setter
         def camera(self, value):
             if self._refuse:
                 raise RuntimeError("viewport busy")
-            self.assigned.append(value)
-            self._camera = value
-
-        def fit(self):
-            pass
+            self._assigned.append(value)
+            self._cam = value
 
     @pytest.fixture
     def rig(self, monkeypatch):

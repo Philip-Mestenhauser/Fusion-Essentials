@@ -1,0 +1,661 @@
+"""Unit tests for ``doc_save_as.py`` - Document.saveAs into a project/folder.
+
+Pinned, no live Fusion: the same-name refusal (saveAs on a colliding name FORKS a new
+lineage), the recovery read-back when saveAs raises or returns false AFTER the file
+landed, the lineage-URN pump, and the eventual-consistency folder-resolve retry.
+"""
+
+import json
+import time
+
+import pytest
+
+from conftest import load_tool
+
+dm = load_tool("doc_save_as")
+dc = load_tool("_data_common")
+dcopy = load_tool("doc_copy")   # the same-name rule holds for both writers
+
+def _payload(result):
+    assert result["isError"] is False, result
+    return json.loads(result["content"][0]["text"])
+
+
+# ── fakes mimicking the DataProject / DataFolder / DataFile cloud tree ───────
+
+class FakeFile:
+    def __init__(self, name, fid="urn:adsk.file:src", child_refs=None,
+                 copy_returns=True, rename_ok=True, child_refs_raise=False):
+        self.name = name
+        self.id = fid
+        self._child_refs = list(child_refs or [])
+        self.copied_into = None
+        self._copy_returns = copy_returns   # False -> DataFile.copy returns nothing
+        self._rename_ok = rename_ok         # False -> setting .name raises (rename fails)
+        # True -> the child-reference read fails the way a cloud read can: hasChildReferences
+        # answers True and the enumeration behind it then raises.
+        self._child_refs_raise = child_refs_raise
+
+    def __setattr__(self, key, value):
+        # a rename-rejecting file raises when the handler sets .name after copy
+        if key == "name" and getattr(self, "_rename_ok", True) is False:
+            raise RuntimeError("name is read-only on this file")
+        object.__setattr__(self, key, value)
+
+    # _xref_summary reads hasChildReferences / childReferences.asArray()
+    @property
+    def hasChildReferences(self):
+        return True if self._child_refs_raise else bool(self._child_refs)
+
+    @property
+    def childReferences(self):
+        outer = self
+
+        class _C:
+            def asArray(self_inner):
+                if outer._child_refs_raise:
+                    raise RuntimeError("3 : cloud read failed")
+                return list(outer._child_refs)
+        return _C()
+
+    def copy(self, target):
+        # DataFile.copy lands a NEW DataFile in `target` carrying the SOURCE name.
+        if not self._copy_returns:
+            return None
+        new = FakeFile(self.name, fid="urn:adsk.file:copy", rename_ok=self._rename_ok)
+        new.copied_into = target
+        target._files.append(new)
+        return new
+
+
+class _BlindIdFile:
+    """A DataFile whose NAME reads but whose lineage id does not - the cloud read that fails one
+    step past the name. It is still a file carrying that name, so every same-name count includes
+    it; only its URN is unknown."""
+
+    def __init__(self, name):
+        self.name = name
+
+    @property
+    def id(self):
+        raise RuntimeError("3 : cloud read failed")
+
+
+class FakeFolder:
+    """files_raise/folders_raise model the folder whose cloud enumeration fails - the hole in a
+    by-name search space that a swallowed failure would report as an empty folder."""
+
+    def __init__(self, name, parent=None, is_root=False, files_raise=False, folders_raise=False):
+        self.name = name
+        self.parentFolder = parent
+        self.isRoot = is_root
+        self._children = []
+        self._files = []
+        self._files_raise = files_raise
+        self._folders_raise = folders_raise
+
+    def _add_child(self, name, **kwargs):
+        child = FakeFolder(name, parent=self, **kwargs)
+        self._children.append(child)
+        return child
+
+    @property
+    def dataFolders(self):
+        outer = self
+
+        class _DF:
+            def asArray(self_inner):
+                if outer._folders_raise:
+                    raise RuntimeError("3 : cloud read failed")
+                return list(outer._children)
+
+            def add(self_inner, nm):
+                return outer._add_child(nm)
+        return _DF()
+
+    @property
+    def dataFiles(self):
+        outer = self
+
+        class _FF:
+            def asArray(self_inner):
+                if outer._files_raise:
+                    raise RuntimeError("3 : cloud read failed")
+                return list(outer._files)
+        return _FF()
+
+
+class FakeProject:
+    def __init__(self, name, pid="p1"):
+        self.name = name
+        self.id = pid
+        self.rootFolder = FakeFolder("Root", is_root=True)
+
+
+class FakeData:
+    def __init__(self, projects):
+        self._projects = list(projects)
+
+    @property
+    def dataProjects(self):
+        outer = self
+
+        class _P:
+            def asArray(self_inner):
+                return list(outer._projects)
+        return _P()
+
+    def findFileById(self, fid):
+        return self._by_id.get(fid)
+
+    # registry for findFileById lookups
+    _by_id = {}
+
+
+class FakeSaveAsDoc:
+    """An active document that records its saveAs call. raise_on_save/land_on_save model the observed
+    false-negative: saveAs RAISES (InternalValidationError) or returns false while the file DID land."""
+
+    def __init__(self, is_saved=False, save_ok=True, new_urn=None,
+                 raise_on_save=False, land_on_save=False, land_count=1, land_blind=False):
+        self.isSaved = is_saved
+        self._save_ok = save_ok
+        self.saveas_args = None
+        self._raise_on_save = raise_on_save
+        self._land_on_save = land_on_save
+        # how many files of that name the folder reads back afterwards. One saveAs cannot land two;
+        # 2 models the state the documented retry hazard leaves - an earlier saveAs that outlived a
+        # client timeout had already landed one, this call's pre-check read a lagging folder listing
+        # and saw none, and the post-error read sees both.
+        # land_blind: the file lands but its lineage id will not read (it blinds EVERY landed file,
+        # so a mixed readable/unreadable landing is not constructible here).
+        self._land_count = land_count
+        self._land_blind = land_blind
+        # dataFile.id after saveAs: a urn -> surfaced; a local handle -> reported null
+        self._df = type("DF", (), {"id": new_urn})() if new_urn is not None else \
+            type("DF", (), {"id": "C:/tmp/local-handle"})()
+
+    def saveAs(self, name, target, description, tag):
+        self.saveas_args = (name, target, description, tag)
+        if self._land_on_save:                       # the file lands on disk even when the call fails
+            for i in range(self._land_count):
+                target._files.append(
+                    _BlindIdFile(name) if self._land_blind else
+                    FakeFile(name, fid="urn:adsk.file:landed" + (f"-{i + 1}" if i else "")))
+        if self._raise_on_save:
+            raise RuntimeError("InternalValidationError")
+        return self._save_ok
+
+    @property
+    def dataFile(self):
+        return self._df
+
+
+class FakeApp:
+    def __init__(self, data, active=None):
+        self.data = data
+        self.activeDocument = active
+
+
+def _install(projects, active=None, by_id=None):
+    """Point both modules' module-level `app` (and the shared _data) at fakes."""
+    data = FakeData(projects)
+    data._by_id = by_id or {}
+    app = FakeApp(data, active)
+    # handlers captured `app`/`_data` from _data_common at import; patch the source module.
+    dc.app = app
+    dm.app = app
+    return app, data
+
+
+@pytest.fixture(autouse=True)
+def pump_clock(monkeypatch):
+    """A VIRTUAL clock for _settled_lineage_urn's post-saveAs pump, in place of real sleep.
+
+    That pump runs a fixed burst - _URN_POLL_TRIES doEvents/sleep rounds - waiting for the cloud to
+    replace the local pre-upload handle with a lineage 'urn:'. No fake here ever settles one, so
+    every no-URN case runs the burst to its end; sleeping it is dead wall-clock for a wait whose
+    outcome is fixed. The replacement only ADVANCES a counter, so the loop still runs its full try
+    count and still reaches the give-up branch, in no real time.
+
+    time.sleep is the interception point because _settled_lineage_urn does `import time` inside
+    itself: there is no module attribute on the tool module to patch instead. Yields the record so a
+    test can assert the burst actually ran."""
+    record = {"calls": 0, "virtual_seconds": 0.0}
+
+    def _advance(seconds):
+        record["calls"] += 1
+        record["virtual_seconds"] += seconds
+
+    monkeypatch.setattr(time, "sleep", _advance)
+    return record
+
+
+def _install_mp(monkeypatch, projects, active=None, by_id=None):
+    """The _install rig, patched through monkeypatch so it undoes itself (tests/CLAUDE.md)."""
+    data = FakeData(projects)
+    data._by_id = by_id or {}
+    app = FakeApp(data, active)
+    monkeypatch.setattr(dc, "app", app)
+    monkeypatch.setattr(dm, "app", app)
+    return app, data
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# save_document_as_handler  (Document.saveAs — the skill's template-copy path)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestSaveDocumentAs:
+    def test_requires_name(self):
+        _install([FakeProject("CAM")], active=FakeSaveAsDoc())
+        res = dm.handler(name="", project="CAM")
+        assert res["isError"] is True and "Provide 'name'" in res["message"]
+
+    def test_requires_destination_project(self):
+        _install([FakeProject("CAM")], active=FakeSaveAsDoc())
+        res = dm.handler(name="PartA_CAM")
+        assert res["isError"] is True and "project" in res["message"]
+
+    def test_no_active_document(self):
+        _install([FakeProject("CAM")], active=None)
+        res = dm.handler(name="X", project="CAM")
+        assert res["isError"] is True and "No active document" in res["message"]
+
+    def test_unknown_project_lists_available(self):
+        _install([FakeProject("CAM"), FakeProject("Parts")], active=FakeSaveAsDoc())
+        res = dm.handler(name="X", project="Ghost")
+        assert res["isError"] is True
+        assert "Ghost" in res["message"] and "CAM" in res["message"]
+
+    def test_missing_folder_without_create_path_errors(self):
+        _install([FakeProject("CAM")], active=FakeSaveAsDoc())
+        res = dm.handler(
+            name="X", project="CAM", folder="MCP Test Parts")
+        assert res["isError"] is True
+        assert "not found" in res["message"] and "create_path" in res["message"]
+
+    def test_saves_to_root_and_tags_description(self):
+        doc = FakeSaveAsDoc(is_saved=True, new_urn="urn:adsk.lineage:newcopy")
+        _install([FakeProject("CAM")], active=doc)
+        out = _payload(dm.handler(
+            name="PartA_CAM", project="CAM", description="encap template copy"))
+        assert out["saved"] is True
+        assert out["name"] == "PartA_CAM"
+        assert out["was_previously_saved"] is True
+        assert out["destination_folder"] == "(project root)"
+        # the saveAs call carried the AI-agent-marked description
+        name, target, desc, tag = doc.saveas_args
+        assert desc == "[AI agent] encap template copy"
+        assert target.isRoot is True
+
+    def test_create_path_makes_nested_folders(self):
+        proj = FakeProject("CAM")
+        doc = FakeSaveAsDoc(new_urn="urn:adsk.lineage:x")
+        _install([proj], active=doc)
+        out = _payload(dm.handler(
+            name="PartA_CAM", project="CAM", folder="MCP Test Parts", create_path=True))
+        assert out["auto_created_parents"] == ["MCP Test Parts"]
+        assert out["destination_folder"] == "MCP Test Parts"
+        # the doc was saved INTO that freshly-created folder
+        _, target, _, _ = doc.saveas_args
+        assert target.name == "MCP Test Parts"
+
+    def test_document_id_null_until_urn_assigned(self, pump_clock):
+        # right after saveAs the dataFile.id is a local handle, not a urn: -> reported null
+        doc = FakeSaveAsDoc(new_urn=None)  # FakeSaveAsDoc gives a non-urn local handle
+        _install([FakeProject("CAM")], active=doc)
+        out = _payload(dm.handler(name="X", project="CAM"))
+        assert out["document_id"] is None
+        # the give-up branch is reached by EXHAUSTING the burst, not by skipping it: a pump that
+        # stopped early (or never ran) would report the same null having waited for nothing.
+        assert pump_clock["calls"] == dm._URN_POLL_TRIES
+
+    def test_the_lineage_pump_is_bounded_to_a_few_seconds(self):
+        # The burst blocks Fusion's main thread, so its total budget is the number that matters.
+        budget = dm._URN_POLL_TRIES * dm._URN_POLL_SLEEP
+        assert 0 < budget <= 5.0, f"the post-saveAs URN pump would block the call for {budget:g}s"
+
+    def test_a_settled_urn_stops_the_pump_instead_of_running_it_out(self, pump_clock):
+        # The other side of the boundary: the first read already answers a lineage urn, so the burst
+        # must not run at all - the tries are a give-up bound, not a fixed wait.
+        _install([FakeProject("CAM")], active=FakeSaveAsDoc(new_urn="urn:adsk.lineage:immediate"))
+        out = _payload(dm.handler(name="X", project="CAM"))
+        assert out["document_id"] == "urn:adsk.lineage:immediate"
+        assert pump_clock["calls"] == 0
+
+    def test_document_id_surfaced_when_urn(self):
+        doc = FakeSaveAsDoc(new_urn="urn:adsk.lineage:abc")
+        _install([FakeProject("CAM")], active=doc)
+        out = _payload(dm.handler(name="X", project="CAM"))
+        assert out["document_id"] == "urn:adsk.lineage:abc"
+
+    def test_saveas_false_return_is_an_error(self):
+        doc = FakeSaveAsDoc(save_ok=False)
+        _install([FakeProject("CAM")], active=doc)
+        res = dm.handler(name="X", project="CAM")
+        assert res["isError"] is True and "declined to save" in res["message"]
+
+    def test_saveas_raises_but_file_landed_recovers_as_ok(self):
+        # saveAs raised InternalValidationError while the folder AND file landed. A same-name file NOW
+        # present that was NOT there before is read-back evidence it landed - report ok, not the false
+        # negative that would send a retry into a collision.
+        proj = FakeProject("CAM")
+        doc = FakeSaveAsDoc(raise_on_save=True, land_on_save=True)
+        _install([proj], active=doc)
+        out = _payload(dm.handler(name="X", project="CAM"))
+        assert out["saved"] is True
+        assert out["recovered_from_error"] is True
+        assert out["document_id"] == "urn:adsk.file:landed"
+        assert "DID land" in out["note"] and "InternalValidationError" in out["note"]
+
+    def test_saveas_returns_false_but_file_landed_recovers_as_ok(self):
+        proj = FakeProject("CAM")
+        doc = FakeSaveAsDoc(save_ok=False, land_on_save=True)
+        _install([proj], active=doc)
+        out = _payload(dm.handler(name="X", project="CAM"))
+        assert out["saved"] is True and out["recovered_from_error"] is True
+        assert out["document_id"] == "urn:adsk.file:landed"
+
+    def test_saveas_raises_and_nothing_landed_still_errors(self):
+        # No file appeared and the never-saved doc has no settled urn (local handle) - the honest
+        # failure stands, no false ok.
+        proj = FakeProject("CAM")
+        doc = FakeSaveAsDoc(raise_on_save=True, land_on_save=False)  # non-urn local handle df
+        _install([proj], active=doc)
+        res = dm.handler(name="X", project="CAM")
+        assert res["isError"] is True and "saveAs failed" in res["message"]
+
+    def test_saveas_raises_never_saved_doc_with_settled_urn_recovers(self):
+        # No file visible in the folder listing yet (cloud lag), but the never-saved doc now carries
+        # a settled lineage urn - that is also proof it landed.
+        proj = FakeProject("CAM")
+        doc = FakeSaveAsDoc(raise_on_save=True, land_on_save=False, new_urn="urn:adsk.lineage:settled")
+        _install([proj], active=doc)
+        out = _payload(dm.handler(name="X", project="CAM"))
+        assert out["saved"] is True and out["recovered_from_error"] is True
+        assert out["document_id"] == "urn:adsk.lineage:settled"
+
+    def test_saveas_error_does_not_false_recover_a_duplicate_fork(self):
+        # A pre-existing same-name file (allow_duplicate_name) means a file being 'present' after the
+        # error is NOT proof THIS save landed - the already-saved/pre-existing case must NOT recover.
+        proj = FakeProject("CAM")
+        proj.rootFolder._files.append(FakeFile("X", fid="urn:pre-existing"))
+        doc = FakeSaveAsDoc(is_saved=True, raise_on_save=True, land_on_save=False)
+        _install([proj], active=doc)
+        res = dm.handler(
+            name="X", project="CAM", allow_duplicate_name=True)
+        assert res["isError"] is True and "saveAs failed" in res["message"]
+
+    def test_resolves_project_by_id(self):
+        doc = FakeSaveAsDoc(new_urn="urn:adsk.lineage:x")
+        _install([FakeProject("CAM", pid="p-cam")], active=doc)
+        out = _payload(dm.handler(
+            name="X", project_id="p-cam"))
+        assert out["destination_project"] == "CAM"
+
+    def test_same_name_in_target_folder_refuses_by_default(self):
+        # A same-name file in the target folder is a fork risk - refuse by default (consistent with
+        # doc_copy), naming the existing URN + the flag, and DO NOT save.
+        proj = FakeProject("CAM")
+        proj.rootFolder._files.append(FakeFile("PartA_CAM", fid="urn:existing"))
+        doc = FakeSaveAsDoc(new_urn="urn:adsk.lineage:new")
+        _install([proj], active=doc)
+        res = dm.handler(name="PartA_CAM", project="CAM")
+        assert res["isError"] is True
+        assert "already exists" in res["message"]
+        assert "urn:existing" in res["message"]           # the version-in-place remedy handle
+        assert "allow_duplicate_name" in res["message"]   # the deliberate opt-in
+        assert doc.saveas_args is None                    # refused BEFORE saving - no fork created
+
+    def test_allow_duplicate_name_forks_and_keeps_the_collision_warning(self):
+        # With the explicit opt-in, the fork proceeds AND the name_collision block still fires.
+        proj = FakeProject("CAM")
+        proj.rootFolder._files.append(FakeFile("PartA_CAM", fid="urn:existing"))
+        doc = FakeSaveAsDoc(new_urn="urn:adsk.lineage:newfork")
+        _install([proj], active=doc)
+        out = _payload(dm.handler(
+            name="PartA_CAM", project="CAM", allow_duplicate_name=True))
+        assert out["saved"] is True
+        assert doc.saveas_args is not None                # the fork actually saved
+        assert out["name_collision"]["existing_document_id"] == "urn:existing"
+        assert "NAME COLLISION" in out["note"]
+
+    def test_no_collision_when_same_name_absent(self):
+        # a same-named file in a DIFFERENT context must not false-trigger: only the target folder counts.
+        proj = FakeProject("CAM")
+        proj.rootFolder._files.append(FakeFile("SomethingElse", fid="urn:adsk.file:x"))
+        doc = FakeSaveAsDoc(new_urn="urn:adsk.lineage:new")
+        _install([proj], active=doc)
+        out = _payload(dm.handler(name="PartA_CAM", project="CAM"))
+        assert "name_collision" not in out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# a folder holding SEVERAL files of ONE name — the by-name file resolver
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestSameNameFilesInOneFolder:
+    """A folder holds several files of one name: two saveAs calls into one folder under one name
+    produce two DISTINCT lineages, and the folder reads back both files under that name. So a file
+    name is not an identity there - the resolver must REFUSE and name the candidates by the lineage
+    URN, the one thing that tells them apart, never hand back the first sibling."""
+
+    _URN_A = "urn:adsk.wipprod:dm.lineage:hW1WC_3CRkurSsn8eRCmaQ"
+    _URN_B = "urn:adsk.wipprod:dm.lineage:zTj_JYIcRyqZ35BGQj6N1Q"
+
+    def _twins(self):
+        proj = FakeProject("CAM")
+        proj.rootFolder._files.append(FakeFile("AR44-Dup", fid=self._URN_A))
+        proj.rootFolder._files.append(FakeFile("AR44-Dup", fid=self._URN_B))
+        return proj
+
+    def test_two_files_of_one_name_are_refused_naming_both_urns(self):
+        proj = self._twins()
+        found, refusal = dc._file_in_folder_by_name(proj.rootFolder, "AR44-Dup")
+        assert found is None                       # never one of the two
+        assert self._URN_A in refusal and self._URN_B in refusal
+        assert "2 files" in refusal
+
+    def test_one_file_of_that_name_still_resolves(self):
+        proj = FakeProject("CAM")
+        only = FakeFile("AR44-Dup", fid=self._URN_A)
+        proj.rootFolder._files.append(only)
+        assert dc._file_in_folder_by_name(proj.rootFolder, "AR44-Dup") == (only, None)
+
+    def test_no_file_of_that_name_is_a_clean_miss_not_a_refusal(self):
+        proj = FakeProject("CAM")
+        proj.rootFolder._files.append(FakeFile("Other", fid=self._URN_A))
+        assert dc._file_in_folder_by_name(proj.rootFolder, "AR44-Dup") == (None, None)
+
+    def test_a_longer_name_is_a_different_file(self):
+        # whole-name match: 'AR44-Dup2' neither resolves as nor collides with 'AR44-Dup'
+        proj = FakeProject("CAM")
+        proj.rootFolder._files.append(FakeFile("AR44-Dup2", fid=self._URN_B))
+        assert dc._file_in_folder_by_name(proj.rootFolder, "AR44-Dup") == (None, None)
+
+    def test_an_unreadable_id_is_named_as_such_beside_its_twin(self):
+        # the URN is what the refusal is FOR: an id that will not read must say so, not vanish and
+        # leave a caller reading one URN for two files.
+        proj = FakeProject("CAM")
+        proj.rootFolder._files.append(FakeFile("AR44-Dup", fid=self._URN_A))
+        proj.rootFolder._files.append(_BlindIdFile("AR44-Dup"))
+        found, refusal = dc._file_in_folder_by_name(proj.rootFolder, "AR44-Dup")
+        assert found is None
+        assert self._URN_A in refusal and "(id unreadable)" in refusal
+
+    def test_doc_copy_refuses_an_ambiguous_destination_and_copies_nothing(self, monkeypatch):
+        proj = self._twins()
+        src = FakeFile("Template", fid="urn:adsk.file:src")
+        _install_mp(monkeypatch, [proj], by_id={"urn:adsk.file:src": src})
+        res = dcopy.handler(
+            document_id="urn:adsk.file:src", project="CAM", name="AR44-Dup")
+        assert res["isError"] is True
+        assert self._URN_A in res["message"] and self._URN_B in res["message"]
+        # the remedy is in doc_copy's OWN input vocabulary, not "go rename/delete a cloud file"
+        assert "'folder'" in res["message"] and "'name'" in res["message"]
+        assert len(proj.rootFolder._files) == 2            # nothing was copied in
+
+    def test_doc_save_as_refuses_by_default_naming_both_urns_and_the_optin(self, monkeypatch):
+        proj = self._twins()
+        doc = FakeSaveAsDoc(new_urn="urn:adsk.lineage:new")
+        _install_mp(monkeypatch, [proj], active=doc)
+        res = dm.handler(name="AR44-Dup", project="CAM")
+        assert res["isError"] is True
+        assert self._URN_A in res["message"] and self._URN_B in res["message"]
+        assert "doc_open" in res["message"] and "allow_duplicate_name" in res["message"]
+        assert doc.saveas_args is None                     # refused BEFORE saving - no third fork
+
+    def test_the_opt_in_fork_lists_every_pre_existing_lineage(self, monkeypatch):
+        # one 'existing_document_id' cannot state two, so the collision block names them all rather
+        # than dropping the warning (or picking a sibling) when the name was already shared.
+        proj = self._twins()
+        doc = FakeSaveAsDoc(new_urn="urn:adsk.lineage:third")
+        _install_mp(monkeypatch, [proj], active=doc)
+        out = _payload(dm.handler(
+            name="AR44-Dup", project="CAM", allow_duplicate_name=True))
+        assert out["saved"] is True and doc.saveas_args is not None
+        assert out["name_collision"]["existing_document_ids"] == [self._URN_A, self._URN_B]
+        assert "NAME COLLISION" in out["note"]
+
+    def test_the_fork_warning_names_an_unreadable_id_instead_of_dropping_it(self, monkeypatch):
+        # A file whose id will not read is still one of the files carrying that name. Dropping it
+        # renders 2 files under ONE URN - which reads as though both were that lineage - and hands
+        # back an id list one entry short of the count beside it.
+        proj = FakeProject("CAM")
+        proj.rootFolder._files.append(FakeFile("AR44-Dup", fid=self._URN_A))
+        proj.rootFolder._files.append(_BlindIdFile("AR44-Dup"))
+        doc = FakeSaveAsDoc(new_urn="urn:adsk.lineage:third")
+        _install_mp(monkeypatch, [proj], active=doc)
+        out = _payload(dm.handler(
+            name="AR44-Dup", project="CAM", allow_duplicate_name=True))
+        collision = out["name_collision"]
+        assert collision["existing_document_ids"] == [self._URN_A, None]   # a slot per file
+        assert "2 files named 'AR44-Dup'" in collision["warning"]
+        assert "(id unreadable)" in collision["warning"]                   # named, not vanished
+
+    def test_a_recovery_read_finding_two_files_does_not_name_one_as_this_save(self, monkeypatch):
+        # The documented retry hazard: a saveAs outlived a client timeout and landed, the retry
+        # raised, and the folder now reads back TWO files of the name. WHICH lineage this call wrote
+        # is not readable off the folder, so document_id comes from the document's own settled URN.
+        proj = FakeProject("CAM")
+        doc = FakeSaveAsDoc(raise_on_save=True, land_on_save=True, land_count=2,
+                            new_urn="urn:adsk.lineage:settled")
+        _install_mp(monkeypatch, [proj], active=doc)
+        out = _payload(dm.handler(name="X", project="CAM"))
+        assert out["saved"] is True and out["recovered_from_error"] is True
+        assert out["document_id"] == "urn:adsk.lineage:settled"
+        assert len(proj.rootFolder._files) == 2            # both really are there
+        # the duplicate it just measured is DISCLOSED, not discarded, even where document_id resolved
+        assert out["same_name_document_ids"] == ["urn:adsk.file:landed", "urn:adsk.file:landed-2"]
+        assert "2 files named 'X'" in out["note"]
+
+    def test_an_already_saved_doc_withholds_the_id_rather_than_naming_its_source_lineage(
+            self, monkeypatch):
+        # The other side of the was_saved boundary, and the damaging one: on an ALREADY-SAVED
+        # document dataFile.id still reads the lineage it was saved FROM - a different file, under a
+        # different name, in a different folder - so it must not stand in for the file this call
+        # wrote. Null, plus the candidates, beats a confident wrong URN.
+        proj = FakeProject("CAM")
+        doc = FakeSaveAsDoc(is_saved=True, raise_on_save=True, land_on_save=True, land_count=2,
+                            new_urn="urn:adsk.wipprod:dm.lineage:SOURCE")
+        _install_mp(monkeypatch, [proj], active=doc)
+        out = _payload(dm.handler(name="X", project="CAM"))
+        assert out["saved"] is True and out["recovered_from_error"] is True
+        assert out["document_id"] is None                  # never the source lineage
+        assert "SOURCE" not in json.dumps(out)
+        # and the ambiguity this recovery MEASURED reaches the caller: the count and both URNs
+        assert out["same_name_document_ids"] == ["urn:adsk.file:landed", "urn:adsk.file:landed-2"]
+        assert "2 files named 'X'" in out["note"]
+        assert "urn:adsk.file:landed" in out["note"] and "urn:adsk.file:landed-2" in out["note"]
+        assert "'document_id' is null" in out["note"] and "data_get" in out["note"]
+
+    def test_a_single_landed_file_with_an_unreadable_id_also_withholds_it(self, monkeypatch):
+        # The same gate one file down: exactly one file landed but its id will not read, so there is
+        # nothing to publish - and an already-saved doc's own URN is still the wrong answer.
+        proj = FakeProject("CAM")
+        doc = FakeSaveAsDoc(is_saved=True, raise_on_save=True, land_on_save=True, land_blind=True,
+                            new_urn="urn:adsk.wipprod:dm.lineage:SOURCE")
+        _install_mp(monkeypatch, [proj], active=doc)
+        out = _payload(dm.handler(name="X", project="CAM"))
+        assert out["saved"] is True and out["recovered_from_error"] is True
+        assert out["document_id"] is None
+        assert "same_name_document_ids" not in out         # one file is not an ambiguity
+        assert "'document_id' is null" in out["note"]
+
+    def test_several_landed_files_with_unreadable_ids_keep_a_slot_each(self, monkeypatch):
+        # The same dropped-slot defect as the fork warning, in the recovery disclosure: an id list
+        # that skips a blind file comes back shorter than the count in the note beside it, so the
+        # two surfaces disagree about how many files carry the name. One slot per file, always.
+        proj = FakeProject("CAM")
+        doc = FakeSaveAsDoc(is_saved=True, raise_on_save=True, land_on_save=True, land_count=2,
+                            land_blind=True, new_urn="urn:adsk.wipprod:dm.lineage:SOURCE")
+        _install_mp(monkeypatch, [proj], active=doc)
+        out = _payload(dm.handler(name="X", project="CAM"))
+        assert out["saved"] is True
+        assert out["same_name_document_ids"] == [None, None]
+        assert out["note"].count("(id unreadable)") == 2   # named once per file, not collapsed
+        assert "2 files named 'X'" in out["note"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# doc_save_as folder-resolution retry on the cloud eventual-consistency self-contradiction
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _FlakyRoot:
+    """A project root whose dataFolders enumeration lags (eventual-consistency): the first read returns
+    an empty list (so the first resolve MISSES the child) but every later read includes it - a cloud
+    eventual-consistency self-contradiction (observed live): the folder appears in its own
+    available-folders list yet does not resolve until a retry."""
+    def __init__(self, child_name, empty_calls=1):
+        self._child = FakeFolder(child_name)
+        self._calls = 0
+        self._empty_calls = empty_calls
+        self.isRoot = True
+        self.name = "Root"
+
+    @property
+    def dataFolders(self):
+        outer = self
+
+        class _DF:
+            def asArray(self_inner):
+                outer._calls += 1
+                return [] if outer._calls <= outer._empty_calls else [outer._child]
+        return _DF()
+
+
+class TestFolderResolveEventual:
+    def test_retries_on_self_contradiction(self):
+        # first resolve misses; the child IS in the (now-fresh) sibling list -> ONE retry resolves it.
+        root = _FlakyRoot("Pipeline-v1", empty_calls=1)
+        target, missing, retried = dm._resolve_folder_eventual(root, ["Pipeline-v1"])
+        assert retried is True
+        assert missing is None
+        assert target is root._child
+
+    def test_genuine_miss_is_not_retried(self):
+        # a folder truly absent from the siblings must NOT be retried (only the self-contradiction is).
+        root = FakeFolder("Root", is_root=True)          # no children at all
+        target, missing, retried = dm._resolve_folder_eventual(root, ["Ghost"])
+        assert target is None
+        assert missing == "Ghost"
+        assert retried is False
+
+    def test_first_read_success_is_not_retried(self):
+        root = FakeFolder("Root", is_root=True)
+        root._add_child("Pipeline-v1")
+        target, missing, retried = dm._resolve_folder_eventual(root, ["Pipeline-v1"])
+        assert target is not None and retried is False   # resolved on the first read, no retry
+
+    def test_saveas_recovers_and_notes_eventual_consistency(self):
+        doc = FakeSaveAsDoc(new_urn="urn:adsk.lineage:x")
+        proj = FakeProject("CAM")
+        proj.rootFolder = _FlakyRoot("Pipeline-v1", empty_calls=1)
+        _install([proj], active=doc)
+        out = _payload(dm.handler(
+            name="P5", project="CAM", folder="Pipeline-v1"))
+        assert out.get("folder_resolve_retried") is True
+        assert "eventual-consistency" in out["note"]
+        # it actually saved INTO the recovered folder
+        _, target, _, _ = doc.saveas_args
+        assert target.name == "Pipeline-v1"

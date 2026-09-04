@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 import live_api_facts
-from conftest import FakePoint, MakeComp, load_tool, make_source_document
+from conftest import Camera, FakePoint, MakeComp, Viewport, load_tool, make_source_document
 
 vc = load_tool("_view_common")
 
@@ -131,13 +131,11 @@ class TestOrthoFace:
 
 # ── apply_named_view: the one orient-then-fit both screenshot tools share ────
 
-class _FakeCam:
-    def __init__(self):
-        # conftest's shared point: apply_named_view reads eye.distanceTo(target) for the standoff
-        self.eye = FakePoint(5, 0, 0)
-        self.target = FakePoint(0, 0, 0)
-        self.upVector = None
-        self.cameraType = "initial"
+def _camera():
+    """The camera an orient starts from: 5 cm out on X (apply_named_view reads
+    eye.distanceTo(target) for the standoff), and a projection name no orient produces, so a
+    camera type an orient FORCED is told apart from the one it left alone."""
+    return Camera(eye=(5, 0, 0), camera_type="initial")
 
 
 def _fake_options(filename):
@@ -148,46 +146,9 @@ def _fake_options(filename):
                            isBackgroundTransparent=False, isAntiAliased=True)
 
 
-class _FakeViewport:
-    def __init__(self, cam=None, save_ok=True, png=b"PNGBYTES"):
-        self._cam = cam or _FakeCam()
-        self.assigned_camera = None
-        self.fit_called = 0
-        self.calls = []
-        self._save_ok = save_ok
-        self._png = png
-        self.options_used = None
-
-    @property
-    def camera(self):
-        return self._cam
-
-    @camera.setter
-    def camera(self, value):
-        self.assigned_camera = value
-
-    def fit(self):
-        self.fit_called += 1
-
-    def refresh(self):
-        self.calls.append("refresh")
-
-    def saveAsImageFile(self, path, w, h):
-        self.calls.append("save")
-        if not self._save_ok:
-            return False
-        with open(path, "wb") as f:
-            f.write(self._png)
-        return True
-
-    def saveAsImageFileWithOptions(self, options):
-        self.calls.append("save_with_options")
-        self.options_used = options
-        if not self._save_ok:
-            return False
-        with open(options.filename, "wb") as f:
-            f.write(self._png)
-        return True
+def _viewport(cam=None, save_ok=True, png=b"PNGBYTES"):
+    """The shared viewport fake, its camera defaulting to the orient rig's."""
+    return Viewport(camera=cam or _camera(), save_ok=save_ok, png=png)
 
 
 @pytest.fixture
@@ -210,13 +171,14 @@ def _refusing_point(x, y, z):
 
 class TestApplyNamedView:
     def test_named_view_assigns_camera_and_fits(self):
-        vp = _FakeViewport()
+        vp = _viewport()
         vc.apply_named_view(vp, "front")
-        assert vp.assigned_camera is vp._cam     # assigning back applies the change
-        assert vp.fit_called == 1
+        # the orient assigned back the very camera it read, then framed
+        assert vp._assigned[-1] is vp._original_camera
+        assert vp._fit_calls == 1
 
     def test_true_face_forces_orthographic_camera(self):
-        vp = _FakeViewport()
+        vp = _viewport()
         vc.apply_named_view(vp, "front")
         assert vp._cam.cameraType != "initial"
 
@@ -230,34 +192,34 @@ class TestApplyNamedView:
         # (1, -1, 1), of length sqrt(3) - so the assertion covers the normalization too.
         import adsk.core
         monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: FakePoint(x, y, z))
-        cam = _FakeCam()
+        cam = _camera()
         cam.target = FakePoint(2, -3, 4)         # a focus off the origin
         cam.eye = FakePoint(5, 1, 16)            # (3, 4, 12) from it - a standoff of exactly 13
-        vp = _FakeViewport(cam=cam)
+        vp = _viewport(cam=cam)
         vc.apply_named_view(vp, "iso-top-right")
         eye, tgt = vp._cam.eye, vp._cam.target
         assert math.isclose(math.dist((eye.x, eye.y, eye.z), (tgt.x, tgt.y, tgt.z)), 13.0,
                             rel_tol=1e-9)
 
     def test_iso_corner_keeps_camera_type(self):
-        vp = _FakeViewport()
+        vp = _viewport()
         vc.apply_named_view(vp, "iso-top-right")
         assert vp._cam.cameraType == "initial"
 
     def test_unknown_or_current_is_a_noop(self):
         for name in ("current", "banana"):
-            vp = _FakeViewport()
+            vp = _viewport()
             vc.apply_named_view(vp, name)
-            assert vp.assigned_camera is None and vp.fit_called == 0
+            assert vp._assigned == [] and vp._fit_calls == 0
 
     def test_a_standoff_that_will_not_read_reports_the_fallback_it_used(self, monkeypatch):
         # The distance read RAISED, so the orient ran on a substituted standoff. Returning None
         # here would leave the caller unable to tell a 100 cm camera from a fabricated one.
         import adsk.core
         monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: FakePoint(x, y, z))
-        cam = _FakeCam()
+        cam = _camera()
         cam.eye = _refusing_point(5, 0, 0)
-        vp = _FakeViewport(cam=cam)
+        vp = _viewport(cam=cam)
         used = vc.apply_named_view(vp, "front")
         assert used == vc.STANDOFF_FALLBACK_CM
         eye, tgt = vp._cam.eye, vp._cam.target
@@ -270,10 +232,10 @@ class TestApplyNamedView:
         # used as read.
         import adsk.core
         monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: FakePoint(x, y, z))
-        cam = _FakeCam()
+        cam = _camera()
         cam.target = FakePoint(2, -3, 4)
         cam.eye = FakePoint(2, -3, 4)            # exactly on the target - a standoff of 0.0
-        vp = _FakeViewport(cam=cam)
+        vp = _viewport(cam=cam)
         assert vc.apply_named_view(vp, "front") == vc.STANDOFF_FALLBACK_CM
         eye, tgt = vp._cam.eye, vp._cam.target
         assert math.isclose(math.dist((eye.x, eye.y, eye.z), (tgt.x, tgt.y, tgt.z)),
@@ -284,10 +246,10 @@ class TestApplyNamedView:
         # fallback channel stays null.
         import adsk.core
         monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: FakePoint(x, y, z))
-        cam = _FakeCam()
+        cam = _camera()
         cam.target = FakePoint(2, -3, 4)
         cam.eye = FakePoint(5, 1, 16)            # (3, 4, 12) from it - a standoff of exactly 13
-        vp = _FakeViewport(cam=cam)
+        vp = _viewport(cam=cam)
         assert vc.apply_named_view(vp, "front") is None
         eye, tgt = vp._cam.eye, vp._cam.target
         assert math.isclose(math.dist((eye.x, eye.y, eye.z), (tgt.x, tgt.y, tgt.z)), 13.0,
@@ -326,13 +288,13 @@ class TestApplyNamedViewEyeSide:
     def test_the_eye_lands_on_the_named_side_of_the_target(self, name, side, monkeypatch):
         import adsk.core
         monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: FakePoint(x, y, z))
-        cam = _FakeCam()
+        cam = _camera()
         # An OFF-ORIGIN focus, and a starting eye whose own offset (3, 4, 12) shares no sign
         # pattern with any named view - so a side that reads correct came from the orient rather
         # than from the camera it started on.
         cam.target = FakePoint(2, -3, 4)
         cam.eye = FakePoint(5, 1, 16)
-        vp = _FakeViewport(cam=cam)
+        vp = _viewport(cam=cam)
         vc.apply_named_view(vp, name)
         eye, tgt = vp._cam.eye, vp._cam.target
         offset = (eye.x - tgt.x, eye.y - tgt.y, eye.z - tgt.z)
@@ -346,9 +308,9 @@ class TestApplyNamedViewEyeSide:
     def test_the_target_is_left_where_the_camera_had_it(self):
         # The eye moves around the focus; the focus itself is not re-aimed by an orient, or every
         # named view would also recentre the model.
-        cam = _FakeCam()
+        cam = _camera()
         cam.target = FakePoint(2, -3, 4)
-        vp = _FakeViewport(cam=cam)
+        vp = _viewport(cam=cam)
         vc.apply_named_view(vp, "front")
         tgt = vp._cam.target
         assert (tgt.x, tgt.y, tgt.z) == (2, -3, 4)
@@ -358,19 +320,19 @@ class TestCapturePngB64:
     def test_refreshes_before_the_grab(self):
         # the refresh must precede saveAsImageFile - the capture otherwise races an un-refreshed
         # frame (a camera/visibility change that hasn't drawn yet reads as blank).
-        vp = _FakeViewport()
+        vp = _viewport()
         b64, err = vc.capture_png_b64(vp, 100, 80)
         assert err is None
-        assert vp.calls.index("refresh") < vp.calls.index("save")
+        assert vp._calls.index("refresh") < vp._calls.index("save")
 
     def test_returns_the_png_as_base64(self):
         import base64
-        vp = _FakeViewport(png=b"IMAGEDATA")
+        vp = _viewport(png=b"IMAGEDATA")
         b64, err = vc.capture_png_b64(vp, 100, 80)
         assert err is None and base64.b64decode(b64) == b"IMAGEDATA"
 
     def test_save_returning_false_is_an_error_not_a_blank_ok(self):
-        vp = _FakeViewport(save_ok=False)
+        vp = _viewport(save_ok=False)
         b64, err = vc.capture_png_b64(vp, 100, 80)
         assert b64 is None and "capture failed" in err.lower()
         assert "saveAsImageFile returned false" in err       # the overload that actually answered
@@ -378,7 +340,7 @@ class TestCapturePngB64:
     def test_empty_file_is_an_error_not_an_empty_base64_ok(self):
         # mkstemp already created the file, so file-exists proves nothing - a success that wrote no
         # bytes must not come back as an ok with an empty image.
-        vp = _FakeViewport(png=b"")
+        vp = _viewport(png=b"")
         b64, err = vc.capture_png_b64(vp, 100, 80)
         assert b64 is None and "0-byte" in err
 
@@ -388,57 +350,57 @@ class TestCaptureOptionsPath:
     saveAsImageFileWithOptions; with neither given the plain overload stays untouched."""
 
     def test_neither_switch_uses_the_plain_overload(self, options_kind):
-        vp = _FakeViewport()
+        vp = _viewport()
         b64, err = vc.capture_png_b64(vp, 100, 80)
         assert err is None
-        assert "save" in vp.calls and "save_with_options" not in vp.calls
-        assert vp.options_used is None
+        assert "save" in vp._calls and "save_with_options" not in vp._calls
+        assert vp._options_used is None
 
     def test_transparent_background_switches_to_the_options_overload(self, options_kind):
-        vp = _FakeViewport()
+        vp = _viewport()
         b64, err = vc.capture_png_b64(vp, 100, 80, transparent_background=True)
         assert err is None
-        assert "save_with_options" in vp.calls and "save" not in vp.calls
-        assert vp.options_used.isBackgroundTransparent is True
+        assert "save_with_options" in vp._calls and "save" not in vp._calls
+        assert vp._options_used.isBackgroundTransparent is True
 
     def test_anti_aliased_alone_switches_to_the_options_overload(self, options_kind):
-        vp = _FakeViewport()
+        vp = _viewport()
         vc.capture_png_b64(vp, 100, 80, anti_aliased=False)
-        assert vp.options_used.isAntiAliased is False
+        assert vp._options_used.isAntiAliased is False
         # the switch NOT given is left at the options object's own measured initial value
         assert live_api_facts.BEHAVIOR["save_image_options_defaults"]
-        assert vp.options_used.isBackgroundTransparent is False
+        assert vp._options_used.isBackgroundTransparent is False
 
     def test_false_is_a_request_not_an_absence(self, options_kind):
         # transparent_background=False must still take the options path (False != unset), otherwise
         # an explicit "opaque, anti-aliased" request silently falls back to the plain capture.
-        vp = _FakeViewport()
+        vp = _viewport()
         vc.capture_png_b64(vp, 100, 80, transparent_background=False)
-        assert "save_with_options" in vp.calls
-        assert vp.options_used.isBackgroundTransparent is False
+        assert "save_with_options" in vp._calls
+        assert vp._options_used.isBackgroundTransparent is False
 
     def test_requested_size_is_assigned_onto_the_options(self, options_kind):
         # a fresh options object starts at width/height 0
         # (BEHAVIOR['save_image_options_defaults']), so the requested pixel size is only
         # honoured if the capture assigns it.
         assert live_api_facts.BEHAVIOR["save_image_options_defaults"]
-        vp = _FakeViewport()
+        vp = _viewport()
         vc.capture_png_b64(vp, 1024, 768, anti_aliased=True)
-        assert (vp.options_used.width, vp.options_used.height) == (1024, 768)
+        assert (vp._options_used.width, vp._options_used.height) == (1024, 768)
 
     def test_options_path_still_refreshes_first(self, options_kind):
-        vp = _FakeViewport()
+        vp = _viewport()
         vc.capture_png_b64(vp, 100, 80, transparent_background=True)
-        assert vp.calls.index("refresh") < vp.calls.index("save_with_options")
+        assert vp._calls.index("refresh") < vp._calls.index("save_with_options")
 
     def test_options_path_returns_the_png_as_base64(self, options_kind):
         import base64
-        vp = _FakeViewport(png=b"TRANSPARENTPNG")
+        vp = _viewport(png=b"TRANSPARENTPNG")
         b64, err = vc.capture_png_b64(vp, 100, 80, transparent_background=True)
         assert err is None and base64.b64decode(b64) == b"TRANSPARENTPNG"
 
     def test_options_failure_names_the_options_overload(self, options_kind):
-        vp = _FakeViewport(save_ok=False)
+        vp = _viewport(save_ok=False)
         b64, err = vc.capture_png_b64(vp, 100, 80, transparent_background=True)
         assert b64 is None and "saveAsImageFileWithOptions returned false" in err
 

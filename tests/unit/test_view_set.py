@@ -18,8 +18,8 @@ import types
 
 import pytest
 
-from conftest import (load_tool, make_source_document, make_bbox, BRepBody, FakePoint, FakeVector3D, MakeComp,
-                      _NamedCollection)
+from conftest import (load_tool, make_source_document, make_bbox, BRepBody, Camera, FakePoint,
+                      FakeVector3D, MakeComp, Viewport, _NamedCollection)
 
 iv = load_tool("view_set")
 
@@ -104,48 +104,18 @@ class FakeDesign:
         self.namedViews = named_views if named_views is not None else FakeNamedViews()
 
 
-class FakeCamera:
-    def __init__(self):
-        import adsk.core
-        self.eye = FakePoint(10, 10, 10)
-        self.target = FakePoint(0, 0, 0)
-        # a real camera ALWAYS carries an up vector; framing reads it to build the screen axes
-        self.upVector = FakePoint(0, 0, 1)
-        self.isFitView = False
-        # a camera starts orthographic here; the projection tests are what flip it
-        self.cameraType = adsk.core.CameraTypes.OrthographicCameraType
-        self.perspectiveAngle = 0.0
-        # LINEAR extents (measured, not an area) - what framing scales to zoom in on a focus
-        self.viewExtents = 100.0
+def _camera():
+    """The camera the rig starts from: orthographic, 100 cm of LINEAR extents, and the up vector a
+    real camera always carries (framing reads it to build the screen axes)."""
+    return Camera(up=(0, 0, 1))
 
 
-class FakeViewport:
-    def __init__(self):
-        self.camera = FakeCamera()
-        self.visualStyle = 0
-        # the aspect the framing ratio reconstructs the frame from
-        self.width, self.height = 1516, 757
-        self.frame_w, self.frame_h = 200.0, 100.0
-        # Viewport.fit() frames every VISIBLE entity. Framing on a focus runs it while the rest of
-        # the design is hidden, so the count is what says the framing pass happened at all.
-        self.fit_calls = 0
-
-    def fit(self):
-        self.fit_calls += 1
-
-    # The frame the viewport currently shows, in model units. Framing reads this instead of
-    # fitting, so the fake has to answer it: a screen point maps linearly onto a frame_w x frame_h
-    # rectangle, which makes the spans the code measures exactly (frame_w, frame_h).
-    def viewToModelSpace(self, pt):
-        import adsk.core
-        return adsk.core.Point3D.create((pt.x / self.width - 0.5) * self.frame_w, 0.0,
-                                        -(pt.y / self.height - 0.5) * self.frame_h)
-
-    def refresh(self):
-        pass
+def _viewport():
+    """The rig's viewport at the shared fake's 1516x757 frame."""
+    return Viewport(camera=_camera())
 
 
-class _StubbornViewport:
+class _StubbornViewport(Viewport):
     """A viewport that does not fully honour a camera assignment: every camera READ hands back a
     fresh camera carrying the projection (and optionally the perspective angle) this viewport
     insists on. Models the two states the orient read-back gates on - a projection set that never
@@ -153,19 +123,15 @@ class _StubbornViewport:
 
     def __init__(self, camera_type, perspective_angle=None, angle_readable=True,
                  type_readable=True):
+        super().__init__(camera=_camera())
         self._type = camera_type
         self._angle = perspective_angle
         self._angle_readable = angle_readable
         self._type_readable = type_readable
-        self.assigned = None
-        self.visualStyle = 0
-        self.fit_calls = 0
-        self.width, self.height = 1516, 757
-        self.frame_w, self.frame_h = 200.0, 100.0
 
     @property
     def camera(self):
-        cam = FakeCamera()
+        cam = _camera()
         cam.cameraType = self._type
         if self._angle is not None:
             cam.perspectiveAngle = self._angle
@@ -177,21 +143,7 @@ class _StubbornViewport:
 
     @camera.setter
     def camera(self, value):
-        self.assigned = value
-
-    def fit(self):
-        self.fit_calls += 1
-
-    # The frame the viewport currently shows, in model units. Framing reads this instead of
-    # fitting, so the fake has to answer it: a screen point maps linearly onto a frame_w x frame_h
-    # rectangle, which makes the spans the code measures exactly (frame_w, frame_h).
-    def viewToModelSpace(self, pt):
-        import adsk.core
-        return adsk.core.Point3D.create((pt.x / self.width - 0.5) * self.frame_w, 0.0,
-                                        -(pt.y / self.height - 0.5) * self.frame_h)
-
-    def refresh(self):
-        pass
+        self._assigned.append(value)
 
 
 class FakeDataFile:
@@ -212,7 +164,7 @@ class FakeApp:
     def __init__(self, design, doc_name="Doc", doc_id=None):
         self.activeProduct = design
         self.activeDocument = FakeDoc(doc_name, data_file_id=doc_id)
-        self.activeViewport = FakeViewport()
+        self.activeViewport = _viewport()
 
 
 class _DocWrapper:
@@ -285,7 +237,7 @@ class RewrappingApp:
 
     def __init__(self, design, opened):
         self.activeProduct = design
-        self.activeViewport = FakeViewport()
+        self.activeViewport = _viewport()
         self._opened = opened
 
     @property
@@ -767,7 +719,7 @@ class TestFocusFraming:
         res = iv.handler(action="orient", orientation="front", focus="Part")
         assert res["isError"] is True and "NOT moved" in res["message"]
         assert iv.app.activeViewport.camera.viewExtents == before
-        assert iv.app.activeViewport.fit_calls == 0
+        assert iv.app.activeViewport._fit_calls == 0
 
     def test_framing_zooms_OUT_when_the_focus_is_bigger_than_the_current_frame(self, monkeypatch):
         """The baseline is the frame the viewport shows right now, so moving from a tightly framed
@@ -897,7 +849,7 @@ class TestFocusFraming:
         far = FakeOcc("FarAway", bbox=make_bbox((400, 0, 0), (402, 2, 2)))
         _install(monkeypatch, [near, far])
         out = _payload(iv.handler(action="orient", orientation="front", focus="Part", fit=False))
-        assert iv.app.activeViewport.fit_calls == 0      # no framing pass at all
+        assert iv.app.activeViewport._fit_calls == 0      # no framing pass at all
         assert far.isLightBulbOn is True                 # so no visibility was touched either
         assert "WITHOUT zooming" in out["note"]
 
@@ -907,7 +859,7 @@ class TestFocusFraming:
         _install(monkeypatch, [a, b])
         out = _payload(iv.handler(action="orient", orientation="front"))
         # a whole-model orient is the isFitView path - it must not run the isolation walk
-        assert iv.app.activeViewport.fit_calls == 0
+        assert iv.app.activeViewport._fit_calls == 0
         assert a.isLightBulbOn is True and b.isLightBulbOn is True
         assert "framed on" not in out["note"]
 
@@ -923,7 +875,7 @@ class TestFocusFraming:
         res = iv.handler(action="orient", orientation="front", focus="Part",
                          projection="perspective")
         assert res["isError"] is True and "did not take" in res["message"]
-        assert vp.fit_calls == 0
+        assert vp._fit_calls == 0
         assert near.isLightBulbOn is True and far.isLightBulbOn is True
 
 
@@ -1449,13 +1401,9 @@ class TestSnapshotRestore:
         iv._SNAPSHOTS.clear()
         key = _payload(iv.handler(action="snapshot"))["saved_for"]
 
-        class _RefusingViewport:
+        class _RefusingViewport(Viewport):
             """A viewport that hands back a camera but will not take one - the restore the
             platform declines after the explore already moved the view."""
-            visualStyle = 0
-
-            def __init__(self):
-                self._cam = FakeCamera()
 
             @property
             def camera(self):
@@ -1464,10 +1412,7 @@ class TestSnapshotRestore:
             @camera.setter
             def camera(self, value):
                 raise RuntimeError("viewport busy")
-
-            def refresh(self):
-                pass
-        monkeypatch.setattr(iv.app, "activeViewport", _RefusingViewport())
+        monkeypatch.setattr(iv.app, "activeViewport", _RefusingViewport(camera=_camera()))
         out = _payload(iv.handler(action="restore"))
         assert out["camera_restored"] is False
         assert "camera" in out["failed_restores"]
@@ -1481,12 +1426,12 @@ class TestSnapshotRestore:
         iv.app.activeViewport.visualStyle = 1
         key = _payload(iv.handler(action="snapshot"))["saved_for"]
 
-        class _StuckStyle(FakeViewport):
+        class _StuckStyle(Viewport):
             def __setattr__(self, key, value):
                 if key == "visualStyle" and getattr(self, "_armed", False):
                     return
                 object.__setattr__(self, key, value)
-        vp = _StuckStyle()
+        vp = _StuckStyle(camera=_camera())
         vp.visualStyle = 7                       # the style the viewport insists on keeping
         object.__setattr__(vp, "_armed", True)
         monkeypatch.setattr(iv.app, "activeViewport", vp)

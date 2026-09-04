@@ -38,19 +38,19 @@ def _ok(payload):
 @pytest.fixture
 def stub_slices(monkeypatch):
     """Stub the inline measure CORES (_bbox / _physical_properties) + the mesh core (imported lazily
-    from mesh_ops). The router's job — dispatch + compose — is what these tests pin; the cores' own
-    numbers are covered by live validation."""
+    from _mesh_common). The router's job — dispatch + compose — is what these tests pin; the cores'
+    own numbers are covered by live validation."""
     import sys
     monkeypatch.setattr(mi, "_bbox", lambda design, ent, desc, frame, units: _ok({"x": 10, "y": 5, "z": 2}))
     monkeypatch.setattr(mi, "_physical_properties",
                         lambda design, ent, desc, units, accuracy, per_body: _ok({"mass_kg": 1.5}))
     stub = type("Mesh", (), {"mesh_measure_of_body": staticmethod(
         lambda mb, units: _ok({"triangle_count": 900, "is_closed": True}))})
-    # `from . import mesh_ops` binds the PACKAGE ATTRIBUTE when the real module is already loaded
-    # (another tool imports mesh_ops at top level), and falls back to sys.modules when it is not -
+    # `from . import _mesh_common` binds the PACKAGE ATTRIBUTE when the real module is already
+    # loaded (another tool imports it at top level), and falls back to sys.modules when it is not -
     # stub BOTH seams so the route is pinned regardless of what loaded first.
-    monkeypatch.setitem(sys.modules, "mcpServer.tools.mesh_ops", stub)
-    monkeypatch.setattr(sys.modules["mcpServer.tools"], "mesh_ops", stub, raising=False)
+    monkeypatch.setitem(sys.modules, "mcpServer.tools._mesh_common", stub)
+    monkeypatch.setattr(sys.modules["mcpServer.tools"], "_mesh_common", stub, raising=False)
 
 
 class TestDefaultAndDispatch:

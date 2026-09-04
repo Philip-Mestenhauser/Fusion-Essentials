@@ -7,7 +7,6 @@ kind fails; raw UNIT_TO_CM access or a local mm/cm factor table outside _common.
 shrink-only exemption tables each need a reason, and a stale entry fails."""
 
 import ast
-import inspect
 import os
 import re
 
@@ -56,10 +55,8 @@ def _is_units_kind(schema) -> bool:
 
 
 def _tools_with_report_source():
-    """(tool_name, input_props, source) per registered tool. `source` is the MODULE source for a
-    single-tool module (so a units payload built in a _slice_* helper still counts) and the HANDLER's
-    OWN source for a grandfathered multi-tool file (so one tool is never blamed for a sibling's units
-    payload). A '"units":' occurrence in `source` = the tool reports a units field."""
+    """(tool_name, input_props, module source) per registered tool; a '"units":' occurrence in the
+    source (a _slice_* helper's included) = the tool reports a units field."""
     files = [fn for fn in sorted(os.listdir(TOOLS_DIR)) if fn.endswith(".py") and not fn.startswith("_")]
     if files:
         load_tool(files[0][:-3])                     # bootstraps COMMANDS_DIR onto sys.path first
@@ -77,13 +74,7 @@ def _tools_with_report_source():
         for it in items:
             d = it.to_dict()
             props = (d.get("inputSchema") or {}).get("properties", {}) or {}
-            src = module_src
-            if len(items) > 1:
-                try:
-                    src = inspect.getsource(it.handler)
-                except (OSError, TypeError):
-                    src = module_src
-            out.append((d.get("name"), props, src))
+            out.append((d.get("name"), props, module_src))
     return out
 
 

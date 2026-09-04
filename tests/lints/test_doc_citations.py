@@ -104,8 +104,8 @@ def _registered_names():
 
 
 def _module_basenames():
-    # a grandfathered module (data_ops, doc_lifecycle) or helper (_cam_common) is family-shaped but is
-    # a FILE a doc legitimately names, not a dangling tool - never flag one.
+    # a helper module (_cam_common, _data_read) is family-shaped but is a FILE a doc legitimately
+    # names, not a dangling tool - never flag one.
     return {p.stem for p in MCP.rglob("*.py")}
 
 

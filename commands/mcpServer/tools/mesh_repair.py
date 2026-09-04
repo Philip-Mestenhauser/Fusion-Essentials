@@ -18,7 +18,7 @@ from . import _common
 from ._common import target_component as _target_component
 from . import _geom
 from . import _inputs
-from .mesh_ops import _node_count, _tri_count
+from ._mesh_common import _node_count, _tri_count
 
 app = adsk.core.Application.get()
 

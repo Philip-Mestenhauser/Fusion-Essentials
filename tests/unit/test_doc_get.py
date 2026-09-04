@@ -11,9 +11,11 @@ from types import SimpleNamespace
 from conftest import load_tool, error_message
 
 dg = load_tool("doc_get")
-# The consumer of what this read publishes: 'open:N' is resolved in doc_lifecycle, so the addresses
-# doc_get offers are pinned against the resolver that has to accept them.
-dl = load_tool("doc_lifecycle")
+# The consumers of what this read publishes: 'open:N' is resolved in _doc_common, so the addresses
+# doc_get offers are pinned against the two tools that have to accept them.
+dk = load_tool("_doc_common")
+da = load_tool("doc_activate")
+dcl = load_tool("doc_close")
 
 
 def _payload(result):
@@ -213,7 +215,7 @@ class TestASlotThatAnsweredNoDocument:
     """A slot whose documents.item(i) answered NOTHING is a hole in the listing, not a document.
 
     The row is published, so the listing counts what the session holds - but it carries no
-    'open:N' offer: doc_activate/doc_close resolve that index through doc_lifecycle, which refuses
+    'open:N' offer: doc_activate/doc_close resolve that index through _doc_common, which refuses
     the one naming such a slot and lists it as carrying no handle. Both sides are read off ONE
     session here, since an address is only an offer if the tool it names accepts it."""
 
@@ -221,7 +223,7 @@ class TestASlotThatAnsweredNoDocument:
         class _App:
             activeDocument = docs[0]
             documents = _Docs(docs, item_raises_at=raises_at)
-        for mod in (dg, dl):
+        for mod in (dg, dk, da, dcl):
             monkeypatch.setattr(mod, "app", _App())
 
     def _three(self, monkeypatch):
@@ -237,7 +239,7 @@ class TestASlotThatAnsweredNoDocument:
         offered = [r["open_index"] for r in rows if "open_index" in r]
         assert offered == [0, 2]
         for idx in offered:
-            assert dl._find_open_document("open:%d" % idx)[0] is not None
+            assert dk._find_open_document("open:%d" % idx)[0] is not None
         # the razor holds: only the hole is marked, so readable=false IS the hole test
         assert [r.get("readable") for r in rows] == [None, False, None]
 
@@ -247,7 +249,7 @@ class TestASlotThatAnsweredNoDocument:
         # would offer an address rejected on arrival.
         self._three(monkeypatch)
         assert _payload(dg.handler())["open_documents"][1] == {"name": None, "readable": False}
-        for handler in (dl.activate_document_handler, dl.close_document_handler):
+        for handler in (da.handler, dcl.handler):
             res = handler(name="open:1")
             assert res["isError"] is True
             assert "no handle - the document did not read" in error_message(res)

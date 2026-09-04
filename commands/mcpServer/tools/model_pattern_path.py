@@ -19,7 +19,7 @@ from . import _common
 from . import _inputs
 from . import _assert
 from . import _outputs
-from .model_pattern import _BODIES, _OCCURRENCES, _owning_component, _resolve_input_entities
+from ._pattern_common import _BODIES, _OCCURRENCES, _owning_component, _resolve_input_entities
 
 app = adsk.core.Application.get()
 

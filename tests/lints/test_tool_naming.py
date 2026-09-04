@@ -1,9 +1,12 @@
 """Lint/contract for the TOOL NAMING SCHEMA (CLAUDE.md "Read vs Edit").
 
-Every tool name is ``<domain>_<verb>[_<noun>]`` with ``<verb>`` from the closed set below, and the
-verb's KIND must agree with write=: a read-verb tool is read-only, an edit-verb tool is not."""
+Every tool name is ``<domain>_<verb>[_<noun>]`` with ``<verb>`` from the closed set below, the
+verb's KIND must agree with write=: a read-verb tool is read-only, an edit-verb tool is not - and
+every tool lives alone in the module named after it."""
 
-from conftest import register_all_tools
+import os
+
+from conftest import load_tool, register_all_tools, TOOLS_DIR
 
 _ORIENT = {"orient"}
 _READ = {"get"}
@@ -116,3 +119,24 @@ class TestToolNaming:
             if v in _EDIT_KIND_VERBS and readonly:
                 mismatches.append(f"{name}: edit-verb '{v}' but write=read (mislabeled read?)")
         assert not mismatches, "name/write= disagreements:\n  " + "\n  ".join(mismatches)
+
+    def test_each_tool_lives_alone_in_the_module_named_after_it(self):
+        # One tool per file, the file named after the tool: shared code goes to the family's
+        # underscore helper, and a doc citing `<tool>.py` always lands on that tool.
+        files = [fn for fn in sorted(os.listdir(TOOLS_DIR))
+                 if fn.endswith(".py") and not fn.startswith("_")]
+        load_tool(files[0][:-3])                       # bootstraps COMMANDS_DIR onto sys.path
+        from mcpServer.mcp_primitives import registry  # importable only after the bootstrap
+        bad = []
+        for fn in files:
+            reg = getattr(load_tool(fn[:-3]), "register_tool", None)
+            if not callable(reg):
+                bad.append(f"{fn}: registers no tool (a helper module is underscore-prefixed)")
+                continue
+            registry.reset_registry()
+            reg()
+            names = sorted(it.to_dict().get("name") for it in registry.get_tools())
+            if names != [fn[:-3]]:
+                bad.append(f"{fn}: registers {names}")
+        assert not bad, ("a tool module registers exactly the one tool it is named after - split "
+                         "the extras into their own files, or rename:\n  " + "\n  ".join(bad))

@@ -41,12 +41,12 @@ _ALLOWED = {
     ("cam_edit_tools.py", "safe(lambda: p.value.value, default)"):
         "a generic CAM-parameter reader whose 'default' is the CALLER's chosen value for an absent "
         "parameter, not the tool's own request",
-    ("joint_create_edit.py", "safe(lambda f=f: f.area, 0.0)"):
+    ("_joint_inputs.py", "safe(lambda f=f: f.area, 0.0)"):
         "picking the LARGEST face - an unreadable area sorts last and is never published",
     ("sketch_dimension.py", "safe(lambda: geo.radius, 0.0)"):
         "a text-placement offset, immediately replaced by 1.0 when it is not positive; never "
         "published",
-    ("surface_edit.py", "safe(lambda i=i: cells.item(i).cellBody.area, 0.0)"):
+    ("surface_trim.py", "safe(lambda i=i: cells.item(i).cellBody.area, 0.0)"):
         "cell areas compared against each other to pick a cell; not published",
     ("surface_untrim.py", "safe(lambda f=f: f.area, 0.0)"):
         "an area SUM compared before/after to prove the untrim moved something",

@@ -1,0 +1,121 @@
+# Copyright (c) Fusion-Essentials contributors
+# Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
+
+"""Add one or many USER parameters, rolling back any add that introduces a timeline error. WRITES."""
+
+import adsk.core
+
+from ..mcp_primitives.tool import Tool
+from ..mcp_primitives.item import Item, Verification
+from ..mcp_primitives.registry import register
+from ._common import ok, error, safe
+from . import _common
+# the shared timeline-health walk (before/after edit guard) - one home in _common
+from ._common import timeline_health as _timeline_health
+from ._param_common import _find_parameter, _param_summary
+
+
+def _add_one(design, name, expression, unit, comment, favorite):
+    """Add a single user parameter, health-guarded. Returns (result_dict, error_str). On success
+    error_str is None; on failure result_dict is None and error_str explains why (param rolled back
+    if it broke the timeline)."""
+    name = (name or "").strip()
+    if not name:
+        return None, "missing 'name' for a new parameter."
+    if (expression or "").strip() == "" and expression != "0":
+        return None, f"'{name}': missing 'expression' (the value)."
+    if _find_parameter(design, name):
+        return None, f"a parameter named '{name}' already exists (use param_set to change it)."
+
+    err_before, _, _ = _timeline_health(design)
+    try:
+        vi = adsk.core.ValueInput.createByString(expression)
+        p = design.userParameters.add(name, vi, unit or "", comment or "")
+    except Exception as e:
+        return None, f"could not add '{name}': {e}"
+    if not p:
+        return None, f"adding '{name}' returned nothing."
+    if favorite:
+        safe(lambda: setattr(p, "isFavorite", True))
+
+    err_after, warn_after, _ = _timeline_health(design)
+    if len(err_after) > len(err_before):
+        safe(lambda: p.deleteMe())
+        return None, (f"adding '{name}' introduced a timeline error ({err_after}); rolled back. "
+                "Check the expression/unit.")
+    # Report the ACTUAL favorite state read back from the parameter, not the request - so a silently
+    # failed isFavorite set doesn't surface as a false success.
+    return {"parameter": _param_summary(p), "favorite": bool(safe(lambda: p.isFavorite, False)),
+                "timeline_warnings": warn_after}, None
+
+
+def handler(name: str = "", expression: str = "", unit: str = "mm",
+            comment: str = "", favorite: bool = False, params: list = None) -> dict:
+    """Add one (name+expression) or many ('params' list) user parameters. WRITES; health-guarded."""
+    design = _common.design()
+    if not design:
+        return error("No active design.")
+
+    # batch path
+    if params:
+        if not isinstance(params, list):
+            return error("'params' must be a list of {name, expression, ...} dicts.")
+        results = []
+        for i, spec in enumerate(params):
+            if not isinstance(spec, dict):
+                return error(f"params[{i}] must be a dict with 'name' and 'expression'.")
+            res, err = _add_one(design, spec.get("name", ""), spec.get("expression", ""),
+                                spec.get("unit", "mm"), spec.get("comment", ""),
+                                bool(spec.get("favorite", False)))
+            if err:
+                return error(f"params[{i}]: {err} ({len(results)} added before this).")
+            results.append(res)
+        return ok({"added_count": len(results), "results": results,
+        "note": f"{len(results)} user parameters added; timeline verified."})
+
+    # single path
+    res, err = _add_one(design, name, expression, unit, comment, bool(favorite))
+    if err:
+        return error(err[0].upper() + err[1:])
+    return ok({"added": True, **res,
+        "note": "User parameter added; timeline verified (no new errors)."})
+
+
+TOOL_DESCRIPTION = (
+    "Add ONE or MANY user parameters. Single: name + expression (+ unit/comment/favorite). "
+    "BATCH: 'params' = a list of {name, expression, unit?, comment?, favorite?} dicts to "
+    "add many in ONE call (prefer this over many calls; 'name' is then omitted). Each add "
+    "that introduces a NEW timeline error is rolled back. Use param_set to change an "
+    "existing one.")
+
+# NOTE: built with create_simple + a PLAIN name property (not create_with_string_input, which marks
+# its input REQUIRED) - batch mode legitimately omits 'name', so the schema must not demand it.
+tool = (
+    Tool.create_simple(
+        name="param_add",
+        description=TOOL_DESCRIPTION,
+    )
+    .add_input_property("name", {"type": "string",
+            "description": "New parameter name (single add; omit when using 'params')."})
+    .add_input_property("expression", {"type": "string",
+            "description": "Value/expression, e.g. '25 mm', 'PartX/2', \"'text'\"; function args use ';' - max(a; b)."})
+    .add_input_property("unit", {"type": "string",
+            "description": "Unit: mm/cm/in/deg or '' for unitless (default mm)."})
+    .add_input_property("comment", {"type": "string", "description": "Optional comment."})
+    .add_input_property("favorite", {"type": "boolean",
+            "description": "Show in the favorites list (default false)."})
+    .add_input_property("params", {"type": "array",
+            "description": "BATCH: list of {name, expression, unit?, comment?, favorite?} dicts.",
+            "items": {"type": "object"}})
+    .strict_schema()
+)
+item = Item.create_tool_item(
+    tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    verification=Verification(
+        kind="effect",
+        evidence_test="tests/unit/test_param_add.py::TestAddFavorite"
+                      "::test_a_stuck_favorite_is_published_as_the_parameter_reads_it"))
+
+
+def register_tool():
+    register(item)

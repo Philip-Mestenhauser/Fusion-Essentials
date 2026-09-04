@@ -13,8 +13,9 @@ No live Fusion — fakes model exactly the read surface the handler touches.
 import json
 
 import adsk.cam
+import adsk.core
 
-from conftest import FakeOperation, load_tool, make_cam, strategy_factory
+from conftest import Camera, FakeOperation, Viewport, load_tool, make_cam, strategy_factory
 
 wo = load_tool("workspace_orient")
 
@@ -292,18 +293,6 @@ class FakeDoc:
             self.dataFile = data_file        # only saved docs have one (unsaved -> attr absent)
 
 
-class _FakeCamera:
-    def __init__(self, camera_type=0, eye=(10, 10, 10), target=(0, 0, 0)):
-        self.cameraType = camera_type           # 0 ortho, 1 perspective
-        self.eye = _Pt(*eye)
-        self.target = _Pt(*target)
-
-
-class _FakeViewport:
-    def __init__(self, camera):
-        self.camera = camera
-
-
 class _FakeSelections:
     def __init__(self, entities):
         self._e = list(entities)
@@ -319,7 +308,7 @@ def _install(active_product=None, doc=None, cam=None, design_for_cast=None,
     """Wire the module's app + adsk casts. active_product is what app.activeProduct returns (a design,
     a CAM product, or None); design_for_cast is what Design.cast resolves to (default: active_product
     if it's a FakeDesign). camera/selection feed the new view + selection echo."""
-    cam_obj = camera if camera is not None else _FakeCamera()
+    cam_obj = camera if camera is not None else Camera()
     _ui = type("UI", (), {"activeWorkspace": type("W", (), {"name": "Design"})(),
                           "activeSelections": _FakeSelections(selection)})()
 
@@ -328,7 +317,7 @@ def _install(active_product=None, doc=None, cam=None, design_for_cast=None,
         activeDocument = doc
         activeProduct = active_product
         userInterface = _ui
-        activeViewport = _FakeViewport(cam_obj)
+        activeViewport = Viewport(camera=cam_obj)
     wo.app = _App()
     wo._common.app = wo.app
 
@@ -1304,7 +1293,8 @@ class TestViewState:
         root = FakeRoot(top_occs=[FakeOcc("A:1")])
         des = FakeDesign(root, timeline=[FakeTL(0)])
         _install(active_product=des, doc=FakeDoc(design=des),
-                 camera=_FakeCamera(camera_type=0, eye=(10, 0, 0), target=(0, 0, 0)))
+                 camera=Camera(camera_type=adsk.core.CameraTypes.OrthographicCameraType,
+                               eye=(10, 0, 0), target=(0, 0, 0)))
         v = _payload(wo.handler())["view"]
         assert v["projection"] == "orthographic"
         assert v["eye"] == {"x": 10.0, "y": 0.0, "z": 0.0}
@@ -1313,7 +1303,8 @@ class TestViewState:
     def test_perspective_camera(self):
         root = FakeRoot(top_occs=[FakeOcc("A:1")])
         des = FakeDesign(root, timeline=[FakeTL(0)])
-        _install(active_product=des, doc=FakeDoc(design=des), camera=_FakeCamera(camera_type=1))
+        _install(active_product=des, doc=FakeDoc(design=des),
+                 camera=Camera(camera_type=adsk.core.CameraTypes.PerspectiveCameraType))
         assert _payload(wo.handler())["view"]["projection"] == "perspective"
 
     def test_an_unreadable_eye_component_reports_a_null_point_not_a_zero_axis(self):
@@ -1327,7 +1318,8 @@ class TestViewState:
                 raise RuntimeError("unreadable")
         root = FakeRoot(top_occs=[FakeOcc("A:1")])
         des = FakeDesign(root, timeline=[FakeTL(0)])
-        camera = _FakeCamera(camera_type=0, eye=(10, 0, 0), target=(1, 2, 3))
+        camera = Camera(camera_type=adsk.core.CameraTypes.OrthographicCameraType,
+                        eye=(10, 0, 0), target=(1, 2, 3))
         camera.eye = _BadPt()
         _install(active_product=des, doc=FakeDoc(design=des), camera=camera)
         v = _payload(wo.handler())["view"]

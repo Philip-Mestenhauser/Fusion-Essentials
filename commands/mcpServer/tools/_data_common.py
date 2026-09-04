@@ -2,8 +2,8 @@
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
 """Shared helpers for the cloud data-model tools: hub/project/folder resolution, path splitting,
-URN/web-URL identifier decoding, and the one file reference resolver (URN or name-in-a-project).
-Used by data_ops.py, doc_lifecycle.py, _data_read.py, doc_open.py, and doc_insert_occurrence.py.
+URN/web-URL identifier decoding, the one file reference resolver (URN or name-in-a-project), and
+the upload registry data_upload_file mints a poll handle into.
 """
 
 import base64
@@ -18,8 +18,8 @@ MAP_BLURB = (
     "the cloud data-model substrate: resolve_file_reference - the ONE "
     "URN-or-name-in-a-project DataFile resolver, a name matching several files REFUSED; "
     "navigate_folder_path - the folder-PATH walk from a project root, creating nothing, and the "
-    "miss triple each caller words its own refusal from; FUSION_NATIVE_EXTENSIONS/name_extension "
-    "- the NAME carries the true extension, fileExtension does not")
+    "miss triple each caller words its refusal from; name_extension - the NAME carries the true "
+    "extension; _file_in_folder_by_name - one folder, a shared name REFUSED")
 
 app = adsk.core.Application.get()
 
@@ -78,7 +78,7 @@ def _child_folder_by_name(folder, name):
     """The immediate child folder matching name (case-insensitive), or None. First match is CORRECT
     here: folder names are UNIQUE within a container - dataFolders.add() with a name a sibling
     carries raises 'CB_NAE - Another object with the same name already exists in this container'.
-    A FILE name carries no such rule (doc_lifecycle._file_in_folder_by_name refuses that)."""
+    A FILE name carries no such rule (_file_in_folder_by_name below refuses that)."""
     want = (name or "").strip().lower()
     try:
         for f in folder.dataFolders.asArray():
@@ -140,6 +140,75 @@ def _ensure_folder_path(root, segments, created_out=None):
             created.append(seg)
         cur = nxt
     return cur, created
+
+
+def _retained_parents(auto_created):
+    """The clause an ERROR appends when mkdir -p already created folders before the call failed -
+    real, kept mutations the error is the only place the caller hears about (auto_created_parents
+    ships on the ok path only)."""
+    if not auto_created:
+        return ""
+    return (" This call had already created the folder(s) "
+            + ", ".join(f"'{n}'" for n in auto_created)
+            + " on the way there, and they were NOT removed - delete them with data_delete_folder "
+              "if they were not wanted.")
+
+
+# How many child/parent reference rows a DataFile disclosure spells out.
+_MAX_XREFS = 64
+
+# The registry that makes an upload POLLABLE: it keeps the live DataFileFuture referenced, so a
+# data_get_upload_status call after the upload handler returns can still read the state. An entry
+# is popped once its terminal state has been reported once.
+_UPLOADS = {}
+_UPLOAD_HANDLE_SEQ = [0]
+
+_UPLOAD_STATE = {0: "processing", 1: "finished", 2: "failed"}
+
+
+def _files_in_folder_by_name(folder, name):
+    """EVERY immediate child DataFile of `folder` carrying `name` (case-insensitive, whole name). A
+    folder CAN hold several files of one name - two saveAs calls into one folder under one name
+    produce two DISTINCT lineages - so a name is not an identity here and the caller decides."""
+    want = (name or "").strip().lower()
+    out = []
+    try:
+        for f in folder.dataFiles.asArray():
+            if (safe(lambda f=f: f.name) or "").strip().lower() == want:
+                out.append(f)
+    except Exception:
+        pass
+    return out
+
+
+def _same_name_rows(matches):
+    """Every candidate's lineage URN, one row per file, an id that will not READ named as such - the
+    rendering every same-name disclosure lists its candidates with. One row per file, always: a
+    dropped row shows N files under fewer URNs, which reads as though two of them shared one."""
+    return "; ".join(safe(lambda f=f: f.id) or "(id unreadable)" for f in matches)
+
+
+def _same_name_refusal(folder, name, matches):
+    """The refusal for a folder already holding SEVERAL files of one name: the count, the folder,
+    and every candidate's lineage URN - the thing that IS an identity here. Each caller ENDS it with
+    the remedy its own inputs offer."""
+    rows = _same_name_rows(matches)
+    return (f"'{name}' names {len(matches)} files in "
+            f"'{_folder_path_string(folder) or '(project root)'}' - refusing to guess which. A "
+            f"folder can hold several files of one name, and the lineage URN is what tells them "
+            f"apart: {rows}.")
+
+
+def _file_in_folder_by_name(folder, name):
+    """The ONE immediate child DataFile of `folder` carrying `name`: (file, None) for exactly one
+    match, (None, None) when nothing carries it, (None, sentence) when several do - never one of
+    several, since those are different lineages. The caller appends its own remedy."""
+    matches = _files_in_folder_by_name(folder, name)
+    if len(matches) == 1:
+        return matches[0], None
+    if matches:
+        return None, _same_name_refusal(folder, name, matches)
+    return None, None
 
 
 def _folder_path_string(folder):

@@ -141,7 +141,7 @@ class Item:
         # VERIFICATION CLASSIFICATION: how a write with no kernel postcondition proves its effect
         # (see Verification). Registry metadata, resolved by the postcondition lint - it changes
         # neither the handler nor the wire. Read the annotation the tool just declared rather than
-        # the `write` argument: a tool that wires its own guard passes write=None (sys_selection).
+        # the `write` argument: a tool wiring its own guard passes write=None (sys_request_selection).
         if verification is not None:
             if not isinstance(verification, Verification):
                 raise ValueError(f"verification on '{tool.name}' must be a Verification kind, got "

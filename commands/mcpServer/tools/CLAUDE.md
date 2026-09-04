@@ -59,26 +59,37 @@ don't edit between the markers.
 
 | Helper | Provides (import from here - never re-implement) |
 |---|---|
+| `_assembly_common` | the occurrence WORLD-POSE sampler an assembly write is judged by: _constraint_positions - every target's translation and basis BEFORE the mutation, one that will not read ABSENT rather than zeroed; _constraint_moves - which moved across it (translation plus _axes_rotation_deg, the flip a translation-only row hides), and whether ANY target was sampled on both sides |
 | `_assembly_detail` | the row SERIALIZERS behind assembly_get, one per array in its payload - reach for one only from there. _occ_record/_all_occurrence_rows - occurrence identity and placement; _health_fields - the compute-state verdict; _joint_frame/_limit_facts/_value_now/_motion_axes - a joint's world frame, limits, value and heading; _joint_origin_rows/_relation_rows/_contact_rows - the rest |
 | `_assert` | POSTCONDITION kinds (VersionAdvanced/ReferencesFresh/FileLanded/...) - declare an Edit tool's verify-the-effect once; wired via Item.create_tool_item(postconditions=[...]) |
 | `_cam_common` | the CAM substrate every CAM tool starts from: get_cam (the document's CAM product); the ONE tree walk and its EXACT by-name resolvers (walk_cam_tree, resolve_cam_node, find_setup, find_operation - a duplicate name is refused); the parameter helpers; the per-op state classifiers and readiness verdicts (op_state_facts, ready_verdict, live_readiness); the machine catalog; the bounded library walk |
 | `_cam_presets` | the ToolPreset substrate: _preset_spec_error (why a {name?, spindle_speed?, feed?} spec is unusable), _preset_param_of/_set_preset_param/_apply_preset_values (applying a spec with no silent skip), _preset_names/_presets_named (the index-order list, the exact-name lookup), _persist_preset_change (the commit-then-re-read), resolve_operation_preset (the preset an OPERATION can be pointed at) |
 | `_cam_read` | the per-slice READ cores behind cam_get(include=[...]) - get_cam_setups_handler, get_cam_operations_handler, get_setup_references_handler, get_tool_list_handler, get_machining_time_handler, get_nc_programs_handler, get_inspection_results_handler, get_machine_limits_handler; reach for one only from that router, every other CAM tool shares _cam_common |
+| `_cam_templates` | the CAM TEMPLATE library substrate: _template_library - the handle off the CAMManager singleton, not the CAM product; list_cam_templates_handler - the bounded folder tree cam_get(include=['templates']) returns, each row carrying the ASSET url cam_apply_template takes; _find_template_by_name - the by-name search REFUSING a name several templates answer to; _LOCATION - the location selector |
 | `_common` | response+resolve: ok/error/safe (per-FIELD guard, never a MUTATION), measured/read_flag/counted (None, never a coerced 0/False), design/target_component, find_sketch/resolve_sketch (a shared name REFUSED), timeline_health/set_verified (effect reads), same_component/native_identity/occurrence_walk/broken_reference (TRI-STATE identity, census), scale/iter_collection/named_with_remainder/told_apart |
 | `_contacts` | the substrate assembly_get's contacts slice and assembly_edit_contacts share. contact_sets/all_contact_sets/contact_set_names - the DESIGN-scoped contactSets walk; find_contact_set - the EXACT resolve-one, refusing a duplicate; membership/member_label - the occurencesAndBodies read-back |
-| `_data_common` | the cloud data-model substrate: resolve_file_reference - the ONE URN-or-name-in-a-project DataFile resolver, a name matching several files REFUSED; navigate_folder_path - the folder-PATH walk from a project root, creating nothing, and the miss triple each caller words its own refusal from; FUSION_NATIVE_EXTENSIONS/name_extension - the NAME carries the true extension, fileExtension does not |
-| `_data_read` | the three cloud READ cores data_get delegates to - list_projects_handler (the active hub's projects), list_project_files_handler (one project's files, optionally folder-scoped) and file_facts_handler (ONE file's metadata + link state) - over _walk_folder, the ONE capped/deadlined folder recursion, which records a folder whose enumeration RAISED so a hole is never reported as an empty folder |
+| `_data_common` | the cloud data-model substrate: resolve_file_reference - the ONE URN-or-name-in-a-project DataFile resolver, a name matching several files REFUSED; navigate_folder_path - the folder-PATH walk from a project root, creating nothing, and the miss triple each caller words its refusal from; name_extension - the NAME carries the true extension; _file_in_folder_by_name - one folder, a shared name REFUSED |
+| `_data_read` | the cloud READ cores data_get delegates to - list_projects_handler (the active hub's projects), list_project_files_handler (one project's files, optionally folder-scoped), list_folders_handler (a project's bounded folder TREE) and file_facts_handler (ONE file's metadata + link state) - over _walk_folder, the capped/deadlined recursion recording a folder whose enumeration RAISED |
+| `_design_common` | DESIGN MODE: get_mode_handler - the designType + capability can{} map design_get's 'mode' slice returns, derived from the mode so it agrees with ModeGuards; health_handler - the timeline error/warning rollup of its default slice; run_in_base_feature - a mutation needing a base-feature scope in a PARAMETRIC design, run direct in a DIRECT one; base_feature_run_wrapper - its always-finish wrapper |
+| `_doc_common` | _resolve_open_document - the open-document resolve doc_activate and doc_close share: one document from an 'open:N' index, a lineage URN / web URL matched by LINEAGE EQUALITY, or an exact display name, REFUSING more than one distinct match with the address each row reaches by |
 | `_drawing_common` | active_drawing(_document) - the Drawing gate every tool runs; SHEET_SIZE_MAP/DIMENSION_STRATEGIES/ORIENTATION_MEMBERS/NO_PORTRAIT - key -> member tables plus the portrait refusals; sheet_units/SHEET_EXTENT_UNIT/DOCUMENT_UNIT/coordinate_unit - the three units, never mixed; enum_value + the *_label decoders; resolve_sheet/sheet_listing/sheet_facts - sheet by name, 1-based index, state |
+| `_edge_common` | the edge-treatment substrate: EDGES/BODY/_EDGE_FILTER_DESC - the shared targeting inputs; _edge_convexity + _collect_edges - the per-edge dihedral sign a convex/concave filter selects by (BRepEdge exposes no convexity flag); _apply - the ONE build-and-verify path both tools run, gating on the created faces, the health state and the body's own volume delta |
 | `_export` | export-to-disk substrate: sanitize/prepare_out_path (safe filename, extension and directory prep), find_component/instance_paths (by-name resolve, shared name refused), top_level_occurrences/split_by_occurrence/failure_detail (one file per root occurrence), snapshot/verify_written (prove THIS call wrote), applied_pair (set an option, read it back), stl_unit_enum, pump_until (bounded doEvents wait) |
 | `_geom` | the geometry reads' measurement math: unit_vector/unit_vector_between/evaluator_normal_at/dot/cross (vector math); body_aabb/occ_world_frame/axis_vec (bodies-only AABB, placement); volumes/volume_delta/signed_volume/face_counts/face_count_delta/lump_count/aabb_gap/parallel_plane_facts (the effect reads a write is judged by); address/subtree_facts (a measure row's name, nested children) |
 | `_holder` | holder geometry: get_axis, get_tool_profile, build_holder_data, get_tooling_libraries |
 | `_inputs` | the typed reference kinds (table above); resolve_inputs/apply_to_tool (wire and resolve an input spec), length_value_input/expression_report (a length as a number OR a parameter expression), world_construction_axis/axis_line_of (a world axis as an entity; an AxisRef's line), single_placement/entity_component (the assembly-context lift), resolve_surface/surface_ref_label (the *_to_surface operand) |
+| `_joint_inputs` | the joint WRITE substrate above _joints: _resolve_input - the ONE joint-input resolve (a find_geometry handle, an autonomous '<occurrence>:<snap>', then a Joint Origin by name), with _parse_snap/_pick_face behind it; _JOINT_TYPES/_MOTIONS - the motion vocabulary every joint write surface offers; _apply_limits - the limit writer reading each value BACK off the joint |
 | `_joints` | build_joint_geometry/apply_motion - the keypoint factory and motion dispatch; all_joints/find_joint - the walk over joints AND asBuiltJoints, REFUSING a shared name; DRIVES_ANY - the drivable gate; motion_link_record/link_ratio_values - the link record and ratio codec; all_joint_origins/jo_assembly_proxy - the JointOrigin walk and proxy; component_world_matrix - the matrix-to-world ladder |
 | `_materials` | browse - the ONE material/appearance catalog read: a library census plus the document-local set when no library is named, one library's filtered and capped entries when it is; catalog_census/find_library/entries are its leaf ops |
+| `_mesh_common` | the MeshBody read substrate: _tri_count/_node_count - the displayMesh counts every mesh payload reports; _area_volume + _mesh_moved - the second, independent signal a flat triangle count is judged beside; _mesh_summary - the one per-mesh record; _result_mesh_of - the mesh a mesh feature produced; mesh_measure_of_body - the mesh analogue of a BRep measure |
 | `_outputs` | RETURNS kinds (ReturnsHandle/Urn/Name/Value/Verdict) - declare a tool's stable outputs once |
+| `_param_common` | the design-PARAMETER substrate: _param_summary - the ONE parameter row every param_* tool publishes, converting Parameter.value out of DATABASE units (cm/radians) into the parameter's own and naming the frame it could not convert into; _owner_facts - a MODEL parameter's maker, each key absent when it did not read; _find_parameter - the exact by-name lookup, user parameters first |
+| `_pattern_common` | the pattern substrate: _resolve_input_entities - the ObjectCollection a pattern seeds from, bodies taking precedence over occurrences; _owning_component - the component the feature must be built in (the axis and the feature must share one or Fusion raises getObjectPath); _direction_entity - a world-axis key as that component's own origin axis, anything else lifted into its assembly context |
 | `_pmi` | the PMI substrate. walk_annotations/find_annotation - the design-wide walk and the resolve-one REFUSING a shared name; build_segments/segments_markup/annotation_record - the {symbol} markup codec and light record; readable_warning - errorOrWarningMessage as one bounded line; build_tolerance/build_display - the tolerance/display codecs; apply_*/normalize_extension/set_* - the writers, each re-read |
 | `_relations` | the substrate assembly_get's relations slice and assembly_edit_relations share. all_relations - the ONE walk over a design's rigid groups / motion links / assembly constraints; relation_names/find_relation - the names for an error message and the EXACT resolve-one that REFUSES a duplicate; rigid_group_members - member paths |
-| `_sketch_detail` | the sketch_get(sketch_name=...) X-ray; sketch_world_frame/frame_space_note - a sketch plane's frame + its wire sentence; curve_id - a curve's '<type>:<index>' id; scope_component/scope_components/COMPONENT_SCOPE/component_scope - the 'component' read scope + wire form; scoped_sketch/scoped_or_recent_sketch/scope_remedy - the same for an EDIT; unquote_text/font_read_back - SketchText readers. |
+| `_sketch_detail` | sketch_get's X-ray; sketch_world_frame/frame_space_note - a sketch's frame + sentence; curve_id - a curve's '<type>:<index>'; scope_component/scope_components/COMPONENT_SCOPE/component_scope/scoped_sketch/scoped_or_recent_sketch/scope_remedy - the 'component' scope + wire form; _sketch_summary - a sketch's row; _prepare/_transform - move/copy matrix; unquote_text/font_read_back - SketchText. |
+| `_surface_common` | the surface-body substrate: _solid_verdict - the ONE any-True/False-if-any-False/else-None collapse over isSolid flags; _result_body_report/_body_names_and_solid - a feature's result bodies as names plus flags, or plus that verdict; _created_bodies - the bodies owning the faces a feature CREATED, never feature.bodies; _landed_length - a length read off the feature's own parameter |
+| `_sys_common` | the Fusion SELECTION substrate: _selection_record - the ONE per-entity record sys_request_selection and sys_get_selection both publish (a _classify() dispatch by runtime type, the click point, and a find_geometry-style 'handle' for a face/edge/vertex); RETURNS - the handle output both declare; _ui - the userInterface read, None when there is none |
 | `_threads` | resolve_thread_info - the ONE thread-table walk turning a bare designation ('M5x0.8', '1/4-20 UNC') into a ThreadInfo, shared by model_hole's tap and model_thread; also returns every thread type carrying that designation |
 | `_view_common` | view_direction/look_direction/up_vector/is_ortho_face - camera vectors for a named view; apply_named_view/capture_png_b64 - orient and grab the viewport; standoff_distance/STANDOFF_FALLBACK_CM - the eye-target standoff an orient rebuilds from; DISPLAY_FOLDERS/all_display_components - toggling non-body clutter; keep_visible/isolate_for_fit/restore_message - framing on one occurrence |
 | `_write_guard` | _active_identity - the ONE active-document identity read (name, urn); one_open_document - whether several open-document matches are really ONE document; document_key - the key a store outliving one MCP call remembers a document by (data-file id, else a per-INSTANCE token matched by handle equality, never by name); prune_closed_documents + on_key_evicted/on_key_renamed - eviction and its two hooks |
@@ -117,7 +128,7 @@ The lints say "no"; these are the "yes". A tool is excellent when it:
    - rung 1: report a COUNT (a *wrong* result with the right count passes — insufficient for a mutation
      whose region/geometry could be wrong, e.g. a fillet);
    - rung 2: report the effect EXISTS (a body/feature was made — but maybe the wrong one);
-   - rung 3: read the RIGHT count/value BACK off the feature and error on mismatch (`model_pattern`
+   - rung 3: read the RIGHT count/value BACK off the feature and error on mismatch (`model_pattern_rectangular`
      reads `patternElements.count`; `cam_edit_setup` re-reads every assignment);
    - rung 4: verify the RIGHT GEOMETRY changed — volume/faces/file-on-disk (`model_shell` volume-diff,
      `cam_post` folder snapshot-diff). A material-removal feature needs rung 4; a reflection or a
@@ -125,7 +136,7 @@ The lints say "no"; these are the "yes". A tool is excellent when it:
    Hard sub-cases and their exemplars: an ASYNC effect that lags the call → report the *verified* state
    + a `pending`, never the intent (`doc_activate`); a setter the platform LIES about → assign, re-read,
    honest error if unchanged (`data_switch_hub`); a CREATE → re-list and error if the new thing didn't
-   appear (`data_ops`); a refresh → re-check `isOutOfDate` after (`doc_update_xref`).
+   appear (`data_create_project`); a refresh → re-check `isOutOfDate` after (`doc_update_xref`).
 2. **Refuses ambiguity — returns the candidates, never grabs the first.** A name that matches several
    is a hard error listing what's available (`cam_delete`, `OccurrenceRef`, `find_setup`), not a silent
    wrong pick.
@@ -136,8 +147,8 @@ The lints say "no"; these are the "yes". A tool is excellent when it:
    re-discovering the trap. A destructive/crash-prone path gets a declare-intent guard (`doc_open`).
    For an INVISIBLE resource opened across calls (a base-feature edit scope: `count==0`,
    `itemByName==None`, `timeline` raises while it's open), CAPTURE the handle `add()` returned — it can
-   never be re-found — and do NOT gate the CLOSE on a state the open scope itself changes (`design_mode`
-   deliberately doesn't mode-gate `finish`, or it would leak the scope it opened).
+   never be re-found — and do NOT gate the CLOSE on a state the open scope itself changes
+   (`model_base_feature` deliberately doesn't mode-gate `finish`, or it would leak the scope it opened).
 4. **Teaches at the failure moment, in ONE shared home — not in every description.** Failure-time
    teaching → the error, once, in the shared resolver (`_cam_common.get_cam`'s Manufacture-gate error).
    Purpose + next-step → a lean description. Input legality → a typed kind. (The direction-vector rule.)
@@ -151,12 +162,12 @@ The lints say "no"; these are the "yes". A tool is excellent when it:
   `model_inspect`.
 - **Honesty** (mutation verified or let to raise, never swallowed): `model_create_component` (rename
   read-back), `cam_delete` (`deleteMe()==False` reported, not swallowed), `mesh_export` (file-exists
-  gate after `execute()`), `surface_edit` (commit-or-cancel a `createInput` transaction — never leave
+  gate after `execute()`), `surface_trim` (commit-or-cancel a `createInput` transaction — never leave
   it open), `data_switch_hub` (assign, then re-read `activeHub` to confirm it actually changed),
   `joint_motion_link` (rolls the created link back with `deleteMe()` if the ratio can't be applied,
   rather than leaving a silent default 1:1 link).
 - **Guards**: `doc_open` (a required declare-intent flag refuses the API path for a document class
-  that's known to crash Fusion, rather than silently taking the crash-prone path), `data_ops`
+  that's known to crash Fusion, rather than silently taking the crash-prone path),
   `data_delete_folder` (requires `confirm_name` to match exactly, and previews the full recursive
   blast radius before a non-empty-folder delete).
 - **Acquire**: `find_geometry`. **Orient**: `workspace_orient`.
@@ -173,18 +184,13 @@ always-current reference for raw signatures. A handler docstring that only resta
 `description` should be one line or omitted. Add a SHORT `#` comment only for a non-obvious constraint the code can't show on its own.
 A hard-won lesson belongs in your own memory, not the repo.
 
-## One tool per file — and the grandfathered exceptions
+## One tool per file
 
-Default for a NEW tool: one verb per file (an Edit), or one domain with many slices (a Read, e.g.
-`design_get`). The following files predate that rule and bundle several registered tools; they are
-grandfathered rather than split retroactively (verified tool counts per file): `doc_lifecycle.py` (7),
-`mesh_ops.py` (5), `param_ops.py` (5), `data_ops.py` (4), `sketch_core.py` (4), `surface_edit.py` (4),
-`design_mode.py` (3), `assembly_joints_advanced.py` (3), `assembly_transform.py` (3),
-`surface_create.py` (3), `surface_ops.py` (3), `cam_generate.py` (2), `cam_templates.py` (3),
-`joint_create_edit.py` (2), `mesh_edit.py` (2), `mesh_export.py` (2), `model_fillet_chamfer.py` (2),
-`model_pattern.py` (2), `sketch_transform.py` (2), `view_workspaces.py` (2), `sys_selection.py` (2).
-Split one opportunistically when you already have the file open for an unrelated fix — there is no
-dedicated split effort.
+Every registered tool lives in the file named after it: `<tool_name>.py` holds `handler`,
+`TOOL_DESCRIPTION`, `tool`, `item` and `register_tool()`, and registers nothing else. A Read with many
+slices (`design_get`) is still one tool - its slices are `_slice_*` helpers in the same file. Code two
+tools share lives once, in the family's underscore helper (`_cam_common`, `_doc_common`, ...), never
+copied into a second tool file. Enforced by `test_tool_naming.py`.
 
 ## `write=` policy for a read-style verb whose actions still mutate state
 

@@ -13,7 +13,7 @@ without touching a camera.
 
 import json
 
-from conftest import load_tool, FakePoint, FakeVector3D, make_bbox
+from conftest import Camera, FakePoint, FakeVector3D, Viewport, load_tool, make_bbox
 
 sv = load_tool("view_section")
 
@@ -107,29 +107,12 @@ class FakeDesign:
         self.analyses = FakeAnalyses(sections)
 
 
-class FakeCamera:
-    # _aim_at_cut reads eye/target (for distance) and writes eye/upVector/isFitView.
-    def __init__(self):
-        self.eye = FakePoint(10, 0, 0)
-        self.target = FakePoint(0, 0, 0)
-        self.upVector = None
-        self.isFitView = False
-
-
-class FakeViewport:
-    def __init__(self):
-        self.camera = FakeCamera()
-        self.refreshed = 0
-
-    def refresh(self):
-        self.refreshed += 1
-
-
 class FakeApp:
     def __init__(self, design):
         self._design = design
         self.activeProduct = design
-        self.activeViewport = FakeViewport()
+        # _aim_at_cut reads eye/target (for distance) and writes eye/upVector/isFitView.
+        self.activeViewport = Viewport(camera=Camera(eye=(10, 0, 0), up=None))
 
 
 def _install(occurrences=(), existing_sections=()):

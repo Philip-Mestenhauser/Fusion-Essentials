@@ -653,3 +653,199 @@ class TestFileFacts:
         resolves(err="'notes.txt' names 2 files in project 'P1' - refusing to guess which")
         res = dm.file_facts_handler(file="notes.txt", project="P1")
         assert "names 2 files" in error_message(res)
+
+
+class FakeProjFolder:
+    """A DataFolder that supports add() (folders) and uploadFile()."""
+    def __init__(self, name, parent=None, is_root=False):
+        self.name = name
+        self.parentFolder = parent
+        self.isRoot = is_root
+        self._children = []
+        self._files = []
+        self.uploaded = []
+
+    def _add_child(self, name):
+        child = FakeProjFolder(name, parent=self)
+        self._children.append(child)
+        return child
+
+    @property
+    def id(self):
+        return "fid:" + self.name
+
+    @property
+    def dataFolders(self):
+        outer = self
+        class _DF:
+            @property
+            def count(self_inner):
+                return len(outer._children)
+            def asArray(self_inner):
+                return list(outer._children)
+            def add(self_inner, name):           # Fusion: DataFolder.dataFolders.add(name)
+                return outer._add_child(name)
+        return _DF()
+
+    @property
+    def dataFiles(self):
+        outer = self
+        class _Df:
+            @property
+            def count(self_inner):
+                return len(outer._files)
+            def asArray(self_inner):
+                return list(outer._files)
+        return _Df()
+
+    def uploadFile(self, path):
+        self.uploaded.append(path)
+        return _next_future
+
+
+class FakeProj:
+    def __init__(self, name, pid, root):
+        self.name = name
+        self.id = pid
+        self.rootFolder = root
+
+
+class FakeProjects:
+    def __init__(self, projects):
+        self._p = list(projects)
+        self.added = []
+    def asArray(self):
+        return list(self._p)
+    def add(self, name, purpose, contributors):
+        p = FakeProj(name, "newid:" + name, FakeProjFolder("Root", is_root=True))
+        self._p.append(p)
+        self.added.append((name, purpose, contributors))
+        return p
+
+
+class FakeProjData:
+    def __init__(self, projects):
+        self.dataProjects = FakeProjects(projects)
+
+
+_next_future = None
+
+
+def _install_proj_data(projects):
+    data = FakeProjData(projects)
+    dm._data = lambda: data
+    return data
+
+
+class TestListFolders:
+    def _tree(self):
+        root = FakeProjFolder("Root", is_root=True)
+        parts = root._add_child("Parts")
+        parts._add_child("Fixtures")
+        root._add_child("Templates")
+        return FakeProj("Proj", "pid", root)
+
+    def test_lists_tree_with_paths(self):
+        _install_proj_data([self._tree()])
+        out = _payload(dm.list_folders_handler(project="Proj"))
+        top = {n["name"]: n for n in out["folders"]}
+        assert set(top) == {"Parts", "Templates"}
+        assert top["Parts"]["path"] == "Parts"
+        # nested folder appears under Parts with full path
+        nested = top["Parts"]["folders"][0]
+        assert nested["name"] == "Fixtures" and nested["path"] == "Parts/Fixtures"
+        assert out["folder_count"] == 3
+
+    def test_max_depth_clamped_to_at_least_one(self):
+        _install_proj_data([self._tree()])
+        out = _payload(dm.list_folders_handler(project="Proj", max_depth=0))
+        # clamped to 1 -> top-level folders only. Whether a depth-capped folder has children is
+        # UNKNOWN (checking would cost a cloud fetch) - flagged children_unknown, on every capped
+        # node, never a guessed 'no children'.
+        assert out["max_depth"] == 1
+        top = {n["name"]: n for n in out["folders"]}
+        assert top["Parts"].get("children_unknown") is True
+        assert "folders" not in top["Parts"]
+
+    def test_invalid_max_depth_defaults(self):
+        _install_proj_data([self._tree()])
+        out = _payload(dm.list_folders_handler(project="Proj", max_depth="oops"))
+        assert out["max_depth"] == 4
+
+    def test_within_budget_is_not_truncated(self):
+        _install_proj_data([self._tree()])
+        out = _payload(dm.list_folders_handler(project="Proj"))
+        assert out["truncated"] is False
+
+    def test_folder_budget_cuts_the_walk_and_flags_it(self, monkeypatch):
+        # every dataFolders fetch is a slow MAIN-THREAD cloud round-trip (a large project's walk
+        # can stall Fusion past the 30 s handler cap, live-verified) - the walk must stop at the
+        # budget, report truncated=true, and mark each unexpanded node folders_truncated so the
+        # caller knows WHICH subtrees were cut, not just that something was.
+        root = FakeProjFolder("Root", is_root=True)
+        subs = [root._add_child(f"Sub{i}") for i in range(4)]
+        for s in subs:
+            s._add_child(s.name + "Deep")
+        _install_proj_data([FakeProj("Proj", "pid", root)])
+        monkeypatch.setattr(dm, "_LF_FOLDER_BUDGET", 2)   # root + Sub0 only
+        out = _payload(dm.list_folders_handler(project="Proj"))
+        assert out["truncated"] is True
+        top = {n["name"]: n for n in out["folders"]}
+        assert set(top) == {"Sub0", "Sub1", "Sub2", "Sub3"}   # breadth-first: all shallow nodes land
+        assert top["Sub0"]["folders"][0]["name"] == "Sub0Deep"  # the one budgeted fetch descended
+        # the three unexpanded siblings are each flagged - their subtrees were NOT searched
+        for name in ("Sub1", "Sub2", "Sub3"):
+            assert top[name].get("folders_truncated") is True
+            assert "folders" not in top[name]
+
+    def test_time_budget_cuts_the_walk_and_flags_it(self, monkeypatch):
+        # A transient network stall can hang a single dataFolders fetch past normal latency - unlike
+        # the fetch-COUNT budget above, this exercises the WALL-CLOCK deadline (checked between folder
+        # visits, since an in-flight fetch can't be interrupted). time.monotonic() is scripted rather
+        # than really slept.
+        root = FakeProjFolder("Root", is_root=True)
+        for i in range(4):
+            root._add_child(f"Sub{i}")
+        _install_proj_data([FakeProj("Proj", "pid", root)])
+
+        t0 = 5000.0
+        # calls: 1) deadline calc, 2) root-visit check(ok), 3) Sub0-visit check(ok, no children),
+        # 4) Sub1-visit check(stall) - Sub2/Sub3 never even get fetched.
+        values = [t0, t0, t0, t0 + dm._TIME_BUDGET_S + 1]
+        idx = {"i": 0}
+        def fake_monotonic():
+            v = values[min(idx["i"], len(values) - 1)]
+            idx["i"] += 1
+            return v
+        monkeypatch.setattr(dm.time, "monotonic", fake_monotonic)
+
+        out = _payload(dm.list_folders_handler(project="Proj"))
+        assert out["truncated"] is True
+        assert out["time_truncated"] is True
+        top = {n["name"]: n for n in out["folders"]}
+        assert set(top) == {"Sub0", "Sub1", "Sub2", "Sub3"}
+        # Sub0 was actually fetched (visited before the stall) and had no children - a genuine leaf,
+        # not a truncation.
+        assert top["Sub0"].get("folders_truncated") is None
+        # Sub1 onward were never fetched once the deadline was crossed.
+        for name in ("Sub1", "Sub2", "Sub3"):
+            assert top[name].get("folders_truncated") is True
+
+    def test_time_budget_not_tripped_on_a_fast_walk(self):
+        _install_proj_data([self._tree()])
+        out = _payload(dm.list_folders_handler(project="Proj"))
+        assert out["time_truncated"] is False
+
+    def test_walk_is_breadth_first_shallow_before_deep(self, monkeypatch):
+        # a deep chain must not eat the budget before the shallow siblings are even listed.
+        root = FakeProjFolder("Root", is_root=True)
+        chain = root._add_child("A")
+        chain._add_child("A1")._add_child("A2")._add_child("A3")
+        root._add_child("B")
+        root._add_child("C")
+        _install_proj_data([FakeProj("Proj", "pid", root)])
+        monkeypatch.setattr(dm, "_LF_FOLDER_BUDGET", 3)   # root + A + B (never reaches A1's child)
+        out = _payload(dm.list_folders_handler(project="Proj", max_depth=6))
+        top = {n["name"]: n for n in out["folders"]}
+        assert set(top) == {"A", "B", "C"}                # every shallow folder listed first
+        assert out["truncated"] is True

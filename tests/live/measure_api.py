@@ -262,7 +262,7 @@ ROWS = [
     {
         "id": "vector3d-normalize-zero",
         "claim": "Vector3D.normalize() returns True even for a (near-)zero vector and leaves the components untouched - the return value is not a zero guard",
-        "encoded_in": "tests/conftest.py FakeVector3D.normalize; commands/mcpServer/tools/sys_selection.py _unit",
+        "encoded_in": "tests/conftest.py FakeVector3D.normalize; commands/mcpServer/tools/_geom.py unit_vector (its own magnitude guard, never normalize()'s return)",
         "body": """
     z = adsk.core.Vector3D.create(0.0, 0.0, 0.0)
     rz = z.normalize()
@@ -349,7 +349,7 @@ ROWS = [
                   "for these two types is readable only through the timeline item"),
         "encoded_in": ("_assert.py compute_state / compute_failure safe-guarded entity reads; "
                        "tests/unit/test_assembly_get.py TimelineObject-answers comment; "
-                       "tests/unit/test_assembly_joints_advanced.py poison-read comment"),
+                       "tests/unit/test_assembly_constrain.py poison-read comment"),
         "body": """
     root = des.rootComponent
     tr = adsk.core.Matrix3D.create()
@@ -402,7 +402,7 @@ ROWS = [
                   "regardless of the units argument - that argument only names the unit a BARE "
                   "number in the expression is read in, never the output unit"),
         "encoded_in": ("_inputs.length_value_input value_cm (the read-back compare's unit "
-                       "convention); tests/unit/test_inputs.py + test_model_fillet_chamfer.py "
+                       "convention); tests/unit/test_inputs.py + test_model_fillet.py "
                        "expression fakes, which answer in cm"),
         "body": """
     um = des.unitsManager
@@ -423,7 +423,7 @@ ROWS = [
                   "cut that bottoms out inside its target (the requested value, never clipped), "
                   "and a NEGATIVE distance (the requested SIGN kept, -15 mm reads -1.5)"),
         "encoded_in": ("model_extrude's distance read-back compare (want_distance_cm vs "
-                       "extentOne.distance.value); surface_create._landed_depth, the same contract"),
+                       "extentOne.distance.value); surface_extrude._landed_depth, the same contract"),
         "need_box": True,
         "body": """
     root = des.rootComponent
@@ -838,7 +838,7 @@ ROWS = [
     {
         "id": "meshbodies-no-itembyname",
         "claim": "A component's meshBodies collection has count/item but NO itemByName (unlike bRepBodies, which has all three) - a mesh must be resolved by iterate-and-match, never itemByName",
-        "encoded_in": "tests/unit/test_mesh_export.py + test_inputs.py + test_surface_ops.py (all omit it, correct)",
+        "encoded_in": "tests/unit/test_mesh_export.py + test_inputs.py + test_model_stitch.py (all omit it, correct)",
         "facts_on_pass": {"behavior.meshbodies_has_itembyname": False},
         "body": """
     root = adsk.fusion.Design.cast(app.activeProduct).rootComponent
@@ -971,7 +971,7 @@ ROWS = [
     {
         "id": "meshbody-volume-open-returns-zero",
         "claim": "MeshBody.volume on a mesh that is NOT closed RETURNS 0.0 - it does not raise; a null volume in a payload therefore means the field could not be read at all, never 'the mesh is open'",
-        "encoded_in": "mesh_ops.py _mesh_summary/mesh_get note+description; mesh_shell.py _closed (the reason the closure flag is sampled at both ends); tests/conftest.py's shared MeshBody fake, which reads this BEHAVIOR flag rather than hard-coding it; test_mesh_ops.py's own MeshBody",
+        "encoded_in": "_mesh_common.py _mesh_summary + mesh_get's note/description; mesh_shell.py _closed (the reason the closure flag is sampled at both ends); tests/conftest.py's shared MeshBody fake, which reads this BEHAVIOR flag rather than hard-coding it; test_mesh_get.py's own MeshBody",
         "facts_on_pass": {"behavior.meshbody_volume_open_raises": False},
         "body": """
     tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
@@ -1298,7 +1298,7 @@ ROWS = [
     {
         "id": "enum-design-types",
         "claim": "DesignTypes ints: DirectDesignType=0, ParametricDesignType=1",
-        "encoded_in": "tests/unit/test_design_mode.py; _inputs.py current_design_type/ModeGuard",
+        "encoded_in": "tests/unit/test__design_common.py; _inputs.py current_design_type/ModeGuard",
         "body": """
     D = adsk.fusion.DesignTypes
     dump_enum("fusion.DesignTypes", D)
@@ -1454,7 +1454,7 @@ ROWS = [
     {
         "id": "enum-joint-directions",
         "claim": "JointDirections ints: XAxis=0, YAxis=1, ZAxis=2, Custom=3",
-        "encoded_in": "tests/unit/test_edit_joint.py; _joints.py JointDirections mapping",
+        "encoded_in": "tests/unit/test_joint_edit.py; _joints.py JointDirections mapping",
         "body": """
     D = adsk.fusion.JointDirections
     dump_enum("fusion.JointDirections", D)
@@ -1541,7 +1541,7 @@ ROWS = [
     {
         "id": "camera-returns-copy",
         "claim": "Viewport.camera returns a COPY - mutating it moves nothing until viewport.camera is reassigned",
-        "encoded_in": "tests/unit/test_view_set.py FakeViewport/FakeCamera (models a shared mutable object, the opposite, so only this row checks the real semantics)",
+        "encoded_in": "tests/conftest.py's shared Viewport/Camera fakes (they model a shared mutable object, the opposite, so only this row checks the real semantics)",
         "facts_on_pass": {"behavior.viewport_camera_returns_copy": True},
         "body": """
     vp = app.activeViewport
@@ -1562,7 +1562,7 @@ ROWS = [
     {
         "id": "basefeature-edit-scope",
         "claim": "An open base-feature edit scope is INVISIBLE: baseFeatures.count reads 0 and Design.timeline raises while open; finishEdit makes it appear (count 1)",
-        "encoded_in": "tests/unit/test_design_mode.py; design_mode.py _OPEN_BASE_FEATURES comment",
+        "encoded_in": "tests/unit/test_model_base_feature.py; model_base_feature.py _OPEN_BASE_FEATURES comment",
         "facts_on_pass": {"behavior.open_base_feature_hidden": True},
         "body": """
     root = des.rootComponent
@@ -1660,6 +1660,78 @@ ROWS = [
         0.5, 0.3)))
     emit(len(counts) == 21 and all(c > 0 for c in counts),
          "shape-dump-design-world: " + str(len(counts)) + " types, min attrs " + str(min(counts)))
+""",
+    },
+    {
+        "id": "brepedge-evaluator-tangent-follows-curve-not-edge",
+        "claim": ("BRepEdge.evaluator.getTangent, taken at the parameter of startVertex.geometry, "
+                  "returns a vector ANTI-parallel to (endVertex - startVertex) exactly when "
+                  "isParamReversed reads True, and parallel when it reads False - the evaluator "
+                  "follows the underlying CURVE, so the edge's own heading is the flag applied to "
+                  "it. Measured over EVERY linear edge of a shelled box, and the row fails unless "
+                  "at least one of them reads isParamReversed True, so a rig with nothing to "
+                  "discriminate cannot pass. A plain box read the flag False on all twelve edges"),
+        "encoded_in": ("tests/conftest.py's shared BRepEdge fake (its param_reversed argument) and "
+                       "_edge_common._edge_tangent, which negates the evaluator tangent "
+                       "when isParamReversed reads True before _edge_convexity signs one edge's "
+                       "dihedral off that heading"),
+        "body": """
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        d = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        root = d.rootComponent
+        sk = root.sketches.add(root.xYConstructionPlane)
+        sk.sketchCurves.sketchLines.addTwoPointRectangle(
+            adsk.core.Point3D.create(0.0, 0.0, 0.0), adsk.core.Point3D.create(4.0, 3.0, 0.0))
+        solid = root.features.extrudeFeatures.addSimple(
+            sk.profiles.item(0), adsk.core.ValueInput.createByReal(2.0),
+            adsk.fusion.FeatureOperations.NewBodyFeatureOperation).bodies.item(0)
+        top = None
+        for i in range(solid.faces.count):
+            f = solid.faces.item(i)
+            if type(f.geometry).__name__ == "Plane" and abs(f.geometry.normal.z - 1.0) < 1e-6:
+                top = f
+        opening = adsk.core.ObjectCollection.create()
+        opening.add(top)
+        # The shell is what puts reversed edges on the body: the same box unshelled read the flag
+        # False on every edge, leaving the claim's True half unmeasured.
+        shell_in = root.features.shellFeatures.createInput(opening)
+        shell_in.insideThickness = adsk.core.ValueInput.createByReal(0.3)
+        root.features.shellFeatures.add(shell_in)
+        linear = 0
+        n_reversed = 0
+        agree = 0
+        disagreed = []
+        for i in range(solid.edges.count):
+            e = solid.edges.item(i)
+            if type(e.geometry).__name__ != "Line3D":
+                continue
+            linear += 1
+            start = e.startVertex.geometry
+            end = e.endVertex.geometry
+            against = bool(e.isParamReversed)
+            if against:
+                n_reversed += 1
+            at = e.evaluator.getParameterAtPoint(start)
+            got = e.evaluator.getTangent(at[1]) if at[0] else (False, None)
+            if not (at[0] and got[0]):
+                disagreed.append("edge " + str(i) + " did not evaluate")
+                continue
+            t = got[1]
+            dot = (t.x * (end.x - start.x) + t.y * (end.y - start.y)
+                   + t.z * (end.z - start.z))
+            if (dot < 0.0) == against:
+                agree += 1
+            else:
+                disagreed.append("edge " + str(i) + " isParamReversed=" + repr(against)
+                                 + " dot=" + ("%.4f" % dot))
+        emit(linear > 0 and n_reversed > 0 and agree == linear,
+             "brepedge-evaluator-tangent-follows-curve-not-edge: shelled box, linear edges="
+             + str(linear) + " reading isParamReversed True=" + str(n_reversed)
+             + " | tangent-vs-start-to-end sign matches the flag on " + str(agree)
+             + " of them | mismatches=" + str(disagreed[:3]))
+    finally:
+        tmp.close(False)
 """,
     },
     {
@@ -2129,7 +2201,7 @@ ROWS = [
     {
         "id": "fillet-tangent-chain-loop-faces",
         "claim": "A fillet driven from ONE edge of an 8-edge tangent top loop (4 lines + 4 arcs, isTangentChain=True) lands FilletFeature.faces.count == 8 - the chain expands across every tangent neighbour, so the number of edges HANDED IN predicts nothing about what got filleted",
-        "encoded_in": "model_fillet_chamfer.py's tangent-chain wording and its off-the-feature face read-back",
+        "encoded_in": "_edge_common.py's tangent-chain wording and its off-the-feature face read-back",
         "need_box": True,
         "body": """
     root = des.rootComponent
@@ -2167,7 +2239,7 @@ ROWS = [
     {
         "id": "fillet-feature-has-no-edges",
         "claim": "FilletFeature exposes NO 'edges' member: it is absent from dir() and reading it raises AttributeError, so the edges a fillet consumed cannot be read back off the feature - only its faces can",
-        "encoded_in": "model_fillet_chamfer.py's face-based read-back (the reason a fillet payload never names the filleted edges)",
+        "encoded_in": "_edge_common.py's face-based read-back (the reason a fillet payload never names the filleted edges)",
         "need_box": True,
         "facts_on_pass": {"behavior.fillet_feature_has_edges": False},
         "body": """
@@ -2786,8 +2858,8 @@ ROWS = [
                   "template whose stored leafName spells something else (the shipped hole "
                   "templates: 'Countersink Drill Tap.f3dhsm-template' against the name 'Drill & "
                   "Tap Countersink Hole') be addressed by its position"),
-        "encoded_in": ("cam_templates._walk_library's by_position pairing and its url_basis "
-                       "'folder_position' row key; tests/unit/test_cam_templates.py "
+        "encoded_in": ("_cam_templates._walk_library's by_position pairing and its url_basis "
+                       "'folder_position' row key; tests/unit/test__cam_templates.py "
                        "TestWalkLibrary, whose fake library answers one asset per template"),
         "body": """
     lib = adsk.cam.CAMManager.get().libraryManager.templateLibrary
@@ -3685,11 +3757,11 @@ ROWS = [
         "id": "cam-advanced-swarf-surface-set-editable",
         "claim": ("A fresh advanced_swarf operation reads advancedSwarfSurfaces isEditable True, "
                   "while swarfUpperContour reads isEditable False and checkSurfaceSelection does "
-                  "not resolve through itemByName at all. Nor does ANY of the six names "
+                  "not resolve through itemByName at all. Nor does ANY of the seven names "
                   "cam_select_geometry probes for a curve selection (contours, pockets, "
-                  "swarfContours, edgeSel, machiningBoundarySel, stockContours). So this strategy "
-                  "is reachable through its ONE settable surface set, and through no curve "
-                  "selection at all - the six ABSENT names are why, not the contour reads, whose "
+                  "swarfContours, edgeSel, curves, machiningBoundarySel, stockContours). So this "
+                  "strategy is reachable through its ONE settable surface set, and through no curve "
+                  "selection at all - the seven ABSENT names are why, not the contour reads, whose "
                   "isEditable is recorded as read and decides nothing. The op carries a tool and "
                   "sits in a FRESH setup: a tool-less op added under the harness raises a modal "
                   "'Failed to generate toolpath - no tool selected' dialog that parks the thread"),
@@ -3731,7 +3803,7 @@ ROWS = [
     upper_editable = None if upper is None else upper.isEditable
     # _CURVE_PARAM_CANDIDATES, in the tool's own probe order: a name resolving here would mean a
     # chain/face selection lands somewhere on this op rather than reaching the refusal.
-    curve_hits = [nm for nm in ("contours", "pockets", "swarfContours", "edgeSel",
+    curve_hits = [nm for nm in ("contours", "pockets", "swarfContours", "edgeSel", "curves",
                                 "machiningBoundarySel", "stockContours")
                   if op.parameters.itemByName(nm) is not None]
     emit(drive is not None and drive_editable is True and upper is not None
@@ -3741,6 +3813,70 @@ ROWS = [
          + " | swarfUpperContour present=" + str(upper is not None) + " isEditable="
          + repr(upper_editable) + " | checkSurfaceSelection resolves=" + str(check is not None)
          + " | curve-probe names that resolve=" + str(curve_hits) + " (expect none)")
+""",
+    },
+    {
+        "id": "cam-curves-parameter-carriers",
+        "claim": ("A fresh trace, multi_axis_contour, morph and project operation each resolve "
+                  "parameters.itemByName('curves'), and those four are the only ones of the five "
+                  "measured here that do. Morph and project ALSO resolve machiningBoundarySel, and "
+                  "'curves' is still the FIRST of cam_select_geometry's seven probe names either of "
+                  "them resolves - so the probe order is what decides where a chain selection lands "
+                  "on those two. A fresh pocket2d resolves neither 'curves' nor "
+                  "machiningBoundarySel. The message records, per strategy, every one of the seven "
+                  "names that resolves, in probe order. Every op carries a tool and is created with "
+                  "generationMode SkipGeneration in its own setup: a create left on the platform's "
+                  "user preference can generate at once and park the main thread behind a modal "
+                  "dialog"),
+        "encoded_in": ("cam_select_geometry._CURVE_PARAM_CANDIDATES, whose order puts "
+                       "_DRIVE_CURVES_PARAM ('curves') ahead of _MACHINING_BOUNDARY_PARAM so a "
+                       "morph/project chain reaches the drive curves rather than the boundary; "
+                       "tests/unit/test_cam_select_geometry.py's operation fakes, which name the "
+                       "parameters each strategy carries"),
+        "needs": "cam",
+        "body": """
+    cam, setup = cam_measure_setup()
+    tool = cam_sample_tool()
+    if tool is None:
+        emit(False, "cam-curves-parameter-carriers: no bundled sample milling library"
+             " - inconclusive")
+        return
+    wanted = ("trace", "multi_axis_contour", "morph", "project", "pocket2d")
+    allowed = {}
+    for s in setup.operations.compatibleStrategies:
+        if s.name in wanted:
+            allowed[s.name] = s.isGenerationAllowed
+    # The pre-flight the no-blocked-op rule requires: creating an op on a strategy this flag reads
+    # False for raises a modal licence dialog that parks the main thread.
+    blocked = [nm + "=" + repr(allowed.get(nm)) for nm in wanted if allowed.get(nm) is not True]
+    if blocked:
+        emit(False, "cam-curves-parameter-carriers: isGenerationAllowed is not True for "
+             + ", ".join(blocked) + " - nothing created, inconclusive")
+        return
+    si = cam.setups.createInput(adsk.cam.OperationTypes.MillingOperation)
+    si.models = list(setup.models)
+    own = cam.setups.add(si)
+    own.name = "MeasureCurvesSetup"
+    # _CURVE_PARAM_CANDIDATES in the tool's own probe order - the first hit is where a chain lands.
+    order = ("contours", "pockets", "swarfContours", "edgeSel", "curves",
+             "machiningBoundarySel", "stockContours")
+    census = {}
+    for nm in wanted:
+        opin = own.operations.createInput(nm)
+        opin.tool = tool
+        opin.generationMode = adsk.cam.AutomaticGenerationModes.SkipGeneration
+        op = own.operations.add(opin)
+        census[nm] = [p for p in order if op.parameters.itemByName(p) is not None]
+    with_curves = [nm for nm in wanted if "curves" in census[nm]]
+    first = dict((nm, (census[nm][0] if census[nm] else None)) for nm in wanted)
+    emit(with_curves == ["trace", "multi_axis_contour", "morph", "project"]
+         and "machiningBoundarySel" in census["morph"]
+         and "machiningBoundarySel" in census["project"]
+         and first["morph"] == "curves" and first["project"] == "curves"
+         and "curves" not in census["pocket2d"]
+         and "machiningBoundarySel" not in census["pocket2d"],
+         "cam-curves-parameter-carriers: "
+         + "; ".join(nm + " -> " + ",".join(census[nm] or ["(none)"]) for nm in wanted))
 """,
     },
     {
@@ -3789,8 +3925,8 @@ ROWS = [
                   "templateAtURL on the DELETED address is not part of that proof: it raises "
                   "rather than answering null (cam-templateaturl-raises-on-deleted-url). "
                   "Self-cleaning: the template this row imports is the one it deletes"),
-        "encoded_in": ("cam_templates.py delete_template_handler read-backs and its "
-                       "sibling-inference comment; save-side importTemplate gates"),
+        "encoded_in": ("cam_delete_template.py's read-backs and its sibling-inference comment; "
+                       "save-side importTemplate gates"),
         "needs": "cam",
         "body": """
     # Each step names itself before it runs: the runner truncates a traceback's inner frame, so a
@@ -3865,8 +4001,8 @@ ROWS = [
                   "absence - the asset WALK must - and any caller reading it needs safe(). This "
                   "row catches the raise and gates on its message; the expect also accepts a "
                   "script-level abort, so a PASS does not say which of the two the run saw"),
-        "encoded_in": ("cam_templates.py delete_template_handler's safe()-wrapped loads_after "
-                       "read and the comment naming the asset walk as the load-bearing leg"),
+        "encoded_in": ("cam_delete_template.py's safe()-wrapped loads_after read and the comment "
+                       "naming the asset walk as the load-bearing leg"),
         "needs": "cam",
         "expect": "raise_or_abort",
         "body": """
@@ -4206,7 +4342,7 @@ ROWS = [
                   "never added, so this row creates no operation"),
         "encoded_in": ("cam_create_operation's SkipGeneration assignment on the non-generating "
                        "path (its read-back publishes payload key generation_mode_note only on a "
-                       "disagreement) and cam_templates._GEN_MODES, the "
+                       "disagreement) and cam_apply_template._GEN_MODES, the "
                        "friendly-key -> member table cam_apply_template sets on "
                        "CreateFromCAMTemplateInput.mode; tests/unit/test_cam_create_operation.py's "
                        "OperationInput fake"),
@@ -4489,7 +4625,8 @@ def _judge(row, is_error, payload):
     lines = _verdict_lines(payload)
     fails = [ln[5:] for ln in lines if ln.startswith("FAIL ")]
     if fails:
-        return "FAIL", "; ".join(fails)[:200]
+        # NOT truncated either: the evidence for a FAIL is the numbers at the end of the detail.
+        return "FAIL", "; ".join(fails)
     if not lines:
         return "ERROR", "no verdict output"
     return "PASS", "; ".join(ln[5:] for ln in lines)[:200]

@@ -5,6 +5,8 @@
 constraints, dimensions - and owns the sketch's world FRAME. Entity ids ('<type>:<index>') are the
 references sketch_constrain / model_extrude / sketch_add_geometry take."""
 
+import importlib
+import math
 import types
 
 import adsk.core
@@ -18,11 +20,11 @@ from . import _inputs
 app = adsk.core.Application.get()
 
 MAP_BLURB = (
-    "the sketch_get(sketch_name=...) X-ray; sketch_world_frame/frame_space_note - a sketch plane's "
-    "frame + its wire sentence; curve_id - a curve's '<type>:<index>' id; scope_component/"
-    "scope_components/COMPONENT_SCOPE/component_scope - the 'component' read scope + wire form; "
-    "scoped_sketch/scoped_or_recent_sketch/scope_remedy - the same for an EDIT; unquote_text/"
-    "font_read_back - SketchText readers.")
+    "sketch_get's X-ray; sketch_world_frame/frame_space_note - a sketch's frame + sentence; "
+    "curve_id - a curve's '<type>:<index>'; scope_component/scope_components/COMPONENT_SCOPE/"
+    "component_scope/scoped_sketch/scoped_or_recent_sketch/scope_remedy - the 'component' scope "
+    "+ wire form; _sketch_summary - a sketch's row; _prepare/_transform - move/copy matrix; "
+    "unquote_text/font_read_back - SketchText.")
 
 
 def unquote_text(expr):
@@ -638,6 +640,173 @@ def scoped_or_recent_sketch(design, name, component, input_name="component"):
                             f"act on (scope '{scope}'). Name a sketch in 'sketch_name', or create "
                             "one with sketch_create.")
     return safe(lambda i=n - 1: coll.item(i)), None, None
+
+
+def _detail_engine():
+    """This module, looked up in the module table by NAME at call time - the package attribute is
+    bound once, so swapping the engine in the module table would not reach it."""
+    return importlib.import_module("._sketch_detail", __package__)
+
+
+def _plane_name(sketch) -> str:
+    rp = safe(lambda: sketch.referencePlane)
+    return safe(lambda: rp.name) if rp is not None else None
+
+
+def _sketch_summary(sketch) -> dict:
+    """The per-sketch row (counts + visibility) every sketch payload carries."""
+    curves = safe(lambda: sketch.sketchCurves)
+    row = {
+    "name": safe(lambda: sketch.name),
+    "plane": _plane_name(sketch),
+    "line_count": safe(lambda: curves.sketchLines.count, 0) if curves else 0,
+    "circle_count": safe(lambda: curves.sketchCircles.count, 0) if curves else 0,
+    "arc_count": safe(lambda: curves.sketchArcs.count, 0) if curves else 0,
+    "point_count": safe(lambda: sketch.sketchPoints.count, 0),
+    "profile_count": safe(lambda: sketch.profiles.count, 0),
+    "is_visible": safe(lambda: sketch.isVisible),
+    }
+    # While compute is deferred the profile_count above is the pre-deferral one, and no read of
+    # this sketch resumes compute.
+    if compute_deferred(sketch) is True:
+        row["compute_deferred"] = True
+        row["profiles_stale"] = True
+    return row
+
+
+# ── the sketch-space transform both sketch_move and sketch_copy place geometry through ──────────
+
+_ENTITIES = {"type": "string", "description": "Refs to transform, comma-separated."}
+
+_DX = _inputs.Distance("dx", allow_zero=True, default=0.0,
+                       description="Translation along sketch X.")
+_DY = _inputs.Distance("dy", allow_zero=True, default=0.0,
+                       description="Translation along sketch Y.")
+_CENTER_X = _inputs.Distance("center_x", allow_zero=True, default=0.0,
+                             description="Rotate/scale anchor X.")
+_CENTER_Y = _inputs.Distance("center_y", allow_zero=True, default=0.0,
+                             description="Rotate/scale anchor Y.")
+
+_TRANSFORM_INPUTS = (
+    ("rotation_deg", {"type": "number", "description": "Rotation about the anchor, degrees CCW."}),
+    ("scale_factor", {"type": "number", "description": "Uniform scale about the anchor; > 0."}),
+)
+
+
+def _object_collection(ents, refs):
+    """(ObjectCollection, error) holding the entities to transform."""
+    # Sketch.move/copy take an ObjectCollection and raise TypeError on a plain list; the
+    # neighbouring GeometricConstraints.createCircularPatternInput takes the OPPOSITE container.
+    coll = adsk.core.ObjectCollection.create()
+    for ent, ref in zip(ents, refs):
+        if not coll.add(ent):
+            return None, f"The sketch entity '{ref}' was refused by the collection to transform."
+    return coll, None
+
+
+def _transform(dx_cm, dy_cm, angle_deg, factor, cx_cm, cy_cm):
+    """(Matrix3D, error) for a sketch-space uniform SCALE by `factor` and ROTATION by `angle_deg`
+    about (cx, cy), followed by a TRANSLATION of (dx, dy). Assembled as ONE matrix - linear part
+    factor*R, translation column c + d - factor*R*c - so the result never depends on which way round
+    Matrix3D.transformBy composes."""
+    theta = math.radians(float(angle_deg or 0.0))
+    cos_t, sin_t = math.cos(theta), math.sin(theta)
+    m = adsk.core.Matrix3D.create()
+    applied = [m.setToRotation(theta, adsk.core.Vector3D.create(0.0, 0.0, 1.0),
+                               adsk.core.Point3D.create(0.0, 0.0, 0.0))]
+    if factor != 1.0:
+        # scaling the whole 3x3 linear block is symmetric in row/column, so it needs no assumption
+        # about which index of the 4x4 holds the translation.
+        applied += [m.setCell(r, c, m.getCell(r, c) * factor)
+                    for r in range(3) for c in range(3)]
+    m.translation = adsk.core.Vector3D.create(
+        cx_cm + dx_cm - factor * (cos_t * cx_cm - sin_t * cy_cm),
+        cy_cm + dy_cm - factor * (sin_t * cx_cm + cos_t * cy_cm), 0.0)
+    if not all(applied):
+        return None, "Fusion refused a cell of the transform matrix, so nothing was transformed."
+    return m, None
+
+
+def _prepare(sketch_name, entities, units, dx, dy, rotation_deg, center_x, center_y, scale_factor,
+             component=""):
+    """Everything both tools need before the mutation: (design, sketch, ents, refs, coll, matrix,
+    unit, error_result)."""
+    blank = (None,) * 7
+    k, uerr = _inputs.UNITS.resolve(units)
+    if uerr:
+        return blank + (error(uerr),)
+    unit = (units or "mm").strip().lower()
+
+    design = _common.design()
+    if not design:
+        return blank + (error("No active design. Create or open a document first (see doc_new)."),)
+    sketch, requested, refusal = scoped_or_recent_sketch(design, sketch_name, component)
+    if refusal:
+        return blank + (error(refusal),)
+    if not sketch:
+        if requested:
+            return blank + (error(f"No sketch named '{requested}'. Available: " + (
+                ", ".join(n for n in _common.all_sketch_names(design) if n) or "(none)")),)
+        return blank + (error("No sketch to transform. Draw one first with sketch_create + "
+                              "sketch_add_geometry."),)
+
+    ents, refs, rerr = _common.resolve_entity_refs(sketch, entities)
+    if rerr:
+        return blank + (error(rerr),)
+    if not refs:
+        return blank + (error("'entities' is required - comma-separated '<type>:<index>' refs (e.g. "
+                              "'line:0,arc:1') from sketch_get(include_entities=true)."),)
+
+    try:
+        factor = float(scale_factor if scale_factor is not None else 1.0)
+    except (TypeError, ValueError):
+        return blank + (error(f"'scale_factor' must be a number, got {scale_factor!r}."),)
+    if factor <= 0:
+        return blank + (error(f"'scale_factor' must be greater than 0, got {factor}. A uniform "
+                              "scale cannot mirror geometry - draw the mirrored curves instead."),)
+    try:
+        angle = float(rotation_deg if rotation_deg is not None else 0.0)
+    except (TypeError, ValueError):
+        return blank + (error(f"'rotation_deg' must be a number, got {rotation_deg!r}."),)
+
+    lengths = {}
+    for kind, raw in ((_DX, dx), (_DY, dy), (_CENTER_X, center_x), (_CENTER_Y, center_y)):
+        value, lerr = kind.resolve_scaled(raw, k)
+        if lerr:
+            return blank + (error(lerr),)
+        lengths[kind.name] = float(value or 0.0)
+    if not (lengths["dx"] or lengths["dy"] or angle or factor != 1.0):
+        return blank + (error("Nothing to apply: give a 'dx'/'dy' translation, a 'rotation_deg', "
+                              "or a 'scale_factor' other than 1."),)
+
+    coll, cerr = _object_collection(ents, refs)
+    if cerr:
+        return blank + (error(cerr),)
+    matrix, merr = _transform(lengths["dx"], lengths["dy"], angle, factor,
+                              lengths["center_x"], lengths["center_y"])
+    if merr:
+        return blank + (error(merr),)
+    return design, sketch, ents, refs, coll, matrix, unit, None
+
+
+def _requested(unit, dx, dy, rotation_deg, scale_factor):
+    """The transform the caller asked for, echoed in the caller's own units."""
+    return {"units": unit, "dx": float(dx or 0.0), "dy": float(dy or 0.0),
+            "rotation_deg": float(rotation_deg or 0.0),
+            "scale_factor": float(scale_factor if scale_factor is not None else 1.0)}
+
+
+def _transform_wire(tool):
+    """The transform inputs both tools share, in one order."""
+    tool = (tool.add_input_property("entities", dict(_ENTITIES))
+                .add_required_input("entities")
+                .add_input_property(*_DX.as_property())
+                .add_input_property(*_DY.as_property())
+                .add_input_property(*_CENTER_X.as_property())
+                .add_input_property(*_CENTER_Y.as_property()))
+    for name, schema in _TRANSFORM_INPUTS:
+        tool = tool.add_input_property(name, dict(schema))
+    return tool.add_input_property(*_inputs.UNITS.as_property()).strict_schema()
 
 
 def handler(sketch_name: str = "", include_entities: bool = False, units: str = "mm",
