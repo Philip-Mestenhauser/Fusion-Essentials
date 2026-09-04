@@ -3,8 +3,8 @@
 
 """Manage CAM tools across the document / local / cloud / hub tool libraries: list, add, remove, edit
 parameters, add/remove a named preset on an existing tool, find where a tool is used, or create a new
-shared library. Hub libraries can't be created via the API (importToolLibrary fails there) - create
-those in the UI."""
+shared library. The fusion scope is the shipped sample libraries - readable, never written. Hub
+libraries can't be created via the API (importToolLibrary fails there) - create those in the UI."""
 
 import adsk.core
 import adsk.cam
@@ -21,11 +21,22 @@ app = adsk.core.Application.get()
 
 _ACTIONS = ("list", "list_types", "parameters", "add", "remove", "edit", "add_preset",
             "remove_preset", "where_used", "create_library")
-_SCOPES = ("document", "local", "cloud", "hub")
+_SCOPES = ("document", "local", "cloud", "hub", "fusion")
 # friendly scope -> LibraryLocations attr, for every shared scope (document hosts no shared library
 # and can host no new one). The ONE table the resolve / list / create paths all read.
 _SHARED_LOCATIONS = {"local": "LocalLibraryLocation", "cloud": "CloudLibraryLocation",
-                     "hub": "HubLibraryLocation"}
+                     "hub": "HubLibraryLocation", "fusion": "Fusion360LibraryLocation"}
+
+# The scope holding the libraries the installation ships - the same location _build_type_map clones
+# its from_type samples out of. Every write action is refused there: a shipped asset is shared by
+# every document on this installation, so it is copied out of, never edited in place.
+_READ_ONLY_SCOPE = "fusion"
+_WRITE_ACTIONS = ("add", "remove", "edit", "add_preset", "remove_preset", "create_library")
+_SCOPE_READ_ONLY = (
+    "scope='{scope}' is the libraries this Fusion installation ships, which this tool only READS - "
+    "'{action}' was refused. Copy the tool out instead: action='list' at this scope for its "
+    "libraries and their tools, then action='add' at scope='document' (or local) with "
+    "add_tools=[{{library_url, index}}].")
 
 
 # ── target abstraction: a uniform view over document-lib vs shared-lib ───────
@@ -250,10 +261,10 @@ _json_loads = _json.loads
 _json_dumps = _json.dumps
 
 # Fusion sample libraries that, together, hold one of every common geometry type. 'center drill'
-# appears in no Metric sample library, which is why the one Inch library is here. Metric entries
-# come first: the first library holding a type wins the key.
+# appears in no Metric sample library, which is why the one Inch library is here; 'Probes' is where
+# the probe type lives and no cutting library carries it. Metric first: the first library wins.
 _SAMPLE_LIBS = ("Milling Tools (Metric)", "Hole Making Tools (Metric)", "Cutting Tools (Metric)",
-                "Turning Tools (Metric)", "Hole Making Tools (Inch)")
+                "Turning Tools (Metric)", "Hole Making Tools (Inch)", "Probes")
 _HOLDERS_LIB = "Holders (Metric)"
 # ({tool_type: (library_url, index)}, {sample libraries already fetched}) - built INCREMENTALLY,
 # because each library is a cloud round-trip (see _build_type_map).
@@ -952,6 +963,8 @@ def handler(action: str = "list", scope: str = "document", library: str = "",
     scope = (scope or "document").strip().lower()
     if scope not in _SCOPES:
         return error(f"Unknown scope '{scope}'. Use one of: {', '.join(_SCOPES)}.")
+    if scope == _READ_ONLY_SCOPE and action in _WRITE_ACTIONS:
+        return error(_SCOPE_READ_ONLY.format(scope=scope, action=action))
 
     # create_library: the target doesn't exist yet - 'library' is the NEW name. Dispatch before resolve.
     if action == "create_library":
@@ -993,7 +1006,8 @@ TOOL_DESCRIPTION = (
     "DOCUMENT-library tool; 'add'/'remove': add or drop a library's tools; 'edit': one tool's "
     "parameters; 'add_preset'/'remove_preset': ONE named preset on the tool at 'tool'; "
     "'create_library': a new library at a shared scope, named by 'library'. "
-    "list/list_types/parameters/where_used are read-only; the rest write and persist."
+    "list/list_types/parameters/where_used are read-only; the rest write and persist - and every "
+    "write is refused at scope='fusion', the libraries the installation ships."
 )
 
 tool = (
@@ -1001,7 +1015,7 @@ tool = (
     .add_input_property("action", {"type": "string", "enum": list(_ACTIONS),
             "description": "See the tool description."})
     .add_input_property("scope", {"type": "string", "enum": list(_SCOPES),
-            "description": "Library location; hub is shared TEAM data."})
+            "description": "Library location; hub is shared TEAM data, fusion the shipped sample libraries (reads only)."})
     .add_input_property("library", {"type": "string", "description": "Shared-library name or url (not document scope)."})
     .add_input_property("add_tools", {"type": "array",
             "items": {"type": "object", "properties": {

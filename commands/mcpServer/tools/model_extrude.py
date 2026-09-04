@@ -365,6 +365,31 @@ def _depth_mismatch(fname, what, got_cm, want_cm, raw, k, units) -> str:
             "design_get and remove it with design_delete_feature.")
 
 
+def _no_target_body_hint(ext_key, distance, symmetric=False) -> str:
+    """The remedy for an extrude Fusion answered with no body to reach: which way this one went and
+    the sign that reverses it - or, going both ways already, that no sign can reach one."""
+    negative = None
+    try:
+        negative = float(distance) < 0
+    except (TypeError, ValueError):
+        pass
+    flip_to = "POSITIVE" if negative else "NEGATIVE"
+    # Symmetric is read FIRST: a symmetric extent never reads the sign at all, so a direction remedy
+    # would send the caller after a knob that changed nothing.
+    if symmetric:
+        return (" This extrude already goes BOTH ways from the sketch plane, so no 'distance' sign "
+                "reaches a body it missed - the profile overlaps no participant body. Check where "
+                "the profile sits, and 'target_bodies' if it names any.")
+    if ext_key == "through_all":
+        return (" extent=through_all follows the sketch-plane normal; a sketch ON a body's face "
+                "points AWAY from the material, so this direction hits only air. Pass a "
+                f"{flip_to} 'distance' to cut the other way into the body.")
+    went = "" if negative is None else f" - 'distance' was {'negative' if negative else 'positive'}"
+    return (f" The extrude reached no body the way it went{went}, and a sketch ON a body's face "
+            f"points its normal AWAY from the material. Pass a {flip_to} 'distance' to go the "
+            "other way, or check the profile overlaps the body at all.")
+
+
 def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
             units: str = "mm", operation: str = "new", symmetric: bool = False,
             taper_deg: float = 0.0, to_object: str = "", target_bodies=None,
@@ -507,6 +532,14 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
         ext_input = host.features.extrudeFeatures.createInput(profile_arg, op)
         if open_surface:
             ext_input.isSolid = False   # surface: no end caps (confirmed-live ExtrudeFeatureInput.isSolid)
+        elif text_addr:
+            # as_surface is refused with a text, so the solid this call promises is STATED and read
+            # back rather than inherited from a default the code never read.
+            serr = _common.set_verified(ext_input, "isSolid", True,
+                                        "isSolid=true (a sketch text extrudes as a solid)",
+                                        "ExtrudeFeatureInput")
+            if serr:
+                return error(serr)
     except Exception as e:
         return error(f"Could not start extrude: {e}")
 
@@ -633,22 +666,13 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
         feature = host.features.extrudeFeatures.add(ext_input)
     except Exception as e:
         # A bad expression reference can slip past the pre-check and only fail here, so it is named.
-        # A sketch ON a body's face points its normal AWAY from the material, so the default - and
-        # symmetric - through_all direction hits pure air; that trap is taught below.
+        # The direction hint points the OTHER way from the distance that just failed.
+        platform = str(e).lower()
         if _inputs.looks_like_expression(distance):
             hint = f" The distance expression '{distance.strip()}' may be unresolvable - check param_get."
-        elif ext_key == "through_all" and "body not found" in str(e).lower():
-            # The hint points the OTHER way from the distance that just failed - a fixed "pass a
-            # negative" told a caller whose distance was already negative to do it again (measured).
-            already_negative = False
-            try:
-                already_negative = float(distance) < 0
-            except Exception:
-                pass
-            flip_to = "POSITIVE" if already_negative else "NEGATIVE"
-            hint = (" extent=through_all follows the sketch-plane normal; a sketch ON a body's face "
-                    "points AWAY from the material, so this direction hits only air. Pass a "
-                    f"{flip_to} 'distance' to cut the other way into the body.")
+        elif ((ext_key == "through_all" and "body not found" in platform)
+              or (op_key in ("cut", "intersect") and "no target body found" in platform)):
+            hint = _no_target_body_hint(ext_key, distance, bool(symmetric))
         else:
             hint = " (A 'cut'/'intersect' needs existing geometry to act on.)"
         return error(f"Extrude failed: {e}.{hint}")

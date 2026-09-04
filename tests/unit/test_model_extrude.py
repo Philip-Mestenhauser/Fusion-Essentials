@@ -869,6 +869,42 @@ class TestSketchTextProfile:
                          as_surface=True)
         assert res["isError"] is True and "as_surface" in res["message"]
 
+    def test_a_text_extrude_states_the_solid_it_promises(self):
+        # as_surface is REFUSED with a text, so the solid is set and read back here rather than
+        # inherited from an ExtrudeFeatureInput default this code never reads.
+        ef = _install([FakeSketch("Nameplate", profile_count=0, text_count=1)])
+        prior = ef.createInput
+
+        def _surface_default(profile, operation):
+            inp = prior(profile, operation)
+            inp.isSolid = False
+            return inp
+        ef.createInput = _surface_default
+        out = _payload(ex.handler(sketch_name="Nameplate", distance=2, profile_index="text:0"))
+        assert ef.last_input.isSolid is True and out["is_solid"] is True
+
+    def test_an_isSolid_assignment_the_input_drops_refuses_before_add(self):
+        # The SWIG trap set_verified exists for: the assignment lands on a dead Python attribute
+        # while the object keeps its default, and only the read-back tells.
+        ef = _install([FakeSketch("Nameplate", profile_count=0, text_count=1)])
+
+        class _Swallows(FakeExtrudeInput):
+            @property
+            def isSolid(self):
+                return False
+
+            @isSolid.setter
+            def isSolid(self, value):
+                pass
+
+        def _make(profile, operation):
+            ef.last_input = _Swallows(profile, operation)
+            return ef.last_input
+        ef.createInput = _make
+        res = ex.handler(sketch_name="Nameplate", distance=2, profile_index="text:0")
+        assert res["isError"] is True and "isSolid" in res["message"]
+        assert ef.added is False          # refused BEFORE the feature was added
+
     def test_a_plain_index_selector_is_untouched_by_the_text_route(self):
         ef = _install([FakeSketch("Plate", profile_count=2, text_count=1)])
         out = _payload(ex.handler(sketch_name="Plate", distance=2, profile_index=1))
@@ -1814,7 +1850,7 @@ class TestCrossComponentCut:
         assert "WARNING" not in out["note"]
 
 
-# ── through_all direction teaching (PLATFORM behavior) ──────────────────────────────────────────────
+# ── no-target-body direction teaching (PLATFORM behavior) ────────────────────────────────────────
 # A sketch ON a body's face has its normal pointing AWAY from the material, so through_all's default
 # (and symmetric) direction hits pure air and Fusion raises 'body not found to extrude through'. The
 # direction MAPPING is correct - a negative 'distance' cuts into the body - so the error TEACHES the
@@ -2120,7 +2156,76 @@ class TestScopedCutNoOp:
         assert out["extruded"] is True
 
 
-class TestThroughAllDirectionTeaching:
+class TestNoTargetBodyDirectionTeaching:
+    def test_a_blind_distance_cut_that_reached_nothing_teaches_the_opposite_sign(self):
+        # The other platform text for the same trap, on the extent every cut uses by default.
+        ef = _install([FakeSketch("S")])
+
+        def _raise(inp):
+            raise RuntimeError("3 : No target body found to cut or intersect!")
+        ef.add = _raise
+        res = ex.handler(sketch_name="S", distance=-5, operation="cut")
+        assert res["isError"] is True
+        msg = res["message"]
+        assert "POSITIVE" in msg and "'distance' was negative" in msg
+        # both remedies survive: the sign flip did not displace "does the profile overlap it at all"
+        assert "AWAY from the material" in msg and "overlaps the body at all" in msg
+
+    def test_an_intersect_that_reached_nothing_teaches_the_same_way(self):
+        # Fusion words the refusal for both operations at once, so the gate takes both.
+        ef = _install([FakeSketch("S")])
+
+        def _raise(inp):
+            raise RuntimeError("3 : No target body found to cut or intersect!")
+        ef.add = _raise
+        res = ex.handler(sketch_name="S", distance=5, operation="intersect")
+        assert res["isError"] is True
+        assert "NEGATIVE" in res["message"] and "'distance' was positive" in res["message"]
+
+    def test_a_symmetric_cut_is_not_told_to_flip_a_sign(self):
+        # It already went both ways from the sketch plane, so no sign reaches a body it missed.
+        ef = _install([FakeSketch("S")])
+
+        def _raise(inp):
+            raise RuntimeError("3 : No target body found to cut or intersect!")
+        ef.add = _raise
+        res = ex.handler(sketch_name="S", distance=5, operation="cut", symmetric=True)
+        assert res["isError"] is True
+        msg = res["message"]
+        assert "BOTH ways" in msg and "overlaps no participant body" in msg
+        assert "NEGATIVE" not in msg and "POSITIVE" not in msg
+
+    def test_a_symmetric_through_all_cut_is_not_told_to_flip_a_sign_either(self):
+        # _through_all_direction_key answers 'symmetric' without reading the sign, so a direction
+        # remedy here points at a knob this extrude never consulted.
+        ef = _install([FakeSketch("S")])
+
+        def _raise(inp):
+            raise RuntimeError("3 : Could not complete Through All Extrude, body not found to "
+                               "extrude through.")
+        ef.add = _raise
+        res = ex.handler(sketch_name="S", operation="cut", extent="through_all", symmetric=True)
+        assert res["isError"] is True
+        msg = res["message"]
+        assert "BOTH ways" in msg
+        assert "POSITIVE" not in msg and "NEGATIVE" not in msg
+
+    def test_an_unreadable_distance_sign_is_not_stated(self):
+        # The 'distance' was <sign>' clause is dropped rather than guessed at.
+        assert "'distance' was" not in ex._no_target_body_hint("distance", None)
+        assert "'distance' was positive" in ex._no_target_body_hint("distance", 5)
+
+    def test_the_same_refusal_on_a_new_extrude_keeps_the_plain_hint(self):
+        # 'no target body to cut or intersect' is a cut/intersect refusal; a 'new' body has no
+        # participants, so that text there is not read as a direction problem.
+        ef = _install([FakeSketch("S")])
+
+        def _raise(inp):
+            raise RuntimeError("3 : No target body found to cut or intersect!")
+        ef.add = _raise
+        res = ex.handler(sketch_name="S", distance=-5, operation="new")
+        assert res["isError"] is True and "existing geometry" in res["message"]
+
     def test_body_not_found_teaches_negative_distance(self):
         ef = _install([FakeSketch("S")])
 

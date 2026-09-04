@@ -234,8 +234,9 @@ class _Param:
     def __init__(self, value, editable=True):
         self.value = value
         self.expression = None
-        # read for SURFACE sets only, where a False is what leaves the deprecated
-        # checkSurfaceSelection out; the curve params route by presence and never consult it
+        # read for the surface sets and the direct object sets, where a False leaves a set out
+        # (the deprecated checkSurfaceSelection, flat's machiningDirections); the curve params
+        # route by presence and never consult it
         self.isEditable = editable
 
 
@@ -1157,6 +1158,230 @@ class TestHoles:
         out = _payload(cg.handler(operation="Drill1", selection="holes", handles=["a"], generate=False))
         assert len(op.parameters.itemByName("holeFaces").value.value) == 1 and out["selections"] == 1
 
+    def test_a_hole_set_that_keeps_fewer_faces_than_assigned_is_an_error(self, monkeypatch):
+        # the direct family shares one assign-then-read-back; a set that silently drops faces would
+        # otherwise report the drill as selected while it machines a subset of the holes asked for.
+        op = _drill_op()
+        cam = _CAM([_Setup([op])])
+        op.parameters.itemByName("holeFaces").value = _ShortSurfaceParam()
+        _install(monkeypatch, cam, [_Face(0.3), _Face(0.3), _Face(0.3)])
+        res = cg.handler(operation="Drill1", selection="holes", handles=["a", "b", "c"],
+                         generate=False)
+        assert res["isError"] is True and "did not take" in res["message"]
+        assert "3 face(s) were assigned" in res["message"] and "reads back 1" in res["message"]
+
+
+# ── the turning object sets (groove positions / thread faces) ────────────────
+#
+# MEASURED on the hub: 'grooves' takes the circular EDGE bounding the groove and RAISES
+# '2 : InternalValidationError : status.isOk()' on that groove's own cylinder face, while
+# 'threadFaces' takes the thread's cylinder face. Both read CadObjectParameterValue, so the class
+# does not say which type - only the required handle type keeps a caller off the refused one.
+
+
+def _groove_op(name="Single Groove1", **kw):
+    return _Op(name, {"grooves": _Param(_HoleParamValue())}, **kw)
+
+
+def _turn_thread_op(name="Thread1", **kw):
+    return _Op(name, {"threadFaces": _Param(_HoleParamValue())}, **kw)
+
+
+class TestTurningObjectSets:
+    def test_groove_lands_on_the_grooves_parameter(self, monkeypatch):
+        op = _groove_op()
+        cam = _CAM([_Setup([op])])
+        edges = [_Edge()]
+        _install(monkeypatch, cam, edges)
+        out = _payload(cg.handler(operation="Single Groove1", selection="groove", handles=["e"],
+                                  generate=False))
+        assert op.parameters.itemByName("grooves").value.value == edges
+        assert out["selections"] == 1 and out["selection_param"] == "grooves"
+
+    def test_thread_lands_on_the_thread_faces_parameter(self, monkeypatch):
+        op = _turn_thread_op()
+        cam = _CAM([_Setup([op])])
+        faces = [_Face(1.4911)]
+        _install(monkeypatch, cam, faces)
+        out = _payload(cg.handler(operation="Thread1", selection="thread", handles=["f"],
+                                  generate=False))
+        assert op.parameters.itemByName("threadFaces").value.value == faces
+        assert out["selections"] == 1 and out["selection_param"] == "threadFaces"
+
+    def test_groove_refuses_a_face_handle_before_the_parameter_raises(self, monkeypatch):
+        # the groove parameter itself raises on a face, and a raise there reads as a tool fault
+        # rather than a wrong pick - so the required type refuses it while nothing has been written.
+        op = _groove_op()
+        cam = _CAM([_Setup([op])])
+        monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
+        import adsk.fusion
+        adsk.fusion.BRepFace = _Face
+        adsk.fusion.BRepEdge = _Edge
+        monkeypatch.setattr(cg._inputs, "_resolve_token_entity", lambda des, h: _Face(2.2))
+        monkeypatch.setattr(cg._inputs._common, "design", lambda: object())
+        res = cg.handler(operation="Single Groove1", selection="groove", handles=["h"],
+                         generate=False)
+        assert res["isError"] is True and "must be an edge" in res["message"]
+        assert op.parameters.itemByName("grooves").value.value == []
+
+    def test_thread_refuses_an_edge_handle(self, monkeypatch):
+        op = _turn_thread_op()
+        cam = _CAM([_Setup([op])])
+        monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
+        import adsk.fusion
+        adsk.fusion.BRepFace = _Face
+        adsk.fusion.BRepEdge = _Edge
+        monkeypatch.setattr(cg._inputs, "_resolve_token_entity", lambda des, h: _Edge())
+        monkeypatch.setattr(cg._inputs._common, "design", lambda: object())
+        res = cg.handler(operation="Thread1", selection="thread", handles=["h"], generate=False)
+        assert res["isError"] is True and "must be a face" in res["message"]
+        assert op.parameters.itemByName("threadFaces").value.value == []
+
+    def test_a_kind_the_operation_carries_no_parameter_for_names_that_parameter(self, monkeypatch):
+        # a milling op met by selection='groove' has no groove positions at all, so the refusal
+        # names the parameter looked for and the family it belongs to.
+        op = _curve_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        res = cg.handler(operation="2D Contour1", selection="groove", handles=["e"], generate=False)
+        assert res["isError"] is True
+        assert "grooves" in res["message"] and "turning groove strategy" in res["message"]
+
+
+# ── the probing object set ──────────────────────────────────────────────────
+#
+# MEASURED: probe and probe_geometry both carry probe_selection, a CadObjectParameterValue that
+# takes BRep FACES - the plane, boss, bore or web probingType 'probing-unknown' derives from.
+
+
+def _probe_op(name="Probe WCS1", **kw):
+    return _Op(name, {"probe_selection": _Param(_HoleParamValue())}, **kw)
+
+
+class TestProbeSelection:
+    def test_probe_lands_on_the_probe_selection_parameter(self, monkeypatch):
+        op = _probe_op()
+        cam = _CAM([_Setup([op])])
+        faces = [_Face()]
+        _install(monkeypatch, cam, faces)
+        out = _payload(cg.handler(operation="Probe WCS1", selection="probe", handles=["f"],
+                                  generate=False))
+        assert op.parameters.itemByName("probe_selection").value.value == faces
+        assert out["selections"] == 1 and out["selection_param"] == "probe_selection"
+
+    def test_a_curve_kind_on_a_probe_op_names_probe_selection_as_the_remedy(self, monkeypatch):
+        # a probing op carries no curve parameter, so 'face' reaches the curve refusal - which has
+        # to hand back the probe set it read off the operation, not a drilling remedy.
+        op = _probe_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="Probe WCS1", selection="face", handles=["f"], generate=False)
+        assert res["isError"] is True
+        assert "'probe_selection'" in res["message"] and "selection='probe'" in res["message"]
+        assert "holes" not in res["message"]
+
+    def test_probe_on_an_op_without_the_parameter_is_refused(self, monkeypatch):
+        op = _curve_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="2D Contour1", selection="probe", handles=["f"], generate=False)
+        assert res["isError"] is True
+        assert "probe_selection" in res["message"] and "probe_geometry" in res["message"]
+
+
+def _orientation_op(name="3+2 Roughing1", mode=None, editable=True, **kw):
+    """A three_plus_two op: machiningDirections beside toolAxisMode, the mode that decides whether
+    the orientation faces are read at all. A fresh op reads 'manual' and isEditable true (measured);
+    `flat` carries the same pair reading isEditable false."""
+    return _Op(name, {"machiningDirections": _Param(_HoleParamValue(), editable=editable),
+                      "toolAxisMode": mode if mode is not None else _BoundaryModeParam("manual")},
+               **kw)
+
+
+class TestOrientationSelection:
+    """three_plus_two takes its tool-axis orientations as FACES on machiningDirections (measured:
+    CadObjectParameterValue, isEditable true); the faces are not machined, their normals become the
+    tool axes, and they count only while toolAxisMode reads 'manual'."""
+
+    def test_orientation_lands_on_the_machining_directions_parameter(self, monkeypatch):
+        op = _orientation_op()
+        cam = _CAM([_Setup([op])])
+        faces = [_Face()]
+        _install(monkeypatch, cam, faces)
+        out = _payload(cg.handler(operation="3+2 Roughing1", selection="orientation",
+                                  handles=["f"], generate=False))
+        assert op.parameters.itemByName("machiningDirections").value.value == faces
+        assert out["selections"] == 1 and out["selection_param"] == "machiningDirections"
+
+    def test_orientation_engages_the_tool_axis_mode_and_publishes_it(self, monkeypatch):
+        # faces on machiningDirections are INERT unless toolAxisMode reads 'manual', so the call
+        # that lands them engages that mode and says so - the same step swarf and the 3D boundary
+        # take. Landing them under any other mode would report a selection that changes nothing.
+        op = _orientation_op(mode=_BoundaryModeParam("tilt"))
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        out = _payload(cg.handler(operation="3+2 Roughing1", selection="orientation",
+                                  handles=["f"], generate=False))
+        assert cg.unquote_expression(
+            op.parameters.itemByName("toolAxisMode").expression) == "manual"
+        assert out["tool_axis_engaged"] is True and out["tool_axis_mode"] == "manual"
+
+    def test_a_tool_axis_mode_that_will_not_take_is_an_error(self, monkeypatch):
+        # a swallowed toolAxisMode leaves the orientations unread while the assignment succeeded,
+        # so the call fails rather than reporting an engage, naming the value still read.
+        op = _orientation_op(mode=_DeafBoundaryMode("tilt"))
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="3+2 Roughing1", selection="orientation", handles=["f"],
+                         generate=False)
+        assert res["isError"] is True
+        assert "toolAxisMode" in res["message"] and "did not take" in res["message"]
+        assert "tilt" in res["message"]
+
+    def test_an_op_without_the_mode_parameter_is_disclosed_not_claimed_engaged(self, monkeypatch):
+        op = _Op("3+2 Roughing1", {"machiningDirections": _Param(_HoleParamValue())})
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="3+2 Roughing1", selection="orientation", handles=["f"],
+                         generate=False)
+        assert res["isError"] is True
+        assert "toolAxisMode" in res["message"] and "cannot confirm" in res["message"]
+
+    def test_a_non_editable_orientation_set_is_refused_before_any_assignment(self, monkeypatch):
+        # `flat` carries machiningDirections reading isEditable false (measured), and such a set
+        # silently DROPS the write - so it is refused up front rather than assigned and reported
+        # through a read-back count.
+        op = _orientation_op(name="Flat1", editable=False)
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="Flat1", selection="orientation", handles=["f"], generate=False)
+        assert res["isError"] is True
+        assert "did not read isEditable true" in res["message"]
+        assert op.parameters.itemByName("machiningDirections").value.value == []
+
+    def test_a_non_editable_set_is_not_advertised_as_the_remedy(self, monkeypatch):
+        # the curve refusal hands back remedies, so advertising a set the operation would silently
+        # drop sends the caller to a call that cannot work. The op carries NO curve parameter, so
+        # the refusal that composes those remedies is the one this exercises.
+        op = _Op("Flat1", {"machiningDirections": _Param(_HoleParamValue(), editable=False)})
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        res = cg.handler(operation="Flat1", selection="chain", handles=["e"], generate=False)
+        assert res["isError"] is True and "no curve-selection parameter" in res["message"]
+        assert "selection='orientation'" not in res["message"]
+        assert "did not read isEditable true" in res["message"]
+
+    def test_orientation_does_not_land_on_a_surface_set(self, monkeypatch):
+        # the orientation faces are directions, not geometry to cut, so an op carrying drive
+        # surfaces but no orientations must be refused rather than have them machined as surfaces.
+        op = _geodesic_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="Geodesic1", selection="orientation", handles=["f"],
+                         generate=False)
+        assert res["isError"] is True and "machiningDirections" in res["message"]
+        assert op.parameters.itemByName("driveSurfaces").value.value == []
+
 
 # ── heights ──────────────────────────────────────────────────────────────────
 
@@ -1876,6 +2101,14 @@ def _ma_roughing_op(name="Multi-Axis Roughing1", **kw):
                       "boundaryMode": _BoundaryModeParam("none")}, **kw)
 
 
+def _trace_op(name="Trace1", **kw):
+    """A trace op: 'curves' is its only curve parameter and it carries no boundary mode, so the
+    selection is read as soon as it lands - the shape trace, multi_axis_contour and
+    multi_axis_morph share; morph and project carry a machining boundary beside their curves."""
+    return _Op(name, {"curves": _Param(_CurveParamValue()),
+                      "topHeight_mode": _Param(None), "topHeight_offset": _Param(None)}, **kw)
+
+
 def _selection_on(op, param):
     return op.parameters.itemByName(param).value.getCurveSelections()
 
@@ -1968,6 +2201,64 @@ class TestDriveParamRouting:
         res = cg.handler(operation="Ghost1", selection="chain", handles=["a"], generate=False)
         assert res["isError"] is True
         assert "swarfContours" in res["message"] and "edgeSel" in res["message"]
+
+    def test_a_trace_chain_lands_on_the_curves_parameter(self, monkeypatch):
+        # 'curves' is the drive-curve parameter (measured: CadContours2dParameterValue, isEditable
+        # true); on trace it is the only selection parameter the operation carries.
+        op = _trace_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge(), _Edge()])
+        out = _payload(cg.handler(operation="Trace1", selection="chain", handles=["a", "b"],
+                                  generate=False))
+        assert _selection_on(op, "curves").count == 1
+        assert out["selections"] == 1
+
+    def test_curves_is_probed_before_the_machining_boundary(self, monkeypatch):
+        # morph and project carry BOTH (measured over every allowed strategy): 'curves' is their
+        # drive and machiningBoundarySel is containment, so a chain landing on the boundary would
+        # leave the strategy driven by nothing while the payload reported a landed selection.
+        op = _Op("Morph1", {"curves": _Param(_CurveParamValue()),
+                            "machiningBoundarySel": _Param(_CurveParamValue()),
+                            "boundaryMode": _BoundaryModeParam("silhouette")})
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        out = _payload(cg.handler(operation="Morph1", selection="chain", handles=["a"],
+                                  generate=False))
+        assert _selection_on(op, "curves").count == 1
+        assert _selection_on(op, "machiningBoundarySel").count == 0
+        assert "boundary_engaged" not in out
+
+    def test_the_curve_param_miss_names_the_selection_params_the_op_carries(self, monkeypatch):
+        # a drill met by a chain carries holeFaces, so the refusal names THAT parameter and the kind
+        # that reaches it - a remedy read off the operation rather than one the strategy might want.
+        op = _drill_op_with_heights()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        res = cg.handler(operation="Drill1", selection="chain", handles=["a"], generate=False)
+        assert res["isError"] is True
+        assert "'holeFaces'" in res["message"] and "selection='holes'" in res["message"]
+
+    def test_an_op_carrying_both_families_is_handed_both_remedies(self, monkeypatch):
+        # one tail per family: an operation carrying a direct set AND a surface set has two ways
+        # in, and naming only the first hides the other behind a second failed call.
+        op = _Op("Both1", {"probe_selection": _Param(_HoleParamValue()),
+                           "driveSurfaces": _Param(_HoleParamValue())})
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        res = cg.handler(operation="Both1", selection="chain", handles=["a"], generate=False)
+        assert res["isError"] is True
+        assert "selection='probe'" in res["message"]
+        assert "selection='surfaces'" in res["message"] and "drive" in res["message"]
+
+    def test_an_op_carrying_no_selection_parameter_names_no_kind_at_all(self, monkeypatch):
+        # with nothing read off the operation there is no remedy to name, so the refusal sends the
+        # caller to the parameter read instead of guessing a strategy family.
+        op = _Op("Ghost1", {})
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        res = cg.handler(operation="Ghost1", selection="chain", handles=["a"], generate=False)
+        assert "selection='" not in res["message"]
+        assert "include=['parameters']" in res["message"]
 
 
 # ── swarf's rail PAIR: one CurveSelection per rail ──────────────────────────────────────────
@@ -2309,8 +2600,8 @@ def _chamfer_op(name="3D Chamfer1", **kw):
 
 def _advanced_swarf_op(name="Advanced Swarf1", **kw):
     """A fresh advanced_swarf op: advancedSwarfSurfaces is its ONE surface set and reads editable,
-    its swarf contour parameters read isEditable False (inert - never probed), and none of the six
-    names in the curve-parameter probe order resolves on it
+    its swarf contour parameters read isEditable False (inert - never probed), and no name in the
+    curve-parameter probe order, 'curves' included, resolves on it
     (cam-advanced-swarf-surface-set-editable)."""
     return _Op(name, {"advancedSwarfSurfaces": _Param(_HoleParamValue()),
                       "swarfUpperContour": _Param(_CurveParamValue(), editable=False),

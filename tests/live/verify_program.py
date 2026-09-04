@@ -12,8 +12,8 @@ tools deliberately not driven unattended, `PENDING` the honest todo.
 
 from verify_acts_cam import (
     CAM_SETUP, FLIP_SETUP, MACHINING_EXTENSION, _CAM, _CAM_DELIVER, _CAM_EXTENSION,
-    _CAM_FB_DELIVER, _CAM_MULTI_POST, _CAM_SCOPE, _CAM_SECOND_SETUP, _CAM_STORY, _SW_SETUP,
-    _SW_SETUP2, _SWARF_RIG)
+    _CAM_FB_DELIVER, _CAM_MULTI_POST, _CAM_SCOPE, _CAM_SECOND_SETUP, _CAM_STORY, _CAM_TURNING,
+    _MX_SETUP, _ROT_SETUP, _SW_SETUP, _SW_SETUP2, _SWARF_RIG, _TURN_SETUP)
 from verify_acts_doc import _FINALE, _OVERTURE, _SHOWCASE
 from verify_acts_mesh import _MACHINING, _MESH, _NESTING
 from verify_acts_model import (
@@ -94,6 +94,10 @@ _ACT_PROGRAM = [
     # document and depend on nothing the story built, so the act runs its narrative always - where
     # the entitlement is there to run it (ACT_NEEDS below).
     ("ACT 10c - CAM: EXTENSION STRATEGIES", None, _CAM_EXTENSION, []),
+    # The turned profile, on the same cameo: the one axis family that needs no extension, and the
+    # one job the sweep does not post - posting a turning program is not measured. It depends on
+    # nothing the story built, so no precondition and no fallback.
+    ("ACT 10c2 - CAM: TURNING", None, _CAM_TURNING, []),
     # The last two acts machine the PART - the flip setup and the program that spans it and the
     # first - so each is gated on the job ACT 10a built, and falls back to nothing rather than to a
     # scratch world: every tool they drive is driven again by the scratch-stock fallbacks above, so
@@ -181,7 +185,11 @@ POLL_AFTER = {
     # The two cameo acts route to their narrative always (no precondition), so both modes name the
     # same setup - the poll has to answer whichever key run() looks up.
     "ACT 10b2 - CAM: COMPONENT SCOPE": {"narrative": _SW_SETUP2, "fallback": _SW_SETUP2},
-    "ACT 10c - CAM: EXTENSION STRATEGIES": {"narrative": _SW_SETUP, "fallback": _SW_SETUP},
+    # the extension act leaves THREE setups generating - the rails, the simultaneous strategies and
+    # the rotary wrap - each certified in turn; the turning act leaves its one.
+    "ACT 10c - CAM: EXTENSION STRATEGIES": {"narrative": [_SW_SETUP, _MX_SETUP, _ROT_SETUP],
+                                            "fallback": [_SW_SETUP, _MX_SETUP, _ROT_SETUP]},
+    "ACT 10c2 - CAM: TURNING": {"narrative": _TURN_SETUP, "fallback": _TURN_SETUP},
     # the flip act's fallback is EMPTY, so it launches nothing and there is nothing to certify -
     # an empty target list polls nothing rather than reading a setup that was never created.
     "ACT 10d - CAM: THE SECOND SETUP": {"narrative": FLIP_SETUP, "fallback": []},
@@ -430,7 +438,13 @@ STORY = {
     "model_fillet": ("round the pocket's four corners at the radius the parameter states, break "
                      "the step's leading edge, blend the boss rim; then the two path fixtures - one box corner "
                      "rounded into an OPEN tangent run, and all four rounded into a CLOSED tangent "
-                     "loop - that the chaining beats read their edge counts off"),
+                     "loop - that the chaining beats read their edge counts off; and the EDGE "
+                     "FILTER, on an L prism whose 18 edges are 17 convex and one concave by hand "
+                     "count - the census partitions them, the filter requests the concave one "
+                     "alone, and the volume grows because filling a corner adds material; then the "
+                     "SMOOTH branch on the body that round curved - 21 edges reading 19 convex, no "
+                     "concave one left and the two tangent joins smooth, published in the refusal a "
+                     "filter matching nothing carries"),
     "model_chamfer": ("break the step's outboard edge and a through-bore rim, then a mounting-bore "
                       "rim by distance-and-angle with a miter corner, each read back off the "
                       "created feature"),
@@ -557,7 +571,10 @@ STORY = {
                 "census where the states tally and active_count partition one row set across a "
                 "suppression. Plus the templates slice at the SHIPPED location, where the url the "
                 "hole-drilling bundle is applied by comes from, with url_basis naming how it "
-                "addresses the asset"),
+                "addresses the asset. And the turning setup's own two reads: the setups slice, "
+                "where its operation_type and its blocked_by are read off the Setup on both sides "
+                "of the machine assignment, and the parameters slice for the stock mode and the "
+                "turning WCS origin it turns from"),
     "cam_edit_tools": ("stock the document library with the shop set this part is cut with - a "
                        "50 mm face mill, a 10 mm flat mill (10, not 12, because it has to fit "
                        "inside the 12 mm bore it finishes), a 6 mm ball, a 6 mm drill and a "
@@ -579,7 +596,9 @@ STORY = {
                        "is edited (the operation refuses that write)"),
     "cam_create_setup": ("create the milling setup on the bracket in the vise, and the FLIP setup "
                          "that turns it over on its own WCS - the pair one NC program ends the "
-                         "sweep on; then the two setups on the drafted cameo"),
+                         "sweep on; then the setups on the drafted cameo: two milling, one for the "
+                         "simultaneous strategies, one for the rotary wrap, and a TURNING one whose "
+                         "operation_type is read back off the Setup itself"),
     "cam_create_operation": ("build the job a shop would run on the bracket: face the top, rough it "
                              "with the 3D adaptive, open the pocket with 2D offset roughing, "
                              "contour the boss, break the stepped top's edges with a 2D chamfer, "
@@ -593,7 +612,13 @@ STORY = {
                              "drafted cameo - swarf, deburr and geodesic - and the refusal for a "
                              "strategy the setup offers that this installation reads "
                              "isGenerationAllowed false on, which creates nothing rather than "
-                             "minting an operation that never generates"),
+                             "minting an operation that never generates. Then the families the "
+                             "bracket's job has no geometry for: an engraving on the part itself, "
+                             "the three simultaneous passes (multi-axis finishing and roughing, "
+                             "flow) in a setup of their own, a rotary wrap in another - both "
+                             "extension strategies - and the four turning cycles - face, profile "
+                             "roughing, profile finishing and the part-off - each created with no "
+                             "selection at all"),
     "cam_select_geometry": ("aim every operation at the feature it cuts: the stock-top face, the "
                             "boss top and the stepped top through the FACE kind (which takes the "
                             "loops that bound the face), the pocket FLOOR through the POCKET kind "
@@ -621,7 +646,10 @@ STORY = {
                             "silhouette: 'Body1' unscoped refused with the candidates and with the "
                             "input that narrows them, then scoped to one component, where "
                             "'selected' is the qualified name of the body that reached "
-                            "inputGeometry"),
+                            "inputGeometry. The sketch kind drives the engraving, and the surfaces "
+                            "kind lands ONE drafted wall on the multi-axis finishing pass's FLOOR "
+                            "set and on the flow's DRIVE set - the same face, two roles, each read "
+                            "back off the parameter it landed on"),
     "cam_edit_operation": ("edit the face operation's feed; then park the drill operation and "
                            "restore it - the suppression WRITE, with hasToolpath read back on both "
                            "sides of the set so the discarded toolpath is reported, not implied. "
@@ -629,7 +657,11 @@ STORY = {
                            "off Operation.toolPreset beside the preset it ran before and a miss "
                            "refused listing the tool's own; the cutting side written and read back "
                            "off its parameter; and the isEditable pre-guard refusing a cutting-TOOL "
-                           "dimension by name before anything is applied"),
+                           "dimension by name before anything is applied. Then the deburr's "
+                           "multi-pass, in two writes because the stepover row is settable only "
+                           "once the flag above it is true, each read back off the operation; and "
+                           "the TOOL arm on an operation the shipped template landed with none - "
+                           "Operation.tool read back beside a null was_tool"),
     "cam_create_machine": ("build a run-stamped 3-axis machine into the Local library, find it in "
                            "the catalog, assign it to the setup, and refuse the duplicate name"),
     "cam_delete_machine": ("take the run's own machine back out of the Local library: the "
@@ -652,8 +684,9 @@ STORY = {
                      "takes no 'pump_seconds': CAM-7 confirms the kernel refuses to be pumped while "
                      "a generation runs, so completion is certified by the bounded cam_get_status "
                      "poll after this act, never by a sleep inside the call. Then one launch per "
-                     "extension setup - three operations of different strategies generated "
-                     "together, with the resolved node's KIND read back beside the name asked for"),
+                     "cameo setup - each act's launches taken back to back behind its writes, and "
+                     "certified one setup at a time by the boundary poll, with the resolved node's "
+                     "KIND read back beside the name asked for"),
     "cam_inspect_toolpaths": ("verdict false with named ops before generation, scoped check, "
                               "bogus-scope refusal, an over-cap max_results clamped to the tool's "
                               "own row ceiling, verdict true after generation, include_suppressed "
@@ -682,7 +715,12 @@ STORY = {
                            "Fusion's shipped spotdrill/drill/counterbore hole bundle by the URL "
                            "the templates slice published for it, with the name passed too - the "
                            "tool's cross-check (the url must LOAD the template the name says) is "
-                           "what makes the pair one measurement instead of two hopes"),
+                           "what makes the pair one measurement instead of two hopes. Both applies "
+                           "publish a row per operation the SETUP gained, and the two are asserted "
+                           "apart: the run's own template arrives TOOLED (tool_unselected empty, "
+                           "'ready' true), while every operation of the shipped bundle arrives "
+                           "tool-less - all of them named in tool_unselected, with 'ready' false "
+                           "and cam_edit_operation assigning one of them a tool"),
     "cam_delete_template": ("take the run's own template back out of the Local library: the "
                             "confirm_name mismatch refused while it still exists, then the delete "
                             "proved by the library's asset walk and by nothing loading from the "

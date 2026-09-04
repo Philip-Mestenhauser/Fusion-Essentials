@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 187  |  **description breadcrumbs:** 642  |  **note/error breadcrumbs:** 482
+**Tools:** 187  |  **description breadcrumbs:** 648  |  **note/error breadcrumbs:** 481
   |  **guidance smells flagged:** 4
 ## Blindspots to engineer
 
@@ -14,8 +14,8 @@ close orphans, factor duplicated guards into shared helpers.
 - none - every named breadcrumb resolves to a real tool.
 
 ### Orphans (no breadcrumb leads here - reachable only via workspace_orient / search)
-**Read/Acquire (4)** - higher concern, a check-your-work tool nothing points to:
-  `cam_inspect_toolpaths`, `drawing_get`, `model_compute_holder`, `sys_get_api_doc`
+**Read/Acquire (5)** - higher concern, a check-your-work tool nothing points to:
+  `cam_compare_operations`, `cam_inspect_toolpaths`, `drawing_get`, `model_compute_holder`, `sys_get_api_doc`
 
 **Edit (33)** - usually leaf actions, scan for genuine gaps:
   `assembly_edit_contacts`, `cam_activate_setup`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `design_configure`, `design_remove_feature`, `design_set_name`, `doc_insert_derive`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_dimension`, `drawing_update`, `mesh_delete`, `mesh_repair`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_draft`, `model_replace_face`, `model_scale`, `model_set_material`, `model_thread`, `sketch_edit_curve`, `sketch_project`, `surface_create_ruled`, `surface_delete_face`, `surface_fill`, `surface_untrim`, `sys_reload_addin`
@@ -36,11 +36,11 @@ close orphans, factor duplicated guards into shared helpers.
 ### Hubs (most breadcrumbs lead here - the connective tissue)
 - `doc_new`  <- 95  (desc 10, note 85)
 - `find_geometry`  <- 59  (desc 32, note 27)
-- `view_screenshot`  <- 49  (desc 18, note 31)
+- `view_screenshot`  <- 48  (desc 18, note 30)
 - `design_get`  <- 44  (desc 19, note 25)
 - `design_delete_feature`  <- 39  (desc 18, note 21)
 - `sketch_create`  <- 36  (desc 19, note 17)
-- `cam_get`  <- 34  (desc 20, note 14)
+- `cam_get`  <- 33  (desc 20, note 13)
 - `data_get`  <- 33  (desc 19, note 14)
 - `sketch_get`  <- 32  (desc 14, note 18)
 - `assembly_get`  <- 25  (desc 12, note 13)
@@ -296,7 +296,6 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ' is not in a valid state to apply.
 - createFromCAMTemplate2 ran but the setup's operation count did not increase (
 - before and after) - no operations were added. The template may not be compatible with this setup.
-- Operations were added to the setup. If generation_mode was 'skip', the toolpaths are not yet generated. Use cam_get(include=['operations']) or view_screenshot to verify, and cam_compare_operations ...
 - Invalid template URL: '
 - No template found at URL:
 - 'template_url' loads the template '
@@ -341,6 +340,10 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - the add, so the operation's landing is UNCONFIRMED. Re-read the setup with cam_get(include=['operations']).
 - ' but the setup's operation count did not increase (
 - after) - the operation did not land.
+- ' but Operation.tool reads back null - it carries no cutting tool and cannot generate. Assign one with cam_edit_operation(tool_scope/tool_library_url, tool_index), or remove it with cam_delete.
+- ' but Operation.tool reads
+- , which does not name the requested
+- - it carries a tool this call did not ask for. Re-assign it with cam_edit_operation(tool_scope/tool_library_url, tool_index), or remove it with cam_delete.
 - Operation created but toolpath generation errored:
 - Operation created; toolpath generation started (async). Poll it with cam_get_status(handle='
 - '), or confirm with cam_get(include=['operations']) once generation completes.
@@ -1974,6 +1977,9 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - State the edge scope: pass 'edges' (find_geometry edge handles - the precise set to
 - ) or an explicit edge_filter ('all' | 'convex' | 'concave') to sweep the body. An omitted scope never means the whole body.
 - edge_filter must be: all | convex | concave.
+- ' could not be classified convex or concave (
+- ' set cannot be stated. The rest read
+- . Pass 'edges' handles from find_geometry to name the set, or edge_filter='all'.
 - No matching edges on '
 - The feature has been rolled back.
 - (The feature could not be auto-removed.)
@@ -2129,6 +2135,9 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - State the edge scope: pass 'edges' (find_geometry edge handles - the precise set to
 - ) or an explicit edge_filter ('all' | 'convex' | 'concave') to sweep the body. An omitted scope never means the whole body.
 - edge_filter must be: all | convex | concave.
+- ' could not be classified convex or concave (
+- ' set cannot be stated. The rest read
+- . Pass 'edges' handles from find_geometry to name the set, or edge_filter='all'.
 - No matching edges on '
 - The feature has been rolled back.
 - (The feature could not be auto-removed.)

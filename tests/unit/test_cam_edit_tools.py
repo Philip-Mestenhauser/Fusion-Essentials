@@ -1394,12 +1394,23 @@ class TestSampleTypeMap:
         assert url.endswith("Hole Making Tools (Metric)")
 
     def test_map_walks_only_the_named_libraries(self, monkeypatch):
-        # Milling/Turning Inch add nothing their Metric twins lack, and Probes is not a cutting-tool
-        # sample - none of the three is walked.
+        # Milling/Turning Inch add nothing their Metric twins lack, so neither is walked. Probes
+        # IS: it is the one shipped library holding the 'probe' type, which a probing operation
+        # needs and no cutting-tool library carries.
         _install_samples(monkeypatch, _SAMPLE_ASSETS)
         assert set(ct._build_type_map()) == {"flat end mill", "ball end mill", "drill",
                                              "center drill", "laser cutter", "turning general",
-                                             "turning threading"}
+                                             "turning threading", "probe"}
+
+    def test_the_probe_type_is_offered_and_clones_from_the_shipped_probes_library(self, monkeypatch):
+        # THE BITE: with 'Probes' out of the sample list the vocabulary carries no probe at all,
+        # so a probing operation has no tool to be created with.
+        assets = _install_samples(monkeypatch, _SAMPLE_ASSETS)
+        out = _payload(ct.handler(action="list_types"))
+        assert "probe" in out["types"]
+        src, serr = ct._sample_for_type("probe")
+        assert serr is None and src.desc == "probe"
+        assert "Probes" in assets.fetched
 
     def test_a_turning_type_clones_through_the_add_path(self, monkeypatch):
         # _sample_for_type resolves 'turning general' through the same map to a real source tool.
@@ -2785,6 +2796,56 @@ class TestCreateLibraryGuards:
         libs.importToolLibrary = lambda lib, dest, name: None
         res = ct.handler(action="create_library", scope="cloud", library="X")
         assert res["isError"] is True and "returned no URL" in res["message"]
+
+
+_READ_ACTIONS = ("list", "list_types", "parameters", "where_used")
+
+
+class TestFusionScopeIsReadOnly:
+    """scope='fusion' reaches the libraries the installation ships - where the sample clones already
+    come from - so they can be listed and read. Every write action is refused there."""
+
+    def test_the_scope_reads_the_fusion360_library_location(self, monkeypatch):
+        import adsk.cam as _c
+        seen = []
+
+        def _by_location(loc):
+            seen.append(loc)
+            return _AssetURL("root")
+
+        libs = SimpleNamespace(urlByLocation=_by_location,
+                               childAssetURLs=lambda u: [_AssetURL("Probing Tools (Metric)")],
+                               childFolderURLs=lambda u: [])
+        monkeypatch.setattr(ct, "_tool_libraries", lambda: libs)
+        entries, truncated, err = ct._shared_libraries("fusion")
+        assert err is None and truncated is False
+        assert seen == [_c.LibraryLocations.Fusion360LibraryLocation]
+        assert [e["name"] for e in entries] == ["Probing Tools (Metric)"]
+
+    def test_the_write_list_partitions_the_action_vocabulary(self):
+        # a write action left out of the list would reach the shipped libraries unguarded
+        assert set(ct._WRITE_ACTIONS) | set(_READ_ACTIONS) == set(ct._ACTIONS)
+        assert not set(ct._WRITE_ACTIONS) & set(_READ_ACTIONS)
+
+    @pytest.mark.parametrize("action", ct._WRITE_ACTIONS)
+    def test_every_write_action_is_refused_at_the_fusion_scope(self, action, monkeypatch):
+        # THE BITE: _resolve_target is patched to hand back a live target, so a missing guard lets
+        # each of these write to the shipped library instead of refusing.
+        _install(monkeypatch)
+        res = ct.handler(action=action, scope="fusion", library="Milling Tools (Metric)",
+                         add_tools=[{"from_type": "drill"}], remove_indices=[0], tool=0,
+                         parameters={"tool_numberOfFlutes": "4"}, preset={"name": "Alu"})
+        assert res["isError"] is True
+        assert "only READS" in res["message"] and f"'{action}'" in res["message"]
+        assert "scope='document'" in res["message"]
+
+    def test_list_and_parameters_still_read_at_the_fusion_scope(self, monkeypatch):
+        _install(monkeypatch)
+        out = _payload(ct.handler(action="list", scope="fusion", library="Milling Tools (Metric)"))
+        assert out["tool_count"] == 2
+        params = _payload(ct.handler(action="parameters", scope="fusion",
+                                     library="Milling Tools (Metric)", tool=0))
+        assert params["tool"] == 0 and params["parameter_count"] > 0
 
 
 # ── read_library: the READ half cam_get(include=['library']) shares ─────────────────────────────

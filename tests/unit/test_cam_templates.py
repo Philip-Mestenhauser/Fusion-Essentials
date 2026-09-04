@@ -400,24 +400,77 @@ class TestSaveTemplateRename:
 # the call is the read the claim rests on.
 
 
-class _ApplySetup:
-    """The apply target. `adds` is how many operations the template actually lands in it, so
-    adds=0 models the call returning operations the setup never took."""
+def _op(name, tool=None, strategy="drill"):
+    """One operation as a setup's walk reads it - `tool` is the description Operation.tool answers
+    (or a tool OBJECT), and None is an operation carrying no tool at all."""
+    holder = SimpleNamespace(description=tool) if isinstance(tool, str) else tool
+    return SimpleNamespace(name=name, strategy=strategy, tool=holder)
 
-    def __init__(self, name, adds=1):
+
+class _ApplyFolder:
+    """A CAM folder under the setup - the shared walk reaches its operations AFTER the setup's own."""
+
+    def __init__(self, name, ops):
+        self.name = name
+        self._ops = [_op(*row) for row in ops]
+
+    @property
+    def operations(self):
+        return _Coll(self._ops)
+
+    @property
+    def folders(self):
+        return _Coll([])
+
+    @property
+    def patterns(self):
+        return _Coll([])
+
+
+class _ApplySetup:
+    """The apply target: `adds` is what the template lands ((name, tool) pairs, or a count of
+    tool-less ops - adds=0 models the call returning operations the setup never took), `existing`
+    and `folders` what it already held, `phantom` a rise in its own COUNT the walk does not see,
+    `count_unreadable` an allOperations that raises, `returns` what the apply call hands back."""
+
+    def __init__(self, name, adds=1, existing=(), folders=(), phantom=0, count_unreadable=False,
+                 returns=None):
         self.name = name
         self.applied = []
-        self._adds = adds
-        self._count = 0
+        self._ops = [_op(*row) for row in existing]
+        self._folders = [_ApplyFolder(fname, ops) for fname, ops in folders]
+        self._adds = ([(f"Op{i + 1}", None) for i in range(adds)]
+                      if isinstance(adds, int) else list(adds))
+        self._phantom_after = phantom
+        self._phantom = 0
+        self._count_unreadable = count_unreadable
+        self._returns = returns
+
+    @property
+    def operations(self):
+        return _Coll(self._ops)
+
+    @property
+    def folders(self):
+        return _Coll(self._folders)
+
+    @property
+    def patterns(self):
+        return _Coll([])
 
     @property
     def allOperations(self):
-        return SimpleNamespace(count=self._count)
+        if self._count_unreadable:
+            raise RuntimeError("allOperations is not available")
+        nested = sum(len(f._ops) for f in self._folders)
+        return SimpleNamespace(count=len(self._ops) + nested + self._phantom)
 
     def createFromCAMTemplate2(self, template_input):
         self.applied.append(template_input)
-        self._count += self._adds
-        return [SimpleNamespace(name="Op%d" % (i + 1)) for i in range(self._adds)]
+        made = [_op(*row) for row in self._adds]
+        self._ops.extend(made)
+        self._phantom = self._phantom_after
+        return made if self._returns is None else self._returns
 
 
 def _wire_apply(monkeypatch, setup):
@@ -477,6 +530,132 @@ class TestApplyTemplateEffect:
         out = _payload(ct.apply_template_to_setup_handler(setup="Setup1", template_name="T"))
         assert out["applied"] is True
         assert out["operations_added"] == 1 and out["created_count"] == 1
+
+
+# ── the applied operations' TOOL status, read off the setup ─────────────────────────────────────
+#
+# A template lands operations carrying no tool: they read Operation.tool null and generate nothing,
+# while 'applied' and a count say only that they arrived. The rows come from the setup's own walk.
+
+
+def _apply(monkeypatch, setup, **kwargs):
+    """Apply a template to `setup` through the by-name path and return the payload."""
+    _wire_apply(monkeypatch, setup)
+    return _payload(ct.apply_template_to_setup_handler(setup=setup.name, template_name="T",
+                                                       **kwargs))
+
+
+class TestApplyTemplateToolStatus:
+    def test_an_operation_with_no_tool_is_named_with_its_remedy(self, monkeypatch):
+        setup = _ApplySetup("Setup1", adds=[("Spot Drill1", None), ("Drill1", None),
+                                            ("Bore1", None)])
+        out = _apply(monkeypatch, setup)
+        assert out["operations_added"] == 3
+        assert out["tool_unselected"] == ["Spot Drill1", "Drill1", "Bore1"]
+        assert [r["tool"] for r in out["operations"]] == [None, None, None]
+        assert out["ready"] is False
+        assert "cam_edit_operation" in out["note"] and "tool_scope='document'" in out["note"]
+
+    def test_an_operation_carrying_a_tool_is_not_listed_unselected(self, monkeypatch):
+        setup = _ApplySetup("Setup1", adds=[("Face1", "#1 - 16mm Flat Endmill"), ("Drill1", None)])
+        out = _apply(monkeypatch, setup)
+        rows = {r["name"]: r for r in out["operations"]}
+        assert rows["Face1"]["tool"] == "#1 - 16mm Flat Endmill"
+        assert rows["Face1"]["strategy"] == "drill"
+        assert out["tool_unselected"] == ["Drill1"] and out["ready"] is False
+
+    def test_a_fully_tooled_apply_reads_ready(self, monkeypatch):
+        setup = _ApplySetup("Setup1", adds=[("Face1", "#1 - 16mm Flat Endmill")])
+        out = _apply(monkeypatch, setup)
+        assert out["tool_unselected"] == [] and out["ready"] is True
+        assert "cam_generate" in out["note"]
+
+    def test_an_operation_the_setup_already_held_is_not_reported(self, monkeypatch):
+        # The delta is the SETUP's own: a tool-less operation that was already there is not one
+        # this apply landed, and naming it would send the caller after another op's tool.
+        setup = _ApplySetup("Setup1", existing=[("OldFace", None)],
+                            adds=[("Drill1", "#2 - 6mm Drill")])
+        out = _apply(monkeypatch, setup)
+        assert [r["name"] for r in out["operations"]] == ["Drill1"]
+        assert out["tool_unselected"] == [] and out["ready"] is True
+
+    def test_a_held_operation_in_a_folder_does_not_absorb_a_new_one_of_that_name(self, monkeypatch):
+        # The boundary of the census credit, and why its key is the PATH: the walk visits the
+        # setup's own operations BEFORE its folders, so a name-keyed census hands the held folder
+        # op's credit to the new arrival and reports the HELD operation - tool and all.
+        setup = _ApplySetup("Setup1", adds=[("Drill1", None)],
+                            folders=[("Holes", [("Drill1", "#2 - 6mm Drill")])])
+        out = _apply(monkeypatch, setup)
+        assert [r["name"] for r in out["operations"]] == ["Drill1"]
+        assert out["operations"][0]["tool"] is None
+        assert out["tool_unselected"] == ["Drill1"] and out["ready"] is False
+
+    def test_two_of_one_name_in_one_container_withholds_ready(self, monkeypatch):
+        # The residual the breadcrumb cannot separate: both operations sit at the same path, so
+        # which one this apply landed is not established and no order is allowed to decide it.
+        setup = _ApplySetup("Setup1", existing=[("Drill1", "#2 - 6mm Drill")],
+                            adds=[("Drill1", None)])
+        out = _apply(monkeypatch, setup)
+        assert out["ready"] is False
+        assert "Drill1" in out["note"] and "not established" in out["note"]
+        assert "cam_get(include=['operations'], setup=...)" in out["note"]
+
+    def test_a_fully_tooled_collision_is_withheld_not_captioned(self, monkeypatch):
+        # Both operations carry a tool, so nothing else withholds here: the pair is left OUT of
+        # 'operations' and named in 'collisions', rather than handed back as an order-picked row.
+        setup = _ApplySetup("Setup1", existing=[("Drill1", "#2 - 6mm Drill")],
+                            adds=[("Drill1", "#7 - 3mm Drill")])
+        out = _apply(monkeypatch, setup)
+        assert out["ready"] is False and out["tool_unselected"] == []
+        assert out["collisions"] == ["Drill1"] and out["operations"] == []
+
+    def test_a_collision_alone_withholds_ready(self, monkeypatch):
+        # The clause's OWN case: a tooled operation landed at a clean breadcrumb and the count
+        # cannot contradict the rows, so the collision is the only thing left to withhold 'ready'.
+        setup = _ApplySetup("Setup1", existing=[("Drill1", "#2 - 6mm Drill")],
+                            adds=[("Face1", "#1 - 16mm Flat Endmill"), ("Drill1", "#7 - 3mm Drill")],
+                            count_unreadable=True)
+        out = _apply(monkeypatch, setup)
+        assert [r["name"] for r in out["operations"]] == ["Face1"]
+        assert out["tool_unselected"] == [] and out["collisions"] == ["Drill1"]
+        assert out["ready"] is False and "left out of" in out["note"]
+
+    def test_an_unreadable_count_with_no_new_operation_is_not_ready(self, monkeypatch):
+        # allOperations raises, so the growth gate is skipped and operations_added reads null: an
+        # EMPTY per-op read must not pass for readiness on the strength of nothing blocking.
+        setup = _ApplySetup("Setup1", adds=[], count_unreadable=True)
+        out = _apply(monkeypatch, setup)
+        assert out["operations_added"] is None and out["operations"] == []
+        assert out["ready"] is False and "does not account for operations_added" in out["note"]
+
+    def test_the_rows_are_the_setups_own_not_what_the_apply_returned(self, monkeypatch):
+        # The lying return again: it hands back operations the setup never took, so the tool status
+        # is read off the setup's walk and not off those objects.
+        setup = _ApplySetup("Setup1", adds=[("Drill1", None)],
+                            returns=[SimpleNamespace(name="Ghost1"),
+                                     SimpleNamespace(name="Ghost2")])
+        out = _apply(monkeypatch, setup)
+        assert out["created_operations"] == ["Ghost1", "Ghost2"] and out["created_count"] == 2
+        assert [r["name"] for r in out["operations"]] == ["Drill1"]
+        assert out["operations_added"] == 1 and out["tool_unselected"] == ["Drill1"]
+
+    def test_a_count_the_per_op_read_cannot_account_for_withholds_ready(self, monkeypatch):
+        # The setup's own count moved by two while one operation reads as new, so the per-op list
+        # is incomplete and 'ready' is not claimed off it.
+        setup = _ApplySetup("Setup1", adds=[("Drill1", "#2 - 6mm Drill")], phantom=1)
+        out = _apply(monkeypatch, setup)
+        assert out["operations_added"] == 2 and len(out["operations"]) == 1
+        assert out["ready"] is False
+        assert "does not account for operations_added" in out["note"]
+
+    def test_a_tool_whose_description_did_not_read_is_not_called_unselected(self, monkeypatch):
+        # Operation.tool answered an object: only its description is missing, and reporting that as
+        # 'no tool' would send the caller to assign a tool the operation already carries.
+        setup = _ApplySetup("Setup1", adds=[("Drill1", SimpleNamespace(description=None))])
+        out = _apply(monkeypatch, setup)
+        assert out["operations"][0]["tool"] is None
+        assert out["operations"][0]["tool_description_unread"] is True
+        assert out["tool_unselected"] == [] and out["ready"] is True
 
 
 # ── cam_delete_template: the guarded, LOCAL-only removal ────────────────────────────────────────

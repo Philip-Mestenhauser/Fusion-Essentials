@@ -4,6 +4,8 @@
 """Create a CAM milling operation in a setup: pick a strategy, a tool by (library_url, index)
 reference, and add it. Generating is opt-in (generate=true) - the geometry selection comes first."""
 
+import re
+
 import adsk.core
 import adsk.cam
 
@@ -12,6 +14,8 @@ from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import apply_rename, counted, named_with_remainder, ok, error, read_flag, safe
 from ._cam_common import get_cam, find_setup, operation_nodes, register_future, setups
+# _read_tool_number is the one tool_number read; _tp is the one tool-parameter value read.
+from .cam_edit_tools import _read_tool_number, _tp
 
 app = adsk.core.Application.get()
 
@@ -103,6 +107,49 @@ def _tool_at(library_url, index):
     if t is None:
         return None, f"No tool at index {index}."
     return t, None
+
+
+# A tool number prefixes a description as '#<n> - ', measured live: the operation's COPY always
+# carries it, and a DOCUMENT-library tool's own description already does while a shared sample
+# library's does not - so it is stripped from BOTH sides before they are compared.
+_OP_TOOL_PREFIX = re.compile(r"^#\d+ - ")
+
+
+def _tool_facts(t):
+    """A CAM Tool's (description, tool_number) - two fetches of one tool are different Python
+    objects, so a read-back is compared on what the tool READS, never on identity."""
+    return (safe(lambda: t.description), _read_tool_number(t))
+
+
+def _names_the_same_tool(read_back, library):
+    """Whether the description read off Operation.tool names `library`'s tool - the number prefix
+    stripped from BOTH, since either side can carry one. None when either side did not read, which
+    settles nothing. EQUALITY after the strip: '#1 - 16mm Flat Endmill' does not name a 6mm one."""
+    if not read_back or not library:
+        return None
+    return _OP_TOOL_PREFIX.sub("", read_back) == _OP_TOOL_PREFIX.sub("", library)
+
+
+# The probing strategies and the tool_type a probe reads. A cutting tool is ACCEPTED at create and
+# only reports at generate, so the type is checked here instead of leaving that for the toolpath.
+_PROBE_STRATEGIES = ("probe", "probe_geometry", "inspect_surface")
+_PROBE_TOOL_TYPE = "probe"
+
+
+def _probe_tool_refusal(strategy, tool):
+    """The refusal for a probing strategy handed a tool whose tool_type is not a probe, else None -
+    a type that did not read is no verdict and refuses nothing."""
+    if strategy not in _PROBE_STRATEGIES:
+        return None
+    kind = _tp(tool, "tool_type")
+    if kind is None or str(kind).strip().lower() == _PROBE_TOOL_TYPE:
+        return None
+    return (f"Strategy '{strategy}' needs a PROBE and the requested tool reads tool_type "
+            f"{str(kind)!r}, so nothing was created. A face mill on a probing strategy generated "
+            "with 'Tool (face mill) is not supported for the strategy.' Take a probe instead: "
+            "cam_edit_tools(action='add', scope='document', add_tools=[{'from_type': 'probe'}]), "
+            "or copy one from the shipped 'Probes' library "
+            "(cam_edit_tools(action='list', scope='fusion')).")
 
 
 def _operation_name_clash(cam, want, current=""):
@@ -255,6 +302,10 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
     if terr:
         return error(terr)
 
+    perr = _probe_tool_refusal(strategy, tool)
+    if perr:
+        return error(perr)
+
     # The name is refused BEFORE the add, through the same check the rename arm runs: a deduped
     # name would otherwise land silently and the caller would address the operation by the wrong one.
     clash = _operation_name_clash(cam, name)
@@ -336,10 +387,30 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
     else:
         op_name, rename_warning = apply_rename(op, name)
 
+    # The tool is read off the CREATED operation, never the request echoed back: the assignment was
+    # made on the OperationInput, and nothing before this read shows what the operation carries.
+    want_desc = _tool_facts(tool)[0]
+    carried = safe(lambda: op.tool)
+    if carried is None:
+        return error(f"Created operation '{op_name}' in setup '{setup}' but Operation.tool reads "
+                     "back null - it carries no cutting tool and cannot generate. Assign one with "
+                     "cam_edit_operation(tool_scope/tool_library_url, tool_index), or remove it "
+                     "with cam_delete.")
+    tool_desc, tool_number = _tool_facts(carried)
+    named = _names_the_same_tool(tool_desc, want_desc)
+    if named is False:
+        return error(f"Created operation '{op_name}' in setup '{setup}' but Operation.tool reads "
+                     f"{tool_desc!r}, which does not name the requested {want_desc!r} - it carries "
+                     "a tool this call did not ask for. Re-assign it with "
+                     "cam_edit_operation(tool_scope/tool_library_url, tool_index), or remove it "
+                     "with cam_delete.")
+
     result = {
         "operation": op_name,
         "setup": setup,
         "strategy": strategy,
+        "tool": tool_desc,
+        "tool_number": tool_number,
         "generation_started": False,
         "note": "Operation created. " + ("" if generate else
                 "No toolpath yet: select the geometry it cuts with cam_select_geometry, THEN compute "
@@ -351,6 +422,9 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
         # The read-back is published only when it DISAGREED: absent = generationMode read back
         # SkipGeneration; present = what it read back instead, or why the assignment raised.
         result["generation_mode_note"] = mode_note
+    if named is None:
+        # absent = both descriptions read and the read-back names the requested tool
+        result["tool_identity_checked"] = False
 
     if generate:
         # The Future MUST be registered, not discarded: if it is garbage-collected Fusion ABANDONS
@@ -422,7 +496,8 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
     # The synchronous effect only: generate=true launches a background generation this call never
-    # reads back. The landing gate is the setup's operation count either side of the add.
+    # reads back. The landing gate is the setup's operation count either side of the add, and
+    # Operation.tool is read off the created operation - a disagreement is an error, not a payload.
     verification=Verification(
         kind="inline",
         evidence_test="tests/unit/test_cam_create_operation.py::TestOperationLanding"

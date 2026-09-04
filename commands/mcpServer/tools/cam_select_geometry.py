@@ -2,9 +2,9 @@
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
 """Set the machining geometry (and optional heights) on a CAM operation.
-Two selection mechanisms exist: curve selections (contours / pockets / silhouettes / sketches /
-recognized pockets) and direct object-lists (drill hole faces, a strategy's surface sets); heights
-are a mode+offset parameter group."""
+Two selection mechanisms exist: curve selections, built through a CurveSelections collection, and
+direct object-lists, assigned to a parameter's value; heights are a mode+offset parameter group.
+A selection on a parameter whose mode decides whether it is READ is engaged in the same call."""
 
 import adsk.cam
 
@@ -18,8 +18,8 @@ from ._cam_common import (SWARF_CONTOURS_PARAM, enumeration_remedy, expression_e
 from . import _inputs
 from . import _sketch_detail
 
-# The selection kinds. All but 'holes' and 'surfaces' are the CURVE (A) family - one CurveSelections
-# builder each; those two are the DIRECT (B) family (a CadObject list) and are handled separately.
+# The selection kinds. The CURVE (A) family gets one CurveSelections builder each; the DIRECT (B)
+# family - the _DIRECT_PARAM keys below, plus surfaces - assigns a CAD-object list instead.
 _CHAIN = "chain"
 _POCKET = "pocket"
 _FACE = "face"
@@ -28,15 +28,21 @@ _SKETCH = "sketch"
 _POCKET_RECOGNITION = "pocket_recognition"
 _HOLES = "holes"
 _SURFACES = "surfaces"
-_SELECTIONS = (_CHAIN, _POCKET, _FACE, _SILHOUETTE, _SKETCH, _POCKET_RECOGNITION, _HOLES, _SURFACES)
+_GROOVE = "groove"
+_THREAD = "thread"
+_PROBE = "probe"
+_ORIENTATION = "orientation"
+_SELECTIONS = (_CHAIN, _POCKET, _FACE, _SILHOUETTE, _SKETCH, _POCKET_RECOGNITION, _HOLES,
+               _SURFACES, _GROOVE, _THREAD, _PROBE, _ORIENTATION)
 
 # Which operation parameter carries the selection: the first of these the op has, so the ORDER is
 # the routing. A deburr op carries edgeSel AND machiningBoundarySel, so the drive param is probed
 # first, or the feed lands on the boundary and drives nothing; stockContours is never a drive.
 _MACHINING_BOUNDARY_PARAM = "machiningBoundarySel"   # the 3D adaptive/parallel/surfacing boundary
 _DEBURR_EDGE_PARAM = "edgeSel"                       # deburr's drive edges
+_DRIVE_CURVES_PARAM = "curves"                       # drive curves, where no contours/pockets exist
 _CURVE_PARAM_CANDIDATES = ("contours", "pockets", SWARF_CONTOURS_PARAM, _DEBURR_EDGE_PARAM,
-                           _MACHINING_BOUNDARY_PARAM, "stockContours")
+                           _DRIVE_CURVES_PARAM, _MACHINING_BOUNDARY_PARAM, "stockContours")
 
 # A selection on the 3D machining boundary is INERT while boundaryMode holds its default
 # 'silhouette' - the op machines the silhouette surface set instead. boundaryMode is a CAM STRING
@@ -50,13 +56,22 @@ _BOUNDARY_MODE_SELECTION = "selection"
 _SWARF_MODE_PARAM = "swarfSelectionMode"
 _SWARF_MODE_CONTOURS = "contours"
 
-# The select-and-engage table: curve param -> (mode param, value, the noun the errors use, payload
-# key prefix). A selection landing on one of these is applied AND its mode engaged in the same call.
+# three_plus_two reads the orientation faces only while toolAxisMode is 'manual' - the spelling
+# Fusion reports as Primary mode 'Selection'. A fresh op already reads 'manual' (measured), so this
+# entry confirms the mode rather than assuming it; flat's copy reads isEditable false.
+_TOOL_AXIS_MODE_PARAM = "toolAxisMode"
+_TOOL_AXIS_SELECTION = "manual"
+
+# The select-and-engage table: selection param -> (mode param, value, the noun the errors use,
+# payload key prefix). A selection landing on one of these is applied AND its mode engaged in the
+# same call, whichever family the parameter belongs to.
 _ENGAGE_MODE = {
     _MACHINING_BOUNDARY_PARAM: (_BOUNDARY_MODE_PARAM, _BOUNDARY_MODE_SELECTION,
                                 "machining boundary", "boundary"),
     SWARF_CONTOURS_PARAM: (_SWARF_MODE_PARAM, _SWARF_MODE_CONTOURS,
                            "swarf rail pair", "swarf"),
+    "machiningDirections": (_TOOL_AXIS_MODE_PARAM, _TOOL_AXIS_SELECTION,
+                            "tool-axis orientations", "tool_axis"),
 }
 
 # swarfContours is a RAIL PAIR, not one contour: two rails fed to a single CurveSelection are walked
@@ -66,9 +81,19 @@ _RAIL_PAIR_PARAMS = (SWARF_CONTOURS_PARAM,)
 _RAILS_REQUIRED = 2
 _RAILS_ORDER = "as passed - the LOWER rail must be first"
 
-# 'holes' = the direct object-list family. DRILL uses 'holeFaces'; BORE/CIRCULAR use 'circularFaces'
-# (same CadObjectParameterValue shape - set .value to a list of cylinder faces). Probe in order.
-_HOLE_PARAM_CANDIDATES = ("holeFaces", "circularFaces")
+# The DIRECT (B) family: per selection kind, the parameter name(s) whose CadObjectParameterValue
+# takes a CAD-object list on .value, probed in order. 'holes' carries two spellings - DRILL
+# 'holeFaces', BORE/CIRCULAR 'circularFaces'.
+_DIRECT_PARAM = {_HOLES: ("holeFaces", "circularFaces"), _GROOVE: ("grooves",),
+                 _THREAD: ("threadFaces",), _PROBE: ("probe_selection",),
+                 _ORIENTATION: ("machiningDirections",)}
+
+# What each direct kind is for - the refusal an operation carrying none of its parameters gets.
+_DIRECT_MISS = {_HOLES: "drilling/boring strategies (drill / bore / circular / tap / ...)",
+                _GROOVE: "a turning groove strategy",
+                _THREAD: "a turning thread strategy",
+                _PROBE: "the probe and probe_geometry strategies",
+                _ORIENTATION: "a strategy that takes tool-axis orientations, e.g. three_plus_two"}
 
 # 'surfaces' = the same shape, one parameter per ROLE, and an op can carry several at once - so the
 # role is an input, not a probe order. The op's 'model' parameter is the same class but is NOT one
@@ -87,14 +112,16 @@ _CURVE_BUILDER = {
     _POCKET_RECOGNITION: "createNewPocketRecognitionSelection",
 }
 
-# Each selection class takes ONE object type on inputGeometry: ChainSelection B-Rep edges,
-# FaceContour/Pocket a BRepFace, Silhouette and PocketRecognition a BRepBody, SketchSelection ENTIRE
-# sketches - not curves, not profiles.
+# Each selection takes ONE object type on its input: ChainSelection B-Rep edges, FaceContour/Pocket
+# a BRepFace, Silhouette/PocketRecognition a BRepBody, SketchSelection ENTIRE sketches; 'grooves'
+# the groove's bounding EDGE (its own face raises InternalValidationError), threadFaces a face.
 _GEOMETRY_INPUT = {_CHAIN: "handles", _POCKET: "handles", _FACE: "handles", _HOLES: "handles",
-                   _SURFACES: "handles",
+                   _SURFACES: "handles", _GROOVE: "handles", _THREAD: "handles",
+                   _PROBE: "handles", _ORIENTATION: "handles",
                    _SILHOUETTE: "bodies", _POCKET_RECOGNITION: "bodies", _SKETCH: "sketches"}
 _HANDLE_REQUIRE = {_CHAIN: "edge", _POCKET: "face", _FACE: "face", _HOLES: "face",
-                   _SURFACES: "face"}
+                   _SURFACES: "face", _GROOVE: "edge", _THREAD: "face", _PROBE: "face",
+                   _ORIENTATION: "face"}
 _BODY_SELECTIONS = (_SILHOUETTE, _POCKET_RECOGNITION)
 # loopType/sideType exist on FaceContourSelection, SilhouetteSelection and SketchSelection only.
 _LOOP_SIDE_SELECTIONS = (_FACE, _SILHOUETTE, _SKETCH)
@@ -423,20 +450,26 @@ def _apply_curve(op, selection, entities, knobs, factor, units, extra):
     apply them, read them back, and engage the drive parameter's mode in the same call."""
     name, p = _curve_param(op)
     if p is None:
-        # An op driven by SURFACES carries no curve parameter at all, so the refusal hands over
-        # what this one's surface sets read as - settable, or left out and why.
+        # An op driven by an OBJECT set carries no curve parameter at all, so the refusal hands over
+        # EVERY settable set this one carries - an op with both would otherwise hide one remedy.
+        direct, direct_blocked = _direct_params(op)
         carried, blocked = _surface_params(op)
+        tails = []
+        if direct:
+            listed = named_with_remainder([f"'{nm}' (selection='{kind}')" for kind, nm in direct])
+            tails.append(f" It carries the selection parameter(s) {listed}.")
         if carried:
             listed = named_with_remainder([k for k in _SURFACE_TARGET_PARAM if k in carried])
-            tail = (f" It carries the surface set(s) {listed} - pass selection='surfaces' with "
-                    "surface_target and face handles.")
-        elif blocked:
-            tail = (f" Its surface set(s) {named_with_remainder(blocked)} did not read isEditable "
-                    "true, so selection='surfaces' does not offer them either.")
-        else:
-            tail = " Its strategy may need a different selection kind (e.g. 'holes' for drilling)."
+            tails.append(f" It carries the surface set(s) {listed} - pass selection='surfaces' with "
+                         "surface_target and face handles.")
+        if not tails and (blocked or direct_blocked):
+            tails.append(f" Its set(s) {named_with_remainder(blocked + direct_blocked)} did not "
+                         "read isEditable true, so no selection kind is offered for them.")
+        if not tails:
+            tails.append(" It carries none of the selection parameters this call routes either - "
+                         f"read what it does carry with {_PARAM_READ}.")
         return None, (f"Operation '{safe(lambda: op.name)}' has no curve-selection parameter "
-                      f"(looked for {', '.join(_CURVE_PARAM_CANDIDATES)}).{tail}")
+                      f"(looked for {', '.join(_CURVE_PARAM_CANDIDATES)}).{''.join(tails)}")
     pv = p.value
     cs = safe(lambda: pv.getCurveSelections())
     if cs is None:
@@ -494,30 +527,88 @@ def _apply_curve(op, selection, entities, knobs, factor, units, extra):
     return record, None
 
 
-def _hole_param(op):
-    """The op's cylinder-face selection parameter: drill -> 'holeFaces', bore/circular ->
-    'circularFaces' (probe in order). Returns (name, param) or (None, None)."""
-    for nm in _HOLE_PARAM_CANDIDATES:
-        p = safe(lambda nm=nm: op.parameters.itemByName(nm))
-        if p is not None:
-            return nm, p
-    return None, None
+def _direct_params(op):
+    """([(selection kind, parameter name)] for every SETTABLE direct-family parameter this operation
+    carries, [the names it carries that did not read isEditable true]) - a refusal advertises only
+    the first, so the remedy it hands back is one the operation will accept."""
+    out, blocked = [], []
+    for kind, names in _DIRECT_PARAM.items():
+        for nm in names:
+            p = safe(lambda nm=nm: op.parameters.itemByName(nm))
+            if p is None:
+                continue
+            if safe(lambda p=p: p.isEditable) is True:
+                out.append((kind, nm))
+            else:
+                blocked.append(nm)
+    return out, blocked
 
 
-def _apply_holes(op, faces):
-    """Mechanism (B): set the op's cylinder-face selection directly (holeFaces for drill,
-    circularFaces for bore/circular). Returns (count, None) or (None, error)."""
-    nm, p = _hole_param(op)
-    if p is None:
-        return None, (f"Operation '{safe(lambda: op.name)}' has neither 'holeFaces' nor "
-                      "'circularFaces' - 'holes' selection is for drilling/boring strategies "
-                      "(drill / bore / circular / tap / ...).")
+def _set_object_set(nm, p, entities, noun):
+    """(count, None) or (None, error) - assign a CAD-object list to ONE direct-family parameter and
+    read the count back off the parameter, since an assignment that raises nothing proves nothing."""
+    pv = safe(lambda: p.value)
+    if pv is None:
+        return None, f"Could not read the operation's '{nm}' parameter value."
+    wanted = list(entities)
     try:
-        p.value.value = faces                 # MUTATION
+        pv.value = wanted                     # MUTATION
     except Exception as e:
         return None, f"Could not set {nm}: {e}"
-    nv = safe(lambda: p.value.value)
-    return (len(list(nv)) if nv is not None else 0), None
+    back = safe(lambda: list(pv.value))
+    if back is None:
+        return None, (f"{nm} cannot be read back after {len(wanted)} {noun}(s) were assigned, so "
+                      f"the selection is UNCONFIRMED - re-read the operation with {_PARAM_READ}.")
+    if len(back) != len(wanted):
+        return None, (f"Setting {nm} did not take - {len(wanted)} {noun}(s) were assigned and the "
+                      f"operation reads back {len(back)}.")
+    return len(back), None
+
+
+def _apply_direct(op, selection, entities, extra):
+    """(count, None) or (None, error) - mechanism (B): land the entities on the first SETTABLE
+    parameter this kind names, then engage the mode that decides whether the operation reads it."""
+    name = safe(lambda: op.name)
+    blocked = []
+    for nm in _DIRECT_PARAM[selection]:
+        p = safe(lambda nm=nm: op.parameters.itemByName(nm))
+        if p is None:
+            continue
+        # A set reading isEditable false silently drops the write, so it is refused before the
+        # assignment rather than reported through the read-back as a count that did not take.
+        if safe(lambda p=p: p.isEditable) is not True:
+            blocked.append(nm)
+            continue
+        extra["selection_param"] = nm
+        count, err = _set_object_set(nm, p, entities, _HANDLE_REQUIRE[selection])
+        if err:
+            return None, err
+        merr = _engage_direct_mode(op, nm, extra)
+        return (None, merr) if merr else (count, None)
+    if blocked:
+        return None, (f"Operation '{name}' carries {named_with_remainder(blocked)} but it did not "
+                      f"read isEditable true, so the '{selection}' selection is not offered on it. "
+                      "Select this geometry in the Fusion UI, or use an operation whose set reads "
+                      "editable.")
+    return None, (f"Operation '{name}' carries none of "
+                  f"{', '.join(_DIRECT_PARAM[selection])} - the '{selection}' selection is for "
+                  f"{_DIRECT_MISS[selection]}.")
+
+
+def _engage_direct_mode(op, nm, extra):
+    """The error for a direct-family selection whose mode could not be engaged, or None - the same
+    select-and-engage step the curve family runs, so orientations are not left inert."""
+    if nm not in _ENGAGE_MODE:
+        return None
+    mode_param, want, subject, key = _ENGAGE_MODE[nm]
+    mode, quoted, merr = _engage_mode(op, mode_param, want, subject)
+    if merr:
+        return merr
+    extra[f"{key}_engaged"] = True
+    extra[f"{key}_mode"] = mode
+    if quoted:
+        extra.setdefault("quoted", []).append(mode_param)
+    return None
 
 
 def _surface_params(op):
@@ -572,24 +663,12 @@ def _apply_surfaces(op, faces, target, extra):
         return None, (f"Operation '{name}' has no '{param}' parameter, so surface_target="
                       f"'{target}' cannot be applied to it. It carries {listed}.")
     nm, p = carried[target]
-    pv = safe(lambda: p.value)
-    if pv is None:
-        return None, f"Could not read the operation's '{nm}' parameter value."
-    wanted = list(faces)
-    try:
-        pv.value = wanted                     # MUTATION
-    except Exception as e:
-        return None, f"Could not set {nm}: {e}"
-    back = safe(lambda: list(pv.value))
-    if back is None:
-        return None, (f"{nm} cannot be read back after {len(wanted)} face(s) were assigned, so the "
-                      f"surface selection is UNCONFIRMED - re-read the operation with {_PARAM_READ}.")
-    if len(back) != len(wanted):
-        return None, (f"Setting {nm} did not take - {len(wanted)} face(s) were assigned and the "
-                      f"operation reads back {len(back)}.")
+    count, err = _set_object_set(nm, p, faces, _HANDLE_REQUIRE[_SURFACES])
+    if err:
+        return None, err
     extra["surface_target"] = target
     extra["surface_param"] = nm
-    return len(back), None
+    return count, None
 
 
 def _filter_by_diameter(faces, min_d, max_d, factor):
@@ -773,8 +852,8 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
     # 'quoted' names every parameter this call WRAPPED to match what it already stored - the mode
     # engage below appends to the same list. Absent means each request was written as it was sent.
     extra = {"quoted": wrapped} if wrapped else {}
-    if selection == _HOLES:
-        count, aerr = _apply_holes(op, faces)
+    if selection in _DIRECT_PARAM:
+        count, aerr = _apply_direct(op, selection, faces, extra)
         record = None if aerr else {"selections": count}
     elif selection == _SURFACES:
         count, aerr = _apply_surfaces(op, entities, knobs.get("surface_target"), extra)
@@ -831,16 +910,15 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
 
 
 TOOL_DESCRIPTION = (
-    "SELECT the machining geometry on a CAM operation. 'selection' picks the strategy family AND the "
-    "input carrying the geometry: chain (edge 'handles'; Fusion walks the contour chain) / pocket / "
-    "face (face 'handles') / silhouette / pocket_recognition ('bodies'; omit them to machine the "
-    "setup's own models) / sketch ('sketches' by name - a whole sketch, not one curve) / holes "
-    "(cylinder-face 'handles', filtered by min/max_diameter) / surfaces (face 'handles'; "
-    "surface_target picks the set). A chain routes to the strategy's own drive input - swarf rails, "
-    "deburr edges, a 3D machining boundary - and engages that input's mode. loop_type/side_type "
-    "suit face, silhouette and sketch, pocket_filter suits pocket_recognition, and a knob passed to "
-    "another kind is REFUSED. top/bottom_mode and top/bottom_offset set the heights. 'generate' "
-    "LAUNCHES regeneration and returns immediately - check cam_get_status."
+    "SELECT the machining geometry on a CAM operation. 'selection' picks the family, and the family "
+    "fixes the input. EDGE 'handles': chain (Fusion walks the chain) / groove (turning groove "
+    "positions). FACE 'handles': pocket / face / holes (min/max_diameter) / surfaces (surface_target "
+    "picks the set) / thread (turning) / probe / orientation (3+2: the normals become tool axes). "
+    "'bodies': silhouette / pocket_recognition (omit for the setup's own models). 'sketches': sketch "
+    "(whole sketches, not one curve). A chain routes to the strategy's drive input (swarf rails, "
+    "deburr edges, drive curves, a 3D boundary), engaging its mode. loop_type/side_type suit "
+    "face/silhouette/sketch and pocket_filter pocket_recognition; a knob on another kind is REFUSED. "
+    "top/bottom_mode and _offset set heights. 'generate' LAUNCHES regeneration - see cam_get_status."
 )
 
 tool = (
@@ -849,8 +927,8 @@ tool = (
     .add_input_property("selection", {"type": "string", "enum": list(_SELECTIONS),
             "description": "The geometry family."})
     .add_input_property("handles", {"type": "array", "items": {"type": "string"},
-            "description": "find_geometry handles: edges for chain, faces for "
-                           "pocket/face/holes/surfaces."})
+            "description": "find_geometry handles: EDGES for chain and groove; FACES for "
+                           "pocket/face/holes/surfaces/thread/probe/orientation."})
     .add_input_property(*BODIES.as_property())
     .add_input_property(*SKETCHES.as_property())
     .add_input_property(*_sketch_detail.component_scope("component", narrows="sketches / bodies"))

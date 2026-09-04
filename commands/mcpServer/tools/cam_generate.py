@@ -90,7 +90,8 @@ def _op_labels(nodes):
 
 _LAUNCH_NOTE = ("Generation is launched and runs in the background at its own pace - the compute "
                 "is often minutes. Check cam_get_status(handle) at whatever cadence you need the "
-                "progress, until completed=true. The op count/progress populate on the first check.")
+                "progress, until completed=true. operations_to_generate is the scope this launch "
+                "covers; the progress counters populate on the first check.")
 
 # The remedy for THIS call site: cam_generate takes no strategy, so the operation itself is what
 # changes - picking a different strategy is a create-time choice.
@@ -122,21 +123,50 @@ def _blocked_clause(rows) -> str:
             f"{named_with_remainder([r['name'] for r in rows])}. " + _ENTITLEMENT_REMEDY)
 
 
+def _launch_set(rows, skip_valid):
+    """(the (label, node) rows a launch builds a toolpath for, suppressed count, already-valid
+    count) - a suppressed operation carries no toolpath to build, and skip_valid passes over the
+    ones already reading operationState IsValid (0)."""
+    covered, parked, already_valid = [], 0, 0
+    for label, node in rows:
+        facts = _cam_common.op_state_facts(node.obj)
+        if _cam_common.op_is_suppressed(facts):
+            parked += 1
+        elif skip_valid and facts["operation_state"] == 0:
+            already_valid += 1
+        else:
+            covered.append((label, node))
+    return covered, parked, already_valid
+
+
+def _nothing_to_launch(target_desc, parked, already_valid) -> dict:
+    """The payload for a scope no launch was made over - the ONE builder both arms return, so a
+    skip cannot read one way here and another there. No Future is minted, so this reports skipped
+    rather than sending the caller to poll a generation nobody started, and the hint names whatever
+    left the scope empty: an exclusion, or the scope holding no operations at all."""
+    payload = {"launched": False, "skipped": True, "target": target_desc}
+    if not parked and not already_valid:
+        payload["reason"] = "no operations in scope - there is nothing to generate."
+        payload["hint"] = ("Add one with cam_create_operation, or read what the document holds "
+                           "with cam_get(include=['operations']).")
+        return payload
+    payload["reason"] = (f"nothing in scope needed a launch ({already_valid} already valid, "
+                         f"{parked} suppressed).")
+    payload["hint"] = ("Pass skip_valid=false to force-regenerate the valid one(s)."
+                       if already_valid else
+                       "Restore a suppressed operation with cam_edit_operation(suppressed=false), "
+                       "then re-run.")
+    return payload
+
+
 def _launch_around_blocked(cam, keep, blocked, skip_valid, scope, target_desc, resolved_name,
                            unread):
     """The launch for a scope holding entitlement-blocked operations: the whole-scope sweep
     regenerates NOTHING over such a scope, so every operation that did not read false is launched on
     its own, all under one handle."""
     futures, failures = [], []
-    parked = already_valid = 0
-    for label, node in keep:
-        facts = _cam_common.op_state_facts(node.obj)
-        if _cam_common.op_is_suppressed(facts):
-            parked += 1
-            continue
-        if skip_valid and facts["operation_state"] == 0:
-            already_valid += 1
-            continue
+    covered, parked, already_valid = _launch_set(keep, skip_valid)
+    for label, node in covered:
         try:
             fut = cam.generateToolpath(node.obj)
         except Exception as e:
@@ -156,11 +186,9 @@ def _launch_around_blocked(cam, keep, blocked, skip_valid, scope, target_desc, r
         if not keep:
             return error(_ALL_BLOCKED.format(
                 names=named_with_remainder([r["name"] for r in blocked])))
-        return ok({"launched": False, "skipped": True, "target": target_desc,
-                   "entitlement_blocked": blocked,
-                   "reason": (f"nothing else needed a launch ({already_valid} already valid, "
-                              f"{parked} suppressed)."),
-                   "note": _blocked_clause(blocked)})
+        skipped = _nothing_to_launch(target_desc, parked, already_valid)
+        skipped.update({"entitlement_blocked": blocked, "note": _blocked_clause(blocked)})
+        return ok(skipped)
 
     handle, _total = register_future(futures[0], target_desc, scope, skip_valid,
                                      target_name=resolved_name, also=futures[1:])
@@ -218,6 +246,16 @@ def generate_handler(target: str = "", skip_valid: bool = True) -> dict:
         return _launch_around_blocked(cam, keep, blocked, skip_valid, scope, target_desc,
                                       resolved_name, unread)
 
+    # generateToolpath regenerates its whole target whatever skip_valid says; only the document
+    # sweep is handed the flag, so only there does it narrow what this launch covers.
+    narrowing = bool(skip_valid) and node is None
+    # The count is this call's OWN walk, not future.numberOfOperations - that counter reads a
+    # different collection (2 over a six-operation turning setup, measured) - and it runs BEFORE
+    # the launch, which moves the operation_state the walk reads.
+    covered, parked, already_valid = _launch_set(list(zip(labels, nodes)), narrowing)
+    if not covered:
+        return ok(_nothing_to_launch(target_desc, parked, already_valid))
+
     try:
         future = (cam.generateAllToolpaths(bool(skip_valid)) if node is None
                   else cam.generateToolpath(node.obj))
@@ -227,17 +265,15 @@ def generate_handler(target: str = "", skip_valid: bool = True) -> dict:
     if not future:
         return error("Generation launch returned no future (nothing to generate?).")
 
-    handle, total = register_future(future, target_desc, scope, skip_valid,
-                                    target_name=resolved_name)
+    handle, _total = register_future(future, target_desc, scope, skip_valid,
+                                     target_name=resolved_name)
 
-    # future.numberOfOperations raises "Generation not started" when read on the launch tick - the
-    # count populates once generation has spun up, so an unread total is published as pending.
     payload = {
         "launched": True,
         "handle": handle,
         "target": target_desc,
         "skip_valid": bool(skip_valid),
-        "operations_to_generate": (total if total is not None else "pending (read on first status check)"),
+        "operations_to_generate": len(covered),
         "note": _LAUNCH_NOTE,
     }
     if unread:

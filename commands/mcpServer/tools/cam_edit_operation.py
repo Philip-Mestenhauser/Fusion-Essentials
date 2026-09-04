@@ -4,8 +4,6 @@
 """Edit a CAM operation by name: its parameters, the cutting TOOL it runs, that tool's PRESET, its
 NAME, and its suppression."""
 
-import re
-
 import adsk.core
 
 from ..mcp_primitives.tool import Tool
@@ -15,10 +13,11 @@ from ._common import apply_rename, ok, error, safe, read_flag
 from ._cam_common import (get_cam, enumeration_remedy, expression_error, matched_quoting,
                           parse_parameters, resolve_cam_node, unquote_expression)
 from ._cam_presets import resolve_operation_preset
-from .cam_create_operation import (_NO_INDEX, _doc_tool_at, _operation_name_clash, _tool_at,
+from .cam_create_operation import (_NO_INDEX, _doc_tool_at, _names_the_same_tool,
+                                   _operation_name_clash, _tool_at, _tool_facts,
                                    index_request_error, tool_index_of)
-# _read_tool_number is the one tool_number read.
-from .cam_edit_tools import _read_tool_number
+# The selection spellings themselves, from the one table cam_select_geometry routes them by.
+from .cam_select_geometry import _DIRECT_PARAM, _HOLES
 
 app = adsk.core.Application.get()
 
@@ -62,27 +61,6 @@ def _set_suppressed(op, name, want):
             "was_suppressed": was,
             "had_toolpath": had_toolpath,
             "has_toolpath": read_flag(lambda: op.hasToolpath)}, None
-
-
-# A tool number prefixes a description as '#<n> - ', measured live: the operation's COPY always
-# carries it, and a DOCUMENT-library tool's own description already does while a shared sample
-# library's does not - so it is stripped from BOTH sides before they are compared.
-_OP_TOOL_PREFIX = re.compile(r"^#\d+ - ")
-
-
-def _tool_facts(t):
-    """A CAM Tool's (description, tool_number) - two fetches of one tool are different Python
-    objects, so a read-back is compared on what the tool READS, never on identity."""
-    return (safe(lambda: t.description), _read_tool_number(t))
-
-
-def _names_the_same_tool(read_back, library):
-    """Whether the description read off Operation.tool names `library`'s tool - the number prefix
-    stripped from BOTH, since either side can carry one. None when either side did not read, which
-    settles nothing. EQUALITY after the strip: '#1 - 16mm Flat Endmill' does not name a 6mm one."""
-    if not read_back or not library:
-        return None
-    return _OP_TOOL_PREFIX.sub("", read_back) == _OP_TOOL_PREFIX.sub("", library)
 
 
 def _set_tool(cam, op, name, scope, library_url, index):
@@ -176,6 +154,43 @@ def _tool_note(rec, name):
     if now is False:
         return lead + "; isToolpathValid reads False - regenerate the toolpath with cam_generate."
     return lead + f"; isToolpathValid reads {_flag_word(now)}."
+
+
+# The strategies whose face selection gates a rename: setting Operation.name on one makes the
+# platform generate it, and that generation failed behind a modal on a bore carrying no faces.
+_RENAME_GATED_STRATEGIES = ("bore", "circular", "thread")
+# The sets those strategies pick into: all three carry a 'holes' spelling (the milling thread reads
+# circularFaces).
+_RENAME_GATED_KINDS = (_HOLES,)
+
+
+def _empty_selection_set(op):
+    """(selection kind, parameter name) for the rename-gated set this operation carries when it
+    reads ZERO faces, else None - an absent parameter and a list that did not read refuse nothing."""
+    for kind in _RENAME_GATED_KINDS:
+        for nm in _DIRECT_PARAM[kind]:
+            p = safe(lambda nm=nm: op.parameters.itemByName(nm))
+            if p is None:
+                continue
+            picked = safe(lambda p=p: list(p.value.value))
+            return (kind, nm) if picked is not None and not picked else None
+    return None
+
+
+def _rename_gate_refusal(op, name):
+    """The refusal for renaming a gated operation whose own selection reads no faces, else None."""
+    strategy = (safe(lambda: op.strategy) or "").strip().lower()
+    if strategy not in _RENAME_GATED_STRATEGIES:
+        return None
+    empty = _empty_selection_set(op)
+    if empty is None:
+        return None
+    kind, param = empty
+    return (f"Operation '{name}' runs strategy '{strategy}' and its '{param}' selection reads 0 "
+            "faces, so the rename was refused before any write. A 'bore' renamed in that state "
+            "parked Fusion behind a 'Failed to generate toolpath.' dialog. Select the faces first "
+            f"- cam_select_geometry(operation='{name}', selection='{kind}', handles=[...]) - then "
+            "rename.")
 
 
 def _rename(op, current, want):
@@ -329,9 +344,16 @@ def handler(operation: str = "", parameters=None, suppressed=None, preset: str =
     # The name clash is checked with the other pre-flights, before ANY write: the rename itself runs
     # after the parameters, and a call refused here has changed nothing.
     if want_rename:
-        clash = _operation_name_clash(cam, want_rename, safe(lambda: op.name) or operation)
+        current_name = safe(lambda: op.name) or operation
+        clash = _operation_name_clash(cam, want_rename, current_name)
         if clash:
             return error(clash)
+        # A rename onto the name it already reads writes nothing (see _rename), so it provokes
+        # none of the generation this gate exists for. The compare is exact, like _rename's.
+        if want_rename != current_name:
+            gate_err = _rename_gate_refusal(op, current_name)
+            if gate_err:
+                return error(gate_err)
 
     params = op.parameters if wanted else None
     # Validate ALL named parameters exist BEFORE applying any (no half-edited op on a typo).

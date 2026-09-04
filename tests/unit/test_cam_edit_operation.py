@@ -1480,6 +1480,86 @@ class TestRename:
         assert out["edited"] is True and out["updated_count"] == 0
 
 
+class HoleFacesParam(FakeParam):
+    """holeFaces / circularFaces - a CadObjectParameterValue whose .value.value is the face LIST,
+    not a number, which is what the hole-selection read counts."""
+
+    def __init__(self, name, faces=()):
+        super().__init__(name, "")
+        self._faces = list(faces)
+
+    @property
+    def value(self):
+        return FakeValue(list(self._faces))
+
+
+class TestHoleRenameGuard:
+    """Setting Operation.name on a hole/thread operation makes the platform generate it, so the
+    rename is refused while that operation's own face selection reads empty."""
+
+    def _op(self, strategy, params):
+        op = FakeOp("Bore1", params)
+        op.strategy = strategy
+        return op
+
+    def test_a_bore_with_no_faces_selected_is_refused_before_the_write(self, monkeypatch):
+        op = _install_op(monkeypatch, self._op(
+            "bore", {"circularFaces": HoleFacesParam("circularFaces")}))
+        res = ce.handler(operation="Bore1", rename="Bore Deep Holes")
+        assert res["isError"] is True
+        assert "'circularFaces' selection reads 0 faces" in res["message"]
+        assert "Failed to generate toolpath." in res["message"]
+        assert "cam_select_geometry(operation='Bore1', selection='holes'" in res["message"]
+        assert op.name == "Bore1"                       # refused BEFORE the write
+
+    def test_a_thread_is_gated_on_the_hole_spelling_it_carries(self, monkeypatch):
+        # MEASURED: the milling thread op picks into circularFaces - it reports "Circular Face
+        # Selections: No faces selected" - so the gate reaches it through the 'holes' spelling.
+        op = _install_op(monkeypatch, self._op(
+            "thread", {"circularFaces": HoleFacesParam("circularFaces")}))
+        res = ce.handler(operation="Bore1", rename="Thread M30")
+        assert res["isError"] is True
+        assert "'circularFaces' selection reads 0 faces" in res["message"]
+        assert "selection='holes'" in res["message"]
+        assert op.name == "Bore1"
+
+    def test_a_thread_holding_faces_renames(self, monkeypatch):
+        op = _install_op(monkeypatch, self._op(
+            "thread", {"circularFaces": HoleFacesParam("circularFaces", [object()])}))
+        out = _payload(ce.handler(operation="Bore1", rename="Thread M30"))
+        assert op.name == "Thread M30" and out["renamed"] is True
+
+    def test_renaming_a_face_less_bore_onto_its_own_name_writes_nothing(self, monkeypatch):
+        # the no-op rename never reaches Operation.name (see _rename), so there is no generation
+        # to gate - refusing it would block a call that changes nothing.
+        op = _install_op(monkeypatch, self._op(
+            "bore", {"circularFaces": HoleFacesParam("circularFaces")}))
+        out = _payload(ce.handler(operation="Bore1", rename="Bore1"))
+        assert out["name_unchanged"] is True and out["renamed"] is False
+        assert op.name == "Bore1"
+
+    def test_a_bore_whose_selection_holds_faces_renames(self, monkeypatch):
+        # THE BOUNDARY: one face is enough - the guard is about an EMPTY selection, not about bores.
+        op = _install_op(monkeypatch, self._op(
+            "bore", {"circularFaces": HoleFacesParam("circularFaces", [object()])}))
+        out = _payload(ce.handler(operation="Bore1", rename="Bore Deep Holes"))
+        assert op.name == "Bore Deep Holes" and out["renamed"] is True
+
+    def test_a_non_hole_strategy_carrying_no_hole_parameter_renames(self, monkeypatch):
+        op = _install_op(monkeypatch, self._op("adaptive", {"tool_stepover": "2."}))
+        out = _payload(ce.handler(operation="Bore1", rename="Rough Pocket"))
+        assert op.name == "Rough Pocket" and out["renamed"] is True
+
+    def test_a_drill_with_an_empty_selection_is_outside_the_guard(self, monkeypatch):
+        # The parked dialog was measured on a bore/circular/thread; drill carries the same empty
+        # holeFaces shape and is deliberately not refused, so the guard cannot creep to every
+        # hole strategy on its own.
+        op = _install_op(monkeypatch, self._op(
+            "drill", {"holeFaces": HoleFacesParam("holeFaces")}))
+        out = _payload(ce.handler(operation="Bore1", rename="Drill Holes"))
+        assert op.name == "Drill Holes" and out["renamed"] is True
+
+
 class EnumRefusingParam(FakeParam):
     """The platform's refusal for a value outside a string parameter's enumeration - Fusion words
     it '3 : Invalid enumeration value.'"""

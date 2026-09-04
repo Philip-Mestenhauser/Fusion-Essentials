@@ -671,6 +671,14 @@ class TestLibrarySlice:
         assert out["library"]["tool_count"] == 1
         assert seen == {"scope": "cloud", "library": "Shop", "tool_type": "ball"}
 
+    def test_the_scope_enum_matches_the_scopes_read_library_accepts(self):
+        # The enum is spelled here and the vocabulary lives in cam_edit_tools, whose read_library
+        # this slice calls - a scope missing from the enum is unreachable through cam_get, and one
+        # that is not in the vocabulary is refused after the schema let it through.
+        ctl = load_tool("cam_edit_tools")
+        enum = cg.tool.input_schema["properties"]["scope"]["enum"]
+        assert tuple(enum) == ctl._SCOPES
+
     def test_slice_delegates_to_read_library(self, monkeypatch):
         # _slice_library unwraps cam_edit_tools.read_library's ok() payload (one read implementation).
         ctl = load_tool("cam_edit_tools")

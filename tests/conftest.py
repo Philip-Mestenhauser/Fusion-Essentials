@@ -1425,13 +1425,26 @@ class _SimpleNamed:
 class BRepEdge:
     """Matches type(entity).__name__ == 'BRepEdge'. `geometry` is the curve. `point_on_edge`/
     `entity_token` are None by default (see BRepFace) - set them for a test that mints/asserts on a
-    find_geometry-style handle."""
-    def __init__(self, curve, start=None, end=None, point_on_edge=None, entity_token=None):
+    find_geometry-style handle. `tangent` installs a curve evaluator answering the live
+    (bool, value) tuples getParameterAtPoint/getTangent return; `co_edges` installs the BRepCoEdges
+    bounding it. Left None the edge carries neither attribute, which is how one whose curve or
+    topology will not read reads. `param_reversed` is the live isParamReversed - whether the edge
+    runs against its own curve; None leaves that flag unreadable too."""
+    def __init__(self, curve, start=None, end=None, point_on_edge=None, entity_token=None,
+                 tangent=None, co_edges=None, param_reversed=False):
         self.geometry = curve
         self.startVertex = _Vertex(start) if start else None
         self.endVertex = _Vertex(end) if end else None
         self.pointOnEdge = point_on_edge
         self.entityToken = entity_token
+        if param_reversed is not None:
+            self.isParamReversed = bool(param_reversed)
+        if tangent is not None:
+            self.evaluator = types.SimpleNamespace(
+                getParameterAtPoint=lambda _pt: (True, 0.0),
+                getTangent=lambda _prm, t=tangent: (True, t))
+        if co_edges is not None:
+            self.coEdges = _NamedCollection(list(co_edges))
 
 
 # ── shared fake-design builder + dual-seam install (the test-plumbing convention) ───────────────────

@@ -219,9 +219,9 @@ def _slice_tools(cam):
 
 
 def _slice_library(cam, scope, library, tool_type):
-    """A tool LIBRARY's catalog (the tools you can ADD), by scope: document/local/cloud/hub. A shared
-    scope with no 'library' lists the libraries there. Distinct from 'tools' (what ops USE); the write
-    actions stay on cam_edit_tools."""
+    """A tool LIBRARY's catalog (the tools you can ADD), by scope: document/local/cloud/hub/fusion.
+    A shared scope with no 'library' lists the libraries there. Distinct from 'tools' (what ops USE);
+    the write actions stay on cam_edit_tools, which refuses every write at the fusion scope."""
     from . import cam_edit_tools
     return _unwrap(cam_edit_tools.read_library(scope or "document", library, tool_type))
 
@@ -626,8 +626,9 @@ tool = (
             "description": "The operation whose parameters/tool to read (required for include=tool)."})
     .add_input_property("preset", {"type": "string",
             "description": "With include=['tool']: this preset's feeds/speeds expressions."})
-    .add_input_property("scope", {"type": "string", "enum": ["document", "local", "cloud", "hub"],
-            "description": "The 'library' slice: which location (default document)."})
+    .add_input_property("scope", {"type": "string",
+            "enum": ["document", "local", "cloud", "hub", "fusion"],
+            "description": "The 'library' slice: which location (default document; fusion = the shipped samples)."})
     .add_input_property("library", {"type": "string",
             "description": "The 'library' slice, shared scope: library name/url (omit to list the libraries there)."})
     .add_input_property("tool_type", {"type": "string",

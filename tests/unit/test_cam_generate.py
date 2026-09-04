@@ -100,7 +100,7 @@ class TestTargetResolution:
 
     def test_document_launch_records_no_target_name(self, monkeypatch):
         gen._GENERATIONS.clear()
-        self._install(monkeypatch, [SharedSetup("S")])
+        self._install(monkeypatch, [SharedSetup("S", ops=[SharedOp("Face1", operation_state=1)])])
         out = _payload(gen.generate_handler(target=""))
         entry = gen._GENERATIONS[out["handle"]]
         assert entry["target_name"] == "" and entry["scope"] == "document"
@@ -285,7 +285,9 @@ class TestRailTriageRidesTheEmptyToolpathDisclosure:
 
 class TestGenerateHandler:
     def test_whole_document_calls_generate_all(self, monkeypatch):
-        cam = _FakeCAM([_setup("S")])
+        # the setup carries an out-of-date operation: a scope with nothing to build is the
+        # skipped payload, not a launch, so a launch test needs something in scope.
+        cam = _FakeCAM([_setup("S", [SharedOp("Face1", operation_state=1)])])
         monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
         out = _payload(gen.generate_handler(target=""))
         assert out["launched"] is True
@@ -340,6 +342,109 @@ class TestLaunchHandsOffToTheStatusRead:
         assert "completed" not in out and "generated" not in out
         assert "cam_get_status" in out["note"]               # where completion IS confirmed
         assert out["handle"] in gen._GENERATIONS             # the handle that read is spent on
+
+
+class TestLaunchCountIsTheScopeWalk:
+    """operations_to_generate names the operations THIS launch covers, walked off the resolved
+    scope. The generation Future's own numberOfOperations counts some other collection (2 over a
+    six-operation turning setup, measured), so it is never what the payload publishes."""
+
+    def _install(self, monkeypatch, setups, future_count):
+        import adsk.cam
+        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
+        cam = _FakeCAM(setups)
+        cam.generateAllToolpaths = lambda skip_valid: SimpleNamespace(
+            numberOfOperations=future_count)
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
+        return cam
+
+    def _ops(self):
+        return [SharedOp("Todo1", operation_state=1), SharedOp("Todo2", operation_state=1),
+                SharedOp("Todo3", operation_state=1), SharedOp("Done", operation_state=0),
+                SharedOp("Parked", operation_state=2, suppressed=True)]
+
+    def test_the_document_count_is_the_scope_not_the_futures_number(self, monkeypatch):
+        # THE BITE: the Future counts 13 while three operations in scope are out of date - its
+        # counter is not this scope, so it is not what the payload publishes.
+        gen._GENERATIONS.clear()
+        self._install(monkeypatch, [SharedSetup("S", ops=self._ops())], 13)
+        out = _payload(gen.generate_handler(target="", skip_valid=True))
+        assert out["operations_to_generate"] == 3
+        gen._GENERATIONS.clear()
+
+    def test_the_walk_runs_before_the_launch_that_moves_the_state_it_reads(self, monkeypatch):
+        # generateAllToolpaths marks every operation valid here. Counting after it would read the
+        # states the launch just wrote and report 0 over a launch covering three.
+        gen._GENERATIONS.clear()
+        ops = self._ops()
+        cam = self._install(monkeypatch, [SharedSetup("S", ops=ops)], 13)
+        plain = cam.generateAllToolpaths
+
+        def _launch_and_settle(skip_valid):
+            for op in ops:
+                op._operation_state = 0
+            return plain(skip_valid)
+
+        cam.generateAllToolpaths = _launch_and_settle
+        out = _payload(gen.generate_handler(target="", skip_valid=True))
+        assert out["operations_to_generate"] == 3
+        gen._GENERATIONS.clear()
+
+    def test_a_scope_with_nothing_to_build_is_skipped_not_a_launch(self, monkeypatch):
+        # launched=true with a count of 0 sends the caller to poll a generation nobody started.
+        gen._GENERATIONS.clear()
+        ops = [SharedOp("Done", operation_state=0),
+               SharedOp("Parked", operation_state=2, suppressed=True)]
+        cam = self._install(monkeypatch, [SharedSetup("S", ops=ops)], 13)
+        out = _payload(gen.generate_handler(target="", skip_valid=True))
+        assert out["launched"] is False and out["skipped"] is True
+        assert "1 already valid, 1 suppressed" in out["reason"]
+        assert out["hint"] == "Pass skip_valid=false to force-regenerate the valid one(s)."
+        assert "handle" not in out                    # no Future was minted
+        assert cam.generate_calls == []               # and nothing was launched
+        assert gen._GENERATIONS == {}
+
+    def test_a_scope_holding_no_operations_says_so_and_names_the_create(self, monkeypatch):
+        # '0 already valid, 0 suppressed' describes an exclusion that never happened - the scope is
+        # simply empty, and the remedy is a create, not a flag.
+        gen._GENERATIONS.clear()
+        cam = self._install(monkeypatch, [SharedSetup("Empty")], 13)
+        out = _payload(gen.generate_handler(target="Empty"))
+        assert out["launched"] is False and out["skipped"] is True
+        assert out["reason"] == "no operations in scope - there is nothing to generate."
+        assert "cam_create_operation" in out["hint"]
+        assert "already valid" not in out["reason"] and "suppressed" not in out["reason"]
+        assert cam.generate_calls == []
+
+    def test_an_all_suppressed_scope_names_the_suppression_not_skip_valid(self, monkeypatch):
+        # skip_valid excluded nothing here, so pointing at it would be a remedy that changes
+        # nothing - the exclusion that emptied the scope is what the hint names.
+        gen._GENERATIONS.clear()
+        ops = [SharedOp("Parked", operation_state=2, suppressed=True)]
+        self._install(monkeypatch, [SharedSetup("Roughing", ops=ops)], 13)
+        out = _payload(gen.generate_handler(target="Roughing", skip_valid=False))
+        assert out["launched"] is False and "0 already valid, 1 suppressed" in out["reason"]
+        assert "cam_edit_operation(suppressed=false)" in out["hint"]
+
+    def test_skip_valid_false_counts_the_valid_op_and_never_the_suppressed_one(self, monkeypatch):
+        # the boundary of the skip: state 0 joins the count only while skip_valid is off, and the
+        # suppressed operation stays out either way - it has no toolpath to build.
+        gen._GENERATIONS.clear()
+        self._install(monkeypatch, [SharedSetup("S", ops=self._ops())], 13)
+        out = _payload(gen.generate_handler(target="", skip_valid=False))
+        assert out["operations_to_generate"] == 4
+        gen._GENERATIONS.clear()
+
+    def test_a_setup_target_counts_every_unsuppressed_op_whatever_skip_valid_says(self, monkeypatch):
+        # generateToolpath takes no skip_valid flag - it regenerates the whole target - so a count
+        # narrowed by that flag would under-report what the platform is about to rebuild.
+        gen._GENERATIONS.clear()
+        ops = [SharedOp("Todo1", operation_state=1), SharedOp("Done", operation_state=0),
+               SharedOp("Parked", operation_state=2, suppressed=True)]
+        self._install(monkeypatch, [SharedSetup("Roughing", ops=ops)], 13)
+        out = _payload(gen.generate_handler(target="Roughing", skip_valid=True))
+        assert out["operations_to_generate"] == 2
+        gen._GENERATIONS.clear()
 
 
 # ── status_handler: guards, handle resolution, clamp, stall warning ─────────────────────────────────
@@ -1804,6 +1909,21 @@ class TestEntitlementPreflight:
         _payload(gen.generate_handler(target="", skip_valid=False))
         assert self._launched(cam) == ["Done", "Todo"]
         gen._GENERATIONS.clear()
+
+    def test_the_blocked_arms_skip_is_built_by_the_one_shared_builder(self, monkeypatch):
+        # Two arms returning a hand-built skip drift: this one carries the entitlement rows and the
+        # note ON TOP of the shared reason/hint, never a second wording of them.
+        gen._GENERATIONS.clear()
+        ops = [SharedOp("Cham", operation_state=1, strategy="chamfer"),
+               SharedOp("Done", operation_state=0, strategy="face")]
+        cam = self._install(monkeypatch, [SharedSetup("S", ops=ops)],
+                            {"chamfer": False, "face": True})
+        out = _payload(gen.generate_handler(target="", skip_valid=True))
+        shared = gen._nothing_to_launch("all setups", 0, 1)
+        assert out["reason"] == shared["reason"] and out["hint"] == shared["hint"]
+        assert out["entitlement_blocked"] == [{"name": "Cham", "strategy": "chamfer"}]
+        assert "isGenerationAllowed false" in out["note"]
+        assert cam.generate_calls == []
 
     def test_blocked_beside_only_valid_ops_launches_nothing_and_says_why(self, monkeypatch):
         ops = [SharedOp("Cham", operation_state=1, strategy="chamfer"),

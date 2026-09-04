@@ -8,6 +8,7 @@ Plus the guards (no CAM, setup not found, bad strategy, tool ref out of range).
 """
 
 import json
+from types import SimpleNamespace
 
 from conftest import load_tool
 
@@ -166,6 +167,31 @@ class _RaisingDisplayNameInput:
         raise AttributeError("'OperationInput' object has no attribute 'displayName'")
 
 
+class _ToollessOperation(_Operation):
+    """The add lands an operation carrying NO tool - the OperationInput assignment never reached it."""
+
+    def __init__(self, inp):
+        super().__init__(inp)
+        self.tool = None
+
+
+class _SwappedToolOperation(_Operation):
+    """The add lands an operation carrying a DIFFERENT tool than the input was given."""
+
+    def __init__(self, inp):
+        super().__init__(inp)
+        self.tool = _Tool("6mm Ball Endmill", number=7)
+
+
+class _PrefixedToolOperation(_Operation):
+    """The operation's own COPY of the tool, whose description carries the '#<n> - ' number prefix
+    the shared library's tool does not."""
+
+    def __init__(self, inp):
+        super().__init__(inp)
+        self.tool = _Tool("#1 - " + inp.tool.description, number=1)
+
+
 class _Operations:
     op_class = _Operation                     # swapped by a test that needs a different Operation
 
@@ -210,9 +236,26 @@ class _Setups:
         return self._s[i]
 
 
+class _ToolParams:
+    """Tool.parameters - itemByName(n).value.value, the shape the tool_number read walks."""
+
+    def __init__(self, values):
+        self._d = {k: SimpleNamespace(value=SimpleNamespace(value=v)) for k, v in values.items()}
+
+    def itemByName(self, name):
+        return self._d.get(name)
+
+
 class _Tool:
-    def __init__(self, desc):
+    """A library Tool: the description, tool_number and tool_type the create reads it by."""
+
+    def __init__(self, desc, number=1, tool_type="flat end mill"):
         self.desc = desc
+        self.description = desc
+        params = {"tool_number": number}
+        if tool_type is not None:
+            params["tool_type"] = tool_type
+        self.parameters = _ToolParams(params)
 
 
 class _ToolLib:
@@ -318,6 +361,93 @@ class TestToolIndexRequest:
         res = cco.handler(setup="Setup1", strategy="face", tool_library_url="u", tool_index=True)
         assert res["isError"] is True and "not a whole number" in res["message"]
         assert cam.setups.item(0).operations.count == 0            # nothing was created
+
+
+class TestProbeStrategyNeedsAProbe:
+    """A probing strategy takes ANY tool at create and only reports at generate, so the tool_type
+    is read here and a cutting tool is refused before the add."""
+
+    _STRATEGIES = ("face", "probe", "probe_geometry", "inspect_surface")
+
+    def _with_tool(self, monkeypatch, tool):
+        cam = _install(monkeypatch, strategies=self._STRATEGIES)
+        monkeypatch.setattr(cco, "_tool_at", lambda url, idx: (tool, None))
+        return cam
+
+    def test_a_cutting_tool_on_a_probing_strategy_is_refused_before_the_add(self, monkeypatch):
+        cam = self._with_tool(monkeypatch, _Tool("50mm Face Mill", tool_type="face mill"))
+        res = cco.handler(setup="Setup1", strategy="probe",
+                          tool_library_url="u", tool_index=0)
+        assert res["isError"] is True
+        assert "'face mill'" in res["message"]                 # the type actually read
+        assert "not supported for the strategy" in res["message"]
+        assert "'from_type': 'probe'" in res["message"]        # the clone remedy
+        assert "scope='fusion'" in res["message"]              # the shipped-library remedy
+        assert cam.setups.item(0).operations.count == 0        # nothing was created
+
+    def test_a_probe_creates_on_a_probing_strategy(self, monkeypatch):
+        cam = self._with_tool(monkeypatch, _Tool("OMP400", tool_type="probe"))
+        out = _payload(cco.handler(setup="Setup1", strategy="probe",
+                                   tool_library_url="u", tool_index=0))
+        assert out["tool"] == "OMP400"
+        assert cam.setups.item(0).operations.count == 1
+
+    def test_every_probing_strategy_is_gated_and_a_cutting_one_is_not(self, monkeypatch):
+        # THE BOUNDARY: the gate is keyed on the STRATEGY, so a face mill still creates a 'face'.
+        for strategy in ("probe", "probe_geometry", "inspect_surface"):
+            self._with_tool(monkeypatch, _Tool("50mm Face Mill", tool_type="face mill"))
+            res = cco.handler(setup="Setup1", strategy=strategy,
+                              tool_library_url="u", tool_index=0)
+            assert res["isError"] is True, strategy
+        cam = self._with_tool(monkeypatch, _Tool("50mm Face Mill", tool_type="face mill"))
+        _payload(cco.handler(setup="Setup1", strategy="face", tool_library_url="u", tool_index=0))
+        assert cam.setups.item(0).operations.count == 1
+
+    def test_a_tool_type_that_does_not_read_refuses_nothing(self, monkeypatch):
+        # an unread type is no verdict - refusing on it would block a create off a read that
+        # never answered.
+        cam = self._with_tool(monkeypatch, _Tool("Mystery", tool_type=None))
+        _payload(cco.handler(setup="Setup1", strategy="probe", tool_library_url="u", tool_index=0))
+        assert cam.setups.item(0).operations.count == 1
+
+
+class TestToolReadBack:
+    """opin.tool is the REQUEST. What the payload publishes is Operation.tool read off the
+    operation the add returned, and a read-back that names another tool - or none - is an error."""
+
+    def test_the_payload_publishes_the_tool_the_operation_carries(self, monkeypatch):
+        _install(monkeypatch)
+        out = _payload(cco.handler(setup="Setup1", strategy="face",
+                                   tool_library_url="u", tool_index=0))
+        assert out["tool"] == "12mm Flat Endmill" and out["tool_number"] == 1
+        assert "tool_identity_checked" not in out      # absent = both sides read and agreed
+
+    def test_an_add_that_drops_the_tool_is_refused_with_the_read_back(self, monkeypatch):
+        # THE BITE: the request echoed would report '12mm Flat Endmill' on an operation carrying
+        # nothing, and the caller would learn otherwise only at generate.
+        cam = _install(monkeypatch)
+        cam.setups.item(0).operations.op_class = _ToollessOperation
+        res = cco.handler(setup="Setup1", strategy="face", tool_library_url="u", tool_index=0)
+        assert res["isError"] is True
+        assert "Operation.tool reads back null" in res["message"]
+        assert "cam_edit_operation" in res["message"] and "cam_delete" in res["message"]
+
+    def test_a_read_back_naming_another_tool_is_refused_and_names_both(self, monkeypatch):
+        cam = _install(monkeypatch)
+        cam.setups.item(0).operations.op_class = _SwappedToolOperation
+        res = cco.handler(setup="Setup1", strategy="face", tool_library_url="u", tool_index=0)
+        assert res["isError"] is True
+        assert "'6mm Ball Endmill'" in res["message"]        # what it carries
+        assert "'12mm Flat Endmill'" in res["message"]       # what was asked for
+
+    def test_the_tool_number_prefix_is_stripped_from_both_sides(self, monkeypatch):
+        # the operation's COPY carries a '#<n> - ' prefix the shared library's tool does not, so a
+        # prefix-blind compare would refuse every create made against a sample library.
+        cam = _install(monkeypatch)
+        cam.setups.item(0).operations.op_class = _PrefixedToolOperation
+        out = _payload(cco.handler(setup="Setup1", strategy="face",
+                                   tool_library_url="u", tool_index=0))
+        assert out["tool"] == "#1 - 12mm Flat Endmill"
 
 
 # ── the operation has to LAND in the setup, not just come back from add() ────

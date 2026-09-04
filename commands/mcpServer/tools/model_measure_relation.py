@@ -74,16 +74,8 @@ def _sub(a, b):
     return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
 
 
-def _dot(a, b):
-    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-
-
-def _cross(a, b):
-    return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
-
-
 def _mag(a):
-    return math.sqrt(_dot(a, a))
+    return math.sqrt(_geom.dot(a, a))
 
 
 def _unit(a):
@@ -97,7 +89,7 @@ def _line_angle_deg(u, v):
     uu, vv = _unit(u), _unit(v)
     if uu is None or vv is None:
         return None
-    d = max(-1.0, min(1.0, abs(_dot(uu, vv))))
+    d = max(-1.0, min(1.0, abs(_geom.dot(uu, vv))))
     return math.degrees(math.acos(d))
 
 
@@ -109,13 +101,13 @@ def _line_offset(p1, d1, p2, d2):
     if u1 is None or u2 is None:
         return None
     w = _sub(p2, p1)
-    cr = _cross(u1, u2)
+    cr = _geom.cross(u1, u2)
     m = _mag(cr)
     if m < 1e-9: # parallel: drop the component of w along the shared direction
-        proj = _dot(w, u1)
+        proj = _geom.dot(w, u1)
         perp = _sub(w, (u1[0] * proj, u1[1] * proj, u1[2] * proj))
         return _mag(perp)
-    return abs(_dot(w, cr)) / m
+    return abs(_geom.dot(w, cr)) / m
 
 
 # ── geometry extraction (what each resolved entity offers; guard-friendly) ────────────────────────
@@ -324,7 +316,7 @@ def _rel_flush(ea, ka, eb, kb, tol_cm, tol_deg, inv, units):
     un = _unit(na)
     if ang is None or un is None:
         return error("flush: a face normal was degenerate; cannot compare.")
-    offs = abs(_dot(_sub(ob, oa), un)) # distance from plane B's origin to plane A, along A's normal
+    offs = abs(_geom.dot(_sub(ob, oa), un)) # distance from plane B's origin to plane A, along A's normal
     is_parallel = ang <= tol_deg
     is_coincident = offs <= tol_cm
     passed = bool(is_parallel and is_coincident)

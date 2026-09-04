@@ -54,6 +54,7 @@ _BOSS_OP = "BossFinish"        # the base-licence finishing pass round the boss
 _BOSS3D_OP = "BossSteep"       # the Machining Extension's own 3D finish on the same feature
 _FLIP_FACE_OP = "FlipFace"     # the second setup: facing the underside
 _FLIP_BACK_OP = "FlipCbores"   # and the contour round the counterbore backsides
+_ENGRAVE_OP = "SketchEngrave"  # the engraving, driven by the scratch sketch
 
 # The shipped hole-drilling template one act applies by its folder-position url: a spot drill, a
 # drill and a counterbore in one bundle, which is the counterbored mounting pattern's whole cycle.
@@ -365,7 +366,8 @@ _CAM_STORY = [
     # spelling this build does not carry, or one this licence will not generate, reds here with the
     # name in the row - not eight rows later inside a create.
     ("cam_get", {"include": ["strategies"], "setup": CAM_SETUP},
-     _offers(CAM_SETUP, "face", "adaptive", "contour2d", "pocket2d", "bore", "chamfer2d", "drill"),
+     _offers(CAM_SETUP, "face", "adaptive", "contour2d", "pocket2d", "bore", "chamfer2d", "drill",
+             "engrave"),
      None),
     # THE JOB, in the order a shop would cut it: face the top, rough the whole part with the 3D
     # adaptive, open the pocket with 2D offset roughing, finish the boss, break the stepped top's
@@ -502,6 +504,15 @@ _CAM_STORY = [
     ("cam_select_geometry", lambda c: {"operation": _ctx_get(c, "contour_op", "the contour op"),
                                        "selection": "sketch",
                                        "sketches": ["CamContourSketch"], "generate": False},
+     lambda p: p["resolved"]["entities"] >= 1, None),
+    # THE ENGRAVING, driven by the same scratch sketch through the SKETCH kind - the second route
+    # that selection takes, on the strategy made for a sketch line, cut with the chamfer mill.
+    ("cam_create_operation", {"setup": CAM_SETUP, "strategy": "engrave", "name": _ENGRAVE_OP,
+                              "tool_scope": "document", "tool_index": _CHAMFER_MILL,
+                              "generate": False},
+     _op_named(CAM_SETUP, "engrave", _ENGRAVE_OP), None),
+    ("cam_select_geometry", {"operation": _ENGRAVE_OP, "selection": "sketch",
+                             "sketches": ["CamContourSketch"], "generate": False},
      lambda p: p["resolved"]["entities"] >= 1, None),
     # No pocket_recognition beat: running that selection here coincides with the Fusion process
     # terminating, and a routine sweep must not risk the host. The other selection kinds above and
@@ -693,6 +704,67 @@ def _shipped_template_url(name):
     return lambda p: _applicable_listing(p, name)[0]["url"]
 
 
+def _applied_rows_account(p, rows, tool_less):
+    """The per-op census every apply publishes: one row per operation the SETUP gained, and
+    'tool_unselected' naming exactly the rows carrying NO tool - which excludes a row whose tool
+    object is there and only its description did not read (tool_description_unread)."""
+    return (len(rows) == p.get("operations_added")
+            and tool_less == [r.get("name") for r in rows
+                              if r.get("tool") is None and not r.get("tool_description_unread")])
+
+
+def _template_applied(name, setup, minimum):
+    """cam_apply_template of a template bundled from an operation that CARRIES a tool: the row count
+    accounts for operations_added, nothing is named in 'tool_unselected', and 'ready' reads true -
+    the opposite reading from the shipped bundle below, which is why neither is asserted
+    symmetrically."""
+    def check(p):
+        rows = p.get("operations") or []
+        tool_less = p.get("tool_unselected")
+        return _measured(f"{name!r} applied to '{setup}', every added operation carrying a tool",
+                         {"applied": p.get("applied"), "template": p.get("template"),
+                          "setup": p.get("setup"), "operations_added": p.get("operations_added"),
+                          "operations": rows, "tool_unselected": tool_less, "ready": p.get("ready")},
+                         p.get("applied") is True and p.get("template") == name
+                         and p.get("setup") == setup and (p.get("operations_added") or 0) >= minimum
+                         and _applied_rows_account(p, rows, tool_less)
+                         and tool_less == [] and p.get("ready") is True)
+    return check
+
+
+def _template_applied_tool_less(name, setup, minimum):
+    """The same census on the SHIPPED hole bundle, whose operations arrive carrying no tool: every
+    row reads a null tool, 'tool_unselected' names all of them, and 'ready' is false."""
+    def check(p):
+        rows = p.get("operations") or []
+        tool_less = p.get("tool_unselected")
+        return _measured(f"{name!r} applied to '{setup}' with every operation tool-less",
+                         {"applied": p.get("applied"), "operations_added": p.get("operations_added"),
+                          "operations": rows, "tool_unselected": tool_less, "ready": p.get("ready")},
+                         p.get("applied") is True and p.get("template") == name
+                         and p.get("setup") == setup and (p.get("operations_added") or 0) >= minimum
+                         and _applied_rows_account(p, rows, tool_less)
+                         and p.get("ready") is False and bool(rows)
+                         and len(tool_less) == len(rows)
+                         and all(r.get("tool") is None and not r.get("tool_description_unread")
+                                 for r in rows))
+    return check
+
+
+def _tool_assigned(index):
+    """cam_edit_operation(tool_scope='document', tool_index=...): 'tool' is Operation.tool's own
+    description read back after the assignment, and 'was_tool' is null on an operation that carried
+    none - the state the shipped template's operations arrive in."""
+    def check(p):
+        return _measured(f"document tool {index} assigned to an operation that carried none",
+                         {"tool": p.get("tool"), "was_tool": p.get("was_tool"),
+                          "tool_number": p.get("tool_number"), "tool_index": p.get("tool_index"),
+                          "is_toolpath_valid": p.get("is_toolpath_valid")},
+                         p.get("tool_index") == index and bool(p.get("tool"))
+                         and p.get("was_tool") is None)
+    return check
+
+
 def _all_cut(setup, minimum):
     """cam_get(include=['time']) over a whole setup: EVERY operation carries its own
     getMachiningTime figure above zero.
@@ -713,6 +785,24 @@ def _all_cut(setup, minimum):
                           "seconds": {r.get("operation"): r.get("machining_time_seconds")
                                       for r in ops}},
                          len(ops) >= minimum and not idle)
+    return check
+
+
+def _setup_ready(setup, count):
+    """cam_get(include=['operations']) on one generated setup: the readiness verdict is published
+    either way, and a setup carrying a blocked_by changes its WORDING to "'ready to post' is NOT
+    established" - so the postable wording is what says the machine assignment cleared the
+    blocker, and the exceptions list is asserted empty beside it."""
+    def check(p):
+        recs = ((p.get("operations") or {}).get("setups") or [])
+        rec = next((r for r in recs if r.get("setup") == setup), None)
+        summary = (rec or {}).get("summary") or {}
+        verdict = str(summary.get("readiness") or "")
+        return _measured(f"'{setup}' reads {count} active operations and a postable verdict",
+                         {"summary": summary},
+                         summary.get("active_count") == count
+                         and summary.get("exceptions") == []
+                         and ("ready to post." in verdict or "postable, but" in verdict))
     return check
 
 
@@ -834,8 +924,7 @@ _CAM_DELIVER = [
     # objects, which is what says the by-name search reached the template this run saved.
     ("cam_apply_template", {"setup": "Setup2", "template_name": TEMPLATE_NAME,
                             "location": "local", "generate": "skip"},
-     lambda p: p["applied"] is True and p["template"] == TEMPLATE_NAME
-     and p["setup"] == "Setup2" and (p["operations_added"] or 0) >= 1, None),
+     _template_applied(TEMPLATE_NAME, "Setup2", 1), None),
     # THE SHIPPED LIBRARY, the other half of the same tool: Fusion's own hole-drilling bundle,
     # reached by the url the templates slice publishes for it rather than by a name search. The
     # read is what says the url exists and how it addresses the asset; the apply hands BOTH the url
@@ -849,8 +938,15 @@ _CAM_DELIVER = [
                 "template_url": _ctx_get(c, "hole_template_url", "the shipped hole template url"),
                 "template_name": _FUSION_HOLE_TEMPLATE, "location": "fusion",
                 "generate": "skip"},
-     lambda p: p["applied"] is True and p["template"] == _FUSION_HOLE_TEMPLATE
-     and p["setup"] == "Setup2" and (p["operations_added"] or 0) >= 2, None),
+     _template_applied_tool_less(_FUSION_HOLE_TEMPLATE, "Setup2", 2),
+     ("tool_less_op", _recall("tool_less_op", lambda p: p["tool_unselected"][0]))),
+    # THE REMEDY the apply's note names, run on one of those operations: a document tool by index,
+    # with Operation.tool read back after the assignment and 'was_tool' null - which is what says
+    # the operation reached here carrying none.
+    ("cam_edit_operation", lambda c: {"operation": _ctx_get(c, "tool_less_op",
+                                                            "a tool-less applied operation"),
+                                      "tool_scope": "document", "tool_index": _DRILL},
+     _tool_assigned(_DRILL), None),
     # entity_type is the resolved node's kind: it is what says an OPERATION went, not the setup or
     # folder a shared name could have reached.
     ("cam_delete", lambda c: {"entity": _ctx_get(c, "adaptive_op", "the created adaptive op")},
@@ -1065,8 +1161,7 @@ _CAM_FB_DELIVER = [
      lambda p: p["created"] is True and p["setup_name"] == "Setup2"
      and p["operation_count"] == 0, None),
     ("cam_apply_template", {"setup": "Setup2", "template_name": TEMPLATE_NAME, "location": "local", "generate": "skip"},
-     lambda p: p["applied"] is True and p["template"] == TEMPLATE_NAME
-     and p["setup"] == "Setup2" and (p["operations_added"] or 0) >= 1, None),
+     _template_applied(TEMPLATE_NAME, "Setup2", 1), None),
     ("cam_delete", lambda c: {"entity": _ctx_get(c, "adaptive_op", "the created adaptive op")},
      lambda p: p["deleted"] is True and p["entity"] == _RECALL.get("adaptive_op")
      and p["entity_type"] == "operation", None),
@@ -1108,6 +1203,52 @@ _SW_TOP_LEN = _SW_BASE_X - 2 * _SW_INSET
 # A run whose swarf toolpath comes back EMPTY is this constant reading the wrong way round.
 _SW_CUT_SIDE = "true"
 
+# The cameo's other three setups, each machining the same drafted block along an axis the bracket's
+# own job never uses. They are kept OUT of the rail program's two setups: the multi-axis strategies
+# are refused by the 3-axis post that program is written with, and neither the rotary nor the turned
+# job is posted at all.
+_MX_SETUP = "MultiAxisSetup"     # the extension's simultaneous strategies
+_ROT_SETUP = "RotarySetup"       # the 4-axis wrap, an extension strategy too
+_TURN_SETUP = "TurnSetup"        # the turned profile, on the mill-turn machine below
+# The layout pass deals the cameo a cell a metre out in the field, so the rotary and turning setups
+# bind their WCS to a Joint Origin at the block's own centre rather than to the world origin. One
+# name per act, so the turning act stands on its own where the extension act does not run.
+_CAMEO_WCS = "CameoWCS"
+_TURN_WCS = "TurnWCS"
+_TURN_MACHINE = "Brother SPEEDIO M300Xd1"
+# Setup.operationType crosses the wire as the API's own enum NAME, not the create call's key.
+_TURNING_TYPE = "TurningOperation"
+
+
+# The dihedral bench beside the cameo: an L prism, 60 x 40 outer with 20 mm arms, 20 mm tall. Its
+# 18 edges are 17 convex and the single vertical one at the reflex corner, which is what makes a
+# hand-counted census possible at all.
+_L_COMP = "DihedralL"
+_L_SKETCH = "DihedralLSketch"
+_L_X0, _L_Y0 = 1200.0, 600.0
+_L_LONG, _L_SHORT, _L_ARM, _L_H = 60.0, 40.0, 20.0, 20.0
+
+
+def _concave_filtered(convex, concave):
+    """model_fillet(edge_filter='concave'): the convex/concave/smooth census the filter chose from
+    (an unclassifiable edge refuses the call instead), the count it requested, and the volume it
+    MOVED. Filling a concave corner ADDS material, so a classifier reading the L's 17 convex
+    edges as concave lands a negative delta here."""
+    def check(p):
+        delta = p.get("volume_delta_cm3")
+        counts = {k: p.get(k) for k in ("edges_convex", "edges_concave", "edges_smooth",
+                                        "edges_requested")}
+        return _measured(f"{concave} of {convex + concave} edges read concave, and the fillet "
+                         "added material",
+                         dict(counts, faces_created=p.get("faces_created"),
+                              volume_delta_cm3=delta),
+                         counts["edges_convex"] == convex and counts["edges_concave"] == concave
+                         and counts["edges_smooth"] == 0
+                         and counts["edges_requested"] == concave
+                         and _num(p.get("faces_created")) and p["faces_created"] >= 1
+                         and _num(delta) and delta > 0)
+    return check
+
 
 def _frustum_measured(p):
     """model_inspect on the cameo: the drafted block's bounding box, which is its BASE rectangle and
@@ -1144,6 +1285,54 @@ def _planar_faces(count):
     return check
 
 
+def _face_facing(label, normal_reads):
+    """find_geometry(kind='planar_face'): the ONE face found, told apart by its own outward normal.
+    The cameo is dealt a cell by the layout pass, so a centroid would not travel with it - the
+    normal is the reading that says which of the six planar faces answered."""
+    def check(p):
+        ms = p.get("matches") or []
+        m = ms[0] if ms else {}
+        n = m.get("normal")
+        return _measured(f"one planar face {label}",
+                         {"count": len(ms), "normal": n, "position": m.get("position")},
+                         len(ms) == 1 and m.get("kind") == "planar_face"
+                         and isinstance(n, list) and len(n) == 3 and normal_reads(n))
+    return check
+
+
+def _setup_row(setup, blocked_by, operation_type=None):
+    """cam_get's setups slice: ONE setup's row, whose operationType, machine and blocked_by are read
+    off the Setup rather than echoed from the call that made it. A blocker and a machine are
+    complementary - the code IS 'no machine' - so both are asserted together."""
+    def check(p):
+        row = next((s for s in (p.get("setups") or []) if s.get("name") == setup), None)
+        got = {k: (row or {}).get(k) for k in ("name", "operation_type", "machine", "blocked_by")}
+        return _measured(f"'{setup}' reads blocked_by {list(blocked_by)}", got,
+                         bool(row) and row.get("blocked_by") == list(blocked_by)
+                         and bool(row.get("machine")) == (not blocked_by)
+                         and (operation_type is None
+                              or row.get("operation_type") == operation_type))
+    return check
+
+
+def _turning_stock(setup):
+    """cam_get(include=['parameters'], setup=...): the turning setup's own stock mode and turning
+    WCS origin, read off the setup's parameter rows. The expression is what the platform stored, so
+    the mode is asserted as CARRIED rather than equal, and the origin row is reported as it reads."""
+    def check(p):
+        params = p.get("parameters") or {}
+        rows = [r for section in (params.get("sections") or {}).values() for r in section]
+        by = {r.get("name"): r.get("expression") for r in rows}
+        origin = by.get("wcs_origin_turning")
+        return _measured(f"'{setup}' turns a fixed cylinder off its own WCS",
+                         {"job_stockMode": by.get("job_stockMode"), "wcs_origin_turning": origin,
+                          "parameter_count": params.get("parameter_count")},
+                         params.get("setup") == setup
+                         and "fixedcylinder" in str(by.get("job_stockMode") or "").lower()
+                         and isinstance(origin, str) and origin.strip() != "")
+    return check
+
+
 def _param_landed(name, fragment):
     """cam_edit_operation(parameters=...): the named parameter read BACK off the operation. The
     platform normalizes what it stores, so the read-back is asserted to CARRY the value rather than
@@ -1156,6 +1345,22 @@ def _param_landed(name, fragment):
                          {"edited": p.get("edited"), "changed": rows},
                          p.get("edited") is True and bool(row)
                          and fragment in str(row.get("after")).lower())
+    return check
+
+
+def _param_value(name, value):
+    """The same read-back on a NUMERIC parameter, compared for EQUALITY: the carry test above reads
+    a stored '13' as carrying the 3 that was asked for, which is a count off by ten."""
+    def check(p):
+        rows = p.get("changed") or []
+        row = next((r for r in rows if r.get("name") == name), None)
+        try:
+            got = float(str((row or {}).get("after")).strip())
+        except (TypeError, ValueError):
+            got = None
+        return _measured(f"operation parameter '{name}' reads back {value}",
+                         {"edited": p.get("edited"), "changed": rows},
+                         p.get("edited") is True and got is not None and got == float(value))
     return check
 
 
@@ -1369,6 +1574,32 @@ _SWARF_RIG = [
                        "taper_deg": -12, "operation": "new"}, _extruded, None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     ("model_inspect", {"target": _SW_COMP + ":1"}, _frustum_measured, None),
+    # THE DIHEDRAL BENCH, built beside it: an L prism is the one shape whose edge census is known by
+    # hand - 18 edges, of which exactly the one at the reflex corner is concave - so the edge_filter
+    # path has a body to classify. Nothing later reads this body.
+    ("model_create_component", {"name": _L_COMP, "activate": True}, _made_component, None),
+    ("sketch_create", {"plane": "xy", "name": _L_SKETCH}, "ok", None),
+    ("sketch_add_geometry", {"kind": "closed_path", "sketch_name": _L_SKETCH,
+                             "points": [[_L_X0, _L_Y0],
+                                        [_L_X0 + _L_LONG, _L_Y0],
+                                        [_L_X0 + _L_LONG, _L_Y0 + _L_ARM],
+                                        [_L_X0 + _L_ARM, _L_Y0 + _L_ARM],
+                                        [_L_X0 + _L_ARM, _L_Y0 + _L_SHORT],
+                                        [_L_X0, _L_Y0 + _L_SHORT]]}, "ok", None),
+    ("model_extrude", {"sketch_name": _L_SKETCH, "profile_index": 0, "distance": _L_H,
+                       "operation": "new"}, _extruded, None),
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    # the FILTER path, which no other row drives: every fillet elsewhere hands in its own edge
+    # handles. The census partitions the 18, the request is the concave one alone, and the volume
+    # GREW - a filter that took the 17 convex edges instead would cut material away.
+    ("model_fillet", {"body_name": _L_COMP + ":1:Body1", "edge_filter": "concave", "radius": 2},
+     _concave_filtered(17, 1), None),
+    # THE SMOOTH BRANCH, on the body that fillet just curved: the round replaced the reflex edge
+    # with a cylindrical patch tangent to both walls, so the census now has to read 21 edges as 19
+    # convex, no concave one left, and the two tangent joins SMOOTH. A filter matching nothing
+    # publishes that census in its own refusal, so the read costs no second feature.
+    ("model_fillet", {"body_name": _L_COMP + ":1:Body1", "edge_filter": "concave", "radius": 1},
+     _refused("body has 21 edges", "19 convex, 0 concave, 2 smooth"), None),
 ]
 
 
@@ -1485,6 +1716,15 @@ _CAM_EXTENSION = [
                                        "handles": [_ctx_get(c, "sw_top_edge", "the top edge")],
                                        "generate": False},
      _edges_applied(1), None),
+    # the deburr's MULTI-PASS, in two writes because the stepover row reads isEditable False until
+    # the flag above it is true, and the tool validates every named row before applying any - so the
+    # pair in one call is refused whole, naming the row that was not settable yet.
+    ("cam_edit_operation", lambda c: {"operation": _ctx_get(c, "deburr_op", "the deburr op"),
+                                      "parameters": {"doMultiplePasses": "true"}},
+     _param_landed("doMultiplePasses", "true"), None),
+    ("cam_edit_operation", lambda c: {"operation": _ctx_get(c, "deburr_op", "the deburr op"),
+                                      "parameters": {"numberOfStepovers": "3"}},
+     _param_value("numberOfStepovers", 3), None),
     # the faces the geodesic is driven by, sorted from a point above the frustum: the top face and
     # the four drafted walls, with the base face the farthest of the six and so the one left out.
     ("find_geometry", {"target": _SW_COMP, "kind": "planar_face",
@@ -1517,9 +1757,103 @@ _CAM_EXTENSION = [
                                        "handles": _ctx_get(c, "sw_faces", "the frustum faces"),
                                        "surface_target": "drive", "generate": False},
      _surfaces_applied(5, "drive", "driveSurfaces"), None),
-    # all three at once, so the act boundary's bounded poll certifies one generation rather than
-    # three. The poll FAILs on an empty toolpath, which is what says the rails cut.
+    # THE SIMULTANEOUS STRATEGIES, in a setup of their own: the rail program spans the swarf setup
+    # and the cameo's plain milling one, and the 3-axis post it is written through refuses a 5-axis
+    # toolpath - so these three ride a setup that program never reaches.
+    ("cam_create_setup", {"models": [_SW_COMP], "name": _MX_SETUP},
+     lambda p: p["created"] is True and p["setup_name"] == _MX_SETUP
+     and p["operation_type"] == "milling" and p["model_count"] >= 1
+     and p["operation_count"] == 0, None),
+    ("cam_edit_setup", {"setup": _MX_SETUP, "machine": "Haas VF-2",
+                        "machine_strip_simulation": True},
+     lambda p: p.get("machine_set") == "Haas VF-2", None),
+    ("cam_get", {"include": ["strategies"], "setup": _MX_SETUP},
+     _offers(_MX_SETUP, "multiaxis_finishing", "multiaxis_roughing", "flow2"), None),
+    # ONE drafted wall, taken from a point 8 mm off it: the -Y wall's own outward normal is what
+    # tells it from the base and the top, whose centroids sit far further from that point.
+    ("find_geometry", {"target": _SW_COMP, "kind": "planar_face",
+                       "nearest_to": [_SW_CX, _SW_CY - _SW_BASE_Y / 2 - 8, _SW_H / 2 + 2],
+                       "max_results": 1},
+     _face_facing("leaning out on -Y", lambda n: n[1] < -0.9 and abs(n[2]) > 0.15),
+     _fg("sw_wall")),
+    # and the block's top, which is the roughing pass's floor - the one planar face reading +Z.
+    ("find_geometry", {"target": _SW_COMP, "kind": "planar_face",
+                       "nearest_to": [_SW_CX, _SW_CY, _SW_H + 10], "max_results": 1},
+     _face_facing("facing +Z", lambda n: n[2] > 0.999), _fg("sw_top_face")),
+    # the simultaneous FINISHING pass, driven by that wall as its floor set - the surface role this
+    # strategy reads, beside the drive set the geodesic above takes.
+    ("cam_create_operation", lambda c: {"setup": _MX_SETUP, "strategy": "multiaxis_finishing",
+                                        "tool_scope": "document",
+                                        "tool_index": _ctx_get(c, "sw_mill",
+                                                               "the flat mill's index") + 1,
+                                        "generate": False},
+     _op_created(_MX_SETUP, "multiaxis_finishing"),
+     ("mafin_op", _recall("mafin_op", lambda p: p["operation"]))),
+    ("cam_select_geometry", lambda c: {"operation": _ctx_get(c, "mafin_op",
+                                                             "the multi-axis finishing op"),
+                                       "selection": "surfaces",
+                                       "handles": [_ctx_get(c, "sw_wall", "the drafted wall")],
+                                       "surface_target": "floor", "generate": False},
+     _surfaces_applied(1, "floor", "floorSurfaces"), None),
+    # the ROUGHING pass on the same floor set, floored on the block's top rather than a wall.
+    ("cam_create_operation", lambda c: {"setup": _MX_SETUP, "strategy": "multiaxis_roughing",
+                                        "tool_scope": "document",
+                                        "tool_index": _ctx_get(c, "sw_mill",
+                                                               "the flat mill's index"),
+                                        "generate": False},
+     _op_created(_MX_SETUP, "multiaxis_roughing"),
+     ("marough_op", _recall("marough_op", lambda p: p["operation"]))),
+    ("cam_select_geometry", lambda c: {"operation": _ctx_get(c, "marough_op",
+                                                             "the multi-axis roughing op"),
+                                       "selection": "surfaces",
+                                       "handles": [_ctx_get(c, "sw_top_face", "the block's top")],
+                                       "surface_target": "floor", "generate": False},
+     _surfaces_applied(1, "floor", "floorSurfaces"), None),
+    # and the FLOW, which drives off the same wall through the drive set instead.
+    ("cam_create_operation", lambda c: {"setup": _MX_SETUP, "strategy": "flow2",
+                                        "tool_scope": "document",
+                                        "tool_index": _ctx_get(c, "sw_mill",
+                                                               "the flat mill's index") + 1,
+                                        "generate": False},
+     _op_created(_MX_SETUP, "flow2"),
+     ("flow_op", _recall("flow_op", lambda p: p["operation"]))),
+    ("cam_select_geometry", lambda c: {"operation": _ctx_get(c, "flow_op", "the flow op"),
+                                       "selection": "surfaces",
+                                       "handles": [_ctx_get(c, "sw_wall", "the drafted wall")],
+                                       "surface_target": "drive", "generate": False},
+     _surfaces_applied(1, "drive", "driveSurfaces"), None),
+    # THE ROTARY WRAP, in a setup of its own for the same reason - and in this act because
+    # rotary_contour is one of the strategies the measured licence split lists the extension as
+    # unblocking (test_workspace_orient.py, the extension_unblocked set). The layout pass deals the
+    # cameo a cell a metre out in the field, so the setup takes a Joint Origin at the block's own
+    # centre rather than the world origin.
+    ("joint_create_origin", {"anchor": "bbox_center", "bbox_target": _SW_COMP + ":1",
+                             "orient_axis": "z", "name": _CAMEO_WCS},
+     _joint_origin_computed(_CAMEO_WCS), None),
+    ("cam_create_setup", {"models": [_SW_COMP], "name": _ROT_SETUP},
+     lambda p: p["created"] is True and p["setup_name"] == _ROT_SETUP
+     and p["operation_type"] == "milling" and p["operation_count"] == 0, None),
+    ("cam_edit_setup", {"setup": _ROT_SETUP, "wcs": {"origin": _CAMEO_WCS}},
+     lambda p: bool(p["wcs_set"]["origin"]["bound_entities"]), None),
+    ("cam_edit_setup", {"setup": _ROT_SETUP, "machine": "Haas VF-2",
+                        "machine_strip_simulation": True},
+     lambda p: p.get("machine_set") == "Haas VF-2", None),
+    ("cam_get", {"include": ["strategies"], "setup": _ROT_SETUP},
+     _offers(_ROT_SETUP, "rotary_contour"), None),
+    ("cam_create_operation", lambda c: {"setup": _ROT_SETUP, "strategy": "rotary_contour",
+                                        "tool_scope": "document",
+                                        "tool_index": _ctx_get(c, "sw_mill",
+                                                               "the flat mill's index") + 1,
+                                        "generate": False},
+     _op_created(_ROT_SETUP, "rotary_contour"),
+     ("rotary_op", _recall("rotary_op", lambda p: p["operation"]))),
+    # the rails' three at once, so the act boundary's bounded poll certifies one generation rather
+    # than three. The poll FAILs on an empty toolpath, which is what says the rails cut.
     ("cam_generate", {"target": _SW_SETUP, "skip_valid": False}, _launched_on(_SW_SETUP), None),
+    # then the other two setups, launched straight after: the boundary poll certifies each in turn,
+    # and all three launches sit behind every write this act makes.
+    ("cam_generate", {"target": _MX_SETUP, "skip_valid": False}, _launched_on(_MX_SETUP), None),
+    ("cam_generate", {"target": _ROT_SETUP, "skip_valid": False}, _launched_on(_ROT_SETUP), None),
 ]
 
 
@@ -1575,6 +1909,82 @@ _CAM_SCOPE = [
 ]
 
 
+# ACT 10c2: the TURNED profile, on the same drafted block and on a mill-turn machine. Turning is
+# not an extension strategy, so this act runs on any licence; it needs only the cameo ACT 8 builds.
+# The job is not posted - posting a turning program is not measured.
+_CAM_TURNING = [
+    _watch(_SW_COMP + ":1"),
+    # its own inserts, at the index the library's own count names: a general one for the profile
+    # cycles, a grooving one for the part-off.
+    ("cam_edit_tools", {"action": "list", "scope": "document"},
+     lambda p: _num(p.get("tool_count")) and p["tool_count"] >= 1,
+     ("rt_tool", _recall("rt_tool", lambda p: p["tool_count"]))),
+    ("cam_edit_tools", {"action": "add", "scope": "document",
+                        "add_tools": [{"from_type": "turning general"},
+                                      {"from_type": "turning grooving"}]},
+     lambda p: p.get("added") == 2 and p.get("tool_count") == _RECALL.get("rt_tool") + 2, None),
+    # the block's own centre, which the setup below turns about: the layout pass deals the cameo a
+    # cell a metre out in the field.
+    ("joint_create_origin", {"anchor": "bbox_center", "bbox_target": _SW_COMP + ":1",
+                             "orient_axis": "z", "name": _TURN_WCS},
+     _joint_origin_computed(_TURN_WCS), None),
+    # THE TURNED PROFILE: a setup of the other operation_type, read back off the Setup itself as the
+    # API's own enum name. It carries no machine yet, which is the blocker the setups slice
+    # publishes for it.
+    ("cam_create_setup", {"operation_type": "turning", "models": [_SW_COMP], "name": _TURN_SETUP},
+     lambda p: p["created"] is True and p["setup_name"] == _TURN_SETUP
+     and p["operation_type"] == "turning" and p["operation_count"] == 0, None),
+    ("cam_get", {},
+     _setup_row(_TURN_SETUP, ["no_machine_selected"], operation_type=_TURNING_TYPE), None),
+    ("cam_edit_setup", {"setup": _TURN_SETUP, "wcs": {"origin": _TURN_WCS}},
+     lambda p: bool(p["wcs_set"]["origin"]["bound_entities"]), None),
+    # the mill-turn machine, assigned through the strip the library machines with a simulation
+    # model need - and the same setups read again, with the blocker gone.
+    ("cam_edit_setup", {"setup": _TURN_SETUP, "machine": _TURN_MACHINE,
+                        "machine_strip_simulation": True},
+     lambda p: p.get("machine_set") == _TURN_MACHINE, None),
+    ("cam_get", {}, _setup_row(_TURN_SETUP, []), None),
+    # the turning setup's OWN parameters: the stock mode a turned job is cut from and the origin
+    # its WCS is measured from, read off the setup rather than off the call that made it.
+    ("cam_get", {"include": ["parameters"], "setup": _TURN_SETUP}, _turning_stock(_TURN_SETUP),
+     None),
+    ("cam_get", {"include": ["strategies"], "setup": _TURN_SETUP},
+     _offers(_TURN_SETUP, "turning_face", "turning_profile_roughing", "turning_profile_finishing",
+             "turning_part"), None),
+    # THE LATHE CYCLE, in the order a shop would turn it: face the end, rough the profile, finish
+    # it, then part the piece off with the grooving insert. None is given a selection - the poll
+    # after this act is what says each of them generated something to cut.
+    ("cam_create_operation", lambda c: {"setup": _TURN_SETUP, "strategy": "turning_face",
+                                        "tool_scope": "document",
+                                        "tool_index": _ctx_get(c, "rt_tool",
+                                                               "the turning insert's index"),
+                                        "generate": False},
+     _op_created(_TURN_SETUP, "turning_face"), None),
+    ("cam_create_operation", lambda c: {"setup": _TURN_SETUP,
+                                        "strategy": "turning_profile_roughing",
+                                        "tool_scope": "document",
+                                        "tool_index": _ctx_get(c, "rt_tool",
+                                                               "the turning insert's index"),
+                                        "generate": False},
+     _op_created(_TURN_SETUP, "turning_profile_roughing"), None),
+    ("cam_create_operation", lambda c: {"setup": _TURN_SETUP,
+                                        "strategy": "turning_profile_finishing",
+                                        "tool_scope": "document",
+                                        "tool_index": _ctx_get(c, "rt_tool",
+                                                               "the turning insert's index"),
+                                        "generate": False},
+     _op_created(_TURN_SETUP, "turning_profile_finishing"), None),
+    ("cam_create_operation", lambda c: {"setup": _TURN_SETUP, "strategy": "turning_part",
+                                        "tool_scope": "document",
+                                        "tool_index": _ctx_get(c, "rt_tool",
+                                                               "the turning insert's index") + 1,
+                                        "generate": False},
+     _op_created(_TURN_SETUP, "turning_part"), None),
+    # launched behind every write this act makes, and certified by the boundary poll.
+    ("cam_generate", {"target": _TURN_SETUP, "skip_valid": False}, _launched_on(_TURN_SETUP), None),
+]
+
+
 # ACT 10d: THE SECOND SETUP ON THE PART - the bracket turned over and machined from underneath,
 # with a WCS of its own. It opens with the two reads taken on the finished rail job, which the
 # extension act's own capability gates: where the extension is not entitled those two rows do not
@@ -1585,6 +1995,14 @@ _CAM_SECOND_SETUP = [
     # and machining time is the only read that tells a cutting toolpath from an empty one.
     ("cam_get", {"include": ["time"], "setup": _SW_SETUP},
      _needs(MACHINING_EXTENSION, _cuts(_SW_SETUP, "swarf_op")), None),
+    # the same oracle over the simultaneous setup: every one of its three operations carries its own
+    # machining time above zero, so none of them generated into air.
+    ("cam_get", {"include": ["time"], "setup": _MX_SETUP},
+     _needs(MACHINING_EXTENSION, _all_cut(_MX_SETUP, 3)), None),
+    # and the turned job, read once its generation is certified: the readiness verdict is what the
+    # machine assignment bought - a setup carrying a blocker is refused that wording.
+    ("cam_get", {"include": ["operations"], "setup": _TURN_SETUP},
+     _setup_ready(_TURN_SETUP, 4), None),
     # back to the real part for the flip: a second setup on the SAME model, cut from the other
     # side, which is how a part with features on two faces is actually run.
     _watch([PART_COMP + ":1"]),

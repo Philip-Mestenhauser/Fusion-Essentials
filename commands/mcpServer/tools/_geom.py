@@ -15,7 +15,7 @@ from . import _common
 
 MAP_BLURB = (
     "the geometry reads' measurement math: unit_vector/unit_vector_between/"
-    "evaluator_normal_at (vectors, face normals); body_aabb/occ_world_frame/axis_vec "
+    "evaluator_normal_at/dot/cross (vector math); body_aabb/occ_world_frame/axis_vec "
     "(bodies-only AABB, placement); volumes/volume_delta/signed_volume/face_counts/"
     "face_count_delta/lump_count/aabb_gap/parallel_plane_facts (the effect reads a write is "
     "judged by); address/subtree_facts (a measure row's name, nested children)")
@@ -442,6 +442,18 @@ def subtree_facts(pair, inv, units):
                    "targets_with_children are that measurement, and they cover only the children "
                    "listed."),
     }
+
+
+def dot(a, b):
+    """Dot product of two [x, y, z] sequences, or None if either is None."""
+    return None if a is None or b is None else a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def cross(a, b):
+    """Cross product of two [x, y, z] sequences as a tuple, or None if either is None."""
+    if a is None or b is None:
+        return None
+    return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
 
 
 def unit_vector(v, decimals: int = 6):

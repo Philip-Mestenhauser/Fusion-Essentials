@@ -16,7 +16,7 @@ from ._common import iter_collection, named_with_remainder, ok, error, safe
 # projection), plus the ONE leafName-or-stem asset matcher every library DELETE addresses its
 # target with - the same reads cam_delete_machine resolves on.
 from ._cam_common import (asset_key, asset_leaf, asset_leaf_keys, assets_named, get_cam, find_setup,
-                          library_assets, library_children, walk_library_folders)
+                          library_assets, library_children, tree_nodes, walk_library_folders)
 from . import _inputs
 
 app = adsk.core.Application.get()
@@ -233,6 +233,90 @@ _GEN = _inputs.Choice("generate", options=list(_GEN_MODES), default="skip",
                       description="Toolpath generation after the operations are created.")
 
 
+def _setup_op_nodes(setup_obj) -> list:
+    """The operation nodes under one setup, each carrying the walk's 'Setup / ... / op' breadcrumb."""
+    return [n for n in tree_nodes(setup_obj) if n.kind == "operation"]
+
+
+def _path_census(nodes) -> dict:
+    """How many of these operation nodes each breadcrumb holds. The PATH is the census key: the
+    walk visits a parent's own operations before its folders, so crediting a held 'Drill1' in a
+    folder to a new 'Drill1' under the setup would report the held operation as the applied one."""
+    census = {}
+    for n in nodes:
+        census[n.path] = census.get(n.path, 0) + 1
+    return census
+
+
+def _added_operations(setup_obj, before):
+    """(the operations a setup GAINED, the names its own walk cannot separate) - the post-apply
+    breadcrumbs with the ones it already held taken off, never the template's operations nor what
+    the apply call handed back. A breadcrumb that HELD an operation and now carries more cannot say
+    WHICH of them landed, so every operation at it is withheld and its name reported instead."""
+    nodes = _setup_op_nodes(setup_obj)
+    after = _path_census(nodes)
+    remaining = dict(before)
+    added, collisions = [], []
+    for n in nodes:
+        held = before.get(n.path, 0)
+        if held and after[n.path] > held:
+            if n.name not in collisions:
+                collisions.append(n.name)
+            continue          # nothing here separates the held operation from the one that landed
+        if remaining.get(n.path):
+            remaining[n.path] -= 1
+            continue
+        added.append(n.obj)
+    return added, collisions
+
+
+def _applied_rows(ops):
+    """(rows, the names carrying no tool) - one {name, strategy, tool} row per applied operation,
+    'tool' being what that operation's own Operation.tool describes itself as."""
+    rows, unselected = [], []
+    for op in ops:
+        name = safe(lambda op=op: op.name)
+        t = safe(lambda op=op: op.tool)
+        row = {"name": name, "strategy": safe(lambda op=op: op.strategy),
+               "tool": safe(lambda t=t: t.description) if t is not None else None}
+        if t is None:
+            unselected.append(name)
+        elif row["tool"] is None:
+            # A tool IS assigned here and only its description did not read - not an unselected one.
+            row["tool_description_unread"] = True
+        rows.append(row)
+    return rows, unselected
+
+
+_TOOL_REMEDY = ("cam_edit_operation(operation=<name>, tool_scope='document', tool_index=<n>) "
+                "assigns one per operation; cam_edit_tools lists this document's tools, and adds "
+                "one when it holds none.")
+
+
+def _named(names) -> str:
+    """A wire list of operation names, a name that did not read MARKED rather than printed as null."""
+    return named_with_remainder([n or "(name unread)" for n in names])
+
+
+def _apply_note(rows, unselected, collisions, added_count, gen_key) -> str:
+    """What the post-apply read of the SETUP observed, and the call that follows from it."""
+    if collisions:
+        return (f"{_named(collisions)} names more than one operation in one container here, so "
+                "which of them this apply landed is not established: they are left out of "
+                "'operations' and 'ready' is withheld. cam_get(include=['operations'], setup=...) "
+                "lists every operation with its path.")
+    if unselected:
+        return (f"{len(unselected)} of {len(rows)} applied operations carry no tool that could be "
+                f"read ({_named(unselected)}), so 'ready' reads false. {_TOOL_REMEDY}")
+    if not rows or (added_count is not None and len(rows) != added_count):
+        return (f"'operations' carries {len(rows)} row(s) read as new to the setup and does not "
+                "account for operations_added, so 'ready' is withheld. "
+                "cam_get(include=['operations'], setup=...) lists every operation it holds.")
+    return (f"All {len(rows)} applied operations read a tool back."
+            + (" Their toolpaths are not generated yet - run cam_generate."
+               if gen_key == "skip" else " cam_get(include=['operations']) reads their state."))
+
+
 def apply_template_to_setup_handler(setup: str = "", template_url: str = "",
                                     template_name: str = "", location: str = "cloud",
                                     generate: str = "skip") -> dict:
@@ -298,6 +382,7 @@ def apply_template_to_setup_handler(setup: str = "", template_url: str = "",
 
     # Build the input + apply.
     ops_before = safe(lambda: target_setup.allOperations.count)
+    before_census = _path_census(_setup_op_nodes(target_setup))
     try:
         ti = adsk.cam.CreateFromCAMTemplateInput.create()
         ti.camTemplate = template
@@ -321,6 +406,12 @@ def apply_template_to_setup_handler(setup: str = "", template_url: str = "",
     except Exception:
         pass
 
+    added_count = ((ops_after - ops_before)
+                   if (ops_before is not None and ops_after is not None) else None)
+    # The per-op status is read off the SETUP's own walk: a template can land operations carrying
+    # no tool, and what the apply call returned is not what the setup took.
+    added_ops, collisions = _added_operations(target_setup, before_census)
+    rows, unselected = _applied_rows(added_ops)
     return ok({
         "applied": True,
         "template": safe(lambda: template.name),
@@ -328,11 +419,15 @@ def apply_template_to_setup_handler(setup: str = "", template_url: str = "",
         "generation_mode": gen_key,
         "created_count": len(created_names),
         "created_operations": created_names,
-        "operations_added": ((ops_after - ops_before)
-                             if (ops_before is not None and ops_after is not None) else None),
-        "note": ("Operations were added to the setup. If generation_mode was 'skip', "
-            "the toolpaths are not yet generated. Use cam_get(include=['operations']) or "
-            "view_screenshot to verify, and cam_compare_operations to check settings."),
+        "operations_added": added_count,
+        "operations": rows,
+        "tool_unselected": unselected,
+        # present-and-empty: the names withheld from 'operations' above, so the caller sees what
+        # this read could not attribute rather than inferring it from a short list.
+        "collisions": collisions,
+        "ready": (bool(rows) and not unselected and not collisions
+                  and (added_count is None or len(rows) == added_count)),
+        "note": _apply_note(rows, unselected, collisions, added_count, gen_key),
     })
 
 
@@ -688,7 +783,8 @@ _apply_tool = (
         description=(
             "Apply a CAM toolpath template to a setup, recreating the template's operations "
             "in that setup. Identify the template by 'template_url' or 'template_name' "
-            "(cam_get(include=['templates']) lists both). "
+            "(cam_get(include=['templates']) lists both). Returns the operations the setup gained "
+            "with the tool each reads back; 'ready' is false while any of them carries none. "
             "Note: with generate='generate' a large template can exceed the 30s call "
             "limit and return a timeout even though the work is still running - do NOT blindly "
             "retry; verify with cam_get(include=['operations']) / view_screenshot first."
@@ -707,8 +803,8 @@ apply_template_to_setup_item = Item.create_tool_item(
     run_on_main_thread=True,
     verification=Verification(
         kind="inline",
-        evidence_test="tests/unit/test_cam_templates.py::TestApplyTemplateEffect"
-                      "::test_a_template_that_adds_no_operation_is_an_error")
+        evidence_test="tests/unit/test_cam_templates.py::TestApplyTemplateToolStatus"
+                      "::test_an_operation_with_no_tool_is_named_with_its_remedy")
 )
 
 _save_tool = (

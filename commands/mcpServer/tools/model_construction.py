@@ -125,13 +125,6 @@ def _need_val(val, label, m):
     return None
 
 
-def _dot3(a, b):
-    """Dot product of two [x,y,z] unit-vector lists, or None if either is None."""
-    if a is None or b is None:
-        return None
-    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-
-
 def _surface_label(face):
     st = safe(lambda: face.geometry.surfaceType)
     ST = adsk.core.SurfaceTypes
@@ -446,7 +439,7 @@ def _plane_datum(m, comp, design, k, units, plane_raw, plane2_raw, offset, edges
         # dot compares one space against itself.
         base_normal = _geom.unit_vector(safe(lambda: _datum_geometry(design, base).normal))
         new_normal = _geom.unit_vector(safe(lambda: _datum_geometry(design, obj).normal)) if obj else None
-        dot = _dot3(base_normal, new_normal)
+        dot = _geom.dot(base_normal, new_normal)
         if dot is not None:
             extra["normal_changed"] = bool(dot < 0.999999)
         elif _space_unread(design, base) or _space_unread(design, obj):
@@ -481,7 +474,7 @@ def _plane_datum(m, comp, design, k, units, plane_raw, plane2_raw, offset, edges
         obj = comp.constructionPlanes.add(cpi)
         extra = {"angle_deg": float(angle), "angle_from": _inputs.surface_ref_label(base)}
         g = _datum_geometry(design, obj)
-        dot = _dot3(_geom.unit_vector(safe(lambda: g.normal), decimals=_GATE_DECIMALS),
+        dot = _geom.dot(_geom.unit_vector(safe(lambda: g.normal), decimals=_GATE_DECIMALS),
                     _geom.unit_vector(safe(lambda: face.geometry.axis), decimals=_GATE_DECIMALS))
         # Cylinder/Cone .origin is the centre of the base, i.e. a point ON the inferred axis - so
         # the plane contains the whole axis when the axis direction lies in it and that point does.
@@ -690,7 +683,7 @@ def _axis_datum(m, comp, design, k, x, y, z, axis_raw, plane_raw, plane2_raw, fa
         # The face is proxy-resolved (WORLD); the created axis reads component-LOCAL while an
         # occurrence is active, so it is lifted into the same space before the directions are dotted.
         new_dir = _geom.unit_vector(safe(lambda: _datum_geometry(design, obj).direction)) if obj else None
-        dot = _dot3(face_axis, new_dir)
+        dot = _geom.dot(face_axis, new_dir)
         if dot is not None:
             extra["aligned_to_face_axis"] = bool(abs(dot) > 0.999999)
         elif _space_unread(design, obj):
@@ -751,7 +744,7 @@ def _axis_datum(m, comp, design, k, x, y, z, axis_raw, plane_raw, plane2_raw, fa
         extra = {}
         # Same space split as circular_face: the face reads WORLD, the fresh axis reads LOCAL.
         new_dir = _geom.unit_vector(safe(lambda: _datum_geometry(design, obj).direction)) if obj else None
-        dot = _dot3(face_normal, new_dir)
+        dot = _geom.dot(face_normal, new_dir)
         if dot is not None:
             extra["aligned_to_face_normal"] = bool(abs(dot) > 0.999999)
         elif _space_unread(design, obj):

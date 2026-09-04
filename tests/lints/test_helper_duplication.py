@@ -15,6 +15,11 @@ from conftest import TOOLS_DIR
 # there instead of re-implementing it.
 _DENYLIST = {
     "get_cam": ("_cam_common", "def"),
+    # The cutting-tool identity pair the create and the edit both read Operation.tool back with -
+    # one home, so the '#<n> - ' prefix strip cannot drift between the two comparisons and turn a
+    # landed assignment into a false refusal on one of them.
+    "_tool_facts": ("cam_create_operation", "def"),
+    "_names_the_same_tool": ("cam_create_operation", "def"),
     "find_setup": ("_cam_common", "def"),
     "find_operation": ("_cam_common", "def"),
     "walk_operations": ("_cam_common", "def"),
@@ -360,6 +365,10 @@ _DENYLIST = {
     "unit_vector": ("_geom", "def"),
     "unit_vector_between": ("_geom", "def"),
     "evaluator_normal_at": ("_geom", "def"),
+    # The two vector products. Each is a one-liner, which is exactly how a None guard or a
+    # tuple-vs-list return comes to differ quietly between tools comparing the same two vectors.
+    "dot": ("_geom", "def"),
+    "cross": ("_geom", "def"),
     "body_aabb": ("_geom", "def"),
     "owning_bodies": ("_geom", "def"),
     "volumes": ("_geom", "def"),

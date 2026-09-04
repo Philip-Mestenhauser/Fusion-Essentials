@@ -85,22 +85,111 @@ def _qualified_body_name(body):
     return name
 
 
+# How close to parallel two out-of-material normals may read and still meet smoothly, which is
+# neither convex nor concave. Vectors carry 12 decimals: at 6 the dot quantizes in steps of 1e-6,
+# coarser than the 3.8e-7 this band leaves below 1.0, so the band has no room to exist there.
+_DIHEDRAL_TOL_DEG = 0.05
+_SMOOTH_JOIN_COS = math.cos(math.radians(_DIHEDRAL_TOL_DEG))
+_VECTOR_DECIMALS = 12
+
+# The ways an edge comes back with no convex/concave answer, named so a refusal says which happened
+# rather than asserts a cause.
+_UNCLASSIFIED = ("unreadable", "disagreed", "knife")
+
+
+def _edge_tangent(edge, point):
+    """The edge's unit tangent AT `point`, pointing along the EDGE, or None."""
+    # The evaluator follows the CURVE; isParamReversed says whether the edge runs against it. An
+    # uncorrected tangent negates the heading the sign is read off, flipping the verdict with
+    # nothing to catch it.
+    against = _common.read_flag(lambda: edge.isParamReversed)
+    ev = safe(lambda: edge.evaluator)
+    at = safe(lambda: ev.getParameterAtPoint(point)) if ev is not None else None
+    if against is None or not (isinstance(at, (list, tuple)) and len(at) == 2 and at[0]):
+        return None
+    got = safe(lambda: ev.getTangent(at[1]))
+    if not (isinstance(got, (list, tuple)) and len(got) == 2 and got[0]):
+        return None
+    tangent = _geom.unit_vector(got[1], decimals=_VECTOR_DECIMALS)
+    if tangent is None:
+        return None
+    return tuple(-c for c in tangent) if against else tuple(tangent)
+
+
+def _coedge_side(coedge, point):
+    """(the out-of-material normal at `point` of the face this coEdge bounds, whether the coEdge runs
+    against the edge's own direction), or None where either did not read."""
+    face = safe(lambda: coedge.loop.face)
+    opposed = _common.read_flag(lambda: coedge.isOpposedToEdge)
+    normal = _geom.evaluator_normal_at(face, point, decimals=_VECTOR_DECIMALS)
+    if normal is None or opposed is None:
+        return None
+    return normal, opposed
+
+
+def _edge_convexity(edge):
+    """'convex' | 'concave' | 'smooth', or one of _UNCLASSIFIED - BRepEdge exposes no convexity flag,
+    so one edge's dihedral is signed here from reads taken AT a point on it."""
+    # The geometric fact, entirely LOCAL to that point: cross(n, h) is the in-face direction leading
+    # away from the edge, h being the coEdge's own heading round its face. It leans ALONG the other
+    # face's out-of-material normal when the material fills the reflex wedge - that is concave.
+    coedges = list(_common.iter_collection(safe(lambda: edge.coEdges)))
+    point = safe(lambda: edge.pointOnEdge)
+    if len(coedges) != 2 or point is None:
+        return "unreadable"
+    tangent = _edge_tangent(edge, point)
+    sides = [_coedge_side(c, point) for c in coedges]
+    if tangent is None or any(s is None for s in sides):
+        return "unreadable"
+    cosine = _geom.dot(sides[0][0], sides[1][0])
+    if cosine > _SMOOTH_JOIN_COS:
+        return "smooth"
+    # Two out-of-material normals pointing at each other bound a knife edge or a crack - no material
+    # wedge, so there is no dihedral to sign.
+    if cosine < -_SMOOTH_JOIN_COS:
+        return "knife"
+    # The two coEdges run OPPOSITE ways round one edge, so either one answers for the pair. Two
+    # reporting the same isOpposedToEdge cannot both be right, and nothing is signed off them.
+    if sides[0][1] == sides[1][1]:
+        return "disagreed"
+    normal, opposed = sides[0]
+    heading = tuple(-c for c in tangent) if opposed else tangent
+    return "concave" if _geom.dot(_geom.cross(normal, heading), sides[1][0]) > 0 else "convex"
+
+
+def _census_phrase(census):
+    """The dihedral split as one ASCII clause - the same three the payload publishes."""
+    return f"{census['convex']} convex, {census['concave']} concave, {census['smooth']} smooth"
+
+
+def _unclassified(census):
+    """How many edges got no convex/concave answer, over the three ways that happens."""
+    return sum(census[k] for k in _UNCLASSIFIED)
+
+
+def _unclassified_phrase(census):
+    """Which unclassified branches actually occurred - a branch that did not happen is not named."""
+    return ", ".join(f"{census[k]} {k}" for k in _UNCLASSIFIED if census[k])
+
+
 def _collect_edges(body, edge_filter):
-    """ObjectCollection of the body's edges matching 'edge_filter' (all | convex | concave)."""
+    """(ObjectCollection of the body's edges matching 'edge_filter', the body's edge count, the
+    per-edge census - None under 'all', which takes every edge and classifies none)."""
     flt = (edge_filter or "all").strip().lower()
     coll = adsk.core.ObjectCollection.create()
     edges = safe(lambda: body.edges)
     n = safe(lambda: edges.count, 0) if edges else 0
-    for e in _common.iter_collection(edges):
-        if flt == "all":
+    if flt == "all":
+        for e in _common.iter_collection(edges):
             coll.add(e)
-        else:
-            convex = safe(lambda e=e: e.isConvex, None)
-            if convex is None:
-                coll.add(e)  # unknown convexity -> include rather than silently drop
-            elif (flt == "convex" and convex) or (flt == "concave" and not convex):
-                coll.add(e)
-    return coll, n
+        return coll, n, None
+    census = dict.fromkeys(("convex", "concave", "smooth") + _UNCLASSIFIED, 0)
+    for e in _common.iter_collection(edges):
+        kind = _edge_convexity(e)
+        census[kind] += 1
+        if flt == kind:
+            coll.add(e)
+    return coll, n, census
 
 
 def _variable_radius_spec(end_radius, positions, radii):
@@ -333,6 +422,7 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
 
     edge_src = "filter"
     body_label = None
+    census = None
     # 'edges' (a GeometryHandleList of edge handles) takes precedence - closes the
     # 'fillet THESE specific edges' gap. The kind resolves+validates each handle to a BRep edge.
     blanket_note = None
@@ -370,14 +460,23 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
             "edge handles from find_geometry.")
         if berr:
             return error(berr)
-        edges, total = _collect_edges(body, flt)
+        edges, total, census = _collect_edges(body, flt)
+        if census is not None and _unclassified(census):
+            return error(
+                f"{_unclassified(census)} of the {total} edges on '{safe(lambda: body.name)}' could "
+                f"not be classified convex or concave ({_unclassified_phrase(census)}), so the "
+                f"'{flt}' set cannot be stated. The rest read {_census_phrase(census)}. Pass "
+                "'edges' handles from find_geometry to name the set, or edge_filter='all'.")
         if edges.count == 0:
-            return error(f"No matching edges on '{safe(lambda: body.name)}' "
-                          f"(filter '{flt}', body has {total} edges).")
+            return error(f"No matching edges on '{safe(lambda: body.name)}' (filter '{flt}', body "
+                         f"has {total} edges"
+                         + (f": {_census_phrase(census)}" if census else "") + ").")
         body_label = _qualified_body_name(body)
         verify_bodies = [body]
         blanket_note = (f" BLANKET call: {edges.count} of the body's {total} edges swept by "
-                        f"filter '{flt}' - pass edges=[...] handles to target a specific set.")
+                        f"filter '{flt}'"
+                        + (f" ({_census_phrase(census)})" if census else "")
+                        + " - pass edges=[...] handles to target a specific set.")
 
     vol_before = _geom.volumes(verify_bodies)
     try:
@@ -523,6 +622,10 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
     # Omit rather than report null: a None from safe() means the attribute did not answer.
     if faces_created is not None:
         payload["faces_created"] = faces_created
+    if census is not None:
+        payload["edges_convex"] = census["convex"]
+        payload["edges_concave"] = census["concave"]
+        payload["edges_smooth"] = census["smooth"]
     if vol_readable:
         payload["volume_delta_cm3"] = round(vol_delta, 6)
     if kind == "fillet":

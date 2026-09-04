@@ -9,30 +9,62 @@ import math
 
 import pytest
 
-from conftest import BRepFace, FakeUnitsManager, load_tool, _NamedCollection
+import types
+
+from conftest import (BRepEdge, BRepFace, FakePoint, FakeUnitsManager, FakeVector3D, load_tool,
+                      _NamedCollection)
 
 fl = load_tool("model_fillet_chamfer")
 
+# Every rig below is ONE edge running along +Z through the origin. The classifier reads only local
+# things there: the edge's own tangent, and per bounding coEdge its face normal plus whether that
+# coEdge heads against the edge. A manifold edge's two coEdges head opposite ways round it.
+_PLUS_X, _PLUS_Y, _PLUS_Z = (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)
 
-class FakeEdge:
-    def __init__(self, convex):
-        self.isConvex = convex
+
+def _coedge(normal, opposed):
+    """A BRepCoEdge: the face it bounds (answering its out-of-material normal at any point) reached
+    through its loop, and whether it runs against the edge's own direction."""
+    face = BRepFace(surface=None, normal=FakeVector3D(*normal))
+    return types.SimpleNamespace(isOpposedToEdge=opposed,
+                                 loop=types.SimpleNamespace(face=face))
 
 
-class FakeEdges:
-    def __init__(self, convex_flags):
-        self._e = [FakeEdge(c) for c in convex_flags]
-    @property
-    def count(self):
-        return len(self._e)
-    def item(self, i):
-        return self._e[i]
+def _rig(*sides, tangent=_PLUS_Z, param_reversed=False):
+    """A BRepEdge bounded by the given (normal, opposed) coEdge sides; tangent None is an edge whose
+    curve evaluator does not answer, param_reversed None one whose isParamReversed does not."""
+    return BRepEdge(curve=None, point_on_edge=FakePoint(),
+                    tangent=FakeVector3D(*tangent) if tangent else None,
+                    param_reversed=param_reversed,
+                    co_edges=[_coedge(n, o) for n, o in sides])
+
+
+def _tilted(deg):
+    """The +X normal turned `deg` about the edge - the second face of a dihedral that shallow."""
+    a = math.radians(deg)
+    return (math.cos(a), math.sin(a), 0.0)
+
+
+def _edge(kind):
+    """One rig per named dihedral. True = convex (the cube corner), False = concave (the same two
+    normals with both coEdges reversed), 'smooth' = two faces meeting flat, 'antiparallel' = normals
+    pointing at each other, 'split' = coEdges that cannot both be right, None = no coEdges at all."""
+    if kind is None:
+        return BRepEdge(curve=None, point_on_edge=FakePoint(), tangent=FakeVector3D(*_PLUS_Z))
+    return {
+        True: lambda: _rig((_PLUS_X, False), (_PLUS_Y, True)),
+        False: lambda: _rig((_PLUS_X, True), (_PLUS_Y, False)),
+        "smooth": lambda: _rig((_PLUS_X, False), (_PLUS_X, True)),
+        "antiparallel": lambda: _rig((_PLUS_X, False), ((-1.0, 0.0, 0.0), True)),
+        # the two coEdges round one edge head opposite ways, so this pair cannot both be right
+        "split": lambda: _rig((_PLUS_X, False), (_PLUS_Y, False)),
+    }[kind]()
 
 
 class FakeBody:
-    def __init__(self, name, convex_flags, volume=None):
+    def __init__(self, name, edge_kinds, volume=None):
         self.name = name
-        self.edges = FakeEdges(convex_flags)
+        self.edges = _NamedCollection([_edge(k) for k in edge_kinds])
         self.isSolid = True          # BodyRef(kind='solid') checks this
         # None = the volume read does not answer, so the volume gate has nothing to judge.
         self.volume = volume
@@ -343,6 +375,14 @@ class TestGuards:
         assert res["isError"] is True and "No matching edges" in res["message"]
         assert "body has 2 edges" in res["message"]
 
+    def test_a_body_with_no_readable_edges_refuses_under_all(self):
+        # 'all' classifies nothing, so there is no census for this refusal to name - and naming one
+        # anyway raises out of the handler instead of refusing.
+        _install([FakeBody("B", [])])
+        res = fl._fillet_handler(body_name="B", radius=1, edge_filter="all")
+        assert res["isError"] is True and "No matching edges" in res["message"]
+        assert "body has 0 edges" in res["message"]
+
 
 class TestFillet:
     def test_fillet_all_edges_scaled(self):
@@ -367,12 +407,95 @@ class TestFillet:
         out = _payload(fl._fillet_handler(radius=1, edge_filter="all"))
         assert out["body"] == "Last"
 
-    def test_unknown_convexity_included_under_filter(self):
-        # An edge whose isConvex is None (unknown) is INCLUDED rather than silently dropped, even
-        # under a convex/concave filter. Body: [convex, unknown] under 'convex' -> both pass.
-        _install([FakeBody("B", [True, None])])
+    def test_a_smooth_edge_is_in_neither_filter(self):
+        # BRepEdge exposes no isConvex, so each edge is classified here; two faces meeting flat are
+        # neither convex nor concave and match no filter. The split is published beside the sweep.
+        _install([FakeBody("B", [True, "smooth", False])])
+        out = _payload(fl._fillet_handler(body_name="B", radius=1, edge_filter="concave"))
+        assert (out["edges_convex"], out["edges_concave"], out["edges_smooth"]) == (1, 1, 1)
+        assert "1 convex, 1 concave, 1 smooth" in out["note"]
+
+    def test_convex_and_concave_are_told_apart_on_one_body(self):
+        # The two differ ONLY in which way each coEdge heads round the edge - the local read.
+        _install([FakeBody("B", [True, False, True])])
         out = _payload(fl._fillet_handler(body_name="B", radius=1, edge_filter="convex"))
-        assert out["edges_requested"] == 2
+        assert (out["edges_convex"], out["edges_concave"]) == (2, 1)
+        assert out["edges_requested"] == 2 and "edges_swept" not in out
+
+    def test_an_unclassifiable_edge_refuses_a_filtered_sweep(self):
+        # An edge the classifier could not answer must NOT be swept in silently. The refusal names
+        # the branch and the count.
+        ff, _ = _install([FakeBody("B", [True, None])])
+        res = fl._fillet_handler(body_name="B", radius=1, edge_filter="convex")
+        assert res["isError"] is True
+        assert "1 of the 2 edges on 'B' could not be classified" in res["message"]
+        assert "1 unreadable" in res["message"]
+        assert "'edges' handles" in res["message"] and "edge_filter='all'" in res["message"]
+        assert ff.last is None            # refused BEFORE any fillet input was created
+
+    def test_every_unclassified_branch_holds_the_sweep_back(self):
+        # A knife edge and a disagreeing pair are as unswept as an unreadable one: all three count
+        # toward the refusal, and each is named so the caller knows which it met.
+        ff, _ = _install([FakeBody("B", [True, "antiparallel", "split"])])
+        res = fl._fillet_handler(body_name="B", radius=1, edge_filter="convex")
+        assert res["isError"] is True
+        assert "2 of the 3 edges on 'B' could not be classified" in res["message"]
+        assert "1 knife" in res["message"] and "1 disagreed" in res["message"]
+        assert ff.last is None            # refused BEFORE any fillet input was created
+
+    def test_all_sweeps_every_edge_without_classifying(self, monkeypatch):
+        # 'all' gates on nothing, so it neither pays the classifier nor publishes a census it did
+        # not take - and an edge no classifier could answer is no reason to refuse.
+        _install([FakeBody("B", [True, None])])
+        called = []
+        monkeypatch.setattr(fl, "_edge_convexity", lambda e: called.append(e))
+        out = _payload(fl._fillet_handler(body_name="B", radius=1, edge_filter="all"))
+        assert out["edges_requested"] == 2 and called == []
+        assert "convex" not in out["note"] and "edges_convex" not in out
+
+    def test_two_coedges_heading_the_same_way_are_not_signed(self):
+        # The pair runs OPPOSITE ways round one edge, so this pair cannot both be right and the
+        # heading the sign would be read off is not known.
+        assert fl._edge_convexity(_edge("split")) == "disagreed"
+
+    def test_anti_parallel_normals_are_a_knife_not_a_smooth_join(self):
+        # Two out-of-material normals pointing at each other bound a knife edge or a crack: no
+        # material wedge to sign - and it is NOT a flat join either.
+        assert fl._edge_convexity(_edge("antiparallel")) == "knife"
+
+    def test_an_edge_running_against_its_curve_flips_the_verdict(self):
+        # The evaluator follows the CURVE; isParamReversed says whether the edge runs against it.
+        # Uncorrected, both headings negate together and the verdict flips with nothing to catch it.
+        assert fl._edge_convexity(_rig((_PLUS_X, False), (_PLUS_Y, True))) == "convex"
+        assert fl._edge_convexity(
+            _rig((_PLUS_X, False), (_PLUS_Y, True), param_reversed=True)) == "concave"
+
+    def test_an_edge_whose_param_direction_does_not_read_is_unreadable(self):
+        assert fl._edge_convexity(
+            _rig((_PLUS_X, False), (_PLUS_Y, True), param_reversed=None)) == "unreadable"
+
+    def test_an_edge_whose_tangent_does_not_read_is_unreadable(self):
+        # Every side may read and the dihedral still have no heading to sign against.
+        assert fl._edge_convexity(
+            _rig((_PLUS_X, False), (_PLUS_Y, True), tangent=None)) == "unreadable"
+
+    def test_an_edge_without_exactly_two_coedges_is_unreadable(self):
+        assert fl._edge_convexity(_rig((_PLUS_X, False))) == "unreadable"
+        assert fl._edge_convexity(
+            _rig((_PLUS_X, False), (_PLUS_Y, True), (_PLUS_Y, False))) == "unreadable"
+
+    def test_the_dihedral_tolerance_pins_the_smooth_band(self):
+        # 0.05 deg: a 0.04 deg dihedral is a flat join, a 0.06 deg one is a corner to round.
+        assert fl._edge_convexity(_rig((_PLUS_X, False), (_tilted(0.04), True))) == "smooth"
+        assert fl._edge_convexity(_rig((_PLUS_X, False), (_tilted(0.06), True))) == "convex"
+
+    def test_the_smooth_band_excludes_its_own_boundary(self, monkeypatch):
+        # '>' not '>=': a dihedral sitting exactly ON the tolerance is a corner, not a smooth join.
+        corner = _edge(True)                       # 90 deg: the two normals' cosine is exactly 0.0
+        monkeypatch.setattr(fl, "_SMOOTH_JOIN_COS", 0.0)
+        assert fl._edge_convexity(corner) == "convex"
+        monkeypatch.setattr(fl, "_SMOOTH_JOIN_COS", -1e-9)
+        assert fl._edge_convexity(corner) == "smooth"
 
     def test_radius_echoed_rounded_in_payload(self):
         _install([FakeBody("B", [True])])
