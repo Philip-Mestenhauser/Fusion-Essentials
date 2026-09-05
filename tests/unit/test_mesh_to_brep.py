@@ -1,138 +1,25 @@
 """Unit tests for mesh_to_brep.py - the mesh->BRep conversion and its new-body diff."""
 
-import json
 import types
-from conftest import body_proxy, load_tool, make_bbox
-import adsk.fusion  # noqa: E402
+
+import adsk.fusion
+import pytest
+
+from conftest import (BRepBody, MakeComp, MeshBody, _NamedCollection, body_proxy, install,
+                      load_tool, make_design, payload)
 
 mo = load_tool("mesh_to_brep")
-
 
 _CONV = adsk.fusion.MeshConvertMethodTypes
 
 
-inp = mo._inputs
-
-
-class TriangleMesh:
-    def __init__(self, tri, nodes):
-        self.triangleCount = tri
-        self.nodeCount = nodes
-
-
-class PolygonMesh:
-    def __init__(self, tri, polys, nodes):
-        self.triangleCount = tri
-        self.polygonCount = polys
-        self.nodeCount = nodes
-
-
-_UNSET = object()
-
-
-class MeshBody:
-    """Stands in for adsk.fusion.MeshBody (a SEPARATE type from BRepBody).
-
-    area/volume default to UNSET (the attribute is not set at all), so a plain access raises
-    AttributeError - a field that cannot be READ, which the record must publish as null. It is NOT
-    the open-mesh shape: MeshBody.volume on a mesh that is not closed RETURNS 0.0 (measured on a
-    single-triangle STL reading is_closed false), so an open-mesh fake passes volume=0.0 and the
-    record publishes 0.0. Pass explicit cm values to model a real reading."""
-    def __init__(self, name="Mesh1", tri=1000, nodes=502, is_closed=True, is_oriented=True,
-                 token=None, bbox=None, parent=None, area=_UNSET, volume=_UNSET):
-        self.name = name
-        self.displayMesh = TriangleMesh(tri, nodes)
-        self.mesh = PolygonMesh(tri, tri, nodes)
-        self.isClosed = is_closed
-        self.isOriented = is_oriented
-        self.entityToken = token or f"MTOK::{name}"
-        self.boundingBox = bbox or make_bbox((0, 0, 0), (1, 2, 3))   # cm
-        self.parentComponent = parent
-        if area is not _UNSET:
-            self.area = area
-        if volume is not _UNSET:
-            self.volume = volume
-
-
-class BRepBody:
-    """Stands in for adsk.fusion.BRepBody — the WRONG kind for a mesh input."""
-    def __init__(self, name="Body1", is_solid=True, token=None):
-        self.name = name
-        self.isSolid = is_solid
-        self.entityToken = token or f"BTOK::{name}"
-
-
-class _Coll:
-    def __init__(self, items=()):
-        self._items = list(items)
-
-    @property
-    def count(self):
-        return len(self._items)
-
-    def item(self, i):
-        return self._items[i] if 0 <= i < len(self._items) else None
-
-    def itemByName(self, n):
-        for it in self._items:
-            if getattr(it, "name", None) == n:
-                return it
-        return None
-
-
-class _FeatureResult:
-    def __init__(self, name, bodies):
-        self.name = name
-        self.bodies = _Coll(bodies)
-
-
-class _MeshFeatures:
-    """A reduce/remesh/convert feature collection. add() returns a feature whose .bodies hold the
-    result; raise_on_add lets a test force a mutation failure (must surface, not be swallowed).
-
-    none_feature -> add() returns None (the NON-PARAMETRIC contract: a direct design or a base-feature
-    scope). on_add_append: an optional (coll, body) the add() appends so a None return still leaves an
-    observable side effect (a new BRep body on the component) to detect success by.
-
-    input_factory builds the input createInput returns; mesh_reduce uses the strict _ReduceInput so a
-    raw-number assignment to proportion/facecount/maximumDeviation FAILS (it would on the live API)."""
-    def __init__(self, result_bodies, feat_name="MeshFeat1", raise_on_add=False, none_feature=False,
-                 on_add_append=None, on_add=None, input_factory=None):
-        self._result_bodies = result_bodies
-        self._feat_name = feat_name
-        self.raise_on_add = raise_on_add
-        self.none_feature = none_feature
-        self._on_add_append = on_add_append
-        self._on_add = on_add               # an in-place mutation the add() performs (e.g. reduce)
-        self._input_factory = input_factory or (lambda: type("Inp", (), {})())
-        self.last_input = None
-
-    def createInput(self, *a):
-        self.last_input = self._input_factory()
-        return self.last_input
-
-    def add(self, inp):
-        if self.raise_on_add:
-            raise RuntimeError("conversion failed")
-        if self._on_add is not None:
-            self._on_add()                  # model the in-place edit (e.g. the mesh's tri count drops)
-        if self._on_add_append is not None:
-            coll, body = self._on_add_append
-            coll._items.append(body)        # the convert produced a NEW BRep body on the component
-        if self.none_feature:
-            return None
-        return _FeatureResult(self._feat_name, self._result_bodies)
-
-
-class _Features:
-    def __init__(self, reduce=None, remesh=None, convert=None, base_features=None):
-        self.meshReduceFeatures = reduce
-        self.meshRemeshFeatures = remesh
-        self.meshConvertFeatures = convert
-        self.baseFeatures = base_features
+def _brep(name, is_solid=True):
+    """One BRep body carrying the find_geometry-style handle the payload publishes."""
+    return BRepBody(name, is_solid=is_solid, entity_token=f"BTOK::{name}")
 
 
 class _BaseFeature:
+    """The BaseFeature a parametric scope opens, recording its own open and close."""
     def __init__(self):
         self.name = "BaseFeature1"
         self.started = False
@@ -148,6 +35,7 @@ class _BaseFeature:
 
 
 class _BaseFeatures:
+    """comp.features.baseFeatures - add() hands back the one base feature it was built with."""
     def __init__(self, made):
         self._made = made
 
@@ -155,103 +43,96 @@ class _BaseFeatures:
         return self._made
 
 
-class FakeComp:
-    def __init__(self, name="Comp", meshes=(), features=None, mesh_bodies=None, brep_bodies=None):
+class _Features:
+    """comp.features, carrying the two collections mesh_to_brep reads."""
+    def __init__(self, convert=None, base_features=None):
+        self.meshConvertFeatures = convert
+        self.baseFeatures = base_features
+
+
+class _FeatureResult:
+    """The MeshConvertFeature add() returns: its name and the BRep bodies it made."""
+    def __init__(self, name, bodies):
         self.name = name
-        self.meshBodies = mesh_bodies if mesh_bodies is not None else _Coll(meshes)
-        # comp.bRepBodies — the mesh_to_brep non-parametric side-effect probe (new body appeared).
-        self.bRepBodies = brep_bodies if brep_bodies is not None else _Coll()
-        self.features = features
+        self.bodies = _NamedCollection(bodies)
 
 
-class FakeDesign:
-    def __init__(self, comp, design_type=0, edit_object=None, all_comps=None):
-        self.activeComponent = comp
-        self.rootComponent = comp
-        self.designType = design_type           # 0 direct, 1 parametric
-        self.activeEditObject = edit_object
-        self._all = all_comps if all_comps is not None else [comp]
+class _MeshFeatures:
+    """comp.features.meshConvertFeatures: createInput -> input -> add() -> feature or None.
 
-    @property
-    def allComponents(self):
-        # A COUNTED collection (count/item), the live shape every design-wide component walk reads -
-        # a bare list makes `.count` a method and the walk cannot run at all.
-        return _Coll(self._all)
+    raise_on_add forces a mutation failure (it must surface, not be swallowed); none_feature is the
+    None a non-parametric add returns; on_add_append is the (collection, body) pair the add drops
+    onto the component, the observable side effect a None return is judged by."""
+    def __init__(self, result_bodies, feat_name="MeshFeat1", raise_on_add=False, none_feature=False,
+                 on_add_append=None, on_add=None, input_factory=None):
+        self._result_bodies = result_bodies
+        self._feat_name = feat_name
+        self.raise_on_add = raise_on_add
+        self.none_feature = none_feature
+        self._on_add_append = on_add_append
+        self._on_add = on_add
+        self._input_factory = input_factory or (lambda: type("Inp", (), {})())
+        self.last_input = None
 
-    @property
-    def allOccurrences(self):
-        return []
+    def createInput(self, *a):
+        self.last_input = self._input_factory()
+        return self.last_input
 
-    def findEntityByToken(self, tok):
-        return self._handle_map.get(tok, [])
-
-    _handle_map = {}
-
-
-def _wire_adsk(handle_map=None, parametric=False, mesh_units_ok=True):
-    """Install the adsk.fusion type identities + enums the tools/kinds read. Returns nothing; the
-    caller builds the design separately."""
-    import adsk.fusion
-    adsk.fusion.MeshBody = MeshBody
-    adsk.fusion.BRepBody = BRepBody
-    # ModeGuard reads BaseFeature for scope detection (DesignTypes ints come seeded).
-    adsk.fusion.BaseFeature = _BaseFeature
-    # mesh units enum
-    if mesh_units_ok:
-        mu = adsk.fusion.MeshUnits
-        mu.MillimeterMeshUnit = "MM"; mu.CentimeterMeshUnit = "CM"; mu.MeterMeshUnit = "M"
-        mu.InchMeshUnit = "IN"; mu.FootMeshUnit = "FT"
-    return adsk.fusion
+    def add(self, inp):
+        if self.raise_on_add:
+            raise RuntimeError("conversion failed")
+        if self._on_add is not None:
+            self._on_add()
+        if self._on_add_append is not None:
+            coll, body = self._on_add_append
+            coll._items.append(body)
+        if self.none_feature:
+            return None
+        return _FeatureResult(self._feat_name, self._result_bodies)
 
 
-def _install(design, handle_map=None):
-    """Point the tool + the MeshBodyRef kind at a fake design and a token resolver."""
-    handle_map = handle_map or {}
-    design._handle_map = {k: [v] for k, v in handle_map.items()}
-    mo.app = type("A", (), {"activeProduct": design})()
-    mo._common.app = mo.app
-    import adsk.fusion
-    adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
-    # MeshBodyRef resolves via _common.design()/target_component()
-    inp._common.design = lambda: design
-    inp._common.target_component = lambda d: design.activeComponent
-    return design
+@pytest.fixture(autouse=True)
+def _types(monkeypatch):
+    """The adsk.fusion type identities the body kind and the base-feature scope check branch on."""
+    monkeypatch.setattr(adsk.fusion, "MeshBody", MeshBody, raising=False)
+    monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
+    monkeypatch.setattr(adsk.fusion, "BaseFeature", _BaseFeature, raising=False)
 
 
-def _payload(result):
-    assert result["isError"] is False, result
-    return json.loads(result["content"][0]["text"])
+def _wire(src, feats, brep_bodies, design_type=0, base_feature=None):
+    """One mesh + a meshConvertFeatures collection on its component, wired into the tool."""
+    comp = MakeComp("Comp", mesh_bodies=[src] if src is not None else [])
+    comp.bRepBodies = brep_bodies
+    comp.features = _Features(convert=feats,
+                              base_features=_BaseFeatures(base_feature) if base_feature else None)
+    if src is not None:
+        src.parentComponent = comp
+    return comp
 
 
 class TestMeshToBrep:
 
     def _setup(self, is_closed=True, raise_on_add=False, none_feature=False, organic=True,
                none_appends_body=False, parametric=False, base_feature=None):
-        _wire_adsk()
-        import adsk.fusion
         if not organic:
             # organic method ABSENT (older Fusion / no Product Design Extension) -> _organic_available()
             # False -> honest refusal. Genuinely REMOVE the seeded member so the safe() read raises,
             # matching the live "attribute does not exist" case (conftest restores it after the test).
-            _mct = adsk.fusion.MeshConvertMethodTypes
-            if hasattr(_mct, "OrganicMeshConvertMethodType"):
-                delattr(_mct, "OrganicMeshConvertMethodType")
-        result_brep = BRepBody("ConvertedBody", is_solid=True)
-        brep_coll = _Coll()                      # comp.bRepBodies — starts empty
+            if hasattr(_CONV, "OrganicMeshConvertMethodType"):
+                delattr(_CONV, "OrganicMeshConvertMethodType")
+        brep_coll = _NamedCollection()                      # comp.bRepBodies - starts empty
         # In non-parametric mode add() returns None; none_appends_body models the side effect: the
         # convert still drops a new BRep body onto the component (that body is the success signal).
-        append = (brep_coll, BRepBody("ConvertedBody", is_solid=True)) if none_appends_body else None
-        feats = _MeshFeatures([result_brep], raise_on_add=raise_on_add, none_feature=none_feature,
-                              on_add_append=append)
+        append = (brep_coll, _brep("ConvertedBody")) if none_appends_body else None
+        feats = _MeshFeatures([_brep("ConvertedBody")], raise_on_add=raise_on_add,
+                              none_feature=none_feature, on_add_append=append)
         src = MeshBody("Scan", is_closed=is_closed)
         bf = base_feature
-        comp = FakeComp("Comp", features=_Features(
-            convert=feats, base_features=_BaseFeatures(made=bf) if bf else None),
-            brep_bodies=brep_coll)
-        src.parentComponent = comp
-        des = FakeDesign(comp, design_type=1 if parametric else 0,
-                         edit_object=bf if parametric else None)
-        _install(des, handle_map={"H": src})
+        comp = _wire(src, feats, brep_coll, design_type=1 if parametric else 0,
+                     base_feature=bf if parametric else None)
+        install(mo, make_design(comp=comp, tokens={"H": src},
+                                design_type=1 if parametric else 0,
+                                active_edit_object=bf if parametric else None))
         return src, feats
 
     _OCC = types.SimpleNamespace(name="Comp:1", fullPathName="Comp:1")
@@ -266,14 +147,13 @@ class TestMeshToBrep:
         census_ghost adds a second PRE-EXISTING body whose token reads empty, so the BEFORE set is
         asked to hold a None key of its own - the only shape in which the census filter and the
         publish clause stop covering for each other."""
-        _wire_adsk()
-        existing = BRepBody("Existing", is_solid=True)
+        existing = _brep("Existing")
         census = [existing]
         if census_ghost:
-            ghost = BRepBody("Ghost", is_solid=True)
+            ghost = _brep("Ghost")
             ghost.entityToken = ""
             census.append(ghost)
-        brep_coll = _Coll(census)
+        brep_coll = _NamedCollection(census)
 
         def _convert():
             brep_coll._items[:] = [body_proxy(existing, self._OCC)] + census[1:] + [made]
@@ -281,14 +161,13 @@ class TestMeshToBrep:
         assert body_proxy(existing, self._OCC).entityToken != existing.entityToken   # a real proxy
         feats = _MeshFeatures([], none_feature=True, on_add=_convert)
         src = MeshBody("Scan", is_closed=True)
-        comp = FakeComp("Comp", features=_Features(convert=feats), brep_bodies=brep_coll)
-        src.parentComponent = comp
-        _install(FakeDesign(comp, design_type=0), handle_map={"H": src})
+        comp = _wire(src, feats, brep_coll)
+        install(mo, make_design(comp=comp, tokens={"H": src}, design_type=0))
         return existing
 
     def test_prismatic_converts_and_reports_method(self):
         self._setup(is_closed=True)
-        out = _payload(mo.handler(mesh="H", method="prismatic"))
+        out = payload(mo.handler(mesh="H", method="prismatic"))
         assert out["converted"] is True
         assert out["method"] == "prismatic"
         assert out["brep_bodies"][0]["name"] == "ConvertedBody"
@@ -318,10 +197,10 @@ class TestMeshToBrep:
         assert res["isError"] is True and "failed" in res["message"].lower()
 
     def test_none_feature_with_new_brep_body_is_success(self):
-        # add() returns None in a direct design but the conversion applied — a new BRep body appeared on
+        # add() returns None in a direct design but the conversion applied - a new BRep body appeared on
         # the component. Success is judged by that body, not by the (None) feature return.
         self._setup(is_closed=True, none_feature=True, none_appends_body=True)
-        out = _payload(mo.handler(mesh="H", method="prismatic"))
+        out = payload(mo.handler(mesh="H", method="prismatic"))
         assert out["converted"] is True
         assert out["design_mode"] == "direct"
         assert out["base_feature"] is None            # direct opens no scope
@@ -333,9 +212,9 @@ class TestMeshToBrep:
         # Keyed on the wrapper's token a body that was already there reads as newly converted, and
         # the payload publishes a BRep body this conversion never made. The diff has to key on the
         # physical body, whatever wrapper each read hands back.
-        native = BRepBody("ConvertedBody", is_solid=True)
+        native = _brep("ConvertedBody")
         existing = self._proxy_convert(body_proxy(native, self._OCC))
-        out = _payload(mo.handler(mesh="H", method="prismatic"))
+        out = payload(mo.handler(mesh="H", method="prismatic"))
         names = [r["name"] for r in out["brep_bodies"]]
         assert names == ["ConvertedBody"]
         assert existing.name not in names
@@ -345,10 +224,10 @@ class TestMeshToBrep:
         # identity beside it resolves to the NATIVE, which addresses a different reference. The two
         # coincide on a native converted body, so the body has to arrive as a proxy to tell them
         # apart at all.
-        native = BRepBody("ConvertedBody", is_solid=True)
+        native = _brep("ConvertedBody")
         made = body_proxy(native, self._OCC)
         self._proxy_convert(made)
-        out = _payload(mo.handler(mesh="H", method="prismatic"))
+        out = payload(mo.handler(mesh="H", method="prismatic"))
         assert out["brep_bodies"][0]["handle"] == made.entityToken
         assert out["brep_bodies"][0]["handle"] != native.entityToken
 
@@ -356,10 +235,10 @@ class TestMeshToBrep:
         # An empty token yields NO identity, so nothing can show this body was in the census before.
         # The guard publishes it - an over-report the caller can see and check with model_inspect -
         # rather than dropping it, which would report a conversion that produced nothing at all.
-        made = BRepBody("ConvertedBody", is_solid=True)
+        made = _brep("ConvertedBody")
         made.entityToken = ""
         self._proxy_convert(made)
-        out = _payload(mo.handler(mesh="H", method="prismatic"))
+        out = payload(mo.handler(mesh="H", method="prismatic"))
         assert [r["name"] for r in out["brep_bodies"]] == ["ConvertedBody"]
 
     def test_an_identity_less_census_body_does_not_swallow_the_converted_one(self):
@@ -368,10 +247,10 @@ class TestMeshToBrep:
         # None key outright. Either one alone is enough, so each hides the loss of the other - and
         # with BOTH gone the before-set's None matches the converted body's None, the conversion is
         # dropped, and a call that SUCCEEDED reports "did not produce a BRep body".
-        made = BRepBody("ConvertedBody", is_solid=True)
+        made = _brep("ConvertedBody")
         made.entityToken = ""
         self._proxy_convert(made, census_ghost=True)
-        out = _payload(mo.handler(mesh="H", method="prismatic"))
+        out = payload(mo.handler(mesh="H", method="prismatic"))
         assert "ConvertedBody" in [r["name"] for r in out["brep_bodies"]]
 
     def test_null_feature_in_a_parametric_scope_reports_parametric(self):
@@ -380,7 +259,7 @@ class TestMeshToBrep:
         bf = _BaseFeature()
         self._setup(is_closed=True, parametric=True, base_feature=bf, none_feature=True,
                     none_appends_body=True)
-        out = _payload(mo.handler(mesh="H", method="prismatic"))
+        out = payload(mo.handler(mesh="H", method="prismatic"))
         assert out["feature"] is None
         assert out["design_mode"] == "parametric"
         assert out["base_feature"] == "BaseFeature1"
@@ -402,26 +281,23 @@ class TestMeshToBrep:
         # any undetectable-scope guard defeating it.
         bf = _BaseFeature()
         self._setup(is_closed=True, parametric=True, base_feature=bf)
-        out = _payload(mo.handler(mesh="H", method="prismatic"))
+        out = payload(mo.handler(mesh="H", method="prismatic"))
         assert out["converted"] is True
         assert out["brep_bodies"][0]["name"] == "ConvertedBody"
         assert bf.started is True and bf.finished is True
 
     def test_brep_handle_to_convert_is_redirected(self):
         # passing a BRep body to mesh_to_brep (it wants a MESH) -> MeshBodyRef redirect
-        _wire_adsk()
-        brep = BRepBody("AlreadySolid", is_solid=True)
-        comp = FakeComp("Comp")
-        _install(FakeDesign(comp, design_type=0), handle_map={"H": brep})
+        brep = _brep("AlreadySolid")
+        comp = _wire(None, None, _NamedCollection())
+        install(mo, make_design(comp=comp, tokens={"H": brep}, design_type=0))
         res = mo.handler(mesh="H")
         assert res["isError"] is True and "must be a MESH body" in res["message"]
 
     def test_missing_convert_features_collection_errors(self):
-        _wire_adsk()
         src = MeshBody("Scan", is_closed=True)
-        comp = FakeComp("Comp", features=_Features(convert=None))
-        src.parentComponent = comp
-        _install(FakeDesign(comp, design_type=0), handle_map={"H": src})
+        comp = _wire(src, None, _NamedCollection())
+        install(mo, make_design(comp=comp, tokens={"H": src}, design_type=0))
         res = mo.handler(mesh="H", method="prismatic")
         assert res["isError"] is True
         assert "meshConvertFeatures collection" in res["message"]
@@ -435,6 +311,6 @@ class TestMeshToBrep:
     def test_faceted_method_resolves_enum(self):
         # the faceted branch maps to FacetedMeshConvertMethodType on the input
         src, feats = self._setup(is_closed=True)
-        out = _payload(mo.handler(mesh="H", method="faceted"))
+        out = payload(mo.handler(mesh="H", method="faceted"))
         assert out["method"] == "faceted"
         assert getattr(feats.last_input, "meshConvertMethodType", None) == _CONV.FacetedMeshConvertMethodType

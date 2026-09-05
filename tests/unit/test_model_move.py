@@ -12,10 +12,10 @@ import types
 import adsk.core
 import adsk.fusion
 
-from conftest import (load_tool, make_design, install, MakeComp, BRepBody, BRepEdge, BRepFace,
-                      FakePoint, FakeBoundingBox3D, Line3D, Plane, FakeVector3D, go_stale, payload,
-                      error_message, assert_no_active_design, assert_unknown_units,
-                      _NamedCollection)
+from conftest import (load_tool, make_design, make_occurrence, install, MakeComp, BRepBody,
+                      BRepEdge, BRepFace, FakePoint, FakeBoundingBox3D, Line3D, Plane,
+                      FakeVector3D, go_stale, payload, error_message, assert_no_active_design,
+                      assert_unknown_units, _NamedCollection)
 
 mm = load_tool("model_move")
 
@@ -213,7 +213,7 @@ def _wire_sub(monkeypatch, sub, *placements):
     root = MakeComp(name="Root")
     root.entityToken = "TOKEN:Root"
     root.features = types.SimpleNamespace(moveFeatures=FakeMoveFeatures())
-    occs = [types.SimpleNamespace(fullPathName=p) for p in placements]
+    occs = [make_occurrence(path=p) for p in placements]
     root.allOccurrencesByComponent = lambda comp: _NamedCollection(occs)
     design = make_design(comp=root)
     install(mm, design)
@@ -295,7 +295,7 @@ class TestSubComponentHosting:
         sub_feats = FakeMoveFeatures([body])
         sub = _sub_component(bodies=[body], feats=sub_feats)
         body.parentComponent = sub
-        body.assemblyContext = types.SimpleNamespace(fullPathName="Assy:1+Rail:2")
+        body.assemblyContext = make_occurrence(path="Assy:1+Rail:2")
         axis = _Proxyable()
         sub.xConstructionAxis = axis
         _wire_sub(monkeypatch, sub, "Assy:1+Rail:1", "Assy:1+Rail:2")
@@ -311,7 +311,7 @@ def _foreign_edge(owner, token="e9"):
     """A straight edge whose BODY belongs to `owner` and which is NOT already a proxy."""
     edge = BRepEdge(Line3D(FakePoint(0, 0, 0), FakePoint(10, 0, 0)), entity_token=token)
     edge.assemblyContext = None
-    edge.body = types.SimpleNamespace(parentComponent=owner)
+    edge.body = BRepBody(name="RailBody", parent_component=owner)
     return edge
 
 
@@ -321,7 +321,7 @@ class TestForeignAxisHandle:
         root.entityToken = "TOKEN:Root"
         feats = FakeMoveFeatures([body])
         root.features = types.SimpleNamespace(moveFeatures=feats)
-        occs = [types.SimpleNamespace(fullPathName=p) for p in placements]
+        occs = [make_occurrence(path=p) for p in placements]
         root.allOccurrencesByComponent = lambda comp: _NamedCollection(occs)
         design = make_design(comp=root, tokens={"e9": edge})
         install(mm, design)

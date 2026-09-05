@@ -21,7 +21,8 @@ import types
 import adsk.fusion
 import pytest
 
-from conftest import BRepBody, MeshBody, load_tool, payload, error_message
+from conftest import (BRepBody, MakeComp, MakeDesign, MeshBody, install, load_tool, payload,
+                      error_message)
 
 ms = load_tool("mesh_shell")
 
@@ -35,16 +36,22 @@ class _ValueInput:
         self.real = real
 
 
-class _Coll:
-    def __init__(self, items=()):
-        self._items = list(items)
+class _MeshComp(MakeComp):
+    """A component whose meshBodies read RAISES once `dead` is set - the census host that stops
+    answering mid-flight."""
+    def __init__(self, *args, **kwargs):
+        self.dead = False
+        super().__init__(*args, **kwargs)
 
     @property
-    def count(self):
-        return len(self._items)
+    def meshBodies(self):
+        if self.dead:
+            raise RuntimeError("3 : object is no longer valid")
+        return self._mesh_bodies
 
-    def item(self, i):
-        return self._items[i] if 0 <= i < len(self._items) else None
+    @meshBodies.setter
+    def meshBodies(self, value):
+        self._mesh_bodies = value
 
 
 class _ShellInput:
@@ -108,50 +115,16 @@ class _Features:
         self.meshShellFeatures = shell
 
 
-class _Comp:
-    def __init__(self, name="Comp", meshes=(), features=None):
-        self.name = name
-        self.dead = False
-        self._meshes = _Coll(meshes)
-        self.features = features
-        self.bRepBodies = _Coll()
-
-    @property
-    def meshBodies(self):
-        if self.dead:
-            raise RuntimeError("3 : object is no longer valid")
-        return self._meshes
-
-
-class _Design:
-    def __init__(self, comp, design_type=1, tokens=None, all_components=None):
-        self.rootComponent = comp
-        self.activeComponent = comp
-        self.designType = design_type    # 1 parametric, 0 direct (current_design_type's int fallback)
-        self._tokens = dict(tokens or {})
-        self._all_components = list(all_components) if all_components is not None else [comp]
-
-    @property
-    def allComponents(self):
-        return _Coll(self._all_components)
-
-    def findEntityByToken(self, token):
-        e = self._tokens.get(token)
-        return [e] if e is not None else []
-
-
 # ── rig ──────────────────────────────────────────────────────────────────────────────────────────
 
 def _rig(monkeypatch, mesh=None, on_add=None, design_type=1, **feat_kw):
     """Wire one mesh + a meshShellFeatures collection into the tool. Returns (mesh, comp, feats)."""
     mesh = mesh if mesh is not None else MeshBody()
-    comp = _Comp(meshes=[mesh])
+    comp = _MeshComp("Comp", mesh_bodies=[mesh])
     mesh.parentComponent = comp
     feats = _ShellFeatures(on_add=on_add, **feat_kw)
     comp.features = _Features(shell=feats)
-    design = _Design(comp, design_type=design_type)
-    monkeypatch.setattr(ms._common, "design", lambda: design)
-    monkeypatch.setattr(ms._inputs._common, "design", lambda: design)
+    install(ms, MakeDesign(comp=comp, design_type=design_type))
     monkeypatch.setattr(ms._MESH, "resolve", lambda raw: (mesh, None))
     monkeypatch.setattr(ms.adsk.core.ValueInput, "createByReal", _ValueInput)
     return mesh, comp, feats
@@ -248,9 +221,7 @@ class TestInputGuards:
         monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody)
         brep = BRepBody(name="Body1", entity_token="BTOK::Body1")
         monkeypatch.setattr(ms._MESH, "resolve", ms._inputs.MeshBodyRef("mesh").resolve)
-        design = _Design(comp, tokens={"BTOK::Body1": brep})
-        monkeypatch.setattr(ms._common, "design", lambda: design)
-        monkeypatch.setattr(ms._inputs._common, "design", lambda: design)
+        install(ms, MakeDesign(comp=comp, design_type=1, tokens={"BTOK::Body1": brep}))
         msg = error_message(ms.handler(mesh="BTOK::Body1", thickness=2.0))
         assert "MESH body" in msg and "SOLID" in msg
         assert feats.add_called is False

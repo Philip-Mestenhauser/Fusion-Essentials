@@ -16,7 +16,7 @@ import adsk.cam
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe
+from ._common import named_with_remainder, ok, error, safe
 from . import _assert
 from . import _inputs
 from . import _outputs
@@ -45,17 +45,20 @@ _P_UNIT = "nc_program_unit"
 _MISSING = object()   # sentinel: the parameter is not present on this program
 
 
-# Cloud/Hub post scope -> the LibraryLocations enum member that names its root. The team library is
-# network-slow and NESTED in folders (a flat listing is empty), so the walk is bounded on both depth
-# and node count.
-_POST_LOCATIONS = {"cloud": "CloudLibraryLocation", "hub": "HubLibraryLocation"}
-_CLOUD_MAX_DEPTH = 4
-_CLOUD_MAX_POSTS = 400
+# Shared-library post scope -> the LibraryLocations enum member that names its root. The team
+# libraries are network-slow and NESTED in folders (a flat listing is empty), so the walk is bounded
+# on both depth and node count; the shipped library holds hundreds of posts, so its cap is its own.
+_POST_LOCATIONS = {"cloud": "CloudLibraryLocation", "hub": "HubLibraryLocation",
+                   "fusion": "Fusion360LibraryLocation"}
+_POST_MAX_DEPTH = 4
+_POST_MAX_ASSETS = {"cloud": 400, "hub": 400, "fusion": 900}
+_NAMES_LISTED = 30
 
 _POST_SCOPE_CHOICE = _inputs.Choice(
-    "post_scope", options=["local", "cloud", "hub"], default="local",
+    "post_scope", options=["local", "cloud", "hub", "fusion"], default="local",
     description="Where to resolve 'post' from: local .cps folder (default) | cloud | hub team post "
-                "library. cloud/hub reach deployed team posts and are network-slow.")
+                "library (network-slow) | fusion, the posts this installation ships - where a "
+                "turning post resolves from.")
 
 
 def _post_library():
@@ -84,7 +87,8 @@ def _resolve_local_cps(cam, post):
             return c, None
     return None, (f"Post config not found for '{post}'. Tried: {', '.join(candidates) or '(none)'}. "
                   f"Provide a full .cps path, or a post name in the personal ({personal}) or installed "
-                  f"({generic}) post folder. For a deployed team post use post_scope=cloud/hub.")
+                  f"({generic}) post folder. post_scope=fusion resolves the same name against the posts "
+                  "this installation ships; cloud/hub against a deployed team post.")
 
 
 def _norm_post_name(name):
@@ -93,11 +97,11 @@ def _norm_post_name(name):
     return low[:-4] if low.endswith(".cps") else low
 
 
-def _resolve_cloud_post(post, post_scope):
-    """Resolve a CLOUD/HUB 'post' to a PostConfiguration by matching the post NAME (case-insensitive)
-    against the asset URLs' leafName under the scope root, then loading it via postConfigurationAtURL.
-    Refuses an ambiguous name with the candidate urls. Returns (post_config, label, None) or
-    (None, None, error). Network-slow. Patched in tests."""
+def _resolve_library_post(post, post_scope):
+    """Resolve a CLOUD/HUB/FUSION 'post' to a PostConfiguration by matching the post NAME against
+    the asset URLs' leafName under the scope root (case-insensitive and EXACT), then loading it via
+    postConfigurationAtURL. Refuses an ambiguous name with the candidate urls. Returns
+    (post_config, label, None) or (None, None, error). Patched in tests."""
     lib = _post_library()
     if not lib:
         return None, None, "Post library unavailable (CAMManager.get().libraryManager.postLibrary)."
@@ -108,8 +112,8 @@ def _resolve_cloud_post(post, post_scope):
     # The shared bounded library walk. childAssetURLs yields the post URLs (each exposing .leafName =
     # the post name and .toString() = the full url); childPostConfigurations would load the heavy
     # PostConfiguration objects, which carry no name/url, so the asset URLs are what we match on.
-    assets, truncated = library_assets(lib, root, max_depth=_CLOUD_MAX_DEPTH,
-                                       max_assets=_CLOUD_MAX_POSTS)
+    assets, truncated = library_assets(lib, root, max_depth=_POST_MAX_DEPTH,
+                                       max_assets=_POST_MAX_ASSETS[post_scope])
     want = _norm_post_name(post)
 
     def leaf(a):
@@ -117,8 +121,10 @@ def _resolve_cloud_post(post, post_scope):
 
     matches = [a for a in assets if _norm_post_name(leaf(a)) == want]
     if not matches:
-        names = sorted({leaf(a) for a in assets if leaf(a)})[:30]
-        hint = (f" Available posts: {', '.join(names)}." if names
+        # The shipped library answers with hundreds of names, so what the listing cannot carry is
+        # COUNTED by the shared renderer rather than dropped.
+        names = sorted({leaf(a) for a in assets if leaf(a)})
+        hint = (f" Available posts: {named_with_remainder(names, cap=_NAMES_LISTED)}." if names
                 else " No posts were found in this library.")
         trunc = " (search was capped - more posts may exist deeper)" if truncated else ""
         return None, None, f"No {post_scope} post named '{post}'.{hint}{trunc}"
@@ -137,14 +143,14 @@ def _resolve_cloud_post(post, post_scope):
 
 def _resolve_post_config(cam, post, post_scope):
     """(post_config, label, None) or (None, None, error) - 'post' resolved for the chosen scope: a
-    .cps path or name in the local post folders, or a post NAME in the cloud/hub team library."""
+    .cps path or name in the local post folders, or a post NAME in a shared/shipped library."""
     post = (post or "").strip()
     if not post:
         return None, None, ("Provide 'post' - the post processor: for post_scope=local a full .cps path "
-                            "or a name in the personal/installed post folder; for cloud/hub the NAME of "
-                            "a post in the team library.")
+                            "or a name in the personal/installed post folder; for cloud/hub/fusion the "
+                            "NAME of a post in that library.")
     if post_scope in _POST_LOCATIONS:
-        return _resolve_cloud_post(post, post_scope)
+        return _resolve_library_post(post, post_scope)
     path, perr = _resolve_local_cps(cam, post)
     if perr:
         return None, None, perr
@@ -780,7 +786,7 @@ tool = (
     .add_input_property("scope", {"type": "string",
             "description": "Setup/folder/operation NAME to post; omit (or 'document') for the whole document."})
     .add_input_property("post", {"type": "string",
-            "description": "Post processor: for post_scope=local a full .cps path or a name in the personal/installed post folder; for cloud/hub a post NAME in the team library."})
+            "description": "Post processor: for post_scope=local a full .cps path or a name in the personal/installed post folder; for cloud/hub/fusion a post NAME in that library."})
     .add_input_property(_POST_SCOPE_CHOICE.name, _POST_SCOPE_CHOICE.schema())
     .add_input_property("output_folder", {"type": "string",
             "description": "Directory where the NC file(s) will be written (created if it does not exist)."})

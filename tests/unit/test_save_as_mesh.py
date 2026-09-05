@@ -1,39 +1,30 @@
 """Unit tests for save_as_mesh.py - the tessellation, the vertex weld and the landed body."""
 
-import json
-from conftest import load_tool
+import adsk.fusion
+import pytest
+
+from conftest import (BRepBody, MakeComp, MakeDesign, MeshBody, _FakeTriangleMesh, _MeshBodies,
+                      install, load_tool, payload)
 
 mx = load_tool("save_as_mesh")
 
 
-inp = mx._inputs
+class _AddingMeshBodies(_MeshBodies):
+    """comp.meshBodies where addByTriangleMeshData records its arguments and LANDS the new body in
+    the collection, so the count read back afterwards grows."""
 
+    def __init__(self, result=None, raise_on_add=False, existing=()):
+        super().__init__(existing)
+        self._result = result if result is not None else MeshBody("SavedMesh")
+        self._raise_on_add = raise_on_add
+        self.add_args = None
 
-class BRepBody:
-    """Stands in for adsk.fusion.BRepBody â€” the source for tessellation / a valid export target."""
-    def __init__(self, name="Body1", is_solid=True, token=None, parent=None, mesh_manager=None):
-        self.name = name
-        self.isSolid = is_solid
-        self.entityToken = token or f"BTOK::{name}"
-        self.parentComponent = parent
-        self.meshManager = mesh_manager
-
-
-class MeshBody:
-    """Stands in for adsk.fusion.MeshBody (a SEPARATE type from BRepBody)."""
-    def __init__(self, name="Mesh1", token=None):
-        self.name = name
-        self.entityToken = token or f"MTOK::{name}"
-
-
-class TriangleMesh:
-    def __init__(self, tri=12, nodes=8):
-        self.nodeCoordinatesAsDouble = [0.0] * (nodes * 3)
-        self.nodeIndices = list(range(tri * 3))
-        self.normalVectorsAsDouble = [0.0] * (nodes * 3)
-        self.normalIndices = list(range(tri * 3))
-        self.triangleCount = tri
-        self.nodeCount = nodes
+    def addByTriangleMeshData(self, coords, coord_idx, normals, normal_idx):
+        if self._raise_on_add:
+            raise RuntimeError("add failed")
+        self.add_args = (coords, coord_idx, normals, normal_idx)
+        self._items.append(self._result)
+        return self._result
 
 
 class FakeMeshCalculator:
@@ -58,55 +49,6 @@ class FakeMeshManager:
 
     def createMeshCalculator(self):
         return self._calc
-
-
-class FakeMeshBodies:
-    """comp.meshBodies â€” records the addByTriangleMeshData args and returns a new MeshBody."""
-    def __init__(self, result=None, raise_on_add=False):
-        self._result = result if result is not None else MeshBody("SavedMesh")
-        self.raise_on_add = raise_on_add
-        self.add_args = None
-
-    def addByTriangleMeshData(self, coords, coord_idx, normals, normal_idx):
-        if self.raise_on_add:
-            raise RuntimeError("add failed")
-        self.add_args = (coords, coord_idx, normals, normal_idx)
-        return self._result
-
-
-class FakeBodyColl:
-    """A bRepBodies-style collection — HAS itemByName (the real adsk.fusion.BRepBodies does)."""
-    def __init__(self, bodies):
-        self._b = {b.name: b for b in bodies}
-        self._list = bodies
-
-    def itemByName(self, n):
-        return self._b.get(n)
-
-    @property
-    def count(self):
-        return len(self._list)
-
-    def item(self, i):
-        return self._list[i]
-
-
-class FakeOccs:
-    def __init__(self, occs=()):
-        self._l = list(occs)
-
-    def itemByName(self, n):
-        return None
-
-    @property
-    def count(self):
-        return len(self._l)
-
-    def item(self, i):
-        return self._l[i]
-
-    def __iter__(self):
-        return iter(self._l)
 
 
 class FakeBaseFeature:
@@ -138,129 +80,40 @@ class FakeFeatures:
         self.baseFeatures = base_features if base_features is not None else FakeBaseFeatures()
 
 
-class FakeExportOptions:
-    """An export-options object that supports attribute set/get (so the tool's setattr for
-    meshRefinement works, the way the real ExportOptions objects do)."""
-    def __init__(self, kind, geom, path):
-        self.kind = kind
-        self.geom = geom
-        self.path = path
-        self.meshRefinement = None
-
-
-class FakeExportManager:
-    """Records which create*Options ran + the geometry, and that execute ran (writing a fake file)."""
-    def __init__(self):
-        self.calls = []
-        self.executed = None
-        self._last_path = None
-
-    def _opt(self, kind, geom, path):
-        rec = FakeExportOptions(kind, geom, path)
-        self.calls.append(rec)
-        self._last_path = path
-        return rec
-
-    def createOBJExportOptions(self, geom, path):
-        return self._opt("obj", geom, path)
-
-    def createC3MFExportOptions(self, geom, path):
-        return self._opt("3mf", geom, path)
-
-    def createSTLExportOptions(self, geom, path):
-        return self._opt("stl", geom, path)
-
-    def execute(self, opts):
-        self.executed = opts
-        # REALISTIC live divergence: execute() always returns True, but only writes a file when
-        # the geometry is a BRep body / component / occurrence. A BARE MeshBody geometry writes NOTHING
-        # (the file is a no-op) even though the return is truthy.
-        if not isinstance(opts.geom, MeshBody):
-            with open(opts.path, "w") as fh:
-                fh.write("fake-mesh")
-        return True
-
-
-class FakeComp:
-    def __init__(self, name="Root", bodies=(), mesh_bodies=None, features=None, occurrences=()):
-        self.name = name
-        self.bRepBodies = FakeBodyColl(list(bodies))
-        self.meshBodies = mesh_bodies if mesh_bodies is not None else FakeMeshBodies()
-        self.occurrences = FakeOccs(occurrences)
-        self.allOccurrences = list(occurrences)
-        self.features = features if features is not None else FakeFeatures()
-
-
-class FakeDesign:
-    def __init__(self, comp, em=None, design_type=0, all_comps=None):
-        self.rootComponent = comp
-        self.activeComponent = comp
-        self.exportManager = em if em is not None else FakeExportManager()
-        self.designType = design_type            # 0 direct, 1 parametric
-        self._all = all_comps if all_comps is not None else [comp]
-        self._tokens = {}
-
-    @property
-    def allComponents(self):
-        # a COUNTED collection (count + item(i)), the shape _common.all_components walks
-        class _Coll:
-            def __init__(self, items):
-                self._l = items
-
-            @property
-            def count(self):
-                return len(self._l)
-
-            def item(self, i):
-                return self._l[i] if 0 <= i < len(self._l) else None
-        return _Coll(self._all)
-
-    @property
-    def allOccurrences(self):
-        return []
-
-    def findEntityByToken(self, t):
-        e = self._tokens.get(t)
-        return [e] if e is not None else []
-
-
-def _wire_adsk():
-    import adsk.fusion
-    adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
-    adsk.fusion.BRepBody = BRepBody
-    adsk.fusion.MeshBody = MeshBody
-    adsk.fusion.BaseFeature = FakeBaseFeature
-    # export refinement + tessellation-quality enums
-    # MeshRefinementSettings members are NOT hand-seeded: they come off the mock (measured values
-    # once live_api_facts carries the family), and every assertion below reads them by name through
-    # _refine_member so a real int - MeshRefinementHigh is 0, a FALSY member - reads identically.
+@pytest.fixture(autouse=True)
+def _types(monkeypatch):
+    """The adsk types the input kinds isinstance-check, plus the tessellation-quality members."""
+    monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
+    monkeypatch.setattr(adsk.fusion, "MeshBody", MeshBody, raising=False)
+    monkeypatch.setattr(adsk.fusion, "BaseFeature", FakeBaseFeature, raising=False)
     tmo = adsk.fusion.TriangleMeshQualityOptions
-    tmo.LowQualityTriangleMesh = 8; tmo.NormalQualityTriangleMesh = 11
-    tmo.HighQualityTriangleMesh = 13; tmo.VeryHighQualityTriangleMesh = 15
-    return adsk.fusion
+    for member, value in (("LowQualityTriangleMesh", 8), ("NormalQualityTriangleMesh", 11),
+                          ("HighQualityTriangleMesh", 13), ("VeryHighQualityTriangleMesh", 15)):
+        monkeypatch.setattr(tmo, member, value, raising=False)
 
 
-def _install(design, handle_map=None):
-    handle_map = handle_map or {}
-    design._tokens = handle_map
-    mx.app = type("A", (), {"activeProduct": design})()
-    mx._common.app = mx.app
-    # BodyRef resolves via _common.design()/target_component()
-    inp._common.design = lambda: design
-    inp._common.target_component = lambda d: design.activeComponent
-    return design
+def _comp(name="Comp", mesh_bodies=None, features=None):
+    """A component carrying the two collections save_as_mesh writes through."""
+    comp = MakeComp(name)
+    comp.meshBodies = mesh_bodies if mesh_bodies is not None else _AddingMeshBodies()
+    comp.features = features if features is not None else FakeFeatures()
+    return comp
 
 
-def _payload(res):
-    assert res["isError"] is False, res
-    return json.loads(res["content"][0]["text"])
+def _wire(comp, design_type=0, handles=None):
+    """save_as_mesh wired onto a design rooted at `comp` - both design seams patched."""
+    return install(mx, MakeDesign(comp=comp, tokens=handles, design_type=design_type))
 
 
 def _mesh_source(name="SolidA", tri=12, nodes=8, parent_comp=None, raise_on_calc=False):
-    """A BRep body wired with a meshManager that yields a TriangleMesh of the given counts."""
-    tm = TriangleMesh(tri=tri, nodes=nodes)
+    """A BRep body wired with a meshManager that yields a TriangleMesh of the given counts.
+
+    The mesh carries no normalIndices - a live TriangleMesh answers none, so the handler's read of
+    it degrades and the normal index list it passes on is empty."""
+    tm = _FakeTriangleMesh(tri, nodes, coords=[0.0] * (nodes * 3),
+                           node_indices=list(range(tri * 3)), normals=[0.0] * (nodes * 3))
     calc = FakeMeshCalculator(tm, raise_on_calc=raise_on_calc)
-    return BRepBody(name, parent=parent_comp, mesh_manager=FakeMeshManager(calc))
+    return BRepBody(name, parent_component=parent_comp, mesh_manager=FakeMeshManager(calc))
 
 
 class TestSaveAsMesh:
@@ -268,21 +121,19 @@ class TestSaveAsMesh:
     def _tessellate_without_the_quality_member(self, quality="high"):
         """save_as_mesh on a build carrying no TriangleMeshQualityOptions member for the request -
         setQuality is never called and the calculator runs at its own default level of detail."""
-        fusion = _wire_adsk()
-        delattr(fusion.TriangleMeshQualityOptions, "HighQualityTriangleMesh")
-        comp = FakeComp("Comp")
+        delattr(adsk.fusion.TriangleMeshQualityOptions, "HighQualityTriangleMesh")
+        comp = _comp()
         src = _mesh_source("SolidA", parent_comp=comp)
-        _install(FakeDesign(comp, design_type=0), handle_map={"H": src})
-        return _payload(mx.handler(body="H", quality=quality)), src
+        _wire(comp, design_type=0, handles={"H": src})
+        return payload(mx.handler(body="H", quality=quality)), src
 
     def test_direct_tessellates_adds_mesh_no_scope(self):
-        _wire_adsk()
-        mb_coll = FakeMeshBodies(result=MeshBody("SavedMesh"))
+        mb_coll = _AddingMeshBodies(result=MeshBody("SavedMesh"))
         bf = FakeBaseFeature()
-        comp = FakeComp("Comp", mesh_bodies=mb_coll, features=FakeFeatures(FakeBaseFeatures(made=bf)))
+        comp = _comp("Comp", mesh_bodies=mb_coll, features=FakeFeatures(FakeBaseFeatures(made=bf)))
         src = _mesh_source("SolidA", tri=12, nodes=8, parent_comp=comp)
-        _install(FakeDesign(comp, design_type=0), handle_map={"H": src})   # DIRECT
-        out = _payload(mx.handler(body="H", quality="normal"))
+        _wire(comp, design_type=0, handles={"H": src})               # DIRECT
+        out = payload(mx.handler(body="H", quality="normal"))
         assert out["saved_as_mesh"] is True
         assert out["name"] == "SavedMesh"
         assert out["triangle_count"] == 12 and out["node_count"] == 8
@@ -291,13 +142,12 @@ class TestSaveAsMesh:
         assert bf.started is False and bf.finished is False
 
     def test_parametric_routes_through_base_feature_scope(self):
-        _wire_adsk()
-        mb_coll = FakeMeshBodies(result=MeshBody("SavedMesh"))
+        mb_coll = _AddingMeshBodies(result=MeshBody("SavedMesh"))
         bf = FakeBaseFeature()
-        comp = FakeComp("Comp", mesh_bodies=mb_coll, features=FakeFeatures(FakeBaseFeatures(made=bf)))
+        comp = _comp("Comp", mesh_bodies=mb_coll, features=FakeFeatures(FakeBaseFeatures(made=bf)))
         src = _mesh_source("SolidA", parent_comp=comp)
-        _install(FakeDesign(comp, design_type=1), handle_map={"H": src})   # PARAMETRIC
-        out = _payload(mx.handler(body="H"))
+        _wire(comp, design_type=1, handles={"H": src})               # PARAMETRIC
+        out = payload(mx.handler(body="H"))
         assert out["saved_as_mesh"] is True
         # PARAMETRIC: the write was wrapped in an OPEN/CLOSED base-feature scope
         assert bf.started is True and bf.finished is True
@@ -305,45 +155,33 @@ class TestSaveAsMesh:
 
     def test_phantom_body_that_never_lands_bites(self):
         # a returned body object is not proof it joined the component - the count is
-        _wire_adsk()
 
-        class PhantomMeshBodies(FakeMeshBodies):
+        class PhantomMeshBodies(_AddingMeshBodies):
             count = 3                                    # static: the add never actually lands
 
         mb_coll = PhantomMeshBodies(result=MeshBody("Phantom"))
-        comp = FakeComp("Comp", mesh_bodies=mb_coll)
+        comp = _comp("Comp", mesh_bodies=mb_coll)
         src = _mesh_source("SolidA", parent_comp=comp)
-        _install(FakeDesign(comp, design_type=0), handle_map={"H": src})
+        _wire(comp, design_type=0, handles={"H": src})
         res = mx.handler(body="H")
         assert res["isError"] is True
         assert "did not increase" in res["message"]
 
     def test_landed_body_grows_the_count_and_passes(self):
-        _wire_adsk()
-
-        class LandingMeshBodies(FakeMeshBodies):
-            def __init__(self, result=None):
-                super().__init__(result)
-                self.count = 3
-
-            def addByTriangleMeshData(self, *a):
-                out = super().addByTriangleMeshData(*a)
-                self.count += 1
-                return out
-
-        mb_coll = LandingMeshBodies(result=MeshBody("SavedMesh"))
-        comp = FakeComp("Comp", mesh_bodies=mb_coll)
+        mb_coll = _AddingMeshBodies(result=MeshBody("SavedMesh"),
+                                    existing=[MeshBody("Old1"), MeshBody("Old2"), MeshBody("Old3")])
+        comp = _comp("Comp", mesh_bodies=mb_coll)
         src = _mesh_source("SolidA", parent_comp=comp)
-        _install(FakeDesign(comp, design_type=0), handle_map={"H": src})
-        out = _payload(mx.handler(body="H"))
+        _wire(comp, design_type=0, handles={"H": src})
+        out = payload(mx.handler(body="H"))
         assert out["saved_as_mesh"] is True
+        assert mb_coll.count == 4                        # 3 before, 4 after
 
     def test_quality_passed_to_calculator(self):
-        _wire_adsk()
-        comp = FakeComp("Comp")
+        comp = _comp()
         src = _mesh_source("SolidA", parent_comp=comp)
-        _install(FakeDesign(comp, design_type=0), handle_map={"H": src})
-        out = _payload(mx.handler(body="H", quality="very_high"))
+        _wire(comp, design_type=0, handles={"H": src})
+        out = payload(mx.handler(body="H", quality="very_high"))
         assert out["quality"] == "very_high"
         assert out["quality_requested"] == "very_high"
         # the calculator received the VeryHigh quality enum value
@@ -362,53 +200,47 @@ class TestSaveAsMesh:
         assert "did NOT land" in out["note"] and "default level of detail" in out["note"]
 
     def test_a_landed_quality_adds_no_did_not_land_note(self):
-        _wire_adsk()
-        comp = FakeComp("Comp")
+        comp = _comp()
         src = _mesh_source("SolidA", parent_comp=comp)
-        _install(FakeDesign(comp, design_type=0), handle_map={"H": src})
-        out = _payload(mx.handler(body="H", quality="low"))
+        _wire(comp, design_type=0, handles={"H": src})
+        out = payload(mx.handler(body="H", quality="low"))
         assert out["quality"] == "low"
         assert "did NOT land" not in out["note"]
 
     def test_optional_name_renames_the_mesh(self):
-        _wire_adsk()
-        comp = FakeComp("Comp")
+        comp = _comp()
         src = _mesh_source("SolidA", parent_comp=comp)
-        _install(FakeDesign(comp, design_type=0), handle_map={"H": src})
-        out = _payload(mx.handler(body="H", name="MyMesh"))
+        _wire(comp, design_type=0, handles={"H": src})
+        out = payload(mx.handler(body="H", name="MyMesh"))
         assert out["name"] == "MyMesh"
 
     def test_bad_quality_rejected(self):
-        _wire_adsk()
-        comp = FakeComp("Comp")
+        comp = _comp()
         src = _mesh_source("SolidA", parent_comp=comp)
-        _install(FakeDesign(comp, design_type=0), handle_map={"H": src})
+        _wire(comp, design_type=0, handles={"H": src})
         res = mx.handler(body="H", quality="ultra")
         assert res["isError"] is True and "quality" in res["message"]
 
     def test_mesh_source_rejected(self):
         # passing an existing MESH body to save_as_mesh (it wants a BRep) -> honest refusal
-        _wire_adsk()
-        comp = FakeComp("Comp")
+        comp = _comp()
         m = MeshBody("AlreadyMesh")
-        _install(FakeDesign(comp, design_type=0), handle_map={"H": m})
+        _wire(comp, design_type=0, handles={"H": m})
         res = mx.handler(body="H")
         assert res["isError"] is True and "already a MESH" in res["message"]
 
     def test_calculate_failure_surfaces(self):
-        _wire_adsk()
-        comp = FakeComp("Comp")
+        comp = _comp()
         src = _mesh_source("SolidA", parent_comp=comp, raise_on_calc=True)
-        _install(FakeDesign(comp, design_type=0), handle_map={"H": src})
+        _wire(comp, design_type=0, handles={"H": src})
         res = mx.handler(body="H")
         assert res["isError"] is True and "tessellation" in res["message"].lower()
 
     def test_add_failure_surfaces_not_swallowed(self):
-        _wire_adsk()
-        mb_coll = FakeMeshBodies(raise_on_add=True)
-        comp = FakeComp("Comp", mesh_bodies=mb_coll)
+        mb_coll = _AddingMeshBodies(raise_on_add=True)
+        comp = _comp("Comp", mesh_bodies=mb_coll)
         src = _mesh_source("SolidA", parent_comp=comp)
-        _install(FakeDesign(comp, design_type=0), handle_map={"H": src})
+        _wire(comp, design_type=0, handles={"H": src})
         # in DIRECT mode the add runs directly inside run_in_base_feature; the raise must propagate
         try:
             res = mx.handler(body="H")

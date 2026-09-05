@@ -1,91 +1,17 @@
 """Unit tests for mesh_insert.py - the STL/OBJ/3MF import and its base-feature scope."""
 
-import json
-from conftest import load_tool, make_bbox
-import adsk.fusion  # noqa: E402
+import adsk.fusion
+import pytest
+
+from conftest import (BRepBody, MakeComp, MeshBody, _MeshBodies, _NamedCollection, install,
+                      load_tool, make_design, payload)
 
 mo = load_tool("mesh_insert")
 mesh_get = load_tool("mesh_get")
 
 
-inp = load_tool("_inputs")
-
-
-class TriangleMesh:
-    def __init__(self, tri, nodes):
-        self.triangleCount = tri
-        self.nodeCount = nodes
-
-
-class PolygonMesh:
-    def __init__(self, tri, polys, nodes):
-        self.triangleCount = tri
-        self.polygonCount = polys
-        self.nodeCount = nodes
-
-
-_UNSET = object()
-
-
-class MeshBody:
-    """Stands in for adsk.fusion.MeshBody (a SEPARATE type from BRepBody).
-
-    area/volume default to UNSET (the attribute is not set at all), so a plain access raises
-    AttributeError - a field that cannot be READ, which the record must publish as null. It is NOT
-    the open-mesh shape: MeshBody.volume on a mesh that is not closed RETURNS 0.0 (measured on a
-    single-triangle STL reading is_closed false), so an open-mesh fake passes volume=0.0 and the
-    record publishes 0.0. Pass explicit cm values to model a real reading."""
-    def __init__(self, name="Mesh1", tri=1000, nodes=502, is_closed=True, is_oriented=True,
-                 token=None, bbox=None, parent=None, area=_UNSET, volume=_UNSET):
-        self.name = name
-        self.displayMesh = TriangleMesh(tri, nodes)
-        self.mesh = PolygonMesh(tri, tri, nodes)
-        self.isClosed = is_closed
-        self.isOriented = is_oriented
-        self.entityToken = token or f"MTOK::{name}"
-        self.boundingBox = bbox or make_bbox((0, 0, 0), (1, 2, 3))   # cm
-        self.parentComponent = parent
-        if area is not _UNSET:
-            self.area = area
-        if volume is not _UNSET:
-            self.volume = volume
-
-
-class BRepBody:
-    """Stands in for adsk.fusion.BRepBody — the WRONG kind for a mesh input."""
-    def __init__(self, name="Body1", is_solid=True, token=None):
-        self.name = name
-        self.isSolid = is_solid
-        self.entityToken = token or f"BTOK::{name}"
-
-
-class _Coll:
-    def __init__(self, items=()):
-        self._items = list(items)
-
-    @property
-    def count(self):
-        return len(self._items)
-
-    def item(self, i):
-        return self._items[i] if 0 <= i < len(self._items) else None
-
-    def itemByName(self, n):
-        for it in self._items:
-            if getattr(it, "name", None) == n:
-                return it
-        return None
-
-
-class _Features:
-    def __init__(self, reduce=None, remesh=None, convert=None, base_features=None):
-        self.meshReduceFeatures = reduce
-        self.meshRemeshFeatures = remesh
-        self.meshConvertFeatures = convert
-        self.baseFeatures = base_features
-
-
 class _BaseFeature:
+    """The BaseFeature a parametric scope opens, recording its own open and close."""
     def __init__(self):
         self.name = "BaseFeature1"
         self.started = False
@@ -101,6 +27,7 @@ class _BaseFeature:
 
 
 class _BaseFeatures:
+    """comp.features.baseFeatures - add() hands back the one base feature it was built with."""
     def __init__(self, made):
         self._made = made
 
@@ -108,20 +35,19 @@ class _BaseFeatures:
         return self._made
 
 
-class _MeshBodies:
-    """comp.meshBodies — a counted collection that ALSO imports via add(path, units, base_feature)."""
+class _Features:
+    """comp.features, carrying the one collection mesh_insert reads."""
+    def __init__(self, base_features=None):
+        self.baseFeatures = base_features
+
+
+class _ImportingMeshBodies(_MeshBodies):
+    """comp.meshBodies where add(path, units, base_feature) performs the file import."""
     def __init__(self, existing=(), import_result=None, raise_on_add=False):
-        self._existing = list(existing)
+        super().__init__(existing)
         self._import_result = import_result
         self.raise_on_add = raise_on_add
         self.add_args = None
-
-    @property
-    def count(self):
-        return len(self._existing)
-
-    def item(self, i):
-        return self._existing[i] if 0 <= i < len(self._existing) else None
 
     def add(self, path, units, base_feature):
         if self.raise_on_add:
@@ -130,72 +56,38 @@ class _MeshBodies:
         return self._import_result
 
 
-class FakeComp:
-    def __init__(self, name="Comp", meshes=(), features=None, mesh_bodies=None, brep_bodies=None):
-        self.name = name
-        self.meshBodies = mesh_bodies if mesh_bodies is not None else _Coll(meshes)
-        # comp.bRepBodies — the mesh_to_brep non-parametric side-effect probe (new body appeared).
-        self.bRepBodies = brep_bodies if brep_bodies is not None else _Coll()
-        self.features = features
+@pytest.fixture(autouse=True)
+def _types(monkeypatch):
+    """The adsk.fusion type identities and the MeshUnits members the import enum is read from."""
+    monkeypatch.setattr(adsk.fusion, "MeshBody", MeshBody, raising=False)
+    monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
+    monkeypatch.setattr(adsk.fusion, "BaseFeature", _BaseFeature, raising=False)
+    for member, sentinel in (("MillimeterMeshUnit", "MM"), ("CentimeterMeshUnit", "CM"),
+                             ("MeterMeshUnit", "M"), ("InchMeshUnit", "IN"),
+                             ("FootMeshUnit", "FT")):
+        monkeypatch.setattr(adsk.fusion.MeshUnits, member, sentinel, raising=False)
 
 
-class FakeDesign:
-    def __init__(self, comp, design_type=0, edit_object=None, all_comps=None):
-        self.activeComponent = comp
-        self.rootComponent = comp
-        self.designType = design_type           # 0 direct, 1 parametric
-        self.activeEditObject = edit_object
-        self._all = all_comps if all_comps is not None else [comp]
-
-    @property
-    def allComponents(self):
-        # A COUNTED collection (count/item), the live shape every design-wide component walk reads -
-        # a bare list makes `.count` a method and the walk cannot run at all.
-        return _Coll(self._all)
-
-    @property
-    def allOccurrences(self):
-        return []
-
-    def findEntityByToken(self, tok):
-        return self._handle_map.get(tok, [])
-
-    _handle_map = {}
+@pytest.fixture(autouse=True)
+def _file_present(monkeypatch):
+    """The import path exists; the missing-file guard is driven by overriding this."""
+    monkeypatch.setattr(mo.os.path, "isfile", lambda p: True)
 
 
-def _wire_adsk(handle_map=None, parametric=False, mesh_units_ok=True):
-    """Install the adsk.fusion type identities + enums the tools/kinds read. Returns nothing; the
-    caller builds the design separately."""
-    import adsk.fusion
-    adsk.fusion.MeshBody = MeshBody
-    adsk.fusion.BRepBody = BRepBody
-    # ModeGuard reads BaseFeature for scope detection (DesignTypes ints come seeded).
-    adsk.fusion.BaseFeature = _BaseFeature
-    # mesh units enum
-    if mesh_units_ok:
-        mu = adsk.fusion.MeshUnits
-        mu.MillimeterMeshUnit = "MM"; mu.CentimeterMeshUnit = "CM"; mu.MeterMeshUnit = "M"
-        mu.InchMeshUnit = "IN"; mu.FootMeshUnit = "FT"
-    return adsk.fusion
+def _comp(name="Comp", mesh_bodies=None, base_feature=None):
+    """A component whose meshBodies is the importing collection and whose features carry the scope."""
+    comp = MakeComp(name)
+    comp.meshBodies = mesh_bodies if mesh_bodies is not None else _ImportingMeshBodies()
+    comp.features = _Features(
+        base_features=_BaseFeatures(base_feature) if base_feature is not None else None)
+    return comp
 
 
-def _install(design, handle_map=None):
-    """Point the tool + the MeshBodyRef kind at a fake design and a token resolver."""
-    handle_map = handle_map or {}
-    design._handle_map = {k: [v] for k, v in handle_map.items()}
-    mo.app = type("A", (), {"activeProduct": design})()
-    mo._common.app = mo.app
-    import adsk.fusion
-    adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
-    # MeshBodyRef resolves via _common.design()/target_component()
-    inp._common.design = lambda: design
-    inp._common.target_component = lambda d: design.activeComponent
-    return design
-
-
-def _payload(result):
-    assert result["isError"] is False, result
-    return json.loads(result["content"][0]["text"])
+def _wire(comp, design_type=0, edit_object=None, all_components=None):
+    """Wire a design rooted at `comp` into the tool through both design seams."""
+    return install(mo, make_design(comp=comp, design_type=design_type,
+                                   active_edit_object=edit_object,
+                                   all_components=all_components))
 
 
 class TestMeshInsert:
@@ -203,14 +95,10 @@ class TestMeshInsert:
     def test_gates_on_base_feature_scope_in_parametric_when_scope_cannot_open(self):
         # Parametric design where baseFeatures.add() returns None -> run_in_base_feature cannot open the
         # scope -> honest error (NOT a false-negative recheck guard).
-        _wire_adsk()
-        imported = MeshBody("Imported")
-        mb_coll = _MeshBodies(import_result=_Coll([imported]))
-        feats = _Features(base_features=_BaseFeatures(made=None))   # add() -> None: scope won't open
-        comp = FakeComp("Comp", features=feats, mesh_bodies=mb_coll)
-        des = FakeDesign(comp, design_type=1)                       # parametric
-        _install(des)
-        mo.os.path.isfile = lambda p: True
+        mb_coll = _ImportingMeshBodies(import_result=_NamedCollection([MeshBody("Imported")]))
+        comp = _comp(mesh_bodies=mb_coll)
+        comp.features = _Features(base_features=_BaseFeatures(None))  # add() -> None: scope won't open
+        _wire(comp, design_type=1)                                    # parametric
         res = mo.handler(file_path="C:/scan.stl", units="mm")
         assert res["isError"] is True
         assert "base-feature scope" in res["message"].lower()
@@ -219,16 +107,11 @@ class TestMeshInsert:
         # An open base-feature scope is undetectable (activeEditObject is None even though the scope is
         # open), so run_in_base_feature must NOT re-check it after startEdit. The insert succeeds when
         # meshBodies.add returns a non-empty list, regardless of the unobservable scope state.
-        _wire_adsk()
         bf = _BaseFeature()
-        imported = MeshBody("Imported", tri=777)
-        feats = _Features(base_features=_BaseFeatures(made=bf))
-        mb_coll = _MeshBodies(import_result=_Coll([imported]))
-        comp = FakeComp("Comp", features=feats, mesh_bodies=mb_coll)
-        des = FakeDesign(comp, design_type=1, edit_object=None)     # scope invisible to any guard
-        _install(des)
-        mo.os.path.isfile = lambda p: True
-        out = _payload(mo.handler(file_path="C:/scan.stl"))
+        mb_coll = _ImportingMeshBodies(import_result=_NamedCollection([MeshBody("Imported", tri=777)]))
+        comp = _comp(mesh_bodies=mb_coll, base_feature=bf)
+        _wire(comp, design_type=1, edit_object=None)     # scope invisible to any guard
+        out = payload(mo.handler(file_path="C:/scan.stl"))
         assert out["imported"] is True                              # no false "could not open scope"
         assert out["base_feature"] == "BaseFeature1"
         assert out["bodies"][0]["triangle_count"] == 777
@@ -238,16 +121,11 @@ class TestMeshInsert:
 
     def test_works_in_parametric_with_visible_scope(self):
         # Parametric: the import runs inside the helper's base-feature scope and succeeds.
-        _wire_adsk()
         bf = _BaseFeature()
-        imported = MeshBody("Imported", tri=500)
-        feats = _Features(base_features=_BaseFeatures(made=bf))
-        mb_coll = _MeshBodies(import_result=_Coll([imported]))
-        comp = FakeComp("Comp", features=feats, mesh_bodies=mb_coll)
-        des = FakeDesign(comp, design_type=1, edit_object=bf)
-        _install(des)
-        mo.os.path.isfile = lambda p: True
-        out = _payload(mo.handler(file_path="C:/scan.stl", units="mm", name="MyScan"))
+        mb_coll = _ImportingMeshBodies(import_result=_NamedCollection([MeshBody("Imported", tri=500)]))
+        comp = _comp(mesh_bodies=mb_coll, base_feature=bf)
+        _wire(comp, design_type=1, edit_object=bf)
+        out = payload(mo.handler(file_path="C:/scan.stl", units="mm", name="MyScan"))
         assert out["imported"] is True
         assert out["base_feature"] == "BaseFeature1"
         assert out["bodies"][0]["triangle_count"] == 500
@@ -257,49 +135,32 @@ class TestMeshInsert:
 
     def test_works_in_direct_without_scope(self):
         # DIRECT design -> NO base-feature scope; baseOrFormFeature passed as None; import succeeds.
-        _wire_adsk()
-        imported = MeshBody("Imported", tri=320)
-        mb_coll = _MeshBodies(import_result=_Coll([imported]))
-        feats = _Features(base_features=_BaseFeatures(made=_BaseFeature()))
-        comp = FakeComp("Comp", features=feats, mesh_bodies=mb_coll)
-        des = FakeDesign(comp, design_type=0)                        # direct
-        _install(des)
-        mo.os.path.isfile = lambda p: True
-        out = _payload(mo.handler(file_path="C:/scan.obj"))
+        mb_coll = _ImportingMeshBodies(import_result=_NamedCollection([MeshBody("Imported", tri=320)]))
+        comp = _comp(mesh_bodies=mb_coll, base_feature=_BaseFeature())
+        _wire(comp, design_type=0)                                   # direct
+        out = payload(mo.handler(file_path="C:/scan.obj"))
         assert out["imported"] is True
         assert out["base_feature"] is None                           # no scope in direct
         assert mb_coll.add_args[2] is None                           # baseOrFormFeature was None
 
     def test_bad_extension_rejected(self):
-        _wire_adsk()
-        comp = FakeComp("Comp", mesh_bodies=_MeshBodies())
-        _install(FakeDesign(comp, design_type=0))
-        mo.os.path.isfile = lambda p: True
+        _wire(_comp())
         res = mo.handler(file_path="C:/model.step")
         assert res["isError"] is True and ".stl" in res["message"]
 
-    def test_missing_file_rejected(self):
-        _wire_adsk()
-        comp = FakeComp("Comp", mesh_bodies=_MeshBodies())
-        _install(FakeDesign(comp, design_type=0))
-        mo.os.path.isfile = lambda p: False
+    def test_missing_file_rejected(self, monkeypatch):
+        _wire(_comp())
+        monkeypatch.setattr(mo.os.path, "isfile", lambda p: False)
         res = mo.handler(file_path="C:/nope.stl")
         assert res["isError"] is True and "not found" in res["message"].lower()
 
     def test_named_target_component_imports_into_it(self):
         # target_component=<name> imports into THAT component, not the active one
-        _wire_adsk()
-        imported = MeshBody("Imported", tri=64)
-        sub_coll = _MeshBodies(import_result=_Coll([imported]))
-        root = FakeComp("Root", features=_Features(base_features=_BaseFeatures(made=_BaseFeature())),
-                        mesh_bodies=_MeshBodies())
-        sub = FakeComp("SubPart",
-                       features=_Features(base_features=_BaseFeatures(made=_BaseFeature())),
-                       mesh_bodies=sub_coll)
-        des = FakeDesign(root, design_type=0, all_comps=[root, sub])
-        _install(des)
-        mo.os.path.isfile = lambda p: True
-        out = _payload(mo.handler(file_path="C:/scan.stl", target_component="SubPart"))
+        sub_coll = _ImportingMeshBodies(import_result=_NamedCollection([MeshBody("Imported", tri=64)]))
+        root = _comp("Root", base_feature=_BaseFeature())
+        sub = _comp("SubPart", mesh_bodies=sub_coll, base_feature=_BaseFeature())
+        _wire(root, design_type=0, all_components=[root, sub])
+        out = payload(mo.handler(file_path="C:/scan.stl", target_component="SubPart"))
         assert out["imported"] is True
         assert out["component"] == "SubPart"
         assert sub_coll.add_args is not None        # the import went into SubPart's collection
@@ -308,15 +169,10 @@ class TestMeshInsert:
     def test_duplicate_target_component_name_refused_no_import(self):
         # two components named 'SubPart': importing into whichever the walk reached first would put
         # the mesh in the wrong part, so the import refuses before it runs
-        _wire_adsk()
-        root = FakeComp("Root", features=_Features(base_features=_BaseFeatures(made=_BaseFeature())),
-                        mesh_bodies=_MeshBodies())
-        a = FakeComp("SubPart", features=_Features(base_features=_BaseFeatures(made=_BaseFeature())),
-                     mesh_bodies=_MeshBodies())
-        b = FakeComp("SubPart", features=_Features(base_features=_BaseFeatures(made=_BaseFeature())),
-                     mesh_bodies=_MeshBodies())
-        _install(FakeDesign(root, design_type=0, all_comps=[root, a, b]))
-        mo.os.path.isfile = lambda p: True
+        root = _comp("Root", base_feature=_BaseFeature())
+        a = _comp("SubPart", base_feature=_BaseFeature())
+        b = _comp("SubPart", base_feature=_BaseFeature())
+        _wire(root, design_type=0, all_components=[root, a, b])
         res = mo.handler(file_path="C:/scan.stl", target_component="SubPart")
         assert res["isError"] is True
         assert "2 components match 'SubPart'" in res["message"]
@@ -328,46 +184,30 @@ class TestMeshInsert:
         assert root.meshBodies.add_args is None       # and not into the active component either
 
     def test_unknown_target_component_errors(self):
-        _wire_adsk()
-        root = FakeComp("Root",
-                        features=_Features(base_features=_BaseFeatures(made=_BaseFeature())),
-                        mesh_bodies=_MeshBodies())
-        _install(FakeDesign(root, design_type=0, all_comps=[root]))
-        mo.os.path.isfile = lambda p: True
+        root = _comp("Root", base_feature=_BaseFeature())
+        _wire(root, design_type=0, all_components=[root])
         res = mo.handler(file_path="C:/scan.stl", target_component="Ghost")
         assert res["isError"] is True
         assert "Ghost" in res["message"]
 
     def test_unknown_units_rejected(self):
-        _wire_adsk()
-        comp = FakeComp("Comp",
-                        features=_Features(base_features=_BaseFeatures(made=_BaseFeature())),
-                        mesh_bodies=_MeshBodies())
-        _install(FakeDesign(comp, design_type=0))
-        mo.os.path.isfile = lambda p: True
+        _wire(_comp(base_feature=_BaseFeature()))
         res = mo.handler(file_path="C:/scan.stl", units="parsec")
         assert res["isError"] is True
         assert "mm, cm, m, in, or ft" in res["message"]
 
     def test_empty_import_result_errors(self):
         # meshBodies.add returns an EMPTY list (file unreadable as a mesh) -> honest error
-        _wire_adsk()
-        mb_coll = _MeshBodies(import_result=_Coll([]))
-        feats = _Features(base_features=_BaseFeatures(made=_BaseFeature()))
-        comp = FakeComp("Comp", features=feats, mesh_bodies=mb_coll)
-        _install(FakeDesign(comp, design_type=0))
-        mo.os.path.isfile = lambda p: True
+        comp = _comp(mesh_bodies=_ImportingMeshBodies(import_result=_NamedCollection()),
+                     base_feature=_BaseFeature())
+        _wire(comp, design_type=0)
         res = mo.handler(file_path="C:/scan.stl")
         assert res["isError"] is True and "no bodies" in res["message"].lower()
 
     def test_import_failure_surfaces_not_swallowed(self):
         # meshBodies.add raises -> must become an error, NOT a false success (no safe() around mutation)
-        _wire_adsk()
-        mb_coll = _MeshBodies(raise_on_add=True)
-        feats = _Features(base_features=_BaseFeatures(made=_BaseFeature()))
-        comp = FakeComp("Comp", features=feats, mesh_bodies=mb_coll)
-        _install(FakeDesign(comp, design_type=0))
-        mo.os.path.isfile = lambda p: True
+        comp = _comp(mesh_bodies=_ImportingMeshBodies(raise_on_add=True), base_feature=_BaseFeature())
+        _wire(comp, design_type=0)
         res = mo.handler(file_path="C:/scan.stl")
         assert res["isError"] is True and "import failed" in res["message"]
 
@@ -378,15 +218,12 @@ class TestMeshInsertStats:
         return self._insert_with_collection(units, area, volume, existing)[0]
 
     def _insert_with_collection(self, units="mm", area=6.0, volume=1.0, existing=()):
-        _wire_adsk()
         imported = MeshBody("Imported", area=area, volume=volume)
-        mb_coll = _MeshBodies(existing=existing or [imported], import_result=_Coll([imported]))
-        comp = FakeComp("Comp",
-                        features=_Features(base_features=_BaseFeatures(made=_BaseFeature())),
-                        mesh_bodies=mb_coll)
-        _install(FakeDesign(comp, design_type=0))
-        mo.os.path.isfile = lambda p: True
-        out = _payload(mo.handler(file_path="C:/scan.stl", units=units))
+        mb_coll = _ImportingMeshBodies(existing=existing or [imported],
+                              import_result=_NamedCollection([imported]))
+        comp = _comp(mesh_bodies=mb_coll, base_feature=_BaseFeature())
+        _wire(comp, design_type=0)
+        out = payload(mo.handler(file_path="C:/scan.stl", units=units))
         return out, mb_coll
 
     def test_each_unit_key_pairs_its_import_enum_with_its_own_factor(self):
@@ -413,7 +250,7 @@ class TestMeshInsertStats:
         # the two tools' figures for ONE body must agree; a raw-cm insert payload disagrees with
         # mesh_get by a factor of 100 (area) / 1000 (volume) on the identical mesh.
         out = self._insert(units="mm", area=6.0, volume=1.0)
-        listed = _payload(mesh_get.handler(target="", units="mm"))["meshes"][0]
+        listed = payload(mesh_get.handler(target="", units="mm"))["meshes"][0]
         assert out["bodies"][0]["area"] == listed["area"]
         assert out["bodies"][0]["volume"] == listed["volume"]
 

@@ -15,7 +15,8 @@ import math
 import re
 
 from conftest import (BRepEdge, BRepFace, Circle3D, Cone, Cylinder, FakePoint, FakeUnitsManager,
-                      FakeVector3D, Line3D, Plane, _Vertex, load_tool)
+                      FakeVector3D, Line3D, MakeComp, Plane, _Vertex, install, load_tool,
+                      make_design)
 
 cn = load_tool("model_construction")
 
@@ -131,42 +132,33 @@ class _CollOut:
 _OriginPlane = collections.namedtuple("_OriginPlane", "kind name")
 
 
-class FakeComp:
-    def __init__(self):
-        self.name = "Comp"
-        self.constructionPoints = _CollOut()
-        self.constructionAxes = _CollOut()
-        self.constructionPlanes = _CollOut()
-        self.xYConstructionPlane = _OriginPlane("plane", "XY")
-        self.xZConstructionPlane = _OriginPlane("plane", "XZ")
-        self.yZConstructionPlane = _OriginPlane("plane", "YZ")
-
-
-class FakeDesign:
-    # designType: 0 = Direct (setByPoint/setByLine legal), 1 = Parametric (they fail).
-    # activeOccurrence is None when the ROOT component is active (the live contract) - set it to
-    # drive the created datum's geometry through its assembly-context proxy.
-    def __init__(self, comp, design_type=0, active_occurrence=None):
-        self.activeComponent = comp
-        self.rootComponent = comp
-        self.designType = design_type
-        self.activeOccurrence = active_occurrence
+def _datum_component():
+    """The component the datums are built on: the three createInput/add collections plus the origin
+    planes an 'xy'/'xz'/'yz' alias resolves to."""
+    comp = MakeComp(name="Comp")
+    comp.constructionPoints = _CollOut()
+    comp.constructionAxes = _CollOut()
+    comp.constructionPlanes = _CollOut()
+    comp.xYConstructionPlane = _OriginPlane("plane", "XY")
+    comp.xZConstructionPlane = _OriginPlane("plane", "XZ")
+    comp.yZConstructionPlane = _OriginPlane("plane", "YZ")
+    return comp
 
 
 def _install(raise_env=False, design_type=0, active_occurrence=None):
-    comp = FakeComp()
+    comp = _datum_component()
     if raise_env:
         def boom():
             raise RuntimeError("3 : Environment is not supported")
         comp.constructionPoints.createInput = boom
-    design = FakeDesign(comp, design_type, active_occurrence)
-    cn.app = type("A", (), {"activeProduct": design})()
-    cn._common.app = cn.app
-    import adsk.fusion, adsk.core
-    adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
-    # axis (AxisRef) + plane (PlaneRef) resolve via _common — point them at the fake comp.
-    cn._inputs._common.design = lambda: design
-    cn._inputs._common.target_component = lambda d: comp
+    design = make_design(comp=comp)
+    # designType: 0 = Direct (setByPoint/setByLine legal), 1 = Parametric (they fail).
+    # activeOccurrence is None when the ROOT component is active (the live contract) - set it to
+    # drive the created datum's geometry through its assembly-context proxy.
+    design.designType = design_type
+    design.activeOccurrence = active_occurrence
+    install(cn, design)
+    import adsk.core
     adsk.core.Point3D.create = staticmethod(lambda x, y, z: ("pt", x, y, z))
     adsk.core.Vector3D.create = staticmethod(lambda x, y, z: ("vec", x, y, z))
     adsk.core.InfiniteLine3D.create = staticmethod(lambda o, d: ("line", o, d))

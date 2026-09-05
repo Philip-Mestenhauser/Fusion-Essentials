@@ -13,12 +13,13 @@ import types
 
 import pytest
 
-from conftest import (BRepBody, BRepFace, FakeBoundingBox3D, FakePoint, FakeVector3D, Plane,
-                      _NamedCollection, error_message, load_tool)
+from conftest import (BRepBody, BRepEdge, BRepFace, Circle3D, Cylinder, FakeBoundingBox3D,
+                      FakePoint, FakeVector3D, Line3D, MakeComp, Plane, error_message, load_tool,
+                      make_occurrence)
 
 mr = load_tool("model_measure_relation")
 
-_PLATE = types.SimpleNamespace(name="Plate", entityToken="CTOK::Plate")
+_PLATE = MakeComp(name="Plate", entity_token="CTOK::Plate")
 
 _REAL_A, _REAL_B = mr._A.resolve, mr._B.resolve
 
@@ -33,26 +34,19 @@ def _restore(monkeypatch):
 
 # ── fake geometry ─────────────────────────────────────────────────────────────
 
-class _P:
-    def __init__(self, x, y, z): self.x, self.y, self.z = x, y, z
-
-
 def _cyl(origin, axis):
-    # surfaceType read at CREATION time (not module import) - the shared mock's enum attr is
-    # reassigned by other test files, so a value captured at import can go stale under random order.
-    st = mr.adsk.core.SurfaceTypes.CylinderSurfaceType
-    return type("Cyl", (), {"origin": _P(*origin), "axis": _P(*axis),
-                            "radius": 1.0, "surfaceType": st})()
+    """A cylindrical surface: the axis line an axis relation reads, plus its radius."""
+    surface = Cylinder(FakeVector3D(*axis), FakePoint(*origin))
+    surface.radius = 1.0
+    return surface
 
 
 def _plane(origin, normal):
-    st = mr.adsk.core.SurfaceTypes.PlaneSurfaceType
-    return type("Pl", (), {"origin": _P(*origin), "normal": _P(*normal),
-                           "surfaceType": st})()
+    return Plane(FakeVector3D(*normal), FakePoint(*origin))
 
 
-def _face(geom, name="F"):
-    return type("Face", (), {"geometry": geom, "name": name})()
+def _face(geom):
+    return BRepFace(geom)
 
 
 def _resolve_ab(ent_a, kind_a, ent_b, kind_b):
@@ -232,7 +226,7 @@ class TestFlush:
 class TestClearance:
     def test_clears_passes(self, monkeypatch):
         _faces(_plane((0, 0, 0), (0, 0, 1)), _plane((0, 0, 1), (0, 0, 1)))
-        _install_mgr(monkeypatch, _MR(8.0, _P(0, 0, 0), _P(0, 0, 8)))
+        _install_mgr(monkeypatch, _MR(8.0, FakePoint(0, 0, 0), FakePoint(0, 0, 8)))
         out = _payload(mr.handler(relation="clearance", tolerance=5, units="mm"))
         assert out["passed"] is True                    # 80 mm >= 5 mm
         assert out["measured"]["min_distance"] == 80.0
@@ -302,7 +296,7 @@ class TestParallelPlanarPairVerdicts:
         # apart, so the parts clear. A clearance check that answers on the separation refuses an
         # assembly that fits.
         self._offset_pair(monkeypatch)
-        _install_mgr(monkeypatch, _MR(2.0, _P(0, 0, 0), _P(0, 0, 2)))
+        _install_mgr(monkeypatch, _MR(2.0, FakePoint(0, 0, 0), FakePoint(0, 0, 2)))
         out = _payload(mr.handler(relation="clearance", tolerance=25, units="mm"))
         assert out["passed"] is True
         assert out["measured"]["min_distance"] == round(math.sqrt(13.0) * 10, 4)
@@ -314,7 +308,7 @@ class TestParallelPlanarPairVerdicts:
         self._pair(monkeypatch,
                    self._face((0, 0, 0), (0, 0, 1), ((0, 0, 0), (1, 1, 0))),
                    self._face((0, 0, 0), (0, 0, 1), ((5.4, 0, 0), (6.4, 1, 0))))
-        _install_mgr(monkeypatch, _MR(0.0, _P(0, 0, 0), _P(0, 0, 0)))
+        _install_mgr(monkeypatch, _MR(0.0, FakePoint(0, 0, 0), FakePoint(0, 0, 0)))
         out = _payload(mr.handler(relation="touching"))
         assert out["passed"] is False
         assert out["measured"]["min_distance"] == 44.0
@@ -322,7 +316,7 @@ class TestParallelPlanarPairVerdicts:
 
     def test_a_bounded_verdict_drops_the_point_pair_it_no_longer_describes(self, monkeypatch):
         self._offset_pair(monkeypatch)
-        _install_mgr(monkeypatch, _MR(2.0, _P(0, 0, 0), _P(0, 0, 2)))
+        _install_mgr(monkeypatch, _MR(2.0, FakePoint(0, 0, 0), FakePoint(0, 0, 2)))
         measured = _payload(mr.handler(relation="clearance", tolerance=25, units="mm"))["measured"]
         assert measured["closest_point_on_a"] is None and measured["closest_point_on_b"] is None
 
@@ -332,7 +326,7 @@ class TestParallelPlanarPairVerdicts:
         self._pair(monkeypatch,
                    self._face((0, 0, 0), (0, 0, 1), ((0, 0, 0), (1, 1, 0))),
                    self._face((0, 0, 2), (0, 0, 1), ((0, 0, 2), (1, 1, 2))))
-        _install_mgr(monkeypatch, _MR(2.0, _P(0, 0, 0), _P(0, 0, 2)))
+        _install_mgr(monkeypatch, _MR(2.0, FakePoint(0, 0, 0), FakePoint(0, 0, 2)))
         out = _payload(mr.handler(relation="clearance", tolerance=25, units="mm"))
         assert out["passed"] is False
         assert out["measured"]["min_distance"] == 20.0
@@ -342,7 +336,7 @@ class TestParallelPlanarPairVerdicts:
 
     def test_a_body_pair_is_judged_exactly_as_before(self, monkeypatch):
         self._offset_pair(monkeypatch, kind="body")
-        _install_mgr(monkeypatch, _MR(2.0, _P(0, 0, 0), _P(0, 0, 2)))
+        _install_mgr(monkeypatch, _MR(2.0, FakePoint(0, 0, 0), FakePoint(0, 0, 2)))
         out = _payload(mr.handler(relation="clearance", tolerance=25, units="mm"))
         assert out["passed"] is False and out["measured"]["min_distance"] == 20.0
         assert "plane_separation" not in out["measured"]
@@ -352,20 +346,18 @@ class TestParallelPlanarPairVerdicts:
         self._pair(monkeypatch,
                    self._face((0, 0, 0), (0, 0, 1), ((0, 0, 0), (1, 1, 0))),
                    self._face((0, 0, 0), (0, 0, 1), ((0.5, 0.5, 0), (1.5, 1.5, 0))))
-        _install_mgr(monkeypatch, _MR(0.0, _P(0, 0, 0), _P(0, 0, 0)))
+        _install_mgr(monkeypatch, _MR(0.0, FakePoint(0, 0, 0), FakePoint(0, 0, 0)))
         out = _payload(mr.handler(relation="touching"))
         assert out["passed"] is True
         assert out["measured"]["plane_separation_only"] is True
 
 
 def _occ(name, children=()):
-    """An occurrence as the verdict reads one: a name, a fullPathName, its direct children, and the
+    """An occurrence as the verdict reads one: a fullPathName, its direct children, and the
     component-local collection the unresolved-child count is read through."""
     kids = list(children)
-    return types.SimpleNamespace(name=name, fullPathName=name,
-                                 childOccurrences=_NamedCollection(kids),
-                                 component=types.SimpleNamespace(
-                                     occurrences=_NamedCollection(kids)))
+    return make_occurrence(path=name, children=kids,
+                           component=MakeComp(name=name.split(":")[0], occurrences=kids))
 
 
 def _install_child_mgr(monkeypatch, pair_result, gaps):
@@ -389,7 +381,7 @@ class TestNestedTargetDisclosure:
 
     def test_a_flat_pair_carries_no_caveat(self, monkeypatch):
         _resolve_ab(_occ("Carrier:1"), "occurrence", _occ("Frame:1"), "occurrence")
-        _install_mgr(monkeypatch, _MR(0.6, _P(0, 0, 0), _P(0.6, 0, 0)))
+        _install_mgr(monkeypatch, _MR(0.6, FakePoint(0, 0, 0), FakePoint(0.6, 0, 0)))
         out = _payload(mr.handler(relation="clearance", entity_a="Carrier:1", entity_b="Frame:1"))
         assert "targets_with_children" not in out["measured"]
         assert "NESTED" not in out["note"]
@@ -399,7 +391,7 @@ class TestNestedTargetDisclosure:
         # caller has to see before designing around that clearance.
         _resolve_ab(_occ("Carrier:1"), "occurrence",
                     _occ("Frame:1", [_occ("Frame:1+Pedestal:1")]), "occurrence")
-        _install_child_mgr(monkeypatch, _MR(0.6, _P(0, 0, 0), _P(0.6, 0, 0)),
+        _install_child_mgr(monkeypatch, _MR(0.6, FakePoint(0, 0, 0), FakePoint(0.6, 0, 0)),
                            {"Frame:1+Pedestal:1": 0.0})
         out = _payload(mr.handler(relation="clearance", tolerance=5, units="mm",
                                   entity_a="Carrier:1", entity_b="Frame:1"))
@@ -413,7 +405,7 @@ class TestNestedTargetDisclosure:
     def test_a_touching_verdict_carries_it_too(self, monkeypatch):
         _resolve_ab(_occ("Carrier:1"), "occurrence",
                     _occ("Frame:1", [_occ("Frame:1+Pedestal:1")]), "occurrence")
-        _install_child_mgr(monkeypatch, _MR(0.6, _P(0, 0, 0), _P(0.6, 0, 0)),
+        _install_child_mgr(monkeypatch, _MR(0.6, FakePoint(0, 0, 0), FakePoint(0.6, 0, 0)),
                            {"Frame:1+Pedestal:1": 0.0})
         out = _payload(mr.handler(relation="touching", entity_a="Carrier:1", entity_b="Frame:1"))
         assert out["passed"] is False                      # the frame's own bodies do not touch
@@ -425,7 +417,7 @@ class TestNestedTargetDisclosure:
         for b, caveat in ((_occ("Frame:1"), False),
                           (_occ("Frame:1", [_occ("Frame:1+Pedestal:1")]), True)):
             _resolve_ab(_occ("Carrier:1"), "occurrence", b, "occurrence")
-            _install_child_mgr(monkeypatch, _MR(0.6, _P(0, 0, 0), _P(0.6, 0, 0)),
+            _install_child_mgr(monkeypatch, _MR(0.6, FakePoint(0, 0, 0), FakePoint(0.6, 0, 0)),
                                {"Frame:1+Pedestal:1": 0.0})
             out = _payload(mr.handler(relation="clearance", tolerance=5, units="mm",
                                       entity_a="Carrier:1", entity_b="Frame:1"))
@@ -435,7 +427,7 @@ class TestNestedTargetDisclosure:
     def test_a_body_target_is_unaffected(self, monkeypatch):
         # Measuring the frame BAND directly is the way out of the trap, so that verdict stays clean.
         _resolve_ab(_occ("Carrier:1"), "occurrence", _occ("Band", [_occ("Pedestal:1")]), "body")
-        _install_mgr(monkeypatch, _MR(0.6, _P(0, 0, 0), _P(0.6, 0, 0)))
+        _install_mgr(monkeypatch, _MR(0.6, FakePoint(0, 0, 0), FakePoint(0.6, 0, 0)))
         out = _payload(mr.handler(relation="clearance", entity_a="Carrier:1", entity_b="h1"))
         assert "targets_with_children" not in out["measured"] and "NESTED" not in out["note"]
 
@@ -443,10 +435,11 @@ class TestNestedTargetDisclosure:
 # ── concentric: two circular entities whose CENTER POINTS coincide (distinct from coaxial) ────────
 
 def _circ_edge(center, arc=False):
-    # curveType read at CREATION time (the shared enum mock is reassigned by other files - see _cyl).
-    ct = (mr.adsk.core.Curve3DTypes.Arc3DCurveType if arc
-          else mr.adsk.core.Curve3DTypes.Circle3DCurveType)
-    return type("E", (), {"geometry": type("G", (), {"curveType": ct, "center": _P(*center)})()})()
+    """A circular edge. `arc` swaps in an Arc3D curve, which has no measured shape of its own."""
+    if arc:
+        return BRepEdge(types.SimpleNamespace(curveType=mr.adsk.core.Curve3DTypes.Arc3DCurveType,
+                                              center=FakePoint(*center)))
+    return BRepEdge(Circle3D(FakeVector3D(0, 0, 1), FakePoint(*center), 1.0))
 
 
 def _edges(ca, cb, arc_b=False):
@@ -496,8 +489,7 @@ class TestConcentric:
         assert "profile plane" not in _payload(mr.handler(relation="concentric"))["note"]
 
     def test_straight_edge_is_refused_as_non_circular(self):
-        ct = mr.adsk.core.Curve3DTypes.Line3DCurveType
-        straight = type("E", (), {"geometry": type("G", (), {"curveType": ct})()})()
+        straight = BRepEdge(Line3D(FakePoint(0, 0, 0), FakePoint(1, 0, 0)))
         _resolve_ab(straight, "edge", _circ_edge((0, 0, 0)), "edge")
         res = mr.handler(relation="concentric")
         assert res["isError"] is True
@@ -511,7 +503,7 @@ class TestUnreadableGeometry:
     whole-point tri-state: one unreadable component and the point is None, because a 0.0 stand-in
     puts the world origin into a comparison the caller reads as pass/fail."""
 
-    class _Blind:
+    class _Blind(FakePoint):
         """A point whose z refuses to read - the shape a per-component 0.0 default hides."""
 
         def __init__(self, x, y):
@@ -522,26 +514,26 @@ class TestUnreadableGeometry:
             raise RuntimeError("this coordinate is unavailable")
 
     def _cyl_with(self, origin, axis):
-        st = mr.adsk.core.SurfaceTypes.CylinderSurfaceType
-        return type("Cyl", (), {"origin": origin, "axis": axis, "radius": 1.0,
-                                "surfaceType": st})()
+        surface = Cylinder(axis, origin)
+        surface.radius = 1.0
+        return surface
 
     def test_a_whole_point_is_none_when_any_one_component_will_not_read(self):
         assert mr._v(self._Blind(1.0, 2.0)) is None
-        assert mr._v(_P(1.0, 2.0, 3.0)) == (1.0, 2.0, 3.0)     # all three read -> the tuple
+        assert mr._v(FakePoint(1.0, 2.0, 3.0)) == (1.0, 2.0, 3.0)     # all three read -> the tuple
 
     def test_a_non_numeric_component_is_unreadable_too(self):
         # an adsk mock hands back a truthy child object for anything unmodeled; letting one
         # through would put it into the vector math as if it were a coordinate
-        assert mr._v(type("P", (), {"x": 1.0, "y": 2.0, "z": object()})()) is None
+        assert mr._v(FakePoint(1.0, 2.0, object())) is None
 
     def test_a_bool_component_is_not_a_coordinate(self):
-        assert mr._v(type("P", (), {"x": 1.0, "y": 2.0, "z": True})()) is None
+        assert mr._v(FakePoint(1.0, 2.0, True)) is None
 
     def test_coaxial_on_an_unreadable_axis_origin_is_unknown_not_coincident(self):
         # both axes point +z; with z coerced to 0.0 the two origins would read as the SAME line
         # and the call would return passed=true on a measurement that was never made.
-        _resolve_ab(_face(self._cyl_with(self._Blind(0.0, 0.0), _P(0, 0, 1))), "face",
+        _resolve_ab(_face(self._cyl_with(self._Blind(0.0, 0.0), FakeVector3D(0, 0, 1))), "face",
                     _face(_cyl((0, 0, 0), (0, 0, 1))), "face")
         res = mr.handler(relation="coaxial")
         assert res["isError"] is True
@@ -549,23 +541,19 @@ class TestUnreadableGeometry:
         assert "UNKNOWN" in msg and "not a pass" in msg
 
     def test_flush_on_an_unreadable_plane_origin_is_unknown_not_coplanar(self):
-        st = mr.adsk.core.SurfaceTypes.PlaneSurfaceType
-        blind = type("Pl", (), {"origin": self._Blind(0.0, 0.0), "normal": _P(0, 0, 1),
-                                "surfaceType": st})()
+        blind = Plane(FakeVector3D(0, 0, 1), self._Blind(0.0, 0.0))
         _resolve_ab(_face(blind), "face", _face(_plane((0, 0, 0), (0, 0, 1))), "face")
         res = mr.handler(relation="flush")
         assert res["isError"] is True and "UNKNOWN" in error_message(res)
 
     def test_concentric_on_an_unreadable_center_is_unknown_not_coincident(self):
-        ct = mr.adsk.core.Curve3DTypes.Circle3DCurveType
-        blind = type("E", (), {"geometry": type("G", (), {
-            "curveType": ct, "center": self._Blind(0.0, 0.0)})()})()
+        blind = BRepEdge(Circle3D(FakeVector3D(0, 0, 1), self._Blind(0.0, 0.0), 1.0))
         _resolve_ab(blind, "edge", _circ_edge((0, 0, 0)), "edge")
         res = mr.handler(relation="concentric")
         assert res["isError"] is True and "UNKNOWN" in error_message(res)
 
     def test_parallel_on_an_unreadable_direction_is_unknown_not_parallel(self):
-        _resolve_ab(_face(self._cyl_with(_P(0, 0, 0), self._Blind(0.0, 0.0))), "face",
+        _resolve_ab(_face(self._cyl_with(FakePoint(0, 0, 0), self._Blind(0.0, 0.0))), "face",
                     _face(_cyl((0, 0, 0), (0, 0, 1))), "face")
         res = mr.handler(relation="parallel")
         assert res["isError"] is True and "UNKNOWN" in error_message(res)

@@ -241,7 +241,6 @@ ROWS = [
         "claim": "Lengths cross the API in cm - a 10 mm sketch square extruded 1.0 unit has bbox extent 1.0",
         "encoded_in": "tests/conftest.py bbox fixture; every test asserting a scale() factor",
         "need_box": True,
-        "facts_on_pass": {"behavior.internal_length_unit_is_cm": True},
         "body": """
     dx = body.boundingBox.maxPoint.x - body.boundingBox.minPoint.x
     emit(abs(dx - 1.0) < 1e-6, "units-cm: bbox dx=" + str(dx) + " (expect 1.0)")
@@ -635,6 +634,7 @@ ROWS = [
         "encoded_in": ("commands/mcpServer/tools/joint_drive.py _ANGLE_GRID_DEG / _ANGLE_BAND_DEG "
                        "(the half-step landing band) and the off-grid note; "
                        "tests/unit/test_joint_drive.py TestTheAngleBandIsHalfTheStoreGrid"),
+        "facts_on_pass": {"behavior.joint_revolute_store_grid_deg": 0.1},
         "body": """
     import math
     root = des.rootComponent
@@ -758,8 +758,7 @@ ROWS = [
     {
         "id": "allcomponents-design-only",
         "claim": "allComponents lives on Design (Component has none) and is counted AND iterable",
-        "encoded_in": "tests/conftest.py MakeDesign.allComponents",
-        "facts_on_pass": {"behavior.allcomponents_on_design_only": True},
+        "encoded_in": "tests/conftest.py MakeDesign.allComponents (the Component shape dump carries no allComponents, which is what keeps MakeComp from offering one)",
         "body": """
     comp_has = hasattr(des.rootComponent, "allComponents")
     ac = des.allComponents
@@ -838,7 +837,7 @@ ROWS = [
     {
         "id": "meshbodies-no-itembyname",
         "claim": "A component's meshBodies collection has count/item but NO itemByName (unlike bRepBodies, which has all three) - a mesh must be resolved by iterate-and-match, never itemByName",
-        "encoded_in": "tests/unit/test_mesh_export.py + test_inputs.py + test_model_stitch.py (all omit it, correct)",
+        "encoded_in": "tests/conftest.py _MeshBodies (drops itemByName off the flag; MakeComp builds meshBodies from it)",
         "facts_on_pass": {"behavior.meshbodies_has_itembyname": False},
         "body": """
     root = adsk.fusion.Design.cast(app.activeProduct).rootComponent
@@ -1660,6 +1659,161 @@ ROWS = [
         0.5, 0.3)))
     emit(len(counts) == 21 and all(c > 0 for c in counts),
          "shape-dump-design-world: " + str(len(counts)) + " types, min attrs " + str(min(counts)))
+""",
+    },
+    {
+        "id": "shape-dump-document-world",
+        "claim": "The session objects around a scratch document dump non-empty live attribute sets: Application.get() is an Application, its documents a Documents, the added document a FusionDocument (NOT a Document - that is the base class, and Document.cast returns the same FusionDocument), its products a Products, app.data a Data, app.userInterface a UserInterface, that UI's activeSelections a Selections holding a Selection once a construction plane is added to it, ValueInput.createByReal a ValueInput, and the design's exportManager an ExportManager. Document and DocumentReference are dumped from the CLASS object because no construction in this row returns either: dir() of a class is dir() of its instance minus SWIG's 'this', re-measured here on Documents, which the row holds both of",
+        "encoded_in": "tests/conftest.py - the shared fakes DEGRANDFATHER-B step 3 writes for these types",
+        "body": """
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        d = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        ui = app.userInterface
+        ui.activeSelections.clear()
+        ui.activeSelections.add(d.rootComponent.xYConstructionPlane)
+        live = [("Application", app), ("Documents", app.documents), ("FusionDocument", tmp),
+                ("Products", tmp.products), ("Data", app.data), ("UserInterface", ui),
+                ("Selections", ui.activeSelections), ("Selection", ui.activeSelections.item(0)),
+                ("ValueInput", adsk.core.ValueInput.createByReal(1.0)),
+                ("ExportManager", d.exportManager)]
+        # The SHAPES key is the LABEL, and the fake-shape lint maps a fake onto it by name, so the
+        # type each construction actually answers is read rather than assumed.
+        wrong = [lbl + "=" + type(o).__name__ for lbl, o in live if type(o).__name__ != lbl]
+        counts = [dump_shape(lbl, o) for lbl, o in live]
+        ui.activeSelections.clear()
+        ctl = set(n for n in dir(adsk.core.Documents) if not n.startswith("_"))
+        class_ok = ctl == set(n for n in dir(app.documents) if not n.startswith("_")) - set(["this"])
+        counts.append(dump_shape("Document", adsk.core.Document))
+        counts.append(dump_shape("DocumentReference", adsk.core.DocumentReference))
+        emit(len(counts) == 12 and all(c > 0 for c in counts) and not wrong and class_ok,
+             "shape-dump-document-world: " + str(len(counts)) + " types, min attrs "
+             + str(min(counts)) + ", a design document answers FusionDocument and Document/"
+             "DocumentReference come off the class (class dir == instance dir minus 'this': "
+             + str(class_ok) + "), mislabelled " + (", ".join(wrong) or "none"))
+    finally:
+        tmp.close(False)
+""",
+    },
+    {
+        "id": "shape-dump-timeline-world",
+        "claim": "In a scratch document a sketch carrying a rectangle and a point yields Sketches, SketchCurves, SketchPoints and SketchPoint, and its Profiles; an extrude fills Features and the design's Timeline with TimelineObject entries; userParameters.add yields UserParameters and UserParameter; baseFeatures.add followed by startEdit/finishEdit yields BaseFeatures and BaseFeature. Feature and Parameter are dumped from the CLASS: the extrude answers ExtrudeFeature and the parameter answers UserParameter, so no construction here returns the base type, and the class dump is checked against the class-dir-equals-instance-dir-minus-'this' reading taken on Sketches. The row also reads that neither adsk.fusion nor adsk.core carries a type NAMED Parameters - a design's parameter collections are UserParameters and ParameterList",
+        "encoded_in": "tests/conftest.py - the shared fakes DEGRANDFATHER-B step 3 writes for these types",
+        "body": """
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        d = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        root = d.rootComponent
+        sk = root.sketches.add(root.xYConstructionPlane)
+        sk.sketchCurves.sketchLines.addTwoPointRectangle(
+            adsk.core.Point3D.create(0.0, 0.0, 0.0), adsk.core.Point3D.create(2.0, 1.0, 0.0))
+        sk.sketchPoints.add(adsk.core.Point3D.create(0.5, 0.5, 0.0))
+        ext = root.features.extrudeFeatures.addSimple(
+            sk.profiles.item(0), adsk.core.ValueInput.createByReal(1.0),
+            adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+        up = d.userParameters.add("shapeDumpParam", adsk.core.ValueInput.createByReal(1.0), "cm", "")
+        bf = root.features.baseFeatures.add()
+        bf.startEdit()
+        bf.finishEdit()
+        live = [("Sketches", root.sketches), ("SketchCurves", sk.sketchCurves),
+                ("SketchPoints", sk.sketchPoints), ("SketchPoint", sk.sketchPoints.item(0)),
+                ("Profiles", sk.profiles), ("Features", root.features),
+                ("Timeline", d.timeline), ("TimelineObject", d.timeline.item(0)),
+                ("UserParameters", d.userParameters), ("UserParameter", up),
+                ("BaseFeatures", root.features.baseFeatures), ("BaseFeature", bf)]
+        wrong = [lbl + "=" + type(o).__name__ for lbl, o in live if type(o).__name__ != lbl]
+        counts = [dump_shape(lbl, o) for lbl, o in live]
+        ctl = set(n for n in dir(adsk.fusion.Sketches) if not n.startswith("_"))
+        class_ok = ctl == set(n for n in dir(root.sketches) if not n.startswith("_")) - set(["this"])
+        no_parameters_type = not (hasattr(adsk.fusion, "Parameters")
+                                  or hasattr(adsk.core, "Parameters"))
+        counts.append(dump_shape("Feature", adsk.fusion.Feature))
+        counts.append(dump_shape("Parameter", adsk.fusion.Parameter))
+        emit(len(counts) == 14 and all(c > 0 for c in counts) and not wrong and class_ok
+             and no_parameters_type and type(ext).__name__ == "ExtrudeFeature",
+             "shape-dump-timeline-world: " + str(len(counts)) + " types, min attrs "
+             + str(min(counts)) + ", the extrude answers " + type(ext).__name__
+             + " so Feature/Parameter come off the class (class dir == instance dir minus 'this': "
+             + str(class_ok) + "), timeline holds " + str(d.timeline.count)
+             + " entries, no type named Parameters " + str(no_parameters_type)
+             + ", mislabelled " + (", ".join(wrong) or "none"))
+    finally:
+        tmp.close(False)
+""",
+    },
+    {
+        "id": "shape-dump-assembly-world",
+        "claim": "Six new components in a scratch document yield an Occurrences; three joints from the first to the next three - one revolute, one slider, one cylindrical, each on the Z axis through the components' origin construction points - yield Joints, Joint and the three motion types RevoluteJointMotion, SliderJointMotion and CylindricalJointMotion off joint.jointMotion; a motion link over the revolute and the slider yields MotionLinks and MotionLink; and a rigid group over the two un-jointed occurrences yields RigidGroups and RigidGroup. Every one of the ten dumps is non-empty and answers the type its label names",
+        "encoded_in": "tests/conftest.py - the shared fakes DEGRANDFATHER-B step 3 writes for these types",
+        "body": """
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        d = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        root = d.rootComponent
+        occs = [root.occurrences.addNewComponent(adsk.core.Matrix3D.create()) for _ in range(6)]
+
+        def joint(one, two, setter):
+            geo = [adsk.fusion.JointGeometry.createByPoint(
+                o.component.originConstructionPoint.createForAssemblyContext(o)) for o in (one, two)]
+            jin = root.joints.createInput(geo[0], geo[1])
+            setter(jin)
+            return root.joints.add(jin)
+
+        zax = adsk.fusion.JointDirections.ZAxisJointDirection
+        rev = joint(occs[0], occs[1], lambda i: i.setAsRevoluteJointMotion(zax))
+        sli = joint(occs[0], occs[2], lambda i: i.setAsSliderJointMotion(zax))
+        cyl = joint(occs[0], occs[3], lambda i: i.setAsCylindricalJointMotion(zax))
+        link = root.motionLinks.add(root.motionLinks.createInput(rev, sli))
+        group = adsk.core.ObjectCollection.create()
+        group.add(occs[4])
+        group.add(occs[5])
+        rigid = root.rigidGroups.add(group, False)
+        live = [("Occurrences", root.occurrences), ("Joints", root.joints), ("Joint", rev),
+                ("RevoluteJointMotion", rev.jointMotion), ("SliderJointMotion", sli.jointMotion),
+                ("CylindricalJointMotion", cyl.jointMotion), ("MotionLinks", root.motionLinks),
+                ("MotionLink", link), ("RigidGroups", root.rigidGroups), ("RigidGroup", rigid)]
+        wrong = [lbl + "=" + type(o).__name__ for lbl, o in live if type(o).__name__ != lbl]
+        counts = [dump_shape(lbl, o) for lbl, o in live]
+        emit(len(counts) == 10 and all(c > 0 for c in counts) and not wrong,
+             "shape-dump-assembly-world: " + str(len(counts)) + " types, min attrs "
+             + str(min(counts)) + ", " + str(root.occurrences.count) + " occurrences carrying "
+             + str(root.joints.count) + " joints, " + str(root.motionLinks.count)
+             + " motion link, " + str(root.rigidGroups.count) + " rigid group, mislabelled "
+             + (", ".join(wrong) or "none"))
+    finally:
+        tmp.close(False)
+""",
+    },
+    {
+        "id": "shape-dump-data-world",
+        "claim": "The cloud data model dumps three types from a READ-ONLY, bounded look: app.data.activeProject is a DataProject, its rootFolder a DataFolder, and the DataFile dumped is the root folder's first file - or, when the root holds no file, the first file of the root's FIRST subfolder. At most those two folders are opened and only item(0) of each is touched: no recursive walk, which has been measured killing the add-in. When neither folder holds a file, DataFile is dumped from the class object under the same class-dir-equals-instance-dir-minus-'this' reading, taken here on DataFolder; the detail names which of the three sources supplied it",
+        "encoded_in": "tests/conftest.py - the shared fakes DEGRANDFATHER-B step 3 writes for these types",
+        "body": """
+    proj = app.data.activeProject
+    folder = proj.rootFolder
+    dfile = None
+    source = "no file in the root or its first subfolder - the class object"
+    if folder.dataFiles.count:
+        dfile = folder.dataFiles.item(0)
+        source = "the root folder's first file"
+    elif folder.dataFolders.count and folder.dataFolders.item(0).dataFiles.count:
+        dfile = folder.dataFolders.item(0).dataFiles.item(0)
+        source = "the first subfolder's first file"
+    live = [("DataProject", proj), ("DataFolder", folder)]
+    if dfile is not None:
+        live.append(("DataFile", dfile))
+    wrong = [lbl + "=" + type(o).__name__ for lbl, o in live if type(o).__name__ != lbl]
+    counts = [dump_shape(lbl, o) for lbl, o in live]
+    if dfile is None:
+        counts.append(dump_shape("DataFile", adsk.core.DataFile))
+    ctl = set(n for n in dir(adsk.core.DataFolder) if not n.startswith("_"))
+    class_ok = ctl == set(n for n in dir(folder) if not n.startswith("_")) - set(["this"])
+    emit(len(counts) == 3 and all(c > 0 for c in counts) and not wrong and class_ok,
+         "shape-dump-data-world: " + str(len(counts)) + " types, min attrs " + str(min(counts))
+         + ", DataFile from " + source + " (project '" + proj.name + "' root holds "
+         + str(folder.dataFiles.count) + " files and " + str(folder.dataFolders.count)
+         + " folders; class dir == instance dir minus 'this': " + str(class_ok)
+         + "), mislabelled " + (", ".join(wrong) or "none"))
 """,
     },
     {
@@ -2975,6 +3129,50 @@ ROWS = [
 """,
     },
     {
+        "id": "cam-parameter-locked-write-lands",
+        "claim": ("isEditable False does NOT mean a write is dropped: 'advancedMode' reads "
+                  "isEditable False on every operation and still takes a valid write ('false' -> "
+                  "'true': expression AND value.value change, no raise), and takes the same write "
+                  "back. Other locked parameters keep theirs (isXpress), so the flag predicts only "
+                  "that the UI never offers the edit - which is why cam_edit_operation refuses "
+                  "before writing instead of reporting the edit it would have made"),
+        "encoded_in": ("cam_edit_operation.py's locked-parameter refusal; tests/conftest.py "
+                       "FakeCAMParameter's expression setter, which lands the write off this flag"),
+        "needs": "cam",
+        "facts_on_pass": {"behavior.cam_locked_parameter_write_lands": True},
+        "body": """
+    cam, setup = cam_measure_setup()
+    if setup is None:
+        emit(False, "cam-parameter-locked-write-lands: the harness MeasureSetup is not here")
+        return
+    op = adsk.cam.Operation.cast(setup.allOperations.item(0))
+    p = op.parameters.itemByName("advancedMode")
+    if p is None or p.isEditable is not False:
+        emit(False, "cam-parameter-locked-write-lands: '" + op.name + "' carries no locked "
+             "advancedMode (present=" + str(p is not None) + ")")
+        return
+    held = p.expression
+    vheld = p.value.value
+    new = "true" if held == "false" else "false"
+    raised = ""
+    try:
+        p.expression = new
+    except Exception as e:
+        raised = type(e).__name__ + ": " + str(e)[:60]
+    after, vafter = p.expression, p.value.value
+    try:
+        p.expression = held
+    except Exception as e:
+        raised = raised or (type(e).__name__ + ": " + str(e)[:60])
+    back, vback = p.expression, p.value.value
+    emit(after == new and vafter != vheld and back == held and vback == vheld and not raised,
+         "cam-parameter-locked-write-lands: advancedMode (isEditable False) " + repr(held)
+         + " -> " + repr(after) + " value " + repr(vheld) + " -> " + repr(vafter)
+         + " | restored " + repr(back) + "/" + repr(vback) + " | "
+         + ("raised " + raised if raised else "no raise"))
+""",
+    },
+    {
         "id": "cam-machining-time-knobs",
         "claim": "getMachiningTime on a generated op returns a positive estimate decomposing as totalFeedTime + totalRapidTime + totalToolChangeTime; the feedScale/rapidFeed/toolChangeTime arguments are INERT on this build (identical result across values) despite the API doc's percent / cm-per-s / s units",
         "encoded_in": "_cam_read.py get_machining_time_handler comment + constants; tests/unit/test__cam_common.py",
@@ -3036,6 +3234,44 @@ ROWS = [
 """,
     },
     {
+        "id": "shape-dump-cam-job-world",
+        "claim": "Five more CAM types dump non-empty attribute sets off the harness world: cam.setups is a Setups, setups.createInput(MillingOperation) a SetupInput, the bundled 'Milling Tools (Metric)' library's first entry a Tool, the first operation's parameters a CAMParameters whose item(0) is a CAMParameter, and the Fusion360 machine library's first entry a Machine. The dumped Machine is the LIBRARY's; what MeasureSetup's own machine property answered is reported in the detail and gates nothing, because the harness setup is built without a machine",
+        "encoded_in": "tests/conftest.py - the shared fakes DEGRANDFATHER-B step 3 writes for these types",
+        "needs": "cam",
+        "body": """
+    cam, setup = cam_measure_setup()
+    if setup is None:
+        emit(False, "shape-dump-cam-job-world: the harness MeasureSetup is not in this document")
+        return
+    op = adsk.cam.Operation.cast(setup.allOperations.item(0))
+    lib = adsk.cam.CAMManager.get().libraryManager.machineLibrary
+    machines = lib.childMachines(
+        lib.urlByLocation(adsk.cam.LibraryLocations.Fusion360LibraryLocation))
+    live = [("Setups", cam.setups),
+            ("SetupInput", cam.setups.createInput(adsk.cam.OperationTypes.MillingOperation)),
+            ("Tool", cam_sample_tool()), ("CAMParameters", op.parameters),
+            ("CAMParameter", op.parameters.item(0)),
+            ("Machine", machines[0] if len(machines) else None)]
+    missing = [lbl for lbl, o in live if o is None]
+    wrong = [lbl + "=" + type(o).__name__
+             for lbl, o in live if o is not None and type(o).__name__ != lbl]
+    counts = [dump_shape(lbl, o) for lbl, o in live if o is not None]
+    # Read LAST: an unassigned machine is an unmeasured shape, and a raise caught mid-row would
+    # sit ahead of the dumps.
+    try:
+        own = setup.machine
+        own_reads = type(own).__name__ if own is not None else "None"
+    except Exception as e:
+        own_reads = "raised " + str(e)[:60]
+    emit(len(counts) == 6 and all(c > 0 for c in counts) and not wrong and not missing,
+         "shape-dump-cam-job-world: " + str(len(counts)) + " types, min attrs "
+         + str(min(counts) if counts else 0) + ", " + str(len(machines))
+         + " machines in the Fusion360 library, MeasureSetup.machine reads " + own_reads
+         + ", unreachable " + (", ".join(missing) or "none")
+         + ", mislabelled " + (", ".join(wrong) or "none"))
+""",
+    },
+    {
         "id": "cam-empty-toolpath-times-zero",
         "claim": "An operation whose toolpath generated EMPTY reads getMachiningTime(op, 100.0, 10.58, 1.5).machiningTime as EXACTLY 0.0 while hasToolpath reads True and operationState reads IsValid (0) - the flags alone read it as a finished pass, so the time is the only signal that separates it from one that cut. An operation reading hasToolpath False is the OTHER empty shape and the same call RAISES '3 : Machining time could not be calculated.' on it, which is why the time is asked only where hasToolpath is True. This row measures the RAISE leg on the rig's own ungenerated operation; the exact-zero leg needs an operation that generated an empty toolpath, which the MeasureSetup box cannot produce - the measured specimen is a swarf operation on a drafted wall (rails on the non-cutting side), and the leg reports NOT EXERCISED rather than passing when no such operation is in the document",
         "encoded_in": "_cam_common.is_empty_toolpath + _machining_time; tests/unit/test__cam_common.py TestIsEmptyToolpathTimeShape",
@@ -3072,7 +3308,7 @@ ROWS = [
     {
         "id": "cam-children-tree",
         "claim": "Setup.children interleaves top-level Operations and folder objects whose type name is 'CAMFolder'; folder.allOperations and folder.children expose the folder's contents",
-        "encoded_in": "tests/unit/test_cam_show_toolpath.py FakeSetup/CAMFolder; cam_show_toolpath._find_folder_ops type-name branch",
+        "encoded_in": "tests/unit/test_cam_show_toolpath.py FakeSetup/CAMFolder; the tools walk _cam_common.CHILD_COLLECTIONS (operations/folders/patterns) and never read children, so only that test fake leans on this",
         "needs": "cam",
         "body": """
     cam = adsk.cam.CAM.cast(app.activeDocument.products.itemByProductType("CAMProductType"))
@@ -4487,6 +4723,79 @@ ROWS = [
     emit(len(reads) == 3 and all(clean),
          "cam-empty-name-write: " + "; ".join(reads)
          + " | each read back a string=" + str(clean))
+""",
+    },
+    {
+        "id": "pattern-elements-count-equals-quantity",
+        "claim": ("A circular pattern made with quantity 6 answers patternElements.count == 6 and "
+                  "leaves 6 bodies, and a 2 x 3 rectangular pattern answers 6: the element count "
+                  "INCLUDES the seed, so a read-back that disagrees with the requested quantity "
+                  "is a real shortfall, never an off-by-one"),
+        "encoded_in": ("model_pattern_circular's and model_pattern_rectangular's rung-3 refusal on "
+                       "real_total != quantity; tests/unit/test_model_pattern_circular.py and "
+                       "test_model_pattern_rectangular.py feature stubs whose patternElements are "
+                       "sized off the request"),
+        "body": """
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        des = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        root = des.rootComponent
+        sk = root.sketches.add(root.xYConstructionPlane)
+        P = adsk.core.Point3D.create
+        sk.sketchCurves.sketchLines.addTwoPointRectangle(P(2, 0, 0), P(3, 1, 0))
+        ext = root.features.extrudeFeatures.addSimple(
+            sk.profiles.item(0), adsk.core.ValueInput.createByReal(1.0),
+            adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+        coll = adsk.core.ObjectCollection.create()
+        coll.add(ext.bodies.item(0))
+        cp = root.features.circularPatternFeatures
+        ci = cp.createInput(coll, root.zConstructionAxis)
+        ci.quantity = adsk.core.ValueInput.createByReal(6)
+        ci.totalAngle = adsk.core.ValueInput.createByString("360 deg")
+        circ = cp.add(ci).patternElements.count
+        bodies = root.bRepBodies.count
+        rp = root.features.rectangularPatternFeatures
+        ri = rp.createInput(coll, root.xConstructionAxis, adsk.core.ValueInput.createByReal(2),
+                            adsk.core.ValueInput.createByReal(5.0),
+                            adsk.fusion.PatternDistanceType.SpacingPatternDistanceType)
+        ri.setDirectionTwo(root.yConstructionAxis, adsk.core.ValueInput.createByReal(3),
+                           adsk.core.ValueInput.createByReal(5.0))
+        rect = rp.add(ri).patternElements.count
+        emit(circ == 6 and bodies == 6 and rect == 6,
+             "pattern-elements-count-equals-quantity: circular quantity 6 -> elements "
+             + str(circ) + " bodies " + str(bodies) + " | rectangular 2x3 -> elements " + str(rect))
+    finally:
+        tmp.close(False)
+""",
+    },
+    {
+        "id": "sketch-profiles-under-compute-deferred",
+        "claim": ("With isComputeDeferred True, Sketch.profiles still answers and holds the "
+                  "regions closed BEFORE the deferral: two regions read 2, a third region drawn "
+                  "while deferred still reads 2, and 3 once compute resumes"),
+        "encoded_in": ("tests/conftest.py make_sketch(profiles=, is_compute_deferred=) - the "
+                       "profile list a deferred sketch hands a tool is the stale one; the arrange "
+                       "and extrude deferral refusals guard that state"),
+        "body": """
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        des = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        root = des.rootComponent
+        sk = root.sketches.add(root.xYConstructionPlane)
+        P = adsk.core.Point3D.create
+        sk.sketchCurves.sketchLines.addTwoPointRectangle(P(0, 0, 0), P(1, 1, 0))
+        sk.sketchCurves.sketchLines.addTwoPointRectangle(P(2, 0, 0), P(3, 1, 0))
+        before = sk.profiles.count
+        sk.isComputeDeferred = True
+        sk.sketchCurves.sketchLines.addTwoPointRectangle(P(4, 0, 0), P(5, 1, 0))
+        during = sk.profiles.count
+        sk.isComputeDeferred = False
+        after = sk.profiles.count
+        emit(before == 2 and during == 2 and after == 3,
+             "sketch-profiles-under-compute-deferred: before " + str(before) + " | deferred, third "
+             "region drawn " + str(during) + " | resumed " + str(after))
+    finally:
+        tmp.close(False)
 """,
     },
 ]

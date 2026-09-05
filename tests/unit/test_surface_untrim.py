@@ -12,44 +12,24 @@ import adsk.core
 import adsk.fusion
 import pytest
 
-from conftest import load_tool, make_design, install, payload, error_message, MakeComp
+from conftest import (load_tool, make_design, install, payload, error_message, MakeComp,
+                      BRepBody, BRepFace, _NamedCollection)
 
 su = load_tool("surface_untrim")
 
 
-class _Coll:
-    def __init__(self, items):
-        self._i = list(items)
-    @property
-    def count(self):
-        return len(self._i)
-    def item(self, i):
-        return self._i[i] if 0 <= i < len(self._i) else None
-
-
-class _Body:
-    def __init__(self, name="Srf1", is_solid=False):
-        self.name = name
-        self.isSolid = is_solid
-
-
-class _Face:
-    def __init__(self, area=1.0, body=None):
-        self.area = area
-        self.body = body if body is not None else _Body()
+def _face(area=1.0, body=None):
+    """One face carrying the area an untrim read-back grows, on an OPEN surface body."""
+    return BRepFace(None, area=area,
+                    body=body if body is not None else BRepBody("Srf1", is_solid=False))
 
 
 class _Feature:
+    """UntrimFeature: the faces it created and the bodies they belong to."""
     def __init__(self, name="Untrim1", faces=(), bodies=()):
         self.name = name
-        self._faces = list(faces)
-        self._bodies = list(bodies)
-    @property
-    def faces(self):
-        return _Coll(self._faces)
-    @property
-    def bodies(self):
-        return _Coll(self._bodies)
+        self.faces = _NamedCollection(faces)
+        self.bodies = _NamedCollection(bodies)
 
 
 class _UntrimFeatures:
@@ -65,8 +45,8 @@ class _UntrimFeatures:
 
 @pytest.fixture(autouse=True)
 def _types(monkeypatch):
-    monkeypatch.setattr(adsk.fusion, "BRepFace", _Face, raising=False)
-    monkeypatch.setattr(adsk.fusion, "BRepBody", _Body, raising=False)
+    monkeypatch.setattr(adsk.fusion, "BRepFace", BRepFace, raising=False)
+    monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
     # UntrimLoopTypes stays the MEASURED family conftest seeds from live_api_facts.
     # capture the scaled extension the handler hands to ValueInput.createByReal
     monkeypatch.setattr(adsk.core.ValueInput, "createByReal",
@@ -83,8 +63,9 @@ def _wire(feature, tokens):
 
 
 def test_extent_grew_true_when_area_increases():
-    f = _Face(area=1.0)
-    feat = _Feature(faces=[_Face(area=3.0), _Face(area=2.0)], bodies=[_Body("Srf1")])
+    f = _face(area=1.0)
+    feat = _Feature(faces=[_face(area=3.0), _face(area=2.0)],
+                    bodies=[BRepBody("Srf1", is_solid=False)])
     _wire(feat, {"H1": f})
     out = payload(su.untrim_handler(faces=["H1"]))
     assert out["untrimmed"] is True
@@ -93,8 +74,9 @@ def test_extent_grew_true_when_area_increases():
 
 
 def test_no_growth_reported_honestly():
-    f = _Face(area=2.0)
-    feat = _Feature(faces=[_Face(area=2.0)], bodies=[_Body("Srf1")])   # same area -> no growth
+    f = _face(area=2.0)
+    feat = _Feature(faces=[_face(area=2.0)],
+                    bodies=[BRepBody("Srf1", is_solid=False)])   # same area -> no growth
     _wire(feat, {"H1": f})
     res = su.untrim_handler(faces=["H1"])
     assert res["isError"] is False
@@ -104,8 +86,8 @@ def test_no_growth_reported_honestly():
 
 
 def test_loop_type_maps_to_enum():
-    f = _Face(area=1.0)
-    feat = _Feature(faces=[_Face(area=2.0)], bodies=[_Body("Srf1")])
+    f = _face(area=1.0)
+    feat = _Feature(faces=[_face(area=2.0)], bodies=[BRepBody("Srf1", is_solid=False)])
     uf = _wire(feat, {"H1": f})
     payload(su.untrim_handler(faces=["H1"], loop_type="external"))
     _faces, loop_type, _ext = uf.create_calls[0]
@@ -113,8 +95,8 @@ def test_loop_type_maps_to_enum():
 
 
 def test_extension_scaled_to_cm():
-    f = _Face(area=1.0)
-    feat = _Feature(faces=[_Face(area=2.0)], bodies=[_Body("Srf1")])
+    f = _face(area=1.0)
+    feat = _Feature(faces=[_face(area=2.0)], bodies=[BRepBody("Srf1", is_solid=False)])
     uf = _wire(feat, {"H1": f})
     payload(su.untrim_handler(faces=["H1"], loop_type="all", extension=2, units="mm"))
     _faces, _loop, ext = uf.create_calls[0]
@@ -122,16 +104,16 @@ def test_extension_scaled_to_cm():
 
 
 def test_solid_face_rejected():
-    f = _Face(area=1.0, body=_Body("Block", is_solid=True))
-    feat = _Feature(faces=[_Face(area=2.0)])
+    f = _face(area=1.0, body=BRepBody("Block", is_solid=True))
+    feat = _Feature(faces=[_face(area=2.0)])
     _wire(feat, {"H1": f})
     res = su.untrim_handler(faces=["H1"])
     assert "SOLID" in error_message(res)
 
 
 def test_unknown_loop_type_rejected():
-    f = _Face(area=1.0)
-    _wire(_Feature(faces=[_Face(area=2.0)]), {"H1": f})
+    f = _face(area=1.0)
+    _wire(_Feature(faces=[_face(area=2.0)]), {"H1": f})
     res = su.untrim_handler(faces=["H1"], loop_type="diagonal")
     assert "all, external, internal" in error_message(res)
 
@@ -144,7 +126,7 @@ def test_missing_faces_rejected():
 
 
 def test_null_feature_is_error():
-    f = _Face(area=1.0)
+    f = _face(area=1.0)
 
     class _NullUntrim:
         def createInputFromFaces(self, *a):

@@ -5,7 +5,8 @@ the isParamReversed read-back shows every face toggled and FALSE (an honest ok, 
 doesn't; a solid body is rejected; missing bodies is rejected; a null feature is an error.
 
 Uses the shared install()/make_design() plumbing (both design seams patched) per tests/CLAUDE.md; the
-BRepBody/BRepFace type classes are monkeypatched so the input-kind isinstance checks fire.
+shared BRepBody/BRepFace fakes are monkeypatched onto adsk.fusion so the input-kind isinstance
+checks fire.
 """
 
 import types
@@ -13,51 +14,32 @@ import types
 import adsk.fusion
 import pytest
 
-from conftest import load_tool, make_design, install, payload, error_message, MakeComp
+from conftest import (load_tool, make_design, install, payload, error_message, MakeComp,
+                      BRepBody, BRepFace, _NamedCollection)
 
 srn = load_tool("surface_reverse_normal")
 
 
-class _Coll:
-    def __init__(self, items):
-        self._i = list(items)
-    @property
-    def count(self):
-        return len(self._i)
-    def item(self, i):
-        return self._i[i] if 0 <= i < len(self._i) else None
+def _face(reversed_=False, body=None):
+    """One face carrying the isParamReversed flag a normal flip toggles."""
+    return BRepFace(None, param_reversed=reversed_, body=body)
 
 
-class _Face:
-    def __init__(self, reversed_=False, body=None):
-        self.isParamReversed = reversed_
-        self.body = body
-
-
-class _Body:
-    def __init__(self, name, is_solid=False, faces=()):
-        self.name = name
-        self.isSolid = is_solid
-        self._faces = list(faces)
-        for f in self._faces:
-            if f.body is None:
-                f.body = self
-    @property
-    def faces(self):
-        return _Coll(self._faces)
+def _body(name, is_solid=False, faces=()):
+    """An open surface body whose faces point back at it, the way a live body's do."""
+    body = BRepBody(name, is_solid=is_solid, faces=faces)
+    for f in faces:
+        if f.body is None:
+            f.body = body
+    return body
 
 
 class _Feature:
+    """ReverseNormalFeature: the result bodies and the faces it consumed."""
     def __init__(self, name="ReverseNormal1", bodies=(), faces=()):
         self.name = name
-        self._bodies = list(bodies)
-        self._faces = list(faces)
-    @property
-    def bodies(self):
-        return _Coll(self._bodies)
-    @property
-    def faces(self):
-        return _Coll(self._faces)
+        self.bodies = _NamedCollection(bodies)
+        self.faces = _NamedCollection(faces)
 
 
 class _RevFeatures:
@@ -72,8 +54,8 @@ class _RevFeatures:
 
 @pytest.fixture(autouse=True)
 def _types(monkeypatch):
-    monkeypatch.setattr(adsk.fusion, "BRepBody", _Body, raising=False)
-    monkeypatch.setattr(adsk.fusion, "BRepFace", _Face, raising=False)
+    monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
+    monkeypatch.setattr(adsk.fusion, "BRepFace", BRepFace, raising=False)
 
 
 def _wire(rev_result, tokens):
@@ -88,9 +70,9 @@ def _flip_result(coll):
     """A realistic feature: every input body's faces come back with isParamReversed toggled."""
     result_bodies, flipped = [], []
     for b in coll:
-        ff = [_Face(reversed_=not f.isParamReversed) for f in b._faces]
+        ff = [_face(reversed_=not f.isParamReversed) for f in b.faces]
         flipped.extend(ff)
-        result_bodies.append(_Body(b.name, faces=ff))
+        result_bodies.append(_body(b.name, faces=ff))
     return _Feature(bodies=result_bodies, faces=flipped)
 
 
@@ -98,14 +80,14 @@ def _noop_result(coll):
     """A feature that changed nothing - the read-back must NOT confirm a flip."""
     result_bodies, same = [], []
     for b in coll:
-        ff = [_Face(reversed_=f.isParamReversed) for f in b._faces]
+        ff = [_face(reversed_=f.isParamReversed) for f in b.faces]
         same.extend(ff)
-        result_bodies.append(_Body(b.name, faces=ff))
+        result_bodies.append(_body(b.name, faces=ff))
     return _Feature(bodies=result_bodies, faces=same)
 
 
 def test_confirms_flip_via_isparamreversed_readback():
-    body = _Body("Srf1", faces=[_Face(False), _Face(False)])
+    body = _body("Srf1", faces=[_face(False), _face(False)])
     _wire(_flip_result, {"H1": body})
     out = payload(srn.reverse_normal_handler(bodies=["H1"]))
     assert out["reversed"] is True
@@ -115,7 +97,7 @@ def test_confirms_flip_via_isparamreversed_readback():
 
 
 def test_noop_reported_honestly_not_confirmed():
-    body = _Body("Srf1", faces=[_Face(False), _Face(False)])
+    body = _body("Srf1", faces=[_face(False), _face(False)])
     _wire(_noop_result, {"H1": body})
     res = srn.reverse_normal_handler(bodies=["H1"])
     assert res["isError"] is False            # honest ok, not an error
@@ -125,15 +107,15 @@ def test_noop_reported_honestly_not_confirmed():
 
 
 def test_all_input_bodies_handed_to_add():
-    b1 = _Body("Srf1", faces=[_Face(False)])
-    b2 = _Body("Srf2", faces=[_Face(True)])
+    b1 = _body("Srf1", faces=[_face(False)])
+    b2 = _body("Srf2", faces=[_face(True)])
     rev = _wire(_flip_result, {"H1": b1, "H2": b2})
     out = payload(srn.reverse_normal_handler(bodies=["H1", "H2"]))
     assert out["body_count"] == 2
     assert rev.calls and rev.calls[0].count == 2      # both bodies in the collection
 
 def test_solid_body_rejected():
-    solid = _Body("Block", is_solid=True, faces=[_Face(False)])
+    solid = _body("Block", is_solid=True, faces=[_face(False)])
     _wire(_flip_result, {"H1": solid})
     res = srn.reverse_normal_handler(bodies=["H1"])
     msg = error_message(res)
@@ -148,7 +130,7 @@ def test_missing_bodies_rejected():
 
 
 def test_null_feature_is_error():
-    body = _Body("Srf1", faces=[_Face(False)])
+    body = _body("Srf1", faces=[_face(False)])
     _wire(lambda coll: None, {"H1": body})
     res = srn.reverse_normal_handler(bodies=["H1"])
     assert error_message(res)

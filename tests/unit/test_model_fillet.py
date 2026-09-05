@@ -1,10 +1,10 @@
 """Unit tests for model_fillet.py - the fillet shapes, the edge scope and the rule fillet."""
 
-import json
 import math
 import pytest
 import types
-from conftest import (BRepEdge, BRepFace, FakePoint, FakeUnitsManager, FakeVector3D, load_tool,
+from conftest import (BRepBody, BRepEdge, BRepFace, FakePoint, FakeUnitsManager, FakeVector3D,
+                      MakeComp, install, load_tool, make_design, payload as _payload,
                       _NamedCollection)
 
 fl = load_tool("model_fillet")
@@ -57,13 +57,12 @@ def _edge(kind):
     }[kind]()
 
 
-class FakeBody:
-    def __init__(self, name, edge_kinds, volume=None):
-        self.name = name
-        self.edges = _NamedCollection([_edge(k) for k in edge_kinds])
-        self.isSolid = True          # BodyRef(kind='solid') checks this
-        # None = the volume read does not answer, so the volume gate has nothing to judge.
-        self.volume = volume
+def make_body(name, edge_kinds, volume=None):
+    """A solid body whose edges are the dihedral rigs above. volume None = the read does not answer,
+    so the volume gate has nothing to judge."""
+    body = BRepBody(name=name, volume=volume)
+    body.edges = _NamedCollection([_edge(k) for k in edge_kinds])
+    return body
 
 
 class FakeFilletInput:
@@ -169,7 +168,7 @@ class FakeCountingFeature:
     out of order comes back failed and silent, reading 0 faces like a tangent no-op does."""
     def __init__(self, name, faces, health=0, message=""):
         self.name = name
-        self.faces = type("C", (), {"count": faces})()
+        self.faces = _NamedCollection([None] * faces)
         self.healthState = health
         self.errorOrWarningMessage = message
         self.deleted = False
@@ -262,57 +261,32 @@ class FakeChamferFeatures:
         return self.result
 
 
-class FakeComp:
-    def __init__(self, bodies, ff, cf):
-        self.name = "Comp"
-        self.bRepBodies = _NamedCollection(bodies)
-        self.features = type("F", (), {"filletFeatures": ff, "chamferFeatures": cf})()
-
-
-class FakeDesign:
-    def __init__(self, comp):
-        self.activeComponent = comp
-        self.rootComponent = comp
+def _component(bodies, ff, cf):
+    """The active component: its bodies, plus the fillet/chamfer feature collections the handler
+    builds through."""
+    comp = MakeComp(name="Comp")
+    comp.bRepBodies = _NamedCollection(bodies)
+    comp.features = type("F", (), {"filletFeatures": ff, "chamferFeatures": cf})()
+    return comp
 
 
 def _install(bodies):
     ff = FakeFilletFeatures(); cf = FakeChamferFeatures()
-    comp = FakeComp(bodies, ff, cf)
-    design = FakeDesign(comp)
-    fl.app = type("A", (), {"activeProduct": design})()
-    fl._common.app = fl.app
-    # BodyRef (the 'body_name' kind) resolves through the _inputs._common seam — patch it to the SAME
-    # design, else the body resolves against a stale/empty design (the documented dual-seam trap).
-    fl._inputs._common.design = lambda: design
-    fl._inputs._common.target_component = lambda _d=None: comp
+    install(fl, make_design(comp=_component(bodies, ff, cf)))
     import adsk.fusion, adsk.core
-    adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
     # BodyRef(kind='solid') does isinstance(body, adsk.fusion.BRepBody) + checks isSolid — make the
     # fake body pass the BRep type check.
-    adsk.fusion.BRepBody = FakeBody
+    adsk.fusion.BRepBody = BRepBody
     adsk.core.ValueInput.createByReal = staticmethod(lambda v: ("real", v))
-
-    class FakeColl:
-        def __init__(self):
-            self._i = []
-        def add(self, x):
-            self._i.append(x)
-        @property
-        def count(self):
-            return len(self._i)
-    adsk.core.ObjectCollection.create = staticmethod(lambda: FakeColl())
     return ff, cf
 
 
-def _payload(result):
-    assert result["isError"] is False, result
-    return json.loads(result["content"][0]["text"])
-
-
-class _FakeEdgeEnt:
-    """A BRep edge resolved from a handle; carries .body.name for the result label."""
-    def __init__(self, body_name="Block", body=None):
-        self.body = body if body is not None else type("B", (), {"name": body_name})()
+def _edge_ent(body_name="Block", body=None):
+    """A BRep edge resolved from a handle; carries .body.name for the result label. Its body's
+    volume does not read, so the material gate has nothing to judge unless a test supplies one."""
+    edge = BRepEdge(curve=None)
+    edge.body = body if body is not None else BRepBody(name=body_name, volume=None)
+    return edge
 
 
 def _face(body_name="Block"):
@@ -322,45 +296,19 @@ def _face(body_name="Block"):
 
 
 def _install_edge_handles(handle_map):
-    """Install design so the GeometryHandleList resolves edge/face handles. The kind goes through
-    _inputs._common.design()/findEntityByToken + isinstance(BRepEdge/BRepFace)."""
+    """Install a design whose findEntityByToken resolves `handle_map` - the seam GeometryHandleList
+    reads an edge/face handle through, before its isinstance(BRepEdge/BRepFace) gate."""
     ff = FakeFilletFeatures(); cf = FakeChamferFeatures()
-    comp = FakeComp([], ff, cf)
-    design = FakeDesign(comp)
-    fl.app = type("A", (), {"activeProduct": design})()
-    fl._common.app = fl.app
+    install(fl, make_design(comp=_component([], ff, cf), tokens=handle_map))
     import adsk.fusion, adsk.core
-    adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
-    adsk.fusion.BRepEdge = _FakeEdgeEnt
+    adsk.fusion.BRepEdge = BRepEdge
     adsk.fusion.BRepFace = BRepFace
     adsk.core.ValueInput.createByReal = staticmethod(lambda v: ("real", v))
-
-    class FakeColl:
-        def __init__(self):
-            self._i = []
-        def add(self, x):
-            self._i.append(x)
-        @property
-        def count(self):
-            return len(self._i)
-    adsk.core.ObjectCollection.create = staticmethod(lambda: FakeColl())
-
-    class FakeDesignWithTokens(FakeDesign):
-        def findEntityByToken(self, h):
-            e = handle_map.get(h)
-            return [e] if e is not None else []
-    d = FakeDesignWithTokens(comp)
-    fl._inputs._common.design = lambda: d
-    fl._inputs._common.target_component = lambda x: comp
-    # Rebinding the handler's module-global (imported by value from _common) is safe across tests:
-    # conftest's autouse seam-restore reverts `target_component`/`app`/`design` on every loaded
-    # tools module after each test, so no install leaks into the next one.
-    fl.target_component = lambda x: comp
     return ff, cf
 
 
-def _parametric(monkeypatch, install, *args, engine=None, **kw):
-    """`install` (either installer) plus conftest's shared units engine on the design and a
+def _parametric(monkeypatch, installer, *args, engine=None, **kw):
+    """`installer` (either of the two above) plus conftest's shared units engine on the design and a
     ValueInput.createByString seam, so the two ValueInput forms are told apart by shape:
     ('real', cm) vs ('string', expr).
 
@@ -369,7 +317,7 @@ def _parametric(monkeypatch, install, *args, engine=None, **kw):
     valid=() gives an engine that RAISES on every call, which is how a literal is proved never to
     reach it."""
     import adsk.core
-    out = install(*args, **kw)
+    out = installer(*args, **kw)
     design = fl._inputs._common.design()
     design.unitsManager = engine if engine is not None else FakeUnitsManager(valid=("WallT/2",),
                                                                              value=6.5)
@@ -386,18 +334,18 @@ def _blind_engine():
 class TestGuards:
 
     def test_unknown_units(self):
-        _install([FakeBody("B", [True, True])])
+        _install([make_body("B", [True, True])])
         res = fl.handler(body_name="B", radius=1, units="furlong")
         assert res["isError"] is True and "Unknown units" in res["message"]
 
     def test_nonpositive_radius(self):
-        _install([FakeBody("B", [True])])
+        _install([make_body("B", [True])])
         res = fl.handler(body_name="B", radius=0)
         assert res["isError"] is True and "positive" in res["message"]
 
     def test_body_not_found(self):
         # BodyRef resolves the named body; an unknown name errors, naming the value + the handle path.
-        _install([FakeBody("B", [True])])
+        _install([make_body("B", [True])])
         res = fl.handler(body_name="X", radius=1, edge_filter="all")
         assert res["isError"] is True and "no body or component named 'X'" in res["message"]
 
@@ -405,7 +353,7 @@ class TestGuards:
         # No 'edges' and no 'edge_filter': REFUSED, naming both scoping paths. An omitted scope
         # must never silently mean the whole body - implicit blanket rounding was every
         # executor's default design language while 'all' was the default.
-        _install([FakeBody("B", [True, True])])
+        _install([make_body("B", [True, True])])
         res = fl.handler(body_name="B", radius=1)
         assert res["isError"] is True
         assert "edges" in res["message"] and "edge_filter" in res["message"]
@@ -414,19 +362,19 @@ class TestGuards:
 
     def test_blanket_filter_reports_blast_radius(self):
         # An explicit filter sweep names how many of the body's edges it took.
-        _install([FakeBody("B", [True, False, True])])
+        _install([make_body("B", [True, False, True])])
         out = _payload(fl.handler(body_name="B", radius=1, edge_filter="convex"))
         assert "BLANKET" in out["note"] and "2 of the body's 3 edges" in out["note"]
 
     def test_bad_edge_filter(self):
-        _install([FakeBody("B", [True])])
+        _install([make_body("B", [True])])
         res = fl.handler(body_name="B", radius=1, edge_filter="weird")
         assert res["isError"] is True and "edge_filter" in res["message"]
 
     def test_nonnumeric_radius_is_read_as_an_expression_and_refused_by_name(self):
         # A non-numeric radius string is a parameter EXPRESSION, so the refusal comes from the units
         # engine that could not evaluate it - naming the input and the value, not "not a number".
-        _install([FakeBody("B", [True])])
+        _install([make_body("B", [True])])
         res = fl.handler(body_name="B", radius="big")
         assert res["isError"] is True
         assert "'radius'" in res["message"] and "did not evaluate" in res["message"]
@@ -434,7 +382,7 @@ class TestGuards:
 
     def test_no_matching_edges_errors(self):
         # body has only convex edges; a concave filter matches nothing
-        _install([FakeBody("B", [True, True])])
+        _install([make_body("B", [True, True])])
         res = fl.handler(body_name="B", radius=1, edge_filter="concave")
         assert res["isError"] is True and "No matching edges" in res["message"]
         assert "body has 2 edges" in res["message"]
@@ -442,7 +390,7 @@ class TestGuards:
     def test_a_body_with_no_readable_edges_refuses_under_all(self):
         # 'all' classifies nothing, so there is no census for this refusal to name - and naming one
         # anyway raises out of the handler instead of refusing.
-        _install([FakeBody("B", [])])
+        _install([make_body("B", [])])
         res = fl.handler(body_name="B", radius=1, edge_filter="all")
         assert res["isError"] is True and "No matching edges" in res["message"]
         assert "body has 0 edges" in res["message"]
@@ -451,38 +399,38 @@ class TestGuards:
 class TestFillet:
 
     def test_fillet_all_edges_scaled(self):
-        ff, _ = _install([FakeBody("Block", [True, True, False])])
+        ff, _ = _install([make_body("Block", [True, True, False])])
         out = _payload(fl.handler(body_name="Block", radius=2, units="mm", edge_filter="all"))
         assert out["filleted"] is True and out["edges_requested"] == 3
         edges, val, tangent = ff.last.edge_set
         assert val == ("real", 0.2)        # 2mm -> 0.2cm
 
     def test_fillet_convex_filter(self):
-        ff, _ = _install([FakeBody("B", [True, False, True])])
+        ff, _ = _install([make_body("B", [True, False, True])])
         out = _payload(fl.handler(body_name="B", radius=1, edge_filter="convex"))
         assert out["edges_requested"] == 2  # only the two convex edges
 
     def test_fillet_concave_filter(self):
-        ff, _ = _install([FakeBody("B", [True, False, True])])
+        ff, _ = _install([make_body("B", [True, False, True])])
         out = _payload(fl.handler(body_name="B", radius=1, edge_filter="concave"))
         assert out["edges_requested"] == 1
 
     def test_default_most_recent_body(self):
-        _install([FakeBody("First", [True]), FakeBody("Last", [True, True])])
+        _install([make_body("First", [True]), make_body("Last", [True, True])])
         out = _payload(fl.handler(radius=1, edge_filter="all"))
         assert out["body"] == "Last"
 
     def test_a_smooth_edge_is_in_neither_filter(self):
         # BRepEdge exposes no isConvex, so each edge is classified here; two faces meeting flat are
         # neither convex nor concave and match no filter. The split is published beside the sweep.
-        _install([FakeBody("B", [True, "smooth", False])])
+        _install([make_body("B", [True, "smooth", False])])
         out = _payload(fl.handler(body_name="B", radius=1, edge_filter="concave"))
         assert (out["edges_convex"], out["edges_concave"], out["edges_smooth"]) == (1, 1, 1)
         assert "1 convex, 1 concave, 1 smooth" in out["note"]
 
     def test_convex_and_concave_are_told_apart_on_one_body(self):
         # The two differ ONLY in which way each coEdge heads round the edge - the local read.
-        _install([FakeBody("B", [True, False, True])])
+        _install([make_body("B", [True, False, True])])
         out = _payload(fl.handler(body_name="B", radius=1, edge_filter="convex"))
         assert (out["edges_convex"], out["edges_concave"]) == (2, 1)
         assert out["edges_requested"] == 2 and "edges_swept" not in out
@@ -490,7 +438,7 @@ class TestFillet:
     def test_an_unclassifiable_edge_refuses_a_filtered_sweep(self):
         # An edge the classifier could not answer must NOT be swept in silently. The refusal names
         # the branch and the count.
-        ff, _ = _install([FakeBody("B", [True, None])])
+        ff, _ = _install([make_body("B", [True, None])])
         res = fl.handler(body_name="B", radius=1, edge_filter="convex")
         assert res["isError"] is True
         assert "1 of the 2 edges on 'B' could not be classified" in res["message"]
@@ -501,7 +449,7 @@ class TestFillet:
     def test_every_unclassified_branch_holds_the_sweep_back(self):
         # A knife edge and a disagreeing pair are as unswept as an unreadable one: all three count
         # toward the refusal, and each is named so the caller knows which it met.
-        ff, _ = _install([FakeBody("B", [True, "antiparallel", "split"])])
+        ff, _ = _install([make_body("B", [True, "antiparallel", "split"])])
         res = fl.handler(body_name="B", radius=1, edge_filter="convex")
         assert res["isError"] is True
         assert "2 of the 3 edges on 'B' could not be classified" in res["message"]
@@ -511,7 +459,7 @@ class TestFillet:
     def test_all_sweeps_every_edge_without_classifying(self, monkeypatch):
         # 'all' gates on nothing, so it neither pays the classifier nor publishes a census it did
         # not take - and an edge no classifier could answer is no reason to refuse.
-        _install([FakeBody("B", [True, None])])
+        _install([make_body("B", [True, None])])
         called = []
         monkeypatch.setattr(edge_common_mod, "_edge_convexity", lambda e: called.append(e))
         out = _payload(fl.handler(body_name="B", radius=1, edge_filter="all"))
@@ -563,7 +511,7 @@ class TestFillet:
         assert edge_common_mod._edge_convexity(corner) == "smooth"
 
     def test_radius_echoed_rounded_in_payload(self):
-        _install([FakeBody("B", [True])])
+        _install([make_body("B", [True])])
         out = _payload(fl.handler(body_name="B", radius=3.5, units="mm", edge_filter="all"))
         # the raw (un-scaled) radius is echoed under 'radius'
         assert out["radius"] == 3.5
@@ -574,7 +522,7 @@ class TestFillet:
         # echo as the "result" would be the honesty-contract cardinal sin (a fillet silently rounded
         # fewer edges than requested). The read-back count must gate the call: error naming
         # requested vs applied, and the inert/partial feature must be rolled back (deleteMe called).
-        ff, _ = _install([FakeBody("B", [True, True, True])])
+        ff, _ = _install([make_body("B", [True, True, True])])
         ff.result = FakeCountingFeature("Fillet1", faces=2)
         res = fl.handler(body_name="B", radius=1, edge_filter="all")
         assert res["isError"] is True
@@ -586,7 +534,7 @@ class TestFillet:
         # safe() returning None means the attribute did not answer - the keys are OMITTED,
         # never reported as null (the default fake feature carries only .name). The no-op guard is
         # gated on faces_created == 0, so a None (unanswered) count does NOT trip it.
-        _install([FakeBody("B", [True])])
+        _install([make_body("B", [True])])
         out = _payload(fl.handler(body_name="B", radius=1, edge_filter="all"))
         assert "edges_measured" not in out and "faces_created" not in out
         assert "read from the created feature" not in out["note"]
@@ -596,7 +544,7 @@ class TestFillet:
         # faces meeting smoothly, e.g. a hole tangent to a face). filleted:true would be a false ok;
         # the 0-face read-back must convert it to an error naming the tangent cause AND remove the
         # inert feature.
-        ff, _ = _install([FakeBody("B", [True])])
+        ff, _ = _install([make_body("B", [True])])
         ff.result = FakeCountingFeature("Fillet1", faces=0)
         res = fl.handler(body_name="B", radius=1, edge_filter="all")
         assert res["isError"] is True
@@ -607,7 +555,7 @@ class TestFillet:
 class TestEdgeHandles:
 
     def test_fillet_specific_edges_via_handles(self):
-        e1, e2 = _FakeEdgeEnt("Bracket"), _FakeEdgeEnt("Bracket")
+        e1, e2 = _edge_ent("Bracket"), _edge_ent("Bracket")
         ff, _ = _install_edge_handles({"E1": e1, "E2": e2})
         out = _payload(fl.handler(edges=["E1", "E2"], radius=2, units="mm"))
         assert out["filleted"] is True
@@ -616,13 +564,13 @@ class TestEdgeHandles:
         assert out["body"] == "Bracket"             # labelled from the edge's owning body
 
     def test_edges_take_precedence_over_body(self):
-        e1 = _FakeEdgeEnt("X")
+        e1 = _edge_ent("X")
         ff, _ = _install_edge_handles({"E1": e1})
         out = _payload(fl.handler(edges=["E1"], body_name="ignored", radius=1))
         assert out["edges_requested"] == 1           # used the handle, not body_name
 
     def test_bad_edge_handle_errors(self):
-        _install_edge_handles({"E1": _FakeEdgeEnt()})   # E2 missing
+        _install_edge_handles({"E1": _edge_ent()})   # E2 missing
         res = fl.handler(edges=["E1", "E2"], radius=1)
         assert res["isError"] is True and "edges" in res["message"]
 
@@ -630,7 +578,7 @@ class TestEdgeHandles:
         # A stale/unresolvable handle among N passed handles must refuse the WHOLE call before any
         # feature is created (never silently fillet just the live ones) - and name how many handles
         # were requested, plus point back at find_geometry for a fresh one.
-        _install_edge_handles({"E1": _FakeEdgeEnt()})   # E2 is stale/unresolvable
+        _install_edge_handles({"E1": _edge_ent()})   # E2 is stale/unresolvable
         res = fl.handler(edges=["E1", "E2"], radius=1)
         assert res["isError"] is True
         assert "2 edge handle(s) were requested" in res["message"]
@@ -659,12 +607,12 @@ class TestQualifiedBodyName:
 class TestFilletType:
 
     def test_unknown_fillet_type_refused(self):
-        _install([FakeBody("B", [True])])
+        _install([make_body("B", [True])])
         res = fl.handler(body_name="B", radius=1, edge_filter="all", fillet_type="rolling")
         assert res["isError"] is True and "fillet_type" in res["message"]
 
     def test_constant_is_the_default_and_is_named_in_the_payload(self):
-        ff, _ = _install([FakeBody("B", [True])])
+        ff, _ = _install([make_body("B", [True])])
         out = _payload(fl.handler(body_name="B", radius=1, edge_filter="all"))
         assert out["fillet_type"] == "constant"
         assert ff.last.variable_set is None and ff.last.chord_set is None
@@ -672,7 +620,7 @@ class TestFilletType:
     def test_refused_edge_set_errors_instead_of_adding_a_feature(self):
         # addConstantRadiusEdgeSet returns a bool; a False means nothing was selected, so adding the
         # feature anyway would report a fillet that rounds nothing.
-        ff, _ = _install_edge_handles({"E1": _FakeEdgeEnt()})
+        ff, _ = _install_edge_handles({"E1": _edge_ent()})
         ff.refuse_edge_set = True
         res = fl.handler(edges=["E1"], radius=1)
         assert res["isError"] is True and "constant-radius" in res["message"]
@@ -683,7 +631,7 @@ class TestVariableRadius:
     def test_positions_and_radii_cross_as_plain_lists(self):
         # The API takes positions/radii as vectors - plain Python lists. An ObjectCollection there
         # raises a vector-type argument error live, and the fake raises the same way.
-        ff, _ = _install_edge_handles({"E1": _FakeEdgeEnt()})
+        ff, _ = _install_edge_handles({"E1": _edge_ent()})
         out = _payload(fl.handler(edges=["E1"], radius=2, end_radius=5, units="mm",
                                           fillet_type="variable",
                                           positions=[0.25, 0.75], radii=[3, 4]))
@@ -698,7 +646,7 @@ class TestVariableRadius:
         assert out["positions"] == [0.25, 0.75] and out["radii"] == [3.0, 4.0]
 
     def test_without_intermediate_radii_the_arrays_are_empty(self):
-        ff, _ = _install_edge_handles({"E1": _FakeEdgeEnt()})
+        ff, _ = _install_edge_handles({"E1": _edge_ent()})
         out = _payload(fl.handler(edges=["E1"], radius=1, end_radius=2,
                                           fillet_type="variable"))
         _, _, _, positions, radii = ff.last.variable_set
@@ -706,26 +654,26 @@ class TestVariableRadius:
         assert "positions" not in out and "radii" not in out
 
     def test_needs_end_radius(self):
-        _install_edge_handles({"E1": _FakeEdgeEnt()})
+        _install_edge_handles({"E1": _edge_ent()})
         res = fl.handler(edges=["E1"], radius=1, fillet_type="variable")
         assert res["isError"] is True and "end_radius" in res["message"]
 
     def test_refuses_mismatched_positions_and_radii(self):
-        _install_edge_handles({"E1": _FakeEdgeEnt()})
+        _install_edge_handles({"E1": _edge_ent()})
         res = fl.handler(edges=["E1"], radius=1, end_radius=2, fillet_type="variable",
                                  positions=[0.3, 0.6], radii=[4])
         assert res["isError"] is True
         assert "2 position(s)" in res["message"] and "1 radius(es)" in res["message"]
 
     def test_refuses_a_position_outside_the_unit_interval(self):
-        _install_edge_handles({"E1": _FakeEdgeEnt()})
+        _install_edge_handles({"E1": _edge_ent()})
         res = fl.handler(edges=["E1"], radius=1, end_radius=2, fillet_type="variable",
                                  positions=[1.5], radii=[4])
         assert res["isError"] is True
         assert "'positions'[0] is 1.5" in res["message"]
 
     def test_refuses_a_nonpositive_intermediate_radius(self):
-        _install_edge_handles({"E1": _FakeEdgeEnt()})
+        _install_edge_handles({"E1": _edge_ent()})
         res = fl.handler(edges=["E1"], radius=1, end_radius=2, fillet_type="variable",
                                  positions=[0.5], radii=[0])
         assert res["isError"] is True and "'radii'[0] must be positive" in res["message"]
@@ -733,13 +681,13 @@ class TestVariableRadius:
     def test_requires_edge_handles_not_a_filter_sweep(self):
         # The chain must be tangentially connected and in order; a filter sweep has no such order,
         # so there is no start end for the start radius.
-        _install([FakeBody("B", [True, True])])
+        _install([make_body("B", [True, True])])
         res = fl.handler(body_name="B", radius=1, end_radius=2, edge_filter="all",
                                  fillet_type="variable")
         assert res["isError"] is True and "edges" in res["message"]
 
     def test_refused_variable_edge_set_errors(self):
-        ff, _ = _install_edge_handles({"E1": _FakeEdgeEnt()})
+        ff, _ = _install_edge_handles({"E1": _edge_ent()})
         ff.refuse_edge_set = True
         res = fl.handler(edges=["E1"], radius=1, end_radius=2, fillet_type="variable")
         assert res["isError"] is True and "variable-radius" in res["message"]
@@ -748,7 +696,7 @@ class TestVariableRadius:
 class TestChordLength:
 
     def test_chord_length_scaled_and_tangent_chained(self):
-        ff, _ = _install_edge_handles({"E1": _FakeEdgeEnt()})
+        ff, _ = _install_edge_handles({"E1": _edge_ent()})
         out = _payload(fl.handler(edges=["E1"], fillet_type="chord_length",
                                           chord_length=2, units="mm"))
         edges, chord, tangent = ff.last.chord_set
@@ -758,17 +706,17 @@ class TestChordLength:
         assert out["fillet_type"] == "chord_length"
 
     def test_needs_a_chord_length(self):
-        _install_edge_handles({"E1": _FakeEdgeEnt()})
+        _install_edge_handles({"E1": _edge_ent()})
         res = fl.handler(edges=["E1"], radius=3, fillet_type="chord_length")
         assert res["isError"] is True and "chord_length" in res["message"]
 
     def test_nonpositive_chord_length_names_the_input(self):
-        _install_edge_handles({"E1": _FakeEdgeEnt()})
+        _install_edge_handles({"E1": _edge_ent()})
         res = fl.handler(edges=["E1"], fillet_type="chord_length", chord_length=-1)
         assert res["isError"] is True and "positive chord_length" in res["message"]
 
     def test_sweeps_a_body_by_filter_too(self):
-        ff, _ = _install([FakeBody("B", [True, False])])
+        ff, _ = _install([make_body("B", [True, False])])
         out = _payload(fl.handler(body_name="B", fillet_type="chord_length",
                                           chord_length=1, edge_filter="convex"))
         assert out["edges_requested"] == 1
@@ -823,7 +771,7 @@ class TestRuleFillet:
         assert res["isError"] is True and "faces" in res["message"]
 
     def test_an_edge_handle_in_faces_is_refused(self):
-        _install_edge_handles({"E1": _FakeEdgeEnt()})
+        _install_edge_handles({"E1": _edge_ent()})
         res = fl.handler(fillet_type="rule", faces=["E1"], radius=1)
         assert res["isError"] is True and "must be a face" in res["message"]
 
@@ -837,14 +785,14 @@ class TestRuleFillet:
     def test_unchanged_volume_beats_a_positive_face_count(self):
         # The measured volume is the authority when it can be read: a feature reporting 4 created
         # faces over geometry that did not move is still a no-op, not a rounded body.
-        body = FakeBody("B", [], volume=10.0)
+        body = make_body("B", [], volume=10.0)
         ff, _ = _install_edge_handles({"F1": BRepFace(surface=None, body=body)})
         res = fl.handler(fillet_type="rule", faces=["F1"], radius=1)
         assert res["isError"] is True and "rounded nothing" in res["message"]
         assert ff.rule_result.deleted is True
 
     def test_measured_volume_change_is_reported(self):
-        body = FakeBody("B", [], volume=10.0)
+        body = make_body("B", [], volume=10.0)
         ff, _ = _install_edge_handles({"F1": BRepFace(surface=None, body=body)})
         ff.on_add = lambda: setattr(body, "volume", 9.75)
         out = _payload(fl.handler(fillet_type="rule", faces=["F1"], radius=1))
@@ -867,7 +815,7 @@ class TestVolumeReadBack:
     def test_unchanged_volume_errors_and_rolls_back(self):
         # A fillet cuts a convex corner away or fills a concave one; an unchanged volume means the
         # feature exists but moved nothing, which must not read as filleted:true.
-        body = FakeBody("B", [True], volume=10.0)
+        body = make_body("B", [True], volume=10.0)
         ff, _ = _install([body])
         ff.result = FakeCountingFeature("Fillet1", faces=1)
         res = fl.handler(body_name="B", radius=1, edge_filter="all")
@@ -875,7 +823,7 @@ class TestVolumeReadBack:
         assert ff.result.deleted is True
 
     def test_measured_volume_change_is_reported(self):
-        body = FakeBody("B", [True], volume=10.0)
+        body = make_body("B", [True], volume=10.0)
         ff, _ = _install([body])
         ff.result = FakeCountingFeature("Fillet1", faces=1)
         ff.on_add = lambda: setattr(body, "volume", 9.5)
@@ -883,7 +831,7 @@ class TestVolumeReadBack:
         assert out["volume_delta_cm3"] == -0.5
 
     def test_unreadable_volume_is_not_treated_as_a_no_op(self):
-        ff, _ = _install([FakeBody("B", [True])])          # volume defaults to None
+        ff, _ = _install([make_body("B", [True])])          # volume defaults to None
         ff.result = FakeCountingFeature("Fillet1", faces=1)
         out = _payload(fl.handler(body_name="B", radius=1, edge_filter="all"))
         assert out["filleted"] is True and "volume_delta_cm3" not in out
@@ -925,17 +873,17 @@ class TestFilletGuardsBite:
         assert res["isError"] is True and "edges" in res["message"]
 
     def test_chord_length_without_its_length_is_refused(self):
-        _install_edge_handles({"E1": _FakeEdgeEnt("Bracket")})
+        _install_edge_handles({"E1": _edge_ent("Bracket")})
         res = fl.handler(fillet_type="chord_length", edges=["E1"], units="mm")
         assert res["isError"] is True and "chord_length" in res["message"]
 
     def test_an_unknown_unit_is_refused(self):
-        _install_edge_handles({"E1": _FakeEdgeEnt("Bracket")})
+        _install_edge_handles({"E1": _edge_ent("Bracket")})
         res = fl.handler(fillet_type="constant", edges=["E1"], radius=2, units="furlong")
         assert res["isError"] is True and "furlong" in res["message"]
 
     def test_rule_without_faces_is_refused(self):
-        _install_edge_handles({"E1": _FakeEdgeEnt("Bracket")})
+        _install_edge_handles({"E1": _edge_ent("Bracket")})
         res = fl.handler(fillet_type="rule", radius=2, units="mm")
         assert res["isError"] is True and "faces" in res["message"]
 
@@ -943,14 +891,14 @@ class TestFilletGuardsBite:
         # add() raises "position value must be greater than 0 and less than 1" - the interval is
         # open, and the two ends already carry 'radius' and 'end_radius'.
         for endpoint in (0.0, 1.0):
-            _install_edge_handles({"E1": _FakeEdgeEnt("Bracket")})
+            _install_edge_handles({"E1": _edge_ent("Bracket")})
             res = fl.handler(fillet_type="variable", edges=["E1"], radius=2, end_radius=5,
                                      positions=[endpoint], radii=[3], units="mm")
             assert res["isError"] is True
             assert str(endpoint) in res["message"] and "exclusive" in res["message"]
 
     def test_an_interior_position_is_accepted(self):
-        ff, _ = _install_edge_handles({"E1": _FakeEdgeEnt("Bracket")})
+        ff, _ = _install_edge_handles({"E1": _edge_ent("Bracket")})
         ff.result = FakeCountingFeature("Fillet1", faces=3)
         ff.on_add = lambda: setattr(ff, "_bumped", True)
         res = fl.handler(fillet_type="variable", edges=["E1"], radius=2, end_radius=5,
@@ -960,7 +908,7 @@ class TestFilletGuardsBite:
     def test_a_feature_reported_failed_is_an_error_not_a_tangent_diagnosis(self):
         # A mis-ordered variable chain yields healthState 2 with NO message and 0 faces. Reading
         # only the face count would blame a tangent edge - a cause that observation cannot support.
-        ff, _ = _install_edge_handles({"E1": _FakeEdgeEnt("Bracket")})
+        ff, _ = _install_edge_handles({"E1": _edge_ent("Bracket")})
         ff.result = FakeCountingFeature("Fillet1", faces=0, health=2, message="")
         res = fl.handler(fillet_type="variable", edges=["E1"], radius=2, end_radius=5,
                                  units="mm")
@@ -970,7 +918,7 @@ class TestFilletGuardsBite:
         assert ff.result.deleted is True              # the failed feature is rolled back
 
     def test_a_failed_feature_passes_fusions_own_message_through(self):
-        ff, _ = _install_edge_handles({"E1": _FakeEdgeEnt("Bracket")})
+        ff, _ = _install_edge_handles({"E1": _edge_ent("Bracket")})
         ff.result = FakeCountingFeature("Fillet1", faces=0, health=2,
                                         message="radius too large for the edge")
         res = fl.handler(edges=["E1"], radius=2, units="mm")
@@ -984,12 +932,12 @@ class TestFilletGuardsBite:
             def _raise():
                 raise RuntimeError(msg)
             return _raise
-        ff, _ = _install([FakeBody("B", [True])])
+        ff, _ = _install([make_body("B", [True])])
         ff.on_add = raising("5 : radius too large for adjacent geometry")
         res = fl.handler(body_name="B", radius=50, edge_filter="all")
         assert res["isError"] is True and "try a smaller value" in res["message"]
 
-        ff, _ = _install([FakeBody("B", [True])])
+        ff, _ = _install([make_body("B", [True])])
         ff.on_add = raising("2 : FILLET_NO_EDGE_FOUND")
         res = fl.handler(body_name="B", radius=50, edge_filter="all")
         assert res["isError"] is True
@@ -1005,7 +953,7 @@ class TestRadiusTakesAParameterExpression:
     stay numeric, and their schemas say so."""
 
     def test_an_expression_radius_crosses_as_the_string_not_an_evaluated_number(self, monkeypatch):
-        ff, _cf, _d = _parametric(monkeypatch, _install, [FakeBody("B", [True])])
+        ff, _cf, _d = _parametric(monkeypatch, _install, [make_body("B", [True])])
         out = _payload(fl.handler(body_name="B", radius="WallT/2", units="mm",
                                           edge_filter="all"))
         _edges, val, _tangent = ff.last.edge_set
@@ -1017,7 +965,7 @@ class TestRadiusTakesAParameterExpression:
 
     def test_a_literal_radius_still_crosses_as_a_scaled_number(self, monkeypatch):
         # the engine resolves nothing, so a literal routed through it would come back refused
-        ff, _cf, _d = _parametric(monkeypatch, _install, [FakeBody("B", [True])],
+        ff, _cf, _d = _parametric(monkeypatch, _install, [make_body("B", [True])],
                                   engine=_blind_engine())
         out = _payload(fl.handler(body_name="B", radius=2, units="mm", edge_filter="all"))
         assert ff.last.edge_set[1] == ("real", pytest.approx(0.2))
@@ -1026,14 +974,14 @@ class TestRadiusTakesAParameterExpression:
     def test_a_numeric_STRING_is_a_literal_not_an_expression(self, monkeypatch):
         # '2' is a number written as a string - resolving it as an expression would tie the fillet
         # to nothing, and against this engine it would be refused outright
-        ff, _cf, _d = _parametric(monkeypatch, _install, [FakeBody("B", [True])],
+        ff, _cf, _d = _parametric(monkeypatch, _install, [make_body("B", [True])],
                                   engine=_blind_engine())
         out = _payload(fl.handler(body_name="B", radius="2", units="mm", edge_filter="all"))
         assert ff.last.edge_set[1] == ("real", pytest.approx(0.2))
         assert out["radius"] == 2.0
 
     def test_an_unresolvable_expression_is_refused_before_any_feature_is_built(self, monkeypatch):
-        ff, _cf, _d = _parametric(monkeypatch, _install, [FakeBody("B", [True])])
+        ff, _cf, _d = _parametric(monkeypatch, _install, [make_body("B", [True])])
         res = fl.handler(body_name="B", radius="Missing/2", units="mm", edge_filter="all")
         assert res["isError"] is True
         assert "'radius'" in res["message"] and "Missing/2" in res["message"]
@@ -1042,13 +990,13 @@ class TestRadiusTakesAParameterExpression:
 
     def test_the_expression_is_refused_ahead_of_the_edge_scope_guard(self, monkeypatch):
         # the same order a literal is judged in: the size before the edge scope
-        _parametric(monkeypatch, _install, [FakeBody("B", [True])])
+        _parametric(monkeypatch, _install, [make_body("B", [True])])
         res = fl.handler(body_name="B", radius="Missing/2", units="mm")
         assert res["isError"] is True and "did not evaluate" in res["message"]
 
     def test_a_variable_fillets_START_radius_takes_the_expression(self, monkeypatch):
         ff, _cf, _d = _parametric(monkeypatch, _install_edge_handles,
-                                  {"E1": _FakeEdgeEnt("Bracket")})
+                                  {"E1": _edge_ent("Bracket")})
         ff.result = FakeCountingFeature("Fillet1", faces=1)
         _payload(fl.handler(fillet_type="variable", edges=["E1"], radius="WallT/2",
                                     end_radius=5, units="mm"))
@@ -1059,13 +1007,13 @@ class TestRadiusTakesAParameterExpression:
     def test_a_chord_LENGTH_is_still_a_number_only(self, monkeypatch):
         # the expression form is opened on 'radius' alone; chord_length's schema types it as a
         # number, and the refusal is what keeps the two surfaces saying the same thing
-        _parametric(monkeypatch, _install_edge_handles, {"E1": _FakeEdgeEnt("Bracket")})
+        _parametric(monkeypatch, _install_edge_handles, {"E1": _edge_ent("Bracket")})
         res = fl.handler(fillet_type="chord_length", edges=["E1"], chord_length="WallT/2",
                                  units="mm")
         assert res["isError"] is True and "'chord_length' must be a number." in res["message"]
 
     def test_the_positive_and_zero_guards_still_bite_on_a_literal(self, monkeypatch):
-        _parametric(monkeypatch, _install, [FakeBody("B", [True])])
+        _parametric(monkeypatch, _install, [make_body("B", [True])])
         for bad in (0, -1):
             res = fl.handler(body_name="B", radius=bad, units="mm", edge_filter="all")
             assert res["isError"] is True and "positive radius" in res["message"]
@@ -1074,7 +1022,7 @@ class TestRadiusTakesAParameterExpression:
         # '-1 mm' and '0 mm' are legal expressions the engine resolves happily; only the evaluated
         # value catches them, and without it they reach filletFeatures.add
         for expr, value, shown in (("Neg", -1.0, "-1.0 mm"), ("Zero", 0.0, "0.0 mm")):
-            ff, _cf, _d = _parametric(monkeypatch, _install, [FakeBody("B", [True])],
+            ff, _cf, _d = _parametric(monkeypatch, _install, [make_body("B", [True])],
                                       engine=FakeUnitsManager(valid=(expr,), value=value))
             res = fl.handler(body_name="B", radius=expr, units="mm", edge_filter="all")
             assert res["isError"] is True, expr
@@ -1084,7 +1032,7 @@ class TestRadiusTakesAParameterExpression:
 
     def test_the_boundary_a_hair_ABOVE_zero_is_accepted(self, monkeypatch):
         # the guard is <= 0, not < 0: the smallest positive value must still build
-        ff, _cf, _d = _parametric(monkeypatch, _install, [FakeBody("B", [True])],
+        ff, _cf, _d = _parametric(monkeypatch, _install, [make_body("B", [True])],
                                   engine=FakeUnitsManager(valid=("Tiny",), value=0.001))
         _payload(fl.handler(body_name="B", radius="Tiny", units="mm", edge_filter="all"))
         assert ff.last.edge_set[1] == ("string", "Tiny")
@@ -1094,7 +1042,7 @@ class TestRadiusTakesAParameterExpression:
         # than inventing a verdict
         engine = FakeUnitsManager(valid=("Odd",))
         engine.evaluateExpression = lambda expr, units=None: object()
-        ff, _cf, _d = _parametric(monkeypatch, _install, [FakeBody("B", [True])], engine=engine)
+        ff, _cf, _d = _parametric(monkeypatch, _install, [make_body("B", [True])], engine=engine)
         _payload(fl.handler(body_name="B", radius="Odd", units="mm", edge_filter="all"))
         assert ff.last.edge_set[1] == ("string", "Odd")
 

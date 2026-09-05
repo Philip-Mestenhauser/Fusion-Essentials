@@ -14,23 +14,18 @@ import adsk.core
 import adsk.fusion
 import pytest
 
-from conftest import (BRepEdge, MakeComp, error_message, install, load_tool, make_design,
-                      make_sketch, make_sketch_curve, payload)
+from conftest import (BRepEdge, MakeComp, _NamedCollection, error_message, install, load_tool,
+                      make_design, make_sketch, make_sketch_curve, payload)
 
 pp = load_tool("model_pattern_path")
 
 
 # ── fakes: only the feature-collection graph this tool drives ────────────────────────────────────
 
-class _Elements:
-    def __init__(self, count):
-        self.count = count
-
-
 class _Feature:
     def __init__(self, name="Path-Pattern1", elements=3):
         self.name = name
-        self.patternElements = _Elements(elements)
+        self.patternElements = _NamedCollection([None] * elements)
 
 
 class _Input:
@@ -329,7 +324,7 @@ def test_body_targets_reported_as_bodies():
 # -- an unreadable instance count is NULL and named, never the request echoed back ---------------
 
 
-class _BlindElements:
+class _BlindElements(_NamedCollection):
     """patternElements whose .count read RAISES - a feature proxy that stopped answering."""
     @property
     def count(self):

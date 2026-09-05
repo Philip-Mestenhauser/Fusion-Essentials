@@ -497,21 +497,21 @@ ENUMS = {
 
 # Behavior flags the shared fakes consume.
 BEHAVIOR = {
-    "allcomponents_on_design_only": True,
     "alloperations_drops_folder_objects": True,
     "alloperations_flattens_folder_children": True,
+    "cam_locked_parameter_write_lands": True,
     "camera_view_extents_follows_limiting_axis": True,
     "camera_view_extents_is_linear": True,
     "collection_item_out_of_range_raises": True,
     "fillet_feature_has_edges": False,
     "find_entity_token_empty_on_miss": True,
     "find_entity_token_multi_after_face_split": True,
-    "internal_length_unit_is_cm": True,
     "item_by_name_none_on_miss": True,
     "joint_drive_anchored_side_flips_mover": True,
     "joint_drive_moves_occurrence_one": True,
     "joint_drive_sign_follows_slide_direction_vector": True,
     "joint_limit_out_of_range_ignored": True,
+    "joint_revolute_store_grid_deg": 0.1,
     "joint_revolute_value_stored_verbatim": True,
     "machining_time_args_inert": True,
     "mesh_repair_density_default": 128.0,
@@ -529,6 +529,19 @@ BEHAVIOR = {
 # Live public attribute membership per adsk type (dir() of a real object) - the
 # fake-shape lint requires every SHARED fake attribute to exist here.
 SHAPES = {
+    "Application": [
+        "activeDocument", "activeEditObject", "activeProduct", "activeViewport", "applicationFolders", "cameraChanged",
+        "cast", "classType", "crashDescription", "currentUser", "data", "dataFileComplete",
+        "dataFileCopyComplete", "documentActivated", "documentActivating", "documentClosed", "documentClosing", "documentCreated",
+        "documentDeactivated", "documentDeactivating", "documentOpened", "documentOpening", "documentSaved", "documentSaving",
+        "documents", "executeTextCommand", "favoriteAppearances", "favoriteMaterials", "fireCustomEvent", "fontNames",
+        "get", "getLastError", "hasActiveJobs", "importManager", "insertedFromURL", "insertingFromURL",
+        "isComponentColorsDisplayed", "isOffLine", "isStartupComplete", "isValid", "lightingEnvironment", "log",
+        "materialLibraries", "measureManager", "mfgdmDataReady", "objectType", "onlineStatusChanged", "openedFromURL",
+        "openingFromURL", "pointTolerance", "preferences", "registerCustomEvent", "scripts", "startupCompleted",
+        "supportedProductTypes", "this", "thisown", "token", "unregisterCustomEvent", "userId",
+        "userInterface", "userName", "vectorAngleTolerance", "version",
+    ],
     "BRepBodies": [
         "add", "cast", "classType", "count", "isValid", "item",
         "itemByName", "objectType", "this", "thisown",
@@ -559,6 +572,18 @@ SHAPES = {
         "isValid", "loops", "meshManager", "nativeObject", "objectType", "pointOnFace",
         "shell", "tangentiallyConnectedFaces", "tempId", "this", "thisown", "vertices",
     ],
+    "BaseFeature": [
+        "assemblyContext", "attributes", "baseFeature", "bodies", "cast", "classType",
+        "constructionAxes", "constructionPlanes", "constructionPoints", "createForAssemblyContext", "deleteMe", "dissolve",
+        "entityToken", "errorOrWarningMessage", "faces", "finishEdit", "healthState", "isParametric",
+        "isSuppressed", "isValid", "linkedFeatures", "meshBodies", "name", "nativeObject",
+        "objectType", "parentComponent", "sketches", "sourceBodies", "startEdit", "this",
+        "thisown", "timelineObject", "updateBody",
+    ],
+    "BaseFeatures": [
+        "add", "cast", "classType", "count", "isValid", "item",
+        "itemByName", "objectType", "this", "thisown",
+    ],
     "BoundingBox3D": [
         "cast", "classType", "combine", "contains", "copy", "create",
         "expand", "intersects", "isValid", "maxPoint", "minPoint", "objectType",
@@ -586,6 +611,16 @@ SHAPES = {
         "noteIconColor", "notes", "objectType", "operationId", "operations", "parameters",
         "parent", "parentSetup", "patterns", "removeReferences", "strategy", "this",
         "thisown", "warning",
+    ],
+    "CAMParameter": [
+        "cast", "classType", "error", "expression", "fullTitle", "isDeprecated",
+        "isEditable", "isEnabled", "isValid", "isVisible", "name", "objectType",
+        "saveExpressionAsUserDefault", "systemDefaultExpression", "this", "thisown", "title", "userDefaultExpression",
+        "value", "warning",
+    ],
+    "CAMParameters": [
+        "cast", "classType", "count", "isValid", "item", "itemByName",
+        "objectType", "resetToSystemDefaults", "this", "thisown",
     ],
     "Camera": [
         "cameraType", "cast", "classType", "create", "eye", "getExtents",
@@ -624,6 +659,36 @@ SHAPES = {
         "getData", "isValid", "objectType", "origin", "radius", "set",
         "surfaceType", "this", "thisown", "transformBy",
     ],
+    "CylindricalJointMotion": [
+        "cast", "classType", "customRotationAxisEntity", "isValid", "jointType", "objectType",
+        "rotationAxis", "rotationAxisVector", "rotationLimits", "rotationValue", "slideLimits", "slideValue",
+        "this", "thisown",
+    ],
+    "Data": [
+        "activeFolder", "activeHub", "activeProject", "activeSpaceCollectionId", "cast", "classType",
+        "dataHubs", "dataProjects", "findFileById", "findFolderById", "isDataPanelVisible", "isValid",
+        "objectType", "personalUseLimits", "refreshDataPanel", "this", "thisown",
+    ],
+    "DataFile": [
+        "assemblyPIMData", "cast", "childReferences", "classType", "configurationRowId", "configurationTable",
+        "copy", "copyWithInput", "createCopyDesignFileInput", "createCopyFileInput", "createDataVersion", "createMilestone",
+        "createdBy", "dataObject", "dateCreated", "dateModified", "deleteMe", "description",
+        "download", "fileExtension", "fusionWebURL", "hasChildReferences", "hasOutofDateChildReferences", "hasParentReferences",
+        "id", "inUseBy", "isComplete", "isConfiguration", "isConfiguredDesign", "isInUse",
+        "isMilestone", "isReadOnly", "isValid", "lastUpdatedBy", "latestVersion", "latestVersionNumber",
+        "milestone", "milestones", "move", "name", "objectType", "parentFolder",
+        "parentProject", "parentReferences", "promote", "publicLink", "refresh", "sharedLink",
+        "this", "thisown", "thumbnail", "versionId", "versionNumber", "versions",
+    ],
+    "DataFolder": [
+        "cast", "classType", "dataFiles", "dataFolders", "deleteMe", "id",
+        "isRoot", "isValid", "name", "objectType", "parentFolder", "parentProject",
+        "this", "thisown", "uploadAssembly", "uploadFile",
+    ],
+    "DataProject": [
+        "cast", "classType", "id", "isValid", "name", "objectType",
+        "parentHub", "rootFolder", "this", "thisown",
+    ],
     "Design": [
         "activateRootComponent", "activeComponent", "activeEditObject", "activeOccurrence", "allComponents", "allParameters",
         "analyses", "analyzeInterference", "animationManager", "appearances", "areaProperties", "attributes",
@@ -637,11 +702,84 @@ SHAPES = {
         "setLightBulbOn", "setSuppressed", "snapshots", "this", "thisown", "timeline",
         "unitsManager", "userParameters", "workspaces",
     ],
+    "Document": [
+        "activate", "advanceToLatest", "allDocumentReferences", "attributes", "canAdvanceToLatest", "cast",
+        "classType", "close", "creationId", "dataFile", "designDataFile", "documentReferences",
+        "isActive", "isModified", "isSaved", "isUpToDate", "isValid", "isVisible",
+        "name", "objectType", "parent", "products", "save", "saveAs",
+        "saveDataVersion", "saveMilestone", "thisown", "updateAllReferences", "version",
+    ],
+    "DocumentReference": [
+        "cast", "classType", "dataFile", "getLatestVersion", "isOutOfDate", "isValid",
+        "objectType", "parentDocument", "referencedDocument", "thisown", "version",
+    ],
+    "Documents": [
+        "add", "cast", "classType", "count", "isValid", "item",
+        "objectType", "open", "openUsingContext", "this", "thisown",
+    ],
+    "ExportManager": [
+        "cast", "classType", "createC3MFExportOptions", "createDXFFlatPatternExportOptions", "createDXFSketchExportOptions", "createFusionArchiveExportOptions",
+        "createIGESExportOptions", "createOBJExportOptions", "createSATExportOptions", "createSMTExportOptions", "createSTEPExportOptions", "createSTEPExportOptionsForFlatPattern",
+        "createSTLExportOptions", "createUSDExportOptions", "execute", "isValid", "objectType", "this",
+        "thisown",
+    ],
+    "Feature": [
+        "assemblyContext", "attributes", "baseFeature", "bodies", "cast", "classType",
+        "deleteMe", "dissolve", "entityToken", "errorOrWarningMessage", "faces", "healthState",
+        "isParametric", "isSuppressed", "isValid", "linkedFeatures", "name", "objectType",
+        "parentComponent", "thisown", "timelineObject",
+    ],
+    "Features": [
+        "arrangeFeatures", "baseFeatures", "bossFeatures", "boundaryFillFeatures", "boxFeatures", "cast",
+        "chamferFeatures", "circularPatternFeatures", "classType", "coilFeatures", "combineFeatures", "copyPasteBodies",
+        "cornerClosureFeatures", "count", "createPath", "customFeatures", "cutPasteBodies", "cylinderFeatures",
+        "deleteFaceFeatures", "deriveFeatures", "draftFeatures", "embossFeatures", "extendFeatures", "extrudeFeatures",
+        "filletFeatures", "flangeFeatures", "foldFeatures", "formFeatures", "hemFeatures", "holeFeatures",
+        "isValid", "item", "itemByName", "joinByBendFeatures", "loftFeatures", "loftedFlangeFeatures",
+        "mergeFacesFeatures", "meshCombineFaceGroupsFeatures", "meshCombineFeatures", "meshConvertFeatures", "meshGenerateFaceGroupsFeatures", "meshPlaneCutFeatures",
+        "meshReduceFeatures", "meshRemeshFeatures", "meshRemoveFeatures", "meshRepairFeatures", "meshReverseNormalFeatures", "meshSeparateFeatures",
+        "meshShellFeatures", "meshSmoothFeatures", "mirrorFeatures", "moveFeatures", "objectType", "offsetFacesFeatures",
+        "offsetFeatures", "patchFeatures", "pathPatternFeatures", "pipeFeatures", "rectangularPatternFeatures", "refoldFeatures",
+        "removeFeatures", "replaceFaceFeatures", "reverseNormalFeatures", "revolveFeatures", "ribFeatures", "ripFeatures",
+        "ruleFilletFeatures", "ruledSurfaceFeatures", "scaleFeatures", "sheetMetalChamferFeatures", "sheetMetalFilletFeatures", "shellFeatures",
+        "silhouetteSplitFeatures", "sphereFeatures", "splitBodyFeatures", "splitFaceFeatures", "stitchFeatures", "surfaceDeleteFaceFeatures",
+        "sweepFeatures", "tessellateFeatures", "thickenFeatures", "this", "thisown", "threadFeatures",
+        "torusFeatures", "trimFeatures", "unfoldFeatures", "unstitchFeatures", "untrimFeatures", "volumetricCustomFeatures",
+        "volumetricModelFeatures", "volumetricModelToMeshFeatures", "webFeatures",
+    ],
+    "FusionDocument": [
+        "activate", "advanceToLatest", "allDocumentReferences", "attributes", "canAdvanceToLatest", "cast",
+        "classType", "close", "creationId", "dataFile", "design", "designDataFile",
+        "documentReferences", "isActive", "isModified", "isSaved", "isUpToDate", "isValid",
+        "isVisible", "name", "objectType", "parent", "products", "save",
+        "saveAs", "saveDataVersion", "saveMilestone", "this", "thisown", "updateAllReferences",
+        "version",
+    ],
+    "Joint": [
+        "angle", "assemblyContext", "attributes", "cast", "classType", "createForAssemblyContext",
+        "deleteMe", "entityToken", "errorOrWarningMessage", "geometricRelationships", "geometryOneTransform", "geometryOrOriginOne",
+        "geometryOrOriginTwo", "geometryTwoTransform", "healthState", "isFlipped", "isLightBulbOn", "isLocked",
+        "isSuppressed", "isValid", "isVisible", "jointMotion", "motionLinks", "name",
+        "nativeObject", "objectType", "occurrenceOne", "occurrenceTwo", "offset", "offsetX",
+        "offsetY", "parentComponent", "setAsBallJointMotion", "setAsCylindricalJointMotion", "setAsPinSlotJointMotion", "setAsPlanarJointMotion",
+        "setAsRevoluteJointMotion", "setAsRigidJointMotion", "setAsSliderJointMotion", "this", "thisown", "timelineObject",
+    ],
+    "Joints": [
+        "add", "addInferredJoint", "cast", "classType", "count", "createInferredJointInput",
+        "createInput", "isValid", "item", "itemByName", "objectType", "this",
+        "thisown",
+    ],
     "Line3D": [
         "asInfiniteLine", "asNurbsCurve", "cast", "classType", "copy", "create",
         "curveType", "endPoint", "evaluator", "getData", "intersectWithCurve", "intersectWithSurface",
         "isColinearTo", "isValid", "objectType", "set", "startPoint", "this",
         "thisown", "transformBy",
+    ],
+    "Machine": [
+        "capabilities", "cast", "classType", "clearSimulationModel", "create", "createFromFile",
+        "createFromTemplate", "description", "elements", "equivalentTo", "hasPost", "hasSimulationModel",
+        "id", "isValid", "kinematics", "model", "objectType", "postURL",
+        "save", "this", "thisown", "vendor",
     ],
     "Matrix3D": [
         "asArray", "cast", "classType", "copy", "create", "determinant",
@@ -657,6 +795,17 @@ SHAPES = {
         "isSelectable", "isValid", "isVisible", "material", "mesh", "moveToComponent",
         "name", "nativeObject", "objectType", "opacity", "orientedMinimumBoundingBox", "parentComponent",
         "silhouette", "textureMapControl", "this", "thisown", "visibleOpacity", "volume",
+    ],
+    "MotionLink": [
+        "assemblyContext", "attributes", "cast", "classType", "createForAssemblyContext", "deleteMe",
+        "entityToken", "errorOrWarningMessage", "healthState", "isReversed", "isSuppressed", "isValid",
+        "jointOne", "jointTwo", "motionOne", "motionTwo", "name", "nativeObject",
+        "objectType", "parentComponent", "setMotionData", "this", "thisown", "timelineObject",
+        "valueOne", "valueTwo",
+    ],
+    "MotionLinks": [
+        "add", "cast", "classType", "count", "createInput", "isValid",
+        "item", "itemByName", "objectType", "this", "thisown",
     ],
     "ObjectCollection": [
         "add", "asArray", "cast", "classType", "clear", "contains",
@@ -675,6 +824,12 @@ SHAPES = {
         "sourceComponent", "switchConfiguration", "switchToCustomConfiguration", "this", "thisown", "timelineObject",
         "transform", "transform2", "visibleOpacity",
     ],
+    "Occurrences": [
+        "addByInsert", "addExistingComponent", "addFromConfiguration", "addFromCustomConfiguration", "addNewComponent", "addNewComponentCopy",
+        "addNewExternalComponent", "addNewExternalSheetMetalComponent", "addNewSheetMetalComponent", "asArray", "asList", "cast",
+        "classType", "count", "isValid", "item", "itemByName", "objectType",
+        "this", "thisown",
+    ],
     "Operation": [
         "attributes", "cast", "classType", "clearHoleSignature", "clearReferenceTool", "clearTool",
         "copyAfter", "copyBefore", "copyInto", "deleteMe", "duplicate", "error",
@@ -686,6 +841,11 @@ SHAPES = {
         "operationState", "parameters", "parent", "parentSetup", "referenceTool", "removeReferences",
         "setHoleSignatureXML", "strategy", "strategyType", "this", "thisown", "tool",
         "toolJson", "toolPreset", "toolPresetId", "warning",
+    ],
+    "Parameter": [
+        "attributes", "cast", "classType", "comment", "dependencyParameters", "dependentParameters",
+        "entityToken", "expression", "isDeletable", "isFavorite", "isValid", "name",
+        "objectType", "textValue", "thisown", "unit", "value", "valueType",
     ],
     "Plane": [
         "cast", "classType", "copy", "create", "createUsingDirections", "evaluator",
@@ -706,10 +866,41 @@ SHAPES = {
         "objectType", "polygonCount", "polygonNodeIndices", "quadCount", "quadNodeIndices", "this",
         "thisown", "triangleCount", "triangleFaceGroupTempIds", "triangleNodeIndices", "wallThickness",
     ],
+    "Products": [
+        "cast", "classType", "count", "isValid", "item", "itemByProductType",
+        "objectType", "this", "thisown",
+    ],
     "Profile": [
         "areaProperties", "assemblyContext", "boundingBox", "cast", "classType", "createForAssemblyContext",
         "entityToken", "face", "isOnSketchPlane", "isValid", "nativeObject", "objectType",
         "parentSketch", "plane", "profileLoops", "this", "thisown",
+    ],
+    "Profiles": [
+        "cast", "classType", "count", "isValid", "item", "objectType",
+        "this", "thisown",
+    ],
+    "RevoluteJointMotion": [
+        "cast", "classType", "customRotationAxisEntity", "isValid", "jointType", "objectType",
+        "rotationAxis", "rotationAxisVector", "rotationLimits", "rotationValue", "this", "thisown",
+    ],
+    "RigidGroup": [
+        "assemblyContext", "attributes", "cast", "classType", "createForAssemblyContext", "deleteMe",
+        "entityToken", "isSuppressed", "isValid", "isVisible", "name", "nativeObject",
+        "objectType", "occurrences", "parentComponent", "setOccurrences", "this", "thisown",
+        "timelineObject",
+    ],
+    "RigidGroups": [
+        "add", "cast", "classType", "count", "isValid", "item",
+        "itemByName", "objectType", "this", "thisown",
+    ],
+    "Selection": [
+        "cast", "classType", "entity", "isValid", "objectType", "point",
+        "this", "thisown",
+    ],
+    "Selections": [
+        "add", "all", "asArray", "cast", "classType", "clear",
+        "count", "isValid", "item", "objectType", "removeByEntity", "removeByIndex",
+        "removeBySelection", "this", "thisown",
     ],
     "Setup": [
         "activate", "additiveContainerByType", "allOperations", "attributes", "cast", "children",
@@ -723,6 +914,15 @@ SHAPES = {
         "parentSetup", "patterns", "printSetting", "removeReferences", "stockMaterial", "stockMode",
         "stockSolids", "strategy", "this", "thisown", "visibilityManager", "warning",
         "workCoordinateSystem",
+    ],
+    "SetupInput": [
+        "cast", "classType", "fixtureEnabled", "fixtures", "isUsingPreviousSetupData", "isValid",
+        "machine", "models", "name", "objectType", "operationType", "parameters",
+        "printSetting", "stockMode", "stockSolids", "this", "thisown",
+    ],
+    "Setups": [
+        "add", "cast", "classType", "count", "createInput", "isValid",
+        "item", "itemByName", "itemByOperationId", "objectType", "this", "thisown",
     ],
     "Sketch": [
         "addCenterPointArcSlot", "addCenterPointSlot", "addCenterToCenterSlot", "addOverallSlot", "addThreePointArcSlot", "areConstraintsShown",
@@ -739,6 +939,46 @@ SHAPES = {
         "sketchTexts", "sketchToModelSpace", "this", "thisown", "timelineObject", "transform",
         "xDirection", "yDirection",
     ],
+    "SketchCurves": [
+        "cast", "classType", "count", "isValid", "item", "objectType",
+        "sketchArcs", "sketchCircles", "sketchConicCurves", "sketchControlPointSplines", "sketchEllipses", "sketchEllipticalArcs",
+        "sketchFittedSplines", "sketchFixedSplines", "sketchIsoparametricCurves", "sketchLines", "this", "thisown",
+    ],
+    "SketchPoint": [
+        "assemblyContext", "attributes", "boundingBox", "cast", "classType", "connectedEntities",
+        "createForAssemblyContext", "deleteMe", "detach", "entityToken", "geometricConstraints", "geometry",
+        "is2D", "isDeletable", "isFixed", "isFullyConstrained", "isLinked", "isReference",
+        "isValid", "isVisible", "merge", "move", "nativeObject", "objectType",
+        "parentSketch", "referencedEntity", "sketchDimensions", "this", "thisown", "worldGeometry",
+    ],
+    "SketchPoints": [
+        "add", "cast", "classType", "count", "isValid", "item",
+        "objectType", "this", "thisown",
+    ],
+    "Sketches": [
+        "add", "addToBaseOrFormFeature", "addWithoutEdges", "cast", "classType", "count",
+        "isValid", "item", "itemByName", "objectType", "this", "thisown",
+    ],
+    "SliderJointMotion": [
+        "cast", "classType", "customSlideDirectionEntity", "isValid", "jointType", "objectType",
+        "slideDirection", "slideDirectionVector", "slideLimits", "slideValue", "this", "thisown",
+    ],
+    "Timeline": [
+        "cast", "classType", "count", "deleteAllAfterMarker", "isValid", "item",
+        "markerPosition", "moveToBeginning", "moveToEnd", "moveToPreviousStep", "movetoNextStep", "objectType",
+        "parentDesign", "play", "this", "thisown", "timelineGroups",
+    ],
+    "TimelineObject": [
+        "canReorder", "cast", "classType", "deleteObject", "entity", "errorOrWarningMessage",
+        "healthState", "index", "isDeletable", "isGroup", "isRolledBack", "isSuppressed",
+        "isValid", "name", "objectType", "parentGroup", "parentTimeline", "reorder",
+        "rollTo", "this", "thisown",
+    ],
+    "Tool": [
+        "attributes", "breakLink", "cast", "classType", "createFromJson", "createFromP21",
+        "createFromP21File", "description", "isReferencedTool", "isValid", "objectType", "parameters",
+        "presets", "referenceTool", "this", "thisown", "toJson", "toolBlockGeometry",
+    ],
     "Torus": [
         "axis", "cast", "classType", "copy", "create", "evaluator",
         "getData", "isValid", "majorRadius", "minorRadius", "objectType", "origin",
@@ -749,6 +989,32 @@ SHAPES = {
         "nodeCount", "nodeIndices", "normalVectors", "normalVectorsAsDouble", "normalVectorsAsFloat", "objectType",
         "surfaceTolerance", "textureCoordinates", "textureCoordinatesAsDouble", "textureCoordinatesAsFloat", "this", "thisown",
         "triangleCount",
+    ],
+    "UserInterface": [
+        "activeCommand", "activeSelectionChanged", "activeSelections", "activeToolbar", "activeToolbarTab", "activeWorkspace",
+        "allToolbarPanels", "allToolbarTabs", "cast", "classType", "commandCreated", "commandDefinitions",
+        "commandStarting", "commandTerminated", "createCloudFileDialog", "createCloudFolderDialog", "createFileDialog", "createFolderDialog",
+        "createProgressDialog", "getText", "inputBox", "isTabbedToolbarUI", "isUIEnabled", "isValid",
+        "markingMenuDisplaying", "messageBox", "objectType", "palettes", "progressBar", "selectEntity",
+        "statusMessage", "terminateActiveCommand", "this", "thisown", "toolbarPanelsByProductType", "toolbarTabsByProductType",
+        "toolbars", "workspaceActivated", "workspaceDeactivated", "workspacePreActivate", "workspacePreDeactivate", "workspaces",
+        "workspacesByProductType",
+    ],
+    "UserParameter": [
+        "attributes", "cast", "classType", "comment", "deleteMe", "dependencyParameters",
+        "dependentParameters", "design", "entityToken", "expression", "isDeletable", "isFavorite",
+        "isValid", "name", "objectType", "textValue", "this", "thisown",
+        "unit", "userParameters", "value", "valueType",
+    ],
+    "UserParameters": [
+        "add", "asArray", "cast", "classType", "count", "design",
+        "exportUserParameters", "importUserParameters", "isValid", "item", "itemByName", "objectType",
+        "this", "thisown",
+    ],
+    "ValueInput": [
+        "booleanValue", "cast", "classType", "createByBoolean", "createByObject", "createByReal",
+        "createByString", "isValid", "objectReference", "objectType", "realValue", "stringValue",
+        "this", "thisown", "valueType",
     ],
     "Vector3D": [
         "add", "angleTo", "asArray", "asPoint", "cast", "classType",

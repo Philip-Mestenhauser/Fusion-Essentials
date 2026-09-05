@@ -1,19 +1,11 @@
 """Unit tests for model_pattern_circular.py - the ring, its axis and its counts."""
 
-import json
 import types
-from conftest import BRepEdge, BRepFace, Cylinder, FakePoint, FakeVector3D, Line3D, Plane, _NamedCollection, _SimpleNamed, _make_object_collection, load_tool
+from conftest import (BRepBody, BRepEdge, BRepFace, Cylinder, FakePoint, FakeVector3D, Line3D,
+                      MakeComp, MakeDesign, Plane, _NamedCollection, _SimpleNamed, install,
+                      load_tool, make_occurrence, payload)
 
 pt = load_tool("model_pattern_circular")
-
-
-class FakeOcc:
-    def __init__(self, name, full_path=None):
-        self.name = name
-        self.fullPathName = full_path or name
-        # A real Occurrence always answers `component`; a read that RAISES is the
-        # unresolved-external-reference signal the shared occurrence census filters on.
-        self.component = types.SimpleNamespace(name=name.split(":")[0])
 
 
 class FakeRectInput:
@@ -99,10 +91,13 @@ class FakeCircInput:
 
 
 class FakeCircFeatures:
-    def __init__(self, ignores=()):
+    """`elements` is how many patternElements the created feature reports; None means as many as
+    the request asked for, which is what a pattern that fully built answers."""
+    def __init__(self, ignores=(), elements=None):
         self.last_input = None
         self.ignores = ignores
         self.add_calls = 0
+        self.elements = elements
 
     def createInput(self, coll, axis):
         self.last_input = FakeCircInput(coll, axis, self.ignores)
@@ -110,53 +105,46 @@ class FakeCircFeatures:
 
     def add(self, inp):
         self.add_calls += 1
-        return type("F", (), {"name": "C-Pattern1"})()
+        asked = int(inp.quantity[1]) if isinstance(inp.quantity, tuple) else 0
+        n = asked if self.elements is None else self.elements
+        return types.SimpleNamespace(name="C-Pattern1",
+                                     patternElements=_NamedCollection([None] * n))
 
 
-class FakeRoot:
-    def __init__(self, occurrences, rf, cf):
-        self.name = "Root"
-        # Components carry an entityToken and are compared on it: a wrapper is never identity-stable
-        # (two reads of design.rootComponent are DIFFERENT objects sharing one token), so a fake that
-        # keys on id() models a stability the platform does not have.
-        self.entityToken = "TOKEN:Root"
-        self.allOccurrences = list(occurrences)
-        self.xConstructionAxis = "AXIS_X"
-        self.yConstructionAxis = "AXIS_Y"
-        self.zConstructionAxis = "AXIS_Z"
-        self.features = type("F", (), {"rectangularPatternFeatures": rf,
-                                       "circularPatternFeatures": cf})()
-        rf.comp = self               # so add() can tell an OWN entity from a foreign native one
-        # Components placed nowhere by default; a test that patterns across components installs its
-        # own mapping (Fusion's root-level component -> its occurrences lookup).
-        self.allOccurrencesByComponent = lambda comp: _occurrences_of(self, comp)
-        self.occurrences_by_component = {}
+def _root(occurrences, rf, cf):
+    """The design's root: the occurrence census, the three origin axes and both pattern
+    feature collections."""
+    # Components carry an entityToken and are compared on it: a wrapper is never identity-stable
+    # (two reads of design.rootComponent are DIFFERENT objects sharing one token), so a fake that
+    # keys on id() models a stability the platform does not have.
+    root = MakeComp(name="Root", occurrences=occurrences, entity_token="TOKEN:Root")
+    root.xConstructionAxis = "AXIS_X"
+    root.yConstructionAxis = "AXIS_Y"
+    root.zConstructionAxis = "AXIS_Z"
+    root.features = types.SimpleNamespace(rectangularPatternFeatures=rf,
+                                          circularPatternFeatures=cf)
+    rf.comp = root               # so add() can tell an OWN entity from a foreign native one
+    # Components placed nowhere by default; a test that patterns across components installs its
+    # own mapping (Fusion's root-level component -> its occurrences lookup).
+    root.occurrences_by_component = {}
+    root.allOccurrencesByComponent = lambda comp: _occurrences_of(root, comp)
+    return root
 
 
 def _occurrences_of(root, comp):
-    """The occurrence collection a root exposes for one component (count/item, as Fusion's is).
+    """The occurrence collection a root exposes for one component.
 
     Keyed by entityToken, not id(): two references to one component are different Python objects, so
     an id()-keyed fake would answer for one wrapper and not for another wrapper of the SAME
     component."""
-    items = root.occurrences_by_component.get(_component_key(comp), [])
-    return type("OC", (), {"count": len(items), "item": staticmethod(lambda i: items[i])})()
+    return _NamedCollection(root.occurrences_by_component.get(_component_key(comp), []))
 
 
-class FakeDesign:
-    def __init__(self, occurrences, rf, cf):
-        self.rootComponent = FakeRoot(occurrences, rf, cf)
-
-
-def _install(occ_names, refuse_two=False, circ_ignores=()):
-    rf, cf = FakeRectFeatures(refuse_two), FakeCircFeatures(circ_ignores)
-    occs = [FakeOcc(n) for n in occ_names]
-    design = FakeDesign(occs, rf, cf)
-    pt.app = type("A", (), {"activeProduct": design})()
-    pt._common.app = pt.app
+def _install(occ_names, refuse_two=False, circ_ignores=(), circ_elements=None):
+    rf, cf = FakeRectFeatures(refuse_two), FakeCircFeatures(circ_ignores, circ_elements)
+    occs = [make_occurrence(n, component=MakeComp(name=n.split(":")[0])) for n in occ_names]
+    install(pt, MakeDesign(comp=_root(occs, rf, cf)))
     import adsk.fusion, adsk.core
-    adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
-    adsk.core.ObjectCollection.create = staticmethod(_make_object_collection)
     adsk.core.ValueInput.createByReal = staticmethod(lambda v: ("real", v))
     adsk.core.ValueInput.createByString = staticmethod(lambda s: ("str", s))
     pdt = adsk.fusion.PatternDistanceType
@@ -165,83 +153,46 @@ def _install(occ_names, refuse_two=False, circ_ignores=()):
     return rf, cf
 
 
-def _payload(result):
-    assert result["isError"] is False, result
-    return json.loads(result["content"][0]["text"])
-
-
-class _FakeBody:
-    def __init__(self, name):
-        self.name = name
-
-
 def _install_with_bodies(body_map):
     """Install a design that also resolves body handles/names (the app-reference seam).
 
-    The handler now resolves its design via _common.design() (the SAME seam _inputs uses), so there is
-    ONE design. We take _install's rich FakeDesign (its root has the construction axes the handler
-    needs) and EXTEND its root with body-by-name + findEntityByToken, then point both _common.design
-    and _inputs._common.design at it."""
+    The handler resolves its design via _common.design() (the SAME seam _inputs uses), so there is
+    ONE design: _install's root already carries the construction axes the handler needs, and gains
+    the body collection plus the token map here."""
     rf, cf = _install([])
     import adsk.fusion
-    adsk.fusion.BRepBody = _FakeBody
-    design = pt.app.activeProduct                 # rich FakeDesign with rootComponent + axes
-    root = design.rootComponent
-    root.bRepBodies = type("BB", (), {
-        "itemByName": staticmethod(lambda n: body_map.get(n)),
-        "count": len(body_map), "item": staticmethod(lambda i: list(body_map.values())[i]),
-    })()
+    adsk.fusion.BRepBody = BRepBody
+    design = pt.app.activeProduct
+    design.rootComponent.bRepBodies = _NamedCollection(list(body_map.values()))
     design.findEntityByToken = lambda t, bm=body_map: ([bm[t]] if t in bm else [])
-    pt._common.design = lambda: design
-    pt._common.target_component = lambda x: root
-    pt._inputs._common.design = lambda: design
-    pt._inputs._common.target_component = lambda x: root
     return rf, cf
 
 
-class _BodyInSub:
+def _install_body_in_subcomponent():
     """A body whose parentComponent is a distinct sub-component (its OWN axes + pattern features).
     Taking the axis from ROOT and building the feature there mismatches the body's object path -
     Fusion raises 'InternalValidationError getObjectPath'. _owning_component must resolve to the
     body's parent."""
-    def __init__(self, name, parent):
-        self.name = name
-        self.parentComponent = parent
-
-
-def _install_body_in_subcomponent():
-    rf, cf = _install([])           # installs adsk fakes (ValueInput, ObjectCollection, axes enum)
+    _install([])                    # installs the adsk fakes (ValueInput, ObjectCollection, axes)
     import adsk.fusion
-    adsk.fusion.BRepBody = _BodyInSub
-    # the SUB-component that owns the body — distinct axes + its OWN pattern-feature collections
+    adsk.fusion.BRepBody = BRepBody
+    # the SUB-component that owns the body - distinct axes + its OWN pattern-feature collections
     sub_rf, sub_cf = FakeRectFeatures(), FakeCircFeatures()
-    sub = type("Sub", (), {
-        "xConstructionAxis": "SUB_X", "yConstructionAxis": "SUB_Y", "zConstructionAxis": "SUB_Z",
-        "features": type("F", (), {"rectangularPatternFeatures": sub_rf,
-                                   "circularPatternFeatures": sub_cf})(),
-    })()
-    body = _BodyInSub("SubBoss", sub)
-    comp = type("C", (), {"bRepBodies": type("BB", (), {
-        "itemByName": staticmethod(lambda n: body if n == "SubBoss" else None),
-        "count": 1, "item": staticmethod(lambda i: body)})()})()
+    sub = MakeComp(name="Sub")
+    sub.xConstructionAxis, sub.yConstructionAxis, sub.zConstructionAxis = "SUB_X", "SUB_Y", "SUB_Z"
+    sub.features = types.SimpleNamespace(rectangularPatternFeatures=sub_rf,
+                                         circularPatternFeatures=sub_cf)
+    body = BRepBody("SubBoss", parent_component=sub)
     # root carries DIFFERENT axes so a mistaken root build would be detectable
     root_rf, root_cf = FakeRectFeatures(), FakeCircFeatures()
-    root = type("Root", (), {
-        "xConstructionAxis": "ROOT_X", "yConstructionAxis": "ROOT_Y", "zConstructionAxis": "ROOT_Z",
-        "features": type("F", (), {"rectangularPatternFeatures": root_rf,
-                                   "circularPatternFeatures": root_cf})()})()
-
-    class _D:
-        rootComponent = root
-        def findEntityByToken(self, t):
-            return []
-    d = _D()
-    pt._inputs._common.design = lambda: d
-    pt._inputs._common.target_component = lambda x: comp
-    # the tool's own _design() must see this design too
-    pt.app = type("A", (), {"activeProduct": d})()
-    pt._common.app = pt.app
-    adsk.fusion.Design.cast = lambda x: x if isinstance(x, _D) else None
+    root = MakeComp(name="Root")
+    root.xConstructionAxis, root.yConstructionAxis, root.zConstructionAxis = \
+        "ROOT_X", "ROOT_Y", "ROOT_Z"
+    root.features = types.SimpleNamespace(rectangularPatternFeatures=root_rf,
+                                          circularPatternFeatures=root_cf)
+    design = MakeDesign(comp=root)
+    design.activeComponent = MakeComp(name="Holder", bodies=[body])
+    install(pt, design)
     return sub_rf, sub_cf, root_rf, root_cf
 
 
@@ -256,11 +207,11 @@ def _planar_face():
 def _place(root, component, *full_paths):
     """Place `component` in the assembly under the given occurrence fullPathNames."""
     root.occurrences_by_component[_component_key(component)] = [
-        types.SimpleNamespace(fullPathName=p) for p in full_paths]
+        make_occurrence(p) for p in full_paths]
 
 
 def _other_component(name="Rail"):
-    return type("C", (), {"name": name, "entityToken": "TOKEN:" + name})()
+    return MakeComp(name=name, entity_token="TOKEN:" + name)
 
 
 def _install_with_axis_handles(handle_map=None, axes=()):
@@ -290,7 +241,7 @@ class TestCircular:
 
     def test_basic_full_ring(self):
         _, cf = _install(["Spoke:1"])
-        out = _payload(pt.handler(occurrences="Spoke:1", quantity=6,
+        out = payload(pt.handler(occurrences="Spoke:1", quantity=6,
                                            total_angle_deg=360, axis="z"))
         assert out["quantity"] == 6
         inp = cf.last_input
@@ -300,12 +251,12 @@ class TestCircular:
 
     def test_axis_selection(self):
         _, cf = _install(["Spoke:1"])
-        _payload(pt.handler(occurrences="Spoke:1", quantity=4, axis="y"))
+        payload(pt.handler(occurrences="Spoke:1", quantity=4, axis="y"))
         assert cf.last_input.axis == "AXIS_Y"
 
     def test_symmetric_flag(self):
         _, cf = _install(["Spoke:1"])
-        _payload(pt.handler(occurrences="Spoke:1", quantity=4, symmetric=True))
+        payload(pt.handler(occurrences="Spoke:1", quantity=4, symmetric=True))
         assert cf.last_input.isSymmetric is True
         assert cf.add_calls == 1
 
@@ -333,24 +284,39 @@ class TestCircular:
 
     def test_partial_arc_angle_string(self):
         _, cf = _install(["Spoke:1"])
-        out = _payload(pt.handler(occurrences="Spoke:1", quantity=3, total_angle_deg=90))
+        out = payload(pt.handler(occurrences="Spoke:1", quantity=3, total_angle_deg=90))
         # the angle is formatted as a "<float> deg" ValueInput string and echoed in payload
         assert cf.last_input.totalAngle == ("str", "90.0 deg")
         assert out["total_angle_deg"] == 90.0
 
     def test_symmetric_defaults_false(self):
         _, cf = _install(["Spoke:1"])
-        out = _payload(pt.handler(occurrences="Spoke:1", quantity=4))
+        out = payload(pt.handler(occurrences="Spoke:1", quantity=4))
         assert cf.last_input.isSymmetric is False
         assert out["symmetric"] is False
+
+
+class TestInstanceCountReadBack:
+    """The count is read off the CREATED feature, never echoed from the request."""
+
+    def test_a_feature_reporting_fewer_instances_is_an_error_naming_both_counts(self):
+        _, cf = _install(["Spoke:1"], circ_elements=3)
+        res = pt.handler(occurrences="Spoke:1", quantity=6)
+        assert res["isError"] is True
+        assert "created 3 instances but 6 were requested" in res["message"]
+        assert "design_delete_feature" in res["message"]
+
+    def test_a_matching_count_is_reported_from_the_feature(self):
+        _install(["Spoke:1"], circ_elements=6)
+        assert payload(pt.handler(occurrences="Spoke:1", quantity=6))["quantity"] == 6
 
 
 class TestBodyTargets:
 
     def test_circular_patterns_bodies_by_handle(self):
         h = "/v" + "B" * 70
-        rf, _ = _install_with_bodies({h: _FakeBody("FromHandle")})
-        out = _payload(pt.handler(bodies=h, quantity=4))
+        rf, _ = _install_with_bodies({h: BRepBody("FromHandle")})
+        out = payload(pt.handler(bodies=h, quantity=4))
         assert out["entity_kind"] == "bodies"
         assert out["entities"] == ["FromHandle"]
 
@@ -359,7 +325,7 @@ class TestBodyOwningComponent:
 
     def test_circular_builds_on_bodys_parent_component(self):
         sub_rf, sub_cf, root_rf, root_cf = _install_body_in_subcomponent()
-        out = _payload(pt.handler(bodies="SubBoss", quantity=6, axis="y"))
+        out = payload(pt.handler(bodies="SubBoss", quantity=6, axis="y"))
         assert out["entity_kind"] == "bodies"
         # the feature was created on the SUB-component (axis from the sub, not root)
         assert sub_cf.last_input is not None and sub_cf.last_input.axis == "SUB_Y"
@@ -371,21 +337,21 @@ class TestCircularAxisFromGeometry:
     def test_cylindrical_face_handle_reaches_createinput_as_the_face(self):
         f = _cylindrical_face()
         _, cf = _install_with_axis_handles({"CYL": f})
-        out = _payload(pt.handler(occurrences="Spoke:1", quantity=5, axis="CYL"))
+        out = payload(pt.handler(occurrences="Spoke:1", quantity=5, axis="CYL"))
         assert cf.last_input.axis is f            # the FACE, not the component's origin axis
         assert out["axis"] == "BRepFace"
 
     def test_straight_edge_handle_reaches_createinput(self):
         e = _linear_edge()
         _, cf = _install_with_axis_handles({"E": e})
-        out = _payload(pt.handler(occurrences="Spoke:1", quantity=3, axis="E"))
+        out = payload(pt.handler(occurrences="Spoke:1", quantity=3, axis="E"))
         assert cf.last_input.axis is e
         assert out["axis"] == "BRepEdge"
 
     def test_construction_axis_by_name(self):
         ax = _SimpleNamed("WheelAxis")
         _, cf = _install_with_axis_handles(axes=[ax])
-        out = _payload(pt.handler(occurrences="Spoke:1", quantity=5, axis="WheelAxis"))
+        out = payload(pt.handler(occurrences="Spoke:1", quantity=5, axis="WheelAxis"))
         assert cf.last_input.axis is ax
         assert out["axis"] == "WheelAxis"         # the datum's NAME, never the raw input token
 
@@ -406,12 +372,12 @@ class TestCircularAxisFromGeometry:
     def test_world_keys_still_resolve_to_the_origin_construction_axis(self):
         # regression: the world x/y/z keys must keep working exactly as they did.
         _, cf = _install_with_axis_handles()
-        out = _payload(pt.handler(occurrences="Spoke:1", quantity=4, axis="y"))
+        out = payload(pt.handler(occurrences="Spoke:1", quantity=4, axis="y"))
         assert cf.last_input.axis == "AXIS_Y" and out["axis"] == "y"
 
     def test_blank_axis_uses_the_kinds_default(self):
         _, cf = _install_with_axis_handles()
-        out = _payload(pt.handler(occurrences="Spoke:1", quantity=4, axis=""))
+        out = payload(pt.handler(occurrences="Spoke:1", quantity=4, axis=""))
         assert cf.last_input.axis == "AXIS_Z" and out["axis"] == "z"
 
     def test_a_foreign_construction_axis_is_proxied_via_its_component_not_its_parent(self):
@@ -427,5 +393,5 @@ class TestCircularAxisFromGeometry:
         ax.createForAssemblyContext = lambda occ, p=proxy: p
         _, cf = _install_with_axis_handles({"CA": ax})
         _place(pt.app.activeProduct.rootComponent, rail, "Assy:1+Rail:1")
-        _payload(pt.handler(occurrences="Spoke:1", quantity=4, axis="CA"))
+        payload(pt.handler(occurrences="Spoke:1", quantity=4, axis="CA"))
         assert cf.last_input.axis is proxy      # the PROXY reaches createInput, not the native

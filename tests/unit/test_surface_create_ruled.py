@@ -36,10 +36,10 @@ def _raises(_self):
 
 # ── fakes ──────────────────────────────────────────────────────────────────────
 
-def _body(name, is_solid=False):
+def _body(name, is_solid=False, solid_readable=True):
     """One BRepBody. entityToken defaults to the name, which is the key a before/after body census
-    subtracts on."""
-    return BRepBody(name, is_solid=is_solid)
+    subtracts on; solid_readable=False is the flag that REFUSES to read."""
+    return BRepBody(name, is_solid=is_solid, solid_readable=solid_readable)
 
 
 def _proxy_of(body):
@@ -50,19 +50,6 @@ def _proxy_of(body):
     same Python object to both collections would let an identity key pass while it silently reported
     the parent body as newly created."""
     return BRepBody(body.name, is_solid=body.isSolid, entity_token=body.entityToken)
-
-
-class _BlindSolidFlag:
-    """A result body whose isSolid REFUSES to read - the flag `any()` folds into a confident False,
-    which this payload publishes as "an open surface body"."""
-
-    def __init__(self, name="Blind1"):
-        self.name = name
-        self.entityToken = name
-
-    @property
-    def isSolid(self):
-        raise RuntimeError("3 : flag unavailable")
 
 
 def _feature(name="RuledSurface1", parent=None, new=(), ruled_type=None, distance=1.0, angle=0.0,
@@ -369,7 +356,8 @@ class TestResultBody:
     def test_an_unreadable_solid_flag_is_null_not_an_open_sheet(self, wired):
         # body_facts publishes each flag True/False/None; any() folds the None into False, and this
         # payload's False is the claim "a new OPEN SURFACE body" - about a flag nobody read.
-        wired.ruled.feature = _feature(parent=wired.parent, new=[_BlindSolidFlag()])
+        wired.ruled.feature = _feature(parent=wired.parent,
+                                       new=[_body("Blind1", solid_readable=False)])
         body = payload(_call())
         assert body["is_solid"] is None
         assert "is_solid" in body["unverified"]
@@ -387,12 +375,13 @@ class TestResultBody:
     def test_one_solid_body_still_wins_over_an_unreadable_sibling(self, wired):
         # any-True beats an unknown: a result that DID read solid is the verdict, unread or not.
         wired.ruled.feature = _feature(parent=wired.parent,
-                                       new=[_BlindSolidFlag(), _body("S1", is_solid=True)])
+                                       new=[_body("Blind1", solid_readable=False),
+                                            _body("S1", is_solid=True)])
         body = payload(_call())
         assert body["is_solid"] is True and "SOLID" in body["note"]
 
     def test_direct_mode_publishes_a_null_solid_flag_as_unverified(self, wired):
-        landed = _BlindSolidFlag("RuledSurf1")
+        landed = _body("RuledSurf1", solid_readable=False)
         wired.ruled.feature = None
         wired.ruled.add = lambda _i: wired.comp.bRepBodies._items.append(landed)
         wired.design.designType = 0                                   # direct

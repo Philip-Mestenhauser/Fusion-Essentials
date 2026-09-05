@@ -13,7 +13,7 @@ tools deliberately not driven unattended, `PENDING` the honest todo.
 from verify_acts_cam import (
     CAM_SETUP, FLIP_SETUP, MACHINING_EXTENSION, _CAM, _CAM_DELIVER, _CAM_EXTENSION,
     _CAM_FB_DELIVER, _CAM_MULTI_POST, _CAM_SCOPE, _CAM_SECOND_SETUP, _CAM_STORY, _CAM_TURNING,
-    _MX_SETUP, _ROT_SETUP, _SW_SETUP, _SW_SETUP2, _SWARF_RIG, _TURN_SETUP)
+    _CAM_TURNING_POST, _MX_SETUP, _ROT_SETUP, _SW_SETUP, _SW_SETUP2, _SWARF_RIG, _TURN_SETUP)
 from verify_acts_doc import _FINALE, _OVERTURE, _SHOWCASE
 from verify_acts_mesh import _MACHINING, _MESH, _NESTING
 from verify_acts_model import (
@@ -94,10 +94,12 @@ _ACT_PROGRAM = [
     # document and depend on nothing the story built, so the act runs its narrative always - where
     # the entitlement is there to run it (ACT_NEEDS below).
     ("ACT 10c - CAM: EXTENSION STRATEGIES", None, _CAM_EXTENSION, []),
-    # The turned profile, on the same cameo: the one axis family that needs no extension, and the
-    # one job the sweep does not post - posting a turning program is not measured. It depends on
-    # nothing the story built, so no precondition and no fallback.
+    # The turned profile, on the same cameo: the one axis family that needs no extension. It
+    # depends on nothing the story built, so no precondition and no fallback - and its post is an
+    # act of its own: only valid toolpaths post, and the boundary poll that certifies the turning
+    # generation runs BETWEEN acts, not between the steps of one.
     ("ACT 10c2 - CAM: TURNING", None, _CAM_TURNING, []),
+    ("ACT 10c3 - CAM: TURNING POST", None, _CAM_TURNING_POST, []),
     # The last two acts machine the PART - the flip setup and the program that spans it and the
     # first - so each is gated on the job ACT 10a built, and falls back to nothing rather than to a
     # scratch world: every tool they drive is driven again by the scratch-stock fallbacks above, so
@@ -593,7 +595,9 @@ STORY = {
                        "carrying its own preset and a 6 mm ball, added at the index the library's "
                        "own count named - and the flute LENGTHENED on the mill with the "
                        "expression read back off the tool, which is where a cutting-tool dimension "
-                       "is edited (the operation refuses that write)"),
+                       "is edited (the operation refuses that write). And the PROBE the probing "
+                       "cycle needs, cloned by from_type from the shipped 'Probes' library at the "
+                       "index the document library's own count named"),
     "cam_create_setup": ("create the milling setup on the bracket in the vise, and the FLIP setup "
                          "that turns it over on its own WCS - the pair one NC program ends the "
                          "sweep on; then the setups on the drafted cameo: two milling, one for the "
@@ -618,7 +622,9 @@ STORY = {
                              "flow) in a setup of their own, a rotary wrap in another - both "
                              "extension strategies - and the four turning cycles - face, profile "
                              "roughing, profile finishing and the part-off - each created with no "
-                             "selection at all"),
+                             "selection at all. And the PROBING cycle on the part itself: a Probe "
+                             "WCS pass created with the cloned probe, which is the tool kind a "
+                             "probing strategy is refused without"),
     "cam_select_geometry": ("aim every operation at the feature it cuts: the stock-top face, the "
                             "boss top and the stepped top through the FACE kind (which takes the "
                             "loops that bound the face), the pocket FLOOR through the POCKET kind "
@@ -649,7 +655,9 @@ STORY = {
                             "inputGeometry. The sketch kind drives the engraving, and the surfaces "
                             "kind lands ONE drafted wall on the multi-axis finishing pass's FLOOR "
                             "set and on the flow's DRIVE set - the same face, two roles, each read "
-                            "back off the parameter it landed on"),
+                            "back off the parameter it landed on. The PROBE kind lands the stepped "
+                            "top on the probing cycle's own probe_selection input, named in the "
+                            "payload beside the count"),
     "cam_edit_operation": ("edit the face operation's feed; then park the drill operation and "
                            "restore it - the suppression WRITE, with hasToolpath read back on both "
                            "sides of the set so the discarded toolpath is reported, not implied. "

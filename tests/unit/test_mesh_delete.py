@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import load_tool, error_message
+from conftest import MakeComp, MakeDesign, MeshBody, install, load_tool, error_message
 
 md = load_tool("mesh_delete")
 
@@ -26,68 +26,14 @@ def _payload(result):
 
 # ── fakes ──────────────────────────────────────────────────────────────────────────────────────
 
-class _Coll:
-    def __init__(self, items=()):
-        self._items = list(items)
-
-    @property
-    def count(self):
-        return len(self._items)
-
-    def item(self, i):
-        return self._items[i] if 0 <= i < len(self._items) else None
-
-
-class _FakeMesh:
-    """Stands in for adsk.fusion.MeshBody. A REALISTIC successful deleteMe() removes itself from its
-    owning component's meshBodies collection - a genuine disappearance from the collection a fresh
-    walk would see. isValid is LIVE-VERIFIED to stay TRUE even after a successful delete (a held
-    wrapper never reports its own removal) - it is NEVER flipped here, on purpose: any test/handler
-    logic that trusts it must be proven wrong, not accidentally right. A test simulating the platform
-    LYING (nothing actually removed) overrides .deleteMe directly."""
-    def __init__(self, name="Scan1", token="MTOK::Scan1", delete_result=True):
-        self.name = name
-        self.entityToken = token
-        self._delete_result = delete_result
-        self.deleted = False
-        self.parentComponent = None
-        self.isValid = True   # stays True even after a real delete - see class docstring
+class _MeshBody(MeshBody):
+    """Records what deleteMe() answered, so a test can tell a delete that was DECLINED from one that
+    was never attempted. The removal itself is the shared fake's; `deletes=False` is the decline."""
+    deleted = False
 
     def deleteMe(self):
-        self.deleted = self._delete_result
-        if self._delete_result and self.parentComponent is not None:
-            items = self.parentComponent.meshBodies._items
-            if self in items:
-                items.remove(self)
-        return self._delete_result
-
-
-class _FakeComp:
-    def __init__(self, name="Comp", meshes=(), features=None):
-        self.name = name
-        self.meshBodies = _Coll(meshes)
-        self.features = features
-
-
-class _FakeDesign:
-    """findEntityByToken LIVE-VERIFIED returns the PRE-REMOVE body even after a successful delete (a
-    historical-resolution artifact) - by DEFAULT it stays wired that way (returns whatever `_tokens`
-    says, never auto-clearing on delete), so a test trusting it would get the wrong (stale) answer;
-    only the mesh_delete tests exercise this deliberately."""
-    def __init__(self, comp, design_type=0, tokens=None, all_components=None):
-        self.rootComponent = comp
-        self.activeComponent = comp
-        self.designType = design_type   # 0 direct, 1 parametric (current_design_type's int fallback)
-        self._tokens = dict(tokens or {})
-        self._all_components = list(all_components) if all_components is not None else [comp]
-
-    @property
-    def allComponents(self):
-        return _Coll(self._all_components)
-
-    def findEntityByToken(self, token):
-        e = self._tokens.get(token)
-        return [e] if e is not None else []
+        self.deleted = super().deleteMe()
+        return self.deleted
 
 
 class _FakeMeshRemoveFeatures:
@@ -138,15 +84,13 @@ class _FakeFeatures:
 class TestDirectDelete:
     @pytest.fixture
     def rig(self, monkeypatch):
-        comp = _FakeComp("Comp", meshes=[])
-        mesh = _FakeMesh()
+        comp = MakeComp("Comp", mesh_bodies=[])
+        mesh = _MeshBody()
         mesh.parentComponent = comp
         comp.meshBodies._items.append(mesh)
-        design = _FakeDesign(comp, design_type=0)
-        monkeypatch.setattr(md._common, "design", lambda: design)
+        design = install(md, MakeDesign(comp=comp, design_type=0))
         monkeypatch.setattr(md._MESH, "resolve", lambda raw: (mesh, None))
-        state = SimpleNamespace(mesh=mesh, comp=comp, design=design, monkeypatch=monkeypatch)
-        return state
+        return SimpleNamespace(mesh=mesh, comp=comp, design=design, monkeypatch=monkeypatch)
 
     def test_deletes_and_confirms_gone(self, rig):
         out = _payload(md.handler(mesh="H"))
@@ -157,7 +101,7 @@ class TestDirectDelete:
         assert rig.mesh.deleted is True
 
     def test_a_declined_delete_is_an_error(self, rig):
-        rig.mesh._delete_result = False
+        rig.mesh._deletes = False
         assert "declined" in error_message(md.handler(mesh="H"))
         # nothing changed - the mesh is still in the collection
         assert rig.mesh in rig.comp.meshBodies._items
@@ -197,7 +141,7 @@ class TestDirectDelete:
         # success even though its same-named sibling remains: the count-based check only requires
         # exactly ONE FEWER 'Scan1' in this component (n_after == n_before - 1 == 1), not zero - a
         # bare "does this name still appear" check would wrongly fail this.
-        duplicate = _FakeMesh(name="Scan1", token="MTOK::Other")
+        duplicate = _MeshBody(name="Scan1", token="MTOK::Other")
         duplicate.parentComponent = rig.comp
         rig.comp.meshBodies._items.append(duplicate)   # a second "Scan1" already present pre-delete
         out = _payload(md.handler(mesh="H"))
@@ -209,17 +153,16 @@ class TestDirectDelete:
     def test_same_named_mesh_in_a_different_component_is_not_a_false_alarm(self, monkeypatch):
         # A handle resolves one of two same-named meshes across components; the untouched copy in
         # the other component is not a survivor of this delete.
-        comp_a = _FakeComp("CompA", meshes=[])
-        comp_b = _FakeComp("CompB", meshes=[])
-        mesh_a = _FakeMesh(name="Twin", token="MTOK::A")
+        comp_a = MakeComp("CompA", mesh_bodies=[])
+        comp_b = MakeComp("CompB", mesh_bodies=[])
+        mesh_a = _MeshBody(name="Twin", token="MTOK::A")
         mesh_a.parentComponent = comp_a
         comp_a.meshBodies._items.append(mesh_a)
-        mesh_b = _FakeMesh(name="Twin", token="MTOK::B")
+        mesh_b = _MeshBody(name="Twin", token="MTOK::B")
         mesh_b.parentComponent = comp_b
         comp_b.meshBodies._items.append(mesh_b)
 
-        design = _FakeDesign(comp_a, design_type=0, all_components=[comp_a, comp_b])
-        monkeypatch.setattr(md._common, "design", lambda: design)
+        install(md, MakeDesign(comp=comp_a, design_type=0, all_components=[comp_a, comp_b]))
         monkeypatch.setattr(md._MESH, "resolve", lambda raw: (mesh_a, None))   # a HANDLE, not a name
 
         out = _payload(md.handler(mesh="<handle for CompA's Twin>"))
@@ -258,21 +201,20 @@ class TestDirectDelete:
 class TestParametricDelete:
     def _setup(self, monkeypatch, raise_on_add=False, none_feature=False,
                create_input_returns_none=False, remove_on_delete=True):
-        comp = _FakeComp("Comp", meshes=[])
-        mesh = _FakeMesh()
+        comp = MakeComp("Comp", mesh_bodies=[])
+        mesh = _MeshBody()
         mesh.parentComponent = comp
         comp.meshBodies._items.append(mesh)
 
         def _on_add():
             if remove_on_delete and mesh in comp.meshBodies._items:
-                comp.meshBodies._items.remove(mesh)   # isValid intentionally left True - see _FakeMesh
+                comp.meshBodies._items.remove(mesh)   # isValid intentionally left True - see _MeshBody
 
         mrf = _FakeMeshRemoveFeatures(raise_on_add=raise_on_add, none_feature=none_feature,
                                       create_input_returns_none=create_input_returns_none,
                                       on_add=_on_add)
         comp.features = _FakeFeatures(mesh_remove=mrf)
-        design = _FakeDesign(comp, design_type=1)
-        monkeypatch.setattr(md._common, "design", lambda: design)
+        design = install(md, MakeDesign(comp=comp, design_type=1))
         monkeypatch.setattr(md._MESH, "resolve", lambda raw: (mesh, None))
         return mesh, comp, design, mrf
 
@@ -308,13 +250,12 @@ class TestParametricDelete:
         assert "returned nothing" in error_message(md.handler(mesh="H"))
 
     def test_missing_remove_features_collection_errors(self, monkeypatch):
-        comp = _FakeComp("Comp", meshes=[])
-        mesh = _FakeMesh()
+        comp = MakeComp("Comp", mesh_bodies=[])
+        mesh = _MeshBody()
         mesh.parentComponent = comp
         comp.meshBodies._items.append(mesh)
         comp.features = _FakeFeatures(mesh_remove=None)
-        design = _FakeDesign(comp, design_type=1)
-        monkeypatch.setattr(md._common, "design", lambda: design)
+        install(md, MakeDesign(comp=comp, design_type=1))
         monkeypatch.setattr(md._MESH, "resolve", lambda raw: (mesh, None))
         res = md.handler(mesh="H")
         assert res["isError"] is True
@@ -347,20 +288,18 @@ class TestParametricDelete:
 
 class TestDesignWideMeshResolution:
     def test_child_component_mesh_resolves_with_root_active(self, monkeypatch):
-        root = _FakeComp("Root", meshes=[])
-        root.allOccurrences = []
-        child = _FakeComp("MeshChild", meshes=[])
-        child_mesh = _FakeMesh(name="ChildMesh", token="MTOK::ChildMesh")
+        root = MakeComp("Root", mesh_bodies=[])
+        child = MakeComp("MeshChild", mesh_bodies=[])
+        child_mesh = _MeshBody(name="ChildMesh", token="MTOK::ChildMesh")
         child_mesh.parentComponent = child
         child.meshBodies._items.append(child_mesh)
 
-        design = _FakeDesign(root, design_type=0, all_components=[root, child])
+        design = MakeDesign(comp=root, design_type=0, all_components=[root, child])
         assert design.activeComponent is root   # ROOT is active, not the mesh's owner
 
         import adsk.fusion
-        monkeypatch.setattr(adsk.fusion, "MeshBody", _FakeMesh)
-        monkeypatch.setattr(md._common, "design", lambda: design)
-        monkeypatch.setattr(md._inputs._common, "design", lambda: design)   # the dual-seam trap
+        monkeypatch.setattr(adsk.fusion, "MeshBody", MeshBody)
+        install(md, design)          # both design seams - the dual-seam trap
 
         out = _payload(md.handler(mesh="ChildMesh"))
         assert out["deleted"] == "ChildMesh"

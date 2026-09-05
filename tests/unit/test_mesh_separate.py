@@ -20,23 +20,30 @@ import types
 import adsk.fusion
 import pytest
 
-from conftest import MeshBody, go_stale, load_tool, payload, error_message
+from conftest import (MakeComp, MakeDesign, MeshBody, go_stale, install, load_tool, payload,
+                      error_message)
 
 msp = load_tool("mesh_separate")
 
 
 # ── fakes ────────────────────────────────────────────────────────────────────────────────────────
 
-class _Coll:
-    def __init__(self, items=()):
-        self._items = list(items)
+class _MeshComp(MakeComp):
+    """A component whose meshBodies read RAISES once `dead` is set - the census host that stops
+    answering mid-flight."""
+    def __init__(self, *args, **kwargs):
+        self.dead = False
+        super().__init__(*args, **kwargs)
 
     @property
-    def count(self):
-        return len(self._items)
+    def meshBodies(self):
+        if self.dead:
+            raise RuntimeError("3 : object is no longer valid")
+        return self._mesh_bodies
 
-    def item(self, i):
-        return self._items[i] if 0 <= i < len(self._items) else None
+    @meshBodies.setter
+    def meshBodies(self, value):
+        self._mesh_bodies = value
 
 
 class _SeparateInput:
@@ -96,49 +103,18 @@ class _Features:
         self.meshSeparateFeatures = separate
 
 
-class _Comp:
-    def __init__(self, name="Comp", meshes=(), features=None):
-        self.name = name
-        self.dead = False
-        self._meshes = _Coll(meshes)
-        self.features = features
-        self.bRepBodies = _Coll()
-
-    @property
-    def meshBodies(self):
-        if self.dead:
-            raise RuntimeError("3 : object is no longer valid")
-        return self._meshes
-
-
-class _Design:
-    def __init__(self, comp, design_type=1):
-        self.rootComponent = comp
-        self.activeComponent = comp
-        self.designType = design_type    # 1 parametric, 0 direct (current_design_type's int fallback)
-
-    @property
-    def allComponents(self):
-        return _Coll([self.rootComponent])
-
-    def findEntityByToken(self, token):
-        return []
-
-
 # ── rig ──────────────────────────────────────────────────────────────────────────────────────────
 
 def _rig(monkeypatch, meshes=None, on_add=None, design_type=1, **feat_kw):
     """A component holding 4 mesh bodies, the first of which is the separate target."""
     meshes = meshes if meshes is not None else [MeshBody("MeshSepTarget"), MeshBody("MeshShellTarget"),
                                                 MeshBody("MeshSmoothTarget"), MeshBody("MeshRevTarget")]
-    comp = _Comp(meshes=meshes)
+    comp = _MeshComp("Comp", mesh_bodies=meshes)
     for m in meshes:
         m.parentComponent = comp
     feats = _SeparateFeatures(on_add=on_add, **feat_kw)
     comp.features = _Features(separate=feats)
-    design = _Design(comp, design_type=design_type)
-    monkeypatch.setattr(msp._common, "design", lambda: design)
-    monkeypatch.setattr(msp._inputs._common, "design", lambda: design)
+    install(msp, MakeDesign(comp=comp, design_type=design_type))
     monkeypatch.setattr(msp._MESH, "resolve", lambda raw: (meshes[0], None))
     return meshes[0], comp, feats
 
@@ -162,14 +138,12 @@ def rig(monkeypatch):
     target = MeshBody("MeshSepTarget")
     meshes = [target, MeshBody("MeshShellTarget"), MeshBody("MeshSmoothTarget"),
               MeshBody("MeshRevTarget")]
-    comp = _Comp(meshes=meshes)
+    comp = _MeshComp("Comp", mesh_bodies=meshes)
     for m in meshes:
         m.parentComponent = comp
     feats = _SeparateFeatures(on_add=_split(comp, target))
     comp.features = _Features(separate=feats)
-    design = _Design(comp)
-    monkeypatch.setattr(msp._common, "design", lambda: design)
-    monkeypatch.setattr(msp._inputs._common, "design", lambda: design)
+    install(msp, MakeDesign(comp=comp, design_type=1))
     monkeypatch.setattr(msp._MESH, "resolve", lambda raw: (target, None))
     return types.SimpleNamespace(mesh=target, comp=comp, feats=feats, monkeypatch=monkeypatch)
 
@@ -244,8 +218,9 @@ class TestVerification:
         # starts answering a DIFFERENT component afterwards must not swing the census onto it -
         # the difference of two unrelated counts is a fabricated verdict, not a measured one.
         target = MeshBody("MeshSepTarget")
-        home = _Comp("Home", meshes=[target])
-        elsewhere = _Comp("Elsewhere", meshes=[MeshBody("X"), MeshBody("Y"), MeshBody("Z")])
+        home = _MeshComp("Home", mesh_bodies=[target])
+        elsewhere = _MeshComp("Elsewhere",
+                              mesh_bodies=[MeshBody("X"), MeshBody("Y"), MeshBody("Z")])
         target.parentComponent = home
 
         def _apply():
@@ -257,9 +232,7 @@ class TestVerification:
         feats = _SeparateFeatures(on_add=_apply)
         home.features = _Features(separate=feats)
         elsewhere.features = _Features(separate=feats)
-        design = _Design(home)
-        monkeypatch.setattr(msp._common, "design", lambda: design)
-        monkeypatch.setattr(msp._inputs._common, "design", lambda: design)
+        install(msp, MakeDesign(comp=home, design_type=1))
         monkeypatch.setattr(msp._MESH, "resolve", lambda raw: (target, None))
         out = payload(msp.handler(mesh="H"))
         assert out["component"] == "Home"
@@ -269,14 +242,12 @@ class TestVerification:
     def test_a_surviving_input_is_not_claimed_as_consumed(self, monkeypatch):
         target = MeshBody("MeshSepTarget")
         meshes = [target, MeshBody("Other")]
-        comp = _Comp(meshes=meshes)
+        comp = _MeshComp("Comp", mesh_bodies=meshes)
         for m in meshes:
             m.parentComponent = comp
         feats = _SeparateFeatures(on_add=_split(comp, target, consume=False))
         comp.features = _Features(separate=feats)
-        design = _Design(comp)
-        monkeypatch.setattr(msp._common, "design", lambda: design)
-        monkeypatch.setattr(msp._inputs._common, "design", lambda: design)
+        install(msp, MakeDesign(comp=comp, design_type=1))
         monkeypatch.setattr(msp._MESH, "resolve", lambda raw: (target, None))
         out = payload(msp.handler(mesh="H"))
         assert out["input_consumed"] is False
@@ -284,13 +255,11 @@ class TestVerification:
 
     def test_a_split_into_three_shells_reports_all_three(self, monkeypatch):
         target = MeshBody("MeshSepTarget")
-        comp = _Comp(meshes=[target])
+        comp = _MeshComp("Comp", mesh_bodies=[target])
         target.parentComponent = comp
         feats = _SeparateFeatures(on_add=_split(comp, target, pieces=("A", "B", "C")))
         comp.features = _Features(separate=feats)
-        design = _Design(comp)
-        monkeypatch.setattr(msp._common, "design", lambda: design)
-        monkeypatch.setattr(msp._inputs._common, "design", lambda: design)
+        install(msp, MakeDesign(comp=comp, design_type=1))
         monkeypatch.setattr(msp._MESH, "resolve", lambda raw: (target, None))
         out = payload(msp.handler(mesh="H"))
         assert out["pieces"] == ["A", "B", "C"]
@@ -306,13 +275,11 @@ class TestVerification:
         # count is unchanged (2 -> 2) - the same shell under a new auto-name
         target = MeshBody("MeshBody4")
         other = MeshBody("MeshBody3")
-        comp = _Comp(meshes=[other, target])
+        comp = _MeshComp("Comp", mesh_bodies=[other, target])
         target.parentComponent = other.parentComponent = comp
         feats = _SeparateFeatures(on_add=_split(comp, target, pieces=("MeshBody5",)))
         comp.features = _Features(separate=feats)
-        design = _Design(comp)
-        monkeypatch.setattr(msp._common, "design", lambda: design)
-        monkeypatch.setattr(msp._inputs._common, "design", lambda: design)
+        install(msp, MakeDesign(comp=comp, design_type=1))
         monkeypatch.setattr(msp._MESH, "resolve", lambda raw: (target, None))
         msg = error_message(msp.handler(mesh="H"))
         assert "2 mesh bodies before and 2 after" in msg
@@ -324,13 +291,11 @@ class TestVerification:
         # the rename clause is only true when the input is GONE - a surviving input means the new
         # body is something else, and the error must not say otherwise
         target = MeshBody("MeshSepTarget")
-        comp = _Comp(meshes=[target])
+        comp = _MeshComp("Comp", mesh_bodies=[target])
         target.parentComponent = comp
         feats = _SeparateFeatures(on_add=_split(comp, target, pieces=("OnlyOne",), consume=False))
         comp.features = _Features(separate=feats)
-        design = _Design(comp)
-        monkeypatch.setattr(msp._common, "design", lambda: design)
-        monkeypatch.setattr(msp._inputs._common, "design", lambda: design)
+        install(msp, MakeDesign(comp=comp, design_type=1))
         monkeypatch.setattr(msp._MESH, "resolve", lambda raw: (target, None))
         msg = error_message(msp.handler(mesh="H"))
         assert "1 new body name appeared" in msg and "at least 2" in msg
@@ -351,13 +316,11 @@ class TestVerification:
 class TestModeRouting:
     def test_direct_mode_returns_no_feature_yet_the_landed_split_is_success(self, monkeypatch):
         target = MeshBody("MeshSepTarget")
-        comp = _Comp(meshes=[target])
+        comp = _MeshComp("Comp", mesh_bodies=[target])
         target.parentComponent = comp
         feats = _SeparateFeatures(on_add=_split(comp, target), none_feature=True)
         comp.features = _Features(separate=feats)
-        design = _Design(comp, design_type=0)
-        monkeypatch.setattr(msp._common, "design", lambda: design)
-        monkeypatch.setattr(msp._inputs._common, "design", lambda: design)
+        install(msp, MakeDesign(comp=comp, design_type=0))
         monkeypatch.setattr(msp._MESH, "resolve", lambda raw: (target, None))
         out = payload(msp.handler(mesh="H"))
         assert out["pieces"] == ["MeshBody5", "MeshBody6"]
@@ -371,13 +334,11 @@ class TestModeRouting:
 
     def test_parametric_no_feature_return_stays_an_honest_error(self, monkeypatch):
         target = MeshBody("MeshSepTarget")
-        comp = _Comp(meshes=[target])
+        comp = _MeshComp("Comp", mesh_bodies=[target])
         target.parentComponent = comp
         feats = _SeparateFeatures(on_add=_split(comp, target), none_feature=True)
         comp.features = _Features(separate=feats)
-        design = _Design(comp, design_type=1)
-        monkeypatch.setattr(msp._common, "design", lambda: design)
-        monkeypatch.setattr(msp._inputs._common, "design", lambda: design)
+        install(msp, MakeDesign(comp=comp, design_type=1))
         monkeypatch.setattr(msp._MESH, "resolve", lambda raw: (target, None))
         assert "returned no feature" in error_message(msp.handler(mesh="H"))
 

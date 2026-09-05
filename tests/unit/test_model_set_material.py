@@ -4,32 +4,20 @@ Pinned: the material search (exact name across document + libraries), the docume
 no-match candidate hint, the cross-library ambiguity refusal, per-body density read-back, and
 partial-success reporting across a multi-body target.
 
-Fakes are built locally with monkeypatch (conftest's shared fakes carry no material/library surface),
-and BOTH design seams (the tool's own ``_common`` and ``_inputs._common``) are patched to the same
-design - the dual-seam trap - so TargetRef('') resolves against the same root component the handler
-reads.
+Material and MaterialLibrary have no shared fake, so those two are built locally; the design, its
+components and its bodies come from conftest, and ``install`` wires BOTH design seams (the tool's own
+``_common`` and ``_inputs._common``) to the same design - the dual-seam trap - so TargetRef('')
+resolves against the same root component the handler reads.
 """
 
 from types import SimpleNamespace
 
 import pytest
 
-from conftest import load_tool, payload as _payload
+from conftest import (load_tool, install, make_design, payload as _payload,
+                      BRepBody, MakeComp, MakeDesign, _NamedCollection)
 
 mm = load_tool("model_set_material")
-
-
-class _Coll:
-    """Fusion count/item(i) collection."""
-    def __init__(self, items=()):
-        self._items = list(items)
-
-    @property
-    def count(self):
-        return len(self._items)
-
-    def item(self, i):
-        return self._items[i] if 0 <= i < len(self._items) else None
 
 
 def _material(name):
@@ -39,14 +27,14 @@ def _material(name):
 class _Lib:
     def __init__(self, name, materials):
         self.name = name
-        self.materials = _Coll(materials)
+        self.materials = _NamedCollection(materials)
 
 
-class _Body:
+class _Body(BRepBody):
     """A body whose ``.material`` setter records the assigned material (or raises when fail=True, to
     exercise partial success). ``physicalProperties.density`` is kg/cm3 (the API's unit)."""
     def __init__(self, name, density=None, fail=False):
-        self.name = name
+        super().__init__(name=name)
         self._mat = None
         self._fail = fail
         self.physicalProperties = SimpleNamespace(density=density)
@@ -62,25 +50,29 @@ class _Body:
         self._mat = m
 
 
-class _Design:
-    def __init__(self, bodies, doc_materials=(), libraries=()):
-        self.rootComponent = SimpleNamespace(name="Root", bRepBodies=_Coll(bodies))
-        self.materials = _Coll(doc_materials)
+class _NoComponentList(MakeDesign):
+    """A design whose component list does not read - all_components degrades to the root alone."""
+    @property
+    def allComponents(self):
+        raise AttributeError("allComponents")
 
 
 @pytest.fixture
 def wired(monkeypatch):
-    """Build a fake design + material catalog and patch both design seams + the module ``app`` (whose
-    ``materialLibraries`` the search reads). Returns the design."""
+    """Build a fake design + material catalog, wire both design seams, and point the module ``app``
+    (whose ``materialLibraries`` the search reads) at the libraries. Returns the design."""
     def _make(bodies, doc_materials=(), libraries=(), child_components=()):
-        design = _Design(bodies, doc_materials, libraries)
+        root = MakeComp(name="Root", bodies=list(bodies))
         if child_components:
             # design.allComponents carries the ROOT plus every child - the shape _common
-            # .all_components reads; a design without it degrades to root-only, as live.
-            design.allComponents = _Coll([design.rootComponent] + list(child_components))
-        monkeypatch.setattr(mm._common, "design", lambda: design)
-        monkeypatch.setattr(mm._inputs._common, "design", lambda: design)
-        monkeypatch.setattr(mm, "app", SimpleNamespace(materialLibraries=_Coll(libraries)))
+            # .all_components reads; a design whose list does not read degrades to root-only, as live.
+            design = make_design(comp=root, all_components=[root] + list(child_components))
+        else:
+            design = _NoComponentList(comp=root)
+        design.materials = _NamedCollection(doc_materials)
+        install(mm, design)
+        monkeypatch.setattr(mm, "app",
+                            SimpleNamespace(materialLibraries=_NamedCollection(libraries)))
         return design
     return _make
 
@@ -116,7 +108,7 @@ class TestWholeDesignTarget:
         # The only body here belongs to a CHILD component: a root-only walk assigns nothing and
         # leaves model_inspect's mass wrong for the one part that has a body.
         child_body = _Body("Child1", density=0.00785)
-        child = SimpleNamespace(name="Child", bRepBodies=_Coll([child_body]), meshBodies=_Coll())
+        child = MakeComp(name="Child", bodies=[child_body], mesh_bodies=[])
         wired([], libraries=[_Lib("Lib", [_material("Steel")])], child_components=[child])
         out = _payload(mm.handler(target="", material="Steel"))
         assert [a["body"] for a in out["applied_to"]] == ["Child1"]
@@ -129,7 +121,7 @@ class TestWholeDesignTarget:
         # Two components each holding a 'Body1': rows keyed on the body name alone are two
         # identical rows, and a failed one names nothing the caller can act on.
         twin = _Body("Body1", density=0.00785)
-        child = SimpleNamespace(name="Child", bRepBodies=_Coll([twin]), meshBodies=_Coll())
+        child = MakeComp(name="Child", bodies=[twin], mesh_bodies=[])
         wired([_Body("Body1", density=0.00785)],
               libraries=[_Lib("Lib", [_material("Steel")])], child_components=[child])
         out = _payload(mm.handler(target="", material="Steel"))
@@ -152,7 +144,7 @@ class TestWholeDesignTarget:
         # bodies and publishes no design-wide count.
         root_body = _Body("Root1", density=0.00785)
         child_body = _Body("Child1", density=0.00785)
-        child = SimpleNamespace(name="Child", bRepBodies=_Coll([child_body]), meshBodies=_Coll())
+        child = MakeComp(name="Child", bodies=[child_body], mesh_bodies=[])
         wired([root_body], libraries=[_Lib("Lib", [_material("Steel")])], child_components=[child])
         monkeypatch.setattr(mm._TARGET, "resolve", lambda raw: ((child, "component"), None))
         out = _payload(mm.handler(target="Child", material="Steel"))

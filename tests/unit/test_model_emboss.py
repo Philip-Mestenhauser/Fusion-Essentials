@@ -9,9 +9,9 @@ health-error gate, the direct-mode no-feature path, and the ModelParameter depth
 
 import types
 
-from conftest import (load_tool, make_design, install, MakeComp, BRepBody, BRepFace, go_stale,
-                      payload, error_message, assert_no_active_design, assert_unknown_units,
-                      _NamedCollection)
+from conftest import (load_tool, make_design, install, MakeComp, BRepBody, BRepFace, Profile,
+                      go_stale, make_sketch, payload, error_message, assert_no_active_design,
+                      assert_unknown_units, _NamedCollection)
 
 em = load_tool("model_emboss")
 
@@ -30,7 +30,9 @@ def make_face(body):
 
 def make_profile(comp):
     """A sketch profile whose sketch is owned by `comp` - the component the feature must be built on."""
-    return types.SimpleNamespace(parentSketch=types.SimpleNamespace(parentComponent=comp))
+    sketch = make_sketch(name="ProfileSketch")
+    sketch.parentComponent = comp
+    return Profile(parent_sketch=sketch)
 
 
 def make_value_input(value):
@@ -90,7 +92,9 @@ def make_text_sketch(comp=None, name="Nameplate", texts=1):
     """A sketch holding ONLY sketch texts - the nameplate case: it has no closed profile and never
     will. Each text is tagged '<sketch>#<i>' so a test can tell which one reached createInput. A
     sketch left unparented is adopted by the component _wire builds."""
-    sketch = types.SimpleNamespace(name=name, parentComponent=comp, profiles=_NamedCollection())
+    sketch = make_sketch(name=name)
+    sketch.parentComponent = comp
+    sketch.profiles = _NamedCollection()
     sketch.sketchTexts = _NamedCollection(
         [types.SimpleNamespace(tag=f"{name}#{i}", parentSketch=sketch) for i in range(texts)])
     return sketch
@@ -342,7 +346,7 @@ class TestHostComponent:
         feats = FakeEmbossFeatures([body], volume_delta=2.0)
         _wire(monkeypatch, feats, [make_face(body)])
         monkeypatch.setattr(em._PROFILES, "resolve",
-                            lambda raw, component="": ([types.SimpleNamespace(parentSketch=None)], None))
+                            lambda raw, component="": ([Profile()], None))
         out = payload(em.handler(profiles=["p"], faces=["h"], depth=3, units="mm"))
         assert out["embossed"] is True
         assert feats.last_input is not None

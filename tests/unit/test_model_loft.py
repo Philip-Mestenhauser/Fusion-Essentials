@@ -1,60 +1,24 @@
 """Unit tests for model_loft.py - the ordered sections, rails/centerline and the cut evidence."""
 
 import json
-from conftest import load_tool
+
+import adsk.core
+import adsk.fusion
+import pytest
+
+from conftest import (load_tool, make_design, install, MakeComp, BRepBody, BRepFace, Profile,
+                      make_sketch, _NamedCollection)
 
 so = load_tool("model_loft")
-
-
-class _FakeBRepBody:
-    """Named to register as adsk.fusion.BRepBody so _BODY_KINDS surface/solid checks fire on isSolid.
-    `volume` is the reading a cut/intersect is judged on; None models a body whose volume will not
-    read (an unmeasurable body, or one the operation consumed whole)."""
-    def __init__(self, name, is_solid=False, volume=None):
-        self.name = name
-        self.isSolid = is_solid
-        self.volume = volume
-
-
-class _FakeProfile:
-    """Named to register as adsk.fusion.Profile so ProfileRef's isinstance check passes."""
-    def __init__(self, tag=""):
-        self.tag = tag
-
-
-class _FakeFace:
-    def __init__(self, name):
-        self.name = name
-
-
-class _FakeBodies:
-    """A result-feature .bodies collection (count/item) of bodies with isSolid flags."""
-    def __init__(self, bodies):
-        self._b = list(bodies)
-    @property
-    def count(self):
-        return len(self._b)
-    def item(self, i):
-        return self._b[i]
 
 
 class _FakeFeature:
     def __init__(self, name, result_bodies, is_solid=None):
         self.name = name
-        self.bodies = _FakeBodies(result_bodies)
+        self.bodies = _NamedCollection(result_bodies)
         # loft/unstitch read feature.isSolid; stitch reads body.isSolid. Provide both.
         if is_solid is not None:
             self.isSolid = is_solid
-
-
-class _FakeColl:
-    def __init__(self):
-        self.items = []
-    def add(self, x):
-        self.items.append(x)
-    @property
-    def count(self):
-        return len(self.items)
 
 
 class _FakeLoftSections:
@@ -95,7 +59,8 @@ class _FakeLoftFeatures:
         self.last_input = None
         self._result_is_solid = result_is_solid
         self._input_cls = input_cls
-        self._result_bodies = result_bodies if result_bodies is not None else [_FakeBRepBody("Body1", True)]
+        self._result_bodies = (result_bodies if result_bodies is not None
+                               else [BRepBody("Body1", is_solid=True)])
     def createInput(self, op):
         self.last_input = self._input_cls(op)
         return self.last_input
@@ -113,54 +78,24 @@ class _FakeFeatures:
             self.unstitchFeatures = unstitch
 
 
-class _FakeComp:
-    def __init__(self, features, bodies_by_name=None):
-        self.name = "Comp"
-        self.features = features
-        self._bodies = bodies_by_name or {}
-        comp = self
-        # count/item(i) is the live collection protocol a volume census walks; itemByName is what a
-        # BodyRef resolves through. Both are real BRepBodies members, so the fake carries both.
-        self.bRepBodies = type("BB", (), {
-            "itemByName": staticmethod(lambda n: comp._bodies.get(n)),
-            "item": staticmethod(lambda i: list(comp._bodies.values())[i]),
-            "count": property(lambda s: len(comp._bodies)),
-        })()
-        # Live meshBodies has count/item but NO itemByName (meshbodies-no-itembyname in
-        # tests/live/VERIFIED_API_FACTS.md); this comp holds no meshes.
-        self.meshBodies = type("MB", (), {"count": 0, "item": staticmethod(lambda i: None)})()
-
-
-class _FakeDesign:
-    def __init__(self, comp, handle_map=None):
-        self.activeComponent = comp
-        self.rootComponent = comp
-        self._handles = handle_map or {}
-    def findEntityByToken(self, t):
-        e = self._handles.get(t)
-        return [e] if e is not None else []
+@pytest.fixture(autouse=True)
+def _types(monkeypatch):
+    monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
+    monkeypatch.setattr(adsk.fusion, "BRepFace", BRepFace, raising=False)
+    monkeypatch.setattr(adsk.fusion, "Profile", Profile, raising=False)
+    # FeatureOperations carries no measured members, so the four the boolean-op map reads are
+    # pinned to their own names here rather than left as fabricatable child Mocks.
+    for n in ("NewBodyFeatureOperation", "JoinFeatureOperation",
+              "CutFeatureOperation", "IntersectFeatureOperation"):
+        monkeypatch.setattr(adsk.fusion.FeatureOperations, n, n, raising=False)
+    monkeypatch.setattr(adsk.core.ValueInput, "createByReal",
+                        staticmethod(lambda v: ("real", v)), raising=False)
 
 
 def _install(features, bodies_by_name=None, handle_map=None):
-    comp = _FakeComp(features, bodies_by_name)
-    design = _FakeDesign(comp, handle_map)
-    so.app = type("A", (), {"activeProduct": design})()
-    so._common.app = so.app
-    import adsk.fusion, adsk.core
-    adsk.fusion.Design.cast = lambda x: x if isinstance(x, _FakeDesign) else None
-    adsk.fusion.BRepBody = _FakeBRepBody
-    adsk.fusion.BRepFace = _FakeFace
-    adsk.fusion.Profile = _FakeProfile
-    # input-kinds resolve via _inputs._common (the app-reference seam), not so.app.
-    so._inputs._common.design = lambda: design
-    so._inputs._common.target_component = lambda d: comp
-    fo = adsk.fusion.FeatureOperations
-    for n in ("NewBodyFeatureOperation", "JoinFeatureOperation",
-              "CutFeatureOperation", "IntersectFeatureOperation"):
-        setattr(fo, n, n)
-    adsk.core.ValueInput.createByReal = staticmethod(lambda v: ("real", v))
-    adsk.core.ObjectCollection.create = staticmethod(lambda: _FakeColl())
-    return design
+    comp = MakeComp(name="Comp", bodies=list((bodies_by_name or {}).values()), mesh_bodies=())
+    comp.features = features
+    return install(so, make_design(comp=comp, tokens=handle_map))
 
 
 def _payload(result):
@@ -173,7 +108,7 @@ class TestLoft:
     def _profiles_design(self, result_is_solid=True, result_bodies=None):
         lf = _FakeLoftFeatures(result_is_solid=result_is_solid, result_bodies=result_bodies)
         # three profile handles -> live Profile entities (order P0, P1, P2)
-        p0, p1, p2 = (_FakeProfile("0"), _FakeProfile("1"), _FakeProfile("2"))
+        p0, p1, p2 = (Profile("0"), Profile("1"), Profile("2"))
         handles = {"H0": p0, "H1": p1, "H2": p2}
         _install(_FakeFeatures(loft=lf), handle_map=handles)
         return lf, (p0, p1, p2)
@@ -182,7 +117,7 @@ class TestLoft:
         """A loft over 3 profiles on a component holding `bodies`; `moves` are (body, new_volume)
         pairs the add applies - the material effect a real cut has across the mutation."""
         lf = _FakeLoftFeatures()
-        handles = {"H0": _FakeProfile("0"), "H1": _FakeProfile("1"), "H2": _FakeProfile("2")}
+        handles = {"H0": Profile("0"), "H1": Profile("1"), "H2": Profile("2")}
         _install(_FakeFeatures(loft=lf), bodies_by_name={b.name: b for b in bodies},
                  handle_map=handles)
         base_add = lf.add
@@ -209,7 +144,7 @@ class TestLoft:
 
     def test_surface_loft_reports_not_solid(self):
         self._profiles_design(result_is_solid=False,
-                              result_bodies=[_FakeBRepBody("Srf1", False)])
+                              result_bodies=[BRepBody("Srf1", is_solid=False)])
         out = _payload(so.handler(profiles=["H0", "H1"], as_surface=True))
         assert out["is_solid"] is False
         assert "SURFACE" in out["note"]
@@ -253,7 +188,7 @@ class TestLoft:
 
     def test_is_closed_that_does_not_take_is_refused(self):
         lf = _FakeLoftFeatures(input_cls=_SwallowingLoftInput)
-        handles = {"H0": _FakeProfile("0"), "H1": _FakeProfile("1")}
+        handles = {"H0": Profile("0"), "H1": Profile("1")}
         _install(_FakeFeatures(loft=lf), handle_map=handles)
         res = so.handler(profiles=["H0", "H1"], is_closed=True)
         assert res["isError"] is True
@@ -263,7 +198,7 @@ class TestLoft:
         lf = _FakeLoftFeatures()
         rail_ent = object()
         center_ent = object()
-        handles = {"H0": _FakeProfile("0"), "H1": _FakeProfile("1"),
+        handles = {"H0": Profile("0"), "H1": Profile("1"),
                    "R": rail_ent, "C": center_ent}
         _install(_FakeFeatures(loft=lf), handle_map=handles)
         res = so.handler(profiles=["H0", "H1"], rails=["R"], centerline="C")
@@ -273,7 +208,7 @@ class TestLoft:
     def test_centerline_set_on_input(self):
         lf = _FakeLoftFeatures()
         center_ent = object()
-        handles = {"H0": _FakeProfile("0"), "H1": _FakeProfile("1"), "C": center_ent}
+        handles = {"H0": Profile("0"), "H1": Profile("1"), "C": center_ent}
         _install(_FakeFeatures(loft=lf), handle_map=handles)
         out = _payload(so.handler(profiles=["H0", "H1"], centerline="C"))
         assert lf.last_input.centerLineOrRails.centerlines == [center_ent]
@@ -282,7 +217,7 @@ class TestLoft:
     def test_rails_added_and_counted(self):
         lf = _FakeLoftFeatures()
         r1, r2 = object(), object()
-        handles = {"H0": _FakeProfile("0"), "H1": _FakeProfile("1"), "R1": r1, "R2": r2}
+        handles = {"H0": Profile("0"), "H1": Profile("1"), "R1": r1, "R2": r2}
         _install(_FakeFeatures(loft=lf), handle_map=handles)
         out = _payload(so.handler(profiles=["H0", "H1"], rails=["R1", "R2"]))
         assert lf.last_input.centerLineOrRails.rails == [r1, r2]
@@ -296,35 +231,35 @@ class TestLoft:
         assert "new, join, cut, intersect" in res["message"]
 
     def test_cut_that_moves_no_volume_is_an_error(self):
-        self._cut_design([_FakeBRepBody("Bar", is_solid=True, volume=12.0)])
+        self._cut_design([BRepBody("Bar", is_solid=True, volume=12.0)])
         res = so.handler(profiles=["H0", "H1", "H2"], operation="cut")
         assert res["isError"] is True
         assert "changed nothing" in res["message"] and "'Comp'" in res["message"]
         assert "design_delete_feature" in res["message"]
 
     def test_cut_that_removed_material_publishes_the_delta(self):
-        bar = _FakeBRepBody("Bar", is_solid=True, volume=12.0)
+        bar = BRepBody("Bar", is_solid=True, volume=12.0)
         self._cut_design([bar], moves=[(bar, 9.5)])
         out = _payload(so.handler(profiles=["H0", "H1", "H2"], operation="cut"))
         assert out["volume_delta_cm3"] == -2.5      # signed: material LEFT the body
 
     def test_a_consumed_body_is_not_read_as_a_no_op(self):
-        eaten = _FakeBRepBody("Eaten", is_solid=True, volume=4.0)
-        kept = _FakeBRepBody("Kept", is_solid=True, volume=8.0)
+        eaten = BRepBody("Eaten", is_solid=True, volume=4.0)
+        kept = BRepBody("Kept", is_solid=True, volume=8.0)
         self._cut_design([eaten, kept], moves=[(eaten, None)])
         out = _payload(so.handler(profiles=["H0", "H1", "H2"], operation="cut"))
         assert out["lofted"] is True
 
     def test_a_new_body_loft_is_never_volume_gated(self):
-        self._cut_design([_FakeBRepBody("Bar", is_solid=True, volume=12.0)])
+        self._cut_design([BRepBody("Bar", is_solid=True, volume=12.0)])
         out = _payload(so.handler(profiles=["H0", "H1", "H2"]))
         assert out["lofted"] is True and "volume_delta_cm3" not in out
 
     def test_a_surface_body_is_not_sampled(self):
         # Only SOLIDS carry the volume a cut moves; sampling an open surface body (whose volume does
         # not read) would make the census unreadable and silently drop the gate.
-        surf = _FakeBRepBody("Skin", is_solid=False, volume=None)
-        bar = _FakeBRepBody("Bar", is_solid=True, volume=12.0)
+        surf = BRepBody("Skin", is_solid=False, volume=None)
+        bar = BRepBody("Bar", is_solid=True, volume=12.0)
         self._cut_design([surf, bar])
         res = so.handler(profiles=["H0", "H1", "H2"], operation="cut")
         assert res["isError"] is True and "changed nothing" in res["message"]
@@ -338,14 +273,14 @@ class TestLoft:
         assert "design_delete_feature" in res["message"]
 
     def test_one_result_body_is_the_boundary_that_passes(self):
-        self._profiles_design(result_bodies=[_FakeBRepBody("Body1", True)])
+        self._profiles_design(result_bodies=[BRepBody("Body1", is_solid=True)])
         out = _payload(so.handler(profiles=["H0", "H1"]))
         assert out["result_bodies"] == ["Body1"]
 
     def test_a_cut_that_consumed_its_target_is_not_refused_for_an_empty_result(self):
         # a cut/intersect that ate the body outright leaves no result body, and the volume gate
         # above has already proven material moved - refusing there would call a real cut a failure
-        eaten = _FakeBRepBody("Eaten", is_solid=True, volume=4.0)
+        eaten = BRepBody("Eaten", is_solid=True, volume=4.0)
         lf = self._cut_design([eaten], moves=[(eaten, None)])
         lf._result_bodies = []
         out = _payload(so.handler(profiles=["H0", "H1", "H2"], operation="cut"))
@@ -355,7 +290,7 @@ class TestLoft:
         # The census was SAMPLED but no volume read at either end, so the no-op gate above stayed
         # silent and nothing about this cut is proven. Keying the carve-out on "a census exists"
         # rather than on measured movement lets an empty result set through as a success.
-        blind = _FakeBRepBody("Blind", is_solid=True, volume=None)
+        blind = BRepBody("Blind", is_solid=True, volume=None)
         lf = self._cut_design([blind])          # no moves: the volume is None at both ends
         lf._result_bodies = []
         res = so.handler(profiles=["H0", "H1", "H2"], operation="cut")
@@ -366,7 +301,7 @@ class TestLoft:
         # delta exactly AT the band is the smallest movement the volume gate does not refuse, so it
         # is the boundary the carve-out must accept - the >= / > edge of `moved`
         band = so._common.NO_VOLUME_CHANGE_CM3
-        bar = _FakeBRepBody("Bar", is_solid=True, volume=0.0)
+        bar = BRepBody("Bar", is_solid=True, volume=0.0)
         lf = self._cut_design([bar], moves=[(bar, band)])
         lf._result_bodies = []
         out = _payload(so.handler(profiles=["H0", "H1", "H2"], operation="cut"))
@@ -377,7 +312,7 @@ class TestLoft:
         # one notch below the band: the volume gate owns this refusal, and the carve-out must not
         # rescue it
         band = so._common.NO_VOLUME_CHANGE_CM3
-        bar = _FakeBRepBody("Bar", is_solid=True, volume=0.0)
+        bar = BRepBody("Bar", is_solid=True, volume=0.0)
         lf = self._cut_design([bar], moves=[(bar, band / 2)])
         lf._result_bodies = []
         res = so.handler(profiles=["H0", "H1", "H2"], operation="cut")
@@ -389,7 +324,7 @@ class TestLoft:
         # SURFACE" off a flag nobody read
         lf = _FakeLoftFeatures(result_is_solid=None)      # no isSolid attribute at all
         _install(_FakeFeatures(loft=lf),
-                 handle_map={"H0": _FakeProfile("0"), "H1": _FakeProfile("1")})
+                 handle_map={"H0": Profile("0"), "H1": Profile("1")})
         out = _payload(so.handler(profiles=["H0", "H1"]))
         assert out["is_solid"] is None
         assert out["unverified"] == ["is_solid"]
@@ -402,10 +337,11 @@ class TestLoft:
         # so the loft feature must be created on the OWNER's features. The active comp carries its own
         # loftFeatures; the owner carries a SEPARATE one - the test proves the owner's got the call.
         owner_lf = _FakeLoftFeatures()
-        owner = type("Owner", (), {"features": _FakeFeatures(loft=owner_lf)})()
+        owner = MakeComp(name="Owner")
+        owner.features = _FakeFeatures(loft=owner_lf)
         # each profile's parentSketch.parentComponent points at the owner (the live Profile chain)
-        p0 = _FakeProfile("0"); p0.parentSketch = type("Sk", (), {"parentComponent": owner})()
-        p1 = _FakeProfile("1"); p1.parentSketch = type("Sk", (), {"parentComponent": owner})()
+        p0 = Profile("0", parent_sketch=make_sketch(name="Sk0", parent_component=owner))
+        p1 = Profile("1", parent_sketch=make_sketch(name="Sk1", parent_component=owner))
         active_lf = _FakeLoftFeatures()
         _install(_FakeFeatures(loft=active_lf), handle_map={"H0": p0, "H1": p1})
         out = _payload(so.handler(profiles=["H0", "H1"]))

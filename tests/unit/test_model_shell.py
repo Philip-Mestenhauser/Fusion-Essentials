@@ -10,48 +10,19 @@ import adsk.core
 import adsk.fusion
 
 from conftest import (
-    load_tool, make_design, install, MakeComp,
+    load_tool, make_design, install, MakeComp, BRepBody, BRepFace, _NamedCollection,
     payload as _payload, error_message, assert_no_active_design, assert_unknown_units,
 )
 
 sh = load_tool("model_shell")
 
 
-# ── fakes: a shell-able body + the ShellFeatures collection ──────────────────
+# ── fakes: the ShellFeatures collection ──────────────────────────────────────
 
 class _VI:
     """A ValueInput stand-in carrying the raw cm value the handler set."""
     def __init__(self, value):
         self.value = value
-
-
-class _Coll:
-    def __init__(self, items=()):
-        self._items = list(items)
-    @property
-    def count(self):
-        return len(self._items)
-    def item(self, i):
-        return self._items[i]
-
-
-class FakeBody:
-    """A solid body whose volume/face-count the shell feature mutates in place."""
-    def __init__(self, name="Body1", volume=100.0, faces=6, is_solid=True):
-        self.name = name
-        self.volume = volume
-        self._faces = faces
-        self.isSolid = is_solid
-
-    @property
-    def faces(self):
-        return type("FC", (), {"count": self._faces})()
-
-
-class FakeFace:
-    """A BRep face resolved from a find_geometry handle; carries its owning body."""
-    def __init__(self, body):
-        self.body = body
 
 
 class FakeShellInput:
@@ -67,7 +38,7 @@ class FakeShellFeature:
         self.name = name
         self.insideThickness = _VI(inside_v)
         self.outsideThickness = _VI(outside_v)
-        self.bodies = _Coll(result_bodies)
+        self.bodies = _NamedCollection(result_bodies)
 
 
 class FakeShellFeatures:
@@ -89,7 +60,7 @@ class FakeShellFeatures:
             return None
         if self.volume_delta:
             self.body.volume -= self.volume_delta
-        self.body._faces += self.faces_added
+        self.body.faces._items.extend([None] * self.faces_added)
         inside_v = inp.insideThickness.value if inp.insideThickness else 0.0
         outside_v = inp.outsideThickness.value if inp.outsideThickness else 0.0
         return FakeShellFeature("Shell1", inside_v, outside_v, [self.body])
@@ -103,8 +74,8 @@ def _install(body, sf, tokens=None):
     comp = MakeComp(name="Comp", bodies=[body])
     comp.features = type("F", (), {"shellFeatures": sf})()
     install(sh, make_design(comp=comp, tokens=tokens))
-    adsk.fusion.BRepBody = FakeBody
-    adsk.fusion.BRepFace = FakeFace
+    adsk.fusion.BRepBody = BRepBody
+    adsk.fusion.BRepFace = BRepFace
     adsk.core.ValueInput.createByReal = staticmethod(lambda v: _VI(v))
     return comp
 
@@ -113,7 +84,7 @@ def _install(body, sf, tokens=None):
 
 class TestClosedShell:
     def test_hollows_most_recent_body_into_closed_shell(self):
-        body = FakeBody(name="Block", volume=100.0, faces=6)
+        body = BRepBody(name="Block", volume=100.0, face_count=6)
         sf = FakeShellFeatures(body, volume_delta=40.0, faces_added=6)
         _install(body, sf)
         out = _payload(sh.handler(thickness=2, units="mm"))
@@ -125,7 +96,7 @@ class TestClosedShell:
         assert sf.last_input.coll.count == 1
 
     def test_reports_volume_removed_and_face_delta(self):
-        body = FakeBody(volume=100.0, faces=6)
+        body = BRepBody(volume=100.0, face_count=6)
         sf = FakeShellFeatures(body, volume_delta=40.0, faces_added=6)
         _install(body, sf)
         out = _payload(sh.handler(thickness=2, units="mm"))
@@ -133,7 +104,7 @@ class TestClosedShell:
         assert out["faces_delta"] == 6
 
     def test_targets_named_solid_body(self):
-        body = FakeBody(name="Housing", volume=50.0)
+        body = BRepBody(name="Housing", volume=50.0)
         sf = FakeShellFeatures(body, volume_delta=10.0)
         _install(body, sf)
         out = _payload(sh.handler(body_name="Housing", thickness=1, units="mm"))
@@ -142,8 +113,8 @@ class TestClosedShell:
 
 class TestOpenShell:
     def test_removes_given_faces_and_derives_body(self):
-        body = FakeBody(name="Cup", volume=80.0, faces=6)
-        face = FakeFace(body)
+        body = BRepBody(name="Cup", volume=80.0, face_count=6)
+        face = BRepFace(None, body=body)
         sf = FakeShellFeatures(body, volume_delta=30.0, faces_added=5)
         _install(body, sf, tokens={"F1": face})
         out = _payload(sh.handler(remove_faces=["F1"], thickness=2, units="mm"))
@@ -158,7 +129,7 @@ class TestOpenShell:
 
 class TestDirection:
     def test_inside_sets_inside_thickness_only(self):
-        body = FakeBody(volume=100.0)
+        body = BRepBody(volume=100.0)
         sf = FakeShellFeatures(body)
         _install(body, sf)
         out = _payload(sh.handler(thickness=2, units="mm", direction="inside"))
@@ -169,7 +140,7 @@ class TestDirection:
         assert sf.last_input.outsideThickness.value == 0.0
 
     def test_outside_sets_outside_thickness_only(self):
-        body = FakeBody(volume=100.0)
+        body = BRepBody(volume=100.0)
         sf = FakeShellFeatures(body)
         _install(body, sf)
         out = _payload(sh.handler(thickness=3, units="mm", direction="outside"))
@@ -178,7 +149,7 @@ class TestDirection:
         assert sf.last_input.insideThickness.value == 0.0
 
     def test_both_sets_both_thicknesses(self):
-        body = FakeBody(volume=100.0)
+        body = BRepBody(volume=100.0)
         sf = FakeShellFeatures(body)
         _install(body, sf)
         out = _payload(sh.handler(thickness=1, units="mm", direction="both"))
@@ -186,7 +157,7 @@ class TestDirection:
         assert out["outside_thickness"] == 1.0
 
     def test_cm_units_scale_thickness(self):
-        body = FakeBody(volume=100.0)
+        body = BRepBody(volume=100.0)
         sf = FakeShellFeatures(body)
         _install(body, sf)
         out = _payload(sh.handler(thickness=2, units="cm", direction="inside"))
@@ -198,35 +169,35 @@ class TestDirection:
 
 class TestGuards:
     def test_no_active_design(self):
-        body = FakeBody()
+        body = BRepBody()
         _install(body, FakeShellFeatures(body))
         assert_no_active_design(sh, sh.handler, thickness=1, units="mm")
 
     def test_bad_units(self):
-        body = FakeBody()
+        body = BRepBody()
         _install(body, FakeShellFeatures(body))
         assert_unknown_units(sh.handler, thickness=1)
 
     def test_zero_thickness_rejected(self):
-        body = FakeBody()
+        body = BRepBody()
         _install(body, FakeShellFeatures(body))
         msg = error_message(sh.handler(thickness=0, units="mm"))
         assert "thickness" in msg and "non-zero" in msg
 
     def test_negative_thickness_rejected(self):
-        body = FakeBody()
+        body = BRepBody()
         _install(body, FakeShellFeatures(body))
         msg = error_message(sh.handler(thickness=-1, units="mm"))
         assert "thickness" in msg and "positive" in msg
 
     def test_missing_named_body_reports_name(self):
-        body = FakeBody(name="Real")
+        body = BRepBody(name="Real")
         _install(body, FakeShellFeatures(body))
         res = sh.handler(body_name="Ghost", thickness=1, units="mm")
         assert res["isError"] is True and "Ghost" in res["message"]
 
     def test_wrong_kind_body_redirects(self):
-        surf = FakeBody(name="Surf", is_solid=False)
+        surf = BRepBody(name="Surf", is_solid=False)
         _install(surf, FakeShellFeatures(surf))
         res = sh.handler(body_name="Surf", thickness=1, units="mm")
         assert res["isError"] is True and "SOLID" in res["message"]
@@ -238,7 +209,7 @@ class TestHonesty:
     def test_unchanged_body_reports_error_not_ok(self):
         # add() returns a feature but leaves volume/faces identical - a silent no-op the API still
         # calls success. The handler must catch that and return isError, never a false 'shelled'.
-        body = FakeBody(volume=100.0, faces=6)
+        body = BRepBody(volume=100.0, face_count=6)
         sf = FakeShellFeatures(body, volume_delta=0.0, faces_added=0)
         _install(body, sf)
         res = sh.handler(thickness=2, units="mm")
@@ -249,7 +220,7 @@ class TestHonesty:
         # Nothing in the handler reads the thickness against the geometry, so naming the thickness
         # as the reason is a claim no read backs; the numbers it did read, and the reads that would
         # show what happened, are what the message can stand behind.
-        body = FakeBody(volume=100.0, faces=6)
+        body = BRepBody(volume=100.0, face_count=6)
         _install(body, FakeShellFeatures(body, volume_delta=0.0, faces_added=0))
         msg = sh.handler(thickness=2, units="mm")["message"]
         assert "likely" not in msg and "too large" not in msg
@@ -259,7 +230,7 @@ class TestHonesty:
         # Only ONE of the two reads runs: with no volume to compare, the face count is what
         # convicts, so claiming "volume and face count identical" would name a read that never
         # happened.
-        class _NoVolumeBody(FakeBody):
+        class _NoVolumeBody(BRepBody):
             @property
             def volume(self):
                 raise RuntimeError("volume unreadable")
@@ -268,7 +239,7 @@ class TestHonesty:
             def volume(self, _value):
                 pass
 
-        body = _NoVolumeBody(faces=6)
+        body = _NoVolumeBody(face_count=6)
         _install(body, FakeShellFeatures(body, volume_delta=0.0, faces_added=0))
         res = sh.handler(thickness=2, units="mm")
         assert res["isError"] is True
@@ -276,14 +247,14 @@ class TestHonesty:
         assert "volume" not in res["message"]
 
     def test_no_feature_returned_is_error(self):
-        body = FakeBody()
+        body = BRepBody()
         sf = FakeShellFeatures(body, return_feature=False)
         _install(body, sf)
         res = sh.handler(thickness=1, units="mm")
         assert res["isError"] is True and "no feature" in res["message"].lower()
 
     def test_add_raising_surfaces_as_error(self):
-        body = FakeBody()
+        body = BRepBody()
         sf = FakeShellFeatures(body)
         sf.add = lambda inp: (_ for _ in ()).throw(RuntimeError("thickness too large"))
         _install(body, sf)
@@ -294,7 +265,7 @@ class TestHonesty:
         # Nothing here measures the thickness against the geometry or which bodies the removed
         # faces span, so naming either as the reason is a claim no read backs. The raise text is
         # the one cause that was read, and it is the whole message.
-        body = FakeBody()
+        body = BRepBody()
         sf = FakeShellFeatures(body)
         sf.add = lambda inp: (_ for _ in ()).throw(RuntimeError("3-4 : InternalValidationError"))
         _install(body, sf)
@@ -307,7 +278,7 @@ class TestHonesty:
 
 class TestOutputContract:
     def test_feature_output_is_minted(self):
-        body = FakeBody(name="Block")
+        body = BRepBody(name="Block")
         _install(body, FakeShellFeatures(body))
         out = _payload(sh.handler(thickness=2, units="mm"))
         assert sh.RETURNS[0].assert_present(out) == ""

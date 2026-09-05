@@ -6,26 +6,13 @@ drafted-face read-back, the no-active-design guard, resolution-error propagation
 verifier that a feature which computes with a health ERROR is reported as failure, not a false ok.
 """
 
-import types
-
-from conftest import (BRepBody, load_tool, make_design, install, MakeComp, payload,
-                      error_message, assert_no_active_design)
+from conftest import (BRepBody, BRepFace, load_tool, make_design, install, MakeComp, payload,
+                      error_message, assert_no_active_design, _NamedCollection)
 
 dr = load_tool("model_draft")
 
 
 # ── fakes: the draftFeatures collection + input + created feature ───────────────────────────────
-
-class FakeFeatureFaces:
-    """The feature's own `faces` collection - the faces a draft created or modified, which is the
-    count the tool reads back (its `inputFaces` raises on this platform)."""
-    def __init__(self, n):
-        self._n = n
-
-    @property
-    def count(self):
-        return self._n
-
 
 class FakeDraftInput:
     def __init__(self, faces, plane, tangent):
@@ -43,7 +30,9 @@ class FakeDraftInput:
 class FakeDraftFeature:
     def __init__(self, name="Draft1", n_faces=2, health=0):
         self.name = name
-        self.faces = FakeFeatureFaces(n_faces)
+        # DraftFeature.faces - the faces the draft created or modified, which is the count the tool
+        # reads back (its `inputFaces` raises on this platform).
+        self.faces = _NamedCollection([None] * n_faces)
         self.healthState = health
         self.errorOrWarningMessage = "geometry undercut"
 
@@ -169,7 +158,7 @@ class TestDraft:
 def _face_on(body):
     """A face whose owning body is `body` - the chain _geom.owning_bodies walks to find what the
     draft must move."""
-    return types.SimpleNamespace(body=body)
+    return BRepFace(surface=None, body=body)
 
 
 def _add_moving_volume(feats, feature, *changes):

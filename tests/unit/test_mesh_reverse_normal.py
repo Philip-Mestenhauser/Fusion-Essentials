@@ -18,7 +18,7 @@ import types
 
 import pytest
 
-from conftest import MeshBody, load_tool, payload, error_message
+from conftest import MakeComp, MakeDesign, MeshBody, install, load_tool, payload, error_message
 
 mrn = load_tool("mesh_reverse_normal")
 
@@ -32,18 +32,6 @@ _FLIPPED = [-v for v in _NORMALS]
 def _mesh(name="Scan1", normals=None, **kw):
     """conftest's shared MeshBody carrying this file's measured normal array by default."""
     return MeshBody(name=name, normals=_NORMALS if normals is None else normals, **kw)
-
-
-class _Coll:
-    def __init__(self, items=()):
-        self._items = list(items)
-
-    @property
-    def count(self):
-        return len(self._items)
-
-    def item(self, i):
-        return self._items[i] if 0 <= i < len(self._items) else None
 
 
 class _ReverseInput:
@@ -87,43 +75,15 @@ class _Features:
         self.meshReverseNormalFeatures = reverse
 
 
-class _Comp:
-    def __init__(self, name="Comp", meshes=(), features=None):
-        self.name = name
-        self._meshes = _Coll(meshes)
-        self.features = features
-        self.bRepBodies = _Coll()
-
-    @property
-    def meshBodies(self):
-        return self._meshes
-
-
-class _Design:
-    def __init__(self, comp, design_type=1):
-        self.rootComponent = comp
-        self.activeComponent = comp
-        self.designType = design_type    # 1 parametric, 0 direct (current_design_type's int fallback)
-
-    @property
-    def allComponents(self):
-        return _Coll([self.rootComponent])
-
-    def findEntityByToken(self, token):
-        return []
-
-
 # ── rig ──────────────────────────────────────────────────────────────────────────────────────────
 
 def _rig(monkeypatch, mesh=None, on_add=None, design_type=1, **feat_kw):
     mesh = mesh if mesh is not None else _mesh()
-    comp = _Comp(meshes=[mesh])
+    comp = MakeComp("Comp", mesh_bodies=[mesh])
     mesh.parentComponent = comp
     feats = _ReverseFeatures(on_add=on_add, **feat_kw)
     comp.features = _Features(reverse=feats)
-    design = _Design(comp, design_type=design_type)
-    monkeypatch.setattr(mrn._common, "design", lambda: design)
-    monkeypatch.setattr(mrn._inputs._common, "design", lambda: design)
+    install(mrn, MakeDesign(comp=comp, design_type=design_type))
     monkeypatch.setattr(mrn._MESH, "resolve", lambda raw: (mesh, None))
     return mesh, comp, feats
 

@@ -13,55 +13,18 @@ import types
 import pytest
 
 from conftest import (BRepBody, BRepEdge, BRepFace, Cylinder, FakePoint, FakeVector3D, Line3D,
-                      Plane, _NamedCollection, _SimpleNamed, assert_no_active_design, entity_proxy,
-                      load_tool)
+                      MakeComp, Plane, _NamedCollection, _SimpleNamed, assert_no_active_design,
+                      entity_proxy, install, load_tool, make_design, make_occurrence, make_sketch,
+                      payload)
 
 rv = load_tool("model_revolve")
 
 
-class FakeProfiles:
-    def __init__(self, n):
-        self._n = n
-    @property
-    def count(self):
-        return self._n
-    def item(self, i):
-        return ("profile", i)
-
-
-class FakeLines:
-    def __init__(self, n):
-        self._n = n
-    @property
-    def count(self):
-        return self._n
-    def item(self, i):
-        return ("line", i)
-
-
-class FakeSketch:
-    def __init__(self, name, profile_count=1, line_count=2, compute_deferred=False):
-        # A live sketch always answers isComputeDeferred; True is the state whose `profiles` and
-        # `profiles.count` are both the pre-deferral ones.
-        self.isComputeDeferred = compute_deferred
-        self.name = name
-        self.profiles = FakeProfiles(profile_count)
-        self.sketchCurves = type("C", (), {"sketchLines": FakeLines(line_count)})()
-
-
-class FakeSketches:
-    def __init__(self, sketches):
-        self._items = list(sketches)
-    @property
-    def count(self):
-        return len(self._items)
-    def item(self, i):
-        return self._items[i]
-    def itemByName(self, name):
-        for s in self._items:
-            if s.name == name:
-                return s
-        return None
+def _sketch(name, profile_count=1, line_count=2, compute_deferred=False):
+    """A sketch holding `profile_count` closed regions and `line_count` axis-candidate lines."""
+    return make_sketch(name=name, lines=[("line", i) for i in range(line_count)],
+                       profiles=[("profile", i) for i in range(profile_count)],
+                       is_compute_deferred=compute_deferred)
 
 
 class FakeRevInput:
@@ -83,12 +46,9 @@ class FakeRevInput:
 
 
 class FakeRevFeature:
-    name = "Revolve1"
-    class bodies:
-        count = 1
-        @staticmethod
-        def item(i):
-            return type("B", (), {"name": "Body1"})()
+    def __init__(self):
+        self.name = "Revolve1"
+        self.bodies = _NamedCollection([BRepBody("Body1")])
 
 
 class FakeRevFeatures:
@@ -103,34 +63,23 @@ class FakeRevFeatures:
         return FakeRevFeature()
 
 
-class FakeComp:
+def _comp(sketches, rf, name="Comp", token="TOKEN:Comp"):
+    """A component owning `sketches`, the revolve feature collection and the three origin axes."""
     # Every live component answers an entityToken, and _common.same_component compares on it: the
     # assembly-context lift REFUSES an owner it cannot identify rather than guess whether a native
     # entity needs proxying. A test that wants that state deletes the attribute.
-    def __init__(self, sketches, rf, token="TOKEN:Comp"):
-        self.name = "Comp"
-        self.entityToken = token
-        self.sketches = FakeSketches(sketches)
-        self.features = type("F", (), {"revolveFeatures": rf})()
-        self.xConstructionAxis = ("axis", "x")
-        self.yConstructionAxis = ("axis", "y")
-        self.zConstructionAxis = ("axis", "z")
-
-
-class FakeDesign:
-    def __init__(self, comp):
-        self.activeComponent = comp
-        self.rootComponent = comp
+    comp = MakeComp(name=name, sketches=sketches, entity_token=token)
+    comp.features = types.SimpleNamespace(revolveFeatures=rf)
+    comp.xConstructionAxis = ("axis", "x")
+    comp.yConstructionAxis = ("axis", "y")
+    comp.zConstructionAxis = ("axis", "z")
+    return comp
 
 
 def _install(sketches):
     rf = FakeRevFeatures()
-    comp = FakeComp(sketches, rf)
-    design = FakeDesign(comp)
-    rv.app = type("A", (), {"activeProduct": design})()
-    rv._common.app = rv.app
+    install(rv, make_design(comp=_comp(sketches, rf)))
     import adsk.fusion, adsk.core
-    adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
     fo = adsk.fusion.FeatureOperations
     for n in ("NewBodyFeatureOperation", "JoinFeatureOperation",
               "CutFeatureOperation", "IntersectFeatureOperation"):
@@ -139,24 +88,19 @@ def _install(sketches):
     return rf
 
 
-def _payload(result):
-    assert result["isError"] is False, result
-    return json.loads(result["content"][0]["text"])
-
-
 class TestGuards:
     def test_unknown_operation(self):
-        _install([FakeSketch("S")])
+        _install([_sketch("S")])
         res = rv.handler(sketch_name="S", operation="weld")
         assert res["isError"] is True and "Unknown operation" in res["message"]
 
     def test_zero_angle(self):
-        _install([FakeSketch("S")])
+        _install([_sketch("S")])
         res = rv.handler(sketch_name="S", angle_deg=0)
         assert res["isError"] is True and "non-zero 'angle_deg'" in res["message"]
 
     def test_no_sketch_named(self):
-        _install([FakeSketch("S")])
+        _install([_sketch("S")])
         res = rv.handler(sketch_name="Nope")
         assert res["isError"] is True and "No sketch named 'Nope'" in res["message"]
 
@@ -169,7 +113,7 @@ class TestGuards:
     def test_the_component_scope_reaches_the_sketch_resolve(self, monkeypatch):
         # a sketch name two components carry is refused, and 'component' is the way through - the
         # remedy the refusal names, so it has to be the one the resolver is actually given.
-        _install([FakeSketch("S")])
+        _install([_sketch("S")])
         seen = {}
 
         def _scoped(design, name, component, input_name="component"):
@@ -184,7 +128,7 @@ class TestGuards:
     def test_a_padded_name_reports_the_name_the_walk_searched_for(self):
         # the resolver STRIPS the name before searching, so the miss quotes the stripped form -
         # echoing the raw input names a sketch nothing ever looked for.
-        _install([FakeSketch("S")])
+        _install([_sketch("S")])
         res = rv.handler(sketch_name="  Ghost  ")
         assert res["isError"] is True
         assert "No sketch named 'Ghost'" in res["message"]
@@ -202,75 +146,75 @@ class TestGuards:
     def test_a_whitespace_only_name_takes_the_most_recent_sketch(self):
         # ' ' strips to blank, which means the most recent sketch - searching for a space instead
         # misses every sketch and reports a name no caller typed.
-        _install([FakeSketch("First"), FakeSketch("Last")])
+        _install([_sketch("First"), _sketch("Last")])
         res = rv.handler(sketch_name=" ")
         assert "No sketch named" not in json.dumps(res)
-        assert _payload(res)["sketch"] == "Last"
+        assert payload(res)["sketch"] == "Last"
 
     def test_profile_out_of_range(self):
-        _install([FakeSketch("S", profile_count=1)])
+        _install([_sketch("S", profile_count=1)])
         res = rv.handler(sketch_name="S", profile_index=5)
         assert res["isError"] is True and "out of range" in res["message"]
 
     def test_bad_axis(self):
-        _install([FakeSketch("S")])
+        _install([_sketch("S")])
         res = rv.handler(sketch_name="S", axis="q")
         assert res["isError"] is True and "Could not resolve axis" in res["message"]
 
     def test_an_index_into_a_deferred_sketch_is_refused(self):
         # int(profile_index) then profiles.item(idx) - neither reaches ProfileRef, so a deferred
         # sketch would revolve whichever region was first before the deferral.
-        _install([FakeSketch("S", profile_count=3, compute_deferred=True)])
+        _install([_sketch("S", profile_count=3, compute_deferred=True)])
         res = rv.handler(sketch_name="S", profile_index=0)
         assert res["isError"] is True
         assert "isComputeDeferred=true" in res["message"] and "'S'" in res["message"]
         assert "'profile_index'" in res["message"]
 
     def test_an_index_into_a_sketch_computing_normally_still_revolves(self):
-        _install([FakeSketch("S", profile_count=3)])
-        assert _payload(rv.handler(sketch_name="S", profile_index=0))["sketch"] == "S"
+        _install([_sketch("S", profile_count=3)])
+        assert payload(rv.handler(sketch_name="S", profile_index=0))["sketch"] == "S"
 
 
 class TestRevolve:
     def test_full_revolve_converts_deg_to_radians(self):
-        rf = _install([FakeSketch("Cup")])
-        out = _payload(rv.handler(sketch_name="Cup", axis="z", angle_deg=360))
+        rf = _install([_sketch("Cup")])
+        out = payload(rv.handler(sketch_name="Cup", axis="z", angle_deg=360))
         assert out["revolved"] is True and out["axis"] == "z-axis"
         sym, ang = rf.last_input.angle_extent
         assert ang[0] == "real" and abs(ang[1] - 2 * math.pi) < 1e-9
         assert sym is False
 
     def test_partial_angle(self):
-        rf = _install([FakeSketch("S")])
-        _payload(rv.handler(sketch_name="S", angle_deg=90))
+        rf = _install([_sketch("S")])
+        payload(rv.handler(sketch_name="S", angle_deg=90))
         _, ang = rf.last_input.angle_extent
         assert abs(ang[1] - math.pi / 2) < 1e-9
 
     def test_axis_x_resolves(self):
-        rf = _install([FakeSketch("S")])
-        out = _payload(rv.handler(sketch_name="S", axis="x"))
+        rf = _install([_sketch("S")])
+        out = payload(rv.handler(sketch_name="S", axis="x"))
         assert rf.last_input.axis == ("axis", "x") and out["axis"] == "x-axis"
 
     def test_axis_sketch_line(self):
-        rf = _install([FakeSketch("S", line_count=3)])
-        out = _payload(rv.handler(sketch_name="S", axis="line:1"))
+        rf = _install([_sketch("S", line_count=3)])
+        out = payload(rv.handler(sketch_name="S", axis="line:1"))
         assert rf.last_input.axis == ("line", 1) and "line:1" in out["axis"]
 
     def test_operation_cut_mapping(self):
-        rf = _install([FakeSketch("S")])
-        _payload(rv.handler(sketch_name="S", operation="cut"))
+        rf = _install([_sketch("S")])
+        payload(rv.handler(sketch_name="S", operation="cut"))
         assert rf.last_input.operation == "CutFeatureOperation"
 
     def test_symmetric_flag(self):
-        rf = _install([FakeSketch("S")])
-        _payload(rv.handler(sketch_name="S", symmetric=True))
+        rf = _install([_sketch("S")])
+        payload(rv.handler(sketch_name="S", symmetric=True))
         sym, _ = rf.last_input.angle_extent
         assert sym is True
 
     def test_two_sided_asymmetric(self):
         import math
-        rf = _install([FakeSketch("S")])
-        out = _payload(rv.handler(sketch_name="S", angle_deg=90, second_angle_deg=30))
+        rf = _install([_sketch("S")])
+        out = payload(rv.handler(sketch_name="S", angle_deg=90, second_angle_deg=30))
         # setTwoSideAngleExtent used (not setAngleExtent), with both angles in radians
         assert rf.last_input.two_sides is not None
         assert rf.last_input.angle_extent is None
@@ -284,8 +228,8 @@ class TestRevolve:
         assert not hasattr(FakeRevInput("p", "a", "o"), "setTwoSidesExtent")
 
     def test_second_angle_ignored_when_symmetric(self):
-        rf = _install([FakeSketch("S")])
-        _payload(rv.handler(sketch_name="S", angle_deg=90, second_angle_deg=30, symmetric=True))
+        rf = _install([_sketch("S")])
+        payload(rv.handler(sketch_name="S", angle_deg=90, second_angle_deg=30, symmetric=True))
         assert rf.last_input.two_sides is None     # symmetric wins
         assert rf.last_input.angle_extent is not None
 
@@ -295,13 +239,13 @@ class TestRevolve:
 
 class TestHonesty:
     def test_add_returning_none_is_error(self):
-        rf = _install([FakeSketch("S")])
+        rf = _install([_sketch("S")])
         rf.add = lambda inp: None
         res = rv.handler(sketch_name="S")
         assert res["isError"] is True and "no feature" in res["message"].lower()
 
     def test_add_raising_surfaces_as_error(self):
-        rf = _install([FakeSketch("S")])
+        rf = _install([_sketch("S")])
 
         def _boom(inp):
             raise RuntimeError("axis intersects the profile")
@@ -315,7 +259,7 @@ class TestHonesty:
         assert "coplanar" not in res["message"].lower()
 
     def test_no_active_design(self):
-        _install([FakeSketch("S")])
+        _install([_sketch("S")])
         assert_no_active_design(rv, rv.handler, sketch_name="S")
 
 
@@ -329,10 +273,9 @@ class TestHonesty:
 
 @pytest.fixture
 def wire(monkeypatch):
-    """Factory: fake design + handle resolution, wired into the tool by monkeypatch (undone after
-    the test). One `app` patch covers both design seams - the handler's `_common` and the `_common`
-    that `_inputs` binds are the same module object - and the entity classes AxisRef isinstance-checks
-    must be REAL classes, since a bare Mock attribute is not a type.
+    """Factory: fake design + handle resolution, installed into the tool at both design seams. The
+    entity classes AxisRef isinstance-checks must be REAL classes, since a bare Mock attribute is
+    not a type.
 
     `axes` gives the ACTIVE component construction axes (the by-name axis path); `extra_components`
     puts further components in the design-wide walk (a sketch in a sub-component); `placements` maps
@@ -343,18 +286,12 @@ def wire(monkeypatch):
 
     def _wire(sketches, tokens=None, axes=(), extra_components=(), placements=None):
         rf = FakeRevFeatures()
-        root = FakeComp(sketches, rf)
+        root = _comp(sketches, rf)
         root.constructionAxes = _NamedCollection(list(axes))
         root.allOccurrencesByComponent = lambda c, m=dict(placements or {}): _NamedCollection(
             list(m.get(safe_name(c), [])))
-        design = FakeDesign(root)
-        design.allComponents = _NamedCollection([root, *extra_components])
-        design.findEntityByToken = lambda t, m=dict(tokens or {}): ([m[t]] if t in m else [])
-        app = type("A", (), {"activeProduct": design})()
-        monkeypatch.setattr(rv, "app", app)
-        monkeypatch.setattr(rv._common, "app", app)
-        monkeypatch.setattr(adsk.fusion.Design, "cast",
-                            lambda x: x if isinstance(x, FakeDesign) else None)
+        install(rv, make_design(comp=root, tokens=tokens,
+                                all_components=[root, *extra_components]))
         monkeypatch.setattr(adsk.fusion, "BRepEdge", BRepEdge)
         monkeypatch.setattr(adsk.fusion, "BRepFace", BRepFace)
         monkeypatch.setattr(adsk.fusion, "SketchLine", type("SL", (), {}))
@@ -371,58 +308,54 @@ def _cylindrical_face(owner=None):
     """A cylinder face whose axis points along +z - the shape that hides a dropped axis POSITION: its
     DIRECTION is a world key, so only the entity reaching createInput proves the position survived.
     `owner` makes it NATIVE to that component (read through the face's body)."""
-    body = types.SimpleNamespace(parentComponent=owner) if owner is not None else None
+    body = BRepBody(parent_component=owner) if owner is not None else None
     return BRepFace(Cylinder(FakeVector3D(0, 0, 1)), body=body)
-
-
-def _occurrence(path):
-    return types.SimpleNamespace(fullPathName=path)
 
 
 class TestAxisFromGeometry:
     def test_cylindrical_face_handle_reaches_createinput_as_the_face(self, wire):
         f = _cylindrical_face()
-        rf = wire([FakeSketch("Ring")], tokens={"CYL": f})
-        out = _payload(rv.handler(sketch_name="Ring", axis="CYL"))
+        rf = wire([_sketch("Ring")], tokens={"CYL": f})
+        out = payload(rv.handler(sketch_name="Ring", axis="CYL"))
         # the FACE itself, never the component's origin construction axis - the entity is what
         # carries the axis position an off-origin revolve turns about
         assert rf.last_input.axis is f
         assert out["axis"] == "BRepFace"
 
     def test_planar_face_handle_is_refused(self, wire):
-        rf = wire([FakeSketch("S")], tokens={"F": BRepFace(Plane(normal=FakeVector3D(0, 0, 1)))})
+        rf = wire([_sketch("S")], tokens={"F": BRepFace(Plane(normal=FakeVector3D(0, 0, 1)))})
         res = rv.handler(sketch_name="S", axis="F")
         assert res["isError"] is True and "cylindrical" in res["message"]
         assert rf.last_input is None          # refused before any feature transaction opened
 
     def test_straight_edge_handle_still_reaches_createinput(self, wire):
         e = BRepEdge(curve=Line3D(start=FakePoint(0, 0, 0), end=FakePoint(1, 0, 0)))
-        rf = wire([FakeSketch("S")], tokens={"E": e})
-        out = _payload(rv.handler(sketch_name="S", axis="E"))
+        rf = wire([_sketch("S")], tokens={"E": e})
+        out = payload(rv.handler(sketch_name="S", axis="E"))
         # no BRepEdge carries a name, so the label falls back to what the entity IS
         assert rf.last_input.axis is e and out["axis"] == "BRepEdge"
 
     def test_construction_axis_by_name_publishes_the_datums_name(self, wire):
         ax = _SimpleNamed("WheelAxis")
-        rf = wire([FakeSketch("S")], axes=[ax])
-        out = _payload(rv.handler(sketch_name="S", axis="WheelAxis"))
+        rf = wire([_sketch("S")], axes=[ax])
+        out = payload(rv.handler(sketch_name="S", axis="WheelAxis"))
         assert rf.last_input.axis is ax
         assert out["axis"] == "WheelAxis"       # the datum's own NAME, not the raw input or a type
 
     def test_ambiguous_construction_axis_name_is_refused(self, wire):
-        rf = wire([FakeSketch("S")], axes=[_SimpleNamed("Hinge"), _SimpleNamed("Hinge")])
+        rf = wire([_sketch("S")], axes=[_SimpleNamed("Hinge"), _SimpleNamed("Hinge")])
         res = rv.handler(sketch_name="S", axis="Hinge")
         assert res["isError"] is True and "names 2 construction axes" in res["message"]
         assert rf.last_input is None            # refused, never resolved to the first hit
 
     def test_world_key_still_resolves_to_the_origin_construction_axis(self, wire):
-        rf = wire([FakeSketch("S")], tokens={"CYL": _cylindrical_face()})
-        out = _payload(rv.handler(sketch_name="S", axis="y"))
+        rf = wire([_sketch("S")], tokens={"CYL": _cylindrical_face()})
+        out = payload(rv.handler(sketch_name="S", axis="y"))
         assert rf.last_input.axis == ("axis", "y") and out["axis"] == "y-axis"
 
     def test_line_index_still_resolves_in_the_profiles_own_sketch(self, wire):
-        rf = wire([FakeSketch("S", line_count=3)], tokens={"CYL": _cylindrical_face()})
-        out = _payload(rv.handler(sketch_name="S", axis="line:2"))
+        rf = wire([_sketch("S", line_count=3)], tokens={"CYL": _cylindrical_face()})
+        out = payload(rv.handler(sketch_name="S", axis="line:2"))
         assert rf.last_input.axis == ("line", 2) and out["axis"] == "sketch line:2"
 
 
@@ -435,25 +368,23 @@ class TestAxisFromGeometry:
 
 class TestCrossComponentAxis:
     def test_native_face_from_another_component_is_proxied_into_its_occurrence(self, wire):
-        other = FakeComp([], FakeRevFeatures(), token="TOKEN:PartB")
-        other.name = "PartB"
+        other = _comp([], FakeRevFeatures(), name="PartB", token="TOKEN:PartB")
         f = _cylindrical_face(owner=other)
         proxied = _cylindrical_face()
-        proxied.assemblyContext = _occurrence("PartB:1")
+        proxied.assemblyContext = make_occurrence("PartB:1")
         f.createForAssemblyContext = lambda occ, p=proxied: p
-        rf = wire([FakeSketch("Ring")], tokens={"CYL": f},
-                  placements={"PartB": [_occurrence("PartB:1")]})
-        out = _payload(rv.handler(sketch_name="Ring", axis="CYL"))
+        rf = wire([_sketch("Ring")], tokens={"CYL": f},
+                  placements={"PartB": [make_occurrence("PartB:1")]})
+        out = payload(rv.handler(sketch_name="Ring", axis="CYL"))
         assert rf.last_input.axis is proxied     # the PROXY, never the native cross-component face
         assert out["axis"] == "BRepFace"
 
     def test_component_placed_twice_is_refused_with_both_paths(self, wire):
-        other = FakeComp([], FakeRevFeatures(), token="TOKEN:PartB")
-        other.name = "PartB"
+        other = _comp([], FakeRevFeatures(), name="PartB", token="TOKEN:PartB")
         f = _cylindrical_face(owner=other)
         f.createForAssemblyContext = lambda occ: _cylindrical_face()
-        rf = wire([FakeSketch("Ring")], tokens={"CYL": f},
-                  placements={"PartB": [_occurrence("PartB:1"), _occurrence("PartB:2")]})
+        rf = wire([_sketch("Ring")], tokens={"CYL": f},
+                  placements={"PartB": [make_occurrence("PartB:1"), make_occurrence("PartB:2")]})
         res = rv.handler(sketch_name="Ring", axis="CYL")
         assert res["isError"] is True
         assert "placed 2 times" in res["message"]
@@ -461,20 +392,18 @@ class TestCrossComponentAxis:
         assert rf.last_input is None             # refused before any feature transaction opened
 
     def test_proxy_that_cannot_be_built_is_refused_not_passed_native(self, wire):
-        other = FakeComp([], FakeRevFeatures(), token="TOKEN:PartB")
-        other.name = "PartB"
+        other = _comp([], FakeRevFeatures(), name="PartB", token="TOKEN:PartB")
         f = _cylindrical_face(owner=other)
         f.createForAssemblyContext = lambda occ: None      # the context could not be built
-        rf = wire([FakeSketch("Ring")], tokens={"CYL": f},
-                  placements={"PartB": [_occurrence("PartB:1")]})
+        rf = wire([_sketch("Ring")], tokens={"CYL": f},
+                  placements={"PartB": [make_occurrence("PartB:1")]})
         res = rv.handler(sketch_name="Ring", axis="CYL")
         assert res["isError"] is True and "could not be brought into" in res["message"]
         assert rf.last_input is None and rf.add_calls == 0
 
     def test_unplaced_component_is_refused(self, wire):
-        other = FakeComp([], FakeRevFeatures(), token="TOKEN:PartB")
-        other.name = "PartB"
-        rf = wire([FakeSketch("Ring")], tokens={"CYL": _cylindrical_face(owner=other)})
+        other = _comp([], FakeRevFeatures(), name="PartB", token="TOKEN:PartB")
+        rf = wire([_sketch("Ring")], tokens={"CYL": _cylindrical_face(owner=other)})
         res = rv.handler(sketch_name="Ring", axis="CYL")
         assert res["isError"] is True and "not placed in the assembly" in res["message"]
         assert rf.last_input is None
@@ -483,11 +412,11 @@ class TestCrossComponentAxis:
         # the owner is a DIFFERENT Python object for the same component (component wrappers are
         # never identity-stable), so an `owner is comp` test would send this face down the
         # cross-component path and refuse a perfectly legal axis
-        rf = wire([FakeSketch("Ring")], tokens={"CYL": None})
+        rf = wire([_sketch("Ring")], tokens={"CYL": None})
         host = rv.app.activeProduct.rootComponent
         f = _cylindrical_face(owner=entity_proxy(host))
         rv.app.activeProduct.findEntityByToken = lambda t, e=f: ([e] if t == "CYL" else [])
-        out = _payload(rv.handler(sketch_name="Ring", axis="CYL"))
+        out = payload(rv.handler(sketch_name="Ring", axis="CYL"))
         assert rf.last_input.axis is f and out["axis"] == "BRepFace"
 
 
@@ -514,7 +443,7 @@ def _add_moving_volume(rf, *changes):
 
 class TestCutMovesMaterial:
     def test_cut_that_moves_no_volume_is_an_error(self, wire):
-        wire([FakeSketch("S")])
+        wire([_sketch("S")])
         _host_bodies(BRepBody("Bar", volume=12.0))
         res = rv.handler(sketch_name="S", operation="cut")
         assert res["isError"] is True
@@ -522,43 +451,43 @@ class TestCutMovesMaterial:
         assert "design_delete_feature" in res["message"]
 
     def test_intersect_that_moves_no_volume_is_an_error(self, wire):
-        wire([FakeSketch("S")])
+        wire([_sketch("S")])
         _host_bodies(BRepBody("Bar", volume=12.0))
         res = rv.handler(sketch_name="S", operation="intersect")
         assert res["isError"] is True and "this intersect changed nothing" in res["message"]
 
     def test_cut_that_removed_material_publishes_the_delta(self, wire):
-        rf = wire([FakeSketch("S")])
+        rf = wire([_sketch("S")])
         bar = BRepBody("Bar", volume=12.0)
         _host_bodies(bar)
         _add_moving_volume(rf, (bar, 9.5))
-        out = _payload(rv.handler(sketch_name="S", operation="cut"))
+        out = payload(rv.handler(sketch_name="S", operation="cut"))
         assert out["volume_delta_cm3"] == -2.5      # signed: material LEFT the body
 
     def test_a_consumed_body_is_not_read_as_a_no_op(self, wire):
         # A body the cut consumed whole stops reporting a volume, so it contributes no delta - the
         # untouched second body's 0 must not become "nothing happened".
-        rf = wire([FakeSketch("S")])
+        rf = wire([_sketch("S")])
         eaten, kept = BRepBody("Eaten", volume=4.0), BRepBody("Kept", volume=8.0)
         _host_bodies(eaten, kept)
         _add_moving_volume(rf, (eaten, None))
-        out = _payload(rv.handler(sketch_name="S", operation="cut"))
+        out = payload(rv.handler(sketch_name="S", operation="cut"))
         assert out["revolved"] is True
 
     def test_a_new_body_revolve_is_never_volume_gated(self, wire):
         # 'new' adds a body rather than moving material in an existing one; gating it on an unmoved
         # volume would fail every legitimate revolve in a component that already holds a body.
-        wire([FakeSketch("S")])
+        wire([_sketch("S")])
         _host_bodies(BRepBody("Bar", volume=12.0))
-        out = _payload(rv.handler(sketch_name="S", operation="new"))
+        out = payload(rv.handler(sketch_name="S", operation="new"))
         assert out["revolved"] is True and "volume_delta_cm3" not in out
 
     def test_unreadable_volumes_neither_error_nor_publish_a_delta(self, wire):
         # Cannot measure is not "measured the same": no verdict, and no null delta that would read
         # as a measured zero.
-        wire([FakeSketch("S")])
+        wire([_sketch("S")])
         _host_bodies(BRepBody("Bar", volume=None))
-        out = _payload(rv.handler(sketch_name="S", operation="cut"))
+        out = payload(rv.handler(sketch_name="S", operation="cut"))
         assert out["revolved"] is True and "volume_delta_cm3" not in out
 
 
@@ -567,14 +496,13 @@ class TestCutMovesMaterial:
 class TestHostComponent:
     def test_feature_and_axis_come_from_the_sketchs_owning_component(self, wire):
         owner_rf = FakeRevFeatures()
-        sketch = FakeSketch("Rim")
-        owner = FakeComp([sketch], owner_rf)
-        owner.name = "Hub"
+        sketch = _sketch("Rim")
+        owner = _comp([sketch], owner_rf, name="Hub")
         for key in ("x", "y", "z"):
             setattr(owner, f"{key}ConstructionAxis", ("axis", key, "Hub"))
         sketch.parentComponent = owner
         active_rf = wire([], extra_components=[owner])
-        _payload(rv.handler(sketch_name="Rim", axis="z"))
+        payload(rv.handler(sketch_name="Rim", axis="z"))
         # a profile handed to ANOTHER component's features collection raises 'InternalValidationError
         # : bSet', so both the feature and its origin axis must come from the sketch's owner
         assert active_rf.last_input is None and active_rf.add_calls == 0

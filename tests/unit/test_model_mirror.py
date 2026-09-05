@@ -90,7 +90,7 @@ class Scene:
         return self.comp.bRepBodies.itemByName(name)
 
 
-class _Unreadable:
+class _Unreadable(_NamedCollection):
     """A body collection that cannot be counted - the census-blind case."""
 
     @property
@@ -99,9 +99,6 @@ class _Unreadable:
 
     def item(self, i):
         raise RuntimeError("3 : collection is gone")
-
-    def itemByName(self, name):
-        return None
 
 
 @pytest.fixture

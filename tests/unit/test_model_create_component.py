@@ -9,39 +9,72 @@ modelling separate, jointable parts in an assembly.
 
 import json
 
-from conftest import load_tool
+from conftest import (FakeMatrix3D, FakeOccurrence, MakeComp, MakeDesign, install, load_tool,
+                      make_occurrence)
 
 cc = load_tool("model_create_component")
 
 
 # ── fakes ───────────────────────────────────────────────────────────────────
 
-class FakeComponent:
-    def __init__(self):
-        self.name = "Component1"
+class _NewOccurrence(FakeOccurrence):
+    """The occurrence addNewComponent hands back: it activates as the edit target, and answers the
+    parent lock it was created with. ground=None makes that read RAISE - an occurrence whose lock
+    cannot be read, which must publish null rather than a coerced false."""
 
-
-class FakeOcc:
-    def __init__(self, ground=None):
-        self.name = "Component1:1"
-        self.component = FakeComponent()
+    def __init__(self, path="Component1:1", component=None, ground=None):
+        super().__init__(path, component if component is not None else MakeComp(name="Component1"),
+                         ground_to_parent=ground,
+                         raises_on=(None if ground is not None
+                                    else {"isGroundToParent": "3 : the lock does not read"}))
         self.activated = False
-        # ground=None leaves the property ABSENT, so reading it raises - an occurrence whose parent
-        # lock cannot be read, which must publish null rather than a coerced false.
-        if ground is not None:
-            self.isGroundToParent = ground
 
     def activate(self):
         self.activated = True
         return True
 
 
-class FakeMatrix:
+class _ContextProxy(_NewOccurrence):
+    """The assembly-context proxy createForAssemblyContext returns - its fullPathName shows nesting."""
+    def __init__(self, native, parent):
+        super().__init__(path=f"{parent.fullPathName}+{native.name}", component=native.component)
+
+
+class _ChildOccurrence(_NewOccurrence):
+    """The NATIVE child occurrence addNewComponent returns on the parent's component - its own
+    fullPathName shows only the child; createForAssemblyContext proxies it into the parent's context."""
+    def __init__(self, proxy=True):
+        super().__init__(path="Child:1")
+        self._proxy = proxy
+        self.last_proxy = None        # the proxy handed out, so tests can assert on ITS state
+
+    def createForAssemblyContext(self, parent):
+        if not self._proxy:
+            return None
+        self.last_proxy = _ContextProxy(self, parent)
+        return self.last_proxy
+
+
+class _LockedComponent(MakeComp):
+    """A component whose rename lands nowhere: the assignment raises nothing and the component keeps
+    the name it has, which is how Fusion no-ops a duplicate or invalid one."""
+    def __setattr__(self, key, value):
+        if key == "name" and hasattr(self, "name"):
+            return
+        object.__setattr__(self, key, value)
+
+
+class FakeMatrix(FakeMatrix3D):
+    """Matrix3D.create()'s product, recording what the handler wrote: the rotation triple
+    setToRotation was called with, and the translation vector assigned after it."""
     def __init__(self):
+        super().__init__()
         self.translation = None
         self.rotation = None
+
     def setToRotation(self, angle, axis, origin):
         self.rotation = (angle, axis, origin)
+        return True
 
 
 class FakeOccurrences:
@@ -53,19 +86,26 @@ class FakeOccurrences:
     def addNewComponent(self, transform):
         self.last_transform = transform
         self.count += 1
-        return FakeOcc(self.ground)
+        return _NewOccurrence(ground=self.ground)
 
 
-class FakeRoot:
+class FakeParentOccurrences:
     def __init__(self):
-        self.occurrences = FakeOccurrences()
+        self.last_transform = None
+        self._child = _ChildOccurrence()
+    def addNewComponent(self, transform):
+        self.last_transform = transform
+        return self._child
 
 
-class FakeDesign:
+class FakeDesign(MakeDesign):
+    """A design whose designIntent reads and writes, recording every assignment. intent=None is a
+    design that answers no intent at all, where the promotion is skipped."""
+
     def __init__(self, intent=None):
-        self.rootComponent = FakeRoot()
-        # designIntent: None = the fake carries no intent (the pre-existing tests - promotion skipped).
-        # Set intent="part"/"hybrid"/"assembly" to exercise the F-intent auto-promote.
+        root = MakeComp(name="Root")
+        root.occurrences = FakeOccurrences()
+        super().__init__(comp=root)
         self._intent = intent
         self.intent_sets = []                 # records every assignment, to prove the promote fired
 
@@ -87,68 +127,18 @@ class FakeDesign:
         self.intent_sets.append(self._intent)
 
 
-class FakeChildProxy:
-    """The assembly-context proxy createForAssemblyContext returns - its fullPathName shows nesting."""
-    def __init__(self, native, parent):
-        self.component = native.component
-        self.name = native.name
-        self.fullPathName = f"{parent.fullPathName}+{native.name}"
-        self.activated = False
-    def activate(self):
-        self.activated = True
-        return True
-
-
-class FakeChildOcc:
-    """The NATIVE child occurrence addNewComponent returns on the parent's component - its own
-    fullPathName shows only the child; createForAssemblyContext proxies it into the parent's context."""
-    def __init__(self, proxy=True):
-        self.name = "Child:1"
-        self.fullPathName = "Child:1"
-        self.component = FakeComponent()
-        self.activated = False
-        self._proxy = proxy
-        self.last_proxy = None        # the proxy handed out, so tests can assert on ITS state
-    def activate(self):
-        self.activated = True
-        return True
-    def createForAssemblyContext(self, parent):
-        if not self._proxy:
-            return None
-        self.last_proxy = FakeChildProxy(self, parent)
-        return self.last_proxy
-
-
-class FakeParentOccurrences:
-    def __init__(self):
-        self.last_transform = None
-        self._child = FakeChildOcc()
-    def addNewComponent(self, transform):
-        self.last_transform = transform
-        return self._child
-
-
-class FakeParentComponent:
-    def __init__(self):
-        self.name = "Frame"
-        self.occurrences = FakeParentOccurrences()
-
-
-class FakeParentOcc:
-    def __init__(self):
-        self.name = "Frame:1"
-        self.fullPathName = "Frame:1"
-        self.component = FakeParentComponent()
+def _parent_occurrence():
+    """The occurrence 'parent' resolves to, whose component receives the new child."""
+    comp = MakeComp(name="Frame")
+    comp.occurrences = FakeParentOccurrences()
+    return make_occurrence(path="Frame:1", component=comp)
 
 
 def _install(intent=None):
     # DesignIntentTypes is a MEASURED family: conftest seeds it from live_api_facts, and the fake
     # maps through whatever the family holds - no hand-seeded values.
-    import adsk.fusion, adsk.core
-    design = FakeDesign(intent=intent)
-    cc.app = type("A", (), {"activeProduct": design})()
-    cc._common.app = cc.app
-    adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
+    import adsk.core
+    design = install(cc, FakeDesign(intent=intent))
     adsk.core.Matrix3D.create = staticmethod(FakeMatrix)
     adsk.core.Vector3D.create = staticmethod(lambda x, y, z: ("vec", x, y, z))
     adsk.core.Point3D.create = staticmethod(lambda x, y, z: ("pt", x, y, z))
@@ -180,15 +170,9 @@ class TestCreateComponent:
         # Fusion silently no-ops a duplicate/invalid component rename. The handler must read the name
         # back and WARN, not report the requested name as if it took.
         design = _install()
-
-        class _LockedComp:
-            name = "Component1"           # class-level: assignment to instance.name still works...
-            def __setattr__(self, k, v):
-                pass                       # ...but we swallow it -> rename silently fails
-
-        locked = _LockedComp()
-        design.rootComponent.occurrences.addNewComponent = lambda t: type(
-            "O", (), {"name": "Component1:1", "component": locked, "activate": lambda s: True})()
+        locked = _LockedComponent(name="Component1")
+        design.rootComponent.occurrences.addNewComponent = (
+            lambda t: _NewOccurrence(component=locked))
         out = _payload(cc.handler(name="Mast"))
         assert out["component"] == "Component1"    # the ACTUAL (unchanged) name, honestly
         assert "name_warning" in out and "Mast" in out["name_warning"]
@@ -263,11 +247,9 @@ class TestCreateComponent:
         res = cc.handler(rotate_deg=45, rotate_axis="w")
         assert res["isError"] is True and "rotate_axis" in res["message"]
 
-    def test_no_active_design_errors(self):
-        cc.app = type("A", (), {"activeProduct": None})()
-        cc._common.app = cc.app
-        import adsk.fusion
-        adsk.fusion.Design.cast = lambda x: None
+    def test_no_active_design_errors(self, monkeypatch):
+        _install()
+        monkeypatch.setattr(cc._common, "design", lambda: None)
         res = cc.handler()
         assert res["isError"] is True and "No active design" in res["message"]
 
@@ -311,7 +293,7 @@ class TestDesignIntentPromotion:
 
 def _install_with_parent(intent=None):
     design = _install(intent=intent)
-    parent = FakeParentOcc()
+    parent = _parent_occurrence()
     design.rootComponent.allOccurrences = [parent]     # what OccurrenceRef resolves 'parent' against
     return design, parent
 
@@ -346,7 +328,7 @@ class TestNestedParent:
         # If createForAssemblyContext yields no proxy, the handler still reports the nested path by
         # constructing 'Parent:1+Child:1' (Fusion joins fullPathName segments with '+').
         design, parent = _install_with_parent()
-        parent.component.occurrences._child = FakeChildOcc(proxy=False)
+        parent.component.occurrences._child = _ChildOccurrence(proxy=False)
         out = _payload(cc.handler(name="Child", parent="Frame:1"))
         assert out["full_path"] == "Frame:1+Child:1"
 

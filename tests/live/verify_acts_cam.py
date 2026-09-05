@@ -55,6 +55,7 @@ _BOSS3D_OP = "BossSteep"       # the Machining Extension's own 3D finish on the 
 _FLIP_FACE_OP = "FlipFace"     # the second setup: facing the underside
 _FLIP_BACK_OP = "FlipCbores"   # and the contour round the counterbore backsides
 _ENGRAVE_OP = "SketchEngrave"  # the engraving, driven by the scratch sketch
+_PROBE_OP = "ProbeStepTop"     # the Probe WCS cycle that touches off the stepped top
 
 # The shipped hole-drilling template one act applies by its folder-position url: a spot drill, a
 # drill and a counterbore in one bundle, which is the counterbored mounting pattern's whole cycle.
@@ -92,6 +93,35 @@ def _toolpath_shown(action, key, fit=False):
                           "fit": p.get("fit")},
                          p.get("action") == action and want is not None
                          and p.get("operation") == want and p.get("fit") is fit)
+    return check
+
+
+def _probe_applied(count):
+    """cam_select_geometry(selection='probe'): the face count the OPERATION holds after the
+    selection, beside the PARAMETER it landed on - 'probe_selection' is what says the probing input
+    took the faces rather than some other input of the operation, which the count cannot."""
+    def check(p):
+        return _measured(f"{count} face(s) on the probing input",
+                         {"selections": p.get("selections"),
+                          "selection_param": p.get("selection_param")},
+                         p.get("selections") == count
+                         and p.get("selection_param") == "probe_selection")
+    return check
+
+
+def _op_valid(setup, name):
+    """cam_get(include=['operations']) read after the act boundary certified the generation: ONE
+    operation's row, valid, carrying no blocker, and NOT flagged empty_toolpath - the flag the
+    slice puts on a row that cuts nothing, which a state of 'valid' does not exclude."""
+    def check(p):
+        recs = ((p.get("operations") or {}).get("setups") or [])
+        rec = next((r for r in recs if r.get("setup") == setup), None)
+        row = next((r for r in ((rec or {}).get("operations") or [])
+                    if r.get("name") == name), None)
+        return _measured(f"'{name}' reads valid in '{setup}', with a toolpath that is not empty",
+                         {"row": row},
+                         bool(row) and row.get("state") == "valid"
+                         and row.get("blocked_by") == [] and "empty_toolpath" not in row)
     return check
 
 
@@ -557,6 +587,35 @@ _CAM_STORY = [
     # REFUSED: the slice's units guard - the one refusal that fires whether or not results exist,
     # since every length in a point row crosses the wire scaled out of CM.
     ("cam_get", {"include": ["inspection"], "units": "furlongs"}, "refused", None),
+    # THE PROBING CYCLE, on the part itself: a Probe WCS pass touching off the stepped top. Its
+    # tool is a PROBE, cloned by from_type from the shipped 'Probes' library at the index the
+    # document library's own count names - cam_create_operation refuses a probing strategy handed
+    # a cutting tool, so no other tool in this library can carry the beat.
+    ("cam_edit_tools", {"action": "list", "scope": "document"},
+     _needs(MACHINING_EXTENSION,
+            lambda p: _num(p.get("tool_count")) and p["tool_count"] >= 1),
+     ("probe_tool", _recall("probe_tool", lambda p: p["tool_count"]))),
+    ("cam_edit_tools", {"action": "add", "scope": "document",
+                        "add_tools": [{"from_type": "probe"}]},
+     _needs(MACHINING_EXTENSION,
+            lambda p: p.get("added") == 1
+            and p.get("tool_count") == _RECALL.get("probe_tool") + 1), None),
+    ("cam_create_operation", lambda c: {"setup": CAM_SETUP, "strategy": "probe",
+                                        "name": _PROBE_OP, "tool_scope": "document",
+                                        "tool_index": _ctx_get(c, "probe_tool",
+                                                               "the cloned probe's index"),
+                                        "generate": False},
+     _needs(MACHINING_EXTENSION, _op_named(CAM_SETUP, "probe", _PROBE_OP)), None),
+    # the stepped top, measured again for this beat rather than carried from the chamfer's row: a
+    # handle is short-lived, and this row is dropped whole where the capability tier holds the
+    # beat back.
+    ("find_geometry", {"target": PART_COMP, "kind": "planar_face", "nearest_to": [25, 0, 40],
+                       "max_results": 1},
+     _needs(MACHINING_EXTENSION, _face_up_at(25, 0, 40, tol=2.0)), _fg("probe_face")),
+    ("cam_select_geometry", lambda c: {"operation": _PROBE_OP, "selection": "probe",
+                                       "handles": [_ctx_get(c, "probe_face", "the stepped top")],
+                                       "generate": False},
+     _needs(MACHINING_EXTENSION, _probe_applied(1)), None),
     # the feed edit is read BACK off the parameter: 'after' is the expression the platform stored,
     # which a set that did not take leaves at the tool's default.
     ("cam_edit_operation", lambda c: {"operation": _ctx_get(c, "face_op", "the face op"),
@@ -814,6 +873,11 @@ _CAM_DELIVER = [
     # zero. The act-boundary poll fails on an EMPTY toolpath; this says the same thing per
     # operation, with the seconds on the row.
     ("cam_get", {"include": ["time"], "setup": CAM_SETUP}, _all_cut(CAM_SETUP, 9), None),
+    # THE PROBING PASS the job act created, read once the act boundary's poll has certified the
+    # generation: the Probe WCS cycle reads valid on its own row. It is gated with the rows that
+    # made it - where the extension is not entitled there is no such operation to read.
+    ("cam_get", {"include": ["operations"], "setup": CAM_SETUP},
+     _needs(MACHINING_EXTENSION, _op_valid(CAM_SETUP, _PROBE_OP)), None),
     # the validity verdict flips true once generation completed (the act boundary's poll certified
     # it); the not-valid breakdown is empty.
     ("cam_inspect_toolpaths", {"scope": CAM_SETUP},
@@ -1543,6 +1607,28 @@ def _posted_setups(names):
     return check
 
 
+def _posted_turning(setup, program):
+    """cam_post(post_scope='fusion'): a program posted with a post resolved from the library this
+    installation ships, whose url names turning - 'post_scope' and 'post_config' are what say so.
+    At least one operation posted and every file row is stat'd on disk; the G-code is not read."""
+    def check(p):
+        files = p.get("files") or []
+        return _measured(f"'{setup}' posted with a shipped turning post",
+                         {"posted": p.get("posted"), "scope": p.get("scope"),
+                          "program_name": p.get("program_name"),
+                          "post_scope": p.get("post_scope"), "post_config": p.get("post_config"),
+                          "posted_operations": p.get("posted_operations"),
+                          "file_count": p.get("file_count"), "files": files},
+                         p.get("posted") is True and p.get("scope") == "setup"
+                         and p.get("program_name") == program
+                         and p.get("post_scope") == "fusion"
+                         and "turning" in str(p.get("post_config") or "").lower()
+                         and _num(p.get("posted_operations")) and p["posted_operations"] >= 1
+                         and p.get("file_count") == len(files) and len(files) >= 1
+                         and all(_num(f.get("size_bytes")) and f["size_bytes"] > 0 for f in files))
+    return check
+
+
 def _posted_as_is(name):
     """cam_post carrying nothing but 'program_name': the stored configuration posted untouched. The
     mode and the scope both say so, and files still land - an as-is post that wrote nothing would
@@ -1911,7 +1997,7 @@ _CAM_SCOPE = [
 
 # ACT 10c2: the TURNED profile, on the same drafted block and on a mill-turn machine. Turning is
 # not an extension strategy, so this act runs on any licence; it needs only the cameo ACT 8 builds.
-# The job is not posted - posting a turning program is not measured.
+# ACT 10c3 posts it, once the boundary poll below has certified the generation.
 _CAM_TURNING = [
     _watch(_SW_COMP + ":1"),
     # its own inserts, at the index the library's own count names: a general one for the profile
@@ -1982,6 +2068,16 @@ _CAM_TURNING = [
      _op_created(_TURN_SETUP, "turning_part"), None),
     # launched behind every write this act makes, and certified by the boundary poll.
     ("cam_generate", {"target": _TURN_SETUP, "skip_valid": False}, _launched_on(_TURN_SETUP), None),
+]
+
+
+# ACT 10c3: the turned job POSTED, from the post library this installation SHIPS - the scope that
+# reaches a lathe post. An act of its own because the post needs the toolpaths ACT 10c2 leaves
+# generating, and the boundary poll that certifies them runs between the two acts.
+_CAM_TURNING_POST = [
+    ("cam_post", {"scope": _TURN_SETUP, "post": "fanuc turning", "post_scope": "fusion",
+                  "output_folder": EXPORT_DIR + "/nc", "program_name": "3001"},
+     _posted_turning(_TURN_SETUP, "3001"), None),
 ]
 
 

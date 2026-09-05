@@ -17,8 +17,11 @@ that with a tiny fake core — pinning the handler's branching without a live BR
 """
 
 import json
+import types
 
-from conftest import load_tool, FakePoint
+import pytest
+
+from conftest import FakePoint, install, load_tool, make_design
 
 mch = load_tool("model_compute_holder")
 holder = load_tool("_holder")
@@ -69,40 +72,39 @@ class _FakeAxisLine:
     pass
 
 
-def _install_core(*, axis=_FakeAxisLine(), datum=FakePoint(), profile=None):
-    """Patch the module's _holder with a fake core so the handler's branching is exercised without a
-    live BRep. axis=None makes get_axis fail; datum=None makes the datum invalid; profile drives
-    get_tool_profile. build_holder_data stays the REAL one (we want its JSON)."""
+def _core(axis, datum, profile):
+    """A stand-in geometry core: axis=None makes get_axis fail, datum=None makes the datum invalid,
+    and `profile` drives get_tool_profile. build_holder_data stays the REAL one (we want its JSON)."""
     real_build = holder.build_holder_data
 
     class _Core:
         get_axis = staticmethod(lambda ent: axis)
         is_valid_axial_datum = staticmethod(lambda ent, ax: datum)
-        get_tool_profile = staticmethod(lambda body, ax, pt: (profile if profile is not None else []))
+        get_tool_profile = staticmethod(lambda body, ax, pt: list(profile))
         build_holder_data = staticmethod(real_build)
 
-    mch._holder = _Core()
+    return _Core()
 
 
-def _install_design(has_design=True):
-    design = object() if has_design else None
-    mch._common.design = lambda: design
-    mch._inputs._common.design = lambda: design
-    # the three input kinds resolve to opaque entities; patch them to succeed by default
-    mch._BODY.resolve = lambda raw: ("body_ent", None)
-    mch._AXIS.resolve = lambda raw: ("axis_ent", None)
-    mch._END.resolve = lambda raw: ("end_ent", None)
-    # app.activeDocument.name default for the holder name
-    mch.app = type("A", (), {"activeDocument": type("D", (), {"name": "DocHolder"})()})()
-    return design
+@pytest.fixture
+def wire(monkeypatch):
+    """Wire both design seams, the three input kinds and the fake geometry core."""
+    def build(has_design=True, axis=_FakeAxisLine(), datum=FakePoint(), profile=()):
+        install(mch, make_design() if has_design else None)
+        # the holder's default name is read off the active document
+        monkeypatch.setattr(mch, "app", types.SimpleNamespace(
+            activeDocument=types.SimpleNamespace(name="DocHolder")))
+        for kind, ent in ((mch._BODY, "body_ent"), (mch._AXIS, "axis_ent"), (mch._END, "end_ent")):
+            monkeypatch.setattr(kind, "resolve", lambda raw, e=ent: (e, None))
+        monkeypatch.setattr(mch, "_holder", _core(axis, datum, profile))
+    return build
 
 
 # ── handler happy path + guards ──────────────────────────────────────────────────────────────────
 
 class TestHandler:
-    def test_happy_path_returns_segments_and_json_no_library(self):
-        _install_design()
-        _install_core(profile=[[0.0, 2.0, 0.5, 1.0]])
+    def test_happy_path_returns_segments_and_json_no_library(self, wire):
+        wire(profile=[[0.0, 2.0, 0.5, 1.0]])
         out = _payload(mch.handler(body="h_body", axis="h_axis", end_datum="h_end", name="Collet"))
         assert out["computed"] is True
         assert out["name"] == "Collet"
@@ -114,38 +116,34 @@ class TestHandler:
         assert "library" not in json.dumps(fields_except_note).lower()
         assert "does not write to a tool library" in out["note"].lower()
 
-    def test_name_defaults_to_active_document(self):
-        _install_design()
-        _install_core(profile=[[0, 1, 0.5, 0.5]])
+    def test_name_defaults_to_active_document(self, wire):
+        wire(profile=[[0, 1, 0.5, 0.5]])
         out = _payload(mch.handler(body="h", axis="h", end_datum="h"))
         assert out["name"] == "DocHolder"
 
-    def test_no_active_design_errors(self):
-        _install_design(has_design=False)
+    def test_no_active_design_errors(self, wire):
+        wire(has_design=False)
         res = mch.handler(body="h", axis="h", end_datum="h")
         assert res["isError"] is True and "no active design" in res["message"].lower()
 
-    def test_axis_not_an_axis_errors(self):
-        _install_design()
-        _install_core(axis=None)                 # get_axis returns None
+    def test_axis_not_an_axis_errors(self, wire):
+        wire(axis=None)                          # get_axis returns None
         res = mch.handler(body="h", axis="h", end_datum="h")
         assert res["isError"] is True and "axis of rotation" in res["message"].lower()
 
-    def test_invalid_end_datum_errors(self):
-        _install_design()
-        _install_core(datum=None)                # is_valid_axial_datum returns None
+    def test_invalid_end_datum_errors(self, wire):
+        wire(datum=None)                         # is_valid_axial_datum returns None
         res = mch.handler(body="h", axis="h", end_datum="h")
         assert res["isError"] is True and "end datum" in res["message"].lower()
 
-    def test_empty_profile_errors(self):
-        _install_design()
-        _install_core(profile=[])                # no coaxial faces reduced
+    def test_empty_profile_errors(self, wire):
+        wire(profile=[])                         # no coaxial faces reduced
         res = mch.handler(body="h", axis="h", end_datum="h")
         assert res["isError"] is True and "no holder profile" in res["message"].lower()
 
-    def test_bad_body_handle_errors(self):
-        _install_design()
-        _install_core(profile=[[0, 1, 0.5, 0.5]])
-        mch._BODY.resolve = lambda raw: (None, "'body': no body named 'x'.")
+    def test_bad_body_handle_errors(self, wire, monkeypatch):
+        wire(profile=[[0, 1, 0.5, 0.5]])
+        monkeypatch.setattr(mch._BODY, "resolve",
+                            lambda raw: (None, "'body': no body named 'x'."))
         res = mch.handler(body="x", axis="h", end_datum="h")
         assert res["isError"] is True and "body" in res["message"].lower()

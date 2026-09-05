@@ -488,6 +488,108 @@ class TestCloudPostScope:
         assert res["isError"] is True and "ambiguous" in res["message"].lower()
 
 
+# -- post_scope='fusion': the post library this installation SHIPS ---------------------------------
+
+def _fusion_lib(names, root="fusion://root"):
+    """A flat shipped-library fake: one asset url per post name directly under the root."""
+    urls = [_URL(root + "/" + n) for n in names]
+    return _FakePostLibrary(root, {root: ([], urls)},
+                            {u.toString(): object() for u in urls})
+
+
+class TestFusionPostScope:
+    """The lathe and mill-turn posts live in the library this installation ships; post_scope='fusion'
+    is the scope that resolves them."""
+
+    def test_fusion_resolves_a_shipped_post_by_case_folded_name(self, monkeypatch, tmp_path):
+        # THE fusion bite: the name matches an asset leafName under Fusion360LibraryLocation, the
+        # PostConfiguration loads from its url, and the file lands.
+        lib = _fusion_lib(["fanuc turning.cps", "haas turning.cps"])
+        cam = _install(monkeypatch, _CAM([_Setup("S1", [_Op("Face1")])]))
+        monkeypatch.setattr(cp, "_post_library", lambda: lib)
+        data = _payload(cp.handler(post="Fanuc Turning", post_scope="fusion",
+                                   output_folder=str(tmp_path), program_name="1001"))
+        assert data["posted"] is True and data["post_scope"] == "fusion"
+        assert data["post_config"] == "fusion://root/fanuc turning.cps"
+        assert cam.ncPrograms.item(0).postConfiguration is not None
+
+    def test_a_name_that_is_another_shipped_post_s_prefix_does_not_resolve(self, monkeypatch,
+                                                                            tmp_path):
+        # The match is EXACT, not containment. Shipped names nest ('acramatic.cps' beside
+        # 'acramatic 850sx turning.cps'), so a substring match would hand a caller asking for one
+        # post the G-code of another.
+        _install(monkeypatch, _CAM([_Setup("S1", [_Op("Face1")])]))
+        monkeypatch.setattr(cp, "_post_library", lambda: _fusion_lib(["centroid turning.cps"]))
+        res = cp.handler(post="centroid", post_scope="fusion",
+                         output_folder=str(tmp_path), program_name="1")
+        assert res["isError"] is True
+        assert "no fusion post named 'centroid'" in res["message"].lower()
+
+    def test_fusion_ambiguous_name_refused(self, monkeypatch, tmp_path):
+        a = _URL("fusion://root/A/fanuc turning.cps")
+        b = _URL("fusion://root/B/fanuc turning.cps")
+        tree = {
+            "fusion://root": ([_URL("fusion://root/A"), _URL("fusion://root/B")], []),
+            "fusion://root/A": ([], [a]),
+            "fusion://root/B": ([], [b]),
+        }
+        lib = _FakePostLibrary("fusion://root", tree,
+                               {a.toString(): object(), b.toString(): object()})
+        cam = _install(monkeypatch, _CAM([_Setup("S1", [_Op("Face1")])]))
+        monkeypatch.setattr(cp, "_post_library", lambda: lib)
+        res = cp.handler(post="fanuc turning", post_scope="fusion",
+                         output_folder=str(tmp_path), program_name="1")
+        assert res["isError"] is True and "ambiguous fusion post" in res["message"].lower()
+        assert cam.posted == [] and cam.ncPrograms.count == 0
+
+    def test_a_fusion_miss_names_the_scope_and_counts_the_posts_it_did_not_list(self, monkeypatch,
+                                                                                 tmp_path):
+        # The shipped library answers with hundreds of names, so the listing is capped - and the
+        # boundary is the last name listed beside the COUNT of the ones that are not.
+        names = ["post %03d.cps" % i for i in range(cp._NAMES_LISTED + 5)]
+        _install(monkeypatch, _CAM([_Setup("S1", [_Op("Face1")])]))
+        monkeypatch.setattr(cp, "_post_library", lambda: _fusion_lib(names))
+        res = cp.handler(post="lathe wizard", post_scope="fusion",
+                         output_folder=str(tmp_path), program_name="1")
+        assert res["isError"] is True
+        assert "no fusion post named 'lathe wizard'" in res["message"].lower()
+        assert names[cp._NAMES_LISTED - 1] in res["message"]      # the last name listed
+        assert names[cp._NAMES_LISTED] not in res["message"]      # the first one left out
+        assert "(+5 more not listed)" in res["message"]           # and they are counted, not dropped
+
+    def test_the_default_scope_stays_local_when_the_shipped_library_holds_the_name_too(
+            self, monkeypatch, tmp_path):
+        # post_scope defaults to local: a name the shipped library also answers to must still
+        # resolve to the .cps on disk, or the fourth scope would quietly re-aim every existing call.
+        posts = tmp_path / "posts"
+        posts.mkdir()
+        cps = _write_cps(posts, "generic fanuc.cps")
+        out = tmp_path / "out"
+        out.mkdir()
+        cam = _CAM([_Setup("S1", [_Op("Face1")])])
+        cam.personalPostFolder = str(posts)
+        _install(monkeypatch, cam)
+        monkeypatch.setattr(cp, "_post_library", lambda: _fusion_lib(["Generic Fanuc.cps"]))
+        data = _payload(cp.handler(post="generic fanuc", output_folder=str(out), program_name="1"))
+        assert data["post_scope"] == "local"
+        assert data["post_config"] == str(cps).replace("\\", "/")
+
+    def test_the_fusion_cap_reaches_the_post_the_team_cap_stops_at(self, monkeypatch, tmp_path):
+        # The shipped library holds more posts than a team library's cap admits, so the walk that
+        # serves it needs a bound of its own: the wanted post sits at exactly the index the team cap
+        # refuses to append.
+        team_cap = cp._POST_MAX_ASSETS["cloud"]
+        names = ["filler %04d.cps" % i for i in range(team_cap)] + ["fanuc turning.cps"]
+        _install(monkeypatch, _CAM([_Setup("S1", [_Op("Face1")])]))
+        monkeypatch.setattr(cp, "_post_library", lambda: _fusion_lib(names))
+        data = _payload(cp.handler(post="fanuc turning", post_scope="fusion",
+                                   output_folder=str(tmp_path), program_name="1001"))
+        assert data["posted"] is True and data["post_config"].endswith("fanuc turning.cps")
+        res = cp.handler(post="fanuc turning", post_scope="cloud",
+                         output_folder=str(tmp_path), program_name="1002")
+        assert res["isError"] is True and "capped" in res["message"]
+
+
 # -- create-new vs reuse -------------------------------------------------------
 
 class TestCreateOrReuse:

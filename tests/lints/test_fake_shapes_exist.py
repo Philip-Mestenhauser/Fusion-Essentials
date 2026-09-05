@@ -76,6 +76,9 @@ _UNMAPPED_OK = {
     "FakeInfiniteLine3D": "InfiniteLine3D has no SHAPES dump; every member the fake carries "
                           "(create/origin/direction/isColinearTo) is exercised live by the shipped "
                           "Add Holder command code that _holder.py keeps verbatim",
+    "_MeshBodies": "MeshBodies has no SHAPES dump; the one member the fake takes a position on is "
+                   "itemByName, which it DROPS off the measured meshbodies-no-itembyname row "
+                   "(BEHAVIOR['meshbodies_has_itembyname']) rather than asserting a surface",
 }
 
 
@@ -97,9 +100,9 @@ def _auto_mapped(class_names, shapes):
 
 def _is_fake_shaped(name, live_names):
     """Fake/_Fake-prefixed, the Make prefix conftest's builder fakes use, or the bare name of a
-    live adsk type."""
+    live adsk type with or without a leading underscore (_MeshBodies stands for MeshBodies)."""
     return (name.startswith("Fake") or name.startswith("_Fake") or name.startswith("Make")
-            or name in live_names)
+            or name.lstrip("_") in live_names)
 
 
 def _live_type_names():

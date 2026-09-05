@@ -12,62 +12,40 @@ import adsk.fusion
 import pytest
 
 from conftest import (load_tool, make_design, install, entity_proxy, go_stale, payload,
-                      error_message, MakeComp)
+                      error_message, MakeComp, BRepBody, BRepFace, _NamedCollection)
 
 sdf = load_tool("surface_delete_face")
 
 
-class _Coll:
-    def __init__(self, items):
-        self._i = list(items)
-    @property
-    def count(self):
-        return len(self._i)
-    def item(self, i):
-        return self._i[i] if 0 <= i < len(self._i) else None
-
-
-class _Face:
-    def __init__(self, body=None):
-        self.body = body
-
-
-class _Body:
-    """Carries an entityToken, because _geom.owning_bodies dedupes on it and only falls back to
-    identity when there is none. Each face gets its OWN proxy of this body - the measured shape of
-    face.body - so the token path is what these tests actually exercise; sharing one object would
-    make them pass under either keying."""
-    def __init__(self, name="Srf1", is_solid=False, face_count=0, faces=None, entity_token=None):
-        self.name = name
-        self.isSolid = is_solid
-        self.entityToken = entity_token or name
-        if faces is not None:
-            self._faces = list(faces)
-        else:
-            self._faces = [_Face() for _ in range(face_count)]
-        for f in self._faces:
-            if f.body is None:
-                f.body = entity_proxy(self)
-    @property
-    def faces(self):
-        return _Coll(self._faces)
-
-
-class _UnreadableFacesBody(_Body):
+class _UnreadableFacesBody(BRepBody):
     """Present and named, but its faces collection will not enumerate - the read `safe(..., 0)`
     turns into a confident 'this body has zero faces'."""
     @property
     def faces(self):
         raise RuntimeError("4 : An API Object refers to a deleted Object")
 
+    @faces.setter
+    def faces(self, value):
+        pass
+
+
+def _body(name="Srf1", is_solid=False, face_count=0, faces=None, entity_token=None, cls=BRepBody):
+    """A body whose entityToken reads, because _geom.owning_bodies dedupes on it and only falls
+    back to identity when there is none. Each face gets its OWN proxy of the body - the measured
+    shape of face.body - so the token path is what these tests exercise; sharing one object would
+    make them pass under either keying."""
+    faces = list(faces) if faces is not None else [BRepFace(None) for _ in range(face_count)]
+    body = cls(name, is_solid=is_solid, entity_token=entity_token, faces=faces)
+    for f in faces:
+        if f.body is None:
+            f.body = entity_proxy(body)
+    return body
+
 
 class _Feature:
     def __init__(self, name="DeleteFace1", bodies=()):
         self.name = name
-        self._bodies = list(bodies)
-    @property
-    def bodies(self):
-        return _Coll(self._bodies)
+        self.bodies = _NamedCollection(bodies)
 
 
 class _DelFeatures:
@@ -102,19 +80,19 @@ class _DirectDelFeatures:
         self.calls += 1
         for b in self.bodies:
             if self.faces_removed < 0:
-                b._faces.extend([_Face(b) for _ in range(-self.faces_removed)])
+                b.faces._items.extend([BRepFace(None, body=b) for _ in range(-self.faces_removed)])
             else:
-                del b._faces[:self.faces_removed]
+                del b.faces._items[:self.faces_removed]
         if self.count_unreadable:
-            go_stale(*self.bodies, attrs=("_faces",))
+            go_stale(*self.bodies, attrs=("faces",))
         go_stale(*self.bodies)      # identity reads go stale; the face count is the effect check
         return None
 
 
 @pytest.fixture(autouse=True)
 def _types(monkeypatch):
-    monkeypatch.setattr(adsk.fusion, "BRepFace", _Face, raising=False)
-    monkeypatch.setattr(adsk.fusion, "BRepBody", _Body, raising=False)
+    monkeypatch.setattr(adsk.fusion, "BRepFace", BRepFace, raising=False)
+    monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
 
 
 def _wire(tokens, delete=None, surface_delete=None, design_type=None):
@@ -131,9 +109,9 @@ def _wire(tokens, delete=None, surface_delete=None, design_type=None):
 
 
 def test_plain_delete_reports_face_count_delta():
-    body = _Body("Srf1", face_count=6)
-    target = body._faces[0]
-    result = _Feature(bodies=[_Body("Srf1", face_count=5)])
+    body = _body("Srf1", face_count=6)
+    target = body.faces.item(0)
+    result = _Feature(bodies=[_body("Srf1", face_count=5)])
     feats = _wire({"F1": target}, surface_delete=_DelFeatures(result), delete=_DelFeatures(result))
     out = payload(sdf.delete_face_handler(faces=["F1"], heal=False))
     assert out["heal"] is False
@@ -144,9 +122,9 @@ def test_plain_delete_reports_face_count_delta():
 
 
 def test_heal_routes_to_deleteFaceFeatures():
-    body = _Body("Solid1", is_solid=True, face_count=6)
-    target = body._faces[0]
-    result = _Feature(bodies=[_Body("Solid1", is_solid=True, face_count=5)])
+    body = _body("Solid1", is_solid=True, face_count=6)
+    target = body.faces.item(0)
+    result = _Feature(bodies=[_body("Solid1", is_solid=True, face_count=5)])
     feats = _wire({"F1": target}, delete=_DelFeatures(result), surface_delete=_DelFeatures(result))
     out = payload(sdf.delete_face_handler(faces=["F1"], heal=True))
     assert out["heal"] is True
@@ -159,8 +137,8 @@ def test_heal_routes_to_deleteFaceFeatures():
 
 
 def test_consumed_body_is_reported():
-    body = _Body("Srf1", face_count=1)
-    target = body._faces[0]
+    body = _body("Srf1", face_count=1)
+    target = body.faces.item(0)
     result = _Feature(bodies=[])            # no result body -> the body vanished
     _wire({"F1": target}, surface_delete=_DelFeatures(result))
     res = sdf.delete_face_handler(faces=["F1"], heal=False)
@@ -171,8 +149,8 @@ def test_consumed_body_is_reported():
 
 
 def test_heal_failure_is_error_pointing_to_no_heal():
-    body = _Body("Solid1", is_solid=True, face_count=6)
-    target = body._faces[0]
+    body = _body("Solid1", is_solid=True, face_count=6)
+    target = body.faces.item(0)
     _wire({"F1": target}, delete=_Raises())
     res = sdf.delete_face_handler(faces=["F1"], heal=True)
     msg = error_message(res)
@@ -180,18 +158,18 @@ def test_heal_failure_is_error_pointing_to_no_heal():
 
 
 def test_heal_null_feature_is_error():
-    body = _Body("Solid1", is_solid=True, face_count=6)
-    target = body._faces[0]
+    body = _body("Solid1", is_solid=True, face_count=6)
+    target = body.faces.item(0)
     _wire({"F1": target}, delete=_DelFeatures(lambda coll: None))
     res = sdf.delete_face_handler(faces=["F1"], heal=True)
     assert "heal=false" in error_message(res)
 
 
 def test_faces_from_two_bodies_tracked():
-    b1 = _Body("Srf1", face_count=4)
-    b2 = _Body("Srf2", face_count=3)
-    f1, f2 = b1._faces[0], b2._faces[0]
-    result = _Feature(bodies=[_Body("Srf1", face_count=3), _Body("Srf2", face_count=2)])
+    b1 = _body("Srf1", face_count=4)
+    b2 = _body("Srf2", face_count=3)
+    f1, f2 = b1.faces.item(0), b2.faces.item(0)
+    result = _Feature(bodies=[_body("Srf1", face_count=3), _body("Srf2", face_count=2)])
     _wire({"F1": f1, "F2": f2}, surface_delete=_DelFeatures(result))
     out = payload(sdf.delete_face_handler(faces=["F1", "F2"], heal=False))
     assert sorted(out["input_bodies"]) == ["Srf1", "Srf2"]
@@ -202,9 +180,9 @@ def test_faces_from_two_bodies_tracked():
 def test_result_row_is_solid_is_null_when_the_flag_will_not_read():
     # informational, but still a published FLAG: bool(safe(...)) calls a body an open surface off a
     # read that failed, which is exactly what a delete-face caller inspects the row for.
-    body = _Body("Srf1", face_count=6)
-    target = body._faces[0]
-    survivor = _Body("Srf1", face_count=5)
+    body = _body("Srf1", face_count=6)
+    target = body.faces.item(0)
+    survivor = _body("Srf1", face_count=5)
     del survivor.isSolid                              # the flag will not read at all
     result = _Feature(bodies=[survivor])
     _wire({"F1": target}, surface_delete=_DelFeatures(result))
@@ -215,9 +193,9 @@ def test_result_row_is_solid_is_null_when_the_flag_will_not_read():
 
 def test_result_row_is_solid_passes_a_readable_flag_through():
     # the boundary beside it: a flag that READ false stays false, not null.
-    body = _Body("Srf1", face_count=6)
-    target = body._faces[0]
-    result = _Feature(bodies=[_Body("Srf1", is_solid=False, face_count=5)])
+    body = _body("Srf1", face_count=6)
+    target = body.faces.item(0)
+    result = _Feature(bodies=[_body("Srf1", is_solid=False, face_count=5)])
     _wire({"F1": target}, surface_delete=_DelFeatures(result))
     out = payload(sdf.delete_face_handler(faces=["F1"], heal=False))
     assert out["result_bodies"][0]["is_solid"] is False
@@ -238,9 +216,9 @@ class TestParametricFaceCountGate:
     the verdict, at the 0/-1 boundary."""
 
     def _run(self, before, after, heal=False, requested=1):
-        body = _Body("Srf1", face_count=before)
-        targets = {"F%d" % i: body._faces[i] for i in range(requested)}
-        result = _Feature(bodies=[_Body("Srf1", face_count=after)])
+        body = _body("Srf1", face_count=before)
+        targets = {"F%d" % i: body.faces.item(i) for i in range(requested)}
+        result = _Feature(bodies=[_body("Srf1", face_count=after)])
         _wire(targets, surface_delete=_DelFeatures(result), delete=_DelFeatures(result))
         return sdf.delete_face_handler(faces=list(targets), heal=heal)
 
@@ -274,9 +252,9 @@ class TestParametricFaceCountGate:
     def test_an_unreadable_before_count_does_not_refuse(self):
         # No input body's face count read (total 0), so the delta is evidence of nothing - the
         # feature object is what this path is graded on, and a 0-vs-0 must not read as a no-op.
-        body = _UnreadableFacesBody("Srf1", face_count=1)
-        target = body._faces[0]
-        result = _Feature(bodies=[_Body("Srf1", face_count=0)])
+        target = BRepFace(None)
+        _body("Srf1", faces=[target], cls=_UnreadableFacesBody)   # target.body now owns it
+        result = _Feature(bodies=[_body("Srf1", face_count=0)])
         _wire({"F1": target}, surface_delete=_DelFeatures(result))
         out = payload(sdf.delete_face_handler(faces=["F1"], heal=False))
         assert out["faces_before"] == 0 and out["faces_after"] == 0
@@ -288,11 +266,12 @@ class TestParametricAfterCountMustRead:
     verdict then reads the largest possible delete off a number nobody measured."""
 
     def test_one_unreadable_result_body_among_readable_ones_is_refused(self):
-        b1 = _Body("Srf1", face_count=13)
-        b2 = _Body("Srf2", face_count=13)
-        result = _Feature(bodies=[_Body("Srf1", face_count=12),
-                                  _UnreadableFacesBody("Srf2", face_count=12)])
-        _wire({"F1": b1._faces[0], "F2": b2._faces[0]}, surface_delete=_DelFeatures(result))
+        b1 = _body("Srf1", face_count=13)
+        b2 = _body("Srf2", face_count=13)
+        result = _Feature(bodies=[_body("Srf1", face_count=12),
+                                  _body("Srf2", face_count=12, cls=_UnreadableFacesBody)])
+        _wire({"F1": b1.faces.item(0), "F2": b2.faces.item(0)},
+              surface_delete=_DelFeatures(result))
         res = sdf.delete_face_handler(faces=["F1", "F2"], heal=False)
         assert res["isError"] is True
         msg = error_message(res)
@@ -301,9 +280,9 @@ class TestParametricAfterCountMustRead:
         assert "UNVERIFIED" in msg
 
     def test_every_result_body_unreadable_is_refused(self):
-        body = _Body("Srf1", face_count=26)
-        result = _Feature(bodies=[_UnreadableFacesBody("Srf1", face_count=26)])
-        _wire({"F1": body._faces[0]}, surface_delete=_DelFeatures(result))
+        body = _body("Srf1", face_count=26)
+        result = _Feature(bodies=[_body("Srf1", face_count=26, cls=_UnreadableFacesBody)])
+        _wire({"F1": body.faces.item(0)}, surface_delete=_DelFeatures(result))
         res = sdf.delete_face_handler(faces=["F1"], heal=False)
         assert res["isError"] is True
         # the fabricated verdict this refusal replaces
@@ -311,10 +290,11 @@ class TestParametricAfterCountMustRead:
 
     def test_every_result_body_readable_stays_a_success(self):
         # the boundary on the other side: zero unreadable bodies renders the verdict as before
-        b1 = _Body("Srf1", face_count=13)
-        b2 = _Body("Srf2", face_count=13)
-        result = _Feature(bodies=[_Body("Srf1", face_count=12), _Body("Srf2", face_count=12)])
-        _wire({"F1": b1._faces[0], "F2": b2._faces[0]}, surface_delete=_DelFeatures(result))
+        b1 = _body("Srf1", face_count=13)
+        b2 = _body("Srf2", face_count=13)
+        result = _Feature(bodies=[_body("Srf1", face_count=12), _body("Srf2", face_count=12)])
+        _wire({"F1": b1.faces.item(0), "F2": b2.faces.item(0)},
+              surface_delete=_DelFeatures(result))
         out = payload(sdf.delete_face_handler(faces=["F1", "F2"], heal=False))
         assert out["faces_before"] == 26 and out["faces_after"] == 24
         assert out["faces_delta"] == -2
@@ -322,10 +302,11 @@ class TestParametricAfterCountMustRead:
     def test_a_consumed_body_still_reports_with_the_after_count_left_null(self):
         # the consumed branch owns the empty/short result set and keeps its warning; the after-count
         # it cannot measure is published as null rather than as a fabricated total
-        b1 = _Body("Srf1", face_count=6)
-        b2 = _Body("Srf2", face_count=6)
-        result = _Feature(bodies=[_UnreadableFacesBody("Srf1", face_count=5)])
-        _wire({"F1": b1._faces[0], "F2": b2._faces[0]}, surface_delete=_DelFeatures(result))
+        b1 = _body("Srf1", face_count=6)
+        b2 = _body("Srf2", face_count=6)
+        result = _Feature(bodies=[_body("Srf1", face_count=5, cls=_UnreadableFacesBody)])
+        _wire({"F1": b1.faces.item(0), "F2": b2.faces.item(0)},
+              surface_delete=_DelFeatures(result))
         out = payload(sdf.delete_face_handler(faces=["F1", "F2"], heal=False))
         assert out["bodies_consumed"] == 1
         assert out["faces_after"] is None
@@ -334,8 +315,8 @@ class TestParametricAfterCountMustRead:
 
 def test_parametric_no_op_remedy_names_the_timeline_feature():
     # the parametric counterpart of the direct-path remedy below
-    body = _Body("Solid1", is_solid=True, face_count=7)
-    target = body._faces[0]
+    body = _body("Solid1", is_solid=True, face_count=7)
+    target = body.faces.item(0)
     _wire({"F1": target}, delete=_DelFeatures(lambda coll: None))
     msg = error_message(sdf.delete_face_handler(faces=["F1"], heal=True))
     assert "returned no feature" in msg and "DIRECT mode" not in msg
@@ -345,8 +326,8 @@ def test_parametric_no_op_remedy_names_the_timeline_feature():
 
 class TestDirectModeNoFeature:
     def _wire_direct(self, faces_removed=1, count_unreadable=False, design_type=0, face_count=7):
-        body = _Body("Box1", is_solid=True, face_count=face_count)
-        target = body._faces[-1]        # keep index 0 deletable by the fake
+        body = _body("Box1", is_solid=True, face_count=face_count)
+        target = body.faces.item(face_count - 1)   # keep index 0 deletable by the fake
         feats = _DirectDelFeatures([body], faces_removed=faces_removed,
                                    count_unreadable=count_unreadable)
         _wire({"F1": target}, delete=feats, surface_delete=feats, design_type=design_type)
@@ -404,8 +385,8 @@ class TestDirectModeNoFeature:
         # faces_delta is the body's OWN change, however many of its faces were targeted: the owning
         # body is deduped by entityToken, so it is sampled once. Keyed by identity it would be
         # counted once per face and its delta summed that many times (3 faces, delta -3 -> -9).
-        body = _Body("Box1", is_solid=True, face_count=9)
-        targets = {"F%d" % i: body._faces[i] for i in range(3)}
+        body = _body("Box1", is_solid=True, face_count=9)
+        targets = {"F%d" % i: body.faces.item(i) for i in range(3)}
         feats = _DirectDelFeatures([body], faces_removed=3)
         _wire(targets, delete=feats, surface_delete=feats, design_type=0)
         out = payload(sdf.delete_face_handler(faces=list(targets), heal=True))
@@ -417,8 +398,8 @@ class TestDirectModeNoFeature:
         # 3 faces requested, a heal that nets -1: the note must not read "Deleted 3 face(s) ... 9 ->
         # 8" beside faces_delta -1. Only the measured movement is claimed; the request is labelled
         # as a request.
-        body = _Body("Box1", is_solid=True, face_count=9)
-        targets = {"F%d" % i: body._faces[i] for i in range(3)}
+        body = _body("Box1", is_solid=True, face_count=9)
+        targets = {"F%d" % i: body.faces.item(i) for i in range(3)}
         feats = _DirectDelFeatures([body], faces_removed=1)      # heal re-merged the rest
         _wire(targets, delete=feats, surface_delete=feats, design_type=0)
         out = payload(sdf.delete_face_handler(faces=list(targets), heal=True))
@@ -434,8 +415,8 @@ class TestDirectModeNoFeature:
         # A delete that RAISES the count is unmeasured territory: the count moved, so the edit did
         # land - but "7 -> 9" must not read as a normal delete. Not refused either: refusing would
         # assert a delete can only ever lower the count, which nobody has measured.
-        body = _Body("Box1", is_solid=True, face_count=7)
-        target = body._faces[-1]
+        body = _body("Box1", is_solid=True, face_count=7)
+        target = body.faces.item(6)
         feats = _DirectDelFeatures([body], faces_removed=-2)   # negative removal = faces ADDED
         _wire({"F1": target}, delete=feats, surface_delete=feats, design_type=0)
         out = payload(sdf.delete_face_handler(faces=["F1"], heal=True))

@@ -15,22 +15,10 @@ sp = load_tool("model_split")
 
 # ── body-split fakes ────────────────────────────────────────────────────────
 
-class FakeBodies:
-    def __init__(self, names):
-        self._names = list(names)
-
-    @property
-    def count(self):
-        return len(self._names)
-
-    def item(self, i):
-        return type("B", (), {"name": self._names[i]})()
-
-
 class FakeSplitBodyFeature:
     def __init__(self, result_names=("Body1", "Body2"), health=0):
         self.name = "Split1"
-        self.bodies = FakeBodies(result_names)
+        self.bodies = _NamedCollection([BRepBody(name=n) for n in result_names])
         self.healthState = health
         self.errorOrWarningMessage = "no intersection"
 

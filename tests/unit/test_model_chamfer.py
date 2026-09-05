@@ -1,10 +1,10 @@
 """Unit tests for model_chamfer.py - the three chamfer definitions and their read-backs."""
 
-import json
 import math
 import pytest
 import types
-from conftest import (BRepEdge, BRepFace, FakePoint, FakeUnitsManager, FakeVector3D, load_tool,
+from conftest import (BRepBody, BRepEdge, BRepFace, FakePoint, FakeUnitsManager, FakeVector3D,
+                      MakeComp, install, load_tool, make_design, payload as _payload,
                       _NamedCollection)
 
 fl = load_tool("model_chamfer")
@@ -50,13 +50,12 @@ def _edge(kind):
     }[kind]()
 
 
-class FakeBody:
-    def __init__(self, name, edge_kinds, volume=None):
-        self.name = name
-        self.edges = _NamedCollection([_edge(k) for k in edge_kinds])
-        self.isSolid = True          # BodyRef(kind='solid') checks this
-        # None = the volume read does not answer, so the volume gate has nothing to judge.
-        self.volume = volume
+def make_body(name, edge_kinds, volume=None):
+    """A solid body whose edges are the dihedral rigs above. volume None = the read does not answer,
+    so the volume gate has nothing to judge."""
+    body = BRepBody(name=name, volume=volume)
+    body.edges = _NamedCollection([_edge(k) for k in edge_kinds])
+    return body
 
 
 class FakeFilletInput:
@@ -162,7 +161,7 @@ class FakeCountingFeature:
     out of order comes back failed and silent, reading 0 faces like a tangent no-op does."""
     def __init__(self, name, faces, health=0, message=""):
         self.name = name
-        self.faces = type("C", (), {"count": faces})()
+        self.faces = _NamedCollection([None] * faces)
         self.healthState = health
         self.errorOrWarningMessage = message
         self.deleted = False
@@ -255,55 +254,28 @@ class FakeChamferFeatures:
         return self.result
 
 
-class FakeComp:
-    def __init__(self, bodies, ff, cf):
-        self.name = "Comp"
-        self.bRepBodies = _NamedCollection(bodies)
-        self.features = type("F", (), {"filletFeatures": ff, "chamferFeatures": cf})()
-
-
-class FakeDesign:
-    def __init__(self, comp):
-        self.activeComponent = comp
-        self.rootComponent = comp
+def _component(bodies, ff, cf):
+    """The active component: its bodies, plus the fillet/chamfer feature collections the handler
+    builds through."""
+    comp = MakeComp(name="Comp")
+    comp.bRepBodies = _NamedCollection(bodies)
+    comp.features = type("F", (), {"filletFeatures": ff, "chamferFeatures": cf})()
+    return comp
 
 
 def _install(bodies):
     ff = FakeFilletFeatures(); cf = FakeChamferFeatures()
-    comp = FakeComp(bodies, ff, cf)
-    design = FakeDesign(comp)
-    fl.app = type("A", (), {"activeProduct": design})()
-    load_tool("_common").app = fl.app
-    # BodyRef (the 'body_name' kind) resolves through the _inputs._common seam — patch it to the SAME
-    # design, else the body resolves against a stale/empty design (the documented dual-seam trap).
-    fl._inputs._common.design = lambda: design
-    fl._inputs._common.target_component = lambda _d=None: comp
+    install(fl, make_design(comp=_component(bodies, ff, cf)))
     import adsk.fusion, adsk.core
-    adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
     # BodyRef(kind='solid') does isinstance(body, adsk.fusion.BRepBody) + checks isSolid — make the
     # fake body pass the BRep type check.
-    adsk.fusion.BRepBody = FakeBody
+    adsk.fusion.BRepBody = BRepBody
     adsk.core.ValueInput.createByReal = staticmethod(lambda v: ("real", v))
-
-    class FakeColl:
-        def __init__(self):
-            self._i = []
-        def add(self, x):
-            self._i.append(x)
-        @property
-        def count(self):
-            return len(self._i)
-    adsk.core.ObjectCollection.create = staticmethod(lambda: FakeColl())
     return ff, cf
 
 
-def _payload(result):
-    assert result["isError"] is False, result
-    return json.loads(result["content"][0]["text"])
-
-
-def _parametric(monkeypatch, install, *args, engine=None, **kw):
-    """`install` (either installer) plus conftest's shared units engine on the design and a
+def _parametric(monkeypatch, installer, *args, engine=None, **kw):
+    """`installer` plus conftest's shared units engine on the design and a
     ValueInput.createByString seam, so the two ValueInput forms are told apart by shape:
     ('real', cm) vs ('string', expr).
 
@@ -312,7 +284,7 @@ def _parametric(monkeypatch, install, *args, engine=None, **kw):
     valid=() gives an engine that RAISES on every call, which is how a literal is proved never to
     reach it."""
     import adsk.core
-    out = install(*args, **kw)
+    out = installer(*args, **kw)
     design = fl._inputs._common.design()
     design.unitsManager = engine if engine is not None else FakeUnitsManager(valid=("WallT/2",),
                                                                              value=6.5)
@@ -326,7 +298,7 @@ class TestGuards:
     def test_a_nonnumeric_chamfer_distance_is_still_just_not_a_number(self):
         # Only the fillet RADIUS takes the expression form; the chamfer's distance is compared as a
         # number against the created feature, so a string there is refused outright.
-        _install([FakeBody("B", [True])])
+        _install([make_body("B", [True])])
         res = fl.handler(body_name="B", distance="big", edge_filter="all")
         assert res["isError"] is True and "'distance' must be a number." in res["message"]
 
@@ -338,7 +310,7 @@ class TestFillet:
         # per-edge read-back besides its faces (no .edges collection, measured live) - so a chamfer
         # whose feature holds ZERO faces cut nothing, and the partial-application guard converts it
         # to an error and rolls the inert feature back.
-        _, cf = _install([FakeBody("B", [True])])
+        _, cf = _install([make_body("B", [True])])
         cf.result = FakeCountingFeature("Chamfer1", faces=0)
         res = fl.handler(body_name="B", distance=1, edge_filter="all")
         assert res["isError"] is True
@@ -349,7 +321,7 @@ class TestFillet:
         # The SAME partial-application guard applies to chamfer as to fillet: 2 edges requested, the
         # feature's own edge count reads only 1 applied - error naming both counts, and the partial
         # feature is rolled back.
-        _, cf = _install([FakeBody("B", [True, True])])
+        _, cf = _install([make_body("B", [True, True])])
         cf.result = FakeCountingFeature("Chamfer1", faces=1)
         res = fl.handler(body_name="B", distance=1, edge_filter="all")
         assert res["isError"] is True
@@ -361,13 +333,13 @@ class TestFillet:
 class TestChamfer:
 
     def test_chamfer_scales_distance(self):
-        _, cf = _install([FakeBody("B", [True, True])])
+        _, cf = _install([make_body("B", [True, True])])
         out = _payload(fl.handler(body_name="B", distance=1, units="in", edge_filter="all"))
         assert out["chamfered"] is True
         assert cf.last.distance == ("real", 2.54)
 
     def test_two_distance_chamfer(self):
-        _, cf = _install([FakeBody("B", [True, True])])
+        _, cf = _install([make_body("B", [True, True])])
         out = _payload(fl.handler(body_name="B", distance=2, distance_two=4, units="mm", edge_filter="all"))
         # setToTwoDistances used (not equal-distance), both scaled to cm
         assert cf.last.two_distances == (("real", 0.2), ("real", 0.4))
@@ -375,7 +347,7 @@ class TestChamfer:
         assert out["distance_two"] == 4
 
     def test_equal_distance_when_no_second(self):
-        _, cf = _install([FakeBody("B", [True, True])])
+        _, cf = _install([make_body("B", [True, True])])
         out = _payload(fl.handler(body_name="B", distance=2, units="mm", edge_filter="all"))
         assert cf.last.two_distances is None
         assert cf.last.distance == ("real", 0.2)
@@ -384,14 +356,14 @@ class TestChamfer:
     def test_a_refused_equal_distance_is_an_error(self):
         # The refusal message must name the requested size, not fall through the handler's
         # catch-all as an exception about an undefined name.
-        _, cf = _install([FakeBody("B", [True])])
+        _, cf = _install([make_body("B", [True])])
         cf.refuse = "equal"
         res = fl.handler(body_name="B", distance=2, units="mm", edge_filter="all")
         assert res["isError"] is True and "equal-distance chamfer of 2.0 mm" in res["message"]
         assert cf.added == 0
 
     def test_a_refused_two_distance_is_an_error(self):
-        _, cf = _install([FakeBody("B", [True])])
+        _, cf = _install([make_body("B", [True])])
         cf.refuse = "two"
         res = fl.handler(body_name="B", distance=2, distance_two=3, units="mm",
                                   edge_filter="all")
@@ -404,7 +376,7 @@ class TestDistanceAndAngle:
     """The third chamfer definition: setToDistanceAndAngle(distance, angle)."""
 
     def test_angle_routes_to_set_to_distance_and_angle(self):
-        _, cf = _install([FakeBody("B", [True, True])])
+        _, cf = _install([make_body("B", [True, True])])
         out = _payload(fl.handler(body_name="B", distance=2, angle_deg=30, units="mm",
                                            edge_filter="all"))
         distance, angle = cf.last.distance_and_angle
@@ -417,7 +389,7 @@ class TestDistanceAndAngle:
 
     def test_the_angle_is_not_scaled_by_the_length_units(self):
         # 'units' scales the distance only - an inch job must not multiply the angle by 2.54.
-        _, cf = _install([FakeBody("B", [True])])
+        _, cf = _install([make_body("B", [True])])
         _payload(fl.handler(body_name="B", distance=1, angle_deg=45, units="in",
                                      edge_filter="all"))
         distance, angle = cf.last.distance_and_angle
@@ -427,7 +399,7 @@ class TestDistanceAndAngle:
     def test_angle_with_distance_two_is_refused_naming_both(self):
         # Two DIFFERENT definitions of the same chamfer; silently dropping one would bevel
         # something other than what was asked for.
-        _, cf = _install([FakeBody("B", [True])])
+        _, cf = _install([make_body("B", [True])])
         res = fl.handler(body_name="B", distance=2, distance_two=3, angle_deg=45,
                                   edge_filter="all")
         assert res["isError"] is True
@@ -435,7 +407,7 @@ class TestDistanceAndAngle:
         assert cf.last is None and cf.added == 0      # refused before any input was even created
 
     def test_a_refused_distance_and_angle_errors_naming_the_values(self):
-        _, cf = _install([FakeBody("B", [True])])
+        _, cf = _install([make_body("B", [True])])
         cf.refuse = "angle"
         res = fl.handler(body_name="B", distance=2, angle_deg=45, units="mm",
                                   edge_filter="all")
@@ -444,17 +416,17 @@ class TestDistanceAndAngle:
         assert cf.added == 0                          # nothing was added on a refused definition
 
     def test_a_nonpositive_angle_is_refused(self):
-        _install([FakeBody("B", [True])])
+        _install([make_body("B", [True])])
         res = fl.handler(body_name="B", distance=2, angle_deg=0, edge_filter="all")
         assert res["isError"] is True and "'angle_deg' must be positive, got 0.0" in res["message"]
 
     def test_a_nonnumeric_angle_is_refused(self):
-        _install([FakeBody("B", [True])])
+        _install([make_body("B", [True])])
         res = fl.handler(body_name="B", distance=2, angle_deg="steep", edge_filter="all")
         assert res["isError"] is True and "'angle_deg' must be a number" in res["message"]
 
     def test_no_angle_leaves_the_equal_distance_path_alone(self):
-        _, cf = _install([FakeBody("B", [True])])
+        _, cf = _install([make_body("B", [True])])
         out = _payload(fl.handler(body_name="B", distance=2, units="mm", edge_filter="all"))
         assert cf.last.distance_and_angle is None
         assert "angle_deg" not in out
@@ -476,20 +448,20 @@ class TestCornerType:
                                             ("blend", "BlendCornertype")])
     def test_each_option_lands_the_matching_enum_member(self, key, member):
         import adsk.fusion
-        _, cf = _install([FakeBody("B", [True])])
+        _, cf = _install([make_body("B", [True])])
         out = _payload(fl.handler(body_name="B", distance=1, edge_filter="all",
                                            corner_type=key))
         assert cf.last.cornerType == getattr(adsk.fusion.ChamferCornerTypes, member)
         assert out["corner_type"] == key
 
     def test_omitting_corner_type_leaves_the_api_default_untouched(self):
-        _, cf = _install([FakeBody("B", [True])])
+        _, cf = _install([make_body("B", [True])])
         out = _payload(fl.handler(body_name="B", distance=1, edge_filter="all"))
         assert cf.last.cornerType == _UNSET_CORNER      # never assigned
         assert "corner_type" not in out
 
     def test_an_unknown_corner_type_is_refused(self):
-        _, cf = _install([FakeBody("B", [True])])
+        _, cf = _install([make_body("B", [True])])
         res = fl.handler(body_name="B", distance=1, edge_filter="all",
                                   corner_type="rounded")
         assert res["isError"] is True
@@ -499,7 +471,7 @@ class TestCornerType:
     def test_a_corner_type_the_input_never_took_is_an_error(self, monkeypatch):
         # A SWIG proxy accepts an assignment to a name it does not define; the value lands nowhere
         # and the chamfer would run on the DEFAULT corner while the payload claimed 'miter'.
-        _, cf = _install([FakeBody("B", [True])])
+        _, cf = _install([make_body("B", [True])])
         monkeypatch.setattr(FakeChamferInput, "swallow_corner_set", True)
         res = fl.handler(body_name="B", distance=1, edge_filter="all", corner_type="miter")
         assert res["isError"] is True
@@ -508,7 +480,7 @@ class TestCornerType:
 
     def test_an_unavailable_enum_family_is_reported_not_guessed(self):
         import adsk.fusion
-        _, cf = _install([FakeBody("B", [True])])
+        _, cf = _install([make_body("B", [True])])
         adsk.fusion.ChamferCornerTypes = None
         res = fl.handler(body_name="B", distance=1, edge_filter="all", corner_type="blend")
         assert res["isError"] is True and "not available on this Fusion version" in res["message"]
@@ -516,7 +488,7 @@ class TestCornerType:
 
     def test_corner_type_rides_along_with_a_distance_and_angle_chamfer(self):
         import adsk.fusion
-        _, cf = _install([FakeBody("B", [True])])
+        _, cf = _install([make_body("B", [True])])
         out = _payload(fl.handler(body_name="B", distance=1, angle_deg=45,
                                            edge_filter="all", corner_type="miter"))
         assert cf.last.distance_and_angle is not None
@@ -532,7 +504,7 @@ class TestChamferReadsBackWhatItBuilt:
 
     def test_a_feature_reporting_a_different_corner_errors_and_rolls_back(self):
         import adsk.fusion
-        _, cf = _install([FakeBody("B", [True])])
+        _, cf = _install([make_body("B", [True])])
         cf.result = FakeCountingFeature("Chamfer1", faces=1)
         cf.corner_override = (adsk.fusion.ChamferCornerTypes.ChamferCornerType,)
         res = fl.handler(body_name="B", distance=1, edge_filter="all", corner_type="blend")
@@ -544,7 +516,7 @@ class TestChamferReadsBackWhatItBuilt:
         assert cf.result.deleted is True and "rolled back" in res["message"]
 
     def test_a_feature_reporting_a_different_angle_errors_and_rolls_back(self):
-        _, cf = _install([FakeBody("B", [True])])
+        _, cf = _install([make_body("B", [True])])
         cf.result = FakeCountingFeature("Chamfer1", faces=1)
         cf.definition_override = (0.2, math.radians(30))     # asked 45 deg, built 30
         res = fl.handler(body_name="B", distance=2, angle_deg=45, units="mm",
@@ -554,7 +526,7 @@ class TestChamferReadsBackWhatItBuilt:
         assert cf.result.deleted is True and "rolled back" in res["message"]
 
     def test_a_feature_reporting_a_different_distance_errors_and_rolls_back(self):
-        _, cf = _install([FakeBody("B", [True])])
+        _, cf = _install([make_body("B", [True])])
         cf.result = FakeCountingFeature("Chamfer1", faces=1)
         cf.definition_override = (0.5, math.radians(45))     # asked 2 mm, built 5 mm
         res = fl.handler(body_name="B", distance=2, angle_deg=45, units="mm",
@@ -566,7 +538,7 @@ class TestChamferReadsBackWhatItBuilt:
     def test_a_feature_built_as_another_definition_errors(self):
         # A distance-and-angle request that fell back to equal-distance would still read a
         # plausible distance; chamferType is what names the definition that got built.
-        _, cf = _install([FakeBody("B", [True])])
+        _, cf = _install([make_body("B", [True])])
         cf.result = FakeCountingFeature("Chamfer1", faces=1)
         cf.chamfer_type_override = ("equal-distance-type",)
         res = fl.handler(body_name="B", distance=2, angle_deg=45, edge_filter="all")
@@ -577,7 +549,7 @@ class TestChamferReadsBackWhatItBuilt:
     def test_the_reported_values_come_from_the_feature_not_the_request(self):
         # The feature answers a distance/angle that round-trip within tolerance of the request, so
         # the call succeeds - and the payload carries the FEATURE's numbers.
-        _, cf = _install([FakeBody("B", [True])])
+        _, cf = _install([make_body("B", [True])])
         cf.result = FakeCountingFeature("Chamfer1", faces=1)
         cf.definition_override = (0.2, math.radians(45))
         out = _payload(fl.handler(body_name="B", distance=2, angle_deg=45, units="mm",
@@ -590,7 +562,7 @@ class TestChamferReadsBackWhatItBuilt:
         assert "chamfer_type_unverified" not in out
 
     def test_an_unreadable_definition_is_flagged_never_echoed(self):
-        _, cf = _install([FakeBody("B", [True])])
+        _, cf = _install([make_body("B", [True])])
         cf.result = FakeCountingFeature("Chamfer1", faces=1)
         cf.definition_override = False        # the feature answers no chamferTypeDefinition
         out = _payload(fl.handler(body_name="B", distance=2, angle_deg=45, units="mm",
@@ -600,7 +572,7 @@ class TestChamferReadsBackWhatItBuilt:
         assert "could NOT be read back" in out["note"]
 
     def test_an_unreadable_corner_type_is_flagged_never_echoed(self):
-        _, cf = _install([FakeBody("B", [True])])
+        _, cf = _install([make_body("B", [True])])
         cf.result = FakeCountingFeature("Chamfer1", faces=1)
         cf.corner_override = False            # the feature does not answer cornerType
         out = _payload(fl.handler(body_name="B", distance=1, edge_filter="all",
@@ -611,7 +583,7 @@ class TestChamferReadsBackWhatItBuilt:
     def test_an_equal_distance_chamfer_reads_back_nothing_extra(self):
         # The definition read-back is scoped to the distance-and-angle path; the other two
         # definitions are unchanged and carry no verified/unverified fields.
-        _, cf = _install([FakeBody("B", [True])])
+        _, cf = _install([make_body("B", [True])])
         cf.result = FakeCountingFeature("Chamfer1", faces=1)
         out = _payload(fl.handler(body_name="B", distance=2, units="mm",
                                            edge_filter="all"))
@@ -624,7 +596,7 @@ class TestVolumeReadBack:
     def test_chamfer_with_unchanged_volume_errors_and_rolls_back(self):
         # A chamfer that moved no material must not read chamfered:true - the same volume gate as
         # its fillet sibling (a bevel always removes or adds material).
-        body = FakeBody("B", [True], volume=10.0)
+        body = make_body("B", [True], volume=10.0)
         _, cf = _install([body])
         cf.result = FakeCountingFeature("Chamfer1", faces=1)
         res = fl.handler(body_name="B", distance=1, edge_filter="all")
@@ -632,7 +604,7 @@ class TestVolumeReadBack:
         assert cf.result.deleted is True
 
     def test_chamfer_reports_volume_delta_like_its_sibling(self):
-        body = FakeBody("B", [True], volume=10.0)
+        body = make_body("B", [True], volume=10.0)
         _, cf = _install([body])
         cf.result = FakeCountingFeature("Chamfer1", faces=1)
         cf.on_add = lambda: setattr(body, "volume", 9.75)
@@ -649,6 +621,6 @@ class TestRadiusTakesAParameterExpression:
 
     def test_a_chamfer_distance_is_still_a_number_only(self, monkeypatch):
         # _chamfer_readback compares the created feature's distance against this number
-        _parametric(monkeypatch, _install, [FakeBody("B", [True])])
+        _parametric(monkeypatch, _install, [make_body("B", [True])])
         res = fl.handler(body_name="B", distance="Chamf", units="mm", edge_filter="all")
         assert res["isError"] is True and "'distance' must be a number." in res["message"]

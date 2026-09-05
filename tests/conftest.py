@@ -579,47 +579,86 @@ class BRepBody:
     read-back check (e.g. a cut's volume delta). Visibility mirrors the live contract:
     isLightBulbOn is the body's OWN settable browser bulb; isVisible is the EFFECTIVE state
     (own bulb AND every ancestor's, modeled by hidden_by_ancestor) and has no setter. `vertices`
-    takes FakePoints and wraps each as a BRepVertex-shaped item exposing .geometry.
+    takes FakePoints and wraps each as a BRepVertex-shaped item exposing .geometry. `faces` takes
+    BRepFace objects a face-level read walks; `face_count` is the lighter count-only stand-in.
 
     This is a NATIVE body: nativeObject reads None and assemblyContext reads None, the pair a live
-    component-owned body answers. Its occurrence proxy is ``body_proxy(this)``."""
+    component-owned body answers. Its occurrence proxy is ``body_proxy(this)``.
+
+    `area` (cm2) and `mesh_manager` are set only when given, so a body whose surface area or mesh
+    manager does not read stays a testable state. `solid_readable` False makes the isSolid read
+    itself RAISE - the state a solid/surface verdict has to publish as null rather than guess."""
     def __init__(self, name="Body", bbox=None, volume=0.0, is_solid=True, entity_token=None,
                  light_bulb=True, hidden_by_ancestor=False, vertices=(), parent_component=None,
-                 face_count=0):
+                 face_count=0, faces=(), area=None, mesh_manager=None, solid_readable=True):
         self.name = name
         self.parentComponent = parent_component
         self.nativeObject = None
         self.assemblyContext = None
         self.boundingBox = bbox
         self.vertices = _NamedCollection([_Vertex(p) for p in vertices])
-        self.faces = _NamedCollection([None] * face_count)
+        self.faces = _NamedCollection(list(faces) or [None] * face_count)
         self.volume = volume
+        self._solid_readable = solid_readable
         self.isSolid = is_solid
         self.entityToken = entity_token or name
         self.isLightBulbOn = light_bulb
         self._hidden_by_ancestor = hidden_by_ancestor
+        if area is not None:
+            self.area = area
+        if mesh_manager is not None:
+            self.meshManager = mesh_manager
 
     @property
     def isVisible(self):
         return bool(self.isLightBulbOn) and not self._hidden_by_ancestor
 
+    @property
+    def isSolid(self):
+        if not self._solid_readable:
+            raise RuntimeError("3 : the solid flag of this body is unavailable")
+        return self._is_solid
+
+    @isSolid.setter
+    def isSolid(self, value):
+        self._is_solid = value
+
+    @isSolid.deleter
+    def isSolid(self):
+        # `del body.isSolid` and go_stale(body, attrs=("isSolid",)) both mean the flag stops
+        # answering, which is what solid_readable False already models.
+        self._solid_readable = False
+
 
 @fusion_fake(live_type="TriangleMesh", facts=("shape-dump-mesh-world",))
 class _FakeTriangleMesh:
     """MeshBody.displayMesh - the triangle/vertex census a mesh feature is judged on. Held as ONE
-    object per body so a feature fake can mutate the counts in place the way a real repair does."""
-    def __init__(self, tri, nodes):
+    object per body so a feature fake can mutate the counts in place the way a real repair does.
+
+    The three flat arrays a tessellation hands to addByTriangleMeshData are set only when given, so
+    a display mesh whose geometry does not read stays a testable state."""
+    def __init__(self, tri, nodes, coords=None, node_indices=None, normals=None):
         self.triangleCount = tri
         self.nodeCount = nodes
+        if coords is not None:
+            self.nodeCoordinatesAsDouble = list(coords)
+        if node_indices is not None:
+            self.nodeIndices = list(node_indices)
+        if normals is not None:
+            self.normalVectorsAsDouble = list(normals)
 
 
 @fusion_fake(live_type="PolygonMesh", facts=("shape-dump-mesh-world",))
 class _FakePolygonMesh:
     """MeshBody.mesh - the flat x,y,z node coordinates a smooth moves and the flat normal
-    components a reverse negates."""
-    def __init__(self, coords, normals):
+    components a reverse negates, plus the polygon/node census a mesh record publishes."""
+    def __init__(self, coords, normals, polygons=None, nodes=None):
         self.nodeCoordinatesAsDouble = list(coords)
         self.normalVectorsAsDouble = list(normals)
+        if polygons is not None:
+            self.polygonCount = polygons
+        if nodes is not None:
+            self.nodeCount = nodes
 
 
 @fusion_fake(live_type="MeshBody",
@@ -644,12 +683,28 @@ class MeshBody:
     reads that fail INDEPENDENTLY, each one making exactly one published field null: `_dead` (an
     invalidated wrapper - every read raises), `_counts_readable` (displayMesh), `_volume_readable`,
     `_closed_readable`, `_mesh_readable` (the PolygonMesh behind both the coordinates and the
-    normals). A test flips one on the instance to break that read mid-flight."""
+    normals). A test flips one on the instance to break that read mid-flight.
+
+    `area` (cm2), `bbox`, `face_groups` and the polygon-mesh census `polygons`/`mesh_nodes` are set
+    only when given, so a mesh whose surface area, box, face groups or polygon census does not read
+    stays a testable state. `deletes` is what deleteMe() answers."""
     def __init__(self, name="Scan1", tri=12, nodes=8, is_closed=True, volume=1.0, coords=(),
                  normals=(), token=None, parent=None, counts_readable=True, volume_readable=True,
-                 closed_readable=True, mesh_readable=True, lifts=True):
+                 closed_readable=True, mesh_readable=True, lifts=True, area=None, bbox=None,
+                 face_groups=None, polygons=None, mesh_nodes=None, deletes=True):
         self.name = name
         self.isValid = True
+        self._polygons = polygons
+        self._mesh_nodes = mesh_nodes
+        self._deletes = deletes
+        if area is not None:
+            self.area = area
+        if bbox is not None:
+            self.boundingBox = bbox
+        if face_groups is not None:
+            self.faceGroups = _NamedCollection([None] * face_groups
+                                               if isinstance(face_groups, int)
+                                               else list(face_groups))
         # A NATIVE body reads assemblyContext None and nativeObject None; createForAssemblyContext
         # mints the proxy that answers both. `lifts` False models a lift handing nothing back.
         self.assemblyContext = None
@@ -684,7 +739,7 @@ class MeshBody:
         self._live()
         if not self._mesh_readable:
             raise RuntimeError("3 : the polygon mesh is unavailable")
-        return _FakePolygonMesh(self._coords, self._normals)
+        return _FakePolygonMesh(self._coords, self._normals, self._polygons, self._mesh_nodes)
 
     @property
     def isClosed(self):
@@ -718,6 +773,16 @@ class MeshBody:
         meshbody-assembly-context-proxy / meshbody-proxy-token-differs), or None when `lifts`
         is off."""
         return _MeshProxy(self, occurrence) if self._lifts else None
+
+    def deleteMe(self):
+        """Drop this body from its parent component's meshBodies, answering the bool live returns.
+        `deletes` False is the delete that REPORTS failure, leaving the body in the collection."""
+        if not self._deletes:
+            return False
+        items = getattr(getattr(self.parentComponent, "meshBodies", None), "_items", None)
+        if items is not None and self in items:
+            items.remove(self)
+        return True
 
 
 @fusion_fake(scenario_double="a harness affordance, not a stand-in for any live type: it publishes "
@@ -849,10 +914,31 @@ class _NamedCollection:
         for it in self._items:
             if getattr(it, "name", None) == name:
                 return it
-        return None
+        if _api_facts.BEHAVIOR["item_by_name_none_on_miss"]:
+            return None
+        raise RuntimeError("3 : invalid argument name")
 
     def __iter__(self):
         return iter(self._items)
+
+
+def _absent_member(name):
+    """A class attribute standing for one the live type does NOT have: hasattr answers False and a
+    reach for it raises AttributeError, which is what an absent member does - not a method that
+    refuses."""
+    def _missing(self):
+        raise AttributeError(name)
+    return property(_missing)
+
+
+class _MeshBodies(_NamedCollection):
+    """A component's meshBodies: count / item(i) / iteration, and - unlike bRepBodies - NO
+    itemByName, so a mesh is resolved by iterate-and-match. The lookup is dropped from this class
+    exactly while BEHAVIOR["meshbodies_has_itembyname"] says the live collection lacks it, so a
+    resolver that reaches for it fails here the way it fails live."""
+
+    if not _api_facts.BEHAVIOR["meshbodies_has_itembyname"]:
+        itemByName = _absent_member("itemByName")
 
 
 @fusion_fake(factory_for="FakeBoundingBox3D", facts=("units-cm",))
@@ -1285,23 +1371,13 @@ class FakeSetup(FakeCAMFolder):
         return self._activate_ok
 
 
-# Setup.parameters as the WCS read-back sees it. Named without a Fake prefix because CAMParameter
-# has no live SHAPES dump to sweep against (test_fake_shapes_exist), like the _Insp* trio below.
-
-class _SetupParam:
-    """A CAMParameter: .name plus .value, whose OWN .value is the payload - the mode string on a
-    ChoiceParameterValue, the iterable of bound entities on a CadObjectParameterValue."""
-
-    def __init__(self, name, value):
-        self.name = name
-        self.value = types.SimpleNamespace(value=value)
-
-
 @fusion_fake(factory_for="_NamedCollection")
 def wcs_params(origin_mode=None, orientation_mode=None, origin=None, z_axis=None):
-    """A Setup.parameters collection holding the WCS parameters. A mode is its string; `origin` /
-    `z_axis` are lists of (object_type, name) entity specs - None omits that parameter entirely,
-    [] models a present-but-unbound one, and name=None models an entity with no readable name."""
+    """A Setup.parameters collection of FakeCAMParameter, holding the WCS parameters as the
+    read-back sees them - each one's .value.value is the payload (the mode string on a
+    ChoiceParameterValue, the bound entities on a CadObjectParameterValue). A mode is its string;
+    `origin`/`z_axis` are lists of (object_type, name) entity specs - None omits that parameter,
+    [] models a present-but-unbound one, and name=None an entity with no readable name."""
     def _entity(spec):
         object_type, name = spec
         ent = types.SimpleNamespace(objectType=object_type)
@@ -1313,17 +1389,17 @@ def wcs_params(origin_mode=None, orientation_mode=None, origin=None, z_axis=None
     for pname, mode in (("wcs_origin_mode", origin_mode),
                         ("wcs_orientation_mode", orientation_mode)):
         if mode is not None:
-            params.append(_SetupParam(pname, mode))
+            params.append(FakeCAMParameter(pname, value=mode))
     for pname, specs in (("wcs_origin_point", origin), ("wcs_orientation_axisZ", z_axis)):
         if specs is not None:
-            params.append(_SetupParam(pname, [_entity(s) for s in specs]))
+            params.append(FakeCAMParameter(pname, value=[_entity(s) for s in specs]))
     return _NamedCollection(params)
 
 
 class _Strategy:
     """An OperationStrategy as the entitlement seam reads it - only isGenerationAllowed. Named
     without a Fake prefix because OperationStrategy has no live SHAPES dump to sweep against
-    (test_fake_shapes_exist), like _SetupParam above. allowed=None makes the flag itself RAISE."""
+    (test_fake_shapes_exist), like the _Insp* trio below. allowed=None makes the flag itself RAISE."""
 
     def __init__(self, allowed):
         self._allowed = allowed
@@ -1510,13 +1586,16 @@ class BRepFace:
     which is how a face whose normal cannot be sampled reads. `bounding_box` is the face's own AABB
     (BRepFace.boundingBox); without it the face reads as one whose box is unavailable.
     `assembly_context` is the occurrence a PROXY face was read through - None (the default) is a
-    NATIVE face, whose reads are in its owning component's space.
+    NATIVE face, whose reads are in its owning component's space. `param_reversed` is the live
+    isParamReversed a normal flip is read back on; None leaves that flag unreadable.
     """
     def __init__(self, surface, area=0.0, centroid=None, edge_count=0, body_name=None,
                  entity_token=None, body=None, point_on_face=None, normal=None,
-                 bounding_box=None, assembly_context=None):
+                 bounding_box=None, assembly_context=None, param_reversed=None):
         self.geometry = surface
         self.assemblyContext = assembly_context
+        if param_reversed is not None:
+            self.isParamReversed = bool(param_reversed)
         if bounding_box is not None:
             self.boundingBox = bounding_box
         self.area = area
@@ -1544,14 +1623,17 @@ class BRepEdge:
     (bool, value) tuples getParameterAtPoint/getTangent return; `co_edges` installs the BRepCoEdges
     bounding it. Left None the edge carries neither attribute, which is how one whose curve or
     topology will not read reads. `param_reversed` is the live isParamReversed - whether the edge
-    runs against its own curve; None leaves that flag unreadable too."""
+    runs against its own curve; None leaves that flag unreadable too. `body` is the BRepBody the edge
+    belongs to, set only when given - a one-body chain check walks it."""
     def __init__(self, curve, start=None, end=None, point_on_edge=None, entity_token=None,
-                 tangent=None, co_edges=None, param_reversed=False):
+                 tangent=None, co_edges=None, param_reversed=False, body=None):
         self.geometry = curve
         self.startVertex = _Vertex(start) if start else None
         self.endVertex = _Vertex(end) if end else None
         self.pointOnEdge = point_on_edge
         self.entityToken = entity_token
+        if body is not None:
+            self.body = body
         if param_reversed is not None:
             self.isParamReversed = bool(param_reversed)
         if tangent is not None:
@@ -1579,12 +1661,17 @@ class MakeComp:
     Pass bodies as names (str) or objects with a `.name`. Extra collections a specific tool needs
     (e.g. a fake `features`) can be attached by the caller after construction, or pass a ready-made
     component to `make_design(comp=...)` instead.
+
+    `mesh_bodies` is the separate MeshBody collection (a _MeshBodies, which carries no itemByName) -
+    set only when given, so a component that answers no meshBodies at all stays a testable state.
     """
     def __init__(self, name="Root", bodies=(), occurrences=(), sketches=(), entity_token=None,
-                 parent_design=None):
+                 parent_design=None, mesh_bodies=None):
         self.name = name
         norm = [b if hasattr(b, "name") else BRepBody(b) for b in bodies]
         self.bRepBodies = _NamedCollection(norm)
+        if mesh_bodies is not None:
+            self.meshBodies = _MeshBodies(list(mesh_bodies))
         self.occurrences = _NamedCollection(list(occurrences))
         self.allOccurrences = list(occurrences)
         self.sketches = _NamedCollection(list(sketches))
@@ -1612,12 +1699,32 @@ class MakeDesign:
 
     `parent_document` is the Document this design belongs to - the second hop of the source-document
     chain (see make_source_document). Set only when asked: a design whose document cannot be read is
-    its own tested state, and that is what an unsaved or unreachable document looks like."""
-    def __init__(self, comp=None, tokens=None, all_components=None, parent_document=None):
+    its own tested state, and that is what an unsaved or unreachable document looks like.
+
+    `design_type` is the PARAMETRIC/DIRECT mode a ModeGuard branches on and `active_edit_object` the
+    open base-feature scope it detects; both are set only when asked, since a design answering
+    neither read is its own tested state.
+
+    `timeline` (make_timeline), `user_parameters` (FakeUserParameters) and `all_parameters` are the
+    three design-level collections the timeline and parameter tools read; each is set only when
+    asked, since a design whose timeline or parameters do not read is its own tested state."""
+    def __init__(self, comp=None, tokens=None, all_components=None, parent_document=None,
+                 design_type=None, active_edit_object=None, timeline=None, user_parameters=None,
+                 all_parameters=None):
         self.rootComponent = comp if comp is not None else MakeComp()
         self.activeComponent = self.rootComponent
         if parent_document is not None:
             self.parentDocument = parent_document
+        if design_type is not None:
+            self.designType = design_type
+        if active_edit_object is not None:
+            self.activeEditObject = active_edit_object
+        if timeline is not None:
+            self.timeline = timeline
+        if user_parameters is not None:
+            self.userParameters = user_parameters
+        if all_parameters is not None:
+            self.allParameters = all_parameters
         self._tokens = dict(tokens or {})
         self._all_components = list(all_components) if all_components is not None else [self.rootComponent]
 
@@ -1635,7 +1742,11 @@ class MakeDesign:
         e = self._tokens.get(token)
         if isinstance(e, (list, tuple)):
             return list(e)
-        return [e] if e is not None else []
+        if e is not None:
+            return [e]
+        if _api_facts.BEHAVIOR["find_entity_token_empty_on_miss"]:
+            return []
+        raise RuntimeError("3 : invalid argument token")
 
 
 @fusion_fake(factory_for="MakeDesign")
@@ -1648,20 +1759,26 @@ def make_source_document(urn):
     document: it carries no dataFile at all, so the chain stops one hop short.
 
     Hand a DIFFERENT urn to each component standing for a different source document; hand the SAME
-    one to components of a single document. Document/DataFile have no measured shape dump, so those
-    two hops are attribute bags rather than mapped fakes."""
+    one to components of a single document. The two hops are attribute bags here; the mapped fakes
+    for them are FakeFusionDocument and FakeDataFile below."""
     return MakeDesign(parent_document=types.SimpleNamespace(
         dataFile=(types.SimpleNamespace(id=urn) if urn is not None else None)))
 
 
 @fusion_fake(factory_for="MakeDesign")
 def make_design(bodies=(), occurrences=(), tokens=None, comp=None, all_components=None,
-                sketches=()):
+                sketches=(), mesh_bodies=None, design_type=None, active_edit_object=None,
+                timeline=None, user_parameters=None, all_parameters=None):
     """Build a standard FakeDesign. Use `comp=` to supply a tool-specific component (one carrying a
-    fake `features`/`exportManager`/… surface); otherwise a plain MakeComp(bodies, occurrences)."""
+    fake `features`/`exportManager`/… surface); otherwise a plain MakeComp(bodies, occurrences).
+    `timeline`/`user_parameters`/`all_parameters` pass through to MakeDesign."""
     if comp is None:
-        comp = MakeComp(bodies=bodies, occurrences=occurrences, sketches=sketches)
-    return MakeDesign(comp=comp, tokens=tokens, all_components=all_components)
+        comp = MakeComp(bodies=bodies, occurrences=occurrences, sketches=sketches,
+                        mesh_bodies=mesh_bodies)
+    return MakeDesign(comp=comp, tokens=tokens, all_components=all_components,
+                      design_type=design_type, active_edit_object=active_edit_object,
+                      timeline=timeline, user_parameters=user_parameters,
+                      all_parameters=all_parameters)
 
 
 @fusion_fake(live_type="Occurrence", facts=("shape-dump-design-world",))
@@ -1760,12 +1877,15 @@ def make_sketch_curve(token="curve0", length=1.0, is_closed=None):
     return curve
 
 
-@fusion_fake(factory_for="_NamedCollection")
-def make_sketch(name="Sketch1", lines=(), arcs=(), circles=(), ellipses=(), splines=(), points=()):
+@fusion_fake(factory_for="_NamedCollection", facts=("sketch-profiles-under-compute-deferred",))
+def make_sketch(name="Sketch1", lines=(), arcs=(), circles=(), ellipses=(), splines=(), points=(),
+                profiles=(), is_compute_deferred=False, parent_component=None):
     """A Sketch fake: sketchCurves (flat, plus the per-kind sub-collections a '<type>:<index>' ref
     indexes), sketchPoints and name. Members come from make_sketch_curve; a collection-level factory
     a test drives (sketchArcs.addFillet, sketchLines.addDistanceChamfer) is attached to the returned
-    collection."""
+    collection. `profiles` are the closed regions a blind profiles.item(0) indexes,
+    `is_compute_deferred` the flag whose True makes those regions the pre-deferral ones, and
+    `parent_component` the component a feature must be built in."""
     members = list(lines) + list(arcs) + list(circles) + list(ellipses) + list(splines)
     curves = _NamedCollection(members)
     curves.sketchLines = _NamedCollection(lines)
@@ -1776,7 +1896,10 @@ def make_sketch(name="Sketch1", lines=(), arcs=(), circles=(), ellipses=(), spli
     curves.sketchControlPointSplines = _NamedCollection()
     curves.sketchFixedSplines = _NamedCollection()
     return types.SimpleNamespace(name=name, sketchCurves=curves,
-                                 sketchPoints=_NamedCollection(points))
+                                 sketchPoints=_NamedCollection(points),
+                                 profiles=_NamedCollection(profiles),
+                                 isComputeDeferred=is_compute_deferred,
+                                 parentComponent=parent_component)
 
 
 def sketch_curves_edit(sketch, collection, add=(), remove=()):
@@ -1805,8 +1928,12 @@ def go_stale(*entities, attrs=("name", "parentComponent")):
     forces the handler to capture it BEFORE."""
     for e in entities:
         for attr in attrs:
-            if hasattr(e, attr):
+            # delattr, not a hasattr gate: a property-backed read that RAISES (BRepBody.isSolid
+            # under solid_readable=False) makes hasattr answer False while the attribute is there.
+            try:
                 delattr(e, attr)
+            except AttributeError:
+                pass
 
 
 def install(mod, design, *, cast_design=True, object_collection=True):
@@ -1907,3 +2034,1080 @@ def assert_unknown_units(handler, units_param="units", **valid_kwargs):
     res = handler(**{**valid_kwargs, units_param: "furlong"})
     msg = error_message(res).lower()
     assert "unit" in msg, res
+
+
+# ── the session worlds: document / timeline / parameter / joint motion / CAM job / data ───────────
+#
+# One fake per live type the five shape-dump-*-world rows measured, carrying only the members a tool
+# reads or writes, and a make_* factory per world for the assembly its tests keep rebuilding.
+
+
+# ── document world ────────────────────────────────────────────────────────
+
+@fusion_fake(live_type="Selection", facts=("shape-dump-document-world",))
+class FakeSelection:
+    """One entry of ui.activeSelections: the picked entity and the click point."""
+    def __init__(self, entity=None, point=None):
+        self.entity = entity
+        self.point = point
+
+
+@fusion_fake(live_type="Selections", facts=("shape-dump-document-world",))
+class FakeSelections:
+    """ui.activeSelections: the counted/item walk a selection read makes, plus the clear() a
+    selection tool drives - which answers the bool its caller gates on ("Returns true if
+    successful") and empties the walk only then. The calls are counted privately in _cleared."""
+    def __init__(self, selections=(), clear_ok=True):
+        self._items = list(selections)
+        self._clear_ok = clear_ok
+        self._cleared = 0
+
+    @property
+    def count(self):
+        return len(self._items)
+
+    def item(self, i):
+        return _NamedCollection(self._items).item(i)
+
+    def clear(self):
+        self._cleared += 1
+        if self._clear_ok:
+            self._items = []
+        return self._clear_ok
+
+
+@fusion_fake(live_type="UserInterface", facts=("shape-dump-document-world",))
+class FakeUserInterface:
+    """app.userInterface as the selection reads reach it: its activeSelections."""
+    def __init__(self, selections=None):
+        self.activeSelections = FakeSelections() if selections is None else selections
+
+
+@fusion_fake(live_type="Products", facts=("shape-dump-document-world",))
+class FakeProducts:
+    """doc.products: itemByProductType is the lookup every product read goes through
+    ('DesignProductType' / 'CAMProductType'); a product this document does not carry answers None,
+    which is the no-Manufacture-workspace state a CAM tool gates on."""
+    def __init__(self, design=None, cam=None):
+        self._by_type = {"DesignProductType": design, "CAMProductType": cam}
+        self._items = [p for p in (design, cam) if p is not None]
+
+    @property
+    def count(self):
+        return len(self._items)
+
+    def item(self, i):
+        return _NamedCollection(self._items).item(i)
+
+    def itemByProductType(self, product_type):
+        return self._by_type.get(product_type)
+
+
+# The message a read on a CLOSED document's held wrapper raises (measured).
+_CLOSED_DOCUMENT_READ = "3 : An API Object refers to a deleted Object"
+
+
+@fusion_fake(live_type="FusionDocument",
+             facts=("shape-dump-document-world", "closed-document-wrapper-reads",
+                    "closed-document-name-raises"))
+class FakeFusionDocument:
+    """A design document - the concrete class a Fusion design answers, Document being the base.
+    Carries the design/products a tool reaches its product through, the dataFile a save state is
+    read off, and the save/saveAs/saveMilestone/close/activate writes, each answering the bool its
+    caller gates on. `closed=True` is the measured closed wrapper: isValid reads False and a name
+    read RAISES; close() puts a live one into that state. `save_versions=False` is the declared
+    state of a save that answers True and versions nothing - no measurement row carries it."""
+    def __init__(self, name="Untitled", design=None, data_file=None, is_saved=False,
+                 is_modified=True, is_active=True, version=None, references=(), products=None,
+                 save_ok=True, close_ok=True, activate_ok=True, save_versions=True, closed=False):
+        self._name = name
+        self._closed = closed
+        self.design = design
+        self.dataFile = data_file
+        self.isSaved = is_saved
+        self.isModified = is_modified
+        self.isActive = is_active
+        self.version = version
+        self.documentReferences = _NamedCollection(list(references))
+        self.products = FakeProducts(design=design) if products is None else products
+        self._save_ok, self._close_ok, self._activate_ok = save_ok, close_ok, activate_ok
+        self._save_versions = save_versions
+        self._saves = []
+        self._closes = []
+
+    @property
+    def name(self):
+        if self._closed:
+            raise RuntimeError(_CLOSED_DOCUMENT_READ)
+        return self._name
+
+    @name.setter
+    def name(self, value):
+        self._name = value
+
+    @property
+    def isValid(self):
+        return not self._closed
+
+    def _record_save(self, kind, args):
+        self._saves.append((kind, args))
+        if not self._save_ok:
+            return False
+        held = getattr(self.dataFile, "versionNumber", None)
+        if self._save_versions and isinstance(held, int):
+            self.dataFile.versionNumber = held + 1
+        self.isModified = False
+        self.isSaved = True
+        return True
+
+    def save(self, description=""):
+        return self._record_save("save", (description,))
+
+    def saveAs(self, name, folder, description="", tag=""):
+        return self._record_save("saveAs", (name, folder, description, tag))
+
+    def saveMilestone(self, name, description=""):
+        return self._record_save("milestone", (name, description))
+
+    def close(self, save_changes=False):
+        self._closes.append(bool(save_changes))
+        if self._close_ok:
+            self._closed = True
+        return self._close_ok
+
+    def activate(self):
+        if self._activate_ok:
+            self.isActive = True
+        return self._activate_ok
+
+
+@fusion_fake(live_type="Documents", facts=("shape-dump-document-world",))
+class FakeDocuments:
+    """app.documents: the POSITIONAL walk an 'open:N' address indexes, plus add/open/
+    openUsingContext - each records its arguments, appends the document it answers to the walk, and
+    hands it back. `new_document` is that document; None builds a fresh FakeFusionDocument."""
+    def __init__(self, documents=(), new_document=None):
+        self._items = list(documents)
+        self._new = new_document
+        self._opened = []
+
+    @property
+    def count(self):
+        return len(self._items)
+
+    def item(self, i):
+        return _NamedCollection(self._items).item(i)
+
+    def _admit(self, record):
+        self._opened.append(record)
+        doc = self._new if self._new is not None else FakeFusionDocument()
+        self._items.append(doc)
+        return doc
+
+    def add(self, document_type):
+        return self._admit(("add", document_type))
+
+    def open(self, data_file, visible=True):
+        return self._admit(("open", data_file, bool(visible)))
+
+    def openUsingContext(self, data_file, context, visible=True):
+        return self._admit(("openUsingContext", data_file, context, bool(visible)))
+
+
+@fusion_fake(live_type="Data", facts=("shape-dump-document-world", "shape-dump-data-world"))
+class FakeData:
+    """app.data: the active hub/project a cloud read starts from, the project list, and
+    findFileById - which answers the file registered under that id, None otherwise."""
+    def __init__(self, active_project=None, projects=(), active_hub=None, files_by_id=None):
+        self.activeProject = active_project
+        self.activeHub = active_hub
+        listed = list(projects) or ([active_project] if active_project is not None else [])
+        self.dataProjects = _NamedCollection(listed)
+        self._files = dict(files_by_id or {})
+
+    def findFileById(self, file_id):
+        return self._files.get(file_id)
+
+
+@fusion_fake(live_type="Application", facts=("shape-dump-document-world",))
+class FakeApplication:
+    """The session seam a tool reads through: activeDocument and the documents walk, the
+    activeProduct a design comes off, app.data and app.userInterface."""
+    def __init__(self, active_document=None, documents=None, active_product=None, data=None,
+                 user_interface=None):
+        self.activeDocument = active_document
+        self.documents = FakeDocuments() if documents is None else documents
+        self.activeProduct = active_product
+        self.data = FakeData() if data is None else data
+        self.userInterface = FakeUserInterface() if user_interface is None else user_interface
+
+
+@fusion_fake(live_type="DocumentReference", facts=("shape-dump-document-world",))
+class FakeDocumentReference:
+    """One Document.documentReferences entry: the source dataFile, the version it holds (settable -
+    a derive link is refreshed by assigning it), isOutOfDate, and getLatestVersion(). A refresh that
+    answers True moves the version to the file's latest and clears isOutOfDate.
+
+    Two refusing states, like FakeSetup's activate_lies: `stays_out_of_date` is the platform LIE -
+    the refresh answers True while isOutOfDate stays True - and `latest_raises` is the message
+    getLatestVersion throws with, which a DeriveFeature's reference does, so the derive path has to
+    advance through the version setter instead."""
+    def __init__(self, data_file=None, version=1, out_of_date=False, refresh_ok=True,
+                 stays_out_of_date=False, latest_raises=None):
+        self.dataFile = data_file
+        self.version = version
+        self.isOutOfDate = out_of_date
+        self._refresh_ok = refresh_ok
+        self._stays_out_of_date = stays_out_of_date
+        self._latest_raises = latest_raises
+
+    def getLatestVersion(self):
+        if self._latest_raises:
+            raise RuntimeError(self._latest_raises)
+        if not self._refresh_ok:
+            return False
+        latest = getattr(self.dataFile, "latestVersionNumber", None)
+        self.version = latest if isinstance(latest, int) else self.version
+        self.isOutOfDate = bool(self._stays_out_of_date)
+        return True
+
+
+@fusion_fake(factory_for="FakeApplication")
+def make_document_world(design=None, name="Untitled", data_file=None, others=(), selections=(),
+                        project=None):
+    """An Application whose ACTIVE document holds `design` and answers it as its DesignProductType
+    product, with the already-built `others` open beside it in the documents walk, `project` as
+    app.data's active project and `selections` held by app.userInterface."""
+    active = FakeFusionDocument(name=name, design=design, data_file=data_file)
+    return FakeApplication(active_document=active,
+                           documents=FakeDocuments([active] + list(others)),
+                           active_product=design,
+                           data=FakeData(active_project=project),
+                           user_interface=FakeUserInterface(FakeSelections(selections)))
+
+
+# ── timeline world ────────────────────────────────────────────────────────
+
+@fusion_fake(live_type="TimelineObject",
+             facts=("shape-dump-timeline-world", "enum-feature-health-states"))
+class FakeTimelineObject:
+    """One timeline entry: the name/index a feature is addressed by, the `entity` it wraps, the
+    health pair a compute verdict reads, the group/suppress/rolled flags, and rollTo() - which
+    answers the bool its caller gates on and flips isRolledBack only when it succeeded."""
+    def __init__(self, name="Feature1", index=0, entity=None, health=None, message="",
+                 is_group=False, suppressed=False, rolled_back=False, parent_group=None,
+                 roll_ok=True):
+        self.name = name
+        self.index = index
+        self.entity = entity
+        self.healthState = (_api_facts.ENUMS["fusion.FeatureHealthStates"][
+            "HealthyFeatureHealthState"] if health is None else health)
+        self.errorOrWarningMessage = message
+        self.isGroup = is_group
+        self.isSuppressed = suppressed
+        self.isRolledBack = rolled_back
+        self.parentGroup = parent_group
+        self._roll_ok = roll_ok
+        self._rolls = []
+
+    def rollTo(self, roll_before):
+        self._rolls.append(bool(roll_before))
+        if self._roll_ok:
+            self.isRolledBack = bool(roll_before)
+        return self._roll_ok
+
+
+@fusion_fake(live_type="Timeline", facts=("shape-dump-timeline-world", "basefeature-edit-scope"))
+class FakeTimeline:
+    """design.timeline: the counted walk, markerPosition, and the four moves. A move answers the
+    bool its caller gates on and lands the marker where it says; a move PAST either end answers
+    False and leaves the marker, which is this fake's own bound - no row measures it. `raises`
+    models the open base-feature scope, in which the measured read (design.timeline.count) throws;
+    every read here throws with it, so a caller cannot lean on one that was never measured."""
+    def __init__(self, items=(), marker=None, raises=None, move_ok=True):
+        self._items = list(items)
+        self._marker = len(self._items) if marker is None else marker
+        self._raises = raises
+        self._move_ok = move_ok
+
+    def _read(self, value):
+        if self._raises:
+            raise RuntimeError(self._raises)
+        return value
+
+    @property
+    def count(self):
+        return self._read(len(self._items))
+
+    def item(self, i):
+        return self._read(_NamedCollection(self._items).item(i))
+
+    @property
+    def markerPosition(self):
+        return self._read(self._marker)
+
+    def _move(self, position):
+        if not self._move_ok or not 0 <= position <= len(self._items):
+            return False
+        self._marker = position
+        return True
+
+    def moveToBeginning(self):
+        return self._move(0)
+
+    def moveToEnd(self):
+        return self._move(len(self._items))
+
+    def movetoNextStep(self):
+        return self._move(self._marker + 1)
+
+    def moveToPreviousStep(self):
+        return self._move(self._marker - 1)
+
+
+@fusion_fake(live_type="Feature",
+             facts=("shape-dump-timeline-world", "enum-feature-health-states"))
+class FakeFeature:
+    """A timeline feature at the surface EVERY feature shares: Feature is abstract and no
+    construction returns one (an extrude answers ExtrudeFeature), so this stands for a concrete
+    feature read through the base members - name, the health pair, the bodies/faces a result read
+    walks, its timelineObject, and deleteMe answering the bool its caller gates on."""
+    def __init__(self, name="Extrude1", health=None, message="", bodies=(), faces=(),
+                 suppressed=False, timeline_object=None, entity_token=None, delete_ok=True):
+        self.name = name
+        self.healthState = (_api_facts.ENUMS["fusion.FeatureHealthStates"][
+            "HealthyFeatureHealthState"] if health is None else health)
+        self.errorOrWarningMessage = message
+        self.bodies = _NamedCollection(list(bodies))
+        self.faces = _NamedCollection(list(faces))
+        self.isSuppressed = suppressed
+        self.timelineObject = timeline_object
+        # Set only when asked: a feature whose token does not read is its own tested state.
+        if entity_token is not None:
+            self.entityToken = entity_token
+        self._delete_ok = delete_ok
+        self._deletes = 0
+
+    def deleteMe(self):
+        self._deletes += 1
+        return self._delete_ok
+
+
+@fusion_fake(live_type="BaseFeature",
+             facts=("shape-dump-timeline-world", "basefeature-edit-scope"))
+class FakeBaseFeature:
+    """One base feature and its EDIT SCOPE: startEdit/finishEdit answer the bool the caller gates
+    on and open/close the scope, which is what makes this feature invisible to its own collection
+    while it is open."""
+    def __init__(self, name="BaseFeature1", start_ok=True, finish_ok=True):
+        self.name = name
+        self._start_ok, self._finish_ok = start_ok, finish_ok
+        self._open = False
+
+    def startEdit(self):
+        if self._start_ok:
+            self._open = True
+        return self._start_ok
+
+    def finishEdit(self):
+        if self._finish_ok:
+            self._open = False
+        return self._finish_ok
+
+
+@fusion_fake(live_type="BaseFeatures",
+             facts=("shape-dump-timeline-world", "basefeature-edit-scope"))
+class FakeBaseFeatures:
+    """component.features.baseFeatures: add() answers the new base feature, and a base feature whose
+    edit scope is OPEN is INVISIBLE here until finishEdit makes it appear - the measured read is
+    count (BEHAVIOR['open_base_feature_hidden']), and item/itemByName walk that same visible set."""
+    def __init__(self, features=()):
+        self._features = list(features)
+
+    def _visible(self):
+        hide = _api_facts.BEHAVIOR["open_base_feature_hidden"]
+        return [f for f in self._features if not (hide and getattr(f, "_open", False))]
+
+    @property
+    def count(self):
+        return len(self._visible())
+
+    def item(self, i):
+        return _NamedCollection(self._visible()).item(i)
+
+    def itemByName(self, name):
+        return _NamedCollection(self._visible()).itemByName(name)
+
+    def add(self):
+        feature = FakeBaseFeature("BaseFeature%d" % (len(self._features) + 1))
+        self._features.append(feature)
+        return feature
+
+
+@fusion_fake(live_type="Features", facts=("shape-dump-timeline-world",))
+class FakeFeatures:
+    """component.features: the counted/by-name lookup over the features themselves, plus the
+    baseFeatures collection a base-feature scope is opened from. A per-kind sub-collection
+    (extrudeFeatures, holeFeatures, ...) is attached by the caller after construction."""
+    def __init__(self, features=(), base_features=None):
+        self._coll = _NamedCollection(list(features))
+        self.baseFeatures = FakeBaseFeatures() if base_features is None else base_features
+
+    @property
+    def count(self):
+        return self._coll.count
+
+    def item(self, i):
+        return self._coll.item(i)
+
+    def itemByName(self, name):
+        return self._coll.itemByName(name)
+
+
+@fusion_fake(factory_for="FakeTimeline")
+def make_timeline(*names, marker=None, raises=None):
+    """A Timeline holding one entry per name, indexed in order - the walk a health rollup reads and
+    a marker move steps through. `marker` defaults to the end; `raises` models the open
+    base-feature scope."""
+    items = [FakeTimelineObject(name=n, index=i) for i, n in enumerate(names)]
+    return FakeTimeline(items, marker=marker, raises=raises)
+
+
+# ── parameter world ───────────────────────────────────────────────────────
+
+@fusion_fake(live_type="UserParameter", facts=("shape-dump-timeline-world",))
+class FakeUserParameter:
+    """One user parameter as a parameter row reads it: name, expression, the value in DATABASE units
+    (cm/radians), unit, comment and isFavorite, plus deleteMe answering the bool its caller gates
+    on. It carries NO createdBy/role, so the model-parameter owner reads decline on it as they do
+    live. `text_value` is set only when given - only a text parameter answers one."""
+    def __init__(self, name="d1", expression="10 mm", value=1.0, unit="mm", comment="",
+                 favorite=False, delete_ok=True, text_value=None):
+        self.name = name
+        self.expression = expression
+        self.value = value
+        self.unit = unit
+        self.comment = comment
+        self.isFavorite = favorite
+        if text_value is not None:
+            self.textValue = text_value
+        self._delete_ok = delete_ok
+        self._deleted = False
+
+    def deleteMe(self):
+        if self._delete_ok:
+            self._deleted = True
+        return self._delete_ok
+
+
+@fusion_fake(live_type="UserParameters", facts=("shape-dump-timeline-world",))
+class FakeUserParameters:
+    """design.userParameters: the counted/by-name protocol (itemByName None on a miss) plus add(),
+    which answers the new parameter. A parameter whose deleteMe() SUCCEEDED is gone from every read
+    here, so a delete read-back sees what live sees."""
+    def __init__(self, parameters=()):
+        self._parameters = list(parameters)
+        self._added = []
+
+    def _live(self):
+        return [p for p in self._parameters if not getattr(p, "_deleted", False)]
+
+    @property
+    def count(self):
+        return len(self._live())
+
+    def item(self, i):
+        return _NamedCollection(self._live()).item(i)
+
+    def itemByName(self, name):
+        return _NamedCollection(self._live()).itemByName(name)
+
+    def add(self, name, value_input, unit="", comment=""):
+        self._added.append((name, value_input, unit, comment))
+        expression = getattr(value_input, "stringValue", None)
+        param = FakeUserParameter(name=name, unit=unit, comment=comment,
+                                  expression=expression if isinstance(expression, str) else "")
+        self._parameters.append(param)
+        return param
+
+
+# ── joint motion world ────────────────────────────────────────────────────
+#
+# The three drivable motions are named for their live types because the joint tools select on
+# type(jointMotion).__name__. Cylindrical carries NO slideDirectionVector - the live type has none.
+
+def _limit_allows(limits, value):
+    """Whether an assignment of `value` STORES: strictly beyond an ENABLED bound it is IGNORED
+    (BEHAVIOR['joint_limit_out_of_range_ignored']), exactly AT a bound it lands."""
+    if limits is None or not _api_facts.BEHAVIOR["joint_limit_out_of_range_ignored"]:
+        return True
+    if limits.isMinimumValueEnabled and value < limits.minimumValue:
+        return False
+    return not (limits.isMaximumValueEnabled and value > limits.maximumValue)
+
+
+def _stored_rotation(radians):
+    """A commanded rotation as rotationValue stores it: verbatim - neither normalized into [0,360)
+    nor accumulated (BEHAVIOR['joint_revolute_value_stored_verbatim']) - on the store GRID, whose
+    step is its OWN measured fact."""
+    grid_deg = _api_facts.BEHAVIOR["joint_revolute_store_grid_deg"]
+    if not grid_deg:
+        return radians
+    step = math.radians(grid_deg)
+    return round(radians / step) * step
+
+
+class _MotionLimits:
+    """A JointLimits pair on a motion: the enable flag and the value per bound. Named without a Fake
+    prefix because JointLimits has no live SHAPES dump to sweep against (test_fake_shapes_exist),
+    like _Strategy above. A bound left None reads disabled."""
+
+    def __init__(self, minimum=None, maximum=None, rest=None):
+        self.isMinimumValueEnabled = minimum is not None
+        self.minimumValue = 0.0 if minimum is None else minimum
+        self.isMaximumValueEnabled = maximum is not None
+        self.maximumValue = 0.0 if maximum is None else maximum
+        self.isRestValueEnabled = rest is not None
+        self.restValue = 0.0 if rest is None else rest
+
+
+@fusion_fake(live_type="RevoluteJointMotion",
+             facts=("shape-dump-assembly-world", "enum-joint-types",
+                    "joint-limit-out-of-range-ignored", "joint-revolute-value-stored-verbatim",
+                    "joint-revolute-value-tenth-degree-grid"))
+class RevoluteJointMotion:
+    """The revolute motion: rotationValue in RADIANS, its limits, and the axis vector a drive reads
+    its heading off. An assignment beyond an enabled bound is ignored and one that lands is stored
+    on the measured 0.1 deg grid."""
+    def __init__(self, value=0.0, limits=None, axis_vector=None, joint_type=None):
+        self._value = value
+        self.rotationLimits = _MotionLimits() if limits is None else limits
+        self.rotationAxisVector = axis_vector
+        self.jointType = (_api_facts.ENUMS["fusion.JointTypes"]["RevoluteJointType"]
+                          if joint_type is None else joint_type)
+
+    @property
+    def rotationValue(self):
+        return self._value
+
+    @rotationValue.setter
+    def rotationValue(self, value):
+        if _limit_allows(self.rotationLimits, value):
+            self._value = _stored_rotation(value)
+
+
+@fusion_fake(live_type="SliderJointMotion",
+             facts=("shape-dump-assembly-world", "enum-joint-types",
+                    "joint-limit-out-of-range-ignored"))
+class SliderJointMotion:
+    """The slider motion: slideValue in CM, its limits, and the direction vector a drive's SIGN
+    follows. An assignment beyond an enabled bound is ignored; no store grid is measured for it, so
+    a value that lands is kept verbatim."""
+    def __init__(self, value=0.0, limits=None, direction_vector=None, joint_type=None):
+        self._value = value
+        self.slideLimits = _MotionLimits() if limits is None else limits
+        self.slideDirectionVector = direction_vector
+        self.jointType = (_api_facts.ENUMS["fusion.JointTypes"]["SliderJointType"]
+                          if joint_type is None else joint_type)
+
+    @property
+    def slideValue(self):
+        return self._value
+
+    @slideValue.setter
+    def slideValue(self, value):
+        if _limit_allows(self.slideLimits, value):
+            self._value = value
+
+
+@fusion_fake(live_type="CylindricalJointMotion",
+             facts=("shape-dump-assembly-world", "enum-joint-types",
+                    "joint-limit-out-of-range-ignored", "joint-revolute-value-stored-verbatim",
+                    "joint-revolute-value-tenth-degree-grid"))
+class CylindricalJointMotion:
+    """The cylindrical motion: both drivable values, each against its own limits. It exposes
+    rotationAxisVector and NO slideDirectionVector, as the live type does, so a slide-heading read
+    declines here exactly as it declines live."""
+    def __init__(self, rotation=0.0, slide=0.0, rotation_limits=None, slide_limits=None,
+                 axis_vector=None, joint_type=None):
+        self._rotation = rotation
+        self._slide = slide
+        self.rotationLimits = _MotionLimits() if rotation_limits is None else rotation_limits
+        self.slideLimits = _MotionLimits() if slide_limits is None else slide_limits
+        self.rotationAxisVector = axis_vector
+        self.jointType = (_api_facts.ENUMS["fusion.JointTypes"]["CylindricalJointType"]
+                          if joint_type is None else joint_type)
+
+    @property
+    def rotationValue(self):
+        return self._rotation
+
+    @rotationValue.setter
+    def rotationValue(self, value):
+        if _limit_allows(self.rotationLimits, value):
+            self._rotation = _stored_rotation(value)
+
+    @property
+    def slideValue(self):
+        return self._slide
+
+    @slideValue.setter
+    def slideValue(self, value):
+        if _limit_allows(self.slideLimits, value):
+            self._slide = value
+
+
+@fusion_fake(live_type="Joint", facts=("shape-dump-assembly-world",))
+class FakeJoint:
+    """One joint: the jointMotion whose SUBCLASS says what it drives, the two occurrences it
+    couples, the suppress/flip flags a joint edit writes back, its entityToken and timelineObject,
+    the motionLinks it takes part in, and deleteMe answering the bool its caller gates on."""
+    def __init__(self, name="Joint1", motion=None, occurrence_one=None, occurrence_two=None,
+                 suppressed=False, flipped=False, entity_token=None,
+                 timeline_object=None, health=None, message="", links=(), delete_ok=True):
+        self.name = name
+        self.jointMotion = motion
+        self.occurrenceOne = occurrence_one
+        self.occurrenceTwo = occurrence_two
+        self.isSuppressed = suppressed
+        self.isFlipped = flipped
+        self.timelineObject = timeline_object
+        self.motionLinks = _NamedCollection(list(links))
+        self.healthState = health
+        self.errorOrWarningMessage = message
+        if entity_token is not None:
+            self.entityToken = entity_token
+        self._delete_ok = delete_ok
+        self._deleted = False
+
+    def deleteMe(self):
+        if self._delete_ok:
+            self._deleted = True
+        return self._delete_ok
+
+
+@fusion_fake(live_type="Joints", facts=("shape-dump-assembly-world",))
+class FakeJoints:
+    """component.joints: the counted/by-name walk a joint resolve makes, plus createInput/add.
+    createInput answers `joint_input` - None models the input that could not be built, which the
+    create tools guard on - and add() appends `new_joint` (or a default) and hands it back."""
+    def __init__(self, joints=(), new_joint=None, joint_input=None):
+        self._joints = list(joints)
+        self._new = new_joint
+        self._input = joint_input
+        self._calls = []
+
+    def _live(self):
+        return [j for j in self._joints if not getattr(j, "_deleted", False)]
+
+    @property
+    def count(self):
+        return len(self._live())
+
+    def item(self, i):
+        return _NamedCollection(self._live()).item(i)
+
+    def itemByName(self, name):
+        return _NamedCollection(self._live()).itemByName(name)
+
+    def createInput(self, geometry_one, geometry_two):
+        self._calls.append(("createInput", geometry_one, geometry_two))
+        return self._input
+
+    def add(self, joint_input):
+        self._calls.append(("add", joint_input))
+        joint = self._new if self._new is not None else FakeJoint()
+        self._joints.append(joint)
+        return joint
+
+
+def _value_input_number(value_input):
+    """The real number a ValueInput carries (its realValue, or a bare number handed straight in), or
+    None where it does not read as one - which is the state a value that cannot land models."""
+    for candidate in (value_input, getattr(value_input, "realValue", None)):
+        if isinstance(candidate, (int, float)) and not isinstance(candidate, bool):
+            return candidate
+    return None
+
+
+@fusion_fake(live_type="MotionLink", facts=("shape-dump-assembly-world",))
+class FakeMotionLink:
+    """One motion link: the two joints it couples, the DOF pair motionOne/motionTwo a re-value reads
+    back and passes through, the ratio parameters valueOne/valueTwo (whose OWN .value is the number,
+    as a ModelParameter's is), isReversed, isSuppressed, and deleteMe - the rollback a link whose
+    ratio would not apply is undone with. motionOne/motionTwo are set only when given: a link that
+    reports NEITHER is the state a re-value refuses on rather than guessing the coupling."""
+    def __init__(self, name="Link1", joint_one=None, joint_two=None, motion_one=None,
+                 motion_two=None, value_one=1.0, value_two=1.0, reversed_link=False,
+                 suppressed=False, set_motion_ok=True, delete_ok=True):
+        self.name = name
+        self.jointOne = joint_one
+        self.jointTwo = joint_two
+        if motion_one is not None:
+            self.motionOne = motion_one
+        if motion_two is not None:
+            self.motionTwo = motion_two
+        self.valueOne = types.SimpleNamespace(value=value_one)
+        self.valueTwo = types.SimpleNamespace(value=value_two)
+        self.isReversed = reversed_link
+        self.isSuppressed = suppressed
+        self._set_motion_ok = set_motion_ok
+        self._motion_data = []
+        self._delete_ok = delete_ok
+        self._deleted = False
+
+    def setMotionData(self, motion_one, value_one, motion_two, value_two, is_reversed=False):
+        """The live five-argument coupling write: a DOF and a ValueInput per side, plus the
+        direction. On success it LANDS all five, so a caller's read-back sees what it sent."""
+        self._motion_data.append((motion_one, value_one, motion_two, value_two, bool(is_reversed)))
+        if not self._set_motion_ok:
+            return False
+        self.motionOne, self.motionTwo = motion_one, motion_two
+        for member, given in (("valueOne", value_one), ("valueTwo", value_two)):
+            landed = _value_input_number(given)
+            if landed is not None:
+                setattr(self, member, types.SimpleNamespace(value=landed))
+        self.isReversed = bool(is_reversed)
+        return True
+
+    def deleteMe(self):
+        if self._delete_ok:
+            self._deleted = True
+        return self._delete_ok
+
+
+@fusion_fake(live_type="MotionLinks", facts=("shape-dump-assembly-world",))
+class FakeMotionLinks:
+    """component.motionLinks: the counted/by-name walk plus createInput/add. add() answers the new
+    link and a link whose deleteMe() succeeded leaves every read here, so a rolled-back create sees
+    the walk it left behind."""
+    def __init__(self, links=(), new_link=None, link_input=None):
+        self._links = list(links)
+        self._new = new_link
+        self._input = link_input
+        self._calls = []
+
+    def _live(self):
+        return [link for link in self._links if not getattr(link, "_deleted", False)]
+
+    @property
+    def count(self):
+        return len(self._live())
+
+    def item(self, i):
+        return _NamedCollection(self._live()).item(i)
+
+    def itemByName(self, name):
+        return _NamedCollection(self._live()).itemByName(name)
+
+    def createInput(self, joint_one, joint_two):
+        self._calls.append(("createInput", joint_one, joint_two))
+        return self._input
+
+    def add(self, link_input):
+        self._calls.append(("add", link_input))
+        link = self._new if self._new is not None else FakeMotionLink()
+        self._links.append(link)
+        return link
+
+
+@fusion_fake(live_type="RigidGroup", facts=("shape-dump-assembly-world",))
+class FakeRigidGroup:
+    """One rigid group: its name, the occurrences it holds, the suppression flag a relation edit
+    writes back, and setOccurrences - which answers the bool its caller gates on and only then
+    changes the membership a read-back sees."""
+    def __init__(self, name="RigidGroup1", occurrences=(), suppressed=False,
+                 entity_token=None, set_ok=True, delete_ok=True):
+        self.name = name
+        self.occurrences = _NamedCollection(list(occurrences))
+        self.isSuppressed = suppressed
+        if entity_token is not None:
+            self.entityToken = entity_token
+        self._set_ok, self._delete_ok = set_ok, delete_ok
+        self._deleted = False
+
+    def setOccurrences(self, occurrences):
+        if not self._set_ok:
+            return False
+        self.occurrences = _NamedCollection(list(occurrences))
+        return True
+
+    def deleteMe(self):
+        if self._delete_ok:
+            self._deleted = True
+        return self._delete_ok
+
+
+@fusion_fake(live_type="RigidGroups", facts=("shape-dump-assembly-world",))
+class FakeRigidGroups:
+    """component.rigidGroups: the counted/by-name walk plus add(occurrences, include_children),
+    which answers the new group holding exactly the occurrences it was handed."""
+    def __init__(self, groups=(), new_group=None):
+        self._groups = list(groups)
+        self._new = new_group
+        self._added = []
+
+    def _live(self):
+        return [g for g in self._groups if not getattr(g, "_deleted", False)]
+
+    @property
+    def count(self):
+        return len(self._live())
+
+    def item(self, i):
+        return _NamedCollection(self._live()).item(i)
+
+    def itemByName(self, name):
+        return _NamedCollection(self._live()).itemByName(name)
+
+    def add(self, occurrences, include_children=False):
+        self._added.append((occurrences, bool(include_children)))
+        group = (self._new if self._new is not None
+                 else FakeRigidGroup(occurrences=list(occurrences)))
+        self._groups.append(group)
+        return group
+
+
+@fusion_fake(factory_for="FakeJoint")
+def make_joint(name="Joint1", kind="revolute", rotation=0.0, slide=0.0, rotation_limits=None,
+               slide_limits=None, occurrence_one=None, occurrence_two=None, axis_vector=None):
+    """A joint carrying the motion `kind` names - 'revolute', 'slider' or 'cylindrical', the three
+    a drive can move. Limits are _MotionLimits, so a drive past an enabled bound is refused the
+    measured way."""
+    if kind == "revolute":
+        motion = RevoluteJointMotion(rotation, rotation_limits, axis_vector)
+    elif kind == "slider":
+        motion = SliderJointMotion(slide, slide_limits, axis_vector)
+    elif kind == "cylindrical":
+        motion = CylindricalJointMotion(rotation, slide, rotation_limits, slide_limits, axis_vector)
+    else:
+        raise ValueError("make_joint kind is revolute, slider or cylindrical, not %r" % (kind,))
+    return FakeJoint(name=name, motion=motion, occurrence_one=occurrence_one,
+                     occurrence_two=occurrence_two)
+
+
+# ── CAM job world ─────────────────────────────────────────────────────────
+
+@fusion_fake(live_type="CAMParameter",
+             facts=("shape-dump-cam-job-world", "cam-parameter-expressions",
+                    "cam-parameter-locked-write-lands"))
+class FakeCAMParameter:
+    """One CAM parameter as the CAM tools read it: name/title, the `expression` a write goes through
+    and reads back (measured), the isEditable/isEnabled/isVisible flags a selection filters on, and
+    `value` - whose OWN .value is the payload, the second hop every value read makes."""
+    def __init__(self, name, expression="", value=None, title=None, editable=True, enabled=True,
+                 visible=True):
+        self.name = name
+        self._expression = expression
+        self.value = types.SimpleNamespace(value=value)
+        self.title = name if title is None else title
+        self.isEditable = editable
+        self.isEnabled = enabled
+        self.isVisible = visible
+
+    @property
+    def expression(self):
+        return self._expression
+
+    @expression.setter
+    def expression(self, value):
+        # isEditable False does not make the platform drop a write (measured: a locked parameter
+        # takes it, expression and value both change); the flag only says the UI never offers the
+        # edit, which is why cam_edit_operation refuses BEFORE writing.
+        if self.isEditable or _api_facts.BEHAVIOR["cam_locked_parameter_write_lands"]:
+            self._expression = value
+
+
+@fusion_fake(live_type="CAMParameters", facts=("shape-dump-cam-job-world",))
+class FakeCAMParameters:
+    """An operation's, setup's or tool's parameters: itemByName is the lookup every CAM read and
+    write goes through, None on a miss."""
+    def __init__(self, parameters=()):
+        self._coll = _NamedCollection(list(parameters))
+
+    @property
+    def count(self):
+        return self._coll.count
+
+    def item(self, i):
+        return self._coll.item(i)
+
+    def itemByName(self, name):
+        return self._coll.itemByName(name)
+
+
+@fusion_fake(live_type="Tool", facts=("shape-dump-cam-job-world",
+                                      "cam-tool-dimension-parameter-names"))
+class FakeTool:
+    """An operation's cutting tool: the `description` every tool row publishes, the `parameters`
+    its dimensions and feeds are read by name from, the `presets` a preset read walks, and toJson()
+    - the text a tool copy is rebuilt from."""
+    def __init__(self, description="", parameters=None, presets=(), json_text="{}"):
+        self.description = description
+        self.parameters = FakeCAMParameters() if parameters is None else parameters
+        self.presets = _NamedCollection(list(presets))
+        self._json = json_text
+
+    def toJson(self):
+        return self._json
+
+
+@fusion_fake(live_type="Machine", facts=("shape-dump-cam-job-world",
+                                         "cam-machine-query-keyed-on-model"))
+class FakeMachine:
+    """A machine from the library or off a setup: the description/vendor/model a label is built
+    from (adsk.cam.Machine has no .name), its id, the capabilities flags a kind list reads, and the
+    elements tree a limits read walks."""
+    def __init__(self, description="", vendor="", model="", machine_id=None, capabilities=None,
+                 elements=None, has_post=False):
+        self.description = description
+        self.vendor = vendor
+        self.model = model
+        self.id = machine_id
+        self.capabilities = capabilities
+        self.elements = elements
+        self.hasPost = has_post
+
+
+@fusion_fake(live_type="SetupInput", facts=("shape-dump-cam-job-world",))
+class FakeSetupInput:
+    """The input cam.setups.createInput() hands back: the operationType it was created for, and the
+    name/models/machine/stockMode a create assigns before add() consumes it."""
+    def __init__(self, operation_type=None, parameters=None):
+        self.operationType = operation_type
+        self.name = ""
+        self.models = []
+        self.machine = None
+        self.stockMode = None
+        self.parameters = FakeCAMParameters() if parameters is None else parameters
+
+
+@fusion_fake(live_type="Setups", facts=("shape-dump-cam-job-world", "shape-dump-cam-world"))
+class FakeSetups:
+    """cam.setups: the counted/by-name walk plus createInput/add. add() appends `new_setup` - or a
+    FakeSetup named after the input - and hands it back, so a create read-back finds the setup in
+    the walk the way live does."""
+    def __init__(self, setups=(), new_setup=None, setup_input=None):
+        self._setups = list(setups)
+        self._new = new_setup
+        self._input = setup_input
+        self._added = []
+
+    @property
+    def count(self):
+        return len(self._setups)
+
+    def item(self, i):
+        return _NamedCollection(self._setups).item(i)
+
+    def itemByName(self, name):
+        return _NamedCollection(self._setups).itemByName(name)
+
+    def createInput(self, operation_type):
+        return FakeSetupInput(operation_type) if self._input is None else self._input
+
+    def add(self, setup_input):
+        self._added.append(setup_input)
+        setup = (self._new if self._new is not None
+                 else FakeSetup(getattr(setup_input, "name", "") or "Setup1"))
+        self._setups.append(setup)
+        return setup
+
+
+@fusion_fake(factory_for="FakeCAMParameters")
+def make_cam_parameters(*rows):
+    """A CAMParameters collection from (name, expression) or (name, expression, value) rows - the
+    by-name lookup every CAM read and write goes through."""
+    return FakeCAMParameters([FakeCAMParameter(*row) for row in rows])
+
+
+# ── data world ────────────────────────────────────────────────────────────
+
+@fusion_fake(live_type="DataFile", facts=("shape-dump-data-world",))
+class FakeDataFile:
+    """One cloud file: the name/id/versionId identity a resolve keys on, its versionNumber beside
+    latestVersionNumber (the pair a freshness read compares), where it lives, and the move/deleteMe
+    writes, each answering the bool its caller gates on and only then changing what a read-back
+    sees. `file_id` is the LINEAGE urn, unset unless a test supplies one."""
+    def __init__(self, name="Part", file_id=None, version=1, latest_version=None, extension="f3d",
+                 parent_folder=None, parent_project=None, version_id=None, is_complete=True,
+                 move_ok=True, delete_ok=True):
+        self.name = name
+        self.id = file_id
+        self.versionNumber = version
+        self.latestVersionNumber = version if latest_version is None else latest_version
+        self.versionId = version_id
+        self.fileExtension = extension
+        self.parentFolder = parent_folder
+        self.parentProject = parent_project
+        self.isComplete = is_complete
+        self._move_ok, self._delete_ok = move_ok, delete_ok
+        self._moves = []
+        self._deleted = False
+
+    def move(self, folder):
+        self._moves.append(folder)
+        if self._move_ok:
+            self.parentFolder = folder
+        return self._move_ok
+
+    def deleteMe(self):
+        if self._delete_ok:
+            self._deleted = True
+        return self._delete_ok
+
+
+@fusion_fake(live_type="DataFolder", facts=("shape-dump-data-world",))
+class FakeDataFolder:
+    """One folder of the cloud tree: its name/id, the dataFiles and dataFolders a bounded walk
+    reads, the parent pair a path is rebuilt from, isRoot, and deleteMe answering the bool its
+    caller gates on. A child whose own deleteMe() SUCCEEDED is gone from both walks, so a delete
+    read-back sees what live sees; one that refused stays."""
+    def __init__(self, name="Root", folder_id=None, files=(), folders=(), parent_folder=None,
+                 parent_project=None, is_root=False, delete_ok=True):
+        self.name = name
+        self.id = folder_id
+        self._files = list(files)
+        self._folders = list(folders)
+        self.parentFolder = parent_folder
+        self.parentProject = parent_project
+        self.isRoot = is_root
+        self._delete_ok = delete_ok
+        self._deleted = False
+
+    @property
+    def dataFiles(self):
+        return _NamedCollection([f for f in self._files if not getattr(f, "_deleted", False)])
+
+    @property
+    def dataFolders(self):
+        return _NamedCollection([f for f in self._folders if not getattr(f, "_deleted", False)])
+
+    def deleteMe(self):
+        if self._delete_ok:
+            self._deleted = True
+        return self._delete_ok
+
+
+@fusion_fake(live_type="DataProject", facts=("shape-dump-data-world",))
+class FakeDataProject:
+    """One project: its name/id and the rootFolder every folder path is walked from."""
+    def __init__(self, name="Project", project_id=None, root_folder=None):
+        self.name = name
+        self.id = project_id
+        self.rootFolder = (FakeDataFolder("Root", is_root=True) if root_folder is None
+                           else root_folder)
+
+
+@fusion_fake(factory_for="FakeDataProject")
+def make_data_tree(name="Project", files=(), folders=()):
+    """A project whose ROOT folder holds `files` (names or FakeDataFile objects) and `folders`, each
+    back-linked to the root and the project - the two hops a file's location is published from."""
+    contents = [f if hasattr(f, "name") else FakeDataFile(f) for f in files]
+    root = FakeDataFolder("Root", files=contents, folders=list(folders), is_root=True)
+    project = FakeDataProject(name=name, root_folder=root)
+    root.parentProject = project
+    for item in contents + list(folders):
+        item.parentFolder = root
+        item.parentProject = project
+    return project

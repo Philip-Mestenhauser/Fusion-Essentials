@@ -1,39 +1,52 @@
 """Unit tests for surface_trim.py - the cell selection, the phantom-cell gate and the abort."""
 
-import json
 import types
-from conftest import load_tool, _NamedCollection
+
+import adsk.core
+import adsk.fusion
+import pytest
+
+from conftest import (BRepBody, BRepEdge, BRepFace, MakeComp, _NamedCollection, install,
+                      load_tool, make_design, payload)
 
 se = load_tool("surface_trim")
 surface_common_mod = load_tool("_surface_common")
 
 
-inp = se._inputs
+@pytest.fixture(autouse=True)
+def _adsk_seams(monkeypatch):
+    """The adsk types the input kinds isinstance-check, the enum members read by name, and a
+    ValueInput.createByReal returning the ('real', cm) pair a scaled length is read off."""
+    monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
+    monkeypatch.setattr(adsk.fusion, "BRepFace", BRepFace, raising=False)
+    monkeypatch.setattr(adsk.fusion, "BRepEdge", BRepEdge, raising=False)
+    for name in ("NewBodyFeatureOperation", "JoinFeatureOperation",
+                 "CutFeatureOperation", "NewComponentFeatureOperation"):
+        monkeypatch.setattr(adsk.fusion.FeatureOperations, name, name, raising=False)
+    monkeypatch.setattr(adsk.core.ValueInput, "createByReal",
+                        staticmethod(lambda v: ("real", v)), raising=False)
 
 
-class FakeBody:
-    def __init__(self, name="Body1", is_solid=False):
-        self.name = name
-        self.isSolid = is_solid
+def _body(name="Surf1", is_solid=False, area=None, solid_readable=True):
+    """One BRep body - the trim target or a result body; `area` left None models one whose area
+    will not read, which is the reading the phantom-cell gate stands down on."""
+    return BRepBody(name, is_solid=is_solid, area=area, solid_readable=solid_readable)
+
+
+def _wire(trim_features, handle_map=None):
+    """Install a design whose active component carries `trim_features`, with `handle_map` behind
+    the geometry handles."""
+    comp = MakeComp()
+    comp.features = types.SimpleNamespace(trimFeatures=trim_features)
+    install(se, make_design(comp=comp, tokens=dict(handle_map or {})))
+    return comp
 
 
 class FakeFeature:
-    def __init__(self, name="Feat1", bodies=None, faces=None, distance_cm=None, thickness_cm=None):
+    """A TrimFeature: its name and the result bodies the area read-back walks."""
+    def __init__(self, name="Feat1", bodies=None):
         self.name = name
-        self.bodies = _NamedCollection(bodies if bodies is not None else [FakeBody()])
-        if faces is not None:
-            self.faces = _NamedCollection(faces)   # a counted collection of created faces
-        # ExtendFeature.distance and ThickenFeature.thickness are ModelParameters reading CM; None
-        # gives a feature whose length parameter cannot be read at all.
-        if distance_cm is not None:
-            self.distance = types.SimpleNamespace(value=distance_cm)
-        if thickness_cm is not None:
-            self.thickness = types.SimpleNamespace(value=thickness_cm)
-
-
-class FakeCellBody:
-    def __init__(self, area):
-        self.area = area
+        self.bodies = _NamedCollection(bodies if bodies is not None else [_body("Body1")])
 
 
 class FakeBRepCell:
@@ -41,7 +54,7 @@ class FakeBRepCell:
     feature a SELECTED cell is REMOVED. cellBody.area sizes it."""
     def __init__(self, area):
         self.isSelected = False
-        self.cellBody = FakeCellBody(area)
+        self.cellBody = _body("Cell", area=area)
 
 
 class FakeBRepCells:
@@ -77,7 +90,7 @@ def _stale_cell_at(cells, index):
 
 class FakeTrimFeatures:
     """createInput partial-computes and populates input.bRepCells (all isSelected=False). add()
-    REPRODUCES the live contract: it RAISES "No cells are selected" when no cell isSelected — so a
+    REPRODUCES the live contract: it RAISES "No cells are selected" when no cell isSelected - so a
     handler that forgets the selection step fails exactly as it did live. raise_on_add / null_feature
     exercise the failure paths where cancel() MUST be called."""
     def __init__(self, result_bodies=None, raise_on_add=False, null_feature=False,
@@ -101,113 +114,18 @@ class FakeTrimFeatures:
         return FakeFeature(name="Trim1", bodies=self._result)
 
 
-class FakeFeatures:
-    def __init__(self, trim=None, extend=None, offset=None, thicken=None):
-        self.trimFeatures = trim
-        self.extendFeatures = extend
-        self.offsetFeatures = offset
-        self.thickenFeatures = thicken
-
-
-class FakeComp:
-    def __init__(self, features):
-        self.features = features
-
-
-class FakeDesign:
-    def __init__(self, comp):
-        self.rootComponent = comp
-        self.activeComponent = comp
-
-
-class _OC:
-    def __init__(self):
-        self.items = []
-    def add(self, x):
-        self.items.append(x)
-
-
-class FakeBRepBody:
-    """adsk.fusion.BRepBody stand-in for SurfaceBodyRef kind validation."""
-    def __init__(self, name="Surf1", is_solid=False):
-        self.name = name
-        self.isSolid = is_solid
-
-
-class FakeFace:
-    pass
-
-
-class FakeEdge:
-    def __init__(self, body=None):
-        self.body = body
-
-
-def _wire(comp, handle_map=None):
-    design = FakeDesign(comp)
-    se.app = type("A", (), {"activeProduct": design})()
-    se._common.app = se.app
-    import adsk.fusion, adsk.core
-    adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
-    fo = adsk.fusion.FeatureOperations
-    for n in ("NewBodyFeatureOperation", "JoinFeatureOperation",
-              "CutFeatureOperation", "NewComponentFeatureOperation"):
-        setattr(fo, n, n)
-    sxt = adsk.fusion.SurfaceExtendTypes
-    for n in ("NaturalSurfaceExtendType", "TangentSurfaceExtendType", "PerpendicularSurfaceExtendType"):
-        setattr(sxt, n, n)
-    adsk.core.ValueInput.createByReal = staticmethod(lambda v: ("real", v))
-    adsk.core.ObjectCollection.create = staticmethod(_OC)
-    adsk.fusion.BRepBody = FakeBRepBody
-    adsk.fusion.BRepFace = FakeFace
-    adsk.fusion.BRepEdge = FakeEdge
-    handle_map = handle_map or {}
-
-    class _D:
-        rootComponent = comp
-        activeComponent = comp
-        def findEntityByToken(self, t):
-            e = handle_map.get(t)
-            return [e] if e is not None else []
-    inp._common.design = lambda: _D()
-    inp._common.target_component = lambda d: comp
-
-
-def _payload(result):
-    assert result["isError"] is False, result
-    return json.loads(result["content"][0]["text"])
-
-
-class _UnreadableSolidBody:
-    """A result body whose isSolid will not read - the shape bool(safe(...)) turned into a confident
-    'this is a surface'."""
-    def __init__(self, name="Wall1"):
-        self.name = name
-
-    @property
-    def isSolid(self):
-        raise RuntimeError("4 : An API Object refers to a deleted Object")
-
-
 class TestSurfaceTrim:
 
     def _keep_scene(self):
-        surf = FakeBRepBody("Surf1", is_solid=False)
-        tf = FakeTrimFeatures(result_bodies=[FakeBody("Surf1", is_solid=False)],
-                              cell_areas=(3.0, 9.0, 1.0))
-        comp = FakeComp(FakeFeatures(trim=tf))
-        _wire(comp, handle_map={"S": surf, "T": FakeFace()})
+        tf = FakeTrimFeatures(result_bodies=[_body("Surf1")], cell_areas=(3.0, 9.0, 1.0))
+        _wire(tf, handle_map={"S": _body(), "T": BRepFace(None)})
         return tf
 
     def test_commits_via_add_on_success(self):
-        surf = FakeBRepBody("Surf1", is_solid=False)
-        tool = FakeFace()
         # cells: areas 3, 9, 1 -> default keeps the largest (index 1)
-        tf = FakeTrimFeatures(result_bodies=[FakeBody("Surf1", is_solid=False)],
-                              cell_areas=(3.0, 9.0, 1.0))
-        comp = FakeComp(FakeFeatures(trim=tf))
-        _wire(comp, handle_map={"S": surf, "T": tool})
-        out = _payload(se.handler(surface="S", trim_tool="T"))
+        tf = FakeTrimFeatures(result_bodies=[_body("Surf1")], cell_areas=(3.0, 9.0, 1.0))
+        _wire(tf, handle_map={"S": _body(), "T": BRepFace(None)})
+        out = payload(se.handler(surface="S", trim_tool="T"))
         assert out["trimmed"] is True
         # success path: the transaction was committed, NOT cancelled
         assert tf.last_input.cancelled is False
@@ -222,68 +140,50 @@ class TestSurfaceTrim:
     def test_trim_selects_a_cell_before_add(self):
         # A handler that skips the cell-selection step leaves all cells unselected, so add() raises
         # "No cells are selected". The trim must select a cell first.
-        surf = FakeBRepBody("Surf1", is_solid=False)
         tf = FakeTrimFeatures(cell_areas=(3.0, 9.0, 1.0))
-        comp = FakeComp(FakeFeatures(trim=tf))
-        _wire(comp, handle_map={"S": surf, "T": FakeFace()})
-        out = _payload(se.handler(surface="S", trim_tool="T"))
+        _wire(tf, handle_map={"S": _body(), "T": BRepFace(None)})
+        out = payload(se.handler(surface="S", trim_tool="T"))
         assert out["trimmed"] is True   # passes only because a cell is now selected before add()
 
     def test_trim_that_removes_no_area_bites(self):
         # committed, cells were marked removed, but the surface area is identical -> error, not ok
-        surf = FakeBRepBody("Surf1", is_solid=False)
-        surf.area = 12.0
-        rb = FakeBody("Surf1", is_solid=False)
-        rb.area = 12.0                                    # area unchanged by the commit
-        tf = FakeTrimFeatures(result_bodies=[rb], cell_areas=(3.0, 9.0, 1.0))
-        comp = FakeComp(FakeFeatures(trim=tf))
-        _wire(comp, handle_map={"S": surf, "T": FakeFace()})
+        tf = FakeTrimFeatures(result_bodies=[_body("Surf1", area=12.0)],
+                              cell_areas=(3.0, 9.0, 1.0))
+        _wire(tf, handle_map={"S": _body(area=12.0), "T": BRepFace(None)})
         res = se.handler(surface="S", trim_tool="T")
         assert res["isError"] is True
         assert "did not decrease" in res["message"]
 
     def test_trim_that_shrinks_area_passes(self):
-        surf = FakeBRepBody("Surf1", is_solid=False)
-        surf.area = 12.0
-        rb = FakeBody("Surf1", is_solid=False)
-        rb.area = 9.0                                     # the removed cells' area is gone
-        tf = FakeTrimFeatures(result_bodies=[rb], cell_areas=(3.0, 9.0, 1.0))
-        comp = FakeComp(FakeFeatures(trim=tf))
-        _wire(comp, handle_map={"S": surf, "T": FakeFace()})
-        out = _payload(se.handler(surface="S", trim_tool="T"))
+        # the removed cells' area is gone
+        tf = FakeTrimFeatures(result_bodies=[_body("Surf1", area=9.0)],
+                              cell_areas=(3.0, 9.0, 1.0))
+        _wire(tf, handle_map={"S": _body(area=12.0), "T": BRepFace(None)})
+        out = payload(se.handler(surface="S", trim_tool="T"))
         assert out["trimmed"] is True
 
     def test_keep_smaller_keeps_smallest_cell(self):
-        surf = FakeBRepBody("Surf1", is_solid=False)
-        tf = FakeTrimFeatures(result_bodies=[FakeBody("Surf1", is_solid=False)],
-                              cell_areas=(3.0, 9.0, 1.0))
-        comp = FakeComp(FakeFeatures(trim=tf))
-        _wire(comp, handle_map={"S": surf, "T": FakeFace()})
-        out = _payload(se.handler(surface="S", trim_tool="T", keep="smaller"))
+        tf = FakeTrimFeatures(result_bodies=[_body("Surf1")], cell_areas=(3.0, 9.0, 1.0))
+        _wire(tf, handle_map={"S": _body(), "T": BRepFace(None)})
+        out = payload(se.handler(surface="S", trim_tool="T", keep="smaller"))
         cells = tf.last_input.bRepCells
         assert cells.item(2).isSelected is False          # smallest (area 1) kept
         assert cells.item(0).isSelected is True and cells.item(1).isSelected is True
         assert out["cells_kept"] == [2] and out["kept_area"] == 1.0
 
     def test_keep_by_index_keeps_that_cell(self):
-        surf = FakeBRepBody("Surf1", is_solid=False)
-        tf = FakeTrimFeatures(result_bodies=[FakeBody("Surf1", is_solid=False)],
-                              cell_areas=(3.0, 9.0, 1.0))
-        comp = FakeComp(FakeFeatures(trim=tf))
-        _wire(comp, handle_map={"S": surf, "T": FakeFace()})
-        out = _payload(se.handler(surface="S", trim_tool="T", keep="0"))
+        tf = FakeTrimFeatures(result_bodies=[_body("Surf1")], cell_areas=(3.0, 9.0, 1.0))
+        _wire(tf, handle_map={"S": _body(), "T": BRepFace(None)})
+        out = payload(se.handler(surface="S", trim_tool="T", keep="0"))
         cells = tf.last_input.bRepCells
         assert cells.item(0).isSelected is False          # kept by index
         assert cells.item(1).isSelected is True and cells.item(2).isSelected is True
         assert out["cells_kept"] == [0]
 
     def test_keep_list_of_indices(self):
-        surf = FakeBRepBody("Surf1", is_solid=False)
-        tf = FakeTrimFeatures(result_bodies=[FakeBody("Surf1", is_solid=False)],
-                              cell_areas=(3.0, 9.0, 1.0))
-        comp = FakeComp(FakeFeatures(trim=tf))
-        _wire(comp, handle_map={"S": surf, "T": FakeFace()})
-        out = _payload(se.handler(surface="S", trim_tool="T", keep=[0, 2]))
+        tf = FakeTrimFeatures(result_bodies=[_body("Surf1")], cell_areas=(3.0, 9.0, 1.0))
+        _wire(tf, handle_map={"S": _body(), "T": BRepFace(None)})
+        out = payload(se.handler(surface="S", trim_tool="T", keep=[0, 2]))
         cells = tf.last_input.bRepCells
         assert cells.item(0).isSelected is False and cells.item(2).isSelected is False
         assert cells.item(1).isSelected is True           # only the unlisted cell removed
@@ -291,12 +191,9 @@ class TestSurfaceTrim:
 
     def test_keep_int_index_keeps_that_cell(self):
         # keep passed as an actual int (not a string) -> _select_cells int branch
-        surf = FakeBRepBody("Surf1", is_solid=False)
-        tf = FakeTrimFeatures(result_bodies=[FakeBody("Surf1", is_solid=False)],
-                              cell_areas=(3.0, 9.0, 1.0))
-        comp = FakeComp(FakeFeatures(trim=tf))
-        _wire(comp, handle_map={"S": surf, "T": FakeFace()})
-        out = _payload(se.handler(surface="S", trim_tool="T", keep=2))
+        tf = FakeTrimFeatures(result_bodies=[_body("Surf1")], cell_areas=(3.0, 9.0, 1.0))
+        _wire(tf, handle_map={"S": _body(), "T": BRepFace(None)})
+        out = payload(se.handler(surface="S", trim_tool="T", keep=2))
         cells = tf.last_input.bRepCells
         assert cells.item(2).isSelected is False          # kept by int index
         assert cells.item(0).isSelected is True and cells.item(1).isSelected is True
@@ -315,7 +212,7 @@ class TestSurfaceTrim:
     def test_keep_index_at_the_last_cell_is_accepted(self):
         # total-1 is IN range: the boundary the out-of-range refusal must not swallow
         tf = self._keep_scene()
-        out = _payload(se.handler(surface="S", trim_tool="T", keep=2))
+        out = payload(se.handler(surface="S", trim_tool="T", keep=2))
         assert out["cells_kept"] == [2]
         assert tf.last_input.cancelled is False
 
@@ -357,14 +254,14 @@ class TestSurfaceTrim:
     def test_empty_keep_still_takes_the_larger_default(self):
         # '' / [] are an OMISSION, not a bad value - they must not be refused
         self._keep_scene()
-        out = _payload(se.handler(surface="S", trim_tool="T", keep=""))
+        out = payload(se.handler(surface="S", trim_tool="T", keep=""))
         assert out["cells_kept"] == [1]                   # largest (area 9 at index 1)
 
     def test_an_unreadable_cell_leaves_the_area_of_every_later_cell_at_its_own_index(self):
         # 'keep' takes a cell INDEX and the kept indices are published, so the areas list is indexed
         # by cell number. A cell that cannot be read measures 0 in ITS slot: compacting the list
         # instead would make the third cell the second, and 'keep larger' would select the stale one.
-        inp = FakeTrimInput(FakeFace(), (3.0, 9.0, 5.0))
+        inp = FakeTrimInput(BRepFace(None), (3.0, 9.0, 5.0))
         _stale_cell_at(inp.bRepCells, 1)
         kept, kept_area, total, err = se._select_cells(inp, None)
         assert err is None and total == 3
@@ -373,7 +270,7 @@ class TestSurfaceTrim:
     def test_an_unreadable_cell_does_not_shift_which_cells_are_selected(self):
         # the selection walk writes isSelected per index: cell 2 was asked for, so cell 2 is the one
         # left unselected (KEPT for a trim) and cell 0 is the one selected for removal
-        inp = FakeTrimInput(FakeFace(), (3.0, 9.0, 5.0))
+        inp = FakeTrimInput(BRepFace(None), (3.0, 9.0, 5.0))
         first, third = inp.bRepCells.item(0), inp.bRepCells.item(2)
         _stale_cell_at(inp.bRepCells, 1)
         kept, _area, total, err = se._select_cells(inp, 2)
@@ -385,12 +282,9 @@ class TestSurfaceTrim:
         # A coincident/overlapping surface injects a cell LARGER than the target's own area (the compute
         # spans every visible surface the tool crosses). 'keep larger' would latch onto it: kept_area >
         # surf.area is impossible for a real subset of the target -> abort BEFORE add(), cancel the txn.
-        surf = FakeBRepBody("Surf1", is_solid=False)
-        surf.area = 16.0
-        tf = FakeTrimFeatures(result_bodies=[FakeBody("Surf1", is_solid=False)],
+        tf = FakeTrimFeatures(result_bodies=[_body("Surf1")],
                               cell_areas=(4.0, 20.0, 6.0))   # largest cell (20) exceeds the 16 input
-        comp = FakeComp(FakeFeatures(trim=tf))
-        _wire(comp, handle_map={"S": surf, "T": FakeFace()})
+        _wire(tf, handle_map={"S": _body(area=16.0), "T": BRepFace(None)})
         res = se.handler(surface="S", trim_tool="T")
         assert res["isError"] is True
         assert "larger than" in res["message"] and "HIDE" in res["message"]
@@ -398,43 +292,31 @@ class TestSurfaceTrim:
 
     def test_kept_area_within_input_still_trims(self):
         # The same scene without the phantom: the kept cell is smaller than the input -> a normal trim.
-        surf = FakeBRepBody("Surf1", is_solid=False)
-        surf.area = 16.0
-        rb = FakeBody("Surf1", is_solid=False)
-        rb.area = 12.0
-        tf = FakeTrimFeatures(result_bodies=[rb], cell_areas=(4.0, 12.0, 6.0))
-        comp = FakeComp(FakeFeatures(trim=tf))
-        _wire(comp, handle_map={"S": surf, "T": FakeFace()})
-        out = _payload(se.handler(surface="S", trim_tool="T"))
+        tf = FakeTrimFeatures(result_bodies=[_body("Surf1", area=12.0)],
+                              cell_areas=(4.0, 12.0, 6.0))
+        _wire(tf, handle_map={"S": _body(area=16.0), "T": BRepFace(None)})
+        out = payload(se.handler(surface="S", trim_tool="T"))
         assert out["trimmed"] is True and out["kept_area"] == 12.0
 
     def test_no_cells_cancels_and_reports_no_intersection(self):
-        surf = FakeBRepBody("Surf1", is_solid=False)
         tf = FakeTrimFeatures(cell_areas=())              # createInput divided nothing
-        comp = FakeComp(FakeFeatures(trim=tf))
-        _wire(comp, handle_map={"S": surf, "T": FakeFace()})
+        _wire(tf, handle_map={"S": _body(), "T": BRepFace(None)})
         res = se.handler(surface="S", trim_tool="T")
         assert res["isError"] is True
         assert tf.last_input.cancelled is True            # open transaction aborted
         assert "no cells" in res["message"].lower()
 
     def test_cancels_open_transaction_when_add_raises(self):
-        surf = FakeBRepBody("Surf1", is_solid=False)
-        tool = FakeFace()
         tf = FakeTrimFeatures(raise_on_add=True)
-        comp = FakeComp(FakeFeatures(trim=tf))
-        _wire(comp, handle_map={"S": surf, "T": tool})
+        _wire(tf, handle_map={"S": _body(), "T": BRepFace(None)})
         res = se.handler(surface="S", trim_tool="T")
         assert res["isError"] is True
         # THE HAZARD: cancel() was CALLED (not swallowed) so the open transaction is aborted
         assert tf.last_input.cancelled is True
 
     def test_cancels_when_add_returns_null_feature(self):
-        surf = FakeBRepBody("Surf1", is_solid=False)
-        tool = FakeFace()
         tf = FakeTrimFeatures(null_feature=True)
-        comp = FakeComp(FakeFeatures(trim=tf))
-        _wire(comp, handle_map={"S": surf, "T": tool})
+        _wire(tf, handle_map={"S": _body(), "T": BRepFace(None)})
         res = se.handler(surface="S", trim_tool="T")
         assert res["isError"] is True
         assert tf.last_input.cancelled is True
@@ -442,11 +324,8 @@ class TestSurfaceTrim:
 
     def test_wrong_kind_surface_gets_redirect_before_any_transaction(self):
         # a SOLID handed where a surface is required -> redirecting error, no createInput called
-        solid = FakeBRepBody("Body1", is_solid=True)
-        tool = FakeFace()
         tf = FakeTrimFeatures()
-        comp = FakeComp(FakeFeatures(trim=tf))
-        _wire(comp, handle_map={"S": solid, "T": tool})
+        _wire(tf, handle_map={"S": _body("Body1", is_solid=True), "T": BRepFace(None)})
         res = se.handler(surface="S", trim_tool="T")
         assert res["isError"] is True
         assert "OPEN SURFACE body" in res["message"] and "SOLID body" in res["message"]
@@ -459,26 +338,19 @@ class TestTrimPhantomGuardDisclosure:
         # the guard is ONE-SIDED: a foreign cell larger than every target cell but smaller than the
         # target's whole area passes it. The payload must not let a caller read a committed trim as
         # "no foreign cell was involved".
-        surf = FakeBRepBody("Surf1", is_solid=False)
-        surf.area = 16.0
-        rb = FakeBody("Surf1", is_solid=False)
-        rb.area = 12.0
-        tf = FakeTrimFeatures(result_bodies=[rb], cell_areas=(4.0, 12.0, 6.0))
-        comp = FakeComp(FakeFeatures(trim=tf))
-        _wire(comp, handle_map={"S": surf, "T": FakeFace()})
-        out = _payload(se.handler(surface="S", trim_tool="T"))
+        tf = FakeTrimFeatures(result_bodies=[_body("Surf1", area=12.0)],
+                              cell_areas=(4.0, 12.0, 6.0))
+        _wire(tf, handle_map={"S": _body(area=16.0), "T": BRepFace(None)})
+        out = payload(se.handler(surface="S", trim_tool="T"))
         assert out["phantom_cell_guard"] == "kept_area_not_above_target_area"
         assert "smaller than" in out["note"] and "NOT detected" in out["note"]
 
     def test_an_unreadable_target_area_says_the_guard_never_ran(self):
         # surf.area does not read -> the gate's own condition is false, so nothing was checked
-        surf = FakeBRepBody("Surf1", is_solid=False)
-        rb = FakeBody("Surf1", is_solid=False)
-        rb.area = 12.0
-        tf = FakeTrimFeatures(result_bodies=[rb], cell_areas=(4.0, 12.0, 6.0))
-        comp = FakeComp(FakeFeatures(trim=tf))
-        _wire(comp, handle_map={"S": surf, "T": FakeFace()})
-        out = _payload(se.handler(surface="S", trim_tool="T"))
+        tf = FakeTrimFeatures(result_bodies=[_body("Surf1", area=12.0)],
+                              cell_areas=(4.0, 12.0, 6.0))
+        _wire(tf, handle_map={"S": _body(), "T": BRepFace(None)})
+        out = payload(se.handler(surface="S", trim_tool="T"))
         assert out["phantom_cell_guard"] == "not_applied"
         assert "NOT applied" in out["note"]
 
@@ -496,26 +368,18 @@ class TestSolidVerdictOverBodyFacts:
         assert surface_common_mod._solid_verdict([]) is None                   # no body read -> unknown
 
     def test_trim_publishes_a_null_is_solid_with_an_unverified_marker(self):
-        surf = FakeBRepBody("Surf1", is_solid=False)
-        surf.area = 16.0
-        rb = _UnreadableSolidBody("Surf1")
-        rb.area = 12.0
+        rb = _body("Surf1", area=12.0, solid_readable=False)
         tf = FakeTrimFeatures(result_bodies=[rb], cell_areas=(4.0, 12.0, 6.0))
-        comp = FakeComp(FakeFeatures(trim=tf))
-        _wire(comp, handle_map={"S": surf, "T": FakeFace()})
-        out = _payload(se.handler(surface="S", trim_tool="T"))
+        _wire(tf, handle_map={"S": _body(area=16.0), "T": BRepFace(None)})
+        out = payload(se.handler(surface="S", trim_tool="T"))
         assert out["is_solid"] is None
         assert out["unverified"] == ["is_solid"]
         assert "Not read back off the feature: is_solid." in out["note"]
 
     def test_trim_on_a_readable_flag_carries_no_marker(self):
         # the boundary: a flag that READ false is an answer, so the disclosure must not fire on it.
-        surf = FakeBRepBody("Surf1", is_solid=False)
-        surf.area = 16.0
-        rb = FakeBody("Surf1", is_solid=False)
-        rb.area = 12.0
-        tf = FakeTrimFeatures(result_bodies=[rb], cell_areas=(4.0, 12.0, 6.0))
-        comp = FakeComp(FakeFeatures(trim=tf))
-        _wire(comp, handle_map={"S": surf, "T": FakeFace()})
-        out = _payload(se.handler(surface="S", trim_tool="T"))
+        tf = FakeTrimFeatures(result_bodies=[_body("Surf1", area=12.0)],
+                              cell_areas=(4.0, 12.0, 6.0))
+        _wire(tf, handle_map={"S": _body(area=16.0), "T": BRepFace(None)})
+        out = payload(se.handler(surface="S", trim_tool="T"))
         assert out["is_solid"] is False and "unverified" not in out

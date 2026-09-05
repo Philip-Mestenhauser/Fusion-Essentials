@@ -30,18 +30,72 @@ class TestEnumFamiliesMeasured:
             + ", ".join(missing))
 
     def test_every_consumed_behavior_key_is_measured(self):
-        consumed = set()
-        for root, dirs, files in os.walk(TESTS_DIR):
-            dirs[:] = [d for d in dirs if d not in ("__pycache__", "live")]
-            for fn in files:
-                if fn.endswith(".py") and fn != "live_api_facts.py":
-                    with open(os.path.join(root, fn), encoding="utf-8") as fh:
-                        consumed |= set(_BEHAVIOR_KEY.findall(fh.read()))
-        missing = sorted(consumed - set(live_api_facts.BEHAVIOR))
+        missing = sorted(_consumed_behavior_keys() - set(live_api_facts.BEHAVIOR))
         assert not missing, (
             "The harness consumes BEHAVIOR keys live_api_facts.py does not carry - add a "
             "measurement row (facts_on_pass or a FACT line) to tests/live/measure_api.py and "
             "regenerate against live Fusion. Missing: " + ", ".join(missing))
+
+    def test_every_flag_a_shared_fake_stands_on_is_read_by_it(self):
+        # The other direction, for the rows that name a SHARED fake as what encodes them: the
+        # flag they measured must be READ by conftest, or the fake still hard-codes the belief
+        # the row exists to check and a changed answer on a new build changes nothing.
+        unread = sorted(_shared_fake_flags() - _consumed_behavior_keys(conftest_only=True)
+                        - set(_UNCONSUMED_OK))
+        assert not unread, (
+            "measurement rows that name a tests/conftest.py fake as their encoding emit flags the "
+            "shared fakes never read - make the fake read BEHAVIOR[\"<key>\"] instead of "
+            "hard-coding the behaviour, or add a reasoned _UNCONSUMED_OK entry: "
+            + ", ".join(unread))
+
+    def test_unconsumed_ok_entries_still_trip(self):
+        consumed = _consumed_behavior_keys(conftest_only=True)
+        stale = []
+        for key, reason in _UNCONSUMED_OK.items():
+            assert reason.strip(), f"{key} _UNCONSUMED_OK entry needs a plain-English reason"
+            if key not in _shared_fake_flags():
+                stale.append(f"{key}: no row naming a shared fake emits it - remove the entry")
+            elif key in consumed:
+                stale.append(f"{key}: conftest reads it now - remove the entry")
+        assert not stale, "stale _UNCONSUMED_OK entries:\n  " + "\n  ".join(stale)
+
+
+def _shared_fake_flags():
+    """Behavior keys emitted by rows whose encoded_in names tests/conftest.py."""
+    keys = set()
+    for row in measure_api.ROWS:
+        if "conftest" not in row.get("encoded_in", ""):
+            continue
+        for key in (row.get("facts_on_pass") or {}):
+            if key.startswith("behavior."):
+                keys.add(key[len("behavior."):])
+        body = row["body_fn"]() if "body_fn" in row else row.get("body", "")
+        keys |= set(measure_api._FACT_BEHAVIOR_PRINT.findall(body))
+    return keys
+
+
+def _consumed_behavior_keys(conftest_only=False):
+    """Every BEHAVIOR["<key>"] read in the harness - all of tests/ (minus live/), or conftest.py
+    alone, the shared fakes' home."""
+    consumed = set()
+    for root, dirs, files in os.walk(TESTS_DIR):
+        dirs[:] = [] if conftest_only else [d for d in dirs if d not in ("__pycache__", "live")]
+        for fn in files:
+            if conftest_only and fn != "conftest.py":
+                continue
+            if fn.endswith(".py") and fn != "live_api_facts.py":
+                with open(os.path.join(root, fn), encoding="utf-8") as fh:
+                    consumed |= set(_BEHAVIOR_KEY.findall(fh.read()))
+    return consumed
+
+
+# Flags a shared fake deliberately does not read yet. Shrink-only; each names why.
+_UNCONSUMED_OK = {
+    "viewport_camera_returns_copy": (
+        "the shared Viewport fake models a shared MUTABLE camera on purpose (its docstring says "
+        "so) because seven view test files assert identity on it; reading the flag means "
+        "switching them to copy-on-read, a migration of its own"),
+}
 
 
 # Emitted keys the generated facts file does not carry YET - each is a measurement-row rename or

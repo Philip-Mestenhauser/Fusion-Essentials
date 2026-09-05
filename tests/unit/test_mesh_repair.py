@@ -24,7 +24,8 @@ import types
 import adsk.fusion
 import pytest
 
-from conftest import BRepBody, MeshBody, load_tool, payload, error_message
+from conftest import (BRepBody, MakeComp, MakeDesign, MeshBody, install, load_tool, payload,
+                      error_message)
 
 mr = load_tool("mesh_repair")
 
@@ -48,19 +49,22 @@ def _mesh(name="Scan1", tri=1000, nodes=502, is_closed=False, volume=0.0, **kw):
     return MeshBody(name=name, tri=tri, nodes=nodes, is_closed=is_closed, volume=volume, **kw)
 
 
-class _Coll:
-    def __init__(self, items=()):
-        self._items = list(items)
-
-    def __len__(self):
-        return len(self._items)
+class _MeshComp(MakeComp):
+    """A component whose meshBodies read RAISES once `dead` is set - the census host that stops
+    answering mid-flight."""
+    def __init__(self, *args, **kwargs):
+        self.dead = False
+        super().__init__(*args, **kwargs)
 
     @property
-    def count(self):
-        return len(self._items)
+    def meshBodies(self):
+        if self.dead:
+            raise RuntimeError("3 : object is no longer valid")
+        return self._mesh_bodies
 
-    def item(self, i):
-        return self._items[i] if 0 <= i < len(self._items) else None
+    @meshBodies.setter
+    def meshBodies(self, value):
+        self._mesh_bodies = value
 
 
 class _RepairInput:
@@ -185,52 +189,18 @@ class _Features:
         self.baseFeatures = base_features
 
 
-class _Comp:
-    def __init__(self, name="Comp", meshes=(), features=None):
-        self.name = name
-        self.dead = False
-        self._meshes = _Coll(meshes)
-        self.features = features
-        self.bRepBodies = _Coll()
-
-    @property
-    def meshBodies(self):
-        if self.dead:
-            raise RuntimeError("3 : object is no longer valid")
-        return self._meshes
-
-
-class _Design:
-    def __init__(self, comp, design_type=1, tokens=None, all_components=None):
-        self.rootComponent = comp
-        self.activeComponent = comp
-        self.designType = design_type    # 1 parametric, 0 direct (current_design_type's int fallback)
-        self._tokens = dict(tokens or {})
-        self._all_components = list(all_components) if all_components is not None else [comp]
-
-    @property
-    def allComponents(self):
-        return _Coll(self._all_components)
-
-    def findEntityByToken(self, token):
-        e = self._tokens.get(token)
-        return [e] if e is not None else []
-
-
 # ── rig ──────────────────────────────────────────────────────────────────────────────────────────
 
 def _rig(monkeypatch, mesh=None, on_add=None, design_type=1, **feat_kw):
     """Wire one mesh + a meshRepairFeatures collection into the tool. Returns (mesh, comp, feats,
     base_feature)."""
     mesh = mesh if mesh is not None else _mesh()
-    comp = _Comp(meshes=[mesh])
+    comp = _MeshComp("Comp", mesh_bodies=[mesh])
     mesh.parentComponent = comp
     feats = _RepairFeatures(on_add=on_add, **feat_kw)
     base_feature = _BaseFeature()
     comp.features = _Features(repair=feats, base_features=_BaseFeatures(base_feature))
-    design = _Design(comp, design_type=design_type)
-    monkeypatch.setattr(mr._common, "design", lambda: design)
-    monkeypatch.setattr(mr._inputs._common, "design", lambda: design)
+    install(mr, MakeDesign(comp=comp, design_type=design_type))
     monkeypatch.setattr(mr._MESH, "resolve", lambda raw: (mesh, None))
     monkeypatch.setattr(mr.adsk.core.ValueInput, "createByReal", _ValueInput)
     return mesh, comp, feats, base_feature
@@ -370,9 +340,7 @@ class TestInputGuards:
         monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody)
         brep = BRepBody(name="Body1", entity_token="BTOK::Body1")
         monkeypatch.setattr(mr._MESH, "resolve", mr._inputs.MeshBodyRef("mesh").resolve)
-        design = _Design(comp, tokens={"BTOK::Body1": brep})
-        monkeypatch.setattr(mr._common, "design", lambda: design)
-        monkeypatch.setattr(mr._inputs._common, "design", lambda: design)
+        install(mr, MakeDesign(comp=comp, design_type=1, tokens={"BTOK::Body1": brep}))
         msg = error_message(mr.handler(mesh="BTOK::Body1", repair_type="one_touch_fix"))
         assert "MESH body" in msg and "SOLID" in msg
         assert feats.add_called is False
@@ -381,16 +349,13 @@ class TestInputGuards:
         # two meshes named 'Scan' in two components: the resolver must refuse, never pick the first.
         mesh_a = _mesh(name="Scan", token="MTOK::A")
         mesh_b = _mesh(name="Scan", token="MTOK::B")
-        comp_a = _Comp("CompA", meshes=[mesh_a])
-        comp_b = _Comp("CompB", meshes=[mesh_b])
+        comp_a = _MeshComp("CompA", mesh_bodies=[mesh_a])
+        comp_b = _MeshComp("CompB", mesh_bodies=[mesh_b])
         mesh_a.parentComponent, mesh_b.parentComponent = comp_a, comp_b
         feats = _RepairFeatures()
         comp_a.features = _Features(repair=feats, base_features=_BaseFeatures(_BaseFeature()))
-        comp_a.allOccurrences = []
-        design = _Design(comp_a, all_components=[comp_a, comp_b])
         monkeypatch.setattr(adsk.fusion, "MeshBody", MeshBody)
-        monkeypatch.setattr(mr._common, "design", lambda: design)
-        monkeypatch.setattr(mr._inputs._common, "design", lambda: design)
+        install(mr, MakeDesign(comp=comp_a, design_type=1, all_components=[comp_a, comp_b]))
         msg = error_message(mr.handler(mesh="Scan", repair_type="one_touch_fix"))
         assert "ambiguous" in msg and "CompA" in msg and "CompB" in msg
         assert feats.add_called is False

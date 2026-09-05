@@ -370,8 +370,8 @@ def handler(operation: str = "", parameters=None, suppressed=None, preset: str =
                      "cam_get(include=['parameters'], operation=...) lists this operation's own "
                      "parameter names; only a name it lists can be set.")
 
-    # A parameter reading isEditable False takes the assignment without raising and keeps the
-    # expression it held (measured: 308 of a swarf op's 375 read False), so refuse before any write.
+    # isEditable False says the UI never offers the edit, not that the platform drops it (measured:
+    # a locked parameter takes the write, no raise) - so refuse BEFORE writing, never after.
     # read_flag, not safe(..., True): a flag that reads None did not answer, and cannot refuse.
     locked = [name for name, p in resolved.items()
               if read_flag(lambda p=p: p.isEditable) is False]

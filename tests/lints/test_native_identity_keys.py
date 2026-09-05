@@ -225,9 +225,10 @@ class TestEntityKeysUseNativeIdentity:
         # document has an identity carrying more than the token. That scope rests on the measured
         # SHAPES table, so the two facts it uses are pinned here rather than left as prose: an
         # Occurrence carries neither member (its token key IS the identity key), and a Sketch does
-        # carry one (its absence is an unclosed spelling, not an equivalence).
+        # carry one (its absence is an unclosed spelling, not an equivalence). Timeline also
+        # carries parentDesign, and no identity is ever taken for a timeline.
         shapes = live_api_facts.SHAPES
-        assert sorted(k for k, v in shapes.items() if "parentDesign" in v) == ["Component"]
+        assert sorted(k for k, v in shapes.items() if "parentDesign" in v) == ["Component", "Timeline"]
         assert "parentComponent" in shapes["Sketch"]
         assert "parentComponent" in shapes["BRepBody"] and "parentComponent" in shapes["MeshBody"]
         assert "parentComponent" not in shapes["Occurrence"]

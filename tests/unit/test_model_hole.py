@@ -9,12 +9,11 @@ setToTappedHole), and the guards (unknown type, missing diameters, no face/point
 The HoleFeatureInput fake RECORDS the calls so we can assert the exact builder path.
 """
 
-import json
-
 import pytest
 
-from conftest import (load_tool, FakePoint, BRepEdge, Circle3D, Line3D, FakeMatrix3D, MakeComp,
-                      make_occurrence)
+from conftest import (load_tool, FakePoint, FakeVector3D, BRepEdge, Circle3D, Cylinder, Line3D,
+                      FakeMatrix3D, MakeComp, _NamedCollection, _make_object_collection, install,
+                      make_design, make_occurrence, payload as _payload)
 
 mh = load_tool("model_hole")
 
@@ -67,7 +66,7 @@ class FakeHoleInput:
         answer = self._answer("setPositionBySketchPoints")
         if answer is False:
             return False
-        self.placed = ("points", list(coll.items)); return answer
+        self.placed = ("points", list(coll)); return answer
     def setPositionAtCenter(self, planar_entity, center_edge):
         assert planar_entity == "FACE"
         assert isinstance(center_edge, BRepEdge)
@@ -118,34 +117,17 @@ def _deg_to_rad(tip):
     return _m.radians(float(str(tip[1]).split()[0]))
 
 
-class _Axis:
-    def __init__(self, x=0.0, y=0.0, z=1.0):
-        self.x, self.y, self.z = x, y, z
+def _cyl_geo(origin):
+    """A created face's geometry: origin + the Z axis these tests drill along - the drill-line pair
+    the per-point verify reads back."""
+    return Cylinder(FakeVector3D(0.0, 0.0, 1.0), origin)
 
 
-class _CylGeo:
-    """A created face's geometry (Cylinder/Cone duck-type): origin + axis, the drill-line pair the
-    per-point verify reads back."""
-    def __init__(self, origin):
-        self.origin = origin
-        self.axis = _Axis()          # holes drill along Z in these tests
-
-
-class _FaceColl:
-    def __init__(self, faces):
-        self._f = list(faces)
-    @property
-    def count(self):
-        return len(self._f)
-    def item(self, i):
-        return self._f[i]
-
-
-class _UnreadableFaceColl:
+class _UnreadableFaceColl(_NamedCollection):
     """A faces collection that COUNTS but hands back nothing - a stale face proxy after a rebuild.
     The count is real; every item() raises, so the shared walk yields nothing."""
     def __init__(self, count):
-        self.count = count
+        super().__init__([None] * count)
     def item(self, i):
         raise RuntimeError("face proxy is stale")
 
@@ -178,8 +160,8 @@ class FakeHoleFeature:
             # the handler verifies the drilled-axis COUNT, not per-point coordinates, for them).
             pts = [_SketchPoint(FakePoint(0.0, 0.0, 0.0))]
         made = [sp for i, sp in enumerate(pts) if i not in miss_indices]
-        self.faces = _FaceColl([type("F", (), {"geometry": _CylGeo(sp.geometry)})()
-                                for sp in made])
+        self.faces = _NamedCollection([type("F", (), {"geometry": _cyl_geo(sp.geometry)})()
+                                       for sp in made])
         n_missed = len(pts) - len(made)
         self.errorOrWarningMessage = (
             "No target body!<b>%d Reference Failures</b><br/>No target body!Hole1" % n_missed
@@ -340,13 +322,12 @@ class _Features:
         self.threadFeatures = FakeThreadFeatures()
 
 
-class _Comp:
+class _Comp(MakeComp):
     """A component a hole can be HOSTED in: its own sketches and features (a hole is built through
     exactly one component's collections), plus the entityToken same_component compares on - chosen
     rather than inherited, because a component whose token does not read is its own tested state."""
     def __init__(self, name="Bracket", token=None):
-        self.name = name
-        self.entityToken = token or f"tok:{name}"
+        super().__init__(name=name, entity_token=token or f"tok:{name}")
         # the component OWNS the sketches and features created in it, which is what its own
         # parentComponent read-backs answer
         self.sketches = _Sketches(owner=self)
@@ -402,31 +383,13 @@ class _Root(_Comp):
         return list(self.placements.get(getattr(comp, "entityToken", None), []))
 
 
-class _ObjColl:
-    """adsk ObjectCollection.create() stand-in (patched onto the tool)."""
-    def __init__(self):
-        self.items = []
-    def add(self, x):
-        self.items.append(x)
-    @classmethod
-    def create(cls):
-        return cls()
-
-
-class _Design:
-    def __init__(self):
-        self.rootComponent = _Root()
-
-
 class _ClearanceInfo:
     def __init__(self, standard, ftype, size, fit):
         self.standard, self.fastenerType, self.size, self.fit = standard, ftype, size, fit
 
 
 def _install():
-    design = _Design()
-    mh._common.design = lambda: design
-    mh._target_component = lambda d: d.rootComponent
+    design = install(mh, make_design(comp=_Root()))
     # face resolver returns (entity, error) — the GeometryHandle.resolve contract. The handler MUST
     # unpack it; passing the whole tuple to sketches.add raises TypeError (see _Sketches.add). The
     # face's body is owned by the ROOT here, which is also the active component - the ordinary case,
@@ -440,7 +403,7 @@ def _install():
     mh._resolve_offset_edge_two = lambda d, h: (BRepEdge(Line3D()), None)
     # ObjectCollection + ValueInput seams. ExtentDirections stays the MEASURED family the tool
     # bound at import (conftest seeds it from live_api_facts) - no sentinel override.
-    mh._object_collection = _ObjColl.create
+    mh._object_collection = _make_object_collection
     mh._value = lambda s: ("V", s)
     # clearance seam: real impl validates vs the live catalog + builds a ClearanceHoleInfo.
     # the fake echoes a recognisable info object for known fasteners, else raises like the catalog would.
@@ -454,11 +417,6 @@ def _install():
         return _ClearanceInfo("ANSI Metric M Profile", ftype, size, fit), None
     mh._resolve_clearance = _fake_clear
     return design
-
-
-def _payload(result):
-    assert result["isError"] is False, result
-    return json.loads(result["content"][0]["text"])
 
 
 # ── guards ───────────────────────────────────────────────────────────────────
@@ -1131,7 +1089,7 @@ class TestWorldLift:
     converts from, or the refusal when no single placement answers for that component."""
 
     def _design(self, root):
-        return type("D", (), {"rootComponent": root})()
+        return make_design(comp=root)
 
     def _lifted(self, m, x, y, z):
         p = FakePoint(x, y, z)
@@ -1230,17 +1188,17 @@ class TestTheFaceOwnsTheHole:
     not in whatever component happens to be ACTIVE - a hole hosted on the active component puts its
     placement sketch in a component that holds none of the geometry the hole was cut into."""
 
-    def _elsewhere(self, name="RightTieRod"):
+    def _elsewhere(self, design, name="RightTieRod"):
         """Make a DIFFERENT component the active one, so 'active' and 'the face's owner' part."""
         active = _Comp(name)
-        mh._target_component = lambda _d: active
+        design.activeComponent = active
         return active
 
     def test_the_hole_and_its_sketch_land_in_the_faces_component(self):
-        _install()
+        d = _install()
         bracket = _bracket("Chassis")
         mh._resolve_face = lambda _d, _h: (_Face(bracket), None)
-        active = self._elsewhere()
+        active = self._elsewhere(d)
         out = _payload(mh.handler(hole_type="simple", diameter="5 mm", face="h",
                                   points=[[2, 2, 0]], extent="through"))
         assert len(bracket.features.holeFeatures.added) == 1
@@ -1251,11 +1209,11 @@ class TestTheFaceOwnsTheHole:
 
     def test_a_non_sketch_placement_is_hosted_on_the_face_too(self):
         # center/on_edge/plane_offsets make no placement sketch, but the FEATURE still has a host
-        _install()
+        d = _install()
         bracket = _bracket("Chassis")
         mh._resolve_face = lambda _d, _h: (_Face(bracket), None)
         mh._resolve_edge = lambda _d, _h: (BRepEdge(Circle3D(None)), None)
-        active = self._elsewhere()
+        active = self._elsewhere(d)
         out = _payload(mh.handler(hole_type="simple", diameter="5 mm", extent="through",
                                   placement="center", edge="e1"))
         assert len(bracket.features.holeFeatures.added) == 1
@@ -1286,10 +1244,10 @@ class TestTheFaceOwnsTheHole:
         # saying its owner did not read would state a read failure that never happened - beside
         # host_from_face=true in the same payload, and would name the face's owner as the ACTIVE
         # component while a different one is active.
-        _install()
+        d = _install()
         bracket = _bracket("Chassis")
         mh._resolve_face = lambda _d, _h: (_Face(bracket), None)
-        self._elsewhere()
+        self._elsewhere(d)
         out = _payload(mh.handler(hole_type="simple", diameter="5 mm", face="h",
                                   points=[[2, 2, 0]], extent="through"))
         assert out["host_from_face"] is True and out["host_component"] == "Chassis"
@@ -1354,10 +1312,10 @@ class TestTheFaceOwnsTheHole:
         # the other side of that boundary: same_component answers None when the active component
         # carries no identity, and None is not a proven difference - a "was not used" clause about
         # a component nothing was read about is the claim this refuses to make.
-        _install()
+        d = _install()
         bracket = _bracket("Chassis")
         mh._resolve_face = lambda _d, _h: (_Face(bracket), None)
-        mh._target_component = lambda _d: MakeComp(name="RightTieRod")     # no entityToken
+        d.activeComponent = MakeComp(name="RightTieRod")     # no entityToken
         bracket.sketches.add = lambda _plane: None
         res = mh.handler(hole_type="simple", diameter="5 mm", face="h", points=[[2, 2, 0]],
                          extent="through")

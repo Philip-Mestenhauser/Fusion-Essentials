@@ -54,12 +54,34 @@ def _present():
     return counts
 
 
+MEASURE_ROWS = REPO / "tests" / "live" / "measure_api.py"
+
+
 def _scanned_files():
-    # the constitution docs PLUS the server source - a docstring/comment that cites a file rots the
-    # same way a doc does when the file is renamed/moved.
+    # the constitution docs PLUS the server source PLUS the measurement registry - a docstring,
+    # comment or measurement row that cites a file rots the same way a doc does when the file is
+    # renamed/moved.
     files = [d for d in CONSTITUTION_DOCS if d.exists()]
     files += sorted(MCP.rglob("*.py"))
+    files.append(MEASURE_ROWS)
     return files
+
+
+_ROW_PROSE_KEYS = {"claim", "encoded_in"}
+
+
+def _row_prose(src):
+    """The claim and encoded_in text of every measurement row: where a row says which fake and
+    which tool lean on it. The row bodies are Fusion-side scripts and are not prose."""
+    chunks = []
+    for node in ast.walk(_corpus.tree(src)):
+        if not isinstance(node, ast.Dict):
+            continue
+        for key, value in zip(node.keys, node.values):
+            if (isinstance(key, ast.Constant) and key.value in _ROW_PROSE_KEYS
+                    and isinstance(value, ast.Constant) and isinstance(value.value, str)):
+                chunks.append(value.value)
+    return "\n".join(chunks)
 
 
 def _basename(cite):
@@ -71,12 +93,18 @@ def _inline_code(doc):
     return " ".join(m.group(1) for m in _INLINE_CODE.finditer(_corpus.text(doc)))
 
 
+def _citable_text(src):
+    """What a scanned file says in its own voice: a doc or source module entire, the measurement
+    registry only through its rows' claim and encoded_in text."""
+    return _row_prose(src) if src == MEASURE_ROWS else _corpus.text(src)
+
+
 class TestDocCitations:
     def test_cited_files_exist(self):
         present = _present()
         offenders = []
         for src in _scanned_files():
-            text = _corpus.text(src)
+            text = _citable_text(src)
             for cite in sorted(set(_FILE.findall(text))):
                 if _basename(cite) not in present:
                     offenders.append(f"{src.relative_to(REPO)} cites '{cite}' - no file named "
@@ -172,10 +200,13 @@ _NOT_A_MODULE_SYMBOL = {
 
 @lru_cache(maxsize=None)
 def _prose(src):
-    """The hand-written prose of one scanned file: a doc entire, a source module's comments and
-    docstrings (see the module docstring for what the rest of a module would cost)."""
+    """The hand-written prose of one scanned file: a doc entire, a measurement row's claim and
+    encoded_in, a source module's comments and docstrings (see the module docstring for what the
+    rest of a module would cost)."""
     if src.suffix != ".py":
         return _corpus.text(src)
+    if src == MEASURE_ROWS:
+        return _row_prose(src)
     chunks = [tok.string
               for tok in tokenize.generate_tokens(io.StringIO(_corpus.text(src)).readline)
               if tok.type == tokenize.COMMENT]

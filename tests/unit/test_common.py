@@ -1599,11 +1599,12 @@ class TestNativeIdentityOfAComponent:
     def test_only_a_COMPONENT_can_reach_the_second_chain_at_all(self):
         # The blast-radius guard over the whole measured surface, not just the three kinds above: a
         # helper the entire tool surface consumes must answer for exactly the kinds it means to.
-        # parentDesign is carried by Component ALONE, so every other kind an identity is taken for
-        # (an occurrence, a face, an edge - none of which carry either attribute) reaches neither
-        # chain and answers None. A build that adds parentDesign anywhere else reds this.
+        # parentDesign is carried by Component and Timeline only, and no identity is taken for a
+        # timeline, so every other kind an identity is taken for (an occurrence, a face, an edge -
+        # none of which carry either attribute) reaches neither chain and answers None. A build
+        # that adds parentDesign anywhere else reds this.
         carriers = sorted(k for k, v in live_api_facts.SHAPES.items() if "parentDesign" in v)
-        assert carriers == ["Component"], carriers
+        assert carriers == ["Component", "Timeline"], carriers
         for silent_kind in ("Occurrence", "BRepFace", "BRepEdge"):
             attrs = live_api_facts.SHAPES[silent_kind]
             assert "parentDesign" not in attrs and "parentComponent" not in attrs, silent_kind

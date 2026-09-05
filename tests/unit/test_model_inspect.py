@@ -14,8 +14,9 @@ from types import SimpleNamespace
 import adsk.core
 import pytest
 
-from conftest import (load_tool, error_message, FakePoint, FakeBoundingBox3D, BRepBody,
-                      body_proxy, _NamedCollection)
+from conftest import (load_tool, error_message, FakePoint, FakeBoundingBox3D, FakeMatrix3D,
+                      FakeOccurrence, FakeVector3D, BRepBody, BRepFace, MakeComp, Plane,
+                      body_proxy, make_design, make_occurrence, _NamedCollection)
 
 mi = load_tool("model_inspect")
 
@@ -140,7 +141,6 @@ class TestBodyAabb:
     not inflate it and model_inspect + assembly_get agree on one occurrence's size."""
 
     def test_default_bbox_reads_via_geom_body_aabb(self, monkeypatch):
-        from conftest import FakePoint, FakeBoundingBox3D
         monkeypatch.setattr(mi._common, "design", lambda: object())
         monkeypatch.setattr(mi._TARGET, "resolve", lambda raw: ((object(), "occurrence"), None))
         seen = []
@@ -163,7 +163,6 @@ class TestBodyLumpCount:
         monkeypatch.setattr(mi._TARGET, "resolve", lambda raw: ((body, kind), None))
 
     def test_a_body_target_publishes_its_lump_count(self, monkeypatch, stub_slices):
-        from conftest import BRepBody
         body = BRepBody(name="Tensioner")
         body.lumps = type("L", (), {"count": 2})()
         self._resolve_body(monkeypatch, body)
@@ -171,7 +170,6 @@ class TestBodyLumpCount:
         assert out["lump_count"] == 2
 
     def test_a_single_piece_body_reads_one(self, monkeypatch, stub_slices):
-        from conftest import BRepBody
         body = BRepBody(name="Bracket")
         body.lumps = type("L", (), {"count": 1})()
         self._resolve_body(monkeypatch, body)
@@ -179,7 +177,6 @@ class TestBodyLumpCount:
 
     def test_an_unreadable_lump_count_is_published_as_unknown(self, monkeypatch, stub_slices):
         # None (not 0, not 1) - the caller can tell "one solid piece" from "nobody knows".
-        from conftest import BRepBody
         self._resolve_body(monkeypatch, BRepBody(name="Plain"))
         assert _payload(mi.handler(target="Plain"))["lump_count"] is None
 
@@ -200,12 +197,17 @@ class TestNormalizeInclude:
 
 # ── _measurable_geometry: getOrientedBoundingBox needs B-Rep, a Component must fall back ───────────
 
+class _Occurrence(FakeOccurrence):
+    """An occurrence whose bRepBodies are the assembly PROXY bodies a measurement falls back to."""
+
+    def __init__(self, path, bodies, component=None, context=None):
+        FakeOccurrence.__init__(self, path, component, assembly_context=context)
+        self.bRepBodies = _NamedCollection(list(bodies))
+
+
 def _occurrence(path, bodies, component=None, context=None):
-    """An Occurrence as _measurable_geometry sees one: the branch reads the live CLASS NAME, and
-    bRepBodies hands back the occurrence's assembly PROXY bodies."""
-    return type("Occurrence", (), {
-        "name": path.split("+")[-1], "fullPathName": path, "assemblyContext": context,
-        "component": component, "bRepBodies": _NamedCollection(list(bodies))})()
+    """An Occurrence as _measurable_geometry sees one - it holds bodies, and is not one."""
+    return _Occurrence(path, bodies, component, context)
 
 
 class TestMeasurableGeometry:
@@ -220,13 +222,13 @@ class TestMeasurableGeometry:
         assert geom is e and note == ""
 
     def test_component_with_no_bodies_yields_none(self):
-        comp = SimpleNamespace(bRepBodies=_NamedCollection([]))
+        comp = MakeComp(name="Empty")
         geom, _ = mi._measurable_geometry(comp)
         assert geom is None
 
     def test_component_single_body_falls_back_to_it_and_names_it(self):
-        body = SimpleNamespace(name="Core", boundingBox=None)
-        comp = SimpleNamespace(bRepBodies=_NamedCollection([body]))
+        body = BRepBody(name="Core")
+        comp = MakeComp(name="Shell", bodies=[body])
         geom, note = mi._measurable_geometry(comp)
         assert geom is body and "Core" in note
 
@@ -234,14 +236,14 @@ class TestMeasurableGeometry:
         # MEASURED: getOrientedBoundingBox raises "3 : invalid argument geometry" on an Occurrence,
         # so target=<an occurrence or component name> - the shape TargetRef resolves both to - could
         # never be measured in a frame at all. Its bodies are the same fallback a Component takes.
-        body = SimpleNamespace(name="Core", boundingBox=None)
+        body = BRepBody(name="Core")
         geom, note = mi._measurable_geometry(_occurrence("Arm:1", [body]))
         assert geom is body and "Core" in note
 
     def test_an_OCCURRENCE_with_several_bodies_measures_the_largest_and_says_so(self):
-        small = SimpleNamespace(name="Pin", boundingBox=FakeBoundingBox3D(
+        small = BRepBody(name="Pin", bbox=FakeBoundingBox3D(
             FakePoint(0, 0, 0), FakePoint(1, 1, 1)))
-        big = SimpleNamespace(name="Block", boundingBox=FakeBoundingBox3D(
+        big = BRepBody(name="Block", bbox=FakeBoundingBox3D(
             FakePoint(0, 0, 0), FakePoint(10, 2, 1)))
         geom, note = mi._measurable_geometry(_occurrence("Arm:1", [small, big]))
         assert geom is big and "largest of 2" in note
@@ -253,11 +255,11 @@ class TestMeasurableGeometry:
         assert geom is None
 
     def test_multi_body_component_measures_the_largest_by_aabb_volume(self):
-        small = SimpleNamespace(name="Pin", boundingBox=FakeBoundingBox3D(
+        small = BRepBody(name="Pin", bbox=FakeBoundingBox3D(
             FakePoint(0, 0, 0), FakePoint(1, 1, 1)))            # volume 1
-        big = SimpleNamespace(name="Block", boundingBox=FakeBoundingBox3D(
+        big = BRepBody(name="Block", bbox=FakeBoundingBox3D(
             FakePoint(0, 0, 0), FakePoint(10, 2, 1)))           # volume 20
-        comp = SimpleNamespace(bRepBodies=_NamedCollection([small, big]))
+        comp = MakeComp(name="Rig", bodies=[small, big])
         geom, note = mi._measurable_geometry(comp)
         assert geom is big
         assert "largest of 2" in note and "Block" in note       # the fallback is flagged to the caller
@@ -330,8 +332,7 @@ class TestJointOriginAxes:
 
 class TestBboxFramePath:
     def _axes(self):
-        return (SimpleNamespace(x=1, y=0, z=0), SimpleNamespace(x=0, y=1, z=0),
-                SimpleNamespace(x=0, y=0, z=1))
+        return (FakeVector3D(1, 0, 0), FakeVector3D(0, 1, 0), FakeVector3D(0, 0, 1))
 
     def _stub_frame(self, monkeypatch, xv, yv, zv, token, name="PartFrame"):
         """Resolve `name` to a JO whose component shares `token` with the body's owner, so that
@@ -383,7 +384,7 @@ class TestBboxFramePath:
         xv, yv, zv = self._axes()
         self._stub_frame(monkeypatch, xv, yv, zv, "C", name="F")
         monkeypatch.setattr(mi, "app", SimpleNamespace(measureManager=object()))
-        comp = SimpleNamespace(bRepBodies=_NamedCollection([]))
+        comp = MakeComp(name="Empty")
         res = mi._bbox(None, comp, "component 'Empty'", "F", "mm")
         assert res["isError"] and "no B-Rep body" in error_message(res)
 
@@ -405,65 +406,29 @@ class TestBboxFramePath:
 
 # ── the oriented box is measured on axes LIFTED into the target geometry's space ───────────────────
 
-class _Vec:
-    """A Vector3D: copy() and transformBy(matrix) -> bool, the two reads the lift makes."""
-
-    def __init__(self, x, y, z):
-        self.x, self.y, self.z = float(x), float(y), float(z)
-
-    def copy(self):
-        return type(self)(self.x, self.y, self.z)   # a subclass's copy stays that subclass
-
-    def transformBy(self, m):
-        self.x, self.y, self.z = m.apply(self)
-        return True
+class _Axis(FakeVector3D):
+    """A Joint Origin's axis vector, plus the rounded read the lifted-axis assertions compare on."""
 
     def rounded(self):
         return (round(self.x, 4), round(self.y, 4), round(self.z, 4))
 
 
-class _RotZ:
-    """An occurrence's transform2: a rotation of `deg` about Z, plus a translation that must never
-    reach a DIRECTION. Live-measured on a component turned 30 deg and moved 5 cm in X - the lifted
-    X axis read (0.866, 0.5, 0), not the 5 cm offset - so `apply` rotates and drops `tx`; a fake
-    that added it would let a translation-leaking lift pass."""
+def _rot_z(deg, tx=5.0):
+    """An occurrence's transform2: a rotation of `deg` about Z, plus a translation in X that must
+    never reach a DIRECTION. Live-measured on a component turned 30 deg and moved 5 cm in X - the
+    lifted X axis read (0.866, 0.5, 0), not the 5 cm offset."""
+    return FakeMatrix3D(deg, (tx, 0.0, 0.0))
 
-    def __init__(self, deg, tx=5.0):
-        self.deg, self.tx = float(deg), float(tx)
 
-    def copy(self):
-        return _RotZ(self.deg, self.tx)
+class _RotX(FakeMatrix3D):
+    """An occurrence transform2 rotating about X - the axis _rot_z does not turn about, because
+    rotations about a common axis commute: a fixture built only from _rot_z cannot tell `to_world`
+    then `inverse` from `inverse` then `to_world`, and that order is the heart of a two-leg lift."""
 
-    def invert(self):
-        self.deg = -self.deg
-        return True
-
-    def apply(self, v):
-        r = math.radians(self.deg)
+    def _apply_vector(self, x, y, z):
+        r = math.radians(self._deg)
         c, s = math.cos(r), math.sin(r)
-        return (c * v.x - s * v.y, s * v.x + c * v.y, v.z)
-
-
-class _RotX:
-    """An occurrence transform2 rotating about X. Its whole job is to NOT share an axis with
-    _RotZ: rotations about a common axis commute, so a fixture built only from _RotZ cannot tell
-    `to_world` then `inverse` from `inverse` then `to_world` - and the composition order is the
-    heart of a two-leg lift."""
-
-    def __init__(self, deg, tx=0.0):
-        self.deg, self.tx = float(deg), float(tx)
-
-    def copy(self):
-        return _RotX(self.deg, self.tx)
-
-    def invert(self):
-        self.deg = -self.deg
-        return True
-
-    def apply(self, v):
-        r = math.radians(self.deg)
-        c, s = math.cos(r), math.sin(r)
-        return (v.x, c * v.y - s * v.z, s * v.y + c * v.z)
+        return (x, c * y - s * z, s * y + c * z)
 
 
 def _part_frame_jo(comp, name="PartFrame"):
@@ -471,8 +436,8 @@ def _part_frame_jo(comp, name="PartFrame"):
     space. MEASURED - a JO on a component turned 30 deg about Z still reads (1,0,0) for its
     secondary axis, natively and through an assembly proxy alike."""
     return SimpleNamespace(name=name, parentComponent=comp,
-                           secondaryAxisVector=_Vec(1, 0, 0), thirdAxisVector=_Vec(0, 1, 0),
-                           primaryAxisVector=_Vec(0, 0, 1))
+                           secondaryAxisVector=_Axis(1, 0, 0), thirdAxisVector=_Axis(0, 1, 0),
+                           primaryAxisVector=_Axis(0, 0, 1))
 
 
 def _comp_wrapper(name, token):
@@ -481,7 +446,7 @@ def _comp_wrapper(name, token):
     so every reference here hands out its own object. A fixture that reused one object would make
     `a is b` and a token compare indistinguishable, and `same_component`'s whole reason to exist is
     that `a is b` is then effectively always False live."""
-    return SimpleNamespace(name=name, entityToken=token)
+    return MakeComp(name=name, entity_token=token)
 
 
 def _rotated_rig(monkeypatch, deg=30.0):
@@ -495,11 +460,11 @@ def _rotated_rig(monkeypatch, deg=30.0):
     """
     root = _comp_wrapper("root", "ROOT")
     comp = _comp_wrapper("Slab", "SLAB")
-    occ = SimpleNamespace(name="Slab:1", fullPathName="Slab:1",
-                          component=_comp_wrapper("Slab", "SLAB"),
-                          assemblyContext=None, transform2=_RotZ(deg))
+    occ = make_occurrence(path="Slab:1", component=_comp_wrapper("Slab", "SLAB"),
+                          transform2=_rot_z(deg))
     root.allOccurrencesByComponent = lambda c: [occ]
-    monkeypatch.setattr(mi._common, "design", lambda: SimpleNamespace(rootComponent=root))
+    design = make_design(comp=root)
+    monkeypatch.setattr(mi._common, "design", lambda: design)
     native = BRepBody(name="Body1", parent_component=_comp_wrapper("Slab", "SLAB"))
     return SimpleNamespace(root=root, comp=comp, occ=occ,
                            jo=_part_frame_jo(_comp_wrapper("Slab", "SLAB")),
@@ -572,8 +537,8 @@ class TestOrientedAxesAreLiftedIntoTheGeometrySpace:
         # composition ORDER is pinned: applying the inverse first instead would read (0.866, 0.5,
         # 0) and (0, 0, -1), and rotations sharing one axis commute, which would hide it.
         rig = _rotated_rig(monkeypatch)
-        plate_occ = SimpleNamespace(name="Plate:1", component=_comp_wrapper("Plate", "PLATE"),
-                                    assemblyContext=None, transform2=_RotX(90.0))
+        plate_occ = make_occurrence(path="Plate:1", component=_comp_wrapper("Plate", "PLATE"),
+                                    transform2=_RotX(90.0))
         by_comp = {"SLAB": [rig.occ], "PLATE": [plate_occ]}
         rig.root.allOccurrencesByComponent = lambda c: by_comp[c.entityToken]
         seen = self._capture(monkeypatch)
@@ -601,7 +566,7 @@ class TestOrientedAxesAreLiftedIntoTheGeometrySpace:
         # the root frame IS world: an unrotated design is exactly the case that kept this defect
         # invisible, and it must stay a no-op.
         rig = _rotated_rig(monkeypatch)
-        monkeypatch.setattr(adsk.core.Matrix3D, "create", staticmethod(lambda: _RotZ(0.0, 0.0)),
+        monkeypatch.setattr(adsk.core.Matrix3D, "create", staticmethod(lambda: _rot_z(0.0, 0.0)),
                             raising=False)
         rig.jo.parentComponent = _comp_wrapper("root", "ROOT")
         root_body = BRepBody(name="RootBody", parent_component=_comp_wrapper("root", "ROOT"))
@@ -613,8 +578,7 @@ class TestOrientedAxesAreLiftedIntoTheGeometrySpace:
         # two placements of one component rotate differently; the frame the caller asked for is the
         # one on the instance holding the body, not whichever occurrence the design lists first.
         rig = _rotated_rig(monkeypatch)
-        other = SimpleNamespace(name="Slab:2", fullPathName="Slab:2", component=rig.comp,
-                                assemblyContext=None, transform2=_RotZ(90.0))
+        other = make_occurrence(path="Slab:2", component=rig.comp, transform2=_rot_z(90.0))
         rig.root.allOccurrencesByComponent = lambda c: [other, rig.occ]
         seen = self._capture(monkeypatch)
         self._measure(monkeypatch, rig, rig.proxy)        # reached through Slab:1, the 30-deg one
@@ -624,9 +588,9 @@ class TestOrientedAxesAreLiftedIntoTheGeometrySpace:
         # a nested proxy's assemblyContext is the innermost occurrence; the JO's component may sit
         # further up the path, and only walking the chain finds the transform that places it.
         rig = _rotated_rig(monkeypatch)
-        inner_comp = SimpleNamespace(name="Boss", entityToken="BOSS")
-        inner = SimpleNamespace(name="Boss:1", fullPathName="Slab:1+Boss:1", component=inner_comp,
-                                assemblyContext=rig.occ, transform2=_RotZ(0.0, 0.0))
+        inner_comp = _comp_wrapper("Boss", "BOSS")
+        inner = make_occurrence(path="Slab:1+Boss:1", component=inner_comp,
+                                assembly_context=rig.occ, transform2=_rot_z(0.0, 0.0))
         rig.root.allOccurrencesByComponent = lambda c: []      # only the chain can answer
         deep = body_proxy(BRepBody(name="Boss1", parent_component=inner_comp), inner)
         seen = self._capture(monkeypatch)
@@ -638,9 +602,9 @@ class TestOrientedAxesAreLiftedIntoTheGeometrySpace:
         # scope it to. Measuring anyway would publish one instance's frame under the other's name.
         rig = _rotated_rig(monkeypatch)
         rig.root.allOccurrencesByComponent = lambda c: [
-            rig.occ, SimpleNamespace(name="Slab:2", component=rig.comp, assemblyContext=None,
-                                     transform2=_RotZ(90.0))]
-        other_comp = SimpleNamespace(name="Plate", entityToken="PLATE")
+            rig.occ, make_occurrence(path="Slab:2", component=rig.comp,
+                                     transform2=_rot_z(90.0))]
+        other_comp = _comp_wrapper("Plate", "PLATE")
         self._capture(monkeypatch)
         monkeypatch.setattr(mi._FRAME, "resolve", lambda raw: (rig.jo, None))
         res = mi._bbox(None, BRepBody(name="Other", parent_component=other_comp),
@@ -654,8 +618,8 @@ class TestOrientedAxesAreLiftedIntoTheGeometrySpace:
         # placed twice, so which space the axes have to come back into is the open question. The
         # frame-blaming wording sent the caller to re-word the one argument that was not at fault.
         rig = _rotated_rig(monkeypatch)
-        twins = [SimpleNamespace(name=f"Plate:{i}", component=_comp_wrapper("Plate", "PLATE"),
-                                 assemblyContext=None, transform2=_RotZ(90.0 * i, 0.0))
+        twins = [make_occurrence(path=f"Plate:{i}", component=_comp_wrapper("Plate", "PLATE"),
+                                 transform2=_rot_z(90.0 * i, 0.0))
                  for i in (1, 2)]
         by_comp = {"SLAB": [rig.occ], "PLATE": twins}
         rig.root.allOccurrencesByComponent = lambda c: by_comp[c.entityToken]
@@ -675,8 +639,8 @@ class TestOrientedAxesAreLiftedIntoTheGeometrySpace:
         # and blaming the target would send the caller to re-word the argument that was fine.
         rig = _rotated_rig(monkeypatch)
         rig.root.allOccurrencesByComponent = lambda c: [
-            rig.occ, SimpleNamespace(name="Slab:2", component=rig.comp, assemblyContext=None,
-                                     transform2=_RotZ(90.0))] if c.entityToken == "SLAB" else []
+            rig.occ, make_occurrence(path="Slab:2", component=rig.comp,
+                                     transform2=_rot_z(90.0))] if c.entityToken == "SLAB" else []
         self._capture(monkeypatch)
         monkeypatch.setattr(mi._FRAME, "resolve", lambda raw: (rig.jo, None))
         res = mi._bbox(None, BRepBody(name="Other", parent_component=_comp_wrapper("P", "PLATE")),
@@ -689,20 +653,11 @@ class TestOrientedAxesAreLiftedIntoTheGeometrySpace:
         # a placement that WAS found but refuses to invert is a different failure from one that was
         # never found, and only the second is about how many instances there are.
         rig = _rotated_rig(monkeypatch)
-
-        class _NoInvert:
-            """A placement whose invert() refuses. copy() stays this type, so the refusal survives
-            the copy the lift takes before inverting."""
-            def copy(self):
-                return self
-
-            def invert(self):
-                return False
-
-            def apply(self, v):
-                return (v.x, v.y, v.z)
-        plate_occ = SimpleNamespace(name="Plate:1", component=_comp_wrapper("Plate", "PLATE"),
-                                    assemblyContext=None, transform2=_NoInvert())
+        # a placement the platform declines to invert; copy() keeps the refusal, so it survives
+        # the copy the lift takes before inverting
+        plate_occ = make_occurrence(
+            path="Plate:1", component=_comp_wrapper("Plate", "PLATE"),
+            transform2=FakeMatrix3D(0.0, (0.0, 0.0, 0.0), invertible=False))
         by_comp = {"SLAB": [rig.occ], "PLATE": [plate_occ]}
         rig.root.allOccurrencesByComponent = lambda c: by_comp[c.entityToken]
         self._capture(monkeypatch)
@@ -718,18 +673,18 @@ class TestOrientedAxesAreLiftedIntoTheGeometrySpace:
         # the two legs fail separately: an axis lifted into world and left there would be measured
         # against a native body's component-space geometry - the very mismatch this fixes.
         rig = _rotated_rig(monkeypatch)
-        plate_occ = SimpleNamespace(name="Plate:1", component=_comp_wrapper("Plate", "PLATE"),
-                                    assemblyContext=None, transform2=_RotZ(90.0, 0.0))
+        plate_occ = make_occurrence(path="Plate:1", component=_comp_wrapper("Plate", "PLATE"),
+                                    transform2=_rot_z(90.0, 0.0))
         by_comp = {"SLAB": [rig.occ], "PLATE": [plate_occ]}
         rig.root.allOccurrencesByComponent = lambda c: by_comp[c.entityToken]
 
-        class _OneWay(_Vec):
+        class _OneWay(_Axis):
             """Transforms into world, then refuses the trip back."""
             def transformBy(self, m):
                 if getattr(self, "_done", False):
                     return False
                 self._done = True
-                return _Vec.transformBy(self, m)
+                return FakeVector3D.transformBy(self, m)
         rig.jo.secondaryAxisVector = _OneWay(1, 0, 0)
         self._capture(monkeypatch)
         monkeypatch.setattr(mi._FRAME, "resolve", lambda raw: (rig.jo, None))
@@ -746,11 +701,11 @@ class TestOrientedAxesAreLiftedIntoTheGeometrySpace:
         # find_geometry mints face handles and the tool advertises "body/face/mesh", so this is a
         # target kind on the shipped surface, not a corner.
         rig = _rotated_rig(monkeypatch)
-        monkeypatch.setattr(adsk.core.Matrix3D, "create", staticmethod(lambda: _RotZ(0.0, 0.0)),
+        monkeypatch.setattr(adsk.core.Matrix3D, "create", staticmethod(lambda: _rot_z(0.0, 0.0)),
                             raising=False)
-        face = SimpleNamespace(          # no parentComponent at all - as live
-            assemblyContext=None,
-            body=SimpleNamespace(parentComponent=_comp_wrapper("root", "ROOT")))
+        face = BRepFace(Plane(FakeVector3D(0, 0, 1)),      # a face carries no parentComponent
+                        body=BRepBody(name="RootBody",
+                                      parent_component=_comp_wrapper("root", "ROOT")))
         assert not hasattr(face, "parentComponent")
         seen = self._capture(monkeypatch)
         self._measure(monkeypatch, rig, face)
@@ -760,8 +715,9 @@ class TestOrientedAxesAreLiftedIntoTheGeometrySpace:
     def test_a_NATIVE_face_of_the_frames_own_component_is_still_unlifted(self, monkeypatch):
         # the owner read has to reach the face's component for BOTH answers, not just the lift.
         rig = _rotated_rig(monkeypatch)
-        face = SimpleNamespace(assemblyContext=None,
-                               body=SimpleNamespace(parentComponent=_comp_wrapper("Slab", "SLAB")))
+        face = BRepFace(Plane(FakeVector3D(0, 0, 1)),
+                        body=BRepBody(name="SlabBody",
+                                      parent_component=_comp_wrapper("Slab", "SLAB")))
         seen = self._capture(monkeypatch)
         self._measure(monkeypatch, rig, face)
         assert seen["x"].rounded() == (1.0, 0.0, 0.0)
@@ -787,8 +743,8 @@ class TestOrientedAxesAreLiftedIntoTheGeometrySpace:
         # body carries that instance in assemblyContext, so the placement is never ambiguous.
         rig = _rotated_rig(monkeypatch)
         rig.root.allOccurrencesByComponent = lambda c: [
-            rig.occ, SimpleNamespace(name="Slab:2", component=rig.comp, assemblyContext=None,
-                                     transform2=_RotZ(90.0))]
+            rig.occ, make_occurrence(path="Slab:2", component=rig.comp,
+                                     transform2=_rot_z(90.0))]
         seen = self._capture(monkeypatch)
         out = self._measure(monkeypatch, rig, _occurrence("Slab:1", [rig.proxy],
                                                           component=rig.comp))
@@ -836,7 +792,7 @@ class TestOrientedAxesAreLiftedIntoTheGeometrySpace:
     def test_an_axis_vector_that_will_not_transform_is_an_error_not_a_measurement(self, monkeypatch):
         # a half-lifted pair would measure the box against a frame nobody read.
         rig = _rotated_rig(monkeypatch)
-        class _Stuck(_Vec):
+        class _Stuck(_Axis):
             def transformBy(self, m):
                 return False
         rig.jo.thirdAxisVector = _Stuck(0, 1, 0)
@@ -851,8 +807,11 @@ class TestWorldAlignedExtentsAreMeasurements:
     so it holds the SAME contract: an unreadable corner is null, never a confident 0. A 0 extent is
     an answer ("this plate is flat in Z") and a 0 centre is an answer ("it sits on the origin")."""
 
-    class _BlindPoint:
+    class _BlindPoint(FakePoint):
         """A Point3D whose coordinate reads RAISE - a proxy that stopped answering."""
+        def __init__(self):
+            pass                    # x/y/z stay unset, so every read falls through below
+
         def __getattr__(self, name):
             if name in ("x", "y", "z"):
                 raise RuntimeError("point unavailable")
@@ -899,11 +858,11 @@ class TestWorldAlignedExtentsAreMeasurements:
 def _make_pp(**over):
     """A PhysicalProperties fake with concrete cm-based values (the API reports cm)."""
     pp = SimpleNamespace(mass=2.0, volume=4.0, area=6.0, density=0.0078,
-                         centerOfMass=SimpleNamespace(x=1.0, y=2.0, z=3.0), accuracy=None)
+                         centerOfMass=FakePoint(1.0, 2.0, 3.0), accuracy=None)
     pp.getXYZMomentsOfInertia = lambda: (True, 1.0, 2.0, 3.0, 0.4, 0.5, 0.6)
     pp.getPrincipalMomentsOfInertia = lambda: (True, 5.0, 6.0, 7.0)
-    pp.getPrincipalAxes = lambda: (True, SimpleNamespace(x=1, y=0, z=0),
-                                   SimpleNamespace(x=0, y=1, z=0), SimpleNamespace(x=0, y=0, z=1))
+    pp.getPrincipalAxes = lambda: (True, FakeVector3D(1, 0, 0),
+                                   FakeVector3D(0, 1, 0), FakeVector3D(0, 0, 1))
     pp.getRadiusOfGyration = lambda: (True, 0.5, 0.6, 0.7)
     pp.getRotationToPrincipal = lambda: (True, 0.1, 0.2, 0.3)
     for k, v in over.items():
@@ -918,11 +877,11 @@ def _occ_row(path, mass=1.0, children=(), pp=_DEFAULT_PP):
     """One occurrence as the per_body walk reads it: a full path, physical properties (pp=None for
     an unmeasurable one), and its own child occurrences - the collection that says whether its mass
     already aggregates anything."""
-    props = (SimpleNamespace(mass=mass, centerOfMass=SimpleNamespace(x=0.0, y=0.0, z=0.0))
+    props = (SimpleNamespace(mass=mass, centerOfMass=FakePoint(0.0, 0.0, 0.0))
              if pp is _DEFAULT_PP else pp)
-    return SimpleNamespace(name=path.split("+")[-1], fullPathName=path,
-                           getPhysicalProperties=lambda acc: props,
-                           childOccurrences=_NamedCollection(list(children)))
+    occ = make_occurrence(path=path, children=list(children))
+    occ.getPhysicalProperties = lambda acc: props
+    return occ
 
 
 class TestFullProps:
@@ -974,7 +933,7 @@ class TestPhysicalProperties:
         assert "per_occurrence" not in out                  # opt-in via per_body
 
     def test_per_body_breakdown_skips_unmeasurable_occurrences(self):
-        opp = SimpleNamespace(mass=1.25, centerOfMass=SimpleNamespace(x=0.1, y=0.0, z=0.0))
+        opp = SimpleNamespace(mass=1.25, centerOfMass=FakePoint(0.1, 0.0, 0.0))
         o1 = _occ_row("A:1", pp=opp)
         o2 = _occ_row("B:1", pp=None)                      # surface-only: no physical properties
         e = SimpleNamespace(getPhysicalProperties=lambda acc: _make_pp(),
@@ -1028,10 +987,15 @@ class TestPerOccurrenceReachesEveryDepth:
     def test_an_unreadable_child_count_publishes_null_not_leaf(self):
         # null says "unknown", which is the only honest answer; a missing key would claim leaf and
         # invite the caller to sum a row that may already include others.
-        deaf = SimpleNamespace(name="Frame:1", fullPathName="Frame:1",
-                               getPhysicalProperties=lambda acc: SimpleNamespace(
-                                   mass=1.0, centerOfMass=SimpleNamespace(x=0.0, y=0.0, z=0.0)),
-                               childOccurrences=SimpleNamespace())     # no readable count
+        class _Deaf(FakeOccurrence):
+            """An occurrence whose child collection answers no count."""
+            @property
+            def childOccurrences(self):
+                return SimpleNamespace()
+
+        deaf = _Deaf("Frame:1")
+        deaf.getPhysicalProperties = lambda acc: SimpleNamespace(
+            mass=1.0, centerOfMass=FakePoint(0.0, 0.0, 0.0))
         e = SimpleNamespace(getPhysicalProperties=lambda acc: _make_pp(),
                             allOccurrences=_NamedCollection([deaf]))
         _, rows = self._rows(e)
@@ -1085,23 +1049,23 @@ def _walkable_occ(path):
     """An occurrence the shared census can classify and descend: `component` READS (a real
     Occurrence always answers it - one that raises is an unresolved external reference) and both
     child collections are empty."""
-    return SimpleNamespace(
-        name=path.split("+")[-1], fullPathName=path,
-        component=SimpleNamespace(name=path.split(":")[0], occurrences=_NamedCollection([])),
-        childOccurrences=_NamedCollection([]))
+    return make_occurrence(path=path, component=MakeComp(name=path.split(":")[0]))
 
 
-class _RaisingSubtree:
+class _RaisingSubtree(MakeComp):
     """A COMPONENT whose allOccurrences RAISES - one unresolved reference anywhere in the subtree
     takes the whole flattened walk out - and which has no childOccurrences at all, as a Component
     does not. Its own `occurrences` collection is what the census rebuilds from."""
     def __init__(self, kids):
-        self.name = "Sub"
-        self.occurrences = _NamedCollection(list(kids))
+        MakeComp.__init__(self, name="Sub", occurrences=kids)
 
     @property
     def allOccurrences(self):
         raise RuntimeError("2 : InternalValidationError : occ")
+
+    @allOccurrences.setter
+    def allOccurrences(self, value):
+        pass                    # the base class assigns it; the read above is what this models
 
 
 class TestSubtreeOccurrences:
@@ -1109,7 +1073,7 @@ class TestSubtreeOccurrences:
         deep = _occ_row("A:1+B:1+C:1")
         mid = _occ_row("A:1+B:1", children=[deep])
         top = _occ_row("A:1", children=[mid])
-        entity = SimpleNamespace(childOccurrences=_NamedCollection([top]))
+        entity = make_occurrence(path="A:0", children=[top])
         assert [o.fullPathName for o in mi._subtree_occurrences(entity, 10)] == [
             "A:1", "A:1+B:1", "A:1+B:1+C:1"]
 
@@ -1117,7 +1081,7 @@ class TestSubtreeOccurrences:
         # one extra item is what lets the caller flag truncation without counting a total it
         # never walked; an unbounded walk would enumerate a whole assembly to publish 200 rows.
         chain = [_occ_row(f"A{i}:1") for i in range(10)]
-        entity = SimpleNamespace(childOccurrences=_NamedCollection(chain))
+        entity = make_occurrence(path="Rig:1", children=chain)
         assert len(mi._subtree_occurrences(entity, 4)) == 5
 
     def test_an_entity_with_neither_collection_walks_nothing(self):
@@ -1157,14 +1121,14 @@ class TestVecHelpers:
         assert mi._vec(None) is None
 
     def test_vec_scales_components(self):
-        assert mi._vec(SimpleNamespace(x=1.0, y=2.0, z=3.0), 10.0) == [10.0, 20.0, 30.0]
+        assert mi._vec(FakeVector3D(1.0, 2.0, 3.0), 10.0) == [10.0, 20.0, 30.0]
 
     def test_a_component_that_will_not_read_makes_the_whole_vector_null(self):
         # a 0.0 stand-in for one component publishes a DIFFERENT direction/position as if measured
         # (a CoM at [1, 2, 0], a frame axis pointing somewhere nobody read).
-        class _Blind:
-            x = 1.0
-            y = 2.0
+        class _Blind(FakeVector3D):
+            def __init__(self):
+                self.x, self.y = 1.0, 2.0
 
             @property
             def z(self):
@@ -1173,4 +1137,4 @@ class TestVecHelpers:
 
     def test_a_real_zero_component_still_reads_zero(self):
         # the null must mean UNREADABLE only: an axis-aligned vector's other components are 0.
-        assert mi._vec(SimpleNamespace(x=0.0, y=0.0, z=1.0), 10.0) == [0.0, 0.0, 10.0]
+        assert mi._vec(FakeVector3D(0.0, 0.0, 1.0), 10.0) == [0.0, 0.0, 10.0]

@@ -8,16 +8,16 @@ The measureMinimumDistance/measureAngle signatures + return shape are confirmed 
 
 import json
 import math
-import types
 
 import pytest
 
-from conftest import (BRepBody, BRepFace, FakeBoundingBox3D, FakePoint, FakeVector3D, MakeComp,
-                      Plane, _NamedCollection, error_message, install, load_tool, make_design)
+from conftest import (BRepBody, BRepEdge, BRepFace, FakeBoundingBox3D, FakePoint, FakeVector3D,
+                      Line3D, MakeComp, Plane, error_message, install, load_tool, make_design,
+                      make_occurrence)
 
 mb = load_tool("model_measure_between")
 
-_PLATE = types.SimpleNamespace(name="Plate", entityToken="CTOK::Plate")
+_PLATE = MakeComp(name="Plate", entity_token="CTOK::Plate")
 
 _REAL_A, _REAL_B = mb._A.resolve, mb._B.resolve
 
@@ -33,10 +33,6 @@ def _restore(monkeypatch):
 def _payload(result):
     assert result["isError"] is False, result
     return json.loads(result["content"][0]["text"])
-
-
-class _Pt:
-    def __init__(self, x, y, z): self.x, self.y, self.z = x, y, z
 
 
 class _Res:
@@ -62,7 +58,7 @@ class TestDistance:
     def test_distance_default_mode_scales_to_mm(self, monkeypatch):
         _resolve_both()
         # value is in cm; mm scale = x10. closest points scale too.
-        _install_mgr(monkeypatch, _Res(8.0, _Pt(1, 0, 0), _Pt(9, 0, 0)))
+        _install_mgr(monkeypatch, _Res(8.0, FakePoint(1, 0, 0), FakePoint(9, 0, 0)))
         out = _payload(mb.handler(a="A", b="B"))
         assert out["mode"] == "distance"
         assert out["distance"] == 80.0                     # 8cm -> 80mm
@@ -71,7 +67,7 @@ class TestDistance:
 
     def test_distance_in_cm(self, monkeypatch):
         _resolve_both()
-        _install_mgr(monkeypatch, _Res(8.0, _Pt(1, 0, 0), _Pt(9, 0, 0)))
+        _install_mgr(monkeypatch, _Res(8.0, FakePoint(1, 0, 0), FakePoint(9, 0, 0)))
         out = _payload(mb.handler(a="A", b="B", units="cm"))
         assert out["distance"] == 8.0
 
@@ -87,7 +83,7 @@ class _GapMgr:
         self.readbacks = []
 
     def measureMinimumDistance(self, x, y):
-        if isinstance(x, _Pt):
+        if isinstance(x, FakePoint):
             self.readbacks.append((x, y))
             if x not in self._gaps:
                 raise RuntimeError("read-back unavailable")
@@ -115,7 +111,7 @@ class TestClosestPointLabelBinding:
         # a is the z=12mm face, b the z=20mm face, and positionOne came back on b.
         ea, eb = object(), object()
         _resolve_named((ea, eb))
-        p1, p2 = _Pt(5, 3, 2.0), _Pt(5, 3, 1.2)          # cm: z = 20mm and z = 12mm
+        p1, p2 = FakePoint(5, 3, 2.0), FakePoint(5, 3, 1.2)          # cm: z = 20mm and z = 12mm
         monkeypatch.setattr(mb.app, "measureManager",
                             _GapMgr(_Res(0.8, p1, p2), {p1: 0.8, p2: 0.0}))
         out = _payload(mb.handler(a="A", b="B"))
@@ -128,7 +124,7 @@ class TestClosestPointLabelBinding:
         # relabelling must not fire here or it would invent the swap it exists to undo.
         ea, eb = object(), object()
         _resolve_named((ea, eb))
-        p1, p2 = _Pt(5, 3, 1.2), _Pt(5, 3, 2.0)
+        p1, p2 = FakePoint(5, 3, 1.2), FakePoint(5, 3, 2.0)
         monkeypatch.setattr(mb.app, "measureManager",
                             _GapMgr(_Res(0.8, p1, p2), {p1: 0.0, p2: 0.8}))
         out = _payload(mb.handler(a="A", b="B"))
@@ -141,7 +137,7 @@ class TestClosestPointLabelBinding:
         # is the only thing left to go on.
         ea, eb = object(), object()
         _resolve_named((ea, eb))
-        p1, p2 = _Pt(5, 3, 2.0), _Pt(5, 3, 1.2)
+        p1, p2 = FakePoint(5, 3, 2.0), FakePoint(5, 3, 1.2)
         monkeypatch.setattr(mb.app, "measureManager",
                             _GapMgr(_Res(0.8, p1, p2), {p1: 0.4, p2: 0.4}))
         out = _payload(mb.handler(a="A", b="B"))
@@ -152,7 +148,7 @@ class TestClosestPointLabelBinding:
         # a read-back that raises proves nothing about the binding, so it must not reorder the pair.
         ea, eb = object(), object()
         _resolve_named((ea, eb))
-        p1, p2 = _Pt(5, 3, 2.0), _Pt(5, 3, 1.2)
+        p1, p2 = FakePoint(5, 3, 2.0), FakePoint(5, 3, 1.2)
         monkeypatch.setattr(mb.app, "measureManager", _GapMgr(_Res(0.8, p1, p2), {}))
         out = _payload(mb.handler(a="A", b="B"))
         assert out["closest_point_on_a"]["z"] == 20.0
@@ -163,7 +159,7 @@ class TestClosestPointLabelBinding:
         # would double the cost for nothing.
         ea, eb = object(), object()
         _resolve_named((ea, eb))
-        p1, p2 = _Pt(5, 3, 2.0), _Pt(5, 3, 1.2)
+        p1, p2 = FakePoint(5, 3, 2.0), FakePoint(5, 3, 1.2)
         mgr = _GapMgr(_Res(0.8, p1, p2), {p1: 0.8, p2: 0.0})
         monkeypatch.setattr(mb.app, "measureManager", mgr)
         mb.handler(a="A", b="B")
@@ -175,7 +171,7 @@ class TestClosestPointLabelBinding:
         # relabel the pair on a value that is not a measurement.
         ea, eb = object(), object()
         _resolve_named((ea, eb))
-        p1, p2 = _Pt(5, 3, 2.0), _Pt(5, 3, 1.2)
+        p1, p2 = FakePoint(5, 3, 2.0), FakePoint(5, 3, 1.2)
         monkeypatch.setattr(mb.app, "measureManager",
                             _GapMgr(_Res(0.8, p1, p2), {p1: 0.8, p2: False}))
         out = _payload(mb.handler(a="A", b="B"))
@@ -188,7 +184,7 @@ class TestDegenerateOverlap:
 
     def test_zero_distance_with_both_points_at_origin_flagged(self, monkeypatch):
         _resolve_both()
-        _install_mgr(monkeypatch, _Res(0.0, _Pt(0, 0, 0), _Pt(0, 0, 0)))
+        _install_mgr(monkeypatch, _Res(0.0, FakePoint(0, 0, 0), FakePoint(0, 0, 0)))
         out = _payload(mb.handler(a="A", b="B"))
         assert out["closest_points_degenerate"] is True
         assert "OVERLAP" in out["note"]
@@ -197,13 +193,13 @@ class TestDegenerateOverlap:
     def test_zero_distance_at_a_real_contact_point_not_flagged(self, monkeypatch):
         # touching at a NON-origin point is a real contact location - keep the normal payload
         _resolve_both()
-        _install_mgr(monkeypatch, _Res(0.0, _Pt(2, 0, 0), _Pt(2, 0, 0)))
+        _install_mgr(monkeypatch, _Res(0.0, FakePoint(2, 0, 0), FakePoint(2, 0, 0)))
         out = _payload(mb.handler(a="A", b="B"))
         assert "closest_points_degenerate" not in out
 
     def test_positive_distance_not_flagged(self, monkeypatch):
         _resolve_both()
-        _install_mgr(monkeypatch, _Res(1.0, _Pt(0, 0, 0), _Pt(1, 0, 0)))
+        _install_mgr(monkeypatch, _Res(1.0, FakePoint(0, 0, 0), FakePoint(1, 0, 0)))
         out = _payload(mb.handler(a="A", b="B"))
         assert "closest_points_degenerate" not in out
 
@@ -232,7 +228,7 @@ class TestParallelPlanarPair:
         a = self._face((0, 0, 0), (0, 0, 1), ((0, 0, 0), (1, 1, 0)))
         b = self._face((0, 0, 2), (0, 0, 1), ((4, 0, 2), (5, 1, 2)))
         self._pair(monkeypatch, a, b)
-        _install_mgr(monkeypatch, _Res(2.0, _Pt(0, 0, 0), _Pt(0, 0, 2)))
+        _install_mgr(monkeypatch, _Res(2.0, FakePoint(0, 0, 0), FakePoint(0, 0, 2)))
         out = _payload(mb.handler(a="A", b="B"))
         assert out["distance"] == round(math.sqrt(13.0) * 10, 6)
         assert out["distance_is_lower_bound"] is True
@@ -246,7 +242,7 @@ class TestParallelPlanarPair:
         a = self._face((0, 0, 0), (0, 0, 1), ((0, 0, 0), (1, 1, 0)))
         b = self._face((0, 0, 2), (0, 0, 1), ((4, 0, 2), (5, 1, 2)))
         self._pair(monkeypatch, a, b)
-        _install_mgr(monkeypatch, _Res(2.0, _Pt(0, 0, 0), _Pt(0, 0, 2)))
+        _install_mgr(monkeypatch, _Res(2.0, FakePoint(0, 0, 0), FakePoint(0, 0, 2)))
         out = _payload(mb.handler(a="A", b="B"))
         assert "closest_point_on_a" in out and out["closest_point_on_a"] is None
         assert "closest_point_on_b" in out and out["closest_point_on_b"] is None
@@ -257,7 +253,7 @@ class TestParallelPlanarPair:
         a = self._face((0, 0, 0), (0, 0, 1), ((0, 0, 0), (1, 1, 0)))
         b = self._face((0, 0, 0), (0, 0, 1), ((5.4, 0, 0), (6.4, 1, 0)))
         self._pair(monkeypatch, a, b)
-        _install_mgr(monkeypatch, _Res(0.0, _Pt(0, 0, 0), _Pt(0, 0, 0)))
+        _install_mgr(monkeypatch, _Res(0.0, FakePoint(0, 0, 0), FakePoint(0, 0, 0)))
         out = _payload(mb.handler(a="A", b="B"))
         assert out["distance"] == 44.0
         assert out["distance_is_lower_bound"] is True
@@ -271,7 +267,7 @@ class TestParallelPlanarPair:
         a = self._face((0, 0, 0), (0, 0, 1), ((0, 0, 0), (1, 1, 0)))
         b = self._face((0, 0, 2), (0, 0, 1), ((0, 0, 2), (1, 1, 2)))
         self._pair(monkeypatch, a, b)
-        _install_mgr(monkeypatch, _Res(2.0, _Pt(0, 0, 0), _Pt(0, 0, 2)))
+        _install_mgr(monkeypatch, _Res(2.0, FakePoint(0, 0, 0), FakePoint(0, 0, 2)))
         out = _payload(mb.handler(a="A", b="B"))
         assert out["distance"] == 20.0
         assert out["plane_separation_only"] is True
@@ -284,7 +280,7 @@ class TestParallelPlanarPair:
         a = self._face((0, 0, 0), (0, 0, 1), ((0, 0, 0), (1, 1, 0)))
         b = self._face((0, 0, 2), (0, 0, 1), ((4, 0, 2), (5, 1, 2)))
         self._pair(monkeypatch, a, b)
-        _install_mgr(monkeypatch, _Res(math.sqrt(13.0), _Pt(1, 0, 0), _Pt(4, 0, 2)))
+        _install_mgr(monkeypatch, _Res(math.sqrt(13.0), FakePoint(1, 0, 0), FakePoint(4, 0, 2)))
         out = _payload(mb.handler(a="A", b="B"))
         assert out["distance"] == round(math.sqrt(13.0) * 10, 6)
         assert "distance_is_lower_bound" not in out and "plane_separation_only" not in out
@@ -294,7 +290,7 @@ class TestParallelPlanarPair:
         a = self._face((0, 0, 0), (0, 0, 1), ((0, 0, 0), (1, 1, 0)))
         b = self._face((0, 0, 2), (0, 0, 1), ((4, 0, 2), (5, 1, 2)))
         self._pair(monkeypatch, a, b, kind="body")
-        _install_mgr(monkeypatch, _Res(2.0, _Pt(0, 0, 0), _Pt(0, 0, 2)))
+        _install_mgr(monkeypatch, _Res(2.0, FakePoint(0, 0, 0), FakePoint(0, 0, 2)))
         out = _payload(mb.handler(a="A", b="B"))
         assert out["distance"] == 20.0
         assert "plane_separation_only" not in out and "distance_is_lower_bound" not in out
@@ -305,20 +301,18 @@ class TestParallelPlanarPair:
         a = self._face((0, 0, 0), (0, 0, 1), ((0, 0, 0), (1, 1, 0)))
         b = self._face((0, 0, 0), (0, 0, 1), ((0, 0, 0), (1, 1, 0)))
         self._pair(monkeypatch, a, b)
-        _install_mgr(monkeypatch, _Res(0.0, _Pt(0, 0, 0), _Pt(0, 0, 0)))
+        _install_mgr(monkeypatch, _Res(0.0, FakePoint(0, 0, 0), FakePoint(0, 0, 0)))
         out = _payload(mb.handler(a="A", b="B"))
         assert out["closest_points_degenerate"] is True
         assert "OVERLAP" in out["note"]
 
 
 def _occ(name, children=()):
-    """An occurrence as the payload reads one: a name, a fullPathName, its direct children, and the
+    """An occurrence as the payload reads one: a fullPathName, its direct children, and the
     component-local collection the unresolved-child count is read through."""
     kids = list(children)
-    return types.SimpleNamespace(name=name, fullPathName=name,
-                                 childOccurrences=_NamedCollection(kids),
-                                 component=types.SimpleNamespace(
-                                     occurrences=_NamedCollection(kids)))
+    return make_occurrence(path=name, children=kids,
+                           component=MakeComp(name=name.split(":")[0], occurrences=kids))
 
 
 class _ChildMgr:
@@ -351,7 +345,7 @@ class TestNestedTargetDisclosure:
     def test_a_flat_occurrence_pair_carries_no_caveat(self, monkeypatch):
         # The quiet case: a caveat on every measurement is a caveat nobody reads.
         self._pair(monkeypatch, _occ("Carrier:1"), "occurrence", _occ("Frame:1"), "occurrence")
-        _install_mgr(monkeypatch, _Res(0.6, _Pt(0, 0, 0), _Pt(0.6, 0, 0)))
+        _install_mgr(monkeypatch, _Res(0.6, FakePoint(0, 0, 0), FakePoint(0.6, 0, 0)))
         out = _payload(mb.handler(a="Carrier:1", b="Frame:1"))
         assert "targets_with_children" not in out
         assert "NESTED" not in out["note"]
@@ -361,7 +355,7 @@ class TestNestedTargetDisclosure:
         self._pair(monkeypatch, _occ("Carrier:1"), "occurrence",
                    _occ("Frame:1", [_occ("Frame:1+Pedestal:1")]), "occurrence")
         monkeypatch.setattr(mb.app, "measureManager",
-                            _ChildMgr(_Res(0.6, _Pt(1, 0, 0), _Pt(1.6, 0, 0)),
+                            _ChildMgr(_Res(0.6, FakePoint(1, 0, 0), FakePoint(1.6, 0, 0)),
                                       {"Frame:1+Pedestal:1": 0.0}))
         out = _payload(mb.handler(a="Carrier:1", b="Frame:1"))
         assert out["distance"] == 6.0
@@ -380,7 +374,7 @@ class TestNestedTargetDisclosure:
         self._pair(monkeypatch, _occ("Carrier:1"), "occurrence",
                    _occ("Frame:1", [_occ("Frame:1+Pedestal:1")]), "occurrence")
         monkeypatch.setattr(mb.app, "measureManager",
-                            _ChildMgr(_Res(0.6, _Pt(1, 0, 0), _Pt(1.6, 0, 0)),
+                            _ChildMgr(_Res(0.6, FakePoint(1, 0, 0), FakePoint(1.6, 0, 0)),
                                       {"Frame:1+Pedestal:1": 2.5}))
         out = _payload(mb.handler(a="Carrier:1", b="Frame:1", units="mm"))
         assert out["distance"] == 6.0
@@ -392,7 +386,7 @@ class TestNestedTargetDisclosure:
         self._pair(monkeypatch, _occ("Carrier:1"), "occurrence",
                    _occ("Frame:1", [_occ("Frame:1+Pedestal:1")]), "occurrence")
         monkeypatch.setattr(mb.app, "measureManager",
-                            _ChildMgr(_Res(0.6, _Pt(1, 0, 0), _Pt(1.6, 0, 0)),
+                            _ChildMgr(_Res(0.6, FakePoint(1, 0, 0), FakePoint(1.6, 0, 0)),
                                       {"Frame:1+Pedestal:1": 2.5}))
         out = _payload(mb.handler(a="Carrier:1", b="Frame:1", units="cm"))
         assert out["distance"] == 0.6
@@ -406,7 +400,7 @@ class TestNestedTargetDisclosure:
                           (_occ("Frame:1", [_occ("Frame:1+Pedestal:1")]), True)):
             self._pair(monkeypatch, _occ("Carrier:1"), "occurrence", b, "occurrence")
             monkeypatch.setattr(mb.app, "measureManager",
-                                _ChildMgr(_Res(0.6, _Pt(1, 0, 0), _Pt(1.6, 0, 0)),
+                                _ChildMgr(_Res(0.6, FakePoint(1, 0, 0), FakePoint(1.6, 0, 0)),
                                           {"Frame:1+Pedestal:1": 0.0}))
             out = _payload(mb.handler(a="Carrier:1", b="Frame:1"))
             assert out["distance"] == 6.0
@@ -419,7 +413,7 @@ class TestNestedTargetDisclosure:
         # occurrences, so that payload must stay clean.
         self._pair(monkeypatch, _occ("Carrier:1"), "occurrence",
                    _occ("Band", [_occ("Pedestal:1")]), "body")
-        _install_mgr(monkeypatch, _Res(0.6, _Pt(0, 0, 0), _Pt(0.6, 0, 0)))
+        _install_mgr(monkeypatch, _Res(0.6, FakePoint(0, 0, 0), FakePoint(0.6, 0, 0)))
         out = _payload(mb.handler(a="Carrier:1", b="h1"))
         assert "targets_with_children" not in out and "NESTED" not in out["note"]
 
@@ -447,15 +441,12 @@ class TestTargetEcho:
     def _nested(self, path):
         """A nested occurrence as Fusion answers one: fullPathName is the assembly path, name the
         leaf. No children, so the subtree disclosure stays out of this payload."""
-        return types.SimpleNamespace(name=path.split("+")[-1], fullPathName=path,
-                                     childOccurrences=_NamedCollection([]),
-                                     component=types.SimpleNamespace(
-                                         occurrences=_NamedCollection([])))
+        return make_occurrence(path=path, component=MakeComp(name=path.split(":")[0]))
 
     def test_a_nested_occurrence_echoes_its_full_path_not_its_leaf(self, monkeypatch):
         self._pair(monkeypatch, self._nested("Frame:1+Pedestal:1"), "occurrence",
                    self._nested("Carrier:1"), "occurrence")
-        _install_mgr(monkeypatch, _Res(0.6, _Pt(0, 0, 0), _Pt(0.6, 0, 0)))
+        _install_mgr(monkeypatch, _Res(0.6, FakePoint(0, 0, 0), FakePoint(0.6, 0, 0)))
         out = _payload(mb.handler(a="Frame:1+Pedestal:1", b="Carrier:1"))
         assert out["a"] == "occurrence 'Frame:1+Pedestal:1'"
         assert out["b"] == "occurrence 'Carrier:1'"
@@ -473,16 +464,15 @@ class TestTargetEcho:
     def test_a_target_with_no_path_still_echoes_its_name(self, monkeypatch):
         # a body carries a name and no fullPathName - the fallback must not drop to the raw input
         # and hide which body the handle resolved to.
-        self._pair(monkeypatch, types.SimpleNamespace(name="Band"), "body",
-                   types.SimpleNamespace(name="Plate"), "body")
-        _install_mgr(monkeypatch, _Res(0.6, _Pt(0, 0, 0), _Pt(0.6, 0, 0)))
+        self._pair(monkeypatch, BRepBody(name="Band"), "body", BRepBody(name="Plate"), "body")
+        _install_mgr(monkeypatch, _Res(0.6, FakePoint(0, 0, 0), FakePoint(0.6, 0, 0)))
         out = _payload(mb.handler(a="h1", b="h2"))
         assert out["a"] == "body 'Band'" and out["b"] == "body 'Plate'"
 
     def test_a_target_answering_neither_echoes_the_value_the_caller_passed(self, monkeypatch):
         # a face has neither property, so the find_geometry handle IS its address here.
         self._pair(monkeypatch, object(), "face", object(), "face")
-        _install_mgr(monkeypatch, _Res(0.6, _Pt(0, 0, 0), _Pt(0.6, 0, 0)))
+        _install_mgr(monkeypatch, _Res(0.6, FakePoint(0, 0, 0), FakePoint(0.6, 0, 0)))
         out = _payload(mb.handler(a="h7", b="h8"))
         assert out["a"] == "face 'h7'" and out["b"] == "face 'h8'"
 
@@ -509,21 +499,22 @@ class TestEdgeTargets:
     def test_an_edge_is_not_widened_to_its_owning_body(self, monkeypatch):
         # the kind resolves an edge to (entity, 'edge'); _owning_body would hand back the body it
         # belongs to, and the payload would then label and measure that body instead.
-        edge = type("E", (), {"name": "Edge1"})()
+        edge = BRepEdge(Line3D(FakePoint(0, 0, 0), FakePoint(1, 0, 0)))
         mb._A.resolve = lambda raw: ((edge, "edge"), None)
-        mb._B.resolve = lambda raw: ((type("E", (), {"name": "B"})(), "face"), None)
+        mb._B.resolve = lambda raw: ((BRepFace(Plane(FakeVector3D(0, 0, 1))), "face"), None)
         seen = []
 
         class _Mgr:
             def measureMinimumDistance(self, x, y):
                 seen.append((x, y))
-                return _Res(2.0, _Pt(0, 0, 0), _Pt(2, 0, 0))
+                return _Res(2.0, FakePoint(0, 0, 0), FakePoint(2, 0, 0))
         monkeypatch.setattr(mb.app, "measureManager", _Mgr())
         out = _payload(mb.handler(a="h1", b="h2"))
         # call 0 is the entity pair; the label read-backs that follow measure POINTS against the
         # same 'a', so the edge must be what call 0 measured from.
         assert seen[0][0] is edge
-        assert out["a"] == "edge 'Edge1'"
+        # a BRepEdge answers neither fullPathName nor name, so the echo falls back to the handle
+        assert out["a"] == "edge 'h1'"
 
     def test_the_wire_names_the_edge_handle_it_accepts(self):
         # the claim and the kind agree: the target inputs offer an edge handle, and the allow= above
@@ -544,7 +535,7 @@ class TestValueMustBeARealNumber:
     @pytest.mark.parametrize("value", [False, True])
     def test_a_bool_distance_is_refused_naming_the_value(self, monkeypatch, value):
         _resolve_both()
-        _install_mgr(monkeypatch, _Res(value, _Pt(0, 0, 0), _Pt(0, 0, 0)))
+        _install_mgr(monkeypatch, _Res(value, FakePoint(0, 0, 0), FakePoint(0, 0, 0)))
         res = mb.handler(a="A", b="B")
         assert res["isError"] is True
         msg = error_message(res)
@@ -554,7 +545,7 @@ class TestValueMustBeARealNumber:
         # the boundary the bool guard must not swallow: 0.0 IS an answer (touching), and 0 is the
         # int form of the same answer.
         _resolve_both()
-        _install_mgr(monkeypatch, _Res(0, _Pt(2, 0, 0), _Pt(2, 0, 0)))
+        _install_mgr(monkeypatch, _Res(0, FakePoint(2, 0, 0), FakePoint(2, 0, 0)))
         assert _payload(mb.handler(a="A", b="B"))["distance"] == 0.0
 
     def test_an_unreadable_distance_is_refused_too(self, monkeypatch):
@@ -615,9 +606,9 @@ class TestWhichRefusalReachesTheWire:
     entityToken handles do, and they only help if the refusal that carries them arrives."""
 
     def _occ(self, name, path, token, referenced):
-        return types.SimpleNamespace(name=name, fullPathName=path, entityToken=token,
-                                     isReferencedComponent=referenced,
-                                     component=types.SimpleNamespace(name=name.split(":")[0]))
+        occ = make_occurrence(path=path, component=MakeComp(name=name.split(":")[0]))
+        occ.entityToken, occ.isReferencedComponent = token, referenced
+        return occ
 
     def test_two_occurrences_wearing_one_path_are_refused_naming_their_handles(self):
         install(mb, make_design(occurrences=[

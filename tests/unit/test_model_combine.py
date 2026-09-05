@@ -8,51 +8,33 @@ are set on the CombineInput.
 import json
 import types
 
-from conftest import (_NamedCollection, MakeComp, assert_no_active_design, body_proxy, entity_proxy,
-                      go_stale, load_tool, make_source_document)
+from conftest import (BRepBody, _NamedCollection, MakeComp, assert_no_active_design, body_proxy,
+                      entity_proxy, go_stale, install, load_tool, make_design,
+                      make_source_document)
 
 cb = load_tool("model_combine")
 
 
-class _Lumps:
-    def __init__(self, count):
-        self.count = count
+def make_body(name, lumps=None):
+    """A body carrying the entityToken that identifies it ACROSS two references: two itemByName
+    reads of one body are distinct objects with EQUAL tokens (measured), so a guard comparing only
+    identity would never fire.
+
+    Its volume reads as no number until a test assigns one, and `lumps` (BRepBody.lumps - how many
+    DISCONNECTED pieces the body holds) is left off for a body whose lump count cannot be read."""
+    body = BRepBody(name=name, volume=None, entity_token="BTOK::" + name)
+    if lumps is not None:
+        body.lumps = _NamedCollection([None] * lumps)
+    return body
 
 
-class FakeBody:
-    """`parent_component` is the component the body actually LIVES in - which a combine's census must
-    be scoped to. Measured: a combine whose target and tool both sit in a sub-component moves nothing
-    the ACTIVE component can see.
-
-    Carries an entityToken because that is what identifies a body ACROSS two references to it: two
-    itemByName reads of one body are distinct objects with EQUAL tokens (measured), so a guard that
-    compares only identity would never fire."""
-    def __init__(self, name, parent_component=None, entity_token=None, lumps=None):
-        self.name = name
-        self.entityToken = entity_token or "BTOK::" + name
-        if parent_component is not None:
-            self.parentComponent = parent_component
-        if lumps is not None:
-            # BRepBody.lumps: how many DISCONNECTED pieces the body holds. A body left without it
-            # stands for one whose lump count cannot be read (a mesh body carries none at all).
-            self.lumps = _Lumps(lumps)
-
-
-class FakeBodies:
-    def __init__(self, names, lumps=None):
-        lumps = lumps or {}
-        self._b = [FakeBody(n, lumps=lumps.get(n)) for n in names]
-    @property
-    def count(self):
-        return len(self._b)
+class _BodyCollection(_NamedCollection):
+    """component.bRepBodies handing back a FRESH wrapper per read, as the platform does - two reads
+    of one body are distinct objects sharing a token. Returning the same object would make an
+    identity-only guard look correct."""
     def itemByName(self, name):
-        # A FRESH wrapper per read, as the platform hands back - two reads of one body are distinct
-        # objects sharing a token. Returning the same object would make an identity-only guard look
-        # correct.
-        for b in self._b:
-            if b.name == name:
-                return entity_proxy(b)
-        return None
+        found = super().itemByName(name)
+        return entity_proxy(found) if found is not None else None
 
 
 def safe_token(b):
@@ -100,60 +82,41 @@ class FakeCombineFeatures:
         if host is not None and not inp.isKeepToolBodies:
             # matched by TOKEN: the collection holds the originals while `inp.tools` holds the
             # wrappers itemByName handed out, so `in` (identity) would never find them
-            doomed = {safe_token(b) for b in inp.tools._i}
-            host.bRepBodies._b = [b for b in host.bRepBodies._b
-                                  if safe_token(b) not in doomed]
+            doomed = {safe_token(b) for b in inp.tools}
+            host.bRepBodies._items = [b for b in host.bRepBodies
+                                      if safe_token(b) not in doomed]
         # a consumed body's proxy stops answering its identity reads - the names belong to the
         # pre-mutation capture, not to a post-combine projection
-        go_stale(inp.target, *list(inp.tools._i))
+        go_stale(inp.target, *list(inp.tools))
         if self.returns_nothing:
             return None
         return type("F", (), {"name": "Combine1"})()
 
 
-class FakeComp:
-    def __init__(self, names, cf, lumps=None):
-        self.name = "Comp"
-        self.bRepBodies = FakeBodies(names, lumps)
-        self.features = type("F", (), {"combineFeatures": cf})()
-
-
-class FakeDesign:
-    def __init__(self, comp, design_type=None):
-        self.activeComponent = comp
-        self.rootComponent = comp
-        if design_type is not None:
-            # the modelling mode current_design_type reads (1 parametric, 0 direct); absent, the
-            # design reports neither, which is the 'unknown' mode
-            self.designType = design_type
+def _component(names, cf, lumps=None):
+    """A component holding `names` as bodies, carrying the combineFeatures the handler builds
+    through."""
+    lumps = lumps or {}
+    comp = MakeComp(name="Comp")
+    comp.bRepBodies = _BodyCollection(make_body(n, lumps.get(n)) for n in names)
+    comp.features = type("F", (), {"combineFeatures": cf})()
+    return comp
 
 
 def _install(body_names, cf=None, design_type=None, lumps=None):
     cf = cf if cf is not None else FakeCombineFeatures()
-    comp = FakeComp(body_names, cf, lumps)
+    comp = _component(body_names, cf, lumps)
     cf.comp = comp
-    design = FakeDesign(comp, design_type)
-    cb.app = type("A", (), {"activeProduct": design})()
-    cb._common.app = cb.app
-    import adsk.fusion, adsk.core
-    adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
-    # BodyRef inputs resolve via _common.design()/target_component() — point them at the fake comp
-    # (the app-reference seam: input-kinds use _common, not cb.app). Names are short -> name path.
-    cb._inputs._common.design = lambda: design
-    cb._inputs._common.target_component = lambda d: comp
+    design = make_design(comp=comp)
+    if design_type is not None:
+        # the modelling mode current_design_type reads (1 parametric, 0 direct); absent, the
+        # design reports neither, which is the 'unknown' mode
+        design.designType = design_type
+    install(cb, design)
+    import adsk.fusion
     fo = adsk.fusion.FeatureOperations
     for n in ("JoinFeatureOperation", "CutFeatureOperation", "IntersectFeatureOperation"):
         setattr(fo, n, n)
-
-    class FakeColl:
-        def __init__(self):
-            self._i = []
-        def add(self, x):
-            self._i.append(x)
-        @property
-        def count(self):
-            return len(self._i)
-    adsk.core.ObjectCollection.create = staticmethod(lambda: FakeColl())
     return cf
 
 
@@ -254,7 +217,7 @@ class TestXrefBodiesAreNotTheSameBody:
     def _two_xrefs(self):
         cf = _install(["A", "B"])
         comp = cb._inputs._common.target_component(None)
-        a, b = comp.bRepBodies._b
+        a, b = comp.bRepBodies._items
         a.entityToken = b.entityToken = self._SHARED_TOKEN
         a.parentComponent = self._in_document("P2a-Gimbal", self._URN_A)
         b.parentComponent = self._in_document("P3-Gimbal", self._URN_B)
@@ -279,7 +242,7 @@ class TestXrefBodiesAreNotTheSameBody:
         # references now read one token AND one source document.
         cf = _install(["A", "B"])
         comp = cb._inputs._common.target_component(None)
-        comp.bRepBodies._b[0].parentComponent = self._in_document("P2a-Gimbal", self._URN_A)
+        comp.bRepBodies._items[0].parentComponent = self._in_document("P2a-Gimbal", self._URN_A)
         res = cb.handler(target="A", tools=["A"])
         assert res["isError"] is True and "same as the target" in res["message"]
         assert cf.add_calls == 0
@@ -290,7 +253,7 @@ class TestXrefBodiesAreNotTheSameBody:
         # refusal - reached through the unreadable path instead of the x-ref one.
         cf = _install(["A", "B"])
         comp = cb._inputs._common.target_component(None)
-        for body in comp.bRepBodies._b:
+        for body in comp.bRepBodies._items:
             del body.entityToken
         res = cb.handler(target="A", tools=["B"])
         assert "same as the target" not in (res.get("message") or "")
@@ -301,7 +264,7 @@ class TestXrefBodiesAreNotTheSameBody:
         # the proxy resolves to the native, so both halves of the key are read off one body.
         cf = _install(["A", "B"])
         comp = cb._inputs._common.target_component(None)
-        comp.bRepBodies._b[0].parentComponent = self._in_document("P2a-Gimbal", self._URN_A)
+        comp.bRepBodies._items[0].parentComponent = self._in_document("P2a-Gimbal", self._URN_A)
         native = comp.bRepBodies.itemByName("A")
         proxy = body_proxy(native, types.SimpleNamespace(name="Jaw:1", fullPathName="Jaw:1"))
         comp.allOccurrences = [types.SimpleNamespace(name="Jaw:1", fullPathName="Jaw:1",
@@ -437,12 +400,12 @@ class TestDirectModeNoFeature:
         # MEASURED: a combine whose target AND tool both live in a sub-component leaves the ACTIVE
         # component's body count untouched (root 3 -> 3 throughout), so a census scoped to the
         # active component is BLIND and would call this landed join a no-op.
-        host = FakeComp(["T", "a"], None)
+        host = _component(["T", "a"], None)
         host.name = "SubPart"
         cf = FakeCombineFeatures(returns_nothing=True, host=host)
         _install(["Other1", "Other2", "Other3"], cf=cf, design_type=0)
         # the resolved bodies are the HOST's, and they carry it as their parentComponent
-        tgt, tool = host.bRepBodies._b
+        tgt, tool = host.bRepBodies._items
         for b in (tgt, tool):
             b.parentComponent = host
         monkeypatch.setattr(cb._TARGET, "resolve", lambda raw: (tgt, None))
@@ -469,24 +432,11 @@ class TestDirectModeNoFeature:
 
 # ── body-split: a cut/intersect that DISCONNECTS the single target warns naming the pieces ──
 
-class _ResultBodies:
-    def __init__(self, names):
-        self._n = list(names)
-        self.lumps = None          # the result body's lump count, when the test models one
-    @property
-    def count(self):
-        return len(self._n)
-    def item(self, i):
-        b = type("B", (), {"name": self._n[i]})()
-        if self.lumps is not None:
-            b.lumps = _Lumps(self.lumps)
-        return b
-
-
 def _feature_with_bodies(names, lumps=None):
-    bodies = _ResultBodies(names)
-    bodies.lumps = lumps
-    return type("F", (), {"name": "Combine1", "bodies": bodies})()
+    """A CombineFeature whose `bodies` are the result bodies named, each carrying `lumps` when the
+    test models a lump count."""
+    return type("F", (), {"name": "Combine1",
+                          "bodies": _NamedCollection(make_body(n, lumps) for n in names)})()
 
 
 class TestBodySplit:
@@ -549,7 +499,7 @@ class TestDisjointJoin:
         # one; the fake here consumes nothing while the volume moves, so the tool is still standing.
         cf = FakeCombineFeatures(returns_nothing=True)
         _install(["T", "a"], cf=cf, design_type=0)
-        body = cb._inputs._common.target_component(None).bRepBodies._b[0]
+        body = cb._inputs._common.target_component(None).bRepBodies._items[0]
         body.volume = 100.0
 
         def landed_without_consuming(inp):
@@ -569,7 +519,7 @@ class TestDisjointJoin:
         # a failed fuse - the census cannot speak here, and a warning would fire on a good join.
         cf = FakeCombineFeatures(returns_nothing=True)
         _install(["T", "a"], cf=cf, design_type=0)
-        body = cb._inputs._common.target_component(None).bRepBodies._b[0]
+        body = cb._inputs._common.target_component(None).bRepBodies._items[0]
         body.volume = 100.0
 
         def landed(inp):
@@ -712,7 +662,7 @@ class TestFlagsThatDoNotTake:
 
 class TestCutNoEffectGate:
     def _target(self, cf, name="T"):
-        return next(b for b in cf.comp.bRepBodies._b if b.name == name)
+        return next(b for b in cf.comp.bRepBodies._items if b.name == name)
 
     def test_disjoint_cut_with_unchanged_volume_is_refused_and_rolled_back(self):
         # A cut whose target volume never moved removed nothing - the API reports success on a

@@ -52,11 +52,6 @@ class _Param:
         self.value = value
 
 
-class _Faces:
-    def __init__(self, count):
-        self.count = count
-
-
 class _PipeFeature:
     def __init__(self, name, bodies, section_size_cm, thickness_cm, is_hollow, capped=2):
         self.name = name
@@ -64,8 +59,8 @@ class _PipeFeature:
         self.sectionSize = _Param(section_size_cm)
         self.sectionThickness = _Param(thickness_cm) if thickness_cm is not None else None
         self.isHollow = is_hollow
-        self.startFaces = _Faces(1 if capped >= 1 else 0)
-        self.endFaces = _Faces(1 if capped >= 2 else 0)
+        self.startFaces = _NamedCollection([None] if capped >= 1 else [])
+        self.endFaces = _NamedCollection([None] if capped >= 2 else [])
 
 
 class _PipeInput:
