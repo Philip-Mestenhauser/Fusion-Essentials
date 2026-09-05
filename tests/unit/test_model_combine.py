@@ -8,6 +8,8 @@ are set on the CombineInput.
 import json
 import types
 
+import adsk.fusion
+
 from conftest import (BRepBody, _NamedCollection, MakeComp, assert_no_active_design, body_proxy,
                       entity_proxy, go_stale, install, load_tool, make_design,
                       make_source_document)
@@ -113,10 +115,6 @@ def _install(body_names, cf=None, design_type=None, lumps=None):
         # design reports neither, which is the 'unknown' mode
         design.designType = design_type
     install(cb, design)
-    import adsk.fusion
-    fo = adsk.fusion.FeatureOperations
-    for n in ("JoinFeatureOperation", "CutFeatureOperation", "IntersectFeatureOperation"):
-        setattr(fo, n, n)
     return cf
 
 
@@ -279,23 +277,23 @@ class TestCombine:
         cf = _install(["Base", "Boss"])
         out = _payload(cb.handler(target="Base", tools=["Boss"], operation="join"))
         assert out["combined"] is True and out["operation"] == "join"
-        assert cf.last_input.operation == "JoinFeatureOperation"
+        assert cf.last_input.operation == adsk.fusion.FeatureOperations.JoinFeatureOperation
 
     def test_cut_sets_operation(self):
         cf = _install(["Part", "Drill"])
         _payload(cb.handler(target="Part", tools=["Drill"], operation="cut"))
-        assert cf.last_input.operation == "CutFeatureOperation"
+        assert cf.last_input.operation == adsk.fusion.FeatureOperations.CutFeatureOperation
 
     def test_intersect_sets_operation(self):
         cf = _install(["A", "B"])
         out = _payload(cb.handler(target="A", tools=["B"], operation="intersect"))
-        assert cf.last_input.operation == "IntersectFeatureOperation"
+        assert cf.last_input.operation == adsk.fusion.FeatureOperations.IntersectFeatureOperation
         assert out["operation"] == "intersect"
 
     def test_operation_case_insensitive(self):
         cf = _install(["A", "B"])
         _payload(cb.handler(target="A", tools=["B"], operation="CUT"))
-        assert cf.last_input.operation == "CutFeatureOperation"
+        assert cf.last_input.operation == adsk.fusion.FeatureOperations.CutFeatureOperation
 
     def test_multiple_tools_all_added(self):
         cf = _install(["T", "a", "b", "c"])

@@ -14,9 +14,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import load_tool, error_message, _NamedCollection
+from conftest import (FakeOccurrence, FakeTimeline, FakeUserParameters, MakeComp, MakeDesign,
+                      _NamedCollection, error_message, load_tool, make_design)
 
 dg = load_tool("design_get")
+
+# The occurrence walk that will not enumerate at all - the measured unresolved-external-reference
+# state, which reaches the wire as UNKNOWN rather than as zero.
+_UNREADABLE_WALK = "2 : InternalValidationError : occ"
+
+# What Design.timeline RAISES in a direct design (measured: direct-design-timeline-raises).
+_DIRECT_DESIGN_TIMELINE = "3 : this is not a parametric design"
 
 
 def _payload(result):
@@ -251,76 +259,35 @@ class TestCatalogSlices:
         assert seen == ["materials", "appearances"]
 
 
-class _OccColl:
-    """N healthy occurrences: an allOccurrences collection that both counts AND enumerates, each row
-    answering `component` (a real Occurrence always does; one that raises is an unresolved
-    reference)."""
-    def __init__(self, n):
-        from types import SimpleNamespace
-        self._items = [SimpleNamespace(component=SimpleNamespace(name=f"C{i}"),
-                                       fullPathName=f"C{i}:1") for i in range(n)]
-        self.count = n
-
-    def item(self, i):
-        return self._items[i]
-
-    def __iter__(self):
-        return iter(self._items)
+def _occurrences(n):
+    """N healthy occurrences, each answering `component` (a real Occurrence always does; one that
+    raises is an unresolved reference)."""
+    return [FakeOccurrence(path=f"C{i}:1", component=MakeComp(f"C{i}")) for i in range(n)]
 
 
-class _PlainColl:
-    """A counted collection that also hands its items back by index - what the occurrence census
-    walks when it cannot use allOccurrences."""
-    def __init__(self, items=()):
-        self._items = list(items)
-        self.count = len(self._items)
-
-    def item(self, i):
-        return self._items[i]
-
-
-class _BlindRoot:
-    """A root whose occurrence census cannot be taken AT ALL: reading allOccurrences RAISES (the
+def _blind_root(joints=0, asbuilt=0):
+    """A root whose occurrence census cannot be taken AT ALL: allOccurrences will not enumerate (the
     measured unresolved-external-reference state) and the component-local `occurrences` fallback
-    raises with it. The state that must reach the wire as UNKNOWN, never as zero."""
-    def __init__(self, joints=0, asbuilt=0):
-        from types import SimpleNamespace
-        c = lambda n: SimpleNamespace(count=n)
-        self.name = "Root"
-        self.bRepBodies = c(0)
-        self.sketches = c(0)
-        self.joints = c(joints)
-        self.asBuiltJoints = c(asbuilt)
-
-    @property
-    def allOccurrences(self):
-        raise RuntimeError("2 : InternalValidationError : occ")
-
-    @property
-    def occurrences(self):
-        raise RuntimeError("2 : InternalValidationError : occ")
+    will not either. The state that must reach the wire as UNKNOWN, never as zero."""
+    root = MakeComp("Root")
+    root.allOccurrences = _NamedCollection(raises=_UNREADABLE_WALK)
+    root.occurrences = _NamedCollection(raises=_UNREADABLE_WALK)
+    root.joints = _NamedCollection([None] * joints)
+    root.asBuiltJoints = _NamedCollection([None] * asbuilt)
+    return root
 
 
-class _RecursedRoot(_BlindRoot):
-    """allOccurrences raises, but the component-local `occurrences` still enumerates - so the census
-    IS taken, by the fallback walk, and the count it reports is real."""
-    def __init__(self, n=2, **kw):
-        super().__init__(**kw)
-        from types import SimpleNamespace
-        self._kids = [SimpleNamespace(
-            name=f"C{i}:1", fullPathName=f"C{i}:1", childOccurrences=_PlainColl(),
-            component=SimpleNamespace(name=f"C{i}", occurrences=_PlainColl())) for i in range(n)]
-
-    @property
-    def occurrences(self):
-        return _PlainColl(self._kids)
+def _recursed_root(n=2, **kw):
+    """allOccurrences will not enumerate, but the component-local `occurrences` still does - so the
+    census IS taken, by the fallback walk, and the count it reports is real."""
+    root = _blind_root(**kw)
+    root.occurrences = _NamedCollection(_occurrences(n))
+    return root
 
 
 def _design_around(root):
     """A design whose only content is `root` - the shape `_fingerprint` reads its counts off."""
-    from types import SimpleNamespace
-    return SimpleNamespace(rootComponent=root, userParameters=SimpleNamespace(count=0),
-                           allComponents=_PlainColl([root]))
+    return make_design(comp=root, user_parameters=FakeUserParameters())
 
 
 class TestFingerprint:
@@ -333,7 +300,8 @@ class TestFingerprint:
         # through the shared census, which classifies each row (an occurrence whose component raises
         # is an unresolved reference, not a countable instance).
         root = SimpleNamespace(bRepBodies=c(bodies), sketches=c(sketches),
-                               allOccurrences=_OccColl(occs), joints=c(joints), asBuiltJoints=c(asbuilt))
+                               allOccurrences=_NamedCollection(_occurrences(occs)),
+                               joints=c(joints), asBuiltJoints=c(asbuilt))
         return SimpleNamespace(rootComponent=root, userParameters=c(params),
                                allComponents=c(defs))
 
@@ -365,7 +333,7 @@ class TestFingerprint:
         # reports a hole in the read as a single-component design. occurrences_walk is what tells
         # them apart on the wire.
         empty = dg._fingerprint(self._design(bodies=1))
-        blind = dg._fingerprint(_design_around(_BlindRoot()))
+        blind = dg._fingerprint(_design_around(_blind_root()))
         assert "occurrences" not in empty and "occurrences" not in blind
         assert empty["occurrences_walk"] == "allOccurrences"
         assert blind["occurrences_walk"] == "unreadable"
@@ -374,7 +342,7 @@ class TestFingerprint:
         # allOccurrences raising is not the census failing: the component-local recursion answers,
         # so the count is real - and the marker still says which walk produced it, because a
         # recursed census is not the same evidence as the fast one.
-        fp = dg._fingerprint(_design_around(_RecursedRoot(n=2)))
+        fp = dg._fingerprint(_design_around(_recursed_root(n=2)))
         assert fp["occurrences"] == 2 and fp["occurrences_walk"] == "recursed"
 
     def test_components_counts_definitions_not_instances(self):
@@ -477,14 +445,14 @@ class TestTimelineSlice:
         # timeline.count raising means the timeline could not be read AT ALL. Answering with an
         # empty list + count 0 would read as "this design has no history" - a false answer a caller
         # gates on. The refusal carries the platform's reason.
-        from types import SimpleNamespace
-        class _Uncountable:
-            markerPosition = 0
-            timelineGroups = []
-            @property
-            def count(self): raise RuntimeError("timeline is mid-recompute")
-            def item(self, i): raise AssertionError("must not be reached")
-        out, err = dg._slice_timeline(SimpleNamespace(timeline=_Uncountable()),
+        class _Uncountable(FakeTimeline):
+            """A timeline whose count raises; item() may never be reached."""
+            def item(self, i):
+                raise AssertionError("must not be reached")
+
+        timeline = _Uncountable(raises="timeline is mid-recompute")
+        timeline.timelineGroups = []
+        out, err = dg._slice_timeline(SimpleNamespace(timeline=timeline),
                                       include_suppressed=True, group="")
         assert out is None and err["isError"] is True
         assert "mid-recompute" in err["message"]
@@ -540,12 +508,16 @@ class TestTimelineSlice:
         assert [o["name"] for o in out["timeline"]] == ["Live"]
 
     def test_slice_no_timeline_errors(self):
-        from types import SimpleNamespace
-        class _NoTL:
+        class _DirectDesign(MakeDesign):
+            """MEASURED (direct-design-timeline-raises): in a DIRECT design the timeline read
+            RAISES this, so the guard has to catch the platform's error, not a missing attribute."""
             @property
-            def timeline(self): raise RuntimeError("direct design")
-        out, err = dg._slice_timeline(_NoTL(), include_suppressed=True, group="")
+            def timeline(self):
+                raise RuntimeError(_DIRECT_DESIGN_TIMELINE)
+
+        out, err = dg._slice_timeline(_DirectDesign(), include_suppressed=True, group="")
         assert out is None and err["isError"] is True
+        assert "not a parametric design" in error_message(err)
 
 
 class TestTimelineParams:
@@ -602,18 +574,14 @@ class TestTimelineParams:
         assert [p["name"] for p in params] == ["d7"]      # the user parameter belongs to no feature
 
     def test_off_by_default_and_does_not_walk_the_parameters(self):
-        class _Counting:
-            def __init__(self, items):
-                self._items = list(items)
-                self.reads = 0
+        class _Counting(_NamedCollection):
+            """A parameter collection recording how often its count was read."""
+            _reads = 0
 
             @property
             def count(self):
-                self.reads += 1
-                return len(self._items)
-
-            def item(self, i):
-                return self._items[i]
+                self._reads += 1
+                return super().count
 
         fillet = self._entity("Fillet1", token="tok-fillet")
         params = _Counting([self._model_param("d7", "radius", "3 mm", 0.3, fillet)])
@@ -624,7 +592,7 @@ class TestTimelineParams:
         out, err = dg._slice_timeline(design, True, "")
         assert err is None and "params" not in out["timeline"][0]
         assert "params_note" not in out
-        assert params.reads == 0            # the opt-in cost is not paid by the default call
+        assert params._reads == 0           # the opt-in cost is not paid by the default call
 
     def test_name_and_type_match_when_no_token_reads(self):
         # neither side reads a token; the owner is still matched by name+type, which is the only
@@ -806,16 +774,13 @@ class TestNormalizeInclude:
 # matched to the first), while a COMPONENT name roots at its first instance (all instances share one
 # structure).
 
-class _Occ:
-    def __init__(self, name, comp_name, full=None):
-        self.name = name
-        self.fullPathName = full or name
-        self.component = SimpleNamespace(name=comp_name)
-        self.childOccurrences = []
+def _occ(name, comp_name, full=None):
+    """One tree-scoping occurrence: its own name, its fullPathName, and the component it places."""
+    return FakeOccurrence(path=full or name, component=MakeComp(comp_name))
 
 
 def _wire_tree(monkeypatch, occs):
-    root = SimpleNamespace(occurrences=list(occs), allOccurrences=list(occs))
+    root = MakeComp("RootComp", occurrences=occs)
     design = SimpleNamespace(rootComponent=root)
     monkeypatch.setattr(dg._common, "design", lambda: design)
     return root
@@ -836,7 +801,7 @@ class TestTreeUnresolvedRows:
     def test_an_unresolved_child_gets_a_ROW_and_the_parent_counts_it(self):
         design = _tree_design([_tocc("Op1 Workholding Container:1",
                                      kids=[_tocc("48205-125 (1):1")],
-                                     broken_kids=[_BrokenOcc("45740")])])
+                                     broken_kids=[_broken_occ("45740")])])
         out, _ = dg._slice_tree(design, 3, "")
         node = out["children"][0]
         # child_count comes off childOccurrences, which DROPS it - so the count alone still reads 1
@@ -850,28 +815,28 @@ class TestTreeUnresolvedRows:
         assert "child_count" not in rows["45740"] and "body_count" not in rows["45740"]
 
     def test_a_broken_TOP_LEVEL_occurrence_is_a_row_not_a_blank_node(self):
-        design = _tree_design([_BrokenOcc("45740"), _tocc("Stock:1")])
+        design = _tree_design([_broken_occ("45740"), _tocc("Stock:1")])
         out, _ = dg._slice_tree(design, 3, "")
         rows = {c["name"]: c for c in out["children"]}
         assert rows["45740"] == {"name": "45740", "unresolved": True, "detail": UNAVAILABLE}
         assert rows["Stock:1"]["child_count"] == 0
 
     def test_a_node_whose_ONLY_children_are_unresolved_is_not_reported_childless(self):
-        design = _tree_design([_tocc("Op1:1", broken_kids=[_BrokenOcc("45740")])])
+        design = _tree_design([_tocc("Op1:1", broken_kids=[_broken_occ("45740")])])
         node = dg._slice_tree(design, 3, "")[0]["children"][0]
         assert node["child_count"] == 0                 # childOccurrences really is empty
         assert node["children_unresolved"] == 1
         assert [k["name"] for k in node["children"]] == ["45740"]
 
     def test_the_depth_cap_flags_an_unresolved_child_it_did_not_emit(self):
-        design = _tree_design([_tocc("Op1:1", broken_kids=[_BrokenOcc("45740")])])
+        design = _tree_design([_tocc("Op1:1", broken_kids=[_broken_occ("45740")])])
         node = dg._slice_tree(design, 1, "")[0]["children"][0]
         assert node["children_truncated"] is True       # not walked - never "no children"
         assert node["children_unresolved"] == 1
 
     def test_the_scoped_tree_shows_it_too(self):
         design = _tree_design([_tocc("Op1 Workholding Container:1",
-                                     broken_kids=[_BrokenOcc("45740")])])
+                                     broken_kids=[_broken_occ("45740")])])
         out, err = dg._slice_tree(design, 3, "Op1 Workholding Container")
         assert err is None
         assert out["tree"]["children_unresolved"] == 1
@@ -881,14 +846,14 @@ class TestTreeUnresolvedRows:
 class TestFindOccurrenceByName:
     def test_component_name_roots_at_first_instance(self, monkeypatch):
         # a bare component name is unambiguous for a READ: every instance shows the same structure.
-        occs = [_Occ("Bracket:1", "Bracket"), _Occ("Bracket:2", "Bracket")]
+        occs = [_occ("Bracket:1", "Bracket"), _occ("Bracket:2", "Bracket")]
         root = _wire_tree(monkeypatch, occs)
         found, err = dg._find_occurrence_by_name(root, "Bracket")
         assert err is None
         assert found is not None and found.component.name == "Bracket"
 
     def test_exact_occurrence_name_resolves(self, monkeypatch):
-        occs = [_Occ("Gear:1", "Gear"), _Occ("Gear:2", "Gear")]
+        occs = [_occ("Gear:1", "Gear"), _occ("Gear:2", "Gear")]
         root = _wire_tree(monkeypatch, occs)
         found, err = dg._find_occurrence_by_name(root, "Gear:2")
         assert err is None and found is not None and found.name == "Gear:2"
@@ -896,14 +861,14 @@ class TestFindOccurrenceByName:
     def test_ambiguous_occurrence_name_is_refused_not_first_matched(self, monkeypatch):
         # 'Bolt' substring-matches two DIFFERENT-component instances - must refuse (list candidates),
         # never silently root at the first.
-        occs = [_Occ("M6-Bolt:1", "M6-Bolt"), _Occ("M8-Bolt:1", "M8-Bolt")]
+        occs = [_occ("M6-Bolt:1", "M6-Bolt"), _occ("M8-Bolt:1", "M8-Bolt")]
         root = _wire_tree(monkeypatch, occs)
         found, err = dg._find_occurrence_by_name(root, "Bolt")
         assert found is None
         assert err and "ambiguous" in err.lower()
 
     def test_miss_returns_no_error(self, monkeypatch):
-        occs = [_Occ("Gear:1", "Gear")]
+        occs = [_occ("Gear:1", "Gear")]
         root = _wire_tree(monkeypatch, occs)
         found, err = dg._find_occurrence_by_name(root, "Nonexistent")
         assert found is None and err is None
@@ -945,25 +910,15 @@ UNAVAILABLE = ("3 : The occurrence's referenced component is unavailable (broken
                "external reference).")
 
 
-class _BrokenOcc:
+def _broken_occ(name="45740"):
     """An occurrence whose referenced component will not load. Only `name` reads; component,
     fullPathName and childOccurrences raise, and isReferencedComponent reads FALSE - so the tree's
     childOccurrences walk never yields it and no is_reference gate would catch it."""
-    def __init__(self, name="45740"):
-        self.name = name
-        self.isReferencedComponent = False
-
-    @property
-    def component(self):
-        raise RuntimeError(UNAVAILABLE)
-
-    @property
-    def fullPathName(self):
-        raise RuntimeError("2 : InternalValidationError : path.valid()")
-
-    @property
-    def childOccurrences(self):
-        raise RuntimeError("2 : InternalValidationError : path.valid()")
+    invalid = "2 : InternalValidationError : path.valid()"
+    occ = FakeOccurrence(path=name, raises_on={"component": UNAVAILABLE, "fullPathName": invalid,
+                                               "childOccurrences": invalid})
+    occ.isReferencedComponent = False
+    return occ
 
 
 def _tocc(name, comp=None, kids=(), bodies=0, is_ref=False, docref=None, token=None,
@@ -1150,7 +1105,7 @@ class TestSliceTree:
         assert err is None and out["truncated"] is True
 
     def test_component_scope_miss_errors_naming_it(self, monkeypatch):
-        root = _wire_tree(monkeypatch, [_Occ("Gear:1", "Gear")])
+        root = _wire_tree(monkeypatch, [_occ("Gear:1", "Gear")])
         out, err = dg._slice_tree(SimpleNamespace(rootComponent=root), 3, "Ghost")
         assert out is None and "Ghost" in error_message(err)
 
@@ -1320,9 +1275,11 @@ class TestSliceAttributes:
         assert out["truncated"] is True and out["returned"] == 1 and out["count"] == 2
 
     def test_unreadable_search_is_an_error_not_an_empty_read(self):
-        class _Raises:
+        class _Raises(MakeDesign):
+            """A design whose attribute search will not run."""
             def findAttributes(self, group, key):
                 raise RuntimeError("attribute search unavailable")
+
         out, err = dg._slice_attributes(_Raises(), "shop", "")
         assert out is None and "shop" in error_message(err)
 

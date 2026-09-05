@@ -20,7 +20,8 @@ import types
 
 import pytest
 
-from conftest import MakeComp, MakeDesign, MeshBody, install, load_tool, payload, error_message
+from conftest import (FakeFeatures, MakeComp, MakeDesign, MeshBody, install, load_tool, payload,
+                      error_message)
 
 msm = load_tool("mesh_smooth")
 
@@ -99,8 +100,10 @@ class _SmoothFeatures:
             name="MeshSmooth1", smoothness=types.SimpleNamespace(value=float(landed)))
 
 
-class _Features:
+class _Features(FakeFeatures):
+    """comp.features plus the mesh-smooth collection this tool reaches through."""
     def __init__(self, smooth=None):
+        super().__init__()
         self.meshSmoothFeatures = smooth
 
 

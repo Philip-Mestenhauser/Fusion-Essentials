@@ -17,8 +17,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import (FakeBoundingBox3D, FakePoint, MakeComp, MakeDesign, error_message, install,
-                      load_tool, payload)
+from conftest import (FakeBoundingBox3D, FakePoint, MakeComp, MakeDesign, _NamedCollection,
+                      error_message, install, load_tool, payload)
 
 mo = load_tool("design_move_occurrence")
 
@@ -29,19 +29,9 @@ mo = load_tool("design_move_occurrence")
 # never identity-stable) and the allOccurrences subtree view the cycle guard reads. Each occurrence
 # record carries its parent, so a path is the chain; re-parenting one recomputes every path beneath.
 
-
-class _UnreadableColl:
-    """A collection whose COUNT itself raises - the shape the cycle walk cannot enumerate at all,
-    which is not the same as an empty subtree."""
-    @property
-    def count(self):
-        raise RuntimeError("2 : InternalValidationError : occ")
-
-    def item(self, i):
-        raise RuntimeError("2 : InternalValidationError : occ")
-
-    def __iter__(self):
-        raise RuntimeError("2 : InternalValidationError : occ")
+# The collection whose COUNT itself raises - the shape the cycle walk cannot enumerate at all,
+# which is not the same as an empty subtree.
+_UNREADABLE = "2 : InternalValidationError : occ"
 
 
 def _comp(name):
@@ -375,8 +365,8 @@ class TestSelfNestingRefused:
         # re-parent through, so the move is refused and says the question could not be answered.
         des = wire()
         moving = des.comps["A"]
-        del moving.allOccurrences                    # the fast walk raises...
-        moving.occurrences = _UnreadableColl()       # ...and so does the fallback
+        del moving.allOccurrences                            # the fast walk raises...
+        moving.occurrences = _NamedCollection(raises=_UNREADABLE)   # ...and so does the fallback
         msg = error_message(mo.handler(occurrence="A:1", into_component="B:1"))
         assert "could not be determined" in msg and "not be searched to a verdict" in msg
         assert "unresolved external references" in msg          # the remedy that reaches the cause

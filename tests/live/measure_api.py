@@ -46,14 +46,16 @@ FACTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOOLS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))), "commands", "mcpServer", "tools")
 
-# Every adsk enum FAMILY the tools reference (…Types/…States/…Modes/…Directions), scraped from the
-# tool sources so the sweep tracks the codebase - a new enum a tool starts using is measured
-# automatically, no row edit. The value-pinning rows below still assert the specific members
-# production branches on; this sweep is additive coverage for every family, pinned or not.
-# NOT swept: …Options families - those are factory-OBJECT classes (…Options.create()), not int
-# enums, so they carry no members to dump. A family is only counted from a REAL reference, never a
+# Every adsk enum FAMILY the tools reference, scraped from the tool sources so the sweep tracks the
+# codebase - a new enum a tool starts using is measured automatically, no row edit. The value-pinning
+# rows below still assert the specific members production branches on; this sweep is additive
+# coverage for every family, pinned or not. A family is only counted from a REAL reference, never a
 # comment (a stale name in a comment must not drive a live measurement).
-_ENUM_FAMILY_RE = re.compile(r"adsk\.(core|fusion|cam|drawing)\.([A-Za-z]*(?:Types|States?|Modes|Directions|Locations|Positions|Alignments?|Sizes|Formats))\b")
+# …Options and …Operations are scraped too, and some of those names are factory-OBJECT classes
+# (...Options.create()) carrying no int member at all: the sweep row reports such a name as
+# not-an-enum and the generated facts file records it in NOT_ENUMS, so only a name that does not
+# RESOLVE fails the row.
+_ENUM_FAMILY_RE = re.compile(r"adsk\.(core|fusion|cam|drawing)\.([A-Za-z]*(?:Types|States?|Modes|Directions|Locations|Positions|Alignments?|Sizes|Formats|Operations|Options))\b")
 # A family reached only through _drawing_common.enum_value("<Family>", "<member>") never appears as
 # a literal adsk.drawing.<Family> in tool source, so the textual scan above cannot see it - the
 # STRING argument is the real reference. enum_value resolves exclusively against adsk.drawing.
@@ -94,29 +96,37 @@ def emitted_behavior_keys():
 
 
 def _all_enums_body():
-    """Script body for the enum-sweep row: dump every referenced family, then PASS iff each
-    resolved to at least one int member (a family that dumps nothing is a stale/renamed reference)."""
+    """Script body for the enum-sweep row: dump every referenced family, then PASS iff every scraped
+    name RESOLVED to a live class - one that resolves but carries no int member is a factory-object
+    class, recorded as not-an-enum instead of failing the row."""
     fams = referenced_enum_families()
     lines = ["    fams = ["]
     for f in fams:
         # Resolve each family through getattr chains so a scraped name that is NOT a live class
-        # (a typo, or a non-enum) yields None here instead of aborting the whole script.
+        # (a typo, or a renamed family) yields None here instead of aborting the whole script.
         ns, cls = f.split(".", 1)
         lines.append('        ("{0}", getattr(getattr(adsk, "{1}", None), "{2}", None)),'.format(f, ns, cls))
     lines.append("    ]")
-    lines.append("    empty = []")
+    lines.append("    missing = []")
+    lines.append("    not_enum = []")
     lines.append("    for label, cls in fams:")
+    lines.append("        if cls is None:")
+    lines.append("            missing.append(label)")
+    lines.append("            continue")
     lines.append("        n = 0")
-    lines.append("        for name in (dir(cls) if cls is not None else []):")
+    lines.append("        for name in dir(cls):")
     lines.append("            v = getattr(cls, name)")
     lines.append("            if not name.startswith('_') and isinstance(v, int):")
     lines.append("                print('FACT enums.' + label + '.' + name + ' ' + str(v))")
     lines.append("                n += 1")
     lines.append("        if n == 0:")
-    lines.append("            empty.append(label)")
-    lines.append("    emit(not empty, 'enum-sweep: ' + str(len(fams) - len(empty)) + '/'"
-                 " + str(len(fams)) + ' families dumped'"
-                 " + (' EMPTY: ' + ','.join(empty) if empty else ''))")
+    lines.append("            not_enum.append(label)")
+    lines.append("            print('FACT not_enums.' + label + ' true')")
+    lines.append("    emit(not missing, 'enum-sweep: '"
+                 " + str(len(fams) - len(missing) - len(not_enum)) + '/' + str(len(fams))"
+                 " + ' families dumped int members'"
+                 " + ('; no int member (factory class): ' + ','.join(not_enum) if not_enum else '')"
+                 " + ('; UNRESOLVED: ' + ','.join(missing) if missing else ''))")
     return "\n".join(lines) + "\n"
 
 # Each row script is self-contained: emit() prints one verdict line per check, and make_box()
@@ -988,6 +998,172 @@ ROWS = [
 """,
     },
     {
+        "id": "meshbody-delete-answers-true-and-removes",
+        "claim": "MeshBody.deleteMe() answers True and drops the body from meshBodies in every construction measured here - a PARAMETRIC body added in a base-feature scope, one deleted while ANOTHER component's base-feature scope is open, one a downstream mesh-repair feature consumed, and an assembly-context PROXY. A wrapper whose body is already gone RAISES ('An API Object refers to a deleted Object') rather than answering False, so no measured path returns a False here",
+        "encoded_in": "tests/conftest.py MeshBody.deleteMe - its `deletes` False is a DECLARED state (the fake's docstring says so), because no construction measured here declines; mesh_delete.py, which reports a False rather than swallowing it",
+        "body": """
+    FLAT = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    TET = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    TETI = [0, 2, 1, 0, 1, 3, 1, 2, 3, 2, 0, 3]
+
+    def parametric_legs():
+        tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+        try:
+            d = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+            root = d.rootComponent
+            def add_mesh(comp, coords, idx):
+                # A PARAMETRIC design takes a mesh only inside a base-feature edit scope.
+                bf = comp.features.baseFeatures.add()
+                bf.startEdit()
+                comp.meshBodies.addByTriangleMeshData(coords, idx, [], [])
+                bf.finishEdit()
+                return comp.meshBodies.item(comp.meshBodies.count - 1)
+            a = add_mesh(root, FLAT, [0, 1, 2])
+            plain = (a.deleteMe(), root.meshBodies.count)
+            b = add_mesh(root, FLAT, [0, 1, 2])
+            other = root.occurrences.addNewComponent(adsk.core.Matrix3D.create()).component
+            bf2 = other.features.baseFeatures.add()
+            bf2.startEdit()
+            scoped = (b.deleteMe(), root.meshBodies.count)
+            bf2.finishEdit()
+            c = add_mesh(root, TET, TETI)
+            rf = root.features.meshRepairFeatures
+            ri = rf.createInput(c)
+            ri.meshRepairType = adsk.fusion.MeshRepairTypes.RebuildMeshRepairType
+            rf.add(ri)
+            consumed = (c.deleteMe(), root.meshBodies.count)
+            return plain, scoped, consumed
+        finally:
+            tmp.close(False)
+
+    def direct_legs():
+        tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+        try:
+            d = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+            d.designType = adsk.fusion.DesignTypes.DirectDesignType
+            root = d.rootComponent
+            comp = root.occurrences.addNewComponent(adsk.core.Matrix3D.create()).component
+            comp.meshBodies.addByTriangleMeshData(FLAT, [0, 1, 2], [], [])
+            native = comp.meshBodies.item(0)
+            off = adsk.core.Matrix3D.create()
+            off.translation = adsk.core.Vector3D.create(5.0, 0.0, 0.0)
+            second = root.occurrences.addExistingComponent(comp, off)
+            proxied = (native.createForAssemblyContext(second).deleteMe(), comp.meshBodies.count)
+            comp.meshBodies.addByTriangleMeshData(FLAT, [0, 1, 2], [], [])
+            gone = comp.meshBodies.item(0)
+            gone.deleteMe()
+            try:
+                again = repr(gone.deleteMe())
+            except Exception as ex:
+                again = "raised " + type(ex).__name__ + ": " + str(ex)[:80]
+            return proxied, again
+        finally:
+            tmp.close(False)
+
+    plain, scoped, consumed = parametric_legs()
+    proxied, again = direct_legs()
+    legs = (plain, scoped, consumed, proxied)
+    emit(all(r is True and n == 0 for r, n in legs) and again.startswith("raised")
+         and "deleted Object" in again,
+         "meshbody-delete-answers-true-and-removes: (returned, count_after) plain=" + repr(plain)
+         + " foreign_scope_open=" + repr(scoped) + " repair_consumed=" + repr(consumed)
+         + " proxy=" + repr(proxied) + "; second deleteMe on the same wrapper " + again)
+""",
+    },
+    {
+        "id": "meshbody-facegroups-counted-before-generation",
+        "claim": "MeshBody.faceGroups answers a FaceGroups collection - never None, the read never raises - whose count is a plain int reading 1, NOT 0, on a mesh straight from addByTriangleMeshData, before any MeshGenerateFaceGroupsFeature has run; that holds for an open one-triangle mesh and for a closed tetrahedron alike, and the single group items() answers is a FaceGroup",
+        "encoded_in": "tests/conftest.py MeshBody's `face_groups` knob (the counted collection a mesh publishes); mesh_generate_face_groups.py's faceGroups.count read-back and tests/live/verify_acts_mesh.py's >= 1 predicate",
+        "body": """
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        des = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        des.designType = adsk.fusion.DesignTypes.DirectDesignType
+        root = des.rootComponent
+        flat = root.meshBodies.addByTriangleMeshData(
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0], [0, 1, 2], [], [])
+        tet = root.meshBodies.addByTriangleMeshData(
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            [0, 2, 1, 0, 1, 3, 1, 2, 3, 2, 0, 3], [], [])
+        f_groups, t_groups = flat.faceGroups, tet.faceGroups
+        f_n, t_n = f_groups.count, t_groups.count
+        item_type = type(f_groups.item(0)).__name__ if f_n else "NONE"
+        emit(f_groups is not None and t_groups is not None
+             and type(f_n) is int and type(t_n) is int and f_n == 1 and t_n == 1
+             and item_type == "FaceGroup",
+             "meshbody-facegroups-counted-before-generation: open mesh isClosed="
+             + str(flat.isClosed) + " count=" + repr(f_n)
+             + "; closed mesh isClosed=" + str(tet.isClosed) + " count=" + repr(t_n)
+             + "; item(0) type=" + item_type)
+    finally:
+        tmp.close(False)
+""",
+    },
+    {
+        "id": "brepbody-area-cm2-solid-and-open-surface",
+        "claim": "BRepBody.area reads a float in cm2 on BOTH a solid and an open (non-closed) surface body: a 2 cm cube reads 24.0 and a 2 x 3 cm single-face extruded open profile reads 6.0. The surface body reads isSolid False and volume 0.0 while its area still answers, so a null area in a payload means the field could not be read, never 'the body is open'",
+        "encoded_in": "tests/conftest.py BRepBody's `area` knob (cm2); surface_trim.py's before/after area read-back on a surface body; _sys_common.py _selection_record's area_cm2",
+        "body": """
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        d = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        root = d.rootComponent
+        sk = root.sketches.add(root.xYConstructionPlane)
+        sk.sketchCurves.sketchLines.addTwoPointRectangle(
+            adsk.core.Point3D.create(0.0, 0.0, 0.0), adsk.core.Point3D.create(2.0, 2.0, 0.0))
+        solid = root.features.extrudeFeatures.addSimple(
+            sk.profiles.item(0), adsk.core.ValueInput.createByReal(2.0),
+            adsk.fusion.FeatureOperations.NewBodyFeatureOperation).bodies.item(0)
+        # An OPEN profile: extrudeFeatures.createInput refuses a bare open sketch line, and
+        # createOpenProfile is what turns one into the profile a surface extrude accepts.
+        sk2 = root.sketches.add(root.xZConstructionPlane)
+        sk2.sketchCurves.sketchLines.addByTwoPoints(
+            adsk.core.Point3D.create(0.0, 0.0, 0.0), adsk.core.Point3D.create(2.0, 0.0, 0.0))
+        ein = root.features.extrudeFeatures.createInput(
+            root.createOpenProfile(sk2.sketchCurves.sketchLines.item(0)),
+            adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+        ein.isSolid = False
+        ein.setDistanceExtent(False, adsk.core.ValueInput.createByReal(3.0))
+        surf = root.features.extrudeFeatures.add(ein).bodies.item(0)
+        sa, ua = solid.area, surf.area
+        emit(isinstance(sa, float) and abs(sa - 24.0) < 1e-6
+             and isinstance(ua, float) and abs(ua - 6.0) < 1e-6
+             and solid.isSolid is True and surf.isSolid is False and surf.volume == 0.0,
+             "brepbody-area-cm2-solid-and-open-surface: solid 2cm cube isSolid="
+             + str(solid.isSolid) + " volume=" + repr(solid.volume) + " area=" + repr(sa)
+             + " (expect 24.0); open 2x3cm surface isSolid=" + str(surf.isSolid)
+             + " faces=" + str(surf.faces.count) + " volume=" + repr(surf.volume)
+             + " area=" + repr(ua) + " (expect 6.0)")
+    finally:
+        tmp.close(False)
+""",
+    },
+    {
+        "id": "meshbody-area-and-boundingbox-open-mesh",
+        "claim": "MeshBody.area and MeshBody.boundingBox both READ on an open (non-watertight) mesh, the volume-open row's one-triangle mesh: area is a float in cm2 reading 0.5 for the unit right triangle, and boundingBox is a BoundingBox3D whose min/max are the mesh's own extents (0,0,0)-(1,1,0). Neither read raises and neither answers None, so a null area or box in a payload means the field could not be read, never 'the mesh is open'",
+        "encoded_in": "tests/conftest.py MeshBody's `area` and `bbox` knobs; _mesh_common.py _area_volume and mesh_measure_of_body",
+        "body": """
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        des = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        des.designType = adsk.fusion.DesignTypes.DirectDesignType
+        mb = des.rootComponent.meshBodies.addByTriangleMeshData(
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0], [0, 1, 2], [], [])
+        a = mb.area
+        bb = mb.boundingBox
+        lo, hi = bb.minPoint, bb.maxPoint
+        box = (lo.x, lo.y, lo.z, hi.x, hi.y, hi.z)
+        emit(mb.isClosed is False and isinstance(a, float) and abs(a - 0.5) < 1e-9
+             and type(bb).__name__ == "BoundingBox3D"
+             and box == (0.0, 0.0, 0.0, 1.0, 1.0, 0.0),
+             "meshbody-area-and-boundingbox-open-mesh: isClosed=" + str(mb.isClosed)
+             + " area=" + repr(a) + " (expect 0.5) bbox=" + type(bb).__name__
+             + " min/max=" + repr(box) + " (expect (0,0,0,1,1,0))")
+    finally:
+        tmp.close(False)
+""",
+    },
+    {
         "id": "shape-dump-mesh-world",
         "claim": "MeshBody and its PolygonMesh dump non-empty member lists, the latter carrying both nodeCoordinatesAsDouble and normalVectorsAsDouble - the arrays a smooth's coordinate diff and a reverse's normal negation are judged on. displayMesh is a TriangleMesh, dumped alongside so the count fake is swept too. Totals are not pinned: they vary by a member or two across rigs and builds, and the SHAPE lines are the product",
         "encoded_in": "tests/conftest.py shared MeshBody / _FakePolygonMesh / _FakeTriangleMesh fakes; tests/lints/test_fake_shapes_exist.py sweeps them against these dumps",
@@ -1493,8 +1669,8 @@ ROWS = [
     },
     {
         "id": "enum-sweep",
-        "claim": "Every adsk enum family the tools reference resolves to its live integer members - the catch-all that measures all families into live_api_facts.ENUMS, not just the value-pinned few. FAILs if a referenced family dumps no members (a stale/renamed enum reference in a tool)",
-        "encoded_in": "commands/mcpServer/tools/*.py enum references; tests/conftest.py seeds ENUMS onto the mocks",
+        "claim": "Every adsk enum family the tools reference resolves to a live class and dumps its integer members - the catch-all that measures all families into live_api_facts.ENUMS, not just the value-pinned few. A resolved name carrying NO int member is a factory-object class (...Options.create()), recorded in live_api_facts.NOT_ENUMS; only a name that does not resolve at all FAILs the row (a stale/renamed reference in a tool)",
+        "encoded_in": "commands/mcpServer/tools/*.py enum references; tests/conftest.py seeds ENUMS onto the mocks; tests/lints/test_enum_families_measured.py accepts a family in either table",
         "body_fn": _all_enums_body,
     },
     {
@@ -4798,6 +4974,97 @@ ROWS = [
         tmp.close(False)
 """,
     },
+    {
+        "id": "timeline-move-past-either-end-answers-true",
+        "claim": ("A marker move PAST either end answers TRUE and leaves the marker where it was: "
+                  "with the marker at count, movetoNextStep() returns True and markerPosition is "
+                  "still count; with it at 0, moveToPreviousStep() returns True and markerPosition "
+                  "is still 0. The bool is therefore no signal that the marker moved - a caller "
+                  "that needs to know reads markerPosition back"),
+        "encoded_in": ("tests/conftest.py - the shared FakeTimeline's move helper answers True and "
+                       "leaves the marker on an out-of-range target, and "
+                       "tests/unit/test__conftest_worlds.py pins that pair of boundaries"),
+        "body": """
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        des = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        root = des.rootComponent
+        P = adsk.core.Point3D.create
+        sk = root.sketches.add(root.xYConstructionPlane)
+        sk.sketchCurves.sketchLines.addTwoPointRectangle(P(0, 0, 0), P(1, 1, 0))
+        ext = root.features.extrudeFeatures
+        ei = ext.createInput(sk.profiles.item(0),
+                             adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+        ei.setDistanceExtent(False, adsk.core.ValueInput.createByReal(1.0))
+        ext.add(ei)
+        tl = des.timeline
+        total = tl.count
+        tl.moveToEnd()
+        at_end = tl.markerPosition
+        next_ok = tl.movetoNextStep()
+        after_next = tl.markerPosition
+        tl.moveToBeginning()
+        at_start = tl.markerPosition
+        prev_ok = tl.moveToPreviousStep()
+        after_prev = tl.markerPosition
+        emit(at_end == total and next_ok is True and after_next == total
+             and at_start == 0 and prev_ok is True and after_prev == 0,
+             "timeline-move-past-either-end-answers-true: count " + str(total)
+             + " | at end " + str(at_end) + " -> movetoNextStep " + str(next_ok)
+             + " marker " + str(after_next)
+             + " | at 0 -> moveToPreviousStep " + str(prev_ok) + " marker " + str(after_prev))
+    finally:
+        tmp.close(False)
+""",
+    },
+    {
+        "id": "design-computeall-returns-true",
+        "claim": ("Design.computeAll() RETURNS True on a healthy design - the SDK documents 'Returns "
+                  "true if successful' and the call answers a bool, not None"),
+        "encoded_in": ("tests/conftest.py - the shared MakeDesign's computeAll answers True; "
+                       "design_recompute.py ignores the bool and judges the recompute by the "
+                       "timeline health it reads afterwards"),
+        "body": """
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        des = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        root = des.rootComponent
+        P = adsk.core.Point3D.create
+        sk = root.sketches.add(root.xYConstructionPlane)
+        sk.sketchCurves.sketchLines.addTwoPointRectangle(P(0, 0, 0), P(1, 1, 0))
+        answered = des.computeAll()
+        emit(answered is True,
+             "design-computeall-returns-true: computeAll() -> " + repr(answered)
+             + " (type " + type(answered).__name__ + ")")
+    finally:
+        tmp.close(False)
+""",
+    },
+    {
+        "id": "direct-design-timeline-raises",
+        "claim": ("In a DIRECT design the timeline read RAISES '3 : this is not a parametric "
+                  "design' - it does not answer None and the attribute is not absent, so a guard "
+                  "must catch the platform's error rather than an AttributeError"),
+        "encoded_in": ("tests/unit/test_design_get.py's direct-design scenario subclass, which "
+                       "raises this message; design_get.py's timeline-slice guard wraps the read"),
+        "body": """
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        des = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        des.designType = adsk.fusion.DesignTypes.DirectDesignType
+        message = ""
+        raised = False
+        try:
+            n = des.timeline.count
+        except Exception as exc:
+            raised = True
+            message = str(exc)
+        emit(raised and "not a parametric design" in message,
+             "direct-design-timeline-raises: raised=" + str(raised) + " message=" + repr(message))
+    finally:
+        tmp.close(False)
+""",
+    },
 ]
 
 
@@ -5033,13 +5300,15 @@ _STAMP_RE = re.compile(r"^Stamp: Fusion (\S+) \| verified (\S+)$", re.M)
 
 def write_api_facts(facts, fusion_version, stamp_date, shapes=None):
     """Generate tests/live_api_facts.py from a fully-PASSING run: 'enums.*' keys become ENUMS,
-    'behavior.*' keys become BEHAVIOR, dumped shapes become SHAPES. conftest imports the module
-    to populate the mocks; the fake-shape lint checks SHARED fakes against SHAPES."""
-    enums, behavior = {}, {}
+    'not_enums.*' NOT_ENUMS, 'behavior.*' BEHAVIOR, dumped shapes SHAPES. conftest imports the
+    module to populate the mocks; the fake-shape lint checks SHARED fakes against SHAPES."""
+    enums, behavior, not_enums = {}, {}, set()
     for key, value in facts.items():
         if key.startswith("enums."):
             family, member = key[len("enums."):].rsplit(".", 1)
             enums.setdefault(family, {})[member] = value
+        elif key.startswith("not_enums."):
+            not_enums.add(key[len("not_enums."):])
         elif key.startswith("behavior."):
             behavior[key[len("behavior."):]] = value
     lines = [
@@ -5062,6 +5331,15 @@ def write_api_facts(facts, fusion_version, stamp_date, shapes=None):
         lines.append("    },")
     lines += [
         "}",
+        "",
+        "# Referenced families that resolve to a live class carrying NO int member - factory-object",
+        "# classes (Options.create()), measured as such, never seeded onto the mock namespaces.",
+        "NOT_ENUMS = [",
+    ]
+    for family in sorted(not_enums):
+        lines.append('    "{0}",'.format(family))
+    lines += [
+        "]",
         "",
         "# Behavior flags the shared fakes consume.",
         "BEHAVIOR = {",
@@ -5206,12 +5484,14 @@ def run_measurements(write_json, only=None):
     elif all(s == "PASS" for _, s, _ in results):
         write_ledger(results, fusion_version, stamp_date)
         print("\nwrote {0} (stamp: Fusion {1}, {2})".format(LEDGER, fusion_version, stamp_date))
-        print("wrote {0} ({1} enum families, {2} behavior flags, {3} shaped types)".format(
-            write_api_facts(facts, fusion_version, stamp_date, shapes),
-            sum(1 for k in facts if k.startswith("enums.")) and len(
-                {k.rsplit(".", 1)[0] for k in facts if k.startswith("enums.")}),
-            sum(1 for k in facts if k.startswith("behavior.")),
-            len(shapes)))
+        print("wrote {0} ({1} enum families, {2} not-an-enum families, {3} behavior flags, "
+              "{4} shaped types)".format(
+                  write_api_facts(facts, fusion_version, stamp_date, shapes),
+                  sum(1 for k in facts if k.startswith("enums.")) and len(
+                      {k.rsplit(".", 1)[0] for k in facts if k.startswith("enums.")}),
+                  sum(1 for k in facts if k.startswith("not_enums.")),
+                  sum(1 for k in facts if k.startswith("behavior.")),
+                  len(shapes)))
     else:
         failed = [r["id"] for r, s, _ in results if s != "PASS"]
         print("\n{0} and live_api_facts.py NOT rewritten - {1} non-PASS row(s): {2}".format(

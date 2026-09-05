@@ -3,9 +3,9 @@
 import adsk.fusion
 import pytest
 
-from conftest import (BRepBody, BRepFace, FakeBoundingBox3D, FakePoint, FakeVector3D, MakeComp,
-                      MakeDesign, MeshBody, _MeshBodies, _NamedCollection, install, load_tool,
-                      make_timeline, payload)
+from conftest import (BRepBody, BRepFace, FakeBaseFeature, FakeBaseFeatures, FakeBoundingBox3D,
+                      FakeFeatures, FakePoint, FakeVector3D, MakeComp, MakeDesign, MeshBody,
+                      _MeshBodies, _NamedCollection, install, load_tool, make_timeline, payload)
 from conftest import Plane as PlaneGeom
 
 me = load_tool("mesh_plane_cut")
@@ -146,34 +146,12 @@ class _GrowingMeshBodies(_MeshBodies):
         self._pending = []
 
 
-class _Features:
+class _Features(FakeFeatures):
+    """comp.features plus the two mesh-feature collections this tool reaches through."""
     def __init__(self, face_groups=None, plane_cut=None, base_features=None):
+        super().__init__(base_features=base_features)
         self.meshGenerateFaceGroupsFeatures = face_groups
         self.meshPlaneCutFeatures = plane_cut
-        self.baseFeatures = base_features
-
-
-class _BaseFeature:
-    def __init__(self):
-        self.name = "BaseFeature1"
-        self.started = False
-        self.finished = False
-
-    def startEdit(self):
-        self.started = True
-        return True
-
-    def finishEdit(self):
-        self.finished = True
-        return True
-
-
-class _BaseFeatures:
-    def __init__(self, made):
-        self._made = made
-
-    def add(self):
-        return self._made
 
 
 def _design(comp, design_type=0, edit_object=None, tokens=None):
@@ -192,7 +170,7 @@ def _fusion_types(monkeypatch):
     monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
     monkeypatch.setattr(adsk.fusion, "ConstructionPlane", ConstructionPlane, raising=False)
     monkeypatch.setattr(adsk.fusion, "BRepFace", BRepFace, raising=False)
-    monkeypatch.setattr(adsk.fusion, "BaseFeature", _BaseFeature, raising=False)
+    monkeypatch.setattr(adsk.fusion, "BaseFeature", FakeBaseFeature, raising=False)
 
 
 def _component(features=None, mesh_bodies=None, origin_plane=None, name="Comp"):
@@ -221,7 +199,7 @@ class TestPlaneCut:
                                timeline_drops=timeline_drops, blind_after=blind_after,
                                area_after=area_after, volume_after=volume_after)
         bf = base_feature
-        feats = _Features(plane_cut=pc, base_features=_BaseFeatures(made=bf) if bf else None)
+        feats = _Features(plane_cut=pc, base_features=FakeBaseFeatures(made=bf))
         comp = _component(features=feats, mesh_bodies=mesh_bodies, origin_plane=origin_plane)
         src = _mesh("Scan", tri=tri_before, bbox=bbox, area=area, volume=volume, parent=comp)
         pc.cut_mesh = src               # the body whose triangle count the cut re-writes
@@ -769,7 +747,7 @@ class TestPlaneCut:
 
     def test_parametric_routes_through_base_feature_scope(self):
         plane = ConstructionPlane("CP")
-        bf = _BaseFeature()
+        bf = FakeBaseFeature()
         src, pc, _ = self._setup(result_bodies=[_mesh("R")], parametric=True, base_feature=bf)
         # re-install parametric design with both handles + the open scope visible
         des = _design(src.parentComponent, design_type=1, edit_object=bf,
@@ -777,7 +755,7 @@ class TestPlaneCut:
         install(me, des)
         out = payload(me.handler(mesh="H", plane="P", cut_type="trim"))
         assert out["cut"] is True
-        assert bf.started is True and bf.finished is True
+        assert bf._starts == 1 and bf._finishes == 1
 
     def test_add_failure_surfaces(self):
         plane = ConstructionPlane("CP")
@@ -806,7 +784,7 @@ class TestPlaneCut:
         # PARAMETRIC: the scoped add returns None (the scope suppresses the feature) -> SUCCESS, with
         # the base-feature scope opened/closed around the cut. The reported mode is the DESIGN's own.
         plane = ConstructionPlane("CP")
-        bf = _BaseFeature()
+        bf = FakeBaseFeature()
         src, pc, _ = self._setup(none_feature=True, parametric=True, base_feature=bf,
                                  mesh_bodies=_MeshBodies([_mesh("A")]))
         des = _design(src.parentComponent, design_type=1, edit_object=bf,
@@ -818,13 +796,13 @@ class TestPlaneCut:
         assert out["base_feature"] == "BaseFeature1"   # where the cut actually landed
         assert "BaseFeature1" in out["note"]
         assert "direct" not in out["note"].lower()
-        assert bf.started is True and bf.finished is True
+        assert bf._starts == 1 and bf._finishes == 1
 
     def test_mode_is_read_before_the_scope_opens(self):
         # designType reads DIRECT while a base-feature edit scope is open; a mode read taken after
         # the cut would report 'direct' for a parametric design.
         plane = ConstructionPlane("CP")
-        bf = _BaseFeature()
+        bf = FakeBaseFeature()
         src, pc, _ = self._setup(none_feature=True, parametric=True, base_feature=bf,
                                  mesh_bodies=_MeshBodies([_mesh("A")]))
         des = _design(src.parentComponent, design_type=1, edit_object=bf,
@@ -843,7 +821,7 @@ class TestPlaneCut:
     def test_a_returned_feature_is_still_named_in_parametric(self):
         # the feature path is unaffected: a real feature is named beside the parametric mode.
         plane = ConstructionPlane("CP")
-        bf = _BaseFeature()
+        bf = FakeBaseFeature()
         src, pc, _ = self._setup(result_bodies=[_mesh("R")], parametric=True, base_feature=bf)
         des = _design(src.parentComponent, design_type=1, edit_object=bf,
                       tokens={"H": src, "P": plane})

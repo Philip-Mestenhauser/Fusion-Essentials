@@ -13,19 +13,9 @@ import json
 import sys
 import types
 
-from conftest import load_tool, make_occurrence
+from conftest import MakeComp, Profile, load_tool, make_design, make_occurrence, make_sketch
 
 sketches = load_tool("sketch_get")
-
-
-class _Coll:
-    def __init__(self, items):
-        self._items = list(items)
-    @property
-    def count(self):
-        return len(self._items)
-    def item(self, i):
-        return self._items[i] if 0 <= i < len(self._items) else None
 
 
 def _never(what):
@@ -125,9 +115,8 @@ class TestSketchSummaryWalk:
         # property), so reading it here raises AttributeError exactly as adsk does - and a DISTINCT
         # entityToken, which every live component has and which is the only thing separating two
         # components that wear one name.
-        sks = [type("Sk", (), {"name": n})() for n in sketch_names]
-        return type("C", (), {"name": name, "sketches": _Coll(sks),
-                              "entityToken": f"comp-{name}-{next(_comp_serial)}"})()
+        return MakeComp(name=name, sketches=[make_sketch(name=n) for n in sketch_names],
+                        entity_token=f"comp-{name}-{next(_comp_serial)}")
 
     _occ = staticmethod(make_occurrence)         # the shared conftest occurrence fake
 
@@ -137,8 +126,7 @@ class TestSketchSummaryWalk:
         root = self._comp("Root")
         frame = self._comp("Frame", ["FrameSketch"])
         ring = self._comp("OuterRing", ["OuterRingSketch"])
-        d = type("D", (), {"rootComponent": root, "activeComponent": root,
-                           "allComponents": _Coll([root, frame, ring])})()
+        d = make_design(comp=root, all_components=[root, frame, ring])
         monkeypatch.setattr(sketches._common, "design", lambda: d)
         res = sketches._list_sketches()
         payload = json.loads(res["content"][0]["text"])
@@ -150,8 +138,7 @@ class TestSketchSummaryWalk:
         root = self._comp("Root")
         frame = self._comp("Frame", ["Sketch1"])
         ring = self._comp("OuterRing", ["Sketch1"])
-        d = type("D", (), {"rootComponent": root, "activeComponent": root,
-                           "allComponents": _Coll([root, frame, ring])})()
+        d = make_design(comp=root, all_components=[root, frame, ring])
         monkeypatch.setattr(sketches._common, "design", lambda: d)
 
     def test_the_component_scope_narrows_the_list_to_that_component(self, monkeypatch):
@@ -184,11 +171,10 @@ class TestSketchSummaryWalk:
         # unique is the only reason it is withheld.
         frame = self._comp("Frame", ["Sketch1"])
         ring = self._comp("OuterRing", ["Sketch1"])
-        root = type("R", (), {"name": "Root", "sketches": _Coll([]), "entityToken": "comp-root",
-                              "allOccurrences": [self._occ("Frame:1", frame),
-                                                 self._occ("OuterRing:1", ring)]})()
-        d = type("D", (), {"rootComponent": root, "activeComponent": root,
-                           "allComponents": _Coll([root, frame, ring])})()
+        root = MakeComp(name="Root", entity_token="comp-root",
+                        occurrences=[self._occ("Frame:1", frame),
+                                     self._occ("OuterRing:1", ring)])
+        d = make_design(comp=root, all_components=[root, frame, ring])
         monkeypatch.setattr(sketches._common, "design", lambda: d)
         payload = json.loads(sketches._list_sketches("")["content"][0]["text"])
         assert payload["sketch_count"] == 2
@@ -204,14 +190,12 @@ class TestSketchSummaryWalk:
         is what makes any identity-keyed grouping report each component's paths as both."""
         a = self._comp("Frame", ["Frame_Ring"])
         b = self._comp("Frame", ["Frame_Ring"])
-        a.__class__.entityToken = self._XREF_TOKEN
-        b.__class__.entityToken = self._XREF_TOKEN
-        root = type("R", (), {"name": "Root", "sketches": _Coll([]),
-                              "entityToken": "comp-root",
-                              "allOccurrences": [self._occ("P2a-Gimbal:1+Frame:1", a),
-                                                 self._occ("P3-Gimbal:1+Frame:1", b)]})()
-        d = type("D", (), {"rootComponent": root, "activeComponent": root,
-                           "allComponents": _Coll([root, a, b])})()
+        a.entityToken = self._XREF_TOKEN
+        b.entityToken = self._XREF_TOKEN
+        root = MakeComp(name="Root", entity_token="comp-root",
+                        occurrences=[self._occ("P2a-Gimbal:1+Frame:1", a),
+                                     self._occ("P3-Gimbal:1+Frame:1", b)])
+        d = make_design(comp=root, all_components=[root, a, b])
         monkeypatch.setattr(sketches._common, "design", lambda: d)
         assert a.entityToken == b.entityToken        # the fixture models the collision, or it lies
 
@@ -244,19 +228,18 @@ class TestSketchSummaryWalk:
         the other's placements."""
         frame_a = self._comp("Frame", ["Frame_Ring"])
         frame_b = self._comp("Frame", ["Frame_Ring"])
-        frame_a.__class__.entityToken = self._XREF_TOKEN
-        frame_b.__class__.entityToken = self._XREF_TOKEN
+        frame_a.entityToken = self._XREF_TOKEN
+        frame_b.entityToken = self._XREF_TOKEN
         car_a = self._comp("Carrier", ["Carrier_Ring"])
         car_b = self._comp("Carrier", ["Carrier_Ring"])
-        car_a.__class__.entityToken = self._XREF_TOKEN
-        car_b.__class__.entityToken = self._XREF_TOKEN
-        root = type("R", (), {"name": "Root", "sketches": _Coll([]), "entityToken": "comp-root",
-                              "allOccurrences": [self._occ("P2a-Gimbal:1+Frame:1", frame_a),
-                                                 self._occ("P2a-Gimbal:1+Carrier:1", car_a),
-                                                 self._occ("P3-Gimbal:1+Frame:1", frame_b),
-                                                 self._occ("P3-Gimbal:1+Carrier:1", car_b)]})()
-        d = type("D", (), {"rootComponent": root, "activeComponent": root,
-                           "allComponents": _Coll([root, frame_a, frame_b, car_a, car_b])})()
+        car_a.entityToken = self._XREF_TOKEN
+        car_b.entityToken = self._XREF_TOKEN
+        root = MakeComp(name="Root", entity_token="comp-root",
+                        occurrences=[self._occ("P2a-Gimbal:1+Frame:1", frame_a),
+                                     self._occ("P2a-Gimbal:1+Carrier:1", car_a),
+                                     self._occ("P3-Gimbal:1+Frame:1", frame_b),
+                                     self._occ("P3-Gimbal:1+Carrier:1", car_b)])
+        d = make_design(comp=root, all_components=[root, frame_a, frame_b, car_a, car_b])
         monkeypatch.setattr(sketches._common, "design", lambda: d)
 
     def test_a_scoped_call_gets_only_ITS_names_placements(self, monkeypatch):
@@ -301,15 +284,14 @@ class TestSketchSummaryWalk:
         # path would be noise in a block whose only job is separating names that collide.
         a = self._comp("Frame", ["Frame_Ring"])
         b = self._comp("Frame", ["Frame_Ring"])
-        a.__class__.entityToken = self._XREF_TOKEN
-        b.__class__.entityToken = self._XREF_TOKEN
+        a.entityToken = self._XREF_TOKEN
+        b.entityToken = self._XREF_TOKEN
         bolt = self._comp("Bolt", ["BoltProfile"])
-        root = type("R", (), {"name": "Root", "sketches": _Coll([]), "entityToken": "comp-root",
-                              "allOccurrences": [self._occ("P2a-Gimbal:1+Frame:1", a),
-                                                 self._occ("P3-Gimbal:1+Frame:1", b),
-                                                 self._occ("Bolt:1", bolt)]})()
-        d = type("D", (), {"rootComponent": root, "activeComponent": root,
-                           "allComponents": _Coll([root, a, b, bolt])})()
+        root = MakeComp(name="Root", entity_token="comp-root",
+                        occurrences=[self._occ("P2a-Gimbal:1+Frame:1", a),
+                                     self._occ("P3-Gimbal:1+Frame:1", b),
+                                     self._occ("Bolt:1", bolt)])
+        d = make_design(comp=root, all_components=[root, a, b, bolt])
         monkeypatch.setattr(sketches._common, "design", lambda: d)
         payload = json.loads(sketches._list_sketches("")["content"][0]["text"])
         assert payload["sketch_count"] == 3
@@ -320,12 +302,10 @@ class TestSketchSummaryWalk:
     def _deferred_design(self, monkeypatch, deferred):
         """One component holding one sketch whose compute flag reads `deferred` and whose
         profile_count is the pre-deferral 3."""
-        sk = type("Sk", (), {"name": "Sketch1", "isComputeDeferred": deferred,
-                             "profiles": type("P", (), {"count": 3})()})()
-        root = type("R", (), {"name": "Root", "sketches": _Coll([sk]),
-                              "entityToken": "comp-root"})()
-        d = type("D", (), {"rootComponent": root, "activeComponent": root,
-                           "allComponents": _Coll([root])})()
+        sk = make_sketch(name="Sketch1", is_compute_deferred=deferred,
+                         profiles=[Profile(), Profile(), Profile()])
+        root = MakeComp(name="Root", sketches=[sk], entity_token="comp-root")
+        d = make_design(comp=root, all_components=[root])
         monkeypatch.setattr(sketches._common, "design", lambda: d)
 
     def test_a_deferred_row_is_flagged_and_the_note_names_the_remedy(self, monkeypatch):

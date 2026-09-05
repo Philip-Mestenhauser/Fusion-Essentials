@@ -10,47 +10,23 @@ import json
 
 import pytest
 
-from conftest import _NamedCollection, load_tool
+from conftest import (BRepBody, BRepFace, FakeOccurrence, MakeComp, MakeDesign, Sketch,
+                      SketchCurves, _NamedCollection, install, load_tool)
 
 dx = load_tool("design_export")
 
 
 # ── fakes ────────────────────────────────────────────────────────────────────
 
-class FakeBody:
-    def __init__(self, name):
-        self.name = name
+def _occ(name, full_path=None):
+    """One occurrence. A real Occurrence always answers `component`; a read that RAISES is the
+    unresolved-external-reference signal the shared occurrence census filters on."""
+    return FakeOccurrence(path=full_path or name, component=MakeComp(name.split(":")[0]))
 
 
-class FakeOcc:
-    def __init__(self, name, full_path=None):
-        self.name = name
-        self.fullPathName = full_path or name
-        # A real Occurrence always answers `component`; a read that RAISES is the
-        # unresolved-external-reference signal the shared occurrence census filters on.
-        self.component = type("C", (), {"name": name.split(":")[0]})()
-
-
-class FakeOccs:
-    def __init__(self, occs=()):
-        self._l = list(occs)
-    def itemByName(self, n):
-        return None
-    @property
-    def count(self):
-        return len(self._l)
-    def item(self, i):
-        return self._l[i]
-    def __iter__(self):
-        return iter(self._l)
-
-
-class FakeComp:
-    def __init__(self, name, bodies, occurrences=()):
-        self.name = name
-        self.bRepBodies = _NamedCollection(bodies)
-        self.occurrences = FakeOccs(occurrences)
-        self.allOccurrences = list(occurrences)
+def _comp(name, bodies=(), occurrences=()):
+    """A component holding `bodies` and `occurrences` - the two collections a target resolves in."""
+    return MakeComp(name=name, bodies=list(bodies), occurrences=list(occurrences))
 
 
 class FakeOptions:
@@ -121,32 +97,19 @@ class FakeExportManager:
         return True
 
 
-class FakeDesign:
-    def __init__(self, comp, em):
-        self.rootComponent = comp
-        self.exportManager = em
-        self._tokens = {}
-    def findEntityByToken(self, t):
-        e = self._tokens.get(t)
-        return [e] if e is not None else []
-
-
 def _install(monkeypatch, bodies=None, comp_name="Root", occurrences=(), components=None):
-    bodies = bodies if bodies is not None else [FakeBody("Body1")]
-    comp = FakeComp(comp_name, bodies, occurrences)
+    bodies = bodies if bodies is not None else [BRepBody("Body1")]
+    comp = _comp(comp_name, bodies, occurrences)
     em = FakeExportManager()
-    design = FakeDesign(comp, em)
+    design = MakeDesign(comp=comp)
+    design.exportManager = em
     if components is not None:
-        # only when a test needs the design-wide component walk: without it the design answers no
-        # allComponents at all and _common.all_components falls back to [root], as most tests want.
-        # allComponents is a COUNTED collection (count + item(i)) - conftest's shared one.
-        design.allComponents = _NamedCollection([FakeComp(n, []) for n in components])
-    app = type("A", (), {"activeProduct": design})()
-    monkeypatch.setattr(dx, "app", app)
-    monkeypatch.setattr(dx._common, "app", app)
+        # only when a test needs the design-wide component walk: without it the design answers just
+        # the root, as most tests want.
+        design._all_components = [_comp(n) for n in components]
     import adsk.fusion
-    monkeypatch.setattr(adsk.fusion.Design, "cast", lambda x: x if isinstance(x, FakeDesign) else None)
-    monkeypatch.setattr(adsk.fusion, "BRepBody", FakeBody)
+    monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody)
+    install(dx, design)
     return design, em, comp
 
 
@@ -229,15 +192,15 @@ class TestTargetResolution:
         assert "design" in out["target"].lower() or "root" in out["target"].lower()
 
     def test_body_by_name(self, tmp_path, monkeypatch):
-        _, em, _ = _install(monkeypatch, bodies=[FakeBody("Widget")])
+        _, em, _ = _install(monkeypatch, bodies=[BRepBody("Widget")])
         out = _payload(dx.handler(format="step", target="Widget", file_path=str(tmp_path / "p.step")))
         assert em.calls[-1]["geom"].name == "Widget"
         assert "Widget" in out["target"]
 
     def test_body_by_handle(self, tmp_path, monkeypatch):
-        design, em, _ = _install(monkeypatch, bodies=[FakeBody("Body1")])
+        design, em, _ = _install(monkeypatch, bodies=[BRepBody("Body1")])
         h = "/v" + "X" * 70
-        design._tokens[h] = FakeBody("FromHandle")
+        design._tokens[h] = BRepBody("FromHandle")
         out = _payload(dx.handler(format="step", target=h, file_path=str(tmp_path / "p.step")))
         assert em.calls[-1]["geom"].name == "FromHandle"
 
@@ -246,21 +209,21 @@ class TestTargetResolution:
         # resolution falls through to the name lookup and a long body name exports by NAME.
         long_name = "Left-Outrigger-Pivot-Bracket-Weldment-Subassembly-Body-Number-Seven"
         assert len(long_name) > 60
-        _, em, _ = _install(monkeypatch, bodies=[FakeBody(long_name)])
+        _, em, _ = _install(monkeypatch, bodies=[BRepBody(long_name)])
         out = _payload(dx.handler(format="step", target=long_name, file_path=str(tmp_path / "p.step")))
         assert em.calls[-1]["geom"].name == long_name
         assert long_name in out["target"]
 
     def test_occurrence_by_name(self, tmp_path, monkeypatch):
         # occurrence resolution goes through the shared _resolve_occurrence (exact name/fullPathName)
-        occ = FakeOcc("Gear:1")
+        occ = _occ("Gear:1")
         _, em, _ = _install(monkeypatch, occurrences=[occ])
         out = _payload(dx.handler(format="step", target="Gear:1", file_path=str(tmp_path / "p.step")))
         assert em.calls[-1]["geom"] is occ
         assert "Gear:1" in out["target"]
 
     def test_missing_named_target_errors(self, tmp_path, monkeypatch):
-        _install(monkeypatch, bodies=[FakeBody("Body1")])
+        _install(monkeypatch, bodies=[BRepBody("Body1")])
         res = dx.handler(format="step", target="Nope", file_path=str(tmp_path / "p.step"))
         assert res["isError"] is True and "Nope" in res["message"]
 
@@ -268,8 +231,8 @@ class TestTargetResolution:
         # two instances share the local name "Bolt:1" under different sub-assemblies - the real
         # shared resolver (_inputs._resolve_occurrence) must REFUSE the bare substring, naming both
         # fullPathNames, never export the first (wrong) instance.
-        _, em, _ = _install(monkeypatch, occurrences=[FakeOcc("Bolt:1", "Sub-A:1+Bolt:1"),
-                                                      FakeOcc("Bolt:1", "Sub-B:1+Bolt:1")])
+        _, em, _ = _install(monkeypatch, occurrences=[_occ("Bolt:1", "Sub-A:1+Bolt:1"),
+                                                      _occ("Bolt:1", "Sub-B:1+Bolt:1")])
         res = dx.handler(format="step", target="Bolt", file_path=str(tmp_path / "p.step"))
         assert res["isError"] is True
         assert "ambiguous" in res["message"].lower()
@@ -301,8 +264,8 @@ class TestTargetResolution:
         # the shared-EXACT-name refusal carries no "ambiguous" wording - only the OCCURRENCE_MISS
         # stem tells a plain miss from a refusal - so its candidate list must reach the caller
         # instead of degrading to a generic not-found.
-        _, em, _ = _install(monkeypatch, occurrences=[FakeOcc("Bolt:1", "Sub-A:1+Bolt:1"),
-                                                      FakeOcc("Bolt:1", "Sub-B:1+Bolt:1")])
+        _, em, _ = _install(monkeypatch, occurrences=[_occ("Bolt:1", "Sub-A:1+Bolt:1"),
+                                                      _occ("Bolt:1", "Sub-B:1+Bolt:1")])
         res = dx.handler(format="step", target="Bolt:1", file_path=str(tmp_path / "p.step"))
         assert res["isError"] is True
         assert "Sub-A:1+Bolt:1" in res["message"] and "Sub-B:1+Bolt:1" in res["message"]
@@ -590,7 +553,7 @@ class TestOptionsApplied:
         # reaches would write per-component files while dropping the caller's ASCII-vs-binary
         # choice - the same silent drop, on the entry path the live sweep drives (a split STEP
         # export carrying stl_binary).
-        _, em, _ = _install(monkeypatch, occurrences=[FakeOcc("Body:1"), FakeOcc("Cab:1")])
+        _, em, _ = _install(monkeypatch, occurrences=[_occ("Body:1"), _occ("Cab:1")])
         res = dx.handler(format="step", split_by_component=True, stl_binary=True,
                          file_path=str(tmp_path))
         assert res["isError"] is True
@@ -656,7 +619,7 @@ class TestOptionsApplied:
         # every other unit refusal here goes through the single-target path, so that narrowing
         # reads as correct. The unit is not the Choice's default, so the message is pinned to the
         # value the CALL names.
-        _, em, _ = _install(monkeypatch, occurrences=[FakeOcc("Body:1"), FakeOcc("Cab:1")])
+        _, em, _ = _install(monkeypatch, occurrences=[_occ("Body:1"), _occ("Cab:1")])
         res = dx.handler(format="step", split_by_component=True, stl_units="in",
                          file_path=str(tmp_path))
         assert res["isError"] is True
@@ -707,26 +670,14 @@ class TestOptionsApplied:
 
 # ── format=dxf (sketch / face-profile 2D export) ──────────────────────────────
 
-class FakeCount:
-    def __init__(self, n=0):
-        self.count = n
-
-
-class FakeSketchCurves:
-    def __init__(self, lines=0, arcs=0, circles=0):
-        self.sketchLines = FakeCount(lines)
-        self.sketchArcs = FakeCount(arcs)
-        self.sketchCircles = FakeCount(circles)
-
-
-class FakeSketch:
-    """Stands in for a Sketch: deleteMe records that the scratch sketch was removed, project2 grows
-    the line count by 'project_adds'. DXF writing itself goes through the design's exportManager
-    (createDXFSketchExportOptions), not a method on the sketch."""
+class FakeSketch(Sketch):
+    """A sketch that records the two writes the DXF path makes on it: deleteMe (the scratch sketch
+    is removed) and project2, which grows the line count by 'project_adds'. DXF writing itself goes
+    through the design's exportManager (createDXFSketchExportOptions), not a method on the sketch."""
     def __init__(self, name="Sketch1", lines=0, arcs=0, circles=0, points=0, project_adds=1):
-        self.name = name
-        self.sketchCurves = FakeSketchCurves(lines, arcs, circles)
-        self.sketchPoints = FakeCount(points)
+        super().__init__(name=name, points=[None] * points,
+                         curves=SketchCurves(lines=[None] * lines, arcs=[None] * arcs,
+                                             circles=[None] * circles))
         self._project_adds = project_adds
         self.deleted = False
         self.project_calls = []
@@ -737,7 +688,7 @@ class FakeSketch:
 
     def project2(self, entities, is_linked):
         self.project_calls.append((entities, is_linked))
-        self.sketchCurves.sketchLines.count += self._project_adds
+        self.sketchCurves.sketchLines._items.extend([None] * self._project_adds)
         return [object()] * self._project_adds
 
 
@@ -751,19 +702,17 @@ class FakeSketchesColl:
         return self._sketch
 
 
-class FakeFaceComp:
-    def __init__(self, sketch):
-        self.sketches = FakeSketchesColl(sketch)
+def FakeFaceComp(sketch):
+    """The component the scratch DXF sketch is added to - its sketches collection records the face
+    the add was made from."""
+    comp = MakeComp("FaceComp")
+    comp.sketches = FakeSketchesColl(sketch)
+    return comp
 
 
-class FakeFaceBody:
-    def __init__(self, comp):
-        self.parentComponent = comp
-
-
-class FakeFace:
-    def __init__(self, comp):
-        self.body = FakeFaceBody(comp)
+def FakeFace(comp):
+    """A face whose body belongs to `comp` - the hop the DXF path walks to reach its sketches."""
+    return BRepFace(None, body=BRepBody("FaceBody", parent_component=comp))
 
 
 class TestDxfExport:
@@ -865,11 +814,11 @@ class TestDxfExport:
         resolver would prove nothing. Both components hold a sketch of the SAME name; with two
         different names the filter never runs and unscoped code would pass."""
         design, em, comp = _install(monkeypatch)
-        alpha = FakeComp("Alpha", [])
+        alpha = _comp("Alpha", [])
         alpha.sketches = _NamedCollection(list(alpha_sketches))
-        beta = FakeComp("Beta", [])
+        beta = _comp("Beta", [])
         beta.sketches = _NamedCollection(list(beta_sketches))
-        design.allComponents = _NamedCollection([alpha, beta])
+        design._all_components = [alpha, beta]
         design.rootComponent = alpha
         design.activeComponent = alpha
         return design, em, alpha, beta
@@ -935,17 +884,17 @@ class TestDxfExport:
     def test_an_AMBIGUOUS_dxf_component_names_dxf_component(self, tmp_path, monkeypatch):
         from conftest import make_occurrence
         design, em, comp = _install(monkeypatch)
-        root = FakeComp("Root", [])
+        root = _comp("Root", [])
         root.sketches = _NamedCollection([])
-        a = FakeComp("Frame", [])
+        a = _comp("Frame", [])
         a.sketches = _NamedCollection([FakeSketch("Profile1", lines=2)])
-        b = FakeComp("Frame", [])
+        b = _comp("Frame", [])
         b.sketches = _NamedCollection([FakeSketch("Profile1", circles=1)])
         root.allOccurrences = [make_occurrence("P2-Gimbal:1+Frame:1", a),
                                make_occurrence("P3-Gimbal:1+Frame:1", b)]
         design.rootComponent = root
         design.activeComponent = root
-        design.allComponents = _NamedCollection([root, a, b])
+        design._all_components = [root, a, b]
         res = dx.handler(format="dxf", dxf_sketch="Profile1", dxf_component="Frame",
                          file_path=str(tmp_path / "p.dxf"))
         assert res["isError"] is True
@@ -1093,7 +1042,7 @@ class TestInputsABranchCannotReachAreRefused:
     def test_split_by_component_on_a_dxf_export_is_refused(self, tmp_path, monkeypatch):
         # The split walk sits BEHIND the dxf dispatch, so split_by_component=true on a dxf call
         # writes one file from one sketch - the opposite of the per-component set asked for.
-        _, em, _ = _install(monkeypatch, occurrences=[FakeOcc("Body:1"), FakeOcc("Cab:1")])
+        _, em, _ = _install(monkeypatch, occurrences=[_occ("Body:1"), _occ("Cab:1")])
         self._sketch(monkeypatch)
         res = dx.handler(format="dxf", dxf_sketch="Profile1", split_by_component=True,
                          file_path=str(tmp_path))
@@ -1142,7 +1091,7 @@ class TestInputsABranchCannotReachAreRefused:
     def test_a_target_with_split_by_component_is_refused_naming_it(self, tmp_path, monkeypatch):
         # The split walk exports EVERY top-level occurrence off its own census, never 'target' - so a
         # dropped 'target' hands back a directory of files for parts the caller did not ask for.
-        _, em, _ = _install(monkeypatch, occurrences=[FakeOcc("Body:1"), FakeOcc("Cab:1")])
+        _, em, _ = _install(monkeypatch, occurrences=[_occ("Body:1"), _occ("Cab:1")])
         res = dx.handler(format="step", split_by_component=True, target="Cab:1",
                          file_path=str(tmp_path))
         assert res["isError"] is True
@@ -1156,7 +1105,7 @@ class TestInputsABranchCannotReachAreRefused:
 
 class TestSplitByComponent:
     def test_one_file_per_occurrence(self, tmp_path, monkeypatch):
-        occs = [FakeOcc("Body:1"), FakeOcc("Cab:1"), FakeOcc("Wheels:1")]
+        occs = [_occ("Body:1"), _occ("Cab:1"), _occ("Wheels:1")]
         _, em, _ = _install(monkeypatch, occurrences=occs)
         out = _payload(dx.handler(format="stl", file_path=str(tmp_path), split_by_component=True))
         assert out["split_by_component"] is True
@@ -1169,7 +1118,7 @@ class TestSplitByComponent:
         # The split path configures its own options object PER FILE, so the read-back is per file
         # too - the same applied/requested shape mesh_export publishes. One file's read-back
         # standing in for the rest would report a knob as landed on a file that never read it back.
-        occs = [FakeOcc("Body:1"), FakeOcc("Cab:1")]
+        occs = [_occ("Body:1"), _occ("Cab:1")]
         _, _em, _ = _install(monkeypatch, occurrences=occs)
         out = _payload(dx.handler(format="stl", file_path=str(tmp_path), split_by_component=True,
                                   stl_binary=True))
@@ -1189,7 +1138,7 @@ class TestSplitByComponent:
         # The evidence is per file for the same reason the value is: each file got its own options
         # object. Every one of them already read the request and dropped the write, so every file
         # carries false and the note counts the files rather than claiming the knob for them.
-        occs = [FakeOcc("Body:1"), FakeOcc("Cab:1")]
+        occs = [_occ("Body:1"), _occ("Cab:1")]
         _, em, _ = _install(monkeypatch, occurrences=occs)
 
         class _Deaf(FakeOptions):
@@ -1219,7 +1168,7 @@ class TestSplitByComponent:
         # An option Fusion ignored must show as null on the FILE it did not land on - an export
         # that silently wrote ASCII while 'stl_binary' was asked for is the false success this
         # catches, and 'options_requested' keeps the request readable beside it.
-        occs = [FakeOcc("Body:1"), FakeOcc("Cab:1")]
+        occs = [_occ("Body:1"), _occ("Cab:1")]
         _, em, _ = _install(monkeypatch, occurrences=occs)
 
         class Stubborn(FakeOptions):
@@ -1242,7 +1191,7 @@ class TestSplitByComponent:
     def test_one_file_refusing_leaves_the_other_files_read_back_intact(self, tmp_path, monkeypatch):
         # The per-file shape exists for exactly this case: a knob that lands on one file and not on
         # another. A single representative value would report ONE of the two states for both.
-        occs = [FakeOcc("Body:1"), FakeOcc("Cab:1")]
+        occs = [_occ("Body:1"), _occ("Cab:1")]
         _, em, _ = _install(monkeypatch, occurrences=occs)
 
         class Stubborn(FakeOptions):
@@ -1273,7 +1222,7 @@ class TestSplitByComponent:
         # Nothing was asked for and this format forces nothing, so there is nothing to state - an
         # empty applied/requested pair on every file record would be noise a caller reads past.
         # Driven on a format with no always-written knob; stl has one (the unit) by design.
-        _install(monkeypatch, occurrences=[FakeOcc("Body:1")])
+        _install(monkeypatch, occurrences=[_occ("Body:1")])
         out = _payload(dx.handler(format="step", file_path=str(tmp_path), split_by_component=True))
         assert "options_requested" not in out
         assert "options_applied" not in out["files"][0]
@@ -1284,13 +1233,13 @@ class TestSplitByComponent:
         # The counterpart, and the one that matters for a print job: split writes one options object
         # PER FILE, so a unit written on the first file only would leave the rest inheriting the
         # session's unit. Every file record must name it, not just the first.
-        _install(monkeypatch, occurrences=[FakeOcc("Body:1"), FakeOcc("Cab:1")])
+        _install(monkeypatch, occurrences=[_occ("Body:1"), _occ("Cab:1")])
         out = _payload(dx.handler(format="stl", file_path=str(tmp_path), split_by_component=True))
         assert out["options_requested"] == {"stl_units": "mm"}
         assert [f["options_applied"]["stl_units"] for f in out["files"]] == ["mm", "mm"]
 
     def test_filenames_sanitized_and_extensioned(self, tmp_path, monkeypatch):
-        _, _, _ = _install(monkeypatch, occurrences=[FakeOcc("Loader Arm:1")])
+        _, _, _ = _install(monkeypatch, occurrences=[_occ("Loader Arm:1")])
         out = _payload(dx.handler(format="stl", file_path=str(tmp_path), split_by_component=True))
         fp = out["files"][0]["file_path"]
         # ':1' instance suffix dropped, space -> '_', extension applied
@@ -1298,7 +1247,7 @@ class TestSplitByComponent:
 
     def test_duplicate_stems_disambiguated(self, tmp_path, monkeypatch):
         # two instances whose sanitized stem collides must not overwrite each other
-        _install(monkeypatch, occurrences=[FakeOcc("Wheel:1"), FakeOcc("Wheel:2")])
+        _install(monkeypatch, occurrences=[_occ("Wheel:1"), _occ("Wheel:2")])
         out = _payload(dx.handler(format="stl", file_path=str(tmp_path), split_by_component=True))
         paths = [f["file_path"] for f in out["files"]]
         assert len(set(paths)) == 2                       # distinct files
@@ -1315,16 +1264,9 @@ class TestSplitByComponent:
         # The census never happened, so the design's components are unknown. Reporting "no
         # top-level occurrences" would state a fact about the design that was never read, and
         # writing zero files would look like a clean export of nothing.
-        _design, _em, comp = _install(monkeypatch, occurrences=[FakeOcc("Body:1")])
+        _design, _em, comp = _install(monkeypatch, occurrences=[_occ("Body:1")])
 
-        class _Blind:
-            @property
-            def count(self):
-                raise RuntimeError("boom")
-            def item(self, i):
-                raise RuntimeError("boom")
-
-        comp.occurrences = _Blind()
+        comp.occurrences = _NamedCollection(raises="boom")
         res = dx.handler(format="stl", file_path=str(tmp_path), split_by_component=True)
         assert res["isError"] is True
         assert "did not read" in res["message"]
@@ -1334,8 +1276,8 @@ class TestSplitByComponent:
     def test_partial_failure_records_failed_list(self, tmp_path, monkeypatch):
         # one occurrence exports, one fails -> exported=true, file_count counts only the good one,
         # and the failures land under a 'failed' key (not silently dropped).
-        good = FakeOcc("Good:1")
-        bad = FakeOcc("Bad:1")
+        good = _occ("Good:1")
+        bad = _occ("Bad:1")
         _, em, _ = _install(monkeypatch, occurrences=[good, bad])
 
         real_exec = em.execute
@@ -1359,7 +1301,7 @@ class TestSplitByComponent:
                                                                         monkeypatch):
         # ZERO deliverables is a FAILED export, not an ok payload carrying exported:false - and the
         # refusal names every occurrence that failed, the only place those reasons can travel.
-        _, em, _ = _install(monkeypatch, occurrences=[FakeOcc("A:1"), FakeOcc("B:1")])
+        _, em, _ = _install(monkeypatch, occurrences=[_occ("A:1"), _occ("B:1")])
         em.execute = lambda opts: False
         res = dx.handler(format="stl", file_path=str(tmp_path), split_by_component=True)
         assert res["isError"] is True
@@ -1373,7 +1315,7 @@ class TestSplitByComponent:
                                                                                 monkeypatch):
         # The split path reads the same disk: an occurrence whose execute() answered false while
         # its file landed belongs in 'files', flagged, not in 'failed'.
-        _, em, _ = _install(monkeypatch, occurrences=[FakeOcc("Good:1"), FakeOcc("Quiet:1")])
+        _, em, _ = _install(monkeypatch, occurrences=[_occ("Good:1"), _occ("Quiet:1")])
         real_exec = em.execute
 
         def false_for_quiet(opts):
@@ -1390,7 +1332,7 @@ class TestSplitByComponent:
     def test_execute_true_but_no_file_written_is_a_split_failure(self, tmp_path, monkeypatch):
         # execute() lying (True, but nothing landed on disk) must land the occurrence in 'failed',
         # not 'files' - the split path is gated on file existence the same as the single-target path.
-        _, em, _ = _install(monkeypatch, occurrences=[FakeOcc("Good:1"), FakeOcc("Ghost:1")])
+        _, em, _ = _install(monkeypatch, occurrences=[_occ("Good:1"), _occ("Ghost:1")])
         real_exec = em.execute
 
         def lying_execute(opts):
@@ -1545,7 +1487,7 @@ class TestFileExistenceGate:
 class TestResolveTargetExtra:
     def test_handle_resolving_to_non_body_is_not_found(self, tmp_path, monkeypatch):
         # a long token that resolves to something that is NOT a BRepBody -> (None) -> handler error
-        design, _, _ = _install(monkeypatch, bodies=[FakeBody("Body1")])
+        design, _, _ = _install(monkeypatch, bodies=[BRepBody("Body1")])
         h = "/v" + "Z" * 70
         design._tokens[h] = object()              # not a FakeBody (BRepBody)
         res = dx.handler(format="step", target=h, file_path=str(tmp_path / "p.step"))

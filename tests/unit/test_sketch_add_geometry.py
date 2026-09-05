@@ -2,7 +2,8 @@
 
 from types import SimpleNamespace
 import pytest
-from conftest import _NamedCollection, load_tool
+from conftest import (MakeComp, Profile, Sketch, SketchCurves, _NamedCollection, install,
+                      load_tool, make_design)
 import json
 
 sk = load_tool("sketch_add_geometry")
@@ -22,9 +23,11 @@ class _SketchPoint:
         self.isConstruction = False
 
 
-class _Coll:
+class _Coll(_NamedCollection):
+    """One per-kind curve collection: the shared count/item protocol plus the add* factories the
+    handler calls, each recording its arguments in `last`."""
     def __init__(self, centres_into=None):
-        self._items = []
+        super().__init__()
         self.last = None
         # A circle's/arc's CENTRE is a SketchPoint the sketch owns: the constructor lands it in
         # sketchPoints, so every later point's index sits one further along per curve drawn.
@@ -67,26 +70,38 @@ class _Coll:
     def addByAngle(self, c, major, minor, start, sweep):
         return self._make("elliptical_arc", c, major, minor, start, sweep)
     def add(self, *a): return self._make("add", *a)
-    @property
-    def count(self):
-        return len(self._items)
-    def item(self, i):
-        return self._items[i]
 
 
-class _AllCurves:
-    """sketch.sketchCurves: a unified count/item view over every sub-collection's curves."""
-    def __init__(self, sketch):
-        self._s = sketch
+class _AllCurves(SketchCurves):
+    """The shared SketchCurves with each per-kind sub-collection swapped for a recording _Coll, and
+    count/item a unified view over all of them plus the sketch's own points."""
+    def __init__(self, points):
+        super().__init__()
+        self.sketchLines = _Coll()
+        self.sketchCircles = _Coll(centres_into=points)
+        self.sketchArcs = _Coll(centres_into=points)
+        self.sketchEllipses = _Coll()
+        self.sketchFittedSplines = _Coll()
+        self.sketchControlPointSplines = _Coll()
+        self.sketchConicCurves = _Coll()
+        self.sketchEllipticalArcs = _Coll()
+        self._colls = [self.sketchLines, self.sketchCircles, self.sketchArcs, self.sketchEllipses,
+                       self.sketchFittedSplines, self.sketchControlPointSplines,
+                       self.sketchConicCurves, self.sketchEllipticalArcs, points]
+
+    @property
+    def _flat(self):
+        return [cv for c in self._colls for cv in c._items]
+
     @property
     def count(self):
-        return sum(c.count for c in self._s._colls)
+        return len(self._flat)
+
     def item(self, i):
-        flat = [cv for c in self._s._colls for cv in c._items]
-        return flat[i]
-    # the handler also calls sketch.sketchCurves.sketchLines etc. via _draw -> use attribute access
-    def __getattr__(self, n):
-        return getattr(self._s, n)
+        return self._flat[i]
+
+    def __iter__(self):
+        return iter(self._flat)
 
 
 class _GeomConstraints:
@@ -102,34 +117,30 @@ class _GeomConstraints:
         return object()
 
 
-class FakeSketch:
+class FakeSketch(Sketch):
+    """The shared Sketch fake with a recording draw surface: the per-kind curve collections a
+    factory call lands in, and the slot constructors that live on the Sketch itself. Each per-kind
+    collection is reachable both here and through sketchCurves - one object, two paths."""
     def __init__(self, name="S"):
-        self.name = name
-        self.isComputeDeferred = False
+        points = _Coll()
+        curves = _AllCurves(points)
+        super().__init__(name=name, curves=curves, profiles=[Profile()])
+        self.sketchPoints = points
         self.isVisible = True
         self.geometricConstraints = _GeomConstraints()
-        self.sketchPoints = _Coll()
-        self.sketchLines = _Coll()
-        self.sketchCircles = _Coll(centres_into=self.sketchPoints)
-        self.sketchArcs = _Coll(centres_into=self.sketchPoints)
-        self.sketchEllipses = _Coll()
-        self.sketchFittedSplines = _Coll()
-        self.sketchControlPointSplines = _Coll()
-        self.sketchConicCurves = _Coll()
-        self.sketchEllipticalArcs = _Coll()
-        self._colls = [self.sketchLines, self.sketchCircles, self.sketchArcs,
-                       self.sketchEllipses, self.sketchFittedSplines,
-                       self.sketchControlPointSplines, self.sketchConicCurves,
-                       self.sketchEllipticalArcs, self.sketchPoints]
-        self.profiles = type("P", (), {"count": 1})()
+        self.sketchLines = curves.sketchLines
+        self.sketchCircles = curves.sketchCircles
+        self.sketchArcs = curves.sketchArcs
+        self.sketchEllipses = curves.sketchEllipses
+        self.sketchFittedSplines = curves.sketchFittedSplines
+        self.sketchControlPointSplines = curves.sketchControlPointSplines
+        self.sketchConicCurves = curves.sketchConicCurves
+        self.sketchEllipticalArcs = curves.sketchEllipticalArcs
         self.slot_call = None
         self.center_point_arc_slot_args = None
         self.three_point_arc_slot_args = None
         self.overall_slot_args = None
         self.center_point_slot_args = None
-    @property
-    def sketchCurves(self):
-        return _AllCurves(self)
 
     # addCenterToCenterSlot is on the Sketch, NOT sketchLines. Capturing it here (and not on _Coll)
     # makes a call to curves.sketchLines.addCenterToCenterSlot AttributeError instead of passing.
@@ -182,22 +193,18 @@ class FakeSketch:
         return self._land_linear_slot(args)
 
 
-class FakeSketches:
+class FakeSketches(_NamedCollection):
+    """A component's sketches: the shared collection protocol plus the add() that records the plane
+    entity it was handed."""
     def __init__(self, sk_):
         # sk_=None builds an EMPTY collection - the design where a blank sketch_name has no most
         # recent sketch to fall back on, which is the only way to reach "No sketch to draw on".
-        self._l = [] if sk_ is None else [sk_]
+        super().__init__([] if sk_ is None else [sk_])
         self.added = None          # the plane entity sketches.add() was handed
-    @property
-    def count(self):
-        return len(self._l)
-    def item(self, i):
-        return self._l[i]
-    def itemByName(self, n):
-        return next((s for s in self._l if s.name == n), None)
+
     def add(self, planar):
         self.added = planar
-        return self._l[0]
+        return self._items[0]
 
 
 def _datum(name):
@@ -210,7 +217,20 @@ def _datum(name):
     return cp
 
 
-class FakeDesignDraw:
+def _draw_component(name, sketch, planes):
+    # entityToken, because _common.same_component compares on it and answers None without one -
+    # and the assembly-context lift REFUSES an owner it cannot tell from the root rather than
+    # hand back a component-local datum Fusion would reject.
+    comp = MakeComp(name=name, entity_token=f"TOKEN:{name}")
+    comp.sketches = FakeSketches(sketch)
+    comp.constructionPlanes = _NamedCollection(list(planes))
+    comp.xYConstructionPlane = _datum("XY")
+    comp.xZConstructionPlane = _datum("XZ")
+    comp.yZConstructionPlane = _datum("YZ")
+    return comp
+
+
+def _draw_design(sketch, planes=(), subs=(), active=None):
     """The design the sketch tools build into: each component's sketches collection, the origin
     construction planes PlaneRef's xy/xz/yz alias reads off the ACTIVE one, and - for the design-wide
     name lookup - the sub-components carrying their own datums plus the occurrences placing them.
@@ -218,62 +238,33 @@ class FakeDesignDraw:
     planes: [datum] on the root. subs: [(component name, [datum names], [occurrence fullPathNames])].
     active: the component name to treat as active (default: the root).
     """
-
-    def __init__(self, sketch, planes=(), subs=(), active=None):
-        root = self._component("Root", sketch, planes)
-        comps, occs = [root], []
-        for comp_name, datum_names, paths in subs:
-            sub = self._component(comp_name, sketch, [_datum(n) for n in datum_names])
-            for cp in sub.constructionPlanes:
-                cp.component = sub
-            comps.append(sub)
-            occs += [SimpleNamespace(fullPathName=p, name=p, component=sub) for p in paths]
-        self.rootComponent = root
-        self.allComponents = _NamedCollection(comps)
-        self.activeComponent = self.allComponents.itemByName(active) or root
-        root.allOccurrences = occs
-        root.allOccurrencesByComponent = lambda c: _NamedCollection(
-            [o for o in occs if o.component is c])
-
-    @staticmethod
-    def _component(name, sketch, planes):
-        # entityToken, because _common.same_component compares on it and answers None without one -
-        # and the assembly-context lift REFUSES an owner it cannot tell from the root rather than
-        # hand back a component-local datum Fusion would reject.
-        return SimpleNamespace(name=name, entityToken=f"TOKEN:{name}",
-                               sketches=FakeSketches(sketch),
-                               constructionPlanes=_NamedCollection(list(planes)),
-                               xYConstructionPlane=_datum("XY"),
-                               xZConstructionPlane=_datum("XZ"),
-                               yZConstructionPlane=_datum("YZ"))
+    root = _draw_component("Root", sketch, planes)
+    comps, occs = [root], []
+    for comp_name, datum_names, paths in subs:
+        sub = _draw_component(comp_name, sketch, [_datum(n) for n in datum_names])
+        for cp in sub.constructionPlanes:
+            cp.component = sub
+        comps.append(sub)
+        occs += [SimpleNamespace(fullPathName=p, name=p, component=sub) for p in paths]
+    design = make_design(comp=root, all_components=comps)
+    design.activeComponent = design.allComponents.itemByName(active) or root
+    root.allOccurrences = occs
+    root.allOccurrencesByComponent = lambda c: _NamedCollection(
+        [o for o in occs if o.component is c])
+    return design
 
 
 def _install_draw(monkeypatch, sketch, **design_kw):
-    """Wire a fake sketch into the tool's design seams for one test; monkeypatch undoes it after.
-    Extra keywords (planes / subs / active) shape the design PlaneRef resolves against. Returns it.
-
-    Both seams are patched: the handler's own `_common` AND the one `_inputs` resolves its kinds
-    through, so a PlaneRef lookup sees the same design the handler does."""
-    import adsk.fusion, adsk.core
-    design = FakeDesignDraw(sketch, **design_kw)
-    monkeypatch.setattr(sk, "app", SimpleNamespace(activeProduct=design))
-    monkeypatch.setattr(sk._common, "app", sk.app)
-    monkeypatch.setattr(sk._inputs._common, "app", sk.app)
-    monkeypatch.setattr(adsk.fusion.Design, "cast",
-                        lambda x: x if isinstance(x, FakeDesignDraw) else None)
+    """Wire a fake sketch into the tool's design seams for one test. Extra keywords
+    (planes / subs / active) shape the design PlaneRef resolves against. Returns it."""
+    import adsk.core
+    design = install(sk, _draw_design(sketch, **design_kw))
     monkeypatch.setattr(adsk.core.Point3D, "create",
                         lambda x, y, z: type("P", (), {"x": x, "y": y, "z": z})())
     # a Vector3D whose components ARE its magnitude along each axis - the elliptical arc's major/
     # minor axis vectors carry their radius as the vector's magnitude.
     monkeypatch.setattr(adsk.core.Vector3D, "create",
                         lambda x, y, z: type("V", (), {"x": x, "y": y, "z": z})())
-
-    class _OC:
-        def __init__(self): self._i = []
-        def add(self, x): self._i.append(x)
-        @property
-        def count(self): return len(self._i)
-    monkeypatch.setattr(adsk.core.ObjectCollection, "create", _OC)
     monkeypatch.setattr(adsk.core.ValueInput, "createByReal", lambda v: ("real", v))
     monkeypatch.setattr(adsk.core.ValueInput, "createByString", lambda s: ("string", s))
     return design
@@ -301,39 +292,27 @@ class _DeferStuck(FakeSketch):
         self._deferred = bool(value)
 
 
-class _ScopedDesign:
+def _scoped_design(pairs):
     """Two (or more) components, each holding its OWN sketch collection.
 
     Both components hold a sketch of the SAME name on purpose - that is the only fixture in which
     the identity filter actually runs. Two DIFFERENT names would resolve design-wide with no scope
     involved and the test would pass against unscoped code."""
-
-    def __init__(self, pairs):
-        comps = [SimpleNamespace(name=name, sketches=_NamedCollection(list(sketches)),
-                                 constructionPlanes=_NamedCollection([]),
-                                 xYConstructionPlane=_datum("XY"),
-                                 xZConstructionPlane=_datum("XZ"),
-                                 yZConstructionPlane=_datum("YZ"))
-                 for name, sketches in pairs]
-        self.rootComponent = comps[0]
-        self.allComponents = _NamedCollection(comps)
-        self.activeComponent = comps[0]
-        self.rootComponent.allOccurrences = []
-
-    def component(self, name):
-        return self.allComponents.itemByName(name)
+    comps = []
+    for name, sketches in pairs:
+        comp = MakeComp(name=name, sketches=list(sketches))
+        comp.constructionPlanes = _NamedCollection([])
+        comp.xYConstructionPlane = _datum("XY")
+        comp.xZConstructionPlane = _datum("XZ")
+        comp.yZConstructionPlane = _datum("YZ")
+        comps.append(comp)
+    return make_design(comp=comps[0], all_components=comps)
 
 
 def _install_scoped(monkeypatch, pairs):
-    """Point sketch_add_geometry at a multi-component design. Both design seams are patched (the handler's
-    own _common and the one _inputs resolves through), inside monkeypatch so each undoes itself."""
-    import adsk.fusion, adsk.core
-    design = _ScopedDesign(pairs)
-    monkeypatch.setattr(sk, "app", SimpleNamespace(activeProduct=design))
-    monkeypatch.setattr(sk._common, "app", sk.app)
-    monkeypatch.setattr(sk._inputs._common, "app", sk.app)
-    monkeypatch.setattr(adsk.fusion.Design, "cast",
-                        lambda x: x if isinstance(x, _ScopedDesign) else None)
+    """Point sketch_add_geometry at a multi-component design."""
+    import adsk.core
+    design = install(sk, _scoped_design(pairs))
     monkeypatch.setattr(adsk.core.Point3D, "create",
                         lambda x, y, z: type("P", (), {"x": x, "y": y, "z": z})())
     return design
@@ -1478,7 +1457,7 @@ class TestDrawComponentScope:
     def test_a_scope_that_does_not_hold_the_sketch_is_refused_naming_who_does(self, monkeypatch):
         alpha = FakeSketch("Plate")
         design = _install_scoped(monkeypatch, [("Alpha", [alpha]), ("Beta", [])])
-        assert design.component("Beta") is not None
+        assert design.allComponents.itemByName("Beta") is not None
         res = sk.handler(kind="circle", sketch_name="Plate",
                                              component="Beta", cx=0, cy=0, radius=5)
         assert res["isError"] is True

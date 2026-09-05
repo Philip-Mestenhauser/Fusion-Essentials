@@ -8,12 +8,15 @@ import math
 import pytest
 
 import live_api_facts as _api_facts
-from conftest import (FakeApplication, FakeCAMParameter, FakeDataFile, FakeDataFolder,
+from conftest import (FakeApplication, FakeBaseFeature, FakeBaseFeatures, FakeCAMParameter,
+                      FakeDataFile, FakeDataFolder,
                       FakeDocumentReference, FakeFeature, FakeFeatures, FakeJoints, FakeMachine,
                       FakeMotionLink, FakeMotionLinks, FakeRigidGroup, FakeRigidGroups,
-                      FakeSelection, FakeSetups, FakeTimelineObject, FakeTool, FakeUserParameter,
+                      FakeSelection, FakeSetups, FakeTimeline, FakeTimelineObject, FakeTool,
+                      FakeUserParameter,
                       FakeUserParameters, _MotionLimits, make_cam_parameters, make_data_tree,
-                      make_design, make_joint, make_document_world, make_timeline)
+                      make_design, make_joint, make_document_world, make_sketch, make_sketch_curve,
+                      make_timeline)
 
 
 class TestDocumentWorld:
@@ -67,12 +70,21 @@ class TestDocumentWorld:
 
 
 class TestTimelineWorld:
-    def test_a_marker_move_past_the_end_answers_false_and_leaves_the_marker(self):
+    def test_a_marker_move_past_either_end_answers_true_and_leaves_the_marker(self):
+        # Measured: the bool is no signal that the marker moved - only markerPosition says that.
         timeline = make_timeline("Sketch1", "Extrude1", marker=1)
         assert timeline.moveToEnd() is True and timeline.markerPosition == 2
-        # The exact boundary: the marker may sit AT count, one step further cannot land.
-        assert timeline.movetoNextStep() is False and timeline.markerPosition == 2
+        # The exact boundary: the marker may sit AT count, and one step further answers True
+        # while landing nowhere.
+        assert timeline.movetoNextStep() is True and timeline.markerPosition == 2
         assert timeline.moveToPreviousStep() is True and timeline.markerPosition == 1
+        assert timeline.moveToBeginning() is True and timeline.markerPosition == 0
+        assert timeline.moveToPreviousStep() is True and timeline.markerPosition == 0
+
+    def test_a_move_the_platform_refuses_answers_false(self):
+        # the only False left: move_ok models the refusal, distinct from a move that lands nowhere.
+        stuck = FakeTimeline(move_ok=False, marker=1)
+        assert stuck.moveToBeginning() is False and stuck.markerPosition == 1
 
     def test_a_refused_roll_leaves_the_entry_where_it_was(self):
         stubborn = FakeTimelineObject("Extrude1", roll_ok=False)
@@ -89,6 +101,25 @@ class TestTimelineWorld:
         assert features.itemByName("Extrude1") is not None
         assert base.finishEdit() is True
         assert features.baseFeatures.itemByName(base.name) is base
+
+    def test_a_scope_never_opened_reads_apart_from_one_opened_and_closed(self):
+        # _open alone cannot tell the two apart - it is False before the first startEdit and False
+        # again after finishEdit, which is why the counts exist.
+        base = FakeBaseFeature()
+        untouched = FakeBaseFeature()
+        assert base.startEdit() is True and base.finishEdit() is True
+        assert (base._starts, base._finishes) == (1, 1)
+        assert (untouched._starts, untouched._finishes) == (0, 0)
+        assert base._open is untouched._open is False
+
+    def test_the_base_feature_add_hands_back_is_the_one_the_caller_supplied(self):
+        held = FakeBaseFeature("Held")
+        collection = FakeBaseFeatures(made=held)
+        assert collection.count == 0            # nothing is in the walk until add() runs
+        assert collection.add() is held
+        assert collection.count == 1 and collection.itemByName("Held") is held
+        # a supplied feature is governed by the same invisibility rule as a self-made one
+        assert held.startEdit() is True and collection.count == 0
 
     def test_a_timeline_read_inside_an_open_scope_raises(self):
         design = make_design(timeline=make_timeline("Extrude1", raises="scope is open"))
@@ -234,3 +265,21 @@ class TestDataWorld:
         part = root.dataFiles.item(0)
         assert part.move(FakeDataFolder("Archive")) is False
         assert part.parentFolder is root
+
+
+class TestSketchWorld:
+    def test_a_curve_lands_in_both_the_flat_walk_and_its_own_kind(self):
+        # A '<type>:<index>' ref indexes the per-kind sub-collection while a count read-back walks
+        # the flat one, so a curve missing from either side reads as a draw that never landed.
+        line, circle = make_sketch_curve("L0"), make_sketch_curve("C0")
+        sketch = make_sketch("Plate", lines=[line], circles=[circle])
+        assert sketch.sketchCurves.count == 2
+        assert sketch.sketchCurves.sketchLines.item(0) is line
+        assert sketch.sketchCurves.sketchCircles.item(0) is circle
+        assert sketch.sketchCurves.sketchArcs.count == 0
+
+    def test_a_deferred_sketch_still_answers_the_profiles_it_held(self):
+        # Measured (sketch-profiles-under-compute-deferred): the flag does not empty profiles, it
+        # freezes them - so a stale count reads exactly like a fresh one and the flag is the tell.
+        sketch = make_sketch(profiles=[object(), object()], is_compute_deferred=True)
+        assert sketch.isComputeDeferred is True and sketch.profiles.count == 2

@@ -14,7 +14,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import MakeComp, MakeDesign, MeshBody, install, load_tool, error_message
+from conftest import (FakeFeatures, MakeComp, MakeDesign, MeshBody, install, load_tool,
+                      error_message)
 
 md = load_tool("mesh_delete")
 
@@ -74,9 +75,22 @@ class _FakeMeshRemoveFeatures:
         return SimpleNamespace(name=self._feat_name)
 
 
-class _FakeFeatures:
+class _FakeFeatures(FakeFeatures):
+    """comp.features plus the mesh-remove collection this tool reaches through, with baseFeatures
+    counting its own reads - the seam a reintroduced base-feature scope would show up on."""
     def __init__(self, mesh_remove=None):
+        self._base_feature_reads = 0
+        super().__init__()
         self.meshRemoveFeatures = mesh_remove
+
+    @property
+    def baseFeatures(self):
+        self._base_feature_reads += 1
+        return self._base_features
+
+    @baseFeatures.setter
+    def baseFeatures(self, value):
+        self._base_features = value
 
 
 # ── DIRECT mode: MeshBody.deleteMe() ─────────────────────────────────────────────────────────────
@@ -268,14 +282,12 @@ class TestParametricDelete:
         assert "still resolves" in error_message(md.handler(mesh="H"))
 
     def test_add_does_not_touch_base_features_collection(self, monkeypatch):
-        # REGRESSION guard for the base-feature-scope trap: comp.features has NO baseFeatures
-        # attribute at all in this rig, so any code path that tries to open a scope (e.g. a
-        # reintroduced run_in_base_feature wrapper) raises AttributeError instead of silently
-        # succeeding - proving the handler never reaches for it.
+        # mesh_delete calls createInput/add directly, opening no scope. run_in_base_feature reads
+        # comp.features.baseFeatures, so a reintroduced wrapper lands on this rig as a read.
         mesh, comp, design, mrf = self._setup(monkeypatch)
-        assert not hasattr(comp.features, "baseFeatures")
         out = _payload(md.handler(mesh="H"))
         assert out["deleted"] == "Scan1"
+        assert comp.features._base_feature_reads == 0
 
 
 # ── design-wide mesh NAME resolution (exercises the REAL _inputs.MeshBodyRef, not monkeypatched) ───

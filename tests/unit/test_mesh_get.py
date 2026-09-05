@@ -5,17 +5,11 @@ import re
 import adsk.fusion
 import pytest
 
-from conftest import (BRepBody, MakeComp, MeshBody, install, load_tool, make_bbox, make_design,
-                      make_occurrence, payload)
+from conftest import (BRepBody, FakeBaseFeature, MakeComp, MeshBody, install, load_tool, make_bbox,
+                      make_design, make_occurrence, payload)
 
 mo = load_tool("mesh_get")
 mesh_common_mod = load_tool("_mesh_common")
-
-
-class _BaseFeature:
-    """The BaseFeature the base-feature scope check reads for its isinstance branch."""
-    def __init__(self):
-        self.name = "BaseFeature1"
 
 
 @pytest.fixture(autouse=True)
@@ -23,7 +17,7 @@ def _types(monkeypatch):
     """The adsk.fusion type identities the body kind and the base-feature scope check branch on."""
     monkeypatch.setattr(adsk.fusion, "MeshBody", MeshBody, raising=False)
     monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
-    monkeypatch.setattr(adsk.fusion, "BaseFeature", _BaseFeature, raising=False)
+    monkeypatch.setattr(adsk.fusion, "BaseFeature", FakeBaseFeature, raising=False)
 
 
 def _wire(comp, all_components=None):

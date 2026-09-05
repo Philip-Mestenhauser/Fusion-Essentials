@@ -18,21 +18,13 @@ import adsk.core
 import adsk.fusion
 import pytest
 
-from conftest import load_tool
+from conftest import (MakeComp, Sketch, SketchCurves, _NamedCollection, load_tool, make_design,
+                      install as install_design)
 
 sc = load_tool("sketch_constrain")
 
 
 # ── fakes ───────────────────────────────────────────────────────────────────
-
-class _Coll:
-    def __init__(self, items):
-        self._i = list(items)
-    @property
-    def count(self):
-        return len(self._i)
-    def item(self, i):
-        return self._i[i] if 0 <= i < len(self._i) else None
 
 
 class FakeCurve:
@@ -321,25 +313,30 @@ class FakeConstraints:
         return c
 
 
-class FakeSketchCurves:
+class FakeSketchCurves(SketchCurves):
+    """The shared SketchCurves, every per-kind sub-collection filled from its own argument."""
     def __init__(self, lines, arcs, circles, ellipses=(), splines=(), cv_splines=(), fixed_splines=()):
-        self.sketchLines = _Coll(lines)
-        self.sketchArcs = _Coll(arcs)
-        self.sketchCircles = _Coll(circles)
-        self.sketchEllipses = _Coll(ellipses)
-        self.sketchFittedSplines = _Coll(splines)
-        self.sketchControlPointSplines = _Coll(cv_splines)
-        self.sketchFixedSplines = _Coll(fixed_splines)
+        super().__init__()
+        self.sketchLines = _NamedCollection(lines)
+        self.sketchArcs = _NamedCollection(arcs)
+        self.sketchCircles = _NamedCollection(circles)
+        self.sketchEllipses = _NamedCollection(ellipses)
+        self.sketchFittedSplines = _NamedCollection(splines)
+        self.sketchControlPointSplines = _NamedCollection(cv_splines)
+        self.sketchFixedSplines = _NamedCollection(fixed_splines)
 
 
-class FakeSketch:
+class FakeSketch(Sketch):
+    """The shared Sketch carrying the entity collections a '<type>:<index>' ref indexes, the
+    recording geometricConstraints, and the autoConstrain input/result the tool round-trips."""
     def __init__(self, name, lines=(), arcs=(), circles=(), points=(), ellipses=(), splines=(),
                 cv_splines=(), fixed_splines=(), dimensions=()):
-        self.name = name
-        self.sketchCurves = FakeSketchCurves(list(lines), list(arcs), list(circles), list(ellipses),
-                                             list(splines), list(cv_splines), list(fixed_splines))
-        self.sketchPoints = _Coll(list(points))
-        self.sketchDimensions = _Coll(list(dimensions))
+        super().__init__(name=name,
+                         curves=FakeSketchCurves(list(lines), list(arcs), list(circles),
+                                                 list(ellipses), list(splines), list(cv_splines),
+                                                 list(fixed_splines)))
+        self.sketchPoints = _NamedCollection(list(points))
+        self.sketchDimensions = _NamedCollection(list(dimensions))
         self.geometricConstraints = FakeConstraints()
         self.isFullyConstrained = False
         # autoConstrain: the input the tool sets resultOption on, and the result it reads back.
@@ -356,42 +353,19 @@ class FakeSketch:
         return self.autoConstrainResult
 
 
-class FakeSketches:
-    def __init__(self, sketches):
-        self._s = list(sketches)
-    def itemByName(self, name):
-        for s in self._s:
-            if s.name == name:
-                return s
-        return None
-    @property
-    def count(self):
-        return len(self._s)
-    def item(self, i):
-        return self._s[i]
-
-
-class FakeRoot:
-    def __init__(self, sketches):
-        self.sketches = FakeSketches(sketches)
-        # the origin plane a PlaneRef('xy') resolves to - the 'surface' operand's simplest form
-        self.xYConstructionPlane = FakePlane("XY")
-
-
-class FakeDesign:
-    def __init__(self, sketches):
-        self.rootComponent = FakeRoot(sketches)
+def _component(sketches, name="Root"):
+    """A component holding `sketches` plus the origin plane a PlaneRef('xy') resolves to - the
+    'surface' operand's simplest form."""
+    comp = MakeComp(name=name, sketches=list(sketches))
+    comp.xYConstructionPlane = FakePlane("XY")
+    return comp
 
 
 @pytest.fixture
 def install(monkeypatch):
-    """Wire a sketch into the tool's design seams for one test; monkeypatch undoes it after."""
+    """Wire a sketch into the tool's design seams for one test."""
     def _do(sketch):
-        design = FakeDesign([sketch])
-        monkeypatch.setattr(sc, "app", type("A", (), {"activeProduct": design})())
-        monkeypatch.setattr(sc._common, "app", sc.app)
-        monkeypatch.setattr(adsk.fusion.Design, "cast",
-                            lambda x: x if isinstance(x, FakeDesign) else None)
+        design = install_design(sc, make_design(comp=_component([sketch])))
         # ValueInput passes the raw number/string through here, so the fake pattern/offset inputs
         # read the counts and distances the handler actually asked for.
         monkeypatch.setattr(adsk.core.ValueInput, "createByReal", lambda v: v)
@@ -624,7 +598,7 @@ class _AnchoredLine(FakeCurve):
         self.endSketchPoint = end
 
 
-class _AddablePoints(_Coll):
+class _AddablePoints(_NamedCollection):
     """sketchPoints as the 'mid' anchor uses it - that anchor CREATES a point in the sketch, so what
     it added (and whether a refused call added anything) is readable here."""
     def __init__(self, items):
@@ -634,7 +608,7 @@ class _AddablePoints(_Coll):
     def add(self, geometry):
         self.added.append(geometry)
         pt = FakeCurve(f"MID{len(self.added)}", "point")
-        self._i.append(pt)
+        self._items.append(pt)
         return pt
 
 
@@ -769,32 +743,13 @@ class TestEntityAnchors:
 # names 'component' as the way through: a component that arrived inside a referenced document is
 # not renameable from here, so a rename is no remedy. These drive the REAL walk and scope filter.
 
-class _MultiComp:
-    def __init__(self, name, sketches):
-        self.name = name
-        self.sketches = FakeSketches(sketches)
-        self.xYConstructionPlane = FakePlane("XY")
-
-
-class _MultiDesign:
+@pytest.fixture
+def install_multi():
     """Several named components, each with its OWN sketches collection - the shape the scope filter
     is asked about. `allComponents` is a DESIGN property, which is what all_components walks."""
-    def __init__(self, comps):
-        self.rootComponent = comps[0]
-        self.allComponents = _Coll(comps)
-        self.activeComponent = comps[0]
-        self.rootComponent.allOccurrences = []
-
-
-@pytest.fixture
-def install_multi(monkeypatch):
     def _do(pairs):
-        design = _MultiDesign([_MultiComp(n, s) for n, s in pairs])
-        monkeypatch.setattr(sc, "app", type("A", (), {"activeProduct": design})())
-        monkeypatch.setattr(sc._common, "app", sc.app)
-        monkeypatch.setattr(adsk.fusion.Design, "cast",
-                            lambda x: x if isinstance(x, _MultiDesign) else None)
-        return design
+        comps = [_component(s, name=n) for n, s in pairs]
+        return install_design(sc, make_design(comp=comps[0], all_components=comps))
     return _do
 
 
@@ -896,7 +851,7 @@ class TestSingleLine:
             def isFixed(self, v):
                 raise RuntimeError("cannot fix this entity")
 
-        s.sketchCurves.sketchLines._i[1] = _RejectsFix()
+        s.sketchCurves.sketchLines._items[1] = _RejectsFix()
         res = sc.handler(constraint="fix", sketch_name="S", entity_one="line:1")
         assert res["isError"] is True
         assert "fix" in res["message"].lower()
@@ -918,7 +873,7 @@ class TestSingleLine:
             def isFixed(self, v):
                 pass                              # accepted and ignored
 
-        s.sketchCurves.sketchLines._i[1] = _SwallowsFix()
+        s.sketchCurves.sketchLines._items[1] = _SwallowsFix()
         res = sc.handler(constraint="fix", sketch_name="S", entity_one="line:1")
         assert res["isError"] is True
         assert "fix" in res["message"].lower()
@@ -963,7 +918,7 @@ class _TextSketch(FakeSketch):
     def __init__(self, n_lines=4, lockable=(True, True, True, True), always_loose=False):
         super().__init__("S", lines=[FakeCurve("L0", "line")])
         self.anchor_lines = [_RectangleLine(f"R{i}", lockable[i]) for i in range(n_lines)]
-        self.sketchTexts = _Coll([_SketchText(self.anchor_lines)])
+        self.sketchTexts = _NamedCollection([_SketchText(self.anchor_lines)])
         self.always_loose = always_loose
 
     @property
@@ -1178,16 +1133,8 @@ class TestGuards:
         mine, theirs = _two_line_sketch(), _two_line_sketch()
         design = install(mine)
         design.rootComponent.name = "Root"
-        other = FakeRoot([theirs])
-        other.name = "Frame"
-
-        class _Comps:
-            _c = [design.rootComponent, other]
-            count = 2
-            def item(self, i):
-                return _Comps._c[i]
-
-        design.allComponents = _Comps()
+        other = _component([theirs], name="Frame")
+        design._all_components = [design.rootComponent, other]
         res = sc.handler(constraint="horizontal", sketch_name="S", entity_one="line:0")
         assert res["isError"] is True
         assert "2 sketches" in res["message"] and "Root" in res["message"] and "Frame" in res["message"]
@@ -1687,7 +1634,7 @@ def _auto_result(sketch, dims=0, cons=0, moved=(), fully=False):
 
     def _run(aci):
         sketch.autoConstrainCalls.append(aci)
-        sketch.sketchDimensions._i.extend([object()] * dims)
+        sketch.sketchDimensions._items.extend([object()] * dims)
         sketch.geometricConstraints.count += cons
         sketch.isFullyConstrained = fully
         return result

@@ -11,6 +11,8 @@ passed in, without a real design.
 import json
 import types
 
+import adsk.fusion
+
 from conftest import (
     BRepBody, BRepFace, FakeUnitsManager, MakeComp, Profile, _NamedCollection, install, load_tool,
     make_bbox, make_design, make_sketch, payload as _payload,
@@ -121,12 +123,8 @@ def _component(name, sketches=(), bodies=(), ef=None):
 
 
 def _wire_adsk():
-    """Model the enum members and geometry factories the handler reaches for."""
+    """Model the geometry factories the handler reaches for - FeatureOperations arrives seeded."""
     import adsk.fusion, adsk.core
-    fo = adsk.fusion.FeatureOperations
-    for n in ("NewBodyFeatureOperation", "JoinFeatureOperation",
-              "CutFeatureOperation", "IntersectFeatureOperation"):
-        setattr(fo, n, n)
     adsk.core.ValueInput.createByReal = staticmethod(lambda v: ("real", v))
     adsk.core.ValueInput.createByString = staticmethod(lambda s: ("str", s))
     adsk.fusion.ToEntityExtentDefinition.create = staticmethod(lambda face, chained: ("to", face, chained))
@@ -617,7 +615,7 @@ class TestExtrude:
         sym, dist = ef.last_input.distance_extent
         assert dist[0] == "real" and abs(dist[1] - 0.6) < 1e-9
         assert sym is False
-        assert ef.last_input.operation == "NewBodyFeatureOperation"
+        assert ef.last_input.operation == adsk.fusion.FeatureOperations.NewBodyFeatureOperation
 
     def test_inch_scaling(self):
         ef = _install([_sketch("Base")])
@@ -633,7 +631,7 @@ class TestExtrude:
     def test_operation_mapping_cut(self):
         ef = _install([_sketch("S")])
         _payload(ex.handler(sketch_name="S", distance=5, operation="cut"))
-        assert ef.last_input.operation == "CutFeatureOperation"
+        assert ef.last_input.operation == adsk.fusion.FeatureOperations.CutFeatureOperation
 
     def test_symmetric_flag_passed(self):
         ef = _install([_sketch("S")])
@@ -874,7 +872,7 @@ def _install_geom(faces=None, bodies=None):
     def _cut_removes(inp):
         # A cut takes material out of every body it was scoped to - the drop the design-wide
         # snapshot diffs. Override ef.on_add for a cut that reaches nothing.
-        if inp.operation == "CutFeatureOperation":
+        if inp.operation == adsk.fusion.FeatureOperations.CutFeatureOperation:
             for b in (inp.participantBodies or ()):
                 b.volume = max(b.volume - 10.0, 0.0)
     ef.on_add = _cut_removes

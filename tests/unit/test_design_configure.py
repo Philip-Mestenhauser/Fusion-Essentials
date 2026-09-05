@@ -18,9 +18,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import load_tool
+import live_api_facts as _api_facts
+from conftest import (FakeDataFile, FakeFeature, FakeOccurrence, FakeTimeline, FakeTimelineObject,
+                      MakeComp, MakeDesign, _NamedCollection, load_tool)
 
 dc = load_tool("design_configure")
+
+_WARNING = _api_facts.ENUMS["fusion.FeatureHealthStates"]["WarningFeatureHealthState"]
+_ERROR = _api_facts.ENUMS["fusion.FeatureHealthStates"]["ErrorFeatureHealthState"]
 
 
 # ── fakes mirroring the configurations object model ─────────────────────────
@@ -29,13 +34,6 @@ class _Param:
     def __init__(self, name, expr="80 mm"):
         self.name = name
         self.expression = expr
-
-
-class _Params:
-    def __init__(self, params):
-        self._p = list(params)
-    def itemByName(self, name):
-        return next((p for p in self._p if p.name == name), None)
 
 
 class ConfigurationParameterCell:
@@ -92,22 +90,18 @@ class _Row:
         return True
 
 
-class _Rows:
+class _Rows(_NamedCollection):
+    """ConfigurationRows: the shared counted/iterable walk plus add(name), which ACTIVATES the new
+    row and lets the owner copy the row above it into it."""
     def __init__(self, owner=None, on_add=None):
-        self._r = []
+        super().__init__()
         self._owner = owner
         self._on_add = on_add
-    @property
-    def count(self):
-        return len(self._r)
-    def item(self, i):
-        return self._r[i]
-    def __iter__(self):
-        return iter(self._r)        # real ConfigurationRows is iterable (read tool's _find_row needs it)
+
     def add(self, name):
-        prev = self._r[-1] if self._r else None
-        r = _Row(name, len(self._r), self._owner)
-        self._r.append(r)
+        prev = self._items[-1] if self._items else None
+        r = _Row(name, len(self._items), self._owner)
+        self._items.append(r)
         if self._owner is not None:
             self._owner._active = r         # adding a configuration row activates it
         if self._on_add is not None:
@@ -358,17 +352,13 @@ class ConfigurationTopTable:
         tc.getCellByRowName(row.name)._row = tc.getCellByRowName(prev.name).referencedTableRow
 
 
-class _MaterialCollection:
+class _MaterialCollection(_NamedCollection):
     """design.materials - a count/item(i) collection of named materials (what iter_collection walks)."""
     def __init__(self, names):
-        self._m = [SimpleNamespace(name=n, id="mat-%d" % i) for i, n in enumerate(names)]
-    @property
-    def count(self):
-        return len(self._m)
-    def item(self, i):
-        return self._m[i]
+        super().__init__(SimpleNamespace(name=n, id="mat-%d" % i) for i, n in enumerate(names))
+
     def named(self, name):
-        return next(m for m in self._m if m.name == name)
+        return next(m for m in self._items if m.name == name)
 
 
 class _PartRow:
@@ -391,17 +381,19 @@ class _PartTable:
         return None
 
 
-class _FakeDataFile:
+class _FakeDataFile(FakeDataFile):
+    """A configured-design cloud file: its configurationTable carries the rows an insert picks."""
     def __init__(self, name, configs):
-        self.name = name
-        self.id = "urn:" + name
+        super().__init__(name=name, file_id="urn:" + name)
         self.isConfiguredDesign = True
         self.configurationTable = _PartTable(configs)
 
 
-class _FakeOccurrence:
+class _FakeOccurrence(FakeOccurrence):
+    """The instance addFromConfiguration hands back: it carries the configuration row it was
+    placed from."""
     def __init__(self, row):
-        self.name = "Inserted:1"
+        super().__init__(path="Inserted:1")
         self.isConfiguration = True
         self.configurationRow = row
 
@@ -415,23 +407,26 @@ class _Occurrences:
         return occ
 
 
-class _Root:
-    def __init__(self):
-        self.occurrences = _Occurrences()
+def _root():
+    """The root component, whose occurrences collection is the insert seam."""
+    comp = MakeComp("Root")
+    comp.occurrences = _Occurrences()
+    return comp
 
 
-class _Design:
+class _Design(MakeDesign):
+    """A design that can be CONVERTED to a configured one - createConfiguredDesign mints the top
+    table, and `created` records that it ran."""
     def __init__(self, configured=False, params=None, bodies=None, features=None,
                  appearances=None, datafiles=None, materials=()):
+        super().__init__(comp=_root(), all_parameters=_NamedCollection(params or []))
         self._top = ConfigurationTopTable() if configured else None
-        self.allParameters = _Params(params or [])
         self.created = None
         self._bodies = bodies or {}
         self._features = features or {}
         self._appearances = appearances or {}
         self._datafiles = datafiles or {}
         self.materials = _MaterialCollection(materials)
-        self.rootComponent = _Root()
 
     @property
     def configurationTopTable(self):
@@ -587,11 +582,6 @@ class TestAddParameter:
 
 # ── suppress / visibility (need a resolvable feature/body) ──────────────────
 
-class _FakeFeature:
-    def __init__(self, name):
-        self.name = name
-
-
 class TestSuppressVisibility:
     def _stub_feature(self, monkeypatch, d):
         """Stub the typed FeatureRef seam ((entity, timeline name), error) - resolution itself
@@ -601,7 +591,7 @@ class TestSuppressVisibility:
                             else (None, f"'feature': no timeline feature named '{raw}'."))
 
     def test_suppress_sets_is_suppressed(self, monkeypatch):
-        feat = _FakeFeature("Fillet1")
+        feat = FakeFeature("Fillet1")
         d = _install(monkeypatch, _Design(configured=True, features={"Fillet1": feat}))
         self._stub_feature(monkeypatch, d)
         dc.handler(action="add_configuration", name="Small")
@@ -627,7 +617,7 @@ class TestSuppressVisibility:
         assert d.configurationTopTable.columns.added == []   # nothing mutated on a refusal
 
     def test_visibility_sets_is_visible(self, monkeypatch):
-        body = _FakeFeature("Body1")
+        body = FakeFeature("Body1")
         d = _install(monkeypatch, _Design(configured=True, bodies={"Body1": body}))
         monkeypatch.setattr(dc._BODY, "resolve", lambda raw: (d._bodies.get(raw), None) if raw in d._bodies
                             else (None, f"No body named '{raw}'."))
@@ -643,7 +633,7 @@ class TestSuppressVisibility:
 
 class TestAppearanceTheme:
     def test_appearance_adds_column_before_rows_then_links(self, monkeypatch):
-        body = _FakeFeature("Body1")
+        body = FakeFeature("Body1")
         # Appearance stubs carry a readable .name: the read-back gate treats an unreadable
         # appearance name as a failed assignment.
         from types import SimpleNamespace as _NS
@@ -685,7 +675,7 @@ class TestAppearanceTheme:
 def mat_design(monkeypatch):
     """A configured design with three document materials, two bodies, and the body resolver stubbed."""
     d = _Design(configured=True,
-                bodies={"Body1": _FakeFeature("Body1"), "Body2": _FakeFeature("Body2")},
+                bodies={"Body1": FakeFeature("Body1"), "Body2": FakeFeature("Body2")},
                 materials=("Steel", "ABS Plastic", "Aluminum"))
     _install(monkeypatch, d)
     monkeypatch.setattr(dc._BODY, "resolve",
@@ -881,7 +871,7 @@ class TestAddMaterial:
         assert mtbl.columns.count == 0 and mtbl.rows.count == 0
 
     def test_duplicate_document_material_name_is_refused(self, monkeypatch):
-        d = _Design(configured=True, bodies={"Body1": _FakeFeature("Body1")},
+        d = _Design(configured=True, bodies={"Body1": FakeFeature("Body1")},
                     materials=("Steel", "Steel"))
         _install(monkeypatch, d)
         monkeypatch.setattr(dc._BODY, "resolve", lambda raw: (d._bodies.get(raw), None))
@@ -1067,58 +1057,41 @@ class _ActRow:
         return True
 
 
-class _ActRows:
-    def __init__(self, table, names):
-        self._r = [_ActRow(n, table) for n in names]
-    @property
-    def count(self):
-        return len(self._r)
-    def item(self, i):
-        return self._r[i]
-    def __iter__(self):
-        return iter(self._r)
-
-
 class _ActTable:
     def __init__(self, names):
-        self.rows = _ActRows(self, names)
+        self.rows = _NamedCollection([_ActRow(n, self) for n in names])
         self._active = self.rows.item(0)
     @property
     def activeRow(self):
         return self._active
 
 
-class _ActTimeline:
-    """A timeline with N features in error (healthState 2) and N in warning (healthState 1) - what
-    _common.timeline_health reads."""
-    def __init__(self, n_errors, n_warnings=0):
-        self._items = [SimpleNamespace(healthState=2, name="F%d" % i) for i in range(n_errors)]
-        self._items += [SimpleNamespace(healthState=1, name="W%d" % i) for i in range(n_warnings)]
-    @property
-    def count(self):
-        return len(self._items)
-    def item(self, i):
-        return self._items[i]
+def _act_timeline(n_errors, n_warnings=0):
+    """A timeline with N features in error and N in warning - what _common.timeline_health reads."""
+    rows = [FakeTimelineObject(name="F%d" % i, index=i, health=_ERROR) for i in range(n_errors)]
+    rows += [FakeTimelineObject(name="W%d" % i, index=n_errors + i, health=_WARNING)
+             for i in range(n_warnings)]
+    return FakeTimeline(rows)
 
 
-class _ActDesign:
+class _ActDesign(MakeDesign):
     """A configured design whose rebuild (computeAll) can flip features into error or warning, so the
     activate guard's before/after timeline_health comparison has something to catch."""
     def __init__(self, table, errors_before=0, errors_after=0, warnings_after=0):
+        super().__init__()
         self._top = table
-        self._computed = False
         self._before, self._after = errors_before, errors_after
         self._warn_after = warnings_after
+
     @property
     def configurationTopTable(self):
         return self._top
-    def computeAll(self):
-        self._computed = True
+
     @property
     def timeline(self):
-        if self._computed:
-            return _ActTimeline(self._after, self._warn_after)
-        return _ActTimeline(self._before)
+        if self._computes:
+            return _act_timeline(self._after, self._warn_after)
+        return _act_timeline(self._before)
 
 
 class TestActivate:
@@ -1259,8 +1232,8 @@ def col_design(monkeypatch):
     refusals are driven through."""
     d = _Design(configured=True,
                 params=[_Param("plate_len")],
-                bodies={"Body1": _FakeFeature("Body1")},
-                features={"Fillet1": _FakeFeature("Fillet1")})
+                bodies={"Body1": FakeFeature("Body1")},
+                features={"Fillet1": FakeFeature("Fillet1")})
     _install(monkeypatch, d)
     monkeypatch.setattr(dc._BODY, "resolve",
                         lambda raw: (d._bodies.get(raw), None) if raw in d._bodies
@@ -1367,7 +1340,7 @@ class TestRenameConfigurationRefusals:
         # the row keeps its old name: reporting ok would send the caller addressing cells by a name
         # the table does not carry
         d = _install(monkeypatch, _Design(configured=True))
-        _top(d).rows._r[0] = _StubbornRow("Default")
+        _top(d).rows._items[0] = _StubbornRow("Default")
         res = dc.handler(action="rename_configuration", name="Default", new_name="Medium")
         assert res["isError"] is True and "did not take" in res["message"]
 
@@ -1636,7 +1609,7 @@ class TestMaterialNameResolution:
     def test_a_nameless_document_material_is_not_offered_as_a_candidate(self, monkeypatch):
         # a material whose name is unreadable is skipped, so the miss message lists real names
         # instead of an empty quote pair the caller cannot ask for
-        d = _Design(configured=True, bodies={"Body1": _FakeFeature("Body1")},
+        d = _Design(configured=True, bodies={"Body1": FakeFeature("Body1")},
                     materials=("", "Steel"))
         _install(monkeypatch, d)
         monkeypatch.setattr(dc._BODY, "resolve", lambda raw: (d._bodies.get(raw), None))

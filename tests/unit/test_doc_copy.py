@@ -474,8 +474,10 @@ def _install_mp(monkeypatch, projects, active=None, by_id=None):
     data = FakeData(projects)
     data._by_id = by_id or {}
     app = FakeApp(data, active)
-    monkeypatch.setattr(dc, "app", app)
-    monkeypatch.setattr(dm, "app", app)
+    # neither module binds `app` at import (the handlers read it off _data_common), so the seam
+    # exists only once something installs it - raising=False keeps this fixture order-free.
+    monkeypatch.setattr(dc, "app", app, raising=False)
+    monkeypatch.setattr(dm, "app", app, raising=False)
     return app, data
 
 

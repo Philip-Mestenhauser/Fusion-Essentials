@@ -10,6 +10,7 @@ import json
 import math
 import types
 
+import adsk.fusion
 import pytest
 
 from conftest import (BRepBody, BRepEdge, BRepFace, Cylinder, FakePoint, FakeVector3D, Line3D,
@@ -79,11 +80,7 @@ def _comp(sketches, rf, name="Comp", token="TOKEN:Comp"):
 def _install(sketches):
     rf = FakeRevFeatures()
     install(rv, make_design(comp=_comp(sketches, rf)))
-    import adsk.fusion, adsk.core
-    fo = adsk.fusion.FeatureOperations
-    for n in ("NewBodyFeatureOperation", "JoinFeatureOperation",
-              "CutFeatureOperation", "IntersectFeatureOperation"):
-        setattr(fo, n, n)
+    import adsk.core
     adsk.core.ValueInput.createByReal = staticmethod(lambda v: ("real", v))
     return rf
 
@@ -203,7 +200,7 @@ class TestRevolve:
     def test_operation_cut_mapping(self):
         rf = _install([_sketch("S")])
         payload(rv.handler(sketch_name="S", operation="cut"))
-        assert rf.last_input.operation == "CutFeatureOperation"
+        assert rf.last_input.operation == adsk.fusion.FeatureOperations.CutFeatureOperation
 
     def test_symmetric_flag(self):
         rf = _install([_sketch("S")])

@@ -86,9 +86,6 @@ def wire(monkeypatch):
         design = MakeDesign(comp=comp, tokens=handle_map or {},
                             all_components=[comp] + list(sub_components))
         install(sc, design)
-        for name in ("NewBodyFeatureOperation", "JoinFeatureOperation",
-                     "NewComponentFeatureOperation"):
-            monkeypatch.setattr(adsk.fusion.FeatureOperations, name, name, raising=False)
         monkeypatch.setattr(adsk.core.ValueInput, "createByReal",
                             staticmethod(lambda v: ("real", v)))
         return design

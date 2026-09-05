@@ -5,8 +5,8 @@ import types
 import adsk.fusion
 import pytest
 
-from conftest import (BRepBody, MakeComp, MakeDesign, MeshBody, _NamedCollection, install,
-                      load_tool, payload)
+from conftest import (BRepBody, FakeBaseFeature, FakeBaseFeatures, FakeFeatures, MakeComp,
+                      MakeDesign, MeshBody, _NamedCollection, install, load_tool, payload)
 
 me = load_tool("mesh_generate_face_groups")
 mesh_to_brep = load_tool("mesh_to_brep")
@@ -43,34 +43,12 @@ class _FaceGroupsFeatures:
         return _FeatureResult(self._feat_name, [])
 
 
-class _Features:
+class _Features(FakeFeatures):
+    """comp.features plus the two mesh-feature collections this tool reaches through."""
     def __init__(self, face_groups=None, plane_cut=None, base_features=None):
+        super().__init__(base_features=base_features)
         self.meshGenerateFaceGroupsFeatures = face_groups
         self.meshPlaneCutFeatures = plane_cut
-        self.baseFeatures = base_features
-
-
-class _BaseFeature:
-    def __init__(self):
-        self.name = "BaseFeature1"
-        self.started = False
-        self.finished = False
-
-    def startEdit(self):
-        self.started = True
-        return True
-
-    def finishEdit(self):
-        self.finished = True
-        return True
-
-
-class _BaseFeatures:
-    def __init__(self, made):
-        self._made = made
-
-    def add(self):
-        return self._made
 
 
 @pytest.fixture(autouse=True)
@@ -78,7 +56,7 @@ def _fusion_types(monkeypatch):
     """The adsk.fusion type identities the tool and the input kinds branch on."""
     monkeypatch.setattr(adsk.fusion, "MeshBody", MeshBody, raising=False)
     monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
-    monkeypatch.setattr(adsk.fusion, "BaseFeature", _BaseFeature, raising=False)
+    monkeypatch.setattr(adsk.fusion, "BaseFeature", FakeBaseFeature, raising=False)
 
 
 def _component(features):
@@ -94,7 +72,7 @@ class TestFaceGroups:
                face_groups=0):
         fg = _FaceGroupsFeatures(raise_on_add=raise_on_add, none_feature=none_feature)
         bf = base_feature
-        feats = _Features(face_groups=fg, base_features=_BaseFeatures(made=bf) if bf else None)
+        feats = _Features(face_groups=fg, base_features=FakeBaseFeatures(made=bf))
         src = MeshBody("Scan", face_groups=face_groups)
         comp = _component(feats)
         src.parentComponent = comp
@@ -126,20 +104,20 @@ class TestFaceGroups:
     def test_parametric_routes_through_base_feature_scope(self):
         # PARAMETRIC -> run_in_base_feature opens the scope: the captured BaseFeature is started AND
         # finished (atomic), and the add lands inside it.
-        bf = _BaseFeature()
+        bf = FakeBaseFeature()
         src, fg, _ = self._setup(parametric=True, base_feature=bf)
         out = payload(me.handler(mesh="H"))
         assert out["generated"] is True
-        assert bf.started is True and bf.finished is True   # scope opened AND closed (leak-proof)
+        assert bf._starts == 1 and bf._finishes == 1        # scope opened AND closed (leak-proof)
         assert fg.add_called is True
 
     def test_direct_does_not_open_a_scope(self):
         # Even though a baseFeatures collection exists, DIRECT mode must NOT open/touch it.
-        bf = _BaseFeature()
+        bf = FakeBaseFeature()
         src, fg, _ = self._setup(parametric=False, base_feature=bf)
         out = payload(me.handler(mesh="H"))
         assert out["generated"] is True
-        assert bf.started is False and bf.finished is False  # no scope used in direct
+        assert bf._starts == 0 and bf._finishes == 0         # no scope used in direct
 
     def test_add_failure_surfaces_not_swallowed(self):
         self._setup(parametric=False, raise_on_add=True)
@@ -162,7 +140,7 @@ class TestFaceGroups:
         # PARAMETRIC: the scoped add returns None (the base-feature scope suppresses the feature) and
         # the side effect is present -> SUCCESS, with the scope opened/closed around it. The design's
         # mode is reported as PARAMETRIC - the null feature says nothing about the mode.
-        bf = _BaseFeature()
+        bf = FakeBaseFeature()
         self._setup(parametric=True, base_feature=bf, none_feature=True, face_groups=3)
         out = payload(me.handler(mesh="H"))
         assert out["generated"] is True and out["feature"] is None
@@ -171,12 +149,12 @@ class TestFaceGroups:
         assert "BaseFeature1" in out["note"]
         assert "direct" not in out["note"].lower()
         assert out["face_group_count"] == 3
-        assert bf.started is True and bf.finished is True
+        assert bf._starts == 1 and bf._finishes == 1
 
     def test_mode_is_read_before_the_scope_opens(self):
         # designType reads DIRECT while a base-feature edit scope is open, so a mode read taken after
         # the generation would report 'direct' for a parametric design.
-        bf = _BaseFeature()
+        bf = FakeBaseFeature()
         src, fg, _ = self._setup(parametric=True, base_feature=bf, none_feature=True, face_groups=3)
         des = me.app.activeProduct
         real_start = bf.startEdit

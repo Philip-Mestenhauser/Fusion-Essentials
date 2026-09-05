@@ -14,10 +14,10 @@ import json
 import math
 import types
 
-import adsk.fusion
 import pytest
 
-from conftest import load_tool
+from conftest import (MakeComp, MakeDesign, Sketch, SketchCurves, _NamedCollection, install,
+                      load_tool)
 
 st = load_tool("sketch_set_text")
 
@@ -146,64 +146,49 @@ class FakeText:
             self._font = value
 
 
-class _Coll:
-    # Like a live adsk collection: counted (count/item) AND iterable - consumers use both styles.
-    # item_raises_at models a stale slot: item(i) raises while count still includes it.
+class _Coll(_NamedCollection):
+    """The shared collection with a stale slot: item_raises_at makes item(i) raise while count
+    still includes it."""
     def __init__(self, items, item_raises_at=None):
-        self._i = list(items)
+        super().__init__(items)
         self._raises_at = item_raises_at
-    @property
-    def count(self):
-        return len(self._i)
+
     def item(self, i):
         if i == self._raises_at:
             raise RuntimeError("4 : An API Object refers to a deleted Object")
-        return self._i[i]
-    def __iter__(self):
-        return iter(self._i)
+        return super().item(i)
 
 
-class FakeSketch:
+class FakeSketch(Sketch):
+    """The shared Sketch holding the sketchTexts an edit walks."""
     def __init__(self, name, texts):
-        self.name = name
+        super().__init__(name=name)
         self.sketchTexts = _Coll(texts)
 
 
-class FakeComp:
-    """A component. Its sketch collection answers itemByName, as a live Component's does - that is
-    what the design-wide by-name walk asks each component - and each sketch points back at it, the
-    way a live Sketch's parentComponent does."""
+class FakeComp(MakeComp):
+    """The shared component whose sketches each point back at it, the way a live Sketch's
+    parentComponent does."""
     def __init__(self, name, sketches):
-        self.name = name
-        self.sketches = _NamedColl(list(sketches))
+        super().__init__(name=name, sketches=list(sketches))
         for sk in sketches:
             sk.parentComponent = self
 
 
-class FakeDesign:
+class FakeDesign(MakeDesign):
+    """The shared design plus the computeAll a parametric recompute calls, recorded in `computed`.
+    resolve_sketch (used by the create path) searches rootComponent + all_components."""
     def __init__(self, comps, design_type=1):
-        self._comps = list(comps)
-        self.designType = design_type
+        super().__init__(comp=comps[0] if comps else None, all_components=list(comps),
+                         design_type=design_type)
         self.computed = False
-    @property
-    def allComponents(self):
-        # a counted collection on the DESIGN, as in the live API (Component has no such attribute)
-        return _Coll(self._comps)
-    # resolve_sketch (used by the create path) searches rootComponent + all_components.
-    @property
-    def rootComponent(self):
-        return self._comps[0] if self._comps else None
+
     def computeAll(self):
         self.computed = True
 
 
 def _install(comps, design_type=1):
-    design = FakeDesign(comps, design_type)
-    st.app = type("A", (), {"activeProduct": design})()
-    st._common.app = st.app
-    import adsk.fusion
-    adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
-    return design
+    return install(st, FakeDesign(comps, design_type))
 
 
 def _payload(res):
@@ -276,24 +261,20 @@ class TestIterSketchTexts:
 # scope is what says which component's "Label" the call means.
 
 class TestComponentScopeOnEdits:
-    def _shared(self, monkeypatch):
+    def _shared(self):
         """ONE sketch name in TWO components, each holding a DIFFERENT string, so which text an
         edit reached is readable from the payload rather than from a name they share."""
         alpha = FakeSketch("Label", [FakeText("'alpha-old'")])
         beta = FakeSketch("Label", [FakeText("'beta-old'"), FakeText("'beta-second'")])
-        design = FakeDesign([FakeComp("Alpha", [alpha]), FakeComp("Beta", [beta])])
-        monkeypatch.setattr(st, "app", type("A", (), {"activeProduct": design})())
-        monkeypatch.setattr(st._common, "app", st.app)
-        monkeypatch.setattr(adsk.fusion.Design, "cast",
-                            lambda x: x if isinstance(x, FakeDesign) else None)
+        _install([FakeComp("Alpha", [alpha]), FakeComp("Beta", [beta])])
         return alpha, beta
 
-    def test_an_unscoped_shared_name_refuses_and_rewrites_nothing(self, monkeypatch):
+    def test_an_unscoped_shared_name_refuses_and_rewrites_nothing(self):
         # A sketch name is unique only within a component, so an unscoped edit of a name TWO of them
         # carry has no way to know which nameplate was meant. Writing the string into both and
         # reporting the total reads as success while two components' labels changed - so it refuses,
         # naming the owners and the input that narrows it, and neither text moves.
-        alpha, beta = self._shared(monkeypatch)
+        alpha, beta = self._shared()
         res = st.handler(text="New", sketch_name="Label")
         assert res["isError"] is True
         assert "2 sketches are named 'Label'" in res["message"]
@@ -303,8 +284,8 @@ class TestComponentScopeOnEdits:
         assert beta.sketchTexts.item(0).textParameter.expression == "'beta-old'"
         assert beta.sketchTexts.item(1).textParameter.expression == "'beta-second'"
 
-    def test_the_scope_edits_only_that_components_texts(self, monkeypatch):
-        alpha, beta = self._shared(monkeypatch)
+    def test_the_scope_edits_only_that_components_texts(self):
+        alpha, beta = self._shared()
         out = _payload(st.handler(text="New", sketch_name="Label", component="Beta"))
         assert out["changed_count"] == 2                       # Beta's two, not Alpha's one
         assert [c["before"] for c in out["changed"]] == ["beta-old", "beta-second"]
@@ -312,43 +293,39 @@ class TestComponentScopeOnEdits:
         assert {c["component"] for c in out["changed"]} == {"Beta"}
         assert alpha.sketchTexts.item(0).textParameter.expression == "'alpha-old'"
 
-    def test_the_sibling_component_is_reachable_by_the_same_call(self, monkeypatch):
-        alpha, beta = self._shared(monkeypatch)
+    def test_the_sibling_component_is_reachable_by_the_same_call(self):
+        alpha, beta = self._shared()
         out = _payload(st.handler(text="New", sketch_name="Label", component="Alpha"))
         assert out["changed_count"] == 1
         assert beta.sketchTexts.item(0).textParameter.expression == "'beta-old'"
 
-    def test_an_unknown_component_is_refused_and_nothing_is_rewritten(self, monkeypatch):
-        alpha, beta = self._shared(monkeypatch)
+    def test_an_unknown_component_is_refused_and_nothing_is_rewritten(self):
+        alpha, beta = self._shared()
         res = st.handler(text="New", sketch_name="Label", component="Gamma")
         assert res["isError"] is True and "No component named 'Gamma'" in res["message"]
         assert alpha.sketchTexts.item(0).textParameter.expression == "'alpha-old'"
         assert beta.sketchTexts.item(0).textParameter.expression == "'beta-old'"
 
-    def test_the_scope_without_a_name_edits_that_components_texts_only(self, monkeypatch):
+    def test_the_scope_without_a_name_edits_that_components_texts_only(self):
         # 'sketch_name' omitted is "every sketch text", and the scope narrows THAT walk too - the
         # branch a named edit does not pass through, so it needs its own coverage.
-        alpha, beta = self._shared(monkeypatch)
+        alpha, beta = self._shared()
         out = _payload(st.handler(text="New", component="Beta"))
         assert out["changed_count"] == 2
         assert [c["before"] for c in out["changed"]] == ["beta-old", "beta-second"]
         assert alpha.sketchTexts.item(0).textParameter.expression == "'alpha-old'"
 
-    def test_an_unknown_component_without_a_name_is_refused_too(self, monkeypatch):
-        alpha, beta = self._shared(monkeypatch)
+    def test_an_unknown_component_without_a_name_is_refused_too(self):
+        alpha, beta = self._shared()
         res = st.handler(text="New", component="Gamma")
         assert res["isError"] is True and "No component named 'Gamma'" in res["message"]
         assert alpha.sketchTexts.item(0).textParameter.expression == "'alpha-old'"
         assert beta.sketchTexts.item(0).textParameter.expression == "'beta-old'"
 
-    def test_a_scope_holding_no_such_sketch_names_the_scope_and_the_owner(self, monkeypatch):
+    def test_a_scope_holding_no_such_sketch_names_the_scope_and_the_owner(self):
         alpha = FakeSketch("Label", [FakeText("'alpha-old'")])
-        design = FakeDesign([FakeComp("Alpha", [alpha]),
-                             FakeComp("Beta", [FakeSketch("Other", [])])])
-        monkeypatch.setattr(st, "app", type("A", (), {"activeProduct": design})())
-        monkeypatch.setattr(st._common, "app", st.app)
-        monkeypatch.setattr(adsk.fusion.Design, "cast",
-                            lambda x: x if isinstance(x, FakeDesign) else None)
+        _install([FakeComp("Alpha", [alpha]),
+                  FakeComp("Beta", [FakeSketch("Other", [])])])
         res = st.handler(text="New", sketch_name="Label", component="Beta")
         assert res["isError"] is True
         # the scope it looked in, AND where the name actually is - the caller's next call
@@ -356,28 +333,20 @@ class TestComponentScopeOnEdits:
         assert "'Alpha'" in res["message"]
         assert alpha.sketchTexts.item(0).textParameter.expression == "'alpha-old'"
 
-    def test_a_scoped_sketch_holding_no_text_still_reports_the_scope(self, monkeypatch):
+    def test_a_scoped_sketch_holding_no_text_still_reports_the_scope(self):
         # the other miss: the scope DOES hold that sketch, and the sketch holds no text
         alpha = FakeSketch("Label", [FakeText("'alpha-old'")])
-        design = FakeDesign([FakeComp("Alpha", [alpha]),
-                             FakeComp("Beta", [FakeSketch("Label", [])])])
-        monkeypatch.setattr(st, "app", type("A", (), {"activeProduct": design})())
-        monkeypatch.setattr(st._common, "app", st.app)
-        monkeypatch.setattr(adsk.fusion.Design, "cast",
-                            lambda x: x if isinstance(x, FakeDesign) else None)
+        _install([FakeComp("Alpha", [alpha]),
+                  FakeComp("Beta", [FakeSketch("Label", [])])])
         res = st.handler(text="New", sketch_name="Label", component="Beta")
         assert res["isError"] is True and "inside component 'Beta'" in res["message"]
         assert alpha.sketchTexts.item(0).textParameter.expression == "'alpha-old'"
 
-    def test_a_named_edit_reaches_only_that_sketch(self, monkeypatch):
+    def test_a_named_edit_reaches_only_that_sketch(self):
         # the name narrows WITHIN a component too: the sibling sketch's text must not move
         label = FakeSketch("Label", [FakeText("'label-old'")])
         other = FakeSketch("Other", [FakeText("'other-old'")])
-        design = FakeDesign([FakeComp("Alpha", [label, other])])
-        monkeypatch.setattr(st, "app", type("A", (), {"activeProduct": design})())
-        monkeypatch.setattr(st._common, "app", st.app)
-        monkeypatch.setattr(adsk.fusion.Design, "cast",
-                            lambda x: x if isinstance(x, FakeDesign) else None)
+        _install([FakeComp("Alpha", [label, other])])
         out = _payload(st.handler(text="New", sketch_name="Label"))
         assert out["changed_count"] == 1
         assert out["changed"][0]["sketch"] == "Label"
@@ -426,7 +395,7 @@ class TestEditHandler:
         # itself raises. The slot burns its index (index=2 still reaches the third text) instead
         # of the raise taking the whole edit down or sliding the address space.
         sk = FakeSketch("S", [FakeText("'zero'"), FakeText("'dead'"), FakeText("'two'")])
-        sk.sketchTexts = _Coll(sk.sketchTexts._i, item_raises_at=1)
+        sk.sketchTexts = _Coll(sk.sketchTexts._items, item_raises_at=1)
         _install([FakeComp("Root", [sk])])
         out = _payload(st.handler(text="Picked", index=2))
         assert out["changed_count"] == 1
@@ -437,7 +406,7 @@ class TestEditHandler:
         # editing a text that will not read is impossible - a silent skip would report success
         # over a hole, so the SELECTED unreadable index refuses and names the re-read.
         sk = FakeSketch("S", [FakeText("'zero'"), FakeText("'dead'"), FakeText("'two'")])
-        sk.sketchTexts = _Coll(sk.sketchTexts._i, item_raises_at=1)
+        sk.sketchTexts = _Coll(sk.sketchTexts._items, item_raises_at=1)
         _install([FakeComp("Root", [sk])])
         res = st.handler(text="X", index=1)
         assert res["isError"] is True
@@ -720,29 +689,22 @@ class FakeSketchTexts:
         return st if self.add_returns else None
 
 
-class FakeSketchForCreate:
+class FakeSketchForCreate(Sketch):
+    """The shared Sketch a create lands text in, carrying the '<type>:<index>' collections
+    resolve_entity_ref indexes."""
     def __init__(self, name, texts=None, lines=0, circles=0):
-        self.name = name
+        super().__init__(
+            name=name,
+            curves=SketchCurves(
+                lines=[types.SimpleNamespace(kind="line", i=i) for i in range(lines)],
+                circles=[types.SimpleNamespace(kind="circle", i=i) for i in range(circles)]))
         self.sketchTexts = texts if texts is not None else FakeSketchTexts()
-        # the '<type>:<index>' collections resolve_entity_ref indexes
-        self.sketchCurves = types.SimpleNamespace(
-            sketchLines=_Coll([types.SimpleNamespace(kind="line", i=i) for i in range(lines)]),
-            sketchCircles=_Coll([types.SimpleNamespace(kind="circle", i=i) for i in range(circles)]))
         self.sketchPoints = _Coll([types.SimpleNamespace(kind="point", i=0)])
-
-
-class _NamedColl(_Coll):
-    def itemByName(self, name):
-        for it in self._i:
-            if getattr(it, "name", None) == name:
-                return it
-        return None
 
 
 def _install_create(sketch_name="Plate", texts=None, lines=0, circles=0):
     sk = FakeSketchForCreate(sketch_name, texts=texts, lines=lines, circles=circles)
-    comp = type("C", (), {"name": "Root", "sketches": _NamedColl([sk])})()
-    design = _install([comp])
+    design = _install([MakeComp(name="Root", sketches=[sk])])
     import adsk.core
     adsk.core.Point3D.create = staticmethod(lambda x, y, z: ("pt", x, y, z))
     # HorizontalAlignments/VerticalAlignments members arrive pre-seeded with the measured ints
@@ -758,11 +720,7 @@ class TestCreateComponentScope:
         import adsk.core
         alpha = FakeSketchForCreate("Label")
         beta = FakeSketchForCreate("Label")
-        design = FakeDesign([FakeComp("Alpha", [alpha]), FakeComp("Beta", [beta])])
-        monkeypatch.setattr(st, "app", type("A", (), {"activeProduct": design})())
-        monkeypatch.setattr(st._common, "app", st.app)
-        monkeypatch.setattr(adsk.fusion.Design, "cast",
-                            lambda x: x if isinstance(x, FakeDesign) else None)
+        _install([FakeComp("Alpha", [alpha]), FakeComp("Beta", [beta])])
         monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: ("pt", x, y, z))
         return alpha, beta
 
@@ -794,13 +752,9 @@ class TestCreateComponentScope:
         assert res["isError"] is True and "No component named 'Gamma'" in res["message"]
         assert alpha.sketchTexts.add_calls == 0 and beta.sketchTexts.add_calls == 0
 
-    def test_a_wrong_component_is_refused_even_when_the_name_is_UNIQUE(self, monkeypatch):
+    def test_a_wrong_component_is_refused_even_when_the_name_is_UNIQUE(self):
         alpha = FakeSketchForCreate("OnlyOne")
-        design = FakeDesign([FakeComp("Alpha", [alpha]), FakeComp("Beta", [])])
-        monkeypatch.setattr(st, "app", type("A", (), {"activeProduct": design})())
-        monkeypatch.setattr(st._common, "app", st.app)
-        monkeypatch.setattr(adsk.fusion.Design, "cast",
-                            lambda x: x if isinstance(x, FakeDesign) else None)
+        _install([FakeComp("Alpha", [alpha]), FakeComp("Beta", [])])
         res = st.handler(text="LBL", create=True, sketch_name="OnlyOne", component="Beta",
                          height=10)
         assert res["isError"] is True and "'Beta'" in res["message"]
@@ -1779,29 +1733,15 @@ class TestMeasuredExtents:
 
 
 @pytest.fixture
-def wired_create(monkeypatch):
-    """The create path's design - one component holding a sketch named 'Plate' - wired into the
-    tool's seams for one test; monkeypatch undoes it after."""
-    comp = type("C", (), {"name": "Root",
-                          "sketches": _NamedColl([FakeSketchForCreate("Plate")])})()
-    design = FakeDesign([comp])
-    monkeypatch.setattr(st, "app", type("A", (), {"activeProduct": design})())
-    monkeypatch.setattr(st._common, "app", st.app)
-    monkeypatch.setattr(adsk.fusion.Design, "cast",
-                        lambda x: x if isinstance(x, FakeDesign) else None)
-    return design
+def wired_create():
+    """The create path's design - one component holding a sketch named 'Plate'."""
+    return _install([MakeComp(name="Root", sketches=[FakeSketchForCreate("Plate")])])
 
 
 @pytest.fixture
-def wired_edit(monkeypatch):
-    """The edit path's design - one component holding a sketch named 'Plate' carrying one text -
-    wired into the tool's seams for one test; monkeypatch undoes it after."""
-    design = FakeDesign([FakeComp("Root", [FakeSketch("Plate", [FakeText("'a'")])])])
-    monkeypatch.setattr(st, "app", type("A", (), {"activeProduct": design})())
-    monkeypatch.setattr(st._common, "app", st.app)
-    monkeypatch.setattr(adsk.fusion.Design, "cast",
-                        lambda x: x if isinstance(x, FakeDesign) else None)
-    return design
+def wired_edit():
+    """The edit path's design - one component holding a sketch named 'Plate' carrying one text."""
+    return _install([FakeComp("Root", [FakeSketch("Plate", [FakeText("'a'")])])])
 
 
 class TestNamedSketchMiss:

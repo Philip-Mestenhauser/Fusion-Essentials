@@ -18,7 +18,8 @@ import types
 
 import pytest
 
-from conftest import MakeComp, MakeDesign, MeshBody, install, load_tool, payload, error_message
+from conftest import (FakeFeatures, MakeComp, MakeDesign, MeshBody, install, load_tool, payload,
+                      error_message)
 
 mrn = load_tool("mesh_reverse_normal")
 
@@ -70,8 +71,10 @@ class _ReverseFeatures:
         return types.SimpleNamespace(name="MeshReverseNormal1")
 
 
-class _Features:
+class _Features(FakeFeatures):
+    """comp.features plus the mesh-reverse-normal collection this tool reaches through."""
     def __init__(self, reverse=None):
+        super().__init__()
         self.meshReverseNormalFeatures = reverse
 
 

@@ -12,8 +12,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import (MakeComp, MakeDesign, error_message, go_stale, install, load_tool,
-                      payload)
+from conftest import (MakeComp, MakeDesign, _NamedCollection, error_message, go_stale, install,
+                      load_tool, payload)
 
 ai = load_tool("design_add_instance")
 
@@ -32,18 +32,9 @@ def _comp(name):
     return c
 
 
-class _UnreadableColl:
-    """A collection whose COUNT itself raises - the shape the cycle walk cannot enumerate at all,
-    which is not the same as an empty subtree."""
-    @property
-    def count(self):
-        raise RuntimeError("2 : InternalValidationError : occ")
-
-    def item(self, i):
-        raise RuntimeError("2 : InternalValidationError : occ")
-
-    def __iter__(self):
-        raise RuntimeError("2 : InternalValidationError : occ")
+# The collection whose COUNT itself raises - the shape the cycle walk cannot enumerate at all,
+# which is not the same as an empty subtree.
+_UNREADABLE = "2 : InternalValidationError : occ"
 
 
 def _path(node):
@@ -357,8 +348,8 @@ class TestSelfNestingRefused:
         # instance through, so the guard refuses and says the question could not be answered.
         des = wire(names=("Outer", "Bolt"))
         bolt = des.comps["Bolt"]
-        del bolt.allOccurrences                      # the fast walk raises...
-        bolt.occurrences = _UnreadableColl()         # ...and so does the fallback
+        del bolt.allOccurrences                              # the fast walk raises...
+        bolt.occurrences = _NamedCollection(raises=_UNREADABLE)     # ...and so does the fallback
         msg = error_message(ai.handler(component="Bolt", into_component="Outer:1"))
         assert "could not be determined" in msg and "not be searched to a verdict" in msg
         assert "unresolved external references" in msg          # the remedy that reaches the cause

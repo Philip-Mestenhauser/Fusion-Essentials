@@ -23,8 +23,9 @@ import types
 import adsk.fusion
 import pytest
 
-from conftest import (BRepBody, MakeComp, MakeDesign, MeshBody, _NamedCollection, body_proxy,
-                      go_stale, install, load_tool, make_bbox, make_source_document, payload)
+from conftest import (BRepBody, FakeBaseFeature, FakeBaseFeatures, FakeFeatures, MakeComp,
+                      MakeDesign, MeshBody, _NamedCollection, body_proxy, go_stale, install,
+                      load_tool, make_bbox, make_source_document, payload)
 
 mc = load_tool("mesh_combine")
 
@@ -154,33 +155,11 @@ class _MeshCombineFeatures:
         return _FeatureResult(self._feat_name, self._result_bodies)
 
 
-class _Features:
+class _Features(FakeFeatures):
+    """comp.features plus the mesh-combine collection this tool reaches through."""
     def __init__(self, mesh_combine=None, base_features=None):
+        super().__init__(base_features=base_features)
         self.meshCombineFeatures = mesh_combine
-        self.baseFeatures = base_features
-
-
-class _BaseFeature:
-    def __init__(self):
-        self.name = "BaseFeature1"
-        self.started = False
-        self.finished = False
-
-    def startEdit(self):
-        self.started = True
-        return True
-
-    def finishEdit(self):
-        self.finished = True
-        return True
-
-
-class _BaseFeatures:
-    def __init__(self, made):
-        self._made = made
-
-    def add(self):
-        return self._made
 
 
 @pytest.fixture(autouse=True)
@@ -188,7 +167,7 @@ def _fusion_types(monkeypatch):
     """The adsk.fusion type identities the tool and the body-ref kinds branch on."""
     monkeypatch.setattr(adsk.fusion, "MeshBody", MeshBody, raising=False)
     monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
-    monkeypatch.setattr(adsk.fusion, "BaseFeature", _BaseFeature, raising=False)
+    monkeypatch.setattr(adsk.fusion, "BaseFeature", FakeBaseFeature, raising=False)
 
 
 def _component(name, features, mesh_bodies=None, parent_design=None):
@@ -208,8 +187,8 @@ def _build(design_type=0, raise_on_add=False, none_feature=False, result_name="R
     result = MeshBody(result_name)
     feats = _MeshCombineFeatures([result], raise_on_add=raise_on_add, none_feature=none_feature,
                                  input_factory=input_factory, tri_after=1600 if lands else None)
-    bf = _BaseFeature()
-    comp = _component("Comp", _Features(mesh_combine=feats, base_features=_BaseFeatures(made=bf)),
+    bf = FakeBaseFeature()
+    comp = _component("Comp", _Features(mesh_combine=feats, base_features=FakeBaseFeatures(made=bf)),
                       mesh_bodies=mesh_bodies)
     target = MeshBody("Target", parent=comp)
     tool_a = MeshBody("ToolA", parent=comp)
@@ -452,7 +431,7 @@ class TestXrefMeshesAreNotTheSameBody:
     def _component_in_document(self, name, urn, feats):
         # parent_design is the chain a body's source document is read through
         return _component(name, _Features(mesh_combine=feats,
-                                          base_features=_BaseFeatures(made=_BaseFeature())),
+                                          base_features=FakeBaseFeatures(made=FakeBaseFeature())),
                           parent_design=make_source_document(urn))
 
     def _two_xrefs(self):
@@ -520,14 +499,14 @@ class TestBaseFeatureRouting:
         out = payload(mc.handler(target="T", tools=["A"]))
         assert out["combined"] is True
         # no base-feature scope opened in direct mode
-        assert des._bf.started is False and des._bf.finished is False
+        assert des._bf._starts == 0 and des._bf._finishes == 0
 
     def test_parametric_opens_and_finishes_scope(self):
         des, feats, *_ = _build(design_type=1)         # parametric
         out = payload(mc.handler(target="T", tools=["A"]))
         assert out["combined"] is True
         # the add() ran INSIDE an atomic base-feature scope (opened then finished)
-        assert des._bf.started is True and des._bf.finished is True
+        assert des._bf._starts == 1 and des._bf._finishes == 1
 
 
 # ── Choice rejects a bad operation ──────────────────────────────────────────────────────────────
@@ -608,7 +587,7 @@ class TestNoneFeatureSuccess:
         des, feats, *_ = _build(design_type=1, none_feature=True)
         out = payload(mc.handler(target="T", tools=["A"]))
         assert out["combined"] is True and out["feature"] is None
-        assert des._bf.started is True and des._bf.finished is True
+        assert des._bf._starts == 1 and des._bf._finishes == 1
 
 
 # ── the reported mode is the DESIGN's, read before the scope opens ──────────────────────────────
@@ -735,8 +714,8 @@ def _boxed_mesh(name, minp, maxp, parent=None):
 def _build_boxed(target_box, tool_boxes, design_type=0):
     """The _build rig with AABBs on the target and each tool. Returns (design, feats)."""
     feats = _MeshCombineFeatures([MeshBody("Result")])
-    bf = _BaseFeature()
-    comp = _component("Comp", _Features(mesh_combine=feats, base_features=_BaseFeatures(made=bf)))
+    bf = FakeBaseFeature()
+    comp = _component("Comp", _Features(mesh_combine=feats, base_features=FakeBaseFeatures(made=bf)))
     target = _boxed_mesh("Target", *target_box, parent=comp)
     handles = {"T": target}
     for key, name, box in tool_boxes:

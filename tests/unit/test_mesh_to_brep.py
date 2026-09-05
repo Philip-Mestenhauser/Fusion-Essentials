@@ -5,8 +5,9 @@ import types
 import adsk.fusion
 import pytest
 
-from conftest import (BRepBody, MakeComp, MeshBody, _NamedCollection, body_proxy, install,
-                      load_tool, make_design, payload)
+from conftest import (BRepBody, FakeBaseFeature, FakeBaseFeatures, FakeFeatures, MakeComp,
+                      MeshBody, _NamedCollection, body_proxy, install, load_tool, make_design,
+                      payload)
 
 mo = load_tool("mesh_to_brep")
 
@@ -18,36 +19,11 @@ def _brep(name, is_solid=True):
     return BRepBody(name, is_solid=is_solid, entity_token=f"BTOK::{name}")
 
 
-class _BaseFeature:
-    """The BaseFeature a parametric scope opens, recording its own open and close."""
-    def __init__(self):
-        self.name = "BaseFeature1"
-        self.started = False
-        self.finished = False
-
-    def startEdit(self):
-        self.started = True
-        return True
-
-    def finishEdit(self):
-        self.finished = True
-        return True
-
-
-class _BaseFeatures:
-    """comp.features.baseFeatures - add() hands back the one base feature it was built with."""
-    def __init__(self, made):
-        self._made = made
-
-    def add(self):
-        return self._made
-
-
-class _Features:
-    """comp.features, carrying the two collections mesh_to_brep reads."""
+class _Features(FakeFeatures):
+    """comp.features plus the mesh-convert collection this tool reaches through."""
     def __init__(self, convert=None, base_features=None):
+        super().__init__(base_features=base_features)
         self.meshConvertFeatures = convert
-        self.baseFeatures = base_features
 
 
 class _FeatureResult:
@@ -96,7 +72,7 @@ def _types(monkeypatch):
     """The adsk.fusion type identities the body kind and the base-feature scope check branch on."""
     monkeypatch.setattr(adsk.fusion, "MeshBody", MeshBody, raising=False)
     monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
-    monkeypatch.setattr(adsk.fusion, "BaseFeature", _BaseFeature, raising=False)
+    monkeypatch.setattr(adsk.fusion, "BaseFeature", FakeBaseFeature, raising=False)
 
 
 def _wire(src, feats, brep_bodies, design_type=0, base_feature=None):
@@ -104,7 +80,7 @@ def _wire(src, feats, brep_bodies, design_type=0, base_feature=None):
     comp = MakeComp("Comp", mesh_bodies=[src] if src is not None else [])
     comp.bRepBodies = brep_bodies
     comp.features = _Features(convert=feats,
-                              base_features=_BaseFeatures(base_feature) if base_feature else None)
+                              base_features=FakeBaseFeatures(made=base_feature))
     if src is not None:
         src.parentComponent = comp
     return comp
@@ -256,7 +232,7 @@ class TestMeshToBrep:
     def test_null_feature_in_a_parametric_scope_reports_parametric(self):
         # the scope suppresses the feature; the payload reports the DESIGN's own mode and names the
         # base feature the conversion landed in, instead of labelling the design non-parametric.
-        bf = _BaseFeature()
+        bf = FakeBaseFeature()
         self._setup(is_closed=True, parametric=True, base_feature=bf, none_feature=True,
                     none_appends_body=True)
         out = payload(mo.handler(mesh="H", method="prismatic"))
@@ -279,12 +255,12 @@ class TestMeshToBrep:
         # REGRESSION: in PARAMETRIC the convert runs INSIDE the helper's base-feature scope (opened AND
         # finished). The parametric add returns a feature carrying .bodies; success is reported without
         # any undetectable-scope guard defeating it.
-        bf = _BaseFeature()
+        bf = FakeBaseFeature()
         self._setup(is_closed=True, parametric=True, base_feature=bf)
         out = payload(mo.handler(mesh="H", method="prismatic"))
         assert out["converted"] is True
         assert out["brep_bodies"][0]["name"] == "ConvertedBody"
-        assert bf.started is True and bf.finished is True
+        assert bf._starts == 1 and bf._finishes == 1
 
     def test_brep_handle_to_convert_is_redirected(self):
         # passing a BRep body to mesh_to_brep (it wants a MESH) -> MeshBodyRef redirect

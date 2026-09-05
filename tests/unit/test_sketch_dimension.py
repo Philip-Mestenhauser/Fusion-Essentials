@@ -12,7 +12,8 @@ from types import SimpleNamespace
 
 import adsk.core
 import adsk.fusion
-from conftest import BRepFace, Cylinder, load_tool
+from conftest import (BRepFace, Cylinder, MakeComp, Sketch, SketchCurves, _NamedCollection,
+                      install, load_tool, make_design)
 
 sd = load_tool("sketch_dimension")
 
@@ -149,64 +150,38 @@ class FakeFittedSpline:
     endSketchPoint = "spline_ep"     # an open spline has endpoints, like a line
 
 
-class FakeColl:
-    def __init__(self, items):
-        self._i = items
-    @property
-    def count(self):
-        return len(self._i)
-    def item(self, i):
-        return self._i[i]
-
-
-class FakeSketch:
+class FakeSketch(Sketch):
+    """The shared Sketch carrying one operand of each kind a '<type>:<index>' ref indexes, and the
+    recording sketchDimensions every add* lands in."""
     def __init__(self, name="S"):
-        self.name = name
+        super().__init__(name=name,
+                         curves=SketchCurves(lines=[FakeLine(), FakeLine()],
+                                             arcs=[FakeArc()],
+                                             circles=[FakeCircle(), FakeCircle()],
+                                             ellipses=[FakeEllipse()],
+                                             splines=[FakeFittedSpline()]))
         self.sketchDimensions = FakeDims()
-        lines = FakeColl([FakeLine(), FakeLine()])
-        circles = FakeColl([FakeCircle(), FakeCircle()])
-        ellipses = FakeColl([FakeEllipse()])
-        splines = FakeColl([FakeFittedSpline()])
-        self.sketchCurves = type("C", (), {"sketchLines": lines, "sketchArcs": FakeColl([FakeArc()]),
-                                           "sketchCircles": circles, "sketchEllipses": ellipses,
-                                           "sketchFittedSplines": splines,
-                                           "sketchControlPointSplines": FakeColl([]),
-                                           "sketchFixedSplines": FakeColl([])})()
-        self.sketchPoints = FakeColl([FakeSketchPoint(), FakeSketchPoint()])
+        self.sketchPoints = _NamedCollection([FakeSketchPoint(), FakeSketchPoint()])
 
 
-class FakeDesign:
-    def __init__(self, sketches):
-        # Creation order, so the LAST entry is the most recent sketch - what a blank sketch_name
-        # resolves to. itemByName answers by name, like the live collection.
-        items = list(sketches)
-        self.rootComponent = type("R", (), {
-            "sketches": type("SS", (), {
-                "itemByName": staticmethod(lambda n: next((s for s in items if s.name == n), None)),
-                "count": len(items), "item": staticmethod(lambda i: items[i])})(),
-            # the origin plane a PlaneRef('xy') resolves to - the 'surface' operand's simplest form
-            # the origin plane resolves to a real plane OBJECT carrying its name -
-            # the payload reports what the surface RESOLVED to, so the name matters
-            "xYConstructionPlane": SimpleNamespace(name="XY"),
-        })()
-        self.token_entities = {}
-
-    def findEntityByToken(self, token):
-        ent = self.token_entities.get(token)
-        return [ent] if ent is not None else []
+def _design(sketches):
+    """A design holding `sketches` in creation order, so the LAST entry is the most recent sketch -
+    what a blank sketch_name resolves to."""
+    comp = MakeComp(name="Root", sketches=list(sketches))
+    # the origin plane a PlaneRef('xy') resolves to - the 'surface' operand's simplest form. It
+    # resolves to a real plane OBJECT carrying its name, and the payload reports what the surface
+    # RESOLVED to, so the name matters.
+    comp.xYConstructionPlane = SimpleNamespace(name="XY")
+    return make_design(comp=comp)
 
 
 def _install(monkeypatch, sketches=None):
-    """Wire a fake design into the tool's seams for one test; monkeypatch undoes it after.
+    """Wire a fake design into the tool's seams for one test.
 
     The default design holds one sketch named 'S', which is returned. `sketches` replaces that
     list (creation order, most recent LAST) and the first of them is returned instead."""
     items = [FakeSketch()] if sketches is None else list(sketches)
-    design = FakeDesign(items)
-    monkeypatch.setattr(sd, "app", type("A", (), {"activeProduct": design})())
-    monkeypatch.setattr(sd._common, "app", sd.app)
-    monkeypatch.setattr(adsk.fusion.Design, "cast",
-                        lambda x: x if isinstance(x, FakeDesign) else None)
+    install(sd, _design(items))
     monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: ("pt", x, y, z))
     do = adsk.fusion.DimensionOrientations
     monkeypatch.setattr(do, "AlignedDimensionOrientation", "aligned", raising=False)
@@ -233,35 +208,16 @@ def _raiser(message):
 # in with a referenced document, so the write needs a scope of its own. The REAL _common walk and
 # scope filter run here; nothing about them is stubbed.
 
-class _MultiComp:
-    def __init__(self, name, sketches):
-        items = list(sketches)
-        self.name = name
-        self.sketches = type("SS", (), {
-            "itemByName": staticmethod(lambda n: next((s for s in items if s.name == n), None)),
-            "count": len(items), "item": staticmethod(lambda i: items[i])})()
-        self.xYConstructionPlane = SimpleNamespace(name="XY")
-
-
-class _MultiDesign:
-    def __init__(self, comps):
-        self.rootComponent = comps[0]
-        # allComponents is a DESIGN property - that is the collection all_components walks.
-        self.allComponents = type("CC", (), {
-            "count": len(comps), "item": staticmethod(lambda i: comps[i])})()
-        self.activeComponent = comps[0]
-        self.rootComponent.allOccurrences = []
-
-    def findEntityByToken(self, token):
-        return []
+def _multi_component(name, sketches):
+    comp = MakeComp(name=name, sketches=list(sketches))
+    comp.xYConstructionPlane = SimpleNamespace(name="XY")
+    return comp
 
 
 def _install_multi(monkeypatch, pairs):
-    design = _MultiDesign([_MultiComp(n, s) for n, s in pairs])
-    monkeypatch.setattr(sd, "app", type("A", (), {"activeProduct": design})())
-    monkeypatch.setattr(sd._common, "app", sd.app)
-    monkeypatch.setattr(adsk.fusion.Design, "cast",
-                        lambda x: x if isinstance(x, _MultiDesign) else None)
+    # allComponents is a DESIGN property - that is the collection all_components walks.
+    comps = [_multi_component(n, s) for n, s in pairs]
+    design = install(sd, make_design(comp=comps[0], all_components=comps))
     monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: ("pt", x, y, z))
     do = adsk.fusion.DimensionOrientations
     monkeypatch.setattr(do, "AlignedDimensionOrientation", "aligned", raising=False)
@@ -538,13 +494,7 @@ class TestSolvedReadBack:
         lines = [_RichLine(0.0, 0.0, 4.0, 0.0), _RichLine(0.0, 3.0, 4.0, 3.0)]
         circle = _RichCircle(1.0, 1.0, 0.5)
         arc = _RichArc(2.0, 5.0, 0.8)
-        s.sketchCurves = type("C", (), {"sketchLines": FakeColl(lines),
-                                        "sketchArcs": FakeColl([arc]),
-                                        "sketchCircles": FakeColl([circle]),
-                                        "sketchEllipses": FakeColl([]),
-                                        "sketchFittedSplines": FakeColl([]),
-                                        "sketchControlPointSplines": FakeColl([]),
-                                        "sketchFixedSplines": FakeColl([])})()
+        s.sketchCurves = SketchCurves(lines=lines, arcs=[arc], circles=[circle])
         dim = FakeDim("distance")
         dim.parameter.value = value_cm
 
@@ -928,7 +878,7 @@ class TestSurfaceDims:
         s = _install(monkeypatch)
         face = BRepFace(Cylinder(axis=None))
         monkeypatch.setattr(adsk.fusion, "BRepFace", BRepFace)
-        sd.app.activeProduct.token_entities["CYL"] = face
+        sd.app.activeProduct._tokens["CYL"] = face
         out = _payload(sd.handler(dim_type="point_to_surface", entity_one="point:0", surface="CYL"))
         _kind, _point, surface = s.sketchDimensions.calls[-1]
         assert surface is face                       # the second pass through the face kind

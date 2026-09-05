@@ -127,9 +127,6 @@ def wire(monkeypatch):
         design = MakeDesign(comp=comp, tokens=handle_map or {},
                             all_components=[comp] + list(sub_components))
         install(sc, design)
-        for name in ("NewBodyFeatureOperation", "JoinFeatureOperation",
-                     "NewComponentFeatureOperation"):
-            monkeypatch.setattr(adsk.fusion.FeatureOperations, name, name, raising=False)
         monkeypatch.setattr(adsk.core.ValueInput, "createByReal",
                             staticmethod(lambda v: ("real", v)))
         monkeypatch.setattr(adsk.fusion, "BRepEdge", BRepEdge)
@@ -148,7 +145,7 @@ class TestSurfaceExtrude:
         assert ef.last_input.isSolid is False        # the surface switch was actually set
         sym, dist = ef.last_input.distance_extent
         assert dist == ("real", 0.5)                 # 5 mm -> 0.5 cm
-        assert ef.last_input.operation == "NewBodyFeatureOperation"
+        assert ef.last_input.operation == adsk.fusion.FeatureOperations.NewBodyFeatureOperation
 
     def test_reports_result_is_solid_read_back(self, wire):
         # is_solid is READ BACK from the result body, not assumed. With createOpenProfile + isSolid=False
@@ -209,7 +206,7 @@ class TestSurfaceExtrude:
                                  symmetric=True))
         assert out["operation"] == "join"
         assert out["symmetric"] is True
-        assert ef.last_input.operation == "JoinFeatureOperation"
+        assert ef.last_input.operation == adsk.fusion.FeatureOperations.JoinFeatureOperation
         sym, _dist = ef.last_input.distance_extent
         assert sym is True
 

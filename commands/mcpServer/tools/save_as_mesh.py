@@ -121,20 +121,19 @@ def handler(body: str = "", quality: str = "normal", name: str = "") -> dict:
     coords = safe(lambda: tm.nodeCoordinatesAsDouble)
     coord_idx = safe(lambda: tm.nodeIndices)
     normals = safe(lambda: tm.normalVectorsAsDouble)
-    normal_idx = safe(lambda: tm.normalIndices)
     if coords is None or coord_idx is None:
         return error("Tessellation produced no coordinate/index data - cannot build a mesh body.")
     tri_count = safe(lambda: tm.triangleCount)
 
     # The calculator emits one node per triangle corner, so an unwelded mesh is topologically open
-    # (isClosed=false even for a watertight solid) and mesh_to_brep refuses it. The normals stay
-    # per-corner - the coordinate and normal index lists are independent.
+    # (isClosed=false even for a watertight solid) and mesh_to_brep refuses it. Only the coordinate
+    # indices are remapped - a TriangleMesh exposes no normal index list to remap.
     coords, coord_idx = _weld(coords, coord_idx)
     node_count = len(coords) // 3
 
     # 2) addByTriangleMeshData - the WRITE, inside the base-feature scope when parametric.
     def _add(_base_feature):
-        return comp.meshBodies.addByTriangleMeshData(coords, coord_idx, normals or [], normal_idx or [])
+        return comp.meshBodies.addByTriangleMeshData(coords, coord_idx, normals or [], [])
 
     before_mb_count = safe(lambda: comp.meshBodies.count)
     result, scope_err = run_in_base_feature(design, comp, _add)

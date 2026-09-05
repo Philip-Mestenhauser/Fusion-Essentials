@@ -1,121 +1,86 @@
 """Unit tests for ``design_recompute.py`` (computeAll() then re-reports health; surfaces a computeAll
-failure) and the timeline health rollup design_get's health slice reads (feature healthState 0/1/2
-into errors/warnings + a healthy flag). Pure logic over a faked timeline; no live Fusion."""
+failure) and the timeline health rollup design_get's health slice reads (feature healthState into
+errors/warnings + a healthy flag). Pure logic over a faked timeline; no live Fusion."""
 
-import json
-
-from conftest import load_tool
+import live_api_facts as _api_facts
+from conftest import (FakeTimeline, FakeTimelineObject, MakeDesign, error_message, install,
+                      load_tool, make_design, payload)
 
 dops = load_tool("design_recompute")
 dm = load_tool("_design_common")
 
-
-def _payload(result):
-    assert result["isError"] is False, result
-    return json.loads(result["content"][0]["text"])
-
-
-class FakeTimelineItem:
-    def __init__(self, name, health=0):
-        self.name = name
-        self.healthState = health
+_HEALTHY = _api_facts.ENUMS["fusion.FeatureHealthStates"]["HealthyFeatureHealthState"]
+_WARNING = _api_facts.ENUMS["fusion.FeatureHealthStates"]["WarningFeatureHealthState"]
+_ERROR = _api_facts.ENUMS["fusion.FeatureHealthStates"]["ErrorFeatureHealthState"]
 
 
-class FakeTimeline:
-    def __init__(self, items):
-        self._items = list(items)
-
-    @property
-    def count(self):
-        return len(self._items)
-
-    def item(self, i):
-        return self._items[i]
-
-
-class FakeDesign:
-    def __init__(self, timeline, compute_raises=False):
-        self.timeline = timeline
-        self._compute_raises = compute_raises
-        self.computed = False
-
-    def computeAll(self):
-        if self._compute_raises:
-            raise RuntimeError("compute blew up")
-        self.computed = True
-
-
-def _stub(monkeypatch, design):
-    monkeypatch.setattr(dops._common, "design", lambda: design)
-    monkeypatch.setattr(dm._common, "design", lambda: design)
+def _timeline(*rows):
+    """A timeline of (name, healthState) pairs - what _common.timeline_health walks."""
+    return FakeTimeline([FakeTimelineObject(name=n, index=i, health=h)
+                         for i, (n, h) in enumerate(rows)])
 
 
 class TestTimelineHealthHelper:
     def test_rolls_up_errors_and_warnings(self):
-        tl = FakeTimeline([FakeTimelineItem("A", 0), FakeTimelineItem("B", 2),
-                           FakeTimelineItem("C", 1), FakeTimelineItem("D", 2)])
-        errors, warnings, total = dops._timeline_health(FakeDesign(tl))
+        design = make_design(timeline=_timeline(("A", _HEALTHY), ("B", _ERROR),
+                                                ("C", _WARNING), ("D", _ERROR)))
+        errors, warnings, total = dops._timeline_health(design)
         assert total == 4 and errors == ["B", "D"] and warnings == ["C"]
 
     def test_no_timeline_is_empty(self):
-        errors, warnings, total = dops._timeline_health(FakeDesign(None))
+        errors, warnings, total = dops._timeline_health(make_design())
         assert (errors, warnings, total) == ([], [], 0)
 
 
 class TestHealthHandler:
-    def test_reports_healthy(self, monkeypatch):
-        _stub(monkeypatch, FakeDesign(FakeTimeline([FakeTimelineItem("A", 0)])))
-        out = _payload(dm.health_handler())
+    def test_reports_healthy(self):
+        install(dm, make_design(timeline=_timeline(("A", _HEALTHY))))
+        out = payload(dm.health_handler())
         assert out["healthy"] is True and out["error_count"] == 0
 
-    def test_reports_errors(self, monkeypatch):
-        _stub(monkeypatch, FakeDesign(FakeTimeline([FakeTimelineItem("Boom", 2)])))
-        out = _payload(dm.health_handler())
+    def test_reports_errors(self):
+        install(dm, make_design(timeline=_timeline(("Boom", _ERROR))))
+        out = payload(dm.health_handler())
         assert out["healthy"] is False and out["errors"] == ["Boom"]
 
-    def test_no_active_design_errors(self, monkeypatch):
-        monkeypatch.setattr(dops._common, "design", lambda: None)
-        res = dm.health_handler()
-        assert res["isError"] is True and "No active design" in res["message"]
+    def test_no_active_design_errors(self):
+        install(dm, None)
+        assert "No active design" in error_message(dm.health_handler())
 
 
 class TestRecomputeHandler:
-    def test_recomputes_and_reports_health(self, monkeypatch):
-        d = FakeDesign(FakeTimeline([FakeTimelineItem("A", 0)]))
-        _stub(monkeypatch, d)
-        out = _payload(dops.handler())
-        assert out["recomputed"] is True and d.computed is True
+    def test_recomputes_and_reports_health(self):
+        design = install(dops, make_design(timeline=_timeline(("A", _HEALTHY))))
+        out = payload(dops.handler())
+        assert out["recomputed"] is True and design._computes == 1
 
-    def test_errors_surfaced_by_the_recompute_are_named(self, monkeypatch):
+    def test_errors_surfaced_by_the_recompute_are_named(self):
         # an error absent at the start of the call and present after computeAll lands in new_errors
 
-        class BreakingDesign(FakeDesign):
+        class _BreakingDesign(MakeDesign):
+            """A recompute that leaves a downstream feature broken behind it."""
             def computeAll(self):
                 super().computeAll()
-                self.timeline._items.append(FakeTimelineItem("StaleEmboss", 2))
+                self.timeline._items.append(
+                    FakeTimelineObject(name="StaleEmboss", index=1, health=_ERROR))
 
-        d = BreakingDesign(FakeTimeline([FakeTimelineItem("A", 0)]))
-        _stub(monkeypatch, d)
-        out = _payload(dops.handler())
+        install(dops, _BreakingDesign(timeline=_timeline(("A", _HEALTHY))))
+        out = payload(dops.handler())
         assert out["recomputed"] is True
         assert out["new_errors"] == ["StaleEmboss"]
         assert "StaleEmboss" in out["note"]
 
-    def test_errors_present_at_the_start_are_not_new(self, monkeypatch):
-        d = FakeDesign(FakeTimeline([FakeTimelineItem("Boom", 2)]))
-        _stub(monkeypatch, d)
-        out = _payload(dops.handler())
+    def test_errors_present_at_the_start_are_not_new(self):
+        install(dops, make_design(timeline=_timeline(("Boom", _ERROR))))
+        out = payload(dops.handler())
         assert out["recomputed"] is True
         assert "new_errors" not in out
         assert out["errors"] == ["Boom"]
 
-    def test_compute_failure_is_an_error(self, monkeypatch):
-        _stub(monkeypatch, FakeDesign(FakeTimeline([]), compute_raises=True))
-        res = dops.handler()
-        assert res["isError"] is True and "computeAll failed" in res["message"]
+    def test_compute_failure_is_an_error(self):
+        install(dops, make_design(timeline=_timeline(), compute_raises="compute blew up"))
+        assert "computeAll failed" in error_message(dops.handler())
 
-    def test_no_active_design_errors(self, monkeypatch):
-        monkeypatch.setattr(dops._common, "design", lambda: None)
-        res = dops.handler()
-        assert res["isError"] is True
-        assert "No active design" in res["message"]
+    def test_no_active_design_errors(self):
+        install(dops, None)
+        assert "No active design" in error_message(dops.handler())

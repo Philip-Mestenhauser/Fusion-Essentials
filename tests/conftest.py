@@ -572,7 +572,8 @@ class FakeBoundingBox3D:
         self.maxPoint = max_pt
 
 
-@fusion_fake(live_type="BRepBody", facts=("shape-dump-design-world",))
+@fusion_fake(live_type="BRepBody", facts=("shape-dump-design-world",
+                                          "brepbody-area-cm2-solid-and-open-surface"))
 class BRepBody:
     """Matches type(entity).__name__ == 'BRepBody' in the tool's logic. volume/is_solid/entity_token
     are optional (all real BRepBody attributes per live_api_facts.SHAPES) for a before/after
@@ -663,7 +664,10 @@ class _FakePolygonMesh:
 
 @fusion_fake(live_type="MeshBody",
              facts=("shape-dump-mesh-world", "meshbody-volume-open-returns-zero",
-                    "meshbody-assembly-context-proxy"))
+                    "meshbody-assembly-context-proxy",
+                    "meshbody-delete-answers-true-and-removes",
+                    "meshbody-facegroups-counted-before-generation",
+                    "meshbody-area-and-boundingbox-open-mesh"))
 class MeshBody:
     """Matches type(entity).__name__ == 'MeshBody' - the shared mesh fake every mesh-feature tool
     test builds on (repair, shell, smooth, separate, reverse_normal).
@@ -687,7 +691,8 @@ class MeshBody:
 
     `area` (cm2), `bbox`, `face_groups` and the polygon-mesh census `polygons`/`mesh_nodes` are set
     only when given, so a mesh whose surface area, box, face groups or polygon census does not read
-    stays a testable state. `deletes` is what deleteMe() answers."""
+    stays a testable state; live, all four read on an OPEN mesh too and faceGroups already counts 1
+    before any generation. `deletes` is what deleteMe() answers - see the method."""
     def __init__(self, name="Scan1", tri=12, nodes=8, is_closed=True, volume=1.0, coords=(),
                  normals=(), token=None, parent=None, counts_readable=True, volume_readable=True,
                  closed_readable=True, mesh_readable=True, lifts=True, area=None, bbox=None,
@@ -776,7 +781,11 @@ class MeshBody:
 
     def deleteMe(self):
         """Drop this body from its parent component's meshBodies, answering the bool live returns.
-        `deletes` False is the delete that REPORTS failure, leaving the body in the collection."""
+
+        `deletes` False is a DECLARED state, not a measured one: it stands for a delete that reports
+        failure and leaves the body in the collection, so mesh_delete's refusal branch has something
+        to run against. Every construction measure_api probes answers True and removes the body
+        (meshbody-delete-answers-true-and-removes), and an already-deleted wrapper RAISES."""
         if not self._deletes:
             return False
         items = getattr(getattr(self.parentComponent, "meshBodies", None), "_items", None)
@@ -894,15 +903,26 @@ def body_proxy(native, occurrence=None, entity_token=None):
 class _NamedCollection:
     """Counted collection (Fusion's count/item(i)) with itemByName lookup (None on a miss),
     iterable - the measured live protocol (see live_api_facts; NamedViews' raise-on-miss is the
-    known exception, see test_view_set)."""
-    def __init__(self, items=()):
+    known exception, see test_view_set).
+
+    `raises` is the collection that will not enumerate AT ALL - count, item, itemByName and
+    iteration each throw that message, which is not the same answer as an empty walk. A test flips
+    `_raises` on the instance to break the reads mid-flight."""
+    def __init__(self, items=(), raises=None):
         self._items = list(items)
+        self._raises = raises
+
+    def _live(self):
+        if self._raises:
+            raise RuntimeError(self._raises)
 
     @property
     def count(self):
+        self._live()
         return len(self._items)
 
     def item(self, i):
+        self._live()
         if 0 <= i < len(self._items):
             return self._items[i]
         if _api_facts.BEHAVIOR["collection_item_out_of_range_raises"]:
@@ -911,6 +931,7 @@ class _NamedCollection:
         return None
 
     def itemByName(self, name):
+        self._live()
         for it in self._items:
             if getattr(it, "name", None) == name:
                 return it
@@ -919,6 +940,7 @@ class _NamedCollection:
         raise RuntimeError("3 : invalid argument name")
 
     def __iter__(self):
+        self._live()
         return iter(self._items)
 
 
@@ -1692,7 +1714,7 @@ class MakeComp:
 @fusion_fake(live_type="Design",
              facts=("shape-dump-design-world", "allcomponents-design-only",
                     "find-entity-token-shape", "find-entity-token-miss",
-                    "find-entity-token-multi"))
+                    "find-entity-token-multi", "design-computeall-returns-true"))
 class MakeDesign:
     """A design exposing the attributes tools/inputs read: rootComponent, activeComponent (defaults to
     root), allOccurrences, allComponents, and findEntityByToken(token) backed by a `tokens` map.
@@ -1707,10 +1729,16 @@ class MakeDesign:
 
     `timeline` (make_timeline), `user_parameters` (FakeUserParameters) and `all_parameters` are the
     three design-level collections the timeline and parameter tools read; each is set only when
-    asked, since a design whose timeline or parameters do not read is its own tested state."""
+    asked, since a design whose timeline or parameters do not read is its own tested state.
+
+    `computeAll()` is the full recompute design_recompute drives; it answers the measured True,
+    `compute_raises` is the message it throws with instead, and the calls are counted privately in
+    `_computes`."""
     def __init__(self, comp=None, tokens=None, all_components=None, parent_document=None,
                  design_type=None, active_edit_object=None, timeline=None, user_parameters=None,
-                 all_parameters=None):
+                 all_parameters=None, compute_raises=None):
+        self._compute_raises = compute_raises
+        self._computes = 0
         self.rootComponent = comp if comp is not None else MakeComp()
         self.activeComponent = self.rootComponent
         if parent_document is not None:
@@ -1748,6 +1776,12 @@ class MakeDesign:
             return []
         raise RuntimeError("3 : invalid argument token")
 
+    def computeAll(self):
+        if self._compute_raises:
+            raise RuntimeError(self._compute_raises)
+        self._computes += 1
+        return True
+
 
 @fusion_fake(factory_for="MakeDesign")
 def make_source_document(urn):
@@ -1768,17 +1802,17 @@ def make_source_document(urn):
 @fusion_fake(factory_for="MakeDesign")
 def make_design(bodies=(), occurrences=(), tokens=None, comp=None, all_components=None,
                 sketches=(), mesh_bodies=None, design_type=None, active_edit_object=None,
-                timeline=None, user_parameters=None, all_parameters=None):
+                timeline=None, user_parameters=None, all_parameters=None, compute_raises=None):
     """Build a standard FakeDesign. Use `comp=` to supply a tool-specific component (one carrying a
     fake `features`/`exportManager`/… surface); otherwise a plain MakeComp(bodies, occurrences).
-    `timeline`/`user_parameters`/`all_parameters` pass through to MakeDesign."""
+    `timeline`/`user_parameters`/`all_parameters`/`compute_raises` pass through to MakeDesign."""
     if comp is None:
         comp = MakeComp(bodies=bodies, occurrences=occurrences, sketches=sketches,
                         mesh_bodies=mesh_bodies)
     return MakeDesign(comp=comp, tokens=tokens, all_components=all_components,
                       design_type=design_type, active_edit_object=active_edit_object,
                       timeline=timeline, user_parameters=user_parameters,
-                      all_parameters=all_parameters)
+                      all_parameters=all_parameters, compute_raises=compute_raises)
 
 
 @fusion_fake(live_type="Occurrence", facts=("shape-dump-design-world",))
@@ -1807,12 +1841,17 @@ class FakeOccurrence:
     a path that will not read, a child collection that will not enumerate. Like ``raises`` it is a
     DECLARED worst case, not a shape any measurement row carries.
 
+    ``isActive`` is whether this instance is the active EDIT TARGET and ``activate()`` makes it so,
+    answering the bool its caller gates on; ``activate_lies`` is the answer-true-and-never-flip
+    state an activation read-back catches, and ``activate_ok`` False the refusal said out loud.
+
     ONE class, so a test can point ``adsk.fusion.Occurrence`` at it and the shared occurrence
     resolver's isinstance check passes on a handle it resolved.
     """
 
     def __init__(self, path="Comp:1", component=None, raises=None, transform2=None,
-                 assembly_context=None, ground_to_parent=None, children=(), raises_on=None):
+                 assembly_context=None, ground_to_parent=None, children=(), raises_on=None,
+                 is_active=False, activate_ok=True, activate_lies=False):
         self._path = path
         self._component = component
         self._raises = raises
@@ -1821,6 +1860,9 @@ class FakeOccurrence:
         self._ground_to_parent = ground_to_parent
         self._children = _NamedCollection(list(children))
         self._raises_on = dict(raises_on or {})
+        self._is_active = is_active
+        self._activate_ok = activate_ok
+        self._activate_lies = activate_lies
         self.name = path.split("+")[-1]
 
     def _read(self, prop, value):
@@ -1854,6 +1896,15 @@ class FakeOccurrence:
     def childOccurrences(self):
         return self._read("childOccurrences", self._children)
 
+    @property
+    def isActive(self):
+        return self._read("isActive", self._is_active)
+
+    def activate(self):
+        if self._activate_ok and not self._activate_lies:
+            self._is_active = True
+        return self._activate_ok
+
 
 @fusion_fake(factory_for="FakeOccurrence")
 def make_occurrence(path="Comp:1", component=None, raises=None, transform2=None,
@@ -1877,40 +1928,80 @@ def make_sketch_curve(token="curve0", length=1.0, is_closed=None):
     return curve
 
 
-@fusion_fake(factory_for="_NamedCollection", facts=("sketch-profiles-under-compute-deferred",))
+_CURVE_KINDS = ("sketchLines", "sketchArcs", "sketchCircles", "sketchEllipses",
+                "sketchFittedSplines", "sketchControlPointSplines", "sketchFixedSplines")
+
+
+@fusion_fake(live_type="SketchCurves", facts=("shape-dump-timeline-world",))
+class SketchCurves:
+    """A sketch's curves: the per-kind sub-collections a '<type>:<index>' ref indexes, with the flat
+    count/item/iteration DERIVED from them - so a curve added to one, and a sub-collection a
+    subclass swapped in, are both in the flat walk. A collection-level factory a test drives
+    (sketchArcs.addFillet, sketchLines.addDistanceChamfer) is attached to the sub-collection.
+
+    It HOLDS a _NamedCollection rather than being one: live SketchCurves carries no itemByName.
+    `_items` is the flat walk's own tail, where a test lands a curve without naming its kind."""
+    def __init__(self, lines=(), arcs=(), circles=(), ellipses=(), splines=()):
+        self._items = []
+        self.sketchLines = _NamedCollection(lines)
+        self.sketchArcs = _NamedCollection(arcs)
+        self.sketchCircles = _NamedCollection(circles)
+        self.sketchEllipses = _NamedCollection(ellipses)
+        self.sketchFittedSplines = _NamedCollection(splines)
+        self.sketchControlPointSplines = _NamedCollection()
+        self.sketchFixedSplines = _NamedCollection()
+
+    def _flat(self):
+        # Rebuilt per call, so a kind a subclass swapped in and a curve a factory grew are both in
+        # the walk. A curve landed in a kind AND in the tail is still one curve, so the tail
+        # contributes only what no kind holds. The shared collection, so the measured
+        # out-of-range raise lives in one place.
+        kinded = [c for kind in _CURVE_KINDS for c in getattr(self, kind, ())]
+        return _NamedCollection(kinded + [c for c in self._items
+                                          if not any(c is k for k in kinded)])
+
+    @property
+    def count(self):
+        return self._flat().count
+
+    def item(self, i):
+        return self._flat().item(i)
+
+    def __iter__(self):
+        return iter(self._flat())
+
+
+@fusion_fake(live_type="Sketch",
+             facts=("shape-dump-design-world", "sketch-profiles-under-compute-deferred"))
+class Sketch:
+    """A sketch: its name, sketchCurves, sketchPoints and the parentComponent a feature must be
+    built in. `profiles` are the closed regions a blind profiles.item(0) indexes and
+    `is_compute_deferred` the flag whose True makes those regions the pre-deferral ones."""
+    def __init__(self, name="Sketch1", curves=None, points=(), profiles=(),
+                 is_compute_deferred=False, parent_component=None):
+        self.name = name
+        self.sketchCurves = SketchCurves() if curves is None else curves
+        self.sketchPoints = _NamedCollection(points)
+        self.profiles = _NamedCollection(profiles)
+        self.isComputeDeferred = is_compute_deferred
+        self.parentComponent = parent_component
+
+
+@fusion_fake(factory_for="Sketch")
 def make_sketch(name="Sketch1", lines=(), arcs=(), circles=(), ellipses=(), splines=(), points=(),
                 profiles=(), is_compute_deferred=False, parent_component=None):
-    """A Sketch fake: sketchCurves (flat, plus the per-kind sub-collections a '<type>:<index>' ref
-    indexes), sketchPoints and name. Members come from make_sketch_curve; a collection-level factory
-    a test drives (sketchArcs.addFillet, sketchLines.addDistanceChamfer) is attached to the returned
-    collection. `profiles` are the closed regions a blind profiles.item(0) indexes,
-    `is_compute_deferred` the flag whose True makes those regions the pre-deferral ones, and
-    `parent_component` the component a feature must be built in."""
-    members = list(lines) + list(arcs) + list(circles) + list(ellipses) + list(splines)
-    curves = _NamedCollection(members)
-    curves.sketchLines = _NamedCollection(lines)
-    curves.sketchArcs = _NamedCollection(arcs)
-    curves.sketchCircles = _NamedCollection(circles)
-    curves.sketchEllipses = _NamedCollection(ellipses)
-    curves.sketchFittedSplines = _NamedCollection(splines)
-    curves.sketchControlPointSplines = _NamedCollection()
-    curves.sketchFixedSplines = _NamedCollection()
-    return types.SimpleNamespace(name=name, sketchCurves=curves,
-                                 sketchPoints=_NamedCollection(points),
-                                 profiles=_NamedCollection(profiles),
-                                 isComputeDeferred=is_compute_deferred,
-                                 parentComponent=parent_component)
+    """A Sketch whose curves are grouped into the per-kind sub-collections. Members come from
+    make_sketch_curve."""
+    curves = SketchCurves(lines, arcs, circles, ellipses, splines)
+    return Sketch(name, curves, points, profiles, is_compute_deferred, parent_component)
 
 
-def sketch_curves_edit(sketch, collection, add=(), remove=()):
-    """Apply a curve add/remove to a sketch fake. A sketch curve sits in TWO collections - the flat
-    sketchCurves a count read-back walks and the per-kind sub-collection a '<type>:<index>' ref
-    indexes - so both are updated together."""
+def sketch_curves_edit(collection, add=(), remove=()):
+    """Apply a curve add/remove to the per-kind sub-collection a '<type>:<index>' ref indexes - the
+    one place a sketch curve lives, since the flat sketchCurves walk derives from the kinds."""
     for curve in remove:
-        sketch.sketchCurves._items.remove(curve)
         collection._items.remove(curve)
     for curve in add:
-        sketch.sketchCurves._items.append(curve)
         collection._items.append(curve)
 
 
@@ -2317,11 +2408,13 @@ class FakeTimelineObject:
         return self._roll_ok
 
 
-@fusion_fake(live_type="Timeline", facts=("shape-dump-timeline-world", "basefeature-edit-scope"))
+@fusion_fake(live_type="Timeline", facts=("shape-dump-timeline-world", "basefeature-edit-scope",
+                                          "timeline-move-past-either-end-answers-true"))
 class FakeTimeline:
-    """design.timeline: the counted walk, markerPosition, and the four moves. A move answers the
-    bool its caller gates on and lands the marker where it says; a move PAST either end answers
-    False and leaves the marker, which is this fake's own bound - no row measures it. `raises`
+    """design.timeline: the counted walk, markerPosition, and the four moves. A move lands the
+    marker where it says; a move PAST either end answers TRUE and leaves the marker where it was
+    (measured), so the bool is no signal that the marker moved - a caller that needs to know reads
+    markerPosition back. `move_ok` False is the move that REFUSES, the only False here. `raises`
     models the open base-feature scope, in which the measured read (design.timeline.count) throws;
     every read here throws with it, so a caller cannot lean on one that was never measured."""
     def __init__(self, items=(), marker=None, raises=None, move_ok=True):
@@ -2347,9 +2440,10 @@ class FakeTimeline:
         return self._read(self._marker)
 
     def _move(self, position):
-        if not self._move_ok or not 0 <= position <= len(self._items):
+        if not self._move_ok:
             return False
-        self._marker = position
+        if 0 <= position <= len(self._items):
+            self._marker = position
         return True
 
     def moveToBeginning(self):
@@ -2398,18 +2492,22 @@ class FakeFeature:
 class FakeBaseFeature:
     """One base feature and its EDIT SCOPE: startEdit/finishEdit answer the bool the caller gates
     on and open/close the scope, which is what makes this feature invisible to its own collection
-    while it is open."""
+    while it is open. _starts/_finishes count the calls, so a scope never opened reads apart from
+    one opened and closed."""
     def __init__(self, name="BaseFeature1", start_ok=True, finish_ok=True):
         self.name = name
         self._start_ok, self._finish_ok = start_ok, finish_ok
         self._open = False
+        self._starts = self._finishes = 0
 
     def startEdit(self):
+        self._starts += 1
         if self._start_ok:
             self._open = True
         return self._start_ok
 
     def finishEdit(self):
+        self._finishes += 1
         if self._finish_ok:
             self._open = False
         return self._finish_ok
@@ -2420,9 +2518,12 @@ class FakeBaseFeature:
 class FakeBaseFeatures:
     """component.features.baseFeatures: add() answers the new base feature, and a base feature whose
     edit scope is OPEN is INVISIBLE here until finishEdit makes it appear - the measured read is
-    count (BEHAVIOR['open_base_feature_hidden']), and item/itemByName walk that same visible set."""
-    def __init__(self, features=()):
+    count (BEHAVIOR['open_base_feature_hidden']), and item/itemByName walk that same visible set.
+    `made` is the base feature add() hands back, for a caller that must hold the one it opens; a
+    FALSY `made` is the add that opened no scope, and it joins no walk."""
+    def __init__(self, features=(), made=None):
         self._features = list(features)
+        self._made = made
 
     def _visible(self):
         hide = _api_facts.BEHAVIOR["open_base_feature_hidden"]
@@ -2439,8 +2540,10 @@ class FakeBaseFeatures:
         return _NamedCollection(self._visible()).itemByName(name)
 
     def add(self):
-        feature = FakeBaseFeature("BaseFeature%d" % (len(self._features) + 1))
-        self._features.append(feature)
+        feature = (self._made if self._made is not None
+                   else FakeBaseFeature("BaseFeature%d" % (len(self._features) + 1)))
+        if feature:
+            self._features.append(feature)
         return feature
 
 

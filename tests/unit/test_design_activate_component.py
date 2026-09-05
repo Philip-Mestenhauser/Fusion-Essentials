@@ -2,169 +2,99 @@
 
 Pinned: an occurrence resolves by occurrence OR component name, an ambiguous name is REFUSED rather
 than first-matched, an activate() that reports true but does not take is an error, and 'root'/''
-returns the edit target to the root (falling back to deactivating the active occurrence).
+returns the edit target to the root through Design.activateRootComponent.
 """
 
-import json
-
-import pytest
-
-from conftest import load_tool
+from conftest import (FakeOccurrence, MakeComp, MakeDesign, error_message, install, load_tool,
+                      payload)
 
 dm = load_tool("design_activate_component")
 
 
-class _FakeOcc:
-    def __init__(self, name, comp_name, activate_returns=True, full_path=None):
-        self.name = name
-        self.fullPathName = full_path or name
-        self.component = type("C", (), {"name": comp_name})()
-        self.isActive = False
-        self._activate_returns = activate_returns
-        self.deactivated = False
+class _Occ(FakeOccurrence):
+    """An occurrence placing a component of its own."""
 
-    def activate(self):
-        if self._activate_returns:
-            self.isActive = True
-        return self._activate_returns
-
-    def deactivate(self):
-        self.isActive = False
-        self.deactivated = True
-        return True
+    def __init__(self, path, comp_name, **kw):
+        super().__init__(path=path, component=MakeComp(name=comp_name), **kw)
 
 
-class _OccColl:
-    def __init__(self, occs):
-        self._occs = list(occs)
+class _ActivateDesign(MakeDesign):
+    """A design whose activeComponent reports whichever occurrence is the active edit target - the
+    read an activation is judged by. `root_activate` is Design.activateRootComponent."""
 
-    @property
-    def count(self):
-        return len(self._occs)
-
-    def item(self, i):
-        return self._occs[i] if 0 <= i < len(self._occs) else None
-
-    def __iter__(self):
-        return iter(self._occs)
-
-
-class _ActivateDesign:
-    """A design exposing root.allOccurrences + activeComponent, for design_activate_component."""
-    def __init__(self, occs, root_activate=None):
-        self._occs = occs
-        active = type("Root", (), {"name": "RootComp", "allOccurrences": _OccColl(occs)})()
-        self.rootComponent = active
-        self._active_name = "RootComp"
+    def __init__(self, occurrences, root_activate=None):
+        super().__init__(comp=MakeComp(name="RootComp", occurrences=occurrences))
+        self._occs = list(occurrences)
         if root_activate is not None:
             self.activateRootComponent = root_activate
 
     @property
     def activeComponent(self):
-        # report whichever occurrence is active, else root
-        for o in self._occs:
-            if o.isActive:
-                return type("AC", (), {"name": o.component.name})()
-        return type("AC", (), {"name": "RootComp"})()
+        active = next((o for o in self._occs if o.isActive), None)
+        return active.component if active is not None else self.rootComponent
 
-
-def _install_activate(monkeypatch, design):
-    app = type("A", (), {"activeProduct": design})()
-    monkeypatch.setattr(dm._common, "app", app)
-    import adsk.fusion
-    monkeypatch.setattr(adsk.fusion.Design, "cast", lambda x: x if isinstance(x, _ActivateDesign) else None)
-    return design
-
-
-def _payload(result):
-    assert result["isError"] is False, result
-    return json.loads(result["content"][0]["text"])
+    @activeComponent.setter
+    def activeComponent(self, value):
+        # MakeDesign seeds the root here; this design derives the answer from the active occurrence.
+        pass
 
 
 class TestActivateComponent:
-    def test_no_active_design(self, monkeypatch):
-        _install_activate(monkeypatch, None)
-        # cast(None) -> None
-        import adsk.fusion
-        monkeypatch.setattr(adsk.fusion.Design, "cast", lambda x: None)
-        res = dm.handler(occurrence="Chassis:1")
-        assert res["isError"] is True and "No active design" in res["message"]
+    def test_no_active_design(self):
+        install(dm, None)
+        assert "No active design" in error_message(dm.handler(occurrence="Chassis:1"))
 
-    def test_activate_by_occurrence_name(self, monkeypatch):
-        occ = _FakeOcc("Chassis:1", "Chassis")
-        _install_activate(monkeypatch, _ActivateDesign([occ, _FakeOcc("Wheel:1", "Wheel")]))
-        out = _payload(dm.handler(occurrence="Chassis:1"))
+    def test_activate_by_occurrence_name(self):
+        occ = _Occ("Chassis:1", "Chassis")
+        install(dm, _ActivateDesign([occ, _Occ("Wheel:1", "Wheel")]))
+        out = payload(dm.handler(occurrence="Chassis:1"))
         assert occ.isActive is True
         assert out["activated"] == "Chassis:1" and out["component"] == "Chassis"
         assert out["active_component"] == "Chassis"
 
-    def test_activate_by_component_name(self, monkeypatch):
-        occ = _FakeOcc("Chassis:1", "Chassis")
-        _install_activate(monkeypatch, _ActivateDesign([occ]))
-        out = _payload(dm.handler(occurrence="Chassis"))   # component name
+    def test_activate_by_component_name(self):
+        occ = _Occ("Chassis:1", "Chassis")
+        install(dm, _ActivateDesign([occ]))
+        out = payload(dm.handler(occurrence="Chassis"))   # component name
         assert occ.isActive is True and out["activated"] == "Chassis:1"
 
-    def test_activation_that_does_not_take_bites(self, monkeypatch):
+    def test_activation_that_does_not_take_bites(self):
         # activate() returns true but the active component still reads root -> error, not ok
-        occ = _FakeOcc("Chassis:1", "Chassis")
-        occ.activate = lambda: True                    # true returned, isActive never flips
-        _install_activate(monkeypatch, _ActivateDesign([occ]))
-        res = dm.handler(occurrence="Chassis:1")
-        assert res["isError"] is True
-        assert "did not take" in res["message"]
+        occ = _Occ("Chassis:1", "Chassis", activate_lies=True)
+        install(dm, _ActivateDesign([occ]))
+        assert "did not take" in error_message(dm.handler(occurrence="Chassis:1"))
 
-    def test_unknown_component_errors_and_lists(self, monkeypatch):
-        _install_activate(monkeypatch, _ActivateDesign([_FakeOcc("Wheel:1", "Wheel")]))
-        res = dm.handler(occurrence="Ghost")
-        assert res["isError"] is True and "Ghost" in res["message"] and "Wheel:1" in res["message"]
+    def test_unknown_component_errors_and_lists(self):
+        install(dm, _ActivateDesign([_Occ("Wheel:1", "Wheel")]))
+        msg = error_message(dm.handler(occurrence="Ghost"))
+        assert "Ghost" in msg and "Wheel:1" in msg
 
-    def test_ambiguous_name_refused_not_first_match(self, monkeypatch):
+    def test_ambiguous_name_refused_not_first_match(self):
         # two instances share local name "Bolt:1" under different sub-assemblies - a bare "Bolt"
         # substring must ERROR (naming both fullPathNames), NOT silently activate the first.
-        a = _FakeOcc("Bolt:1", "Bolt", full_path="Sub-A:1+Bolt:1")
-        b = _FakeOcc("Bolt:1", "Bolt", full_path="Sub-B:1+Bolt:1")
-        _install_activate(monkeypatch, _ActivateDesign([a, b]))
-        res = dm.handler(occurrence="Bolt")
-        assert res["isError"] is True
-        assert "ambiguous" in res["message"].lower()
-        assert "Sub-A:1+Bolt:1" in res["message"] and "Sub-B:1+Bolt:1" in res["message"]
+        a = _Occ("Sub-A:1+Bolt:1", "Bolt")
+        b = _Occ("Sub-B:1+Bolt:1", "Bolt")
+        install(dm, _ActivateDesign([a, b]))
+        msg = error_message(dm.handler(occurrence="Bolt"))
+        assert "ambiguous" in msg.lower()
+        assert "Sub-A:1+Bolt:1" in msg and "Sub-B:1+Bolt:1" in msg
         assert a.isActive is False and b.isActive is False
 
-    def test_activate_root_via_empty(self, monkeypatch):
-        occ = _FakeOcc("Chassis:1", "Chassis")
-        occ.isActive = True
+    def test_activate_root_via_empty(self):
+        occ = _Occ("Chassis:1", "Chassis", is_active=True)
         called = {"root": False}
+
         def root_activate():
             called["root"] = True
-            occ.isActive = False
+            occ._is_active = False
             return True
-        _install_activate(monkeypatch, _ActivateDesign([occ], root_activate=root_activate))
-        out = _payload(dm.handler(occurrence=""))
+
+        install(dm, _ActivateDesign([occ], root_activate=root_activate))
+        out = payload(dm.handler(occurrence=""))
         assert out["activated"] == "root"
         assert called["root"] is True
 
-    def test_activate_root_falls_back_to_deactivate(self, monkeypatch):
-        # no activateRootComponent on the design -> deactivate the active occurrence instead
-        occ = _FakeOcc("Chassis:1", "Chassis")
-        occ.isActive = True
-        _install_activate(monkeypatch, _ActivateDesign([occ]))     # no root_activate provided
-        out = _payload(dm.handler(occurrence="root"))
-        assert out["activated"] == "root" and occ.deactivated is True
-
-    def test_activate_returns_false_errors(self, monkeypatch):
-        occ = _FakeOcc("Chassis:1", "Chassis", activate_returns=False)
-        _install_activate(monkeypatch, _ActivateDesign([occ]))
-        res = dm.handler(occurrence="Chassis:1")
-        assert res["isError"] is True and "returned false" in res["message"]
-
-    def test_deactivate_raises_surfaces_as_error(self, monkeypatch):
-        # A deactivate() failure must propagate as an error - reporting ok("root") when the
-        # deactivate call failed would be a false success.
-        class _RaisingOcc(_FakeOcc):
-            def deactivate(self):
-                raise RuntimeError("deactivate blew up")
-        occ = _RaisingOcc("Chassis:1", "Chassis")
-        occ.isActive = True
-        _install_activate(monkeypatch, _ActivateDesign([occ]))    # no root_activate -> falls to deactivate()
-        with pytest.raises(RuntimeError, match="deactivate blew up"):
-            dm.handler(occurrence="root")
+    def test_activate_returns_false_errors(self):
+        occ = _Occ("Chassis:1", "Chassis", activate_ok=False)
+        install(dm, _ActivateDesign([occ]))
+        assert "returned false" in error_message(dm.handler(occurrence="Chassis:1"))

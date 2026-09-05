@@ -11,12 +11,12 @@ endSketchPoint (so endpoints are shared, not duplicated), and adds the closing s
 record which point object each segment started from, so we can assert the chaining.
 """
 
-from conftest import load_tool
+from conftest import load_tool, make_sketch
 
 sk = load_tool("sketch_add_geometry")
 
 
-# ── fakes mimicking SketchLines / SketchLine / SketchPoint ──────────────────
+# ── fakes for the types with no shared one: SketchPoint / SketchLine(s) / GeometricConstraints ──
 
 _pid = [0]
 
@@ -54,15 +54,12 @@ class FakeConstraints:
         return ("coin", a, b)
 
 
-class FakeCurves:
-    def __init__(self):
-        self.sketchLines = FakeSketchLines()
-
-
-class FakeSketch:
-    def __init__(self):
-        self.sketchCurves = FakeCurves()
-        self.geometricConstraints = FakeConstraints()
+def _sketch():
+    """The shared Sketch fake, its sketchLines swapped for the recorder the chaining is read off."""
+    s = make_sketch()
+    s.sketchCurves.sketchLines = FakeSketchLines()
+    s.geometricConstraints = FakeConstraints()
+    return s
 
 
 def _pt(x, y, k):
@@ -84,7 +81,7 @@ def _patch_pt(monkeypatch):
 
 class TestPolylineChaining:
     def _draw(self, points):
-        s = FakeSketch()
+        s = _sketch()
         return s, sk._draw_polyline(s, points, k=0.1)
 
     def test_open_polyline_segment_count(self):
@@ -117,6 +114,6 @@ class TestPolylineChaining:
         assert not s.geometricConstraints.coincidents
 
     def test_needs_at_least_two_points(self):
-        s = FakeSketch()
+        s = _sketch()
         res = sk._draw_polyline(s, [(0, 0)], k=0.1)
         assert res is None  # not enough points to draw anything

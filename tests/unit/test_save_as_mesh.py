@@ -1,10 +1,14 @@
 """Unit tests for save_as_mesh.py - the tessellation, the vertex weld and the landed body."""
 
+import types
+
 import adsk.fusion
 import pytest
 
-from conftest import (BRepBody, MakeComp, MakeDesign, MeshBody, _FakeTriangleMesh, _MeshBodies,
-                      install, load_tool, payload)
+import live_api_facts
+from conftest import (BRepBody, FakeBaseFeature, FakeBaseFeatures, FakeFeatures, MakeComp,
+                      MakeDesign, MeshBody, _FakeTriangleMesh, _MeshBodies, install, load_tool,
+                      payload)
 
 mx = load_tool("save_as_mesh")
 
@@ -51,45 +55,12 @@ class FakeMeshManager:
         return self._calc
 
 
-class FakeBaseFeature:
-    def __init__(self):
-        self.name = "BaseFeature1"
-        self.started = False
-        self.finished = False
-
-    def startEdit(self):
-        self.started = True
-        return True
-
-    def finishEdit(self):
-        self.finished = True
-        return True
-
-
-class FakeBaseFeatures:
-    def __init__(self, made=None):
-        self._made = made if made is not None else FakeBaseFeature()
-        self.count = 0
-
-    def add(self):
-        return self._made
-
-
-class FakeFeatures:
-    def __init__(self, base_features=None):
-        self.baseFeatures = base_features if base_features is not None else FakeBaseFeatures()
-
-
 @pytest.fixture(autouse=True)
 def _types(monkeypatch):
-    """The adsk types the input kinds isinstance-check, plus the tessellation-quality members."""
+    """The adsk types the input kinds isinstance-check - TriangleMeshQualityOptions arrives seeded."""
     monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
     monkeypatch.setattr(adsk.fusion, "MeshBody", MeshBody, raising=False)
     monkeypatch.setattr(adsk.fusion, "BaseFeature", FakeBaseFeature, raising=False)
-    tmo = adsk.fusion.TriangleMeshQualityOptions
-    for member, value in (("LowQualityTriangleMesh", 8), ("NormalQualityTriangleMesh", 11),
-                          ("HighQualityTriangleMesh", 13), ("VeryHighQualityTriangleMesh", 15)):
-        monkeypatch.setattr(tmo, member, value, raising=False)
 
 
 def _comp(name="Comp", mesh_bodies=None, features=None):
@@ -108,20 +79,30 @@ def _wire(comp, design_type=0, handles=None):
 def _mesh_source(name="SolidA", tri=12, nodes=8, parent_comp=None, raise_on_calc=False):
     """A BRep body wired with a meshManager that yields a TriangleMesh of the given counts.
 
-    The mesh carries no normalIndices - a live TriangleMesh answers none, so the handler's read of
-    it degrades and the normal index list it passes on is empty."""
+    A live TriangleMesh exposes no normal index list, so the one the handler passes on is empty."""
     tm = _FakeTriangleMesh(tri, nodes, coords=[0.0] * (nodes * 3),
                            node_indices=list(range(tri * 3)), normals=[0.0] * (nodes * 3))
     calc = FakeMeshCalculator(tm, raise_on_calc=raise_on_calc)
     return BRepBody(name, parent_component=parent_comp, mesh_manager=FakeMeshManager(calc))
 
 
+def _quality_family_without(member):
+    """The measured TriangleMeshQualityOptions family with `member` absent - the build whose enum
+    does not carry the requested quality. Reading the missing name raises, as the seeded family
+    does, so the handler's safe(getattr(...)) degrades exactly the way it does live."""
+    measured = live_api_facts.ENUMS["fusion.TriangleMeshQualityOptions"]
+    return types.SimpleNamespace(**{k: v for k, v in measured.items() if k != member})
+
+
 class TestSaveAsMesh:
 
-    def _tessellate_without_the_quality_member(self, quality="high"):
+    def _tessellate_without_the_quality_member(self, monkeypatch, quality="high"):
         """save_as_mesh on a build carrying no TriangleMeshQualityOptions member for the request -
         setQuality is never called and the calculator runs at its own default level of detail."""
-        delattr(adsk.fusion.TriangleMeshQualityOptions, "HighQualityTriangleMesh")
+        # The FAMILY is swapped for one that is a member short, never a member deleted off the seeded
+        # family: that object outlives one test, so the deletion would leak into the next.
+        monkeypatch.setattr(adsk.fusion, "TriangleMeshQualityOptions",
+                            _quality_family_without("HighQualityTriangleMesh"), raising=False)
         comp = _comp()
         src = _mesh_source("SolidA", parent_comp=comp)
         _wire(comp, design_type=0, handles={"H": src})
@@ -130,7 +111,8 @@ class TestSaveAsMesh:
     def test_direct_tessellates_adds_mesh_no_scope(self):
         mb_coll = _AddingMeshBodies(result=MeshBody("SavedMesh"))
         bf = FakeBaseFeature()
-        comp = _comp("Comp", mesh_bodies=mb_coll, features=FakeFeatures(FakeBaseFeatures(made=bf)))
+        comp = _comp("Comp", mesh_bodies=mb_coll,
+                     features=FakeFeatures(base_features=FakeBaseFeatures(made=bf)))
         src = _mesh_source("SolidA", tri=12, nodes=8, parent_comp=comp)
         _wire(comp, design_type=0, handles={"H": src})               # DIRECT
         out = payload(mx.handler(body="H", quality="normal"))
@@ -138,19 +120,24 @@ class TestSaveAsMesh:
         assert out["name"] == "SavedMesh"
         assert out["triangle_count"] == 12 and out["node_count"] == 8
         assert mb_coll.add_args is not None            # the mesh was actually added
+        # A TriangleMesh exposes no normal index list, so the fourth argument is always empty.
+        assert mb_coll.add_args[3] == []
         # DIRECT: run_in_base_feature ran the op with NO scope (the base feature was never started)
-        assert bf.started is False and bf.finished is False
+        assert bf._starts == 0 and bf._finishes == 0
 
     def test_parametric_routes_through_base_feature_scope(self):
         mb_coll = _AddingMeshBodies(result=MeshBody("SavedMesh"))
         bf = FakeBaseFeature()
-        comp = _comp("Comp", mesh_bodies=mb_coll, features=FakeFeatures(FakeBaseFeatures(made=bf)))
+        base_features = FakeBaseFeatures(made=bf)
+        comp = _comp("Comp", mesh_bodies=mb_coll, features=FakeFeatures(base_features=base_features))
         src = _mesh_source("SolidA", parent_comp=comp)
         _wire(comp, design_type=1, handles={"H": src})               # PARAMETRIC
         out = payload(mx.handler(body="H"))
         assert out["saved_as_mesh"] is True
-        # PARAMETRIC: the write was wrapped in an OPEN/CLOSED base-feature scope
-        assert bf.started is True and bf.finished is True
+        # PARAMETRIC: the write was wrapped in an OPEN/CLOSED base-feature scope - and a scope left
+        # open would hide its own base feature from the collection it was added to.
+        assert bf._starts == 1 and bf._finishes == 1
+        assert base_features.count == 1 and base_features.item(0) is bf
         assert mb_coll.add_args is not None
 
     def test_phantom_body_that_never_lands_bites(self):
@@ -187,16 +174,16 @@ class TestSaveAsMesh:
         # the calculator received the VeryHigh quality enum value
         assert src.meshManager._calc.quality == 15
 
-    def test_quality_that_never_reached_setquality_is_published_null(self):
+    def test_quality_that_never_reached_setquality_is_published_null(self, monkeypatch):
         # the tessellation ran at the calculator's DEFAULT LOD, so publishing the requested key as
         # 'quality' would report a level of detail the mesh does not have.
-        out, src = self._tessellate_without_the_quality_member()
+        out, src = self._tessellate_without_the_quality_member(monkeypatch)
         assert src.meshManager._calc.quality is None      # setQuality was never called
         assert out["quality"] is None
         assert out["quality_requested"] == "high"
 
-    def test_an_unlanded_quality_says_so_on_the_wire(self):
-        out, _src = self._tessellate_without_the_quality_member()
+    def test_an_unlanded_quality_says_so_on_the_wire(self, monkeypatch):
+        out, _src = self._tessellate_without_the_quality_member(monkeypatch)
         assert "did NOT land" in out["note"] and "default level of detail" in out["note"]
 
     def test_a_landed_quality_adds_no_did_not_land_note(self):

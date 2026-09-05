@@ -12,27 +12,22 @@ collection must FAIL).
 
 import json
 
-import adsk.fusion
 import pytest
 
-from conftest import load_tool
+from conftest import (MakeComp, Sketch, SketchCurves, _NamedCollection, install, load_tool,
+                      make_design)
 
 sd = load_tool("sketch_delete_entity")
 
 
 # ── fakes that model deletion (deleteMe removes self from its owning collection) ──
 
-class _DelColl:
-    """A count/item collection whose members remove themselves via deleteMe()."""
-    def __init__(self, items):
-        self._i = list(items)
-        for it in self._i:
+class _DelColl(_NamedCollection):
+    """The shared collection whose members remove themselves via deleteMe()."""
+    def __init__(self, items=()):
+        super().__init__(items)
+        for it in self._items:
             it._coll = self
-    @property
-    def count(self):
-        return len(self._i)
-    def item(self, i):
-        return self._i[i] if 0 <= i < len(self._i) else None
 
 
 class FakeEntity:
@@ -43,8 +38,8 @@ class FakeEntity:
     def deleteMe(self):
         if not self._delete_ok:
             return False                      # Fusion refused (e.g. consumed by a dimension)
-        if self._coll is not None and self in self._coll._i:
-            self._coll._i.remove(self)        # a real delete shrinks the collection
+        if self._coll is not None and self in self._coll._items:
+            self._coll._items.remove(self)        # a real delete shrinks the collection
         return True
 
 
@@ -67,7 +62,7 @@ class _UnreadableCount(_DelColl):
         self._reads += 1
         if self._raise_on is None or self._reads in self._raise_on:
             raise RuntimeError("2 : InternalValidationError : count")
-        return len(self._i)
+        return len(self._items)
 
 
 def FakeText(content, delete_ok=True):
@@ -86,8 +81,10 @@ def _text_claiming_success(content):
     return t
 
 
-class FakeSketchCurves:
+class FakeSketchCurves(SketchCurves):
+    """The shared SketchCurves with every per-kind sub-collection modelling deletion."""
     def __init__(self, lines, arcs, circles, ellipses=(), splines=(), cv_splines=(), fixed_splines=()):
+        super().__init__()
         self.sketchLines = _DelColl(lines)
         self.sketchArcs = _DelColl(arcs)
         self.sketchCircles = _DelColl(circles)
@@ -97,49 +94,21 @@ class FakeSketchCurves:
         self.sketchFixedSplines = _DelColl(fixed_splines)
 
 
-class FakeSketch:
+class FakeSketch(Sketch):
+    """The shared Sketch fake whose curve, point, constraint and text collections model deletion."""
     def __init__(self, name, lines=(), arcs=(), circles=(), points=(), constraints=(), ellipses=(),
                 splines=(), cv_splines=(), fixed_splines=(), texts=()):
-        self.name = name
-        self.sketchCurves = FakeSketchCurves(list(lines), list(arcs), list(circles), list(ellipses),
-                                             list(splines), list(cv_splines), list(fixed_splines))
+        super().__init__(name=name,
+                         curves=FakeSketchCurves(list(lines), list(arcs), list(circles),
+                                                 list(ellipses), list(splines), list(cv_splines),
+                                                 list(fixed_splines)))
         self.sketchPoints = _DelColl(list(points))
         self.geometricConstraints = _DelColl(list(constraints))
         self.sketchTexts = _DelColl(list(texts))
 
 
-class FakeSketches:
-    def __init__(self, sketches):
-        self._s = list(sketches)
-    def itemByName(self, name):
-        for s in self._s:
-            if s.name == name:
-                return s
-        return None
-    @property
-    def count(self):
-        return len(self._s)
-    def item(self, i):
-        return self._s[i]
-
-
-class FakeRoot:
-    def __init__(self, sketches):
-        self.sketches = FakeSketches(sketches)
-
-
-class FakeDesign:
-    def __init__(self, sketches):
-        self.rootComponent = FakeRoot(sketches)
-
-
 def _install(sketch):
-    design = FakeDesign([sketch])
-    sd.app = type("A", (), {"activeProduct": design})()
-    sd._common.app = sd.app
-    import adsk.fusion
-    adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
-    return design
+    return install(sd, make_design(sketches=[sketch]))
 
 
 def _payload(result):
@@ -172,30 +141,12 @@ def _full_sketch():
 # offer a way through that does not mean editing another document. monkeypatch (not the imperative
 # _install above) so every seam is restored after each test.
 
-class _MultiComp:
-    def __init__(self, name, sketches):
-        self.name = name
-        self.sketches = FakeSketches(sketches)
-
-
-class _MultiDesign:
-    """Several named components, each with its own sketches. allComponents lives on the DESIGN."""
-    def __init__(self, comps):
-        self.rootComponent = comps[0]
-        self.allComponents = _DelColl(list(comps))
-        self.activeComponent = comps[0]
-        self.rootComponent.allOccurrences = []
-
-
 @pytest.fixture
-def install_multi(monkeypatch):
+def install_multi():
+    """Several named components, each with its own sketches. allComponents lives on the DESIGN."""
     def _do(pairs):
-        design = _MultiDesign([_MultiComp(n, s) for n, s in pairs])
-        monkeypatch.setattr(sd, "app", type("A", (), {"activeProduct": design})())
-        monkeypatch.setattr(sd._common, "app", sd.app)
-        monkeypatch.setattr(adsk.fusion.Design, "cast",
-                            lambda x: x if isinstance(x, _MultiDesign) else None)
-        return design
+        comps = [MakeComp(name=n, sketches=list(s)) for n, s in pairs]
+        return install(sd, make_design(comp=comps[0], all_components=comps))
     return _do
 
 
@@ -257,7 +208,7 @@ class TestDeleteCurve:
         out = _payload(sd.handler(sketch_name="S", target="line:1"))
         assert out["deleted"] is True
         assert out["lines_before"] == 2 and out["lines_after"] == 1
-        assert [e.name for e in s.sketchCurves.sketchLines._i] == ["L0"]
+        assert [e.name for e in s.sketchCurves.sketchLines._items] == ["L0"]
 
     def test_delete_circle(self):
         s = _sketch(); _install(s)
@@ -331,7 +282,7 @@ class TestDeleteNewKinds:
         out = _payload(sd.handler(sketch_name="S", target="spline:0"))
         assert out["deleted"] is True
         assert out["splines_before"] == 2 and out["splines_after"] == 1
-        assert [e.name for e in s.sketchCurves.sketchFittedSplines._i] == ["SP1"]
+        assert [e.name for e in s.sketchCurves.sketchFittedSplines._items] == ["SP1"]
 
     def test_delete_control_point_spline(self):
         s = _full_sketch(); _install(s)
@@ -366,7 +317,7 @@ class TestDeleteConstraint:
         out = _payload(sd.handler(sketch_name="S", target="constraint:1"))
         assert out["deleted"] is True
         assert out["constraints_before"] == 3 and out["constraints_after"] == 2
-        assert [k.name for k in s.geometricConstraints._i] == ["K0", "K2"]
+        assert [k.name for k in s.geometricConstraints._items] == ["K0", "K2"]
 
     def test_constraint_out_of_range_errors(self):
         s = _sketch(); _install(s)
@@ -398,7 +349,7 @@ class TestDeleteText:
         out = _payload(sd.handler(sketch_name="S", target="text:1"))
         assert out["texts_before"] == 3 and out["texts_after"] == 2
         assert out["text"] == "B"                    # index = creation order, so B went - not A
-        assert [t.name for t in s.sketchTexts._i] == ["A", "C"]
+        assert [t.name for t in s.sketchTexts._items] == ["A", "C"]
 
     def test_no_texts_at_all_refuses_naming_the_count(self):
         s = FakeSketch("S", texts=[])
@@ -459,7 +410,7 @@ class TestCountsMustRead:
 
     def test_an_unreadable_after_count_is_refused_not_read_as_a_delete(self):
         s = _sketch()
-        s.sketchCurves.sketchLines = _UnreadableCount(s.sketchCurves.sketchLines._i, raise_on=(3,))
+        s.sketchCurves.sketchLines = _UnreadableCount(s.sketchCurves.sketchLines._items, raise_on=(3,))
         _install(s)
         res = sd.handler(sketch_name="S", target="line:1")
         assert res["isError"] is True
@@ -475,16 +426,16 @@ class TestCountsMustRead:
 
     def test_an_unreadable_before_count_deletes_nothing(self):
         s = _sketch()
-        s.sketchCurves.sketchLines = _UnreadableCount(s.sketchCurves.sketchLines._i, raise_on=(1,))
+        s.sketchCurves.sketchLines = _UnreadableCount(s.sketchCurves.sketchLines._items, raise_on=(1,))
         _install(s)
         res = sd.handler(sketch_name="S", target="line:1")
         assert res["isError"] is True
         assert "Nothing was deleted" in res["message"]
-        assert s.sketchCurves.sketchLines._i[1].name == "L1"      # still there
+        assert s.sketchCurves.sketchLines._items[1].name == "L1"      # still there
 
     def test_an_unreadable_constraint_after_count_is_refused(self):
         s = _sketch()
-        s.geometricConstraints = _UnreadableCount(s.geometricConstraints._i, raise_on=(3,))
+        s.geometricConstraints = _UnreadableCount(s.geometricConstraints._items, raise_on=(3,))
         _install(s)
         res = sd.handler(sketch_name="S", target="constraint:1")
         assert res["isError"] is True
@@ -502,7 +453,7 @@ class TestCountsMustRead:
         # the resolve-time half: 'the sketch has 0 constraint(s)' is a fabricated census, and it
         # sends the caller looking for constraints that may well be there
         s = _sketch()
-        s.geometricConstraints = _UnreadableCount(s.geometricConstraints._i)
+        s.geometricConstraints = _UnreadableCount(s.geometricConstraints._items)
         _install(s)
         res = sd.handler(sketch_name="S", target="constraint:1")
         assert res["isError"] is True
@@ -523,12 +474,12 @@ class TestCountsMustRead:
         # without a readable baseline no after < before verdict is possible, so the delete must not
         # run at all (the entity is provably still resolvable, and provably still present)
         s = _sketch()
-        s.geometricConstraints = _UnreadableCount(s.geometricConstraints._i, raise_on=(1,))
+        s.geometricConstraints = _UnreadableCount(s.geometricConstraints._items, raise_on=(1,))
         _install(s)
         res = sd.handler(sketch_name="S", target="constraint:1")
         assert res["isError"] is True
         assert "Nothing was deleted" in res["message"]
-        assert len(s.geometricConstraints._i) == 3                # nothing removed
+        assert len(s.geometricConstraints._items) == 3                # nothing removed
 
     def test_a_text_count_that_reads_only_at_resolve_time_still_deletes_nothing(self):
         s = FakeSketch("S")
@@ -537,7 +488,7 @@ class TestCountsMustRead:
         res = sd.handler(sketch_name="S", target="text:0")
         assert res["isError"] is True
         assert "Nothing was deleted" in res["message"]
-        assert len(s.sketchTexts._i) == 1                         # nothing removed
+        assert len(s.sketchTexts._items) == 1                         # nothing removed
 
     def test_an_absent_constraints_collection_is_named_not_treated_as_empty(self):
         s = _sketch()
@@ -556,7 +507,7 @@ class TestCountsMustRead:
 
     def test_a_curve_count_that_never_reads_names_the_unread_census(self):
         s = _sketch()
-        s.sketchCurves.sketchLines = _UnreadableCount(s.sketchCurves.sketchLines._i)
+        s.sketchCurves.sketchLines = _UnreadableCount(s.sketchCurves.sketchLines._items)
         _install(s)
         res = sd.handler(sketch_name="S", target="line:1")
         assert res["isError"] is True
@@ -578,16 +529,8 @@ class TestGuards:
         mine, theirs = _sketch(), _sketch()
         design = _install(mine)
         design.rootComponent.name = "Root"
-        other = FakeRoot([theirs])
-        other.name = "Frame"
-
-        class _Comps:
-            _c = [design.rootComponent, other]
-            count = 2
-            def item(self, i):
-                return _Comps._c[i]
-
-        design.allComponents = _Comps()
+        other = MakeComp(name="Frame", sketches=[theirs])
+        design._all_components = [design.rootComponent, other]
         res = sd.handler(sketch_name="S", target="line:0")
         assert res["isError"] is True
         assert "2 sketches" in res["message"] and "Root" in res["message"] and "Frame" in res["message"]
@@ -621,16 +564,9 @@ class TestGuards:
 
 
 @pytest.fixture
-def wired(monkeypatch):
-    """Wire a design holding `sketch` into the tool's seams for one test; monkeypatch undoes it."""
-    def _do(sketch):
-        design = FakeDesign([sketch])
-        monkeypatch.setattr(sd, "app", type("A", (), {"activeProduct": design})())
-        monkeypatch.setattr(sd._common, "app", sd.app)
-        monkeypatch.setattr(adsk.fusion.Design, "cast",
-                            lambda x: x if isinstance(x, FakeDesign) else None)
-        return design
-    return _do
+def wired():
+    """Wire a design holding `sketch` into the tool's seams for one test."""
+    return _install
 
 
 class TestNamedSketchMiss:

@@ -12,10 +12,14 @@ import types
 import adsk.fusion
 import pytest
 
-from conftest import (BRepBody, MakeComp, _NamedCollection, error_message, install, load_tool,
-                      make_design, payload)
+from conftest import (BRepBody, FakeOccurrence, FakeTimelineObject, MakeComp, _NamedCollection,
+                      error_message, install, load_tool, make_design, payload)
 
 drf = load_tool("design_remove_feature")
+
+# The walk that will not enumerate at all - neither allOccurrences nor the component.occurrences
+# fallback answers, which is a different state from an empty assembly.
+_UNREADABLE = "gone"
 
 
 # ── fake surfaces built from the shared conftest fakes ──────────────────────────────────────────
@@ -49,7 +53,8 @@ def _remove_features(*, on_add=None, feature_name="Remove1", returns_feature=Tru
 
 def _timeline(*items):
     """A timeline of (name, healthState) pairs - what _common.timeline_health walks."""
-    return _NamedCollection([types.SimpleNamespace(name=n, healthState=h) for n, h in items])
+    return _NamedCollection([FakeTimelineObject(name=n, index=i, health=h)
+                             for i, (n, h) in enumerate(items)])
 
 
 def _parametric(design, design_type=1):
@@ -77,9 +82,7 @@ def _occurrence_design(paths=("Part:1",), removes=True, **kw):
     target the removeFeatures fake drops from allOccurrences."""
     # Each occurrence answers `component`, as a real one always does: the shared census classifies an
     # occurrence whose component read RAISES as an unresolved reference and keeps it out of the walk.
-    occs = [types.SimpleNamespace(name=p.rsplit("+", 1)[-1], fullPathName=p,
-                                  component=types.SimpleNamespace(name=p.split(":")[0]))
-            for p in paths]
+    occs = [FakeOccurrence(path=p, component=MakeComp(name=p.split(":")[0])) for p in paths]
     comp = MakeComp("Root", occurrences=occs)
     target = occs[0]
     on_add = (lambda: comp.allOccurrences.remove(target)) if removes else None
@@ -241,11 +244,9 @@ class TestRemoveOccurrence:
         # the Remove feature belongs to the component CONTAINING the instance, which for a nested
         # occurrence is its assemblyContext's component - not the root.
         parent_comp = MakeComp("Sub", bodies=[])
-        parent_occ = types.SimpleNamespace(name="Sub:1", fullPathName="Sub:1",
-                                           component=parent_comp)
-        child = types.SimpleNamespace(name="Bolt:1", fullPathName="Sub:1+Bolt:1",
-                                      assemblyContext=parent_occ,
-                                      component=MakeComp("Bolt"))
+        parent_occ = FakeOccurrence(path="Sub:1", component=parent_comp)
+        child = FakeOccurrence(path="Sub:1+Bolt:1", component=MakeComp("Bolt"),
+                               assembly_context=parent_occ)
         root = MakeComp("Root", occurrences=[parent_occ, child])
         parent_comp.features = types.SimpleNamespace(
             removeFeatures=_remove_features(on_add=lambda: root.allOccurrences.remove(child)))
@@ -266,20 +267,12 @@ class TestRemoveOccurrence:
         # BOTH walks raise - allOccurrences and the component.occurrences fallback - so the census
         # cannot answer and the call reports an honest "may or may not have taken" instead of
         # letting the exception escape or claiming a verified removal.
-        class _RaisingWalk:
-            def __iter__(self):
-                raise RuntimeError("gone")
-
-            @property
-            def count(self):
-                raise RuntimeError("gone")
-
         design, comp, occ = _occurrence_design()
 
         def poison():
             comp.allOccurrences.remove(occ)
-            comp.allOccurrences = _RaisingWalk()
-            comp.occurrences = _RaisingWalk()
+            comp.allOccurrences = _NamedCollection(raises=_UNREADABLE)
+            comp.occurrences = _NamedCollection(raises=_UNREADABLE)
 
         comp.features.removeFeatures = _remove_features(on_add=poison)
         install(drf, design)
@@ -289,20 +282,12 @@ class TestRemoveOccurrence:
     def test_a_raising_allOccurrences_still_verifies_through_the_fallback_walk(self):
         # allOccurrences alone raising must NOT make a real removal unverifiable: the shared census
         # rebuilds from component.occurrences, so the removal is confirmed rather than refused.
-        class _RaisingWalk:
-            def __iter__(self):
-                raise RuntimeError("gone")
-
-            @property
-            def count(self):
-                raise RuntimeError("gone")
-
         design, comp, occ = _occurrence_design()
 
         def poison():
             comp.allOccurrences.remove(occ)
             comp.occurrences = _NamedCollection([])   # the fallback collection agrees: it really went
-            comp.allOccurrences = _RaisingWalk()
+            comp.allOccurrences = _NamedCollection(raises=_UNREADABLE)
 
         comp.features.removeFeatures = _remove_features(on_add=poison)
         install(drf, design)

@@ -19,32 +19,28 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import (FakeBoundingBox3D, FakeOccurrence, FakePoint, Profile, install, load_tool,
-                      make_design, make_occurrence)
+from conftest import (FakeBoundingBox3D, FakeOccurrence, FakePoint, MakeComp, Profile, Sketch,
+                      SketchCurves, _NamedCollection, install, load_tool, make_design,
+                      make_occurrence)
 
 sd = load_tool("_sketch_detail")
 
 
 # ── fakes ───────────────────────────────────────────────────────────────────
 
-class _Pt:
-    def __init__(self, x=0.0, y=0.0, z=0.0):
-        self.x, self.y, self.z = x, y, z
-
-
 class FakeLine:
     def __init__(self, tok, x1, y1, x2, y2, construction=False):
         self.entityToken = tok
         self.isConstruction = construction
-        self.startSketchPoint = type("P", (), {"geometry": _Pt(x1, y1), "entityToken": tok + "_s"})()
-        self.endSketchPoint = type("P", (), {"geometry": _Pt(x2, y2), "entityToken": tok + "_e"})()
+        self.startSketchPoint = type("P", (), {"geometry": FakePoint(x1, y1), "entityToken": tok + "_s"})()
+        self.endSketchPoint = type("P", (), {"geometry": FakePoint(x2, y2), "entityToken": tok + "_e"})()
 
 
 class FakeCircle:
     def __init__(self, tok, cx, cy, r, construction=False):
         self.entityToken = tok
         self.isConstruction = construction
-        self.centerSketchPoint = type("P", (), {"geometry": _Pt(cx, cy)})()
+        self.centerSketchPoint = type("P", (), {"geometry": FakePoint(cx, cy)})()
         self.radius = r
 
 
@@ -52,7 +48,7 @@ class FakeEllipse:
     def __init__(self, tok, cx, cy, major, minor, construction=False):
         self.entityToken = tok
         self.isConstruction = construction
-        self.centerSketchPoint = type("P", (), {"geometry": _Pt(cx, cy)})()
+        self.centerSketchPoint = type("P", (), {"geometry": FakePoint(cx, cy)})()
         self.majorAxisRadius = major
         self.minorAxisRadius = minor
 
@@ -80,21 +76,20 @@ class TangentConstraint:
 class FakeSketchPoint:
     def __init__(self, tok, x, y):
         self.entityToken = tok
-        self.geometry = _Pt(x, y)
+        self.geometry = FakePoint(x, y)
 
 
-class _Coll:
-    # item_raises_at models a stale slot: item(i) raises while count still includes it.
+class _Coll(_NamedCollection):
+    """The shared collection with a stale slot: item_raises_at makes item(i) raise while count
+    still includes it."""
     def __init__(self, items, item_raises_at=None):
-        self._i = list(items)
+        super().__init__(items)
         self._raises_at = item_raises_at
-    @property
-    def count(self):
-        return len(self._i)
+
     def item(self, i):
         if i == self._raises_at:
             raise RuntimeError("4 : An API Object refers to a deleted Object")
-        return self._i[i]
+        return super().item(i)
 
 
 # constraint fakes (named to match real adsk class names so the describer maps them)
@@ -158,9 +153,11 @@ def _bbox(x0, y0, x1, y1):
     return FakeBoundingBox3D(FakePoint(x0, y0, 0.0), FakePoint(x1, y1, 0.0))
 
 
-class FakeCurves:
+class FakeCurves(SketchCurves):
+    """The shared SketchCurves, every per-kind sub-collection filled from its own argument."""
     def __init__(self, lines, circles, arcs, ellipses=(), splines=(), cv_splines=(),
                  fixed_splines=()):
+        super().__init__()
         self.sketchLines = _Coll(lines)
         self.sketchCircles = _Coll(circles)
         self.sketchArcs = _Coll(arcs)
@@ -182,30 +179,29 @@ def _profile(tok, area, cx, cy, loops=1):
     return Profile(entity_token=tok, area=area, centroid=(cx, cy), loops=loops)
 
 
-class FakeSketch:
+class FakeSketch(Sketch):
+    """The shared Sketch carrying every collection the X-ray walks, plus a compute flag that can
+    refuse to read."""
     def __init__(self, name, lines=(), circles=(), arcs=(), ellipses=(), points=(),
                  constraints=(), dimensions=(), profiles=0, fully_constrained=False,
                  splines=(), cv_splines=(), fixed_splines=(), texts=(), compute_deferred=False):
+        # 'profiles' may be an int (count only, legacy) OR a list of Profile (for the per-profile
+        # records). _Coll gives count + item(i) either way.
+        rows = [None] * profiles if isinstance(profiles, int) else list(profiles)
         # compute_deferred: the flag's value, or "raises" for a sketch whose read throws - the
         # state read_flag answers None for, which must publish neither a flag nor a refusal.
-        self._compute_deferred = compute_deferred
-        self.name = name
-        self.sketchCurves = FakeCurves(list(lines), list(circles), list(arcs), list(ellipses),
-                                       splines, cv_splines, fixed_splines)
+        super().__init__(name=name,
+                         curves=FakeCurves(list(lines), list(circles), list(arcs), list(ellipses),
+                                           splines, cv_splines, fixed_splines),
+                         is_compute_deferred=compute_deferred)
+        self.profiles = _Coll(rows)
         self.sketchPoints = _Coll(list(points))
         # sketchTexts is its OWN collection on the sketch, not a sketchCurves sub-collection
         self.sketchTexts = _Coll(list(texts))
         self.geometricConstraints = _Coll(list(constraints))
         self.sketchDimensions = _Coll(list(dimensions))
-        # 'profiles' may be an int (count only, legacy) OR a list of FakeProfile (for the per-profile
-        # records). _Coll gives count + item(i) either way.
-        if isinstance(profiles, int):
-            self.profiles = type("Pr", (), {"count": profiles, "item": lambda self, i: None})()
-        else:
-            self.profiles = _Coll(list(profiles))
         self.isFullyConstrained = fully_constrained
-        rp = type("RP", (), {"name": "XY"})()
-        self.referencePlane = rp
+        self.referencePlane = type("RP", (), {"name": "XY"})()
 
     @property
     def isComputeDeferred(self):
@@ -213,34 +209,13 @@ class FakeSketch:
             raise RuntimeError("3 : the compute state of this sketch is unavailable")
         return self._compute_deferred
 
-
-class FakeSketches:
-    def __init__(self, sketches):
-        self._s = list(sketches)
-    @property
-    def count(self):
-        return len(self._s)
-    def item(self, i):
-        return self._s[i]
-    def itemByName(self, name):
-        for s in self._s:
-            if s.name == name:
-                return s
-        return None
-
-
-class FakeDesign:
-    def __init__(self, sketches):
-        self.rootComponent = type("R", (), {"sketches": FakeSketches(sketches)})()
+    @isComputeDeferred.setter
+    def isComputeDeferred(self, value):
+        self._compute_deferred = value
 
 
 def _install(sketch):
-    design = FakeDesign([sketch])
-    sd.app = type("A", (), {"activeProduct": design})()
-    sd._common.app = sd.app
-    import adsk.fusion
-    adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
-    return design
+    return install(sd, make_design(sketches=[sketch]))
 
 
 def _payload(result):
@@ -248,25 +223,15 @@ def _payload(result):
     return json.loads(result["content"][0]["text"])
 
 
-class _SubComponentDesign:
+def _install_subcomponent(sketch):
     """A design whose sketch lives in an ACTIVATED SUB-COMPONENT, with the root component EMPTY - the
     normal assembly workflow (model_create_component(activate=true) + sketch_create). A lookup that
     only checks rootComponent.sketches cannot resolve this shape; resolve_sketch must find it."""
-    def __init__(self, sub_sketch):
-        self.rootComponent = type("Root", (), {"sketches": FakeSketches([])})()
-        self._sub = type("Sub", (), {"sketches": FakeSketches([sub_sketch])})()
-        self.activeComponent = self._sub                       # the activated sub-component
-        # allComponents lives on the DESIGN in the live API (Component has no such attribute)
-        self.allComponents = _Coll([self.rootComponent, self._sub])
-
-
-def _install_subcomponent(sketch):
-    design = _SubComponentDesign(sketch)
-    sd.app = type("A", (), {"activeProduct": design})()
-    sd._common.app = sd.app
-    import adsk.fusion
-    adsk.fusion.Design.cast = lambda x: x if isinstance(x, _SubComponentDesign) else None
-    return design
+    root, sub = MakeComp(name="Root"), MakeComp(name="Sub", sketches=[sketch])
+    # allComponents lives on the DESIGN in the live API (Component has no such attribute)
+    design = make_design(comp=root, all_components=[root, sub])
+    design.activeComponent = sub                               # the activated sub-component
+    return install(sd, design)
 
 
 class TestSubComponentResolution:
@@ -435,7 +400,7 @@ class FakeArc:
     def __init__(self, tok, cx, cy, r, construction=False):
         self.entityToken = tok
         self.isConstruction = construction
-        self.centerSketchPoint = type("P", (), {"geometry": _Pt(cx, cy)})()
+        self.centerSketchPoint = type("P", (), {"geometry": FakePoint(cx, cy)})()
         self.radius = r
 
 
@@ -501,21 +466,10 @@ class TestDimensionTally:
 
 # ── _vector_items: both collection idioms + single-entity rejection ─────────
 
-class _CountItemVec:
-    """A collection exposing the .count/.item idiom (NOT len/[i])."""
-    def __init__(self, items):
-        self._i = list(items)
-    @property
-    def count(self):
-        return len(self._i)
-    def item(self, i):
-        return self._i[i]
-
-
 class TestVectorItems:
     def test_count_item_collection_expanded(self):
         a, b = object(), object()
-        got = sd._vector_items(_CountItemVec([a, b]))
+        got = sd._vector_items(_NamedCollection([a, b]))
         assert got == [a, b]
 
     def test_len_getitem_vector_expanded(self):
@@ -723,8 +677,8 @@ class _OffPlaneLine:
     def __init__(self, tok, s, e):          # s, e are (x, y, z) in cm
         self.entityToken = tok
         self.isConstruction = False
-        self.startSketchPoint = type("P", (), {"geometry": _Pt(*s), "entityToken": tok + "_s"})()
-        self.endSketchPoint = type("P", (), {"geometry": _Pt(*e), "entityToken": tok + "_e"})()
+        self.startSketchPoint = type("P", (), {"geometry": FakePoint(*s), "entityToken": tok + "_s"})()
+        self.endSketchPoint = type("P", (), {"geometry": FakePoint(*e), "entityToken": tok + "_e"})()
 
 
 class TestOffPlane3DLine:
@@ -745,7 +699,7 @@ class TestOffPlane3DLine:
         assert e["end"] == {"x": 10, "y": 20} and "z" not in e["end"]
 
     def test_off_plane_sketch_point_reports_z(self):
-        p = type("P3", (), {"entityToken": "p3", "geometry": _Pt(0.0, 0.0, 3.0)})()
+        p = type("P3", (), {"entityToken": "p3", "geometry": FakePoint(0.0, 0.0, 3.0)})()
         _install(FakeSketch("Pk", points=[p]))
         out = _payload(sd.handler(sketch_name="Pk", include_entities=True))
         pt = next(x for x in out["entities"] if x["id"] == "point:0")
@@ -961,7 +915,7 @@ def _frame_sketch(name="Framed", origin=(0.0, 0.0, 0.0), x=(1.0, 0.0, 0.0), y=(0
     Point3D in cm) and the xDirection/yDirection world vectors. Every other read this file's payload
     makes degrades through safe(), so the frame can be exercised on its own. ROOT-owned, so it
     exercises the common case where local IS world (see TestFrameSpace for the other two)."""
-    sk = SimpleNamespace(name=name, origin=_Pt(*origin), xDirection=_Pt(*x), yDirection=_Pt(*y))
+    sk = SimpleNamespace(name=name, origin=FakePoint(*origin), xDirection=FakePoint(*x), yDirection=FakePoint(*y))
     root = SimpleNamespace(name="Root", entityToken=_ROOT_TOKEN)
     root.parentDesign = SimpleNamespace(rootComponent=root)
     sk.parentComponent = root
@@ -1488,7 +1442,7 @@ class TestSketchTextRecords:
         # carries the third text.
         sk = FakeSketch("S", texts=[_sketch_text("'zero'"), _sketch_text("'dead'"),
                                     _sketch_text("'two'")])
-        sk.sketchTexts = _Coll(sk.sketchTexts._i, item_raises_at=1)
+        sk.sketchTexts = _Coll(sk.sketchTexts._items, item_raises_at=1)
         _install(sk)
         out = _payload(sd.handler(sketch_name="S", include_entities=True))
         texts = [e for e in out["entities"] if e["type"] == "text"]
@@ -1572,8 +1526,8 @@ def _named_comp(name, sketches):
     # Design property - reading it here raises exactly as adsk does), and a DISTINCT entityToken,
     # which every live component has. Two components CAN wear one name (two inserted references each
     # bring their own 'Frame' - measured), and the token is the only thing that tells them apart.
-    return type("C", (), {"name": name, "sketches": FakeSketches(sketches),
-                          "entityToken": f"comp-{name}-{next(_comp_serial)}"})()
+    return MakeComp(name=name, sketches=list(sketches),
+                    entity_token=f"comp-{name}-{next(_comp_serial)}")
 
 
 def _occ_of(path, comp, raises=None):
@@ -1583,39 +1537,20 @@ def _occ_of(path, comp, raises=None):
     return make_occurrence(path, comp, raises)
 
 
-class _MultiComponentDesign:
-    def __init__(self, comps, active=None, occurrences=(), tokens=None):
-        # findEntityByToken is what the HANDLE form of the scope resolves through, and it BYPASSES
-        # the occurrence walk - which is why a broken occurrence (absent from the walk) is reachable
-        # by handle and by nothing else.
-        self._tokens = dict(tokens or {})
-        root = comps[0]
-        # The ROOT is what occurrence_walk walks, so it is the component that carries
-        # allOccurrences; every other component is reached through the design's allComponents.
-        self.rootComponent = type("R", (), {
-            "name": root.name, "sketches": root.sketches, "entityToken": root.entityToken,
-            "allOccurrences": list(occurrences)})()
-        self.activeComponent = active or self.rootComponent
-        self.allComponents = _Coll([self.rootComponent] + list(comps[1:]))
-
-    def findEntityByToken(self, token):
-        ent = self._tokens.get(token)
-        return [ent] if ent is not None else []
-
-
 def _install_components(monkeypatch, comps, active=None, occurrences=(), tokens=None):
-    """Point the engine at a multi-component design through monkeypatch on every seam, so each is
-    restored at teardown. They all matter: the module's own 'app', _common's 'app' (the module
-    object the engine reads the design through), Design.cast, which decides whether the fake IS a
-    design at all, and adsk.fusion.Occurrence, which the shared occurrence resolver type-checks a
-    resolved handle against - without it the handle branch silently refuses everything. An
-    imperative poke to any of them outlives the test that made it."""
-    design = _MultiComponentDesign(comps, active, occurrences, tokens)
+    """Point the engine at a multi-component design. findEntityByToken is what the HANDLE form of
+    the scope resolves through, and it BYPASSES the occurrence walk - which is why a broken
+    occurrence (absent from the walk) is reachable by handle and by nothing else. The ROOT is what
+    occurrence_walk walks, so it is the component that carries allOccurrences; every other
+    component is reached through the design's allComponents.
+
+    adsk.fusion.Occurrence is patched too: the shared occurrence resolver type-checks a resolved
+    handle against it, and without it the handle branch silently refuses everything."""
     import adsk.fusion
-    monkeypatch.setattr(sd, "app", type("A", (), {"activeProduct": design})())
-    monkeypatch.setattr(sd._common, "app", sd.app)
-    monkeypatch.setattr(adsk.fusion.Design, "cast",
-                        lambda x: x if isinstance(x, _MultiComponentDesign) else None)
+    root = comps[0]
+    root.allOccurrences = list(occurrences)
+    design = install(sd, make_design(comp=root, all_components=list(comps), tokens=tokens))
+    design.activeComponent = active or root
     monkeypatch.setattr(adsk.fusion, "Occurrence", FakeOccurrence, raising=False)
     return design
 
@@ -1724,8 +1659,8 @@ class TestSharedComponentName:
         root = _named_comp("Root", [])
         a = _named_comp("Frame", [FakeSketch("Frame_Ring", lines=[FakeLine("a0", 0, 0, 1, 0)])])
         b = _named_comp("Frame", [FakeSketch("Frame_Ring", circles=[FakeCircle("b0", 0, 0, 2)])])
-        a.__class__.entityToken = self._XREF_TOKEN
-        b.__class__.entityToken = self._XREF_TOKEN
+        a.entityToken = self._XREF_TOKEN
+        b.entityToken = self._XREF_TOKEN
         _install_components(monkeypatch, [root, a, b],
                             occurrences=[_occ_of("P2a-Gimbal:1+Frame:1", a),
                                          _occ_of("P3-Gimbal:1+Frame:1", b)])
@@ -1914,11 +1849,11 @@ def _framed_sketch(name, proxies):
     instance puts it. An unlisted occurrence hands back nothing, the measured refusal. Every other
     read the payload makes degrades through safe(), so the frame can be exercised through the whole
     handler."""
-    sk = SimpleNamespace(name=name, origin=_Pt(0, 0, 0), xDirection=_Pt(1, 0, 0),
-                         yDirection=_Pt(0, 1, 0))
+    sk = SimpleNamespace(name=name, origin=FakePoint(0, 0, 0), xDirection=FakePoint(1, 0, 0),
+                         yDirection=FakePoint(0, 1, 0))
     sk.createForAssemblyContext = lambda occ, _p=proxies: (
-        SimpleNamespace(origin=_Pt(*_p[occ.fullPathName]), xDirection=_Pt(1, 0, 0),
-                        yDirection=_Pt(0, 1, 0)) if occ.fullPathName in _p else None)
+        SimpleNamespace(origin=FakePoint(*_p[occ.fullPathName]), xDirection=FakePoint(1, 0, 0),
+                        yDirection=FakePoint(0, 1, 0)) if occ.fullPathName in _p else None)
     return sk
 
 

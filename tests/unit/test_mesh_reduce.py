@@ -3,8 +3,8 @@
 import adsk.fusion
 import pytest
 
-from conftest import (BRepBody, MakeComp, MeshBody, _NamedCollection, install, load_tool,
-                      make_design, payload)
+from conftest import (BRepBody, FakeBaseFeature, FakeBaseFeatures, FakeFeatures, MakeComp,
+                      MeshBody, _NamedCollection, install, load_tool, make_design, payload)
 
 mo = load_tool("mesh_reduce")
 
@@ -32,36 +32,11 @@ class _ReduceInput:
         object.__setattr__(self, name, value)
 
 
-class _BaseFeature:
-    """The BaseFeature a parametric scope opens, recording its own open and close."""
-    def __init__(self):
-        self.name = "BaseFeature1"
-        self.started = False
-        self.finished = False
-
-    def startEdit(self):
-        self.started = True
-        return True
-
-    def finishEdit(self):
-        self.finished = True
-        return True
-
-
-class _BaseFeatures:
-    """comp.features.baseFeatures - add() hands back the one base feature it was built with."""
-    def __init__(self, made):
-        self._made = made
-
-    def add(self):
-        return self._made
-
-
-class _Features:
-    """comp.features, carrying the two collections mesh_reduce reads."""
+class _Features(FakeFeatures):
+    """comp.features plus the mesh-reduce collection this tool reaches through."""
     def __init__(self, reduce=None, base_features=None):
+        super().__init__(base_features=base_features)
         self.meshReduceFeatures = reduce
-        self.baseFeatures = base_features
 
 
 class _FeatureResult:
@@ -105,7 +80,7 @@ def _types(monkeypatch):
     """The adsk.fusion type identities the body kind and the base-feature scope check branch on."""
     monkeypatch.setattr(adsk.fusion, "MeshBody", MeshBody, raising=False)
     monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
-    monkeypatch.setattr(adsk.fusion, "BaseFeature", _BaseFeature, raising=False)
+    monkeypatch.setattr(adsk.fusion, "BaseFeature", FakeBaseFeature, raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -117,8 +92,7 @@ def _value_input(monkeypatch):
 def _wire(src, feats, design_type=0, base_feature=None):
     """One mesh + a meshReduceFeatures collection on its component, wired into the tool."""
     comp = MakeComp("Comp", mesh_bodies=[src])
-    comp.features = _Features(reduce=feats,
-                              base_features=_BaseFeatures(base_feature) if base_feature else None)
+    comp.features = _Features(reduce=feats, base_features=FakeBaseFeatures(made=base_feature))
     src.parentComponent = comp
     install(mo, make_design(comp=comp, tokens={"H": src}, design_type=design_type,
                             active_edit_object=base_feature))
@@ -279,7 +253,7 @@ class TestMeshReduce:
     def test_null_feature_in_a_parametric_scope_reports_parametric(self):
         # the scope - not the design's mode - is why the feature is null, so the payload reports the
         # design as PARAMETRIC and names the base feature the reduce actually landed in.
-        bf = _BaseFeature()
+        bf = FakeBaseFeature()
         src, feats = self._setup(before_tri=1000, parametric=True, base_feature=bf,
                                  none_feature=True)
         feats._on_add = lambda: setattr(src.displayMesh, "triangleCount", 400)
@@ -293,7 +267,7 @@ class TestMeshReduce:
     def test_mode_is_read_before_the_scope_opens(self):
         # designType reads DIRECT while a base-feature edit scope is open, so a mode read taken after
         # the reduce would report 'direct' for a parametric design.
-        bf = _BaseFeature()
+        bf = FakeBaseFeature()
         src, feats = self._setup(before_tri=1000, parametric=True, base_feature=bf,
                                  none_feature=True)
         feats._on_add = lambda: setattr(src.displayMesh, "triangleCount", 400)
@@ -325,7 +299,7 @@ class TestMeshReduce:
         # REGRESSION: in PARAMETRIC the createInput->set->add runs INSIDE the helper's base-feature
         # scope (opened AND finished). The feature add must not be defeated by an undetectable-scope
         # guard - it succeeds.
-        bf = _BaseFeature()
+        bf = FakeBaseFeature()
         src, feats = self._setup(before_tri=1000, after_tri=400, parametric=True, base_feature=bf,
                                  none_feature=True)
         feats._on_add = lambda: setattr(src.displayMesh, "triangleCount", 400)
@@ -333,4 +307,4 @@ class TestMeshReduce:
         assert out["reduced"] is True
         assert out["after"]["triangle_count"] == 400
         # the reduce ran inside the helper-opened base-feature scope (leak-proof open/close)
-        assert bf.started is True and bf.finished is True
+        assert bf._starts == 1 and bf._finishes == 1

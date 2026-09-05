@@ -15,14 +15,11 @@ surface_common_mod = load_tool("_surface_common")
 
 @pytest.fixture(autouse=True)
 def _adsk_seams(monkeypatch):
-    """The adsk types the input kinds isinstance-check, the enum members read by name, and a
-    ValueInput.createByReal returning the ('real', cm) pair a scaled length is read off."""
+    """The adsk types the input kinds isinstance-check, and a ValueInput.createByReal returning the
+    ('real', cm) pair a scaled length is read off. FeatureOperations arrives seeded."""
     monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
     monkeypatch.setattr(adsk.fusion, "BRepFace", BRepFace, raising=False)
     monkeypatch.setattr(adsk.fusion, "BRepEdge", BRepEdge, raising=False)
-    for name in ("NewBodyFeatureOperation", "JoinFeatureOperation",
-                 "CutFeatureOperation", "NewComponentFeatureOperation"):
-        monkeypatch.setattr(adsk.fusion.FeatureOperations, name, name, raising=False)
     monkeypatch.setattr(adsk.core.ValueInput, "createByReal",
                         staticmethod(lambda v: ("real", v)), raising=False)
 

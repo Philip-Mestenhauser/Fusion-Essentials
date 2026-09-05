@@ -138,7 +138,7 @@ class TestGuards:
         short = make_sketch_curve("L2", length=4.0)
 
         def _trim(point, create_constraints=True):
-            sketch_curves_edit(last, last.sketchCurves.sketchLines, remove=[line], add=[short])
+            sketch_curves_edit(last.sketchCurves.sketchLines, remove=[line], add=[short])
             return _result(short)
 
         line.trim = _trim
@@ -201,7 +201,7 @@ class TestGuards:
         arc = make_sketch_curve("A0", length=1.5)
 
         def _add_fillet(*args):
-            sketch_curves_edit(sk, sk.sketchCurves.sketchArcs, add=[arc])
+            sketch_curves_edit(sk.sketchCurves.sketchArcs, add=[arc])
             return arc
 
         sk.sketchCurves.sketchArcs.addFillet = _add_fillet
@@ -327,7 +327,7 @@ class TestSingleCurveEdits:
 
         def _trim(point, create_constraints=True):
             picks.append((point.x, point.y, point.z))
-            sketch_curves_edit(sketch, _lines(sketch), remove=[_lines(sketch).item(0)],
+            sketch_curves_edit(_lines(sketch), remove=[_lines(sketch).item(0)],
                                add=[short])
             return _result(short)
 
@@ -339,7 +339,7 @@ class TestSingleCurveEdits:
         short = make_sketch_curve("L2", length=4.0)
 
         def _trim(point, create_constraints=True):
-            sketch_curves_edit(sketch, _lines(sketch), remove=[_lines(sketch).item(0)],
+            sketch_curves_edit(_lines(sketch), remove=[_lines(sketch).item(0)],
                                add=[short])
             return _result(short)
 
@@ -357,7 +357,7 @@ class TestSingleCurveEdits:
 
     def test_trim_that_consumed_the_whole_curve_is_reported(self, mod, sketch):
         def _trim(point, create_constraints=True):
-            sketch_curves_edit(sketch, _lines(sketch), remove=[_lines(sketch).item(0)])
+            sketch_curves_edit(_lines(sketch), remove=[_lines(sketch).item(0)])
             return _result()
 
         _lines(sketch).item(0).trim = _trim
@@ -538,7 +538,7 @@ class TestSketchCurvesChangedPostcondition:
         kind = load_tool("_assert").SketchCurvesChanged()
         before = kind.capture({"sketch_name": "Plate"})
         line0 = _lines(sketch).item(0)
-        sketch_curves_edit(sketch, _lines(sketch), remove=[line0],
+        sketch_curves_edit(_lines(sketch), remove=[line0],
                            add=[make_sketch_curve("L9", length=10.0)])
         reason, evidence = kind.verify({"sketch_name": "Plate"}, {}, before)
         assert reason == "" and evidence == {"curve_count_after": 2}

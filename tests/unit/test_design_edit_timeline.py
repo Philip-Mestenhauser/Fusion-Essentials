@@ -19,6 +19,8 @@ import types
 
 import pytest
 
+from conftest import FakeTimeline as _SharedTimeline
+from conftest import FakeTimelineObject as _SharedTimelineObject
 from conftest import error_message, load_tool, make_design, payload
 
 et = load_tool("design_edit_timeline")
@@ -26,7 +28,7 @@ et = load_tool("design_edit_timeline")
 
 # ── fakes ────────────────────────────────────────────────────────────────────
 
-class FakeTimelineObject:
+class FakeTimelineObject(_SharedTimelineObject):
     """One timeline item. isRolledBack is DERIVED from the marker, as live: an item at or after the
     marker position is not being computed. So a rollTo that returns true without repositioning the
     marker leaves the item in its previous state, exactly as it would in Fusion."""
@@ -34,18 +36,17 @@ class FakeTimelineObject:
     def __init__(self, name, index, health=0, suppressed=False, is_group=False,
                  roll_returns=True, suppress_takes=True, rename="ok", reports_rolled=True,
                  entity=None):
-        self._name = name
-        self._index = index
-        self.entity = entity                    # the feature object the timeline item wraps
-        self.healthState = health
-        self.isGroup = is_group
-        self._suppressed = suppressed
-        self._roll_returns = roll_returns
-        self._suppress_takes = suppress_takes
-        self._rename = rename
-        self._reports_rolled = reports_rolled   # False models an item whose isRolledBack is None
         self._holder = None                     # the group this item belongs to, once grouped
+        self._suppressed = suppressed
+        self._reports_rolled = reports_rolled   # False models an item whose isRolledBack is None
+        self._roll_returns = roll_returns
         self.timeline = None
+        # The base SEEDS name/isSuppressed through these setters; the refusal modes arm afterwards,
+        # so a mode never fires on the construction write.
+        self._rename, self._suppress_takes = "ok", True
+        super().__init__(name=name, index=index, entity=entity, health=health, is_group=is_group,
+                         suppressed=suppressed)
+        self._rename, self._suppress_takes = rename, suppress_takes
         self.roll_calls = []
 
     @property
@@ -80,6 +81,11 @@ class FakeTimelineObject:
         if not self._reports_rolled:
             return None
         return self.timeline is not None and self.index >= self.timeline.markerPosition
+
+    @isRolledBack.setter
+    def isRolledBack(self, value):
+        # the base seeds a flag here; this item derives the answer from the marker instead
+        pass
 
     @property
     def isSuppressed(self):
@@ -181,27 +187,22 @@ class FakeTimelineGroups:
         return group
 
 
-class FakeTimeline:
-    """Timeline: markerPosition (get AND set), count/item, timelineGroups, the four marker moves and
-    deleteAllAfterMarker - each returning a bool, as the live members do. __len__ makes an EMPTY
-    timeline FALSY."""
+class FakeTimeline(_SharedTimeline):
+    """Timeline: markerPosition (get AND set), timelineGroups, and deleteAllAfterMarker beside the
+    shared walk. A marker move here CLAMPS to the ends instead of refusing past them, and __len__
+    makes an EMPTY timeline FALSY, as an adsk collection is."""
 
     def __init__(self, items=(), marker=None, groups=(), moves_return=True,
                  delete_returns=True, delete_removes=True, marker_sticks=True):
-        self._items = list(items)
+        super().__init__(items, marker=marker)
         for o in self._items:
             o.timeline = self
-        self._marker = len(self._items) if marker is None else marker
         self._moves_return = moves_return
         self._delete_returns = delete_returns
         self._delete_removes = delete_removes
         self._marker_sticks = marker_sticks
         self.timelineGroups = FakeTimelineGroups(self, groups)
         self.delete_calls = 0
-
-    @property
-    def count(self):
-        return len(self._items)
 
     def item(self, i):
         return self._items[i] if 0 <= i < len(self._items) else None
@@ -224,12 +225,6 @@ class FakeTimeline:
         if self._marker_sticks:
             self._marker = target
         return True
-
-    def moveToBeginning(self):
-        return self._move(0)
-
-    def moveToEnd(self):
-        return self._move(len(self._items))
 
     def movetoNextStep(self):
         return self._move(min(self._marker + 1, len(self._items)))
@@ -505,12 +500,18 @@ class TestSuppress:
         broken = FakeTimelineObject("Extrude1", 1)
 
         class _Breaking(FakeTimelineObject):
+            """Suppressing this item is what breaks the downstream feature; `_armed` arms the hook
+            after construction, so the base's own seeding write does not fire it."""
+            _armed = False
+
             @FakeTimelineObject.isSuppressed.setter
             def isSuppressed(self, value):
                 self._suppressed = bool(value)
-                broken.healthState = 2       # the downstream feature loses what this one produced
+                if self._armed:
+                    broken.healthState = 2   # the downstream feature loses what this one produced
 
         target = _Breaking("Sketch1", 0)
+        target._armed = True
         wire(FakeTimeline([target, broken]))
         out = payload(et.handler(action="suppress", feature="Sketch1"))
         assert out["timeline_errors_after"] == ["Extrude1"]

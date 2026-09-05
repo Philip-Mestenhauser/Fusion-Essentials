@@ -21,8 +21,8 @@ import types
 import adsk.fusion
 import pytest
 
-from conftest import (BRepBody, MakeComp, MakeDesign, MeshBody, install, load_tool, payload,
-                      error_message)
+from conftest import (BRepBody, FakeFeatures, MakeComp, MakeDesign, MeshBody, install, load_tool,
+                      payload, error_message)
 
 ms = load_tool("mesh_shell")
 
@@ -110,8 +110,10 @@ class _ShellFeatures:
         return feat
 
 
-class _Features:
+class _Features(FakeFeatures):
+    """comp.features plus the mesh-shell collection this tool reaches through."""
     def __init__(self, shell=None):
+        super().__init__()
         self.meshShellFeatures = shell
 
 

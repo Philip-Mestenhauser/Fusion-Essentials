@@ -3,8 +3,8 @@
 import adsk.fusion
 import pytest
 
-from conftest import (BRepBody, MakeComp, MeshBody, _NamedCollection, install, load_tool,
-                      make_design, payload)
+from conftest import (BRepBody, FakeBaseFeature, FakeBaseFeatures, FakeFeatures, MakeComp,
+                      MeshBody, _NamedCollection, install, load_tool, make_design, payload)
 
 mo = load_tool("mesh_remesh")
 
@@ -16,36 +16,11 @@ class _FakeValueInput:
         self.realValue = real
 
 
-class _BaseFeature:
-    """The BaseFeature a parametric scope opens, recording its own open and close."""
-    def __init__(self):
-        self.name = "BaseFeature1"
-        self.started = False
-        self.finished = False
-
-    def startEdit(self):
-        self.started = True
-        return True
-
-    def finishEdit(self):
-        self.finished = True
-        return True
-
-
-class _BaseFeatures:
-    """comp.features.baseFeatures - add() hands back the one base feature it was built with."""
-    def __init__(self, made):
-        self._made = made
-
-    def add(self):
-        return self._made
-
-
-class _Features:
-    """comp.features, carrying the two collections mesh_remesh reads."""
+class _Features(FakeFeatures):
+    """comp.features plus the mesh-remesh collection this tool reaches through."""
     def __init__(self, remesh=None, base_features=None):
+        super().__init__(base_features=base_features)
         self.meshRemeshFeatures = remesh
-        self.baseFeatures = base_features
 
 
 class _FeatureResult:
@@ -89,7 +64,7 @@ def _types(monkeypatch):
     """The adsk.fusion type identities the body kind and the base-feature scope check branch on."""
     monkeypatch.setattr(adsk.fusion, "MeshBody", MeshBody, raising=False)
     monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
-    monkeypatch.setattr(adsk.fusion, "BaseFeature", _BaseFeature, raising=False)
+    monkeypatch.setattr(adsk.fusion, "BaseFeature", FakeBaseFeature, raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -102,7 +77,7 @@ def _wire(src, feats, design_type=0, base_feature=None):
     """One mesh + a meshRemeshFeatures collection on its component, wired into the tool."""
     comp = MakeComp("Comp", mesh_bodies=[src])
     comp.features = _Features(remesh=feats,
-                              base_features=_BaseFeatures(base_feature) if base_feature else None)
+                              base_features=FakeBaseFeatures(made=base_feature))
     src.parentComponent = comp
     install(mo, make_design(comp=comp, tokens={"H": src}, design_type=design_type,
                             active_edit_object=base_feature))
@@ -155,7 +130,7 @@ class TestMeshRemesh:
     def test_null_feature_in_a_parametric_scope_reports_parametric(self):
         # the scope suppresses the feature; the payload still reports the DESIGN's own mode and names
         # the base feature the remesh landed in.
-        bf = _BaseFeature()
+        bf = FakeBaseFeature()
         src = MeshBody("Scan", tri=2000)
         feats = _MeshFeatures([], none_feature=True,
                               on_add=lambda: setattr(src.displayMesh, "triangleCount", 1800))
@@ -170,13 +145,13 @@ class TestMeshRemesh:
     def test_parametric_routes_through_base_feature_scope(self):
         # REGRESSION: in PARAMETRIC the remesh createInput->add runs INSIDE the helper's base-feature
         # scope (opened AND finished) and succeeds.
-        bf = _BaseFeature()
+        bf = FakeBaseFeature()
         src = MeshBody("Scan", tri=2000)
         _wire(src, _MeshFeatures([MeshBody("Scan", tri=1500)]), design_type=1, base_feature=bf)
         out = payload(mo.handler(mesh="H"))
         assert out["remeshed"] is True
         assert out["after"]["triangle_count"] == 1500
-        assert bf.started is True and bf.finished is True
+        assert bf._starts == 1 and bf._finishes == 1
 
 
 class TestRemeshDensityReadBack:

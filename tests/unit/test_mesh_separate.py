@@ -20,8 +20,8 @@ import types
 import adsk.fusion
 import pytest
 
-from conftest import (MakeComp, MakeDesign, MeshBody, go_stale, install, load_tool, payload,
-                      error_message)
+from conftest import (FakeFeatures, MakeComp, MakeDesign, MeshBody, go_stale, install, load_tool,
+                      payload, error_message)
 
 msp = load_tool("mesh_separate")
 
@@ -98,8 +98,10 @@ class _SeparateFeatures:
         return types.SimpleNamespace(name="MeshSeparate1")
 
 
-class _Features:
+class _Features(FakeFeatures):
+    """comp.features plus the mesh-separate collection this tool reaches through."""
     def __init__(self, separate=None):
+        super().__init__()
         self.meshSeparateFeatures = separate
 
 

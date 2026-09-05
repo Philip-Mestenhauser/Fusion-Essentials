@@ -3,9 +3,11 @@
 
 """Lint: a MEASURED adsk enum member is never hand-assigned in a unit test - it comes seeded.
 
-A line under tests/unit that installs a live_api_facts.ENUMS member by attribute, dict key or
-kwarg fails; conftest seeds those onto the mock adsk modules. _ALLOWLIST files are exempt."""
+A line under tests/unit that installs a live_api_facts.ENUMS member by attribute, dict key, kwarg or
+a setattr loop over the member names fails; conftest seeds those onto the mock adsk modules.
+_ALLOWLIST files are exempt."""
 
+import ast
 import os
 import re
 
@@ -15,6 +17,7 @@ import live_api_facts
 UNIT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "unit")
 
 _MEMBERS = sorted({m for members in live_api_facts.ENUMS.values() for m in members})
+_MEMBER_SET = frozenset(_MEMBERS)
 _NAMES = "|".join(map(re.escape, _MEMBERS))
 # Three re-seeding shapes - attribute install, dict literal, kwarg - each compiled SEPARATELY: a
 # single alternation this large can silently fail to match its tail. The kwarg form's lookbehind
@@ -29,19 +32,42 @@ _PATTERNS = (
 _ALLOWLIST = {}
 
 
+def _is_setattr(func):
+    """True for a `setattr(...)` or `<anything>.setattr(...)` callee - monkeypatch's included."""
+    return ((isinstance(func, ast.Name) and func.id == "setattr")
+            or (isinstance(func, ast.Attribute) and func.attr == "setattr"))
+
+
+def _setattr_seeded_linenos(path):
+    """Lines where a for-loop over a literal tuple/list of measured member NAMES drives a setattr -
+    the bulk re-seed that installs a whole family at once. The member name sits in the loop's
+    iterable, beside neither an `=` nor a `:`, so the three patterns above cannot see it."""
+    hits = set()
+    for node in ast.walk(_corpus.tree(path)):
+        if not (isinstance(node, ast.For) and isinstance(node.iter, (ast.Tuple, ast.List))):
+            continue
+        if any(isinstance(n, ast.Call) and _is_setattr(n.func)
+               for stmt in node.body for n in ast.walk(stmt)):
+            hits |= {e.lineno for e in ast.walk(node.iter)
+                     if isinstance(e, ast.Constant) and e.value in _MEMBER_SET}
+    return hits
+
+
 def _offending_lines(path):
     src = _corpus.text(path)
+    lines = src.split("\n")
+    out = {}
     # Whole-file screen first: no pattern is line-anchored and the one lookbehind admits the "\n"
     # at a line start, so a line match is always a full-text match too.
-    if not any(p.search(src) for p in _PATTERNS):
-        return []
-    out = []
-    for i, line in enumerate(src.split("\n"), 1):
-        if line.lstrip().startswith("#"):
-            continue
-        if any(p.search(line) for p in _PATTERNS):
-            out.append((i, line.strip()))
-    return out
+    if any(p.search(src) for p in _PATTERNS):
+        for i, line in enumerate(lines, 1):
+            if line.lstrip().startswith("#"):
+                continue
+            if any(p.search(line) for p in _PATTERNS):
+                out[i] = line.strip()
+    for i in _setattr_seeded_linenos(path):
+        out[i] = lines[i - 1].strip()
+    return sorted(out.items())
 
 
 class TestNoHandSeededEnums:

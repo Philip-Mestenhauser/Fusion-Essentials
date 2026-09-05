@@ -3,8 +3,9 @@
 
 """Lint: every adsk enum family the tools reference is MEASURED - first contact fails loudly.
 
-A referenced family missing from live_api_facts.ENUMS fails, as does a BEHAVIOR key the harness
-consumes or measure_api emits that the facts file does not carry - regenerate with measure_api."""
+A referenced family missing from BOTH live_api_facts.ENUMS and NOT_ENUMS fails, as does a BEHAVIOR
+key the harness consumes or measure_api emits that the facts file does not carry - regenerate with
+measure_api."""
 
 import os
 import re
@@ -21,8 +22,10 @@ _BEHAVIOR_KEY = re.compile(r"BEHAVIOR\[\s*\"([a-z0-9_]+)\"\s*\]")
 
 class TestEnumFamiliesMeasured:
     def test_every_referenced_family_is_measured(self):
-        missing = [f for f in measure_api.referenced_enum_families()
-                   if f not in live_api_facts.ENUMS]
+        # Either table counts as measured: ENUMS carries a family's int members, NOT_ENUMS names a
+        # family that resolved to a factory-object class carrying none.
+        measured = set(live_api_facts.ENUMS) | set(live_api_facts.NOT_ENUMS)
+        missing = [f for f in measure_api.referenced_enum_families() if f not in measured]
         assert not missing, (
             "Tool code references adsk enum families that live_api_facts.py has not MEASURED. "
             "With Fusion running: py -3 tests/live/measure_api.py  (the enum-sweep measures "

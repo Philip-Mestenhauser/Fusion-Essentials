@@ -15,8 +15,8 @@ import types
 
 import pytest
 
-from conftest import (BRepBody, MakeComp, load_tool, make_design, make_source_document, install,
-                      payload as _payload)
+from conftest import (BRepBody, MakeComp, Sketch, SketchCurves, _NamedCollection, load_tool,
+                      make_design, make_source_document, install, payload as _payload)
 
 sp = load_tool("sketch_project")
 
@@ -36,18 +36,19 @@ def comp_with_axes(name="Comp1", token="comp-1"):
 
 # ── fakes: a sketch whose projections grow its curve/point collections ────────
 
-class _Coll:
+class _Coll(_NamedCollection):
+    """The shared collection sized by count alone - grow(k) is a projection landing k entities."""
     def __init__(self, n=0):
-        self._n = n
-    @property
-    def count(self):
-        return self._n
+        super().__init__([None] * n)
+
     def grow(self, k):
-        self._n += k
+        self._items += [None] * k
 
 
-class _Curves:
+class _Curves(SketchCurves):
+    """The shared SketchCurves whose line/arc/circle sub-collections a projection grows."""
     def __init__(self, lines=0, arcs=0, circles=0):
+        super().__init__()
         self.sketchLines = _Coll(lines)
         self.sketchArcs = _Coll(arcs)
         self.sketchCircles = _Coll(circles)
@@ -71,8 +72,8 @@ class _Created:
         self.referencedEntity = referenced
 
 
-class FakeSketch:
-    """A sketch whose projections append entities across its collections and return that many
+class FakeSketch(Sketch):
+    """The shared Sketch whose projections append entities across its collections and return that many
     stand-ins (mirroring the real returns: a list/vector of created SketchEntity).
 
     ``creates`` drives project2; ``surface_creates`` drives projectToSurface; ``contributions`` maps a
@@ -88,9 +89,9 @@ class FakeSketch:
                  surface_raises=None, intersect_raises=None, plane="XY", unreadable=(),
                  is_reference=True, unreferenced=False, ref_pattern=None, silent_growth=False,
                  link_pattern=None):
-        self.name = name
         b = base or {}
-        self.sketchCurves = _Curves(b.get("line", 0), b.get("arc", 0), b.get("circle", 0))
+        super().__init__(name=name,
+                         curves=_Curves(b.get("line", 0), b.get("arc", 0), b.get("circle", 0)))
         self.sketchPoints = _Coll(b.get("point", 0))
         self.creates = creates if creates is not None else {"line": 2, "circle": 1, "point": 1}
         self.surface_creates = surface_creates if surface_creates is not None else {"line": 1}

@@ -83,11 +83,6 @@ def _types(monkeypatch):
     monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
     monkeypatch.setattr(adsk.fusion, "BRepFace", BRepFace, raising=False)
     monkeypatch.setattr(adsk.fusion, "Profile", Profile, raising=False)
-    # FeatureOperations carries no measured members, so the four the boolean-op map reads are
-    # pinned to their own names here rather than left as fabricatable child Mocks.
-    for n in ("NewBodyFeatureOperation", "JoinFeatureOperation",
-              "CutFeatureOperation", "IntersectFeatureOperation"):
-        monkeypatch.setattr(adsk.fusion.FeatureOperations, n, n, raising=False)
     monkeypatch.setattr(adsk.core.ValueInput, "createByReal",
                         staticmethod(lambda v: ("real", v)), raising=False)
 

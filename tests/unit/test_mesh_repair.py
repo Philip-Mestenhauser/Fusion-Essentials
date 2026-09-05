@@ -24,8 +24,8 @@ import types
 import adsk.fusion
 import pytest
 
-from conftest import (BRepBody, MakeComp, MakeDesign, MeshBody, install, load_tool, payload,
-                      error_message)
+from conftest import (BRepBody, FakeBaseFeature, FakeBaseFeatures, FakeFeatures, MakeComp,
+                      MakeDesign, MeshBody, install, load_tool, payload, error_message)
 
 mr = load_tool("mesh_repair")
 
@@ -160,33 +160,11 @@ class _RepairFeatures:
         return feat
 
 
-class _BaseFeature:
-    def __init__(self):
-        self.name = "BaseFeature1"
-        self.started = False
-        self.finished = False
-
-    def startEdit(self):
-        self.started = True
-        return True
-
-    def finishEdit(self):
-        self.finished = True
-        return True
-
-
-class _BaseFeatures:
-    def __init__(self, made):
-        self._made = made
-
-    def add(self):
-        return self._made
-
-
-class _Features:
+class _Features(FakeFeatures):
+    """comp.features plus the mesh-repair collection this tool reaches through."""
     def __init__(self, repair=None, base_features=None):
+        super().__init__(base_features=base_features)
         self.meshRepairFeatures = repair
-        self.baseFeatures = base_features
 
 
 # ── rig ──────────────────────────────────────────────────────────────────────────────────────────
@@ -198,8 +176,8 @@ def _rig(monkeypatch, mesh=None, on_add=None, design_type=1, **feat_kw):
     comp = _MeshComp("Comp", mesh_bodies=[mesh])
     mesh.parentComponent = comp
     feats = _RepairFeatures(on_add=on_add, **feat_kw)
-    base_feature = _BaseFeature()
-    comp.features = _Features(repair=feats, base_features=_BaseFeatures(base_feature))
+    base_feature = FakeBaseFeature()
+    comp.features = _Features(repair=feats, base_features=FakeBaseFeatures(made=base_feature))
     install(mr, MakeDesign(comp=comp, design_type=design_type))
     monkeypatch.setattr(mr._MESH, "resolve", lambda raw: (mesh, None))
     monkeypatch.setattr(mr.adsk.core.ValueInput, "createByReal", _ValueInput)
@@ -353,7 +331,7 @@ class TestInputGuards:
         comp_b = _MeshComp("CompB", mesh_bodies=[mesh_b])
         mesh_a.parentComponent, mesh_b.parentComponent = comp_a, comp_b
         feats = _RepairFeatures()
-        comp_a.features = _Features(repair=feats, base_features=_BaseFeatures(_BaseFeature()))
+        comp_a.features = _Features(repair=feats, base_features=FakeBaseFeatures())
         monkeypatch.setattr(adsk.fusion, "MeshBody", MeshBody)
         install(mr, MakeDesign(comp=comp_a, design_type=1, all_components=[comp_a, comp_b]))
         msg = error_message(mr.handler(mesh="Scan", repair_type="one_touch_fix"))
@@ -395,7 +373,7 @@ class TestModeRouting:
         # live-measured: meshRepairFeatures.add() returns a real feature at plain parametric
         # scope, unlike MeshRemoveFeatures whose add is parametric-only
         payload(mr.handler(mesh="H", repair_type="one_touch_fix"))
-        assert rig.base_feature.started is False
+        assert rig.base_feature._starts == 0
         assert getattr(rig.feats.last_input, "targetBaseFeature", None) is None
 
     def test_direct_opens_no_scope_and_leaves_target_base_feature_unset(self, monkeypatch):
@@ -403,7 +381,7 @@ class TestModeRouting:
         _m, _c, feats, bf = _rig(monkeypatch, mesh=mesh, design_type=0,
                                  on_add=_grow(mesh, tri=50, nodes=25))
         payload(mr.handler(mesh="H", repair_type="one_touch_fix"))
-        assert bf.started is False
+        assert bf._starts == 0
         assert feats.last_input.targetBaseFeature is None
 
     def test_a_none_feature_return_in_a_parametric_design_still_reports_parametric(self, monkeypatch):
@@ -559,7 +537,7 @@ class TestVerification:
         mesh, comp, feats, bf = _rig(monkeypatch, raise_on_add=True)
         msg = error_message(mr.handler(mesh="H", repair_type="wrap"))
         assert "meshRepairFeatures.add raised" in msg
-        assert bf.started is False   # no scope is opened, so none can be left open
+        assert bf._starts == 0   # no scope is opened, so none can be left open
 
     def test_a_raw_number_on_density_would_be_refused_by_the_api(self, rig):
         # the fake input rejects a non-ValueInput exactly as the live typed property does; the tool

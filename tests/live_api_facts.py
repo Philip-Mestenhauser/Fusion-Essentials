@@ -198,6 +198,13 @@ ENUMS = {
         "SketchBoundingBoxEntityType": 8,
         "ConstructionBoundingBoxEntityType": 16,
     },
+    "fusion.ChainedCurveOptions": {
+        "noChainedCurves": 0,
+        "connectedChainedCurves": 1,
+        "tangentChainedCurves": 2,
+        "openEdgesChainedCurves": 3,
+        "tangentAndOpenEdgesChainedCurves": 4,
+    },
     "fusion.ChamferCornerTypes": {
         "ChamferCornerType": 0,
         "MiterCornerType": 1,
@@ -252,6 +259,13 @@ ENUMS = {
         "SuppressedFeatureHealthState": 3,
         "RolledBackFeatureHealthState": 4,
         "UnknownFeatureHealthState": 5,
+    },
+    "fusion.FeatureOperations": {
+        "JoinFeatureOperation": 0,
+        "CutFeatureOperation": 1,
+        "IntersectFeatureOperation": 2,
+        "NewBodyFeatureOperation": 3,
+        "NewComponentFeatureOperation": 4,
     },
     "fusion.HoleEdgePositions": {
         "EdgeStartPointPosition": 0,
@@ -487,6 +501,12 @@ ENUMS = {
         "HighEndThreadLocation": 0,
         "LowEndThreadLocation": 1,
     },
+    "fusion.TriangleMeshQualityOptions": {
+        "LowQualityTriangleMesh": 8,
+        "NormalQualityTriangleMesh": 11,
+        "HighQualityTriangleMesh": 13,
+        "VeryHighQualityTriangleMesh": 15,
+    },
     "fusion.UntrimLoopTypes": {
         "AllLoopsUntrimType": 0,
         "ExternalLoopsUntrimType": 1,
@@ -494,6 +514,13 @@ ENUMS = {
         "ManualLoopsUntrimType": 3,
     },
 }
+
+# Referenced families that resolve to a live class carrying NO int member - factory-object
+# classes (Options.create()), measured as such, never seeded onto the mock namespaces.
+NOT_ENUMS = [
+    "cam.NCProgramPostProcessOptions",
+    "core.SaveImageFileOptions",
+]
 
 # Behavior flags the shared fakes consume.
 BEHAVIOR = {

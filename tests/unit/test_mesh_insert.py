@@ -3,42 +3,12 @@
 import adsk.fusion
 import pytest
 
-from conftest import (BRepBody, MakeComp, MeshBody, _MeshBodies, _NamedCollection, install,
-                      load_tool, make_design, payload)
+from conftest import (BRepBody, FakeBaseFeature, FakeBaseFeatures, FakeFeatures, MakeComp,
+                      MeshBody, _MeshBodies, _NamedCollection, install, load_tool, make_design,
+                      payload)
 
 mo = load_tool("mesh_insert")
 mesh_get = load_tool("mesh_get")
-
-
-class _BaseFeature:
-    """The BaseFeature a parametric scope opens, recording its own open and close."""
-    def __init__(self):
-        self.name = "BaseFeature1"
-        self.started = False
-        self.finished = False
-
-    def startEdit(self):
-        self.started = True
-        return True
-
-    def finishEdit(self):
-        self.finished = True
-        return True
-
-
-class _BaseFeatures:
-    """comp.features.baseFeatures - add() hands back the one base feature it was built with."""
-    def __init__(self, made):
-        self._made = made
-
-    def add(self):
-        return self._made
-
-
-class _Features:
-    """comp.features, carrying the one collection mesh_insert reads."""
-    def __init__(self, base_features=None):
-        self.baseFeatures = base_features
 
 
 class _ImportingMeshBodies(_MeshBodies):
@@ -61,7 +31,7 @@ def _types(monkeypatch):
     """The adsk.fusion type identities and the MeshUnits members the import enum is read from."""
     monkeypatch.setattr(adsk.fusion, "MeshBody", MeshBody, raising=False)
     monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
-    monkeypatch.setattr(adsk.fusion, "BaseFeature", _BaseFeature, raising=False)
+    monkeypatch.setattr(adsk.fusion, "BaseFeature", FakeBaseFeature, raising=False)
     for member, sentinel in (("MillimeterMeshUnit", "MM"), ("CentimeterMeshUnit", "CM"),
                              ("MeterMeshUnit", "M"), ("InchMeshUnit", "IN"),
                              ("FootMeshUnit", "FT")):
@@ -78,8 +48,7 @@ def _comp(name="Comp", mesh_bodies=None, base_feature=None):
     """A component whose meshBodies is the importing collection and whose features carry the scope."""
     comp = MakeComp(name)
     comp.meshBodies = mesh_bodies if mesh_bodies is not None else _ImportingMeshBodies()
-    comp.features = _Features(
-        base_features=_BaseFeatures(base_feature) if base_feature is not None else None)
+    comp.features = FakeFeatures(base_features=FakeBaseFeatures(made=base_feature))
     return comp
 
 
@@ -97,7 +66,7 @@ class TestMeshInsert:
         # scope -> honest error (NOT a false-negative recheck guard).
         mb_coll = _ImportingMeshBodies(import_result=_NamedCollection([MeshBody("Imported")]))
         comp = _comp(mesh_bodies=mb_coll)
-        comp.features = _Features(base_features=_BaseFeatures(None))  # add() -> None: scope won't open
+        comp.features = FakeFeatures(base_features=FakeBaseFeatures(made=False))
         _wire(comp, design_type=1)                                    # parametric
         res = mo.handler(file_path="C:/scan.stl", units="mm")
         assert res["isError"] is True
@@ -107,7 +76,7 @@ class TestMeshInsert:
         # An open base-feature scope is undetectable (activeEditObject is None even though the scope is
         # open), so run_in_base_feature must NOT re-check it after startEdit. The insert succeeds when
         # meshBodies.add returns a non-empty list, regardless of the unobservable scope state.
-        bf = _BaseFeature()
+        bf = FakeBaseFeature()
         mb_coll = _ImportingMeshBodies(import_result=_NamedCollection([MeshBody("Imported", tri=777)]))
         comp = _comp(mesh_bodies=mb_coll, base_feature=bf)
         _wire(comp, design_type=1, edit_object=None)     # scope invisible to any guard
@@ -116,12 +85,12 @@ class TestMeshInsert:
         assert out["base_feature"] == "BaseFeature1"
         assert out["bodies"][0]["triangle_count"] == 777
         # the import ran INSIDE the helper's atomic scope (opened AND finished)
-        assert bf.started is True and bf.finished is True
+        assert bf._starts == 1 and bf._finishes == 1
         assert mb_coll.add_args[2] is bf
 
     def test_works_in_parametric_with_visible_scope(self):
         # Parametric: the import runs inside the helper's base-feature scope and succeeds.
-        bf = _BaseFeature()
+        bf = FakeBaseFeature()
         mb_coll = _ImportingMeshBodies(import_result=_NamedCollection([MeshBody("Imported", tri=500)]))
         comp = _comp(mesh_bodies=mb_coll, base_feature=bf)
         _wire(comp, design_type=1, edit_object=bf)
@@ -130,13 +99,13 @@ class TestMeshInsert:
         assert out["base_feature"] == "BaseFeature1"
         assert out["bodies"][0]["triangle_count"] == 500
         # the import was wrapped in startEdit/finishEdit on the helper-opened base feature
-        assert bf.started is True and bf.finished is True
+        assert bf._starts == 1 and bf._finishes == 1
         assert mb_coll.add_args[0] == "C:/scan.stl" and mb_coll.add_args[2] is bf
 
     def test_works_in_direct_without_scope(self):
         # DIRECT design -> NO base-feature scope; baseOrFormFeature passed as None; import succeeds.
         mb_coll = _ImportingMeshBodies(import_result=_NamedCollection([MeshBody("Imported", tri=320)]))
-        comp = _comp(mesh_bodies=mb_coll, base_feature=_BaseFeature())
+        comp = _comp(mesh_bodies=mb_coll, base_feature=FakeBaseFeature())
         _wire(comp, design_type=0)                                   # direct
         out = payload(mo.handler(file_path="C:/scan.obj"))
         assert out["imported"] is True
@@ -157,8 +126,8 @@ class TestMeshInsert:
     def test_named_target_component_imports_into_it(self):
         # target_component=<name> imports into THAT component, not the active one
         sub_coll = _ImportingMeshBodies(import_result=_NamedCollection([MeshBody("Imported", tri=64)]))
-        root = _comp("Root", base_feature=_BaseFeature())
-        sub = _comp("SubPart", mesh_bodies=sub_coll, base_feature=_BaseFeature())
+        root = _comp("Root", base_feature=FakeBaseFeature())
+        sub = _comp("SubPart", mesh_bodies=sub_coll, base_feature=FakeBaseFeature())
         _wire(root, design_type=0, all_components=[root, sub])
         out = payload(mo.handler(file_path="C:/scan.stl", target_component="SubPart"))
         assert out["imported"] is True
@@ -169,9 +138,9 @@ class TestMeshInsert:
     def test_duplicate_target_component_name_refused_no_import(self):
         # two components named 'SubPart': importing into whichever the walk reached first would put
         # the mesh in the wrong part, so the import refuses before it runs
-        root = _comp("Root", base_feature=_BaseFeature())
-        a = _comp("SubPart", base_feature=_BaseFeature())
-        b = _comp("SubPart", base_feature=_BaseFeature())
+        root = _comp("Root", base_feature=FakeBaseFeature())
+        a = _comp("SubPart", base_feature=FakeBaseFeature())
+        b = _comp("SubPart", base_feature=FakeBaseFeature())
         _wire(root, design_type=0, all_components=[root, a, b])
         res = mo.handler(file_path="C:/scan.stl", target_component="SubPart")
         assert res["isError"] is True
@@ -184,14 +153,14 @@ class TestMeshInsert:
         assert root.meshBodies.add_args is None       # and not into the active component either
 
     def test_unknown_target_component_errors(self):
-        root = _comp("Root", base_feature=_BaseFeature())
+        root = _comp("Root", base_feature=FakeBaseFeature())
         _wire(root, design_type=0, all_components=[root])
         res = mo.handler(file_path="C:/scan.stl", target_component="Ghost")
         assert res["isError"] is True
         assert "Ghost" in res["message"]
 
     def test_unknown_units_rejected(self):
-        _wire(_comp(base_feature=_BaseFeature()))
+        _wire(_comp(base_feature=FakeBaseFeature()))
         res = mo.handler(file_path="C:/scan.stl", units="parsec")
         assert res["isError"] is True
         assert "mm, cm, m, in, or ft" in res["message"]
@@ -199,14 +168,14 @@ class TestMeshInsert:
     def test_empty_import_result_errors(self):
         # meshBodies.add returns an EMPTY list (file unreadable as a mesh) -> honest error
         comp = _comp(mesh_bodies=_ImportingMeshBodies(import_result=_NamedCollection()),
-                     base_feature=_BaseFeature())
+                     base_feature=FakeBaseFeature())
         _wire(comp, design_type=0)
         res = mo.handler(file_path="C:/scan.stl")
         assert res["isError"] is True and "no bodies" in res["message"].lower()
 
     def test_import_failure_surfaces_not_swallowed(self):
         # meshBodies.add raises -> must become an error, NOT a false success (no safe() around mutation)
-        comp = _comp(mesh_bodies=_ImportingMeshBodies(raise_on_add=True), base_feature=_BaseFeature())
+        comp = _comp(mesh_bodies=_ImportingMeshBodies(raise_on_add=True), base_feature=FakeBaseFeature())
         _wire(comp, design_type=0)
         res = mo.handler(file_path="C:/scan.stl")
         assert res["isError"] is True and "import failed" in res["message"]
@@ -221,7 +190,7 @@ class TestMeshInsertStats:
         imported = MeshBody("Imported", area=area, volume=volume)
         mb_coll = _ImportingMeshBodies(existing=existing or [imported],
                               import_result=_NamedCollection([imported]))
-        comp = _comp(mesh_bodies=mb_coll, base_feature=_BaseFeature())
+        comp = _comp(mesh_bodies=mb_coll, base_feature=FakeBaseFeature())
         _wire(comp, design_type=0)
         out = payload(mo.handler(file_path="C:/scan.stl", units=units))
         return out, mb_coll

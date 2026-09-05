@@ -130,9 +130,6 @@ def wire(monkeypatch):
     def _wire(comp, handle_map=None):
         design = MakeDesign(comp=comp, tokens=handle_map or {})
         install(sc, design)
-        for name in ("NewBodyFeatureOperation", "JoinFeatureOperation",
-                     "NewComponentFeatureOperation"):
-            monkeypatch.setattr(adsk.fusion.FeatureOperations, name, name, raising=False)
         monkeypatch.setattr(adsk.core.ValueInput, "createByReal",
                             staticmethod(lambda v: ("real", v)))
         monkeypatch.setattr(adsk.fusion, "BRepEdge", BRepEdge)

@@ -7,6 +7,9 @@ guards. No live Fusion - fakes mimic adsk.cam.CAM.setups.
 """
 
 import json
+
+import adsk.cam
+
 from conftest import load_tool, _NamedCollection
 
 cs = load_tool("cam_create_setup")
@@ -79,8 +82,6 @@ def _install(monkeypatch, bodies=None, has_cam=True):
     cam = FakeCAM() if has_cam else None
 
     import adsk.cam, adsk.fusion
-    for n in ("MillingOperation", "TurningOperation"):
-        setattr(adsk.cam.OperationTypes, n, n)
     adsk.fusion.BRepBody = FakeBody
     adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
 
@@ -104,13 +105,13 @@ class TestOperationType:
     def test_default_is_milling(self, monkeypatch):
         _, cam, _ = _install(monkeypatch)
         out = _payload(cs.handler())
-        assert cam.setups.added[-1].operationType == "MillingOperation"
+        assert cam.setups.added[-1].operationType == adsk.cam.OperationTypes.MillingOperation
         assert out["created"] is True
 
     def test_turning(self, monkeypatch):
         _, cam, _ = _install(monkeypatch)
         _payload(cs.handler(operation_type="turning"))
-        assert cam.setups.added[-1].operationType == "TurningOperation"
+        assert cam.setups.added[-1].operationType == adsk.cam.OperationTypes.TurningOperation
 
     def test_phantom_setup_that_never_lands_bites(self, monkeypatch):
         # add() returns a setup object but it never appears in the re-listed collection -> error

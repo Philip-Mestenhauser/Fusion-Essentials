@@ -15,8 +15,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import (BRepBody, MakeComp, MakeDesign, MeshBody, _NamedCollection, entity_proxy,
-                      error_message, install, load_tool, payload)
+from conftest import (BRepBody, FakeOccurrence, MakeComp, MakeDesign, MeshBody, _NamedCollection,
+                      entity_proxy, error_message, install, load_tool, payload)
 
 sn = load_tool("design_set_name")
 
@@ -52,19 +52,24 @@ class _Deduping:
         self._name = f"{value} (1)" if value in taken else value
 
 
-class _Occurrence:
+class _Occurrence(FakeOccurrence):
     """An occurrence whose displayed name and fullPathName FOLLOW its component's name (measured:
     setting Component.name makes the occurrence read 'BasePlate:1')."""
 
     def __init__(self, component, index=1, parent_path="", bodies=()):
-        self.component = component
         self._index = index
         self._parent_path = parent_path
+        super().__init__(path="", component=component)
         self.bRepBodies = _NamedCollection(list(bodies))
 
     @property
     def name(self):
         return f"{self.component.name}:{self._index}"
+
+    @name.setter
+    def name(self, value):
+        # the base seeds a path-derived name here; this occurrence reads its component's instead
+        pass
 
     @property
     def fullPathName(self):
