@@ -14,7 +14,7 @@ import types
 import pytest
 
 from conftest import (load_tool, make_design, _make_object_collection, _NamedCollection, BRepBody,
-                      FakePoint, FakeVector3D, MakeComp, MeshBody, Profile, body_proxy,
+                      FakePoint, FakeVector3D, MakeComp, MakeDesign, MeshBody, Profile, body_proxy,
                       entity_proxy, make_source_document)
 
 inp = load_tool("_inputs")
@@ -46,14 +46,10 @@ def _install(token_map):
     adsk.fusion.BRepEdge = FakeEdge
     adsk.fusion.BRepVertex = type("V", (), {})
 
-    class FakeDesign:
-        def findEntityByToken(self, h):
-            e = token_map.get(h)
-            return [e] if e is not None else []
-    # _inputs calls _common.design(); patch it
-    inp._common.design = lambda: FakeDesign()
-    # rebuild the requirement predicates that captured surfaceType at import (they read live each call,
-    # so just ensuring the enum values match is enough)
+    # _inputs calls _common.design(); patch it. The requirement predicates read surfaceType live on
+    # every call, so matching enum values is all they need.
+    design = make_design(tokens=token_map)
+    inp._common.design = lambda: design
 
 
 # ── GeometryHandle: the guardrail ───────────────────────────────────────────
@@ -121,21 +117,12 @@ def _install_with_bodies(faces, token_map):
     adsk.fusion.BRepEdge = FakeEdge
     adsk.fusion.BRepVertex = type("V", (), {})
 
-    class _Coll:
-        def __init__(self, items): self._i = list(items)
-        @property
-        def count(self): return len(self._i)
-        def item(self, i): return self._i[i]
-
-    body = type("Body", (), {"faces": _Coll(faces), "edges": _Coll([]), "vertices": _Coll([])})()
-    root = type("Root", (), {"bRepBodies": _Coll([body]), "allOccurrences": []})()
-
-    class FakeDesign:
-        rootComponent = root
-        def findEntityByToken(self, h):
-            e = token_map.get(h)
-            return [e] if e is not None else []
-    inp._common.design = lambda: FakeDesign()
+    body = type("Body", (), {"name": "Body1", "faces": _NamedCollection(faces),
+                             "edges": _NamedCollection([]),
+                             "vertices": _NamedCollection([])})()
+    root = MakeComp(name="Root", bodies=[body])
+    design = MakeDesign(comp=root, tokens=token_map)
+    inp._common.design = lambda: design
 
 
 class TestIsHandle:
@@ -987,13 +974,8 @@ class _FakeArcEdge:
 def _install_axis(handle_map=None):
     import adsk.fusion
     adsk.fusion.BRepEdge = (_FakeLinearEdge, _FakeArcEdge)
-    handle_map = handle_map or {}
-
-    class FakeDesign:
-        def findEntityByToken(self, h):
-            e = handle_map.get(h)
-            return [e] if e is not None else []
-    inp._common.design = lambda: FakeDesign()
+    design = make_design(tokens=handle_map or {})
+    inp._common.design = lambda: design
 
 
 class TestAxisRef:
@@ -1082,12 +1064,8 @@ def _install_axis_face(handle_map):
     adsk.fusion.BRepFace = (_FakePlanarAxisFace, _FakeCylAxisFace)
     adsk.fusion.BRepEdge = (_FakeLinearEdge, _FakeArcEdge)
     adsk.fusion.SketchLine = type("SL", (), {})
-
-    class FakeDesign:
-        def findEntityByToken(self, h):
-            e = handle_map.get(h)
-            return [e] if e is not None else []
-    inp._common.design = lambda: FakeDesign()
+    design = make_design(tokens=handle_map)
+    inp._common.design = lambda: design
 
 
 class TestAxisRefFace:

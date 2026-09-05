@@ -18,7 +18,8 @@ import types
 
 import pytest
 
-from conftest import (load_tool, make_source_document, make_bbox, BRepBody, Camera, FakePoint,
+from conftest import (load_tool, make_source_document, make_bbox, BRepBody, Camera,
+                      FakeApplication, FakeDataFile, FakeFusionDocument, FakePoint,
                       FakeVector3D, MakeComp, Viewport, _NamedCollection)
 
 iv = load_tool("view_set")
@@ -146,25 +147,19 @@ class _StubbornViewport(Viewport):
         self._assigned.append(value)
 
 
-class FakeDataFile:
-    def __init__(self, file_id):
-        self.id = file_id
+def _doc(name, data_file_id=None):
+    """The active document. Never saved -> dataFile reads None (measured); only a saved document
+    hands back one."""
+    return FakeFusionDocument(
+        name=name,
+        data_file=FakeDataFile(file_id=data_file_id) if data_file_id is not None else None)
 
 
-class FakeDoc:
-    isValid = True
-
-    def __init__(self, name, data_file_id=None):
-        self.name = name
-        # Never saved -> dataFile reads None (measured); only a saved document hands back one.
-        self.dataFile = FakeDataFile(data_file_id) if data_file_id is not None else None
-
-
-class FakeApp:
-    def __init__(self, design, doc_name="Doc", doc_id=None):
-        self.activeProduct = design
-        self.activeDocument = FakeDoc(doc_name, data_file_id=doc_id)
-        self.activeViewport = _viewport()
+def _app(design, doc_name="Doc", doc_id=None):
+    """The session the view verbs read through: the design as the active product, one open
+    document, and the rig's viewport."""
+    return FakeApplication(active_product=design, active_document=_doc(doc_name, doc_id),
+                           active_viewport=_viewport())
 
 
 class _DocWrapper:
@@ -177,7 +172,7 @@ class _DocWrapper:
         self._opened = opened
         # A never-saved document answers dataFile None (measured - it does not raise); only a
         # saved one hands back a DataFile. None is the branch _doc_key's unsaved key exists for.
-        self.dataFile = (FakeDataFile(opened.data_file_id)
+        self.dataFile = (FakeDataFile(file_id=opened.data_file_id)
                          if opened.data_file_id is not None else None)
 
     @property
@@ -232,17 +227,21 @@ class OpenDocument:
         self.is_open = False
 
 
-class RewrappingApp:
-    """FakeApp with the wrapper churn: every app.activeDocument read mints a new wrapper."""
+class RewrappingApp(FakeApplication):
+    """The session with the wrapper churn: every app.activeDocument read mints a new wrapper."""
 
     def __init__(self, design, opened):
-        self.activeProduct = design
-        self.activeViewport = _viewport()
         self._opened = opened
+        FakeApplication.__init__(self, active_product=design, active_viewport=_viewport())
 
     @property
     def activeDocument(self):
         return self._opened.wrapper()
+
+    @activeDocument.setter
+    def activeDocument(self, value):
+        # The base constructor assigns it; this document answers from `opened` instead.
+        pass
 
 
 def _body(name, bulb=True, hidden_by_ancestor=False):
@@ -253,7 +252,7 @@ def _body(name, bulb=True, hidden_by_ancestor=False):
 def _install(monkeypatch, occurrences=(), named_views=None, doc_name="Doc", doc_id=None, bodies=(),
              design_bbox=None):
     design = FakeDesign(list(occurrences), named_views, bodies, design_bbox)
-    app = FakeApp(design, doc_name, doc_id=doc_id)
+    app = _app(design, doc_name, doc_id=doc_id)
     monkeypatch.setattr(iv, "app", app)
     monkeypatch.setattr(iv._common, "app", app)
     # The snapshot key is minted by _write_guard.document_key, which reads the active document
@@ -324,7 +323,7 @@ class TestGuards:
         assert res["isError"] is True and "Unknown action" in res["message"]
 
     def test_no_design(self, monkeypatch):
-        app = FakeApp(None)
+        app = _app(None)
         monkeypatch.setattr(iv, "app", app)
         monkeypatch.setattr(iv._common, "app", app)
         import adsk.fusion

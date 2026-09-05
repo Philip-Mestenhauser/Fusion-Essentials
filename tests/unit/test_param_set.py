@@ -3,78 +3,28 @@
 Includes the subtle carve-out that an expression of ``"0"`` is NOT treated as "empty".
 """
 
-import json
+from types import SimpleNamespace
 
-from conftest import load_tool
+import adsk.core
+
+from conftest import (FakeUserParameter, FakeUserParameters, MakeDesign, load_tool, make_timeline,
+                      payload as _payload)
 
 params = load_tool("param_set")
 
 
-def _payload(result):
-    assert result["isError"] is False, result
-    return json.loads(result["content"][0]["text"])
-
-
-class FakeTimeline:
-    def __init__(self, items):
-        self._items = list(items)
-
-    @property
-    def count(self):
-        return len(self._items)
-
-    def item(self, i):
-        return self._items[i]
-
-
-class FakeParam:
-    def __init__(self, name, expression="", owner=None):
-        self.name = name
-        self.expression = expression
-        self.isFavorite = False
-        self.unit = "mm"
-        self.comment = ""
-        self.value = 1.0
-        self._owner = owner
-        self._deleted = False
-
-    def deleteMe(self):
-        self._deleted = True
-        if self._owner is not None and self in self._owner._items:
-            self._owner._items.remove(self)
-        return True
-
-
-class FakeUserParams:
-    def __init__(self, items=()):
-        self._items = list(items)
-        for it in self._items:
-            it._owner = self
-
-    def itemByName(self, name):
-        for p in self._items:
-            if p.name == name:
-                return p
-        return None
-
-    def add(self, name, _value_input, _unit, _comment):
-        p = FakeParam(name, owner=self)
-        self._items.append(p)
-        return p
-
-
-class FakeParamsDesign:
-    def __init__(self, user_params, timeline, all_params=None):
-        self.userParameters = user_params
-        self.timeline = timeline
-        self.allParameters = list(all_params if all_params is not None else user_params._items)
+def _design(user_params, timeline, all_params=()):
+    """A design carrying the two collections the param write path walks."""
+    return MakeDesign(user_parameters=user_params, timeline=timeline,
+                      all_parameters=list(all_params))
 
 
 def _stub_design(monkeypatch, design):
     monkeypatch.setattr(params._common, "design", lambda: design)
-    # the create path uses adsk.core.ValueInput.createByString - make it benign.
-    import adsk.core
-    adsk.core.ValueInput.createByString = staticmethod(lambda s: ("VI", s))
+    # the create path uses adsk.core.ValueInput.createByString; the string it carries is what the
+    # new parameter's expression reads back as.
+    monkeypatch.setattr(adsk.core.ValueInput, "createByString",
+                        staticmethod(lambda s: SimpleNamespace(stringValue=s)))
 
 
 class TestSetValidation:
@@ -102,8 +52,8 @@ class TestSetValidation:
 
 class TestSetCreateOrUpdate:
     def test_set_existing_updates(self, monkeypatch):
-        up = FakeUserParams([FakeParam("PartX", "10 mm")])
-        design = FakeParamsDesign(up, FakeTimeline([]))
+        up = FakeUserParameters([FakeUserParameter(name="PartX", expression="10 mm")])
+        design = _design(up, make_timeline())
         _stub_design(monkeypatch, design)
         out = _payload(params.handler(name="PartX", expression="20 mm"))
         assert out["set"] is True and out["created"] is False
@@ -111,7 +61,7 @@ class TestSetCreateOrUpdate:
     def test_silent_no_op_assignment_bites(self, monkeypatch):
         # the assignment raises nothing but the parameter still reads the same expression -> error
 
-        class StuckParam(FakeParam):
+        class StuckParam(FakeUserParameter):
             @property
             def expression(self):
                 return "10 mm"
@@ -120,29 +70,29 @@ class TestSetCreateOrUpdate:
             def expression(self, v):
                 pass                                     # silently ignores the assignment
 
-        up = FakeUserParams([StuckParam("PartX")])
-        design = FakeParamsDesign(up, FakeTimeline([]))
+        up = FakeUserParameters([StuckParam(name="PartX")])
+        design = _design(up, make_timeline())
         _stub_design(monkeypatch, design)
         res = params.handler(name="PartX", expression="20 mm")
         assert res["isError"] is True
         assert "did not take" in res["message"]
 
     def test_setting_the_current_expression_is_already_current(self, monkeypatch):
-        up = FakeUserParams([FakeParam("PartX", "10 mm")])
-        design = FakeParamsDesign(up, FakeTimeline([]))
+        up = FakeUserParameters([FakeUserParameter(name="PartX", expression="10 mm")])
+        design = _design(up, make_timeline())
         _stub_design(monkeypatch, design)
         out = _payload(params.handler(name="PartX", expression="10 mm"))
         assert out["set"] is True and out["already_current"] is True
 
     def test_set_missing_without_create_errors(self, monkeypatch):
-        design = FakeParamsDesign(FakeUserParams([]), FakeTimeline([]))
+        design = _design(FakeUserParameters([]), make_timeline())
         _stub_design(monkeypatch, design)
         res = params.handler(name="Ghost", expression="5 mm")
         assert res["isError"] is True and "create=true" in res["message"]
 
     def test_set_missing_with_create_makes_user_param(self, monkeypatch):
-        up = FakeUserParams([])
-        design = FakeParamsDesign(up, FakeTimeline([]))
+        up = FakeUserParameters([])
+        design = _design(up, make_timeline())
         _stub_design(monkeypatch, design)
         out = _payload(params.handler(name="NewP", expression="3 mm", create=True))
         assert out["set"] is True and out["created"] is True

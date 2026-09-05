@@ -10,11 +10,10 @@ part that names the script bug - not the wrapper and the noise (live run: the si
 
 import json
 import re
-import types
 
 import pytest
 
-from conftest import load_tool
+from conftest import FakeApplication, FakeFusionDocument, load_tool
 
 ses = load_tool("sys_execute_script")
 
@@ -151,39 +150,40 @@ class TestDrawingFailureAdvice:
 _SCRIPT = "def run(context):\n    print('hello')\n"
 
 
-class _FakeApp:
-    """Records every text command. Answers MCP.Execute from a canned reply (or raises), and reads
-    the temp file the read-only loader points at while it still exists - that file's contents are
-    what the real channel would exec."""
+class _TextCommandApp(FakeApplication):
+    """The shared Application fake plus its text-command channel: every command is recorded in
+    `_commands`, MCP.Execute answers a canned reply (or raises), and the temp file the read-only
+    loader points at is read while it still exists into `_script_file_text` - that file's contents
+    are what the real channel would exec."""
 
     def __init__(self, reply=None, raises=None):
-        self.commands = []
-        self.logged = []
-        self.script_file_text = None
-        self.activeDocument = types.SimpleNamespace(isValid=True)
+        FakeApplication.__init__(self, active_document=FakeFusionDocument(name="Scratch"))
+        self._commands = []
+        self._logged = []
+        self._script_file_text = None
         self._reply = reply
         self._raises = raises
 
     def executeTextCommand(self, command):
-        self.commands.append(command)
+        self._commands.append(command)
         if command.startswith("MCP.Execute"):
             m = re.search(r"path = '([^']+)'", command)
             if m:
                 with open(m.group(1), encoding="utf-8") as fh:
-                    self.script_file_text = fh.read()
+                    self._script_file_text = fh.read()
             if self._raises is not None:
                 raise RuntimeError(self._raises)
             return self._reply
         return ""
 
     def log(self, text):
-        self.logged.append(text)
+        self._logged.append(text)
 
 
 @pytest.fixture
 def run_script(monkeypatch):
     def _run(reply=None, raises=None, script=_SCRIPT, read_only=True):
-        app = _FakeApp(reply=reply, raises=raises)
+        app = _TextCommandApp(reply=reply, raises=raises)
         monkeypatch.setattr(ses, "app", app)
         monkeypatch.setattr(ses._drawing_common, "active_drawing", lambda: None)
         return app, ses.handler(script, read_only=read_only)
@@ -199,8 +199,8 @@ def _payload_of(command):
 class TestReadOnlyRouting:
     def test_read_only_goes_through_mcp_execute_with_the_flag_set(self, run_script):
         app, _ = run_script(reply=json.dumps({"message": "", "success": True}))
-        assert len(app.commands) == 1, app.commands
-        payload = _payload_of(app.commands[0])
+        assert len(app._commands) == 1, app._commands
+        payload = _payload_of(app._commands[0])
         assert payload["featureType"] == "script"
         assert payload["object"]["readOnly"] is True
 
@@ -208,7 +208,7 @@ class TestReadOnlyRouting:
         # There is no design change to group into one undo step, and PTransaction.Start on a
         # read-only run would be an undo step that can never contain anything.
         app, _ = run_script(reply=json.dumps({"message": "", "success": True}))
-        assert not [c for c in app.commands if c.startswith("PTransaction")]
+        assert not [c for c in app._commands if c.startswith("PTransaction")]
 
     def test_the_callers_script_is_never_inlined_into_the_text_command(self, run_script):
         # The parameter is a quoted JSON string whose inner quotes are backslash-escaped; a script
@@ -216,13 +216,13 @@ class TestReadOnlyRouting:
         # temp file and a fixed loader execs it, so only the loader crosses the parser.
         script = 'def run(context):\n    print("a \\" b \\\\ c")\n'
         app, _ = run_script(reply=json.dumps({"message": "", "success": True}), script=script)
-        loader = _payload_of(app.commands[0])["object"]["script"]
+        loader = _payload_of(app._commands[0])["object"]["script"]
         assert 'a \\" b' not in loader
         assert "exec(compile(" in loader
 
     def test_the_file_the_loader_execs_is_the_sentinel_wrapped_script(self, run_script):
         app, _ = run_script(reply=json.dumps({"message": "", "success": True}))
-        text = app.script_file_text
+        text = app._script_file_text
         assert text.startswith(ses._UNJAM_PRELUDE + 'print("%s")' % ses._RUN_SENTINEL)
         assert _SCRIPT in text
         assert text.endswith("run(None)")
@@ -265,10 +265,10 @@ class TestReadOnlyRouting:
     def test_write_mode_still_uses_python_run_inside_a_transaction(self, run_script):
         app, res = run_script(reply=None, read_only=False)
         assert res["isError"] is False
-        assert any(c.startswith('Python.Run "') for c in app.commands)
-        assert "PTransaction.Start \"Fusion-Essentials MCP Script\"" in app.commands
-        assert "PTransaction.Commit" in app.commands
-        assert not any(c.startswith("MCP.Execute") for c in app.commands)
+        assert any(c.startswith('Python.Run "') for c in app._commands)
+        assert "PTransaction.Start \"Fusion-Essentials MCP Script\"" in app._commands
+        assert "PTransaction.Commit" in app._commands
+        assert not any(c.startswith("MCP.Execute") for c in app._commands)
 
 
 class TestReadOnlyResultHonesty:

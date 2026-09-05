@@ -134,13 +134,27 @@ def _grow_params(params, count):
     params._parameters = [FakeUserParameter(f"p{i}") for i in range(count)]
 
 
-def FakeDesign(root_comp, design_type=1, user_param_count=0, all_param_count=None):
+def FakeDesign(root_comp, design_type=1, user_param_count=0, all_param_count=None, cls=MakeDesign):
     """The DESTINATION design (what _common.design() returns). designType: 1 = parametric, 0 = direct.
     all_param_count=None leaves the design with NO allParameters collection, so the design-level
-    model-parameter count reads as UNKNOWN rather than zero."""
-    return MakeDesign(comp=root_comp, design_type=design_type,
-                      user_parameters=_params(user_param_count),
-                      all_parameters=None if all_param_count is None else _params(all_param_count))
+    model-parameter count reads as UNKNOWN rather than zero. `cls` swaps in a scenario design."""
+    return cls(comp=root_comp, design_type=design_type,
+               user_parameters=_params(user_param_count),
+               all_parameters=None if all_param_count is None else _params(all_param_count))
+
+
+class _ReadBackDeclines(MakeDesign):
+    """A design whose activeOccurrence READ throws - the state the payload must not report as a
+    null. DECLARED, not measured: live the read answers. The setter still records, so activating
+    the derive target works."""
+
+    @property
+    def activeOccurrence(self):
+        raise RuntimeError("activeOccurrence did not read")
+
+    @activeOccurrence.setter
+    def activeOccurrence(self, value):
+        self._active_occurrence = value
 
 
 _NO_DEFAULT = object()
@@ -590,31 +604,41 @@ class TestIntoComponent:
         assert out["into_component"] == "root component"
 
     def _nested_setup(self, monkeypatch, *, occ_activates=True, chassis_derive=None,
-                      root_restore=True):
+                      root_restore="lands", read_back="reads", prev_active=None):
         """A design with a Chassis:1 occurrence targetable by into_component. The occ counts its
-        activate() calls (the platform routes a derive into the ACTIVE component, so nesting
-        activates the target first); the design records the root-restore. root_restore is what
-        activateRootComponent answers - True, False, or 'raise' for one that throws."""
+        activate() calls and takes the design's edit target with it (the platform routes a derive
+        into the ACTIVE component, so nesting activates the target first). activateRootComponent
+        answers True in every measured state, so root_restore says what it DOES: 'lands' clears
+        activeOccurrence, 'lies' leaves the occurrence holding it, 'raise' throws. read_back
+        'declines' makes the activeOccurrence READ throw; prev_active names the component holding
+        the edit target BEFORE the call (default: the root)."""
         chassis_derive = chassis_derive or FakeDeriveFeatures()
         chassis_comp = FakeComp("Chassis", derive_features=chassis_derive)
         calls = {"activated": 0, "root_restored": 0}
+        root_comp = FakeComp("Root")
+        design = FakeDesign(root_comp,
+                            cls=_ReadBackDeclines if read_back == "declines" else MakeDesign)
+        if prev_active is not None:
+            design.activeComponent = MakeComp(prev_active)
 
         class _ActivatableOcc(FakeOccurrence):
-            """The into_component target, counting the activate() that precedes the derive."""
+            """The into_component target: activating it makes it the design's activeOccurrence."""
             def activate(self):
                 calls["activated"] += 1
+                if occ_activates:
+                    design.activeOccurrence = self
                 return occ_activates
 
         occ = _ActivatableOcc("Chassis:1", chassis_comp)
-        root_comp = FakeComp("Root")
         root_comp.allOccurrences = [occ]
-        design = FakeDesign(root_comp)
 
         def _restore_root():
             calls["root_restored"] += 1
             if root_restore == "raise":
                 raise RuntimeError("activateRootComponent blew up")
-            return root_restore
+            if root_restore == "lands":
+                design.activeOccurrence = None
+            return True
         design.activateRootComponent = _restore_root
         monkeypatch.setattr(io._common, "design", lambda: design)
         monkeypatch.setattr(io._inputs._common, "design", lambda: design)
@@ -632,23 +656,50 @@ class TestIntoComponent:
         assert chassis_derive.created is not None
         assert calls["activated"] == 1       # nesting = activate the target before add()
         assert calls["root_restored"] == 1   # ...and restore the root edit target after
+        assert out["active_occurrence_after"] is None    # the read-back that confirms the restore
+        assert "root_restore_note" not in out
 
-    def test_a_FALSE_root_restore_still_reports_the_derive(self, monkeypatch):
-        # A False return means the restore did NOT take. The restore is attempted either way, and
-        # the derive that already landed is still reported - a restore that did not take is not a
-        # reason to withhold the feature the caller asked for.
-        _design, _chassis, derive, calls = self._nested_setup(monkeypatch, root_restore=False)
+    def test_a_non_root_edit_target_before_the_call_is_named_after_it(self, monkeypatch):
+        # The restore landed, so the payload says where the edit target WAS - the caller may want
+        # it back. This is the CONFIRMED-root arm; a refuted one publishes root_restore_note.
+        self._nested_setup(monkeypatch, prev_active="Fixture")
         out = _payload(io.handler(document_id="urn:x", into_component="Chassis:1"))
-        assert "Chassis" in out["into_component"] and derive.created is not None
-        assert calls["root_restored"] == 1
+        assert out["active_occurrence_after"] is None
+        assert "'Fixture'" in out["edit_target_note"]
+
+    def test_a_root_restore_the_read_back_refutes_is_reported(self, monkeypatch):
+        # activateRootComponent() answers True whether or not the edit target moved, so the
+        # activeOccurrence read-back is the only signal: still holding the occurrence means the
+        # restore did not land, and the derive that DID land is still reported beside it.
+        _design, _chassis, derive, calls = self._nested_setup(monkeypatch, root_restore="lies",
+                                                              prev_active="Fixture")
+        out = _payload(io.handler(document_id="urn:x", into_component="Chassis:1"))
+        assert derive.created is not None and calls["root_restored"] == 1
+        assert out["active_occurrence_after"] == "Chassis:1"
+        assert out["root_restore_note"].startswith("nesting activated component 'Chassis'")
+        assert "not confirmed" in out["root_restore_note"]
+        # the OTHER arm's note would claim the target reads ROOT now, which nothing read
+        assert "edit_target_note" not in out
+
+    def test_a_raising_read_back_is_not_reported_as_root(self, monkeypatch):
+        # A read that DECLINES is not the null that confirms the restore: the sentinel keeps it out
+        # of the payload entirely and the note says the read did not answer.
+        _design, _chassis, derive, calls = self._nested_setup(monkeypatch, read_back="declines")
+        out = _payload(io.handler(document_id="urn:x", into_component="Chassis:1"))
+        assert derive.created is not None and calls["root_restored"] == 1
+        assert "active_occurrence_after" not in out
+        assert "did not read" in out["root_restore_note"]
 
     def test_a_RAISING_root_restore_does_not_sink_the_call(self, monkeypatch):
         # The restore runs in a finally, so a raise there would escape the handler and turn a
-        # landed derive into an exception - the same outcome a False return must not cause either.
+        # landed derive into an exception - it is swallowed, and the read-back still reports where
+        # the edit target is.
         _design, _chassis, derive, calls = self._nested_setup(monkeypatch, root_restore="raise")
         out = _payload(io.handler(document_id="urn:x", into_component="Chassis:1"))
         assert "Chassis" in out["into_component"] and derive.created is not None
         assert calls["root_restored"] == 1
+        assert out["active_occurrence_after"] == "Chassis:1"
+        assert "not confirmed" in out["root_restore_note"]
 
     def test_activation_failure_refuses_before_deriving(self, monkeypatch):
         design, chassis, chassis_derive, calls = self._nested_setup(monkeypatch,

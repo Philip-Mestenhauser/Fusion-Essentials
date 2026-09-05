@@ -11,11 +11,29 @@ No live Fusion — fakes model exactly the read surface the handler touches.
 """
 
 import json
+import types
 
 import adsk.cam
 import adsk.core
 
-from conftest import Camera, FakeOperation, Viewport, load_tool, make_cam, strategy_factory
+from conftest import (
+    Camera,
+    FakeApplication,
+    FakeDataFile,
+    FakeDataFolder,
+    FakeDataProject,
+    FakeDocumentReference,
+    FakeFusionDocument,
+    FakeOperation,
+    FakeProducts,
+    FakeSelection,
+    FakeSelections,
+    FakeUserInterface,
+    Viewport,
+    load_tool,
+    make_cam,
+    strategy_factory,
+)
 
 wo = load_tool("workspace_orient")
 
@@ -246,61 +264,35 @@ class FakeCAM:
         self.getMachiningTime = make_cam(machining_times=machining_times).getMachiningTime
 
 
-class FakeProducts:
-    """document.products.itemByProductType(kind) -> the design or CAM product (or None)."""
-    def __init__(self, design=None, cam=None):
-        self._design = design
-        self._cam = cam
-    def itemByProductType(self, kind):
-        if kind == "DesignProductType":
-            return self._design
-        if kind == "CAMProductType":
-            return self._cam
-        return None
+def _ref(name, out_of_date=False):
+    """A DocumentReference to the file called `name` - the external-component freshness signal."""
+    return FakeDocumentReference(data_file=FakeDataFile(name=name), out_of_date=out_of_date)
 
 
-class FakeRef:
-    """A DocumentReference: .isOutOfDate + .dataFile.name (the external-component freshness signal)."""
-    def __init__(self, name, out_of_date=False):
-        self.isOutOfDate = out_of_date
-        self.dataFile = type("DF", (), {"name": name})()
+def _data_file(urn="urn:adsk:lineage:abc", version=3, latest=3,
+               url="https://x/g/data", folder="Parts", folder_id="fld.1",
+               project="MCP Test Project", project_id="a.123", hub="Test Hub"):
+    """A saved doc's data-model identity on the shared cloud fakes: URN + version + web URL +
+    the parent folder/project chain. The hub is stamped on the project here - DataHub has no shape
+    dump, so no shared fake stands for it."""
+    owner = FakeDataProject(name=project, project_id=project_id)
+    owner.parentHub = types.SimpleNamespace(name=hub)
+    return FakeDataFile(file_id=urn, version=version, latest_version=latest, web_url=url,
+                        parent_folder=FakeDataFolder(name=folder, folder_id=folder_id,
+                                                     parent_project=owner),
+                        parent_project=owner)
 
 
-class FakeDataFile:
-    """A saved doc's data-model identity: URN + version + web URL + parent folder/project/hub chain."""
-    def __init__(self, urn="urn:adsk:lineage:abc", version=3, latest=3,
-                 url="https://x/g/data", folder="Parts", folder_id="fld.1",
-                 project="MCP Test Project", project_id="a.123", hub="Test Hub"):
-        self.id = urn
-        self.versionNumber = version
-        self.latestVersionNumber = latest
-        self.fusionWebURL = url
-        self.parentFolder = type("Fld", (), {"name": folder, "id": folder_id})()
-        _hub = type("Hub", (), {"name": hub})()
-        self.parentProject = type("Proj", (), {"name": project, "id": project_id,
-                                               "parentHub": _hub})()
+def _doc(name="Doc", design=None, cam=None, saved=True, modified=False, refs=(), data_file=None):
+    """The active document as the orientation read touches it: its two products, its external
+    references, and the DataFile only a saved one carries."""
+    return FakeFusionDocument(name=name, design=design, data_file=data_file, is_saved=saved,
+                              is_modified=modified, references=refs,
+                              products=FakeProducts(design=design, cam=cam))
 
 
-class FakeDoc:
-    def __init__(self, name="Doc", design=None, cam=None, saved=True, modified=False, refs=(),
-                 data_file=None):
-        self.name = name
-        self.isSaved = saved
-        self.isModified = modified
-        self.products = FakeProducts(design, cam)
-        self.documentReferences = _Coll(refs)
-        if data_file is not None:
-            self.dataFile = data_file        # only saved docs have one (unsaved -> attr absent)
-
-
-class _FakeSelections:
-    def __init__(self, entities):
-        self._e = list(entities)
-    @property
-    def count(self):
-        return len(self._e)
-    def item(self, i):
-        return type("Sel", (), {"entity": self._e[i]})()
+# The workspace the orientation read names. Workspace has no shape dump, so it stays bespoke.
+_DESIGN_WORKSPACE = types.SimpleNamespace(name="Design")
 
 
 def _install(active_product=None, doc=None, cam=None, design_for_cast=None,
@@ -309,16 +301,11 @@ def _install(active_product=None, doc=None, cam=None, design_for_cast=None,
     a CAM product, or None); design_for_cast is what Design.cast resolves to (default: active_product
     if it's a FakeDesign). camera/selection feed the new view + selection echo."""
     cam_obj = camera if camera is not None else Camera()
-    _ui = type("UI", (), {"activeWorkspace": type("W", (), {"name": "Design"})(),
-                          "activeSelections": _FakeSelections(selection)})()
-
-    class _App:
-        version = "TEST.0"
-        activeDocument = doc
-        activeProduct = active_product
-        userInterface = _ui
-        activeViewport = Viewport(camera=cam_obj)
-    wo.app = _App()
+    ui = FakeUserInterface(FakeSelections([FakeSelection(entity=e) for e in selection]),
+                           active_workspace=_DESIGN_WORKSPACE)
+    wo.app = FakeApplication(active_document=doc, active_product=active_product,
+                             user_interface=ui, version="TEST.0",
+                             active_viewport=Viewport(camera=cam_obj))
     wo._common.app = wo.app
 
     import adsk.fusion, adsk.cam
@@ -344,7 +331,7 @@ class TestGuards:
 
     def test_document_without_a_design(self):
         # a doc is open but no Design product (e.g. a drawing) -> has_design False, still reports doc/cam
-        doc = FakeDoc(name="Drawing1", design=None, cam=None)
+        doc = _doc(name="Drawing1", design=None, cam=None)
         _install(active_product=None, doc=doc, design_for_cast=None)
         out = _payload(wo.handler())
         assert out["has_design"] is False
@@ -363,9 +350,16 @@ class TestOrientation:
                         joints=[FakeJoint("Wheel_Spin")], bodies=0, sketches=3)
         return FakeDesign(root, timeline=[FakeTL(0), FakeTL(0)], **kw)
 
+    def test_reports_the_running_fusion_build(self):
+        # the build number an agent quotes when an API behaves differently than a doc says; it is
+        # read off the session, never a constant, so a dropped read must not pass as one.
+        des = self._small_design()
+        _install(active_product=des, doc=_doc(design=des))
+        assert _payload(wo.handler())["fusion_version"] == "TEST.0"
+
     def test_reports_document_and_design_identity(self):
         des = self._small_design()
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         out = _payload(wo.handler())
         assert out["has_design"] is True
         assert out["design"]["mode"] == "parametric"     # designType 1
@@ -377,21 +371,21 @@ class TestOrientation:
         # parameters were invisible in the front-door orient - a design WITH them must report the count
         # AND a param_get breadcrumb (the same inbound crumb design_get now gives).
         des = self._small_design(parameters=18)
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         out = _payload(wo.handler())
         assert out["design"]["parameters"] == 18
         assert "param_get" in out["pointers"]["parameters"]
 
     def test_no_param_pointer_when_zero(self):
         des = self._small_design(parameters=0)
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         out = _payload(wo.handler())
         assert out["design"]["parameters"] == 0            # count still reported (like bodies/sketches)
         assert "parameters" not in out["pointers"]         # but no pointer when there's nothing to point at
 
     def test_healthy_rollup(self):
         des = self._small_design()
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         h = _payload(wo.handler())["health"]
         assert h["is_healthy"] is True
         assert h["timeline_errors"] == 0 and h["broken_joints"] == []
@@ -402,7 +396,7 @@ class TestOrientation:
         occs = [FakeOcc("A:1")]
         root = FakeRoot(top_occs=occs, joints=[])
         des = FakeDesign(root, timeline=[FakeTL(0), FakeTL(2), FakeTL(1), FakeTL(3)])
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         h = _payload(wo.handler())["health"]
         assert h["timeline_errors"] == 1 and h["timeline_warnings"] == 1 and h["timeline_suppressed"] == 1
         assert h["is_healthy"] is False
@@ -412,7 +406,7 @@ class TestOrientation:
         root = FakeRoot(top_occs=[FakeOcc("A:1")],
                         joints=[FakeJoint("Good", 0), FakeJoint("PistonSlide", 2)])
         des = FakeDesign(root, timeline=[FakeTL(0)])
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         out = _payload(wo.handler())
         assert out["health"]["broken_joints"] == ["PistonSlide"]
         assert out["health"]["is_healthy"] is False
@@ -427,7 +421,7 @@ class TestOrientation:
         root = FakeRoot(top_occs=[FakeOcc("A:1")],
                         joints=[FakeJoint("Active", 0), FakeJoint("Parked REVERSED", 3)])
         des = FakeDesign(root, timeline=[FakeTL(0)])
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         out = _payload(wo.handler())
         assert out["health"]["broken_joints"] == []
         assert out["health"]["is_healthy"] is True
@@ -435,13 +429,13 @@ class TestOrientation:
 
     def test_healthy_note_says_so(self):
         des = self._small_design()
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         assert _payload(wo.handler())["note"].startswith("No compute errors")
 
     def test_direct_mode_has_no_timeline(self):
         root = FakeRoot(top_occs=[FakeOcc("A:1")])
         des = FakeDesign(root, timeline=[], design_type=0)   # direct
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         out = _payload(wo.handler())
         assert out["design"]["mode"] == "direct"
         assert out["health"]["timeline_features"] == 0
@@ -451,7 +445,7 @@ class TestOrientation:
                 FakeOcc("Plate:1", children=0, bodies=2, grounded=True)]
         root = FakeRoot(top_occs=occs)
         des = FakeDesign(root, timeline=[FakeTL(0)])
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         digest = _payload(wo.handler())["browser_digest"]
         assert len(digest) == 2
         asm = next(d for d in digest if d["name"] == "Asm:1")
@@ -463,7 +457,7 @@ class TestOrientation:
         occs = [FakeOcc(f"P{i}:1") for i in range(40)]
         root = FakeRoot(top_occs=occs, all_count=40)
         des = FakeDesign(root, timeline=[FakeTL(0)])
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         out = _payload(wo.handler())
         assert len(out["browser_digest"]) == wo._DIGEST_LIMIT      # capped, not all 40
         assert out["design"]["top_level_occurrences"] == 40        # but the true count is reported
@@ -480,7 +474,7 @@ class TestTimelineHonesty:
         # a Snapshot reads NULL health (neither healthy nor error) - counted as a marker, not silently
         # folded into an implied 'healthy'. Flip the elif off and timeline_markers goes to 0 (red).
         des = self._des([FakeTL(0), FakeTL(None), FakeTL(0)])
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         h = _payload(wo.handler())["health"]
         assert h["timeline_markers"] == 1
         assert h["timeline_errors"] == 0 and h["timeline_warnings"] == 0
@@ -488,7 +482,7 @@ class TestTimelineHonesty:
 
     def test_rolled_back_marker_is_unhealthy_and_surfaced(self):
         des = self._des([FakeTL(0), FakeTL(0), FakeTL(0)], marker=1)   # marker at 1 of 3 = rolled back
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         out = _payload(wo.handler())
         assert out["health"]["timeline_rolled_back"] is True
         assert out["health"]["is_healthy"] is False
@@ -497,14 +491,14 @@ class TestTimelineHonesty:
 
     def test_marker_at_end_is_not_rolled_back(self):
         des = self._des([FakeTL(0), FakeTL(0)], marker=2)             # marker at the end
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         assert _payload(wo.handler())["health"]["timeline_rolled_back"] is False
 
     def test_warning_surfaced_distinctly_even_when_otherwise_healthy(self):
         # errors 0 -> is_healthy stays True, but a timeline WARNING must be STATED in the note, never
         # folded into a clean 'no problems'.
         des = self._des([FakeTL(0), FakeTL(1)])                       # one warning, no error
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         out = _payload(wo.handler())
         assert out["health"]["timeline_warnings"] == 1
         assert out["health"]["is_healthy"] is True
@@ -527,7 +521,7 @@ class TestDesignWideCounts:
         subs = [FakeSubComp("Frame", sketches=1), FakeSubComp("OuterRing", sketches=1),
                 FakeSubComp("InnerRing", sketches=1)]
         des = FakeDesign(root, timeline=[FakeTL(0)], sub_components=subs)
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         out = _payload(wo.handler())
         assert out["design"]["sketches"] == 3      # NOT 0 - would be 0 under a root-only count
 
@@ -536,7 +530,7 @@ class TestDesignWideCounts:
         root = FakeRoot(top_occs=[FakeOcc("A:1"), FakeOcc("B:1")], all_count=2, bodies=1, sketches=2)
         subs = [FakeSubComp("A", bodies=2, sketches=1), FakeSubComp("B", bodies=3, sketches=0)]
         des = FakeDesign(root, timeline=[FakeTL(0)], sub_components=subs)
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         out = _payload(wo.handler())
         assert out["design"]["bodies"] == 6        # 1 + 2 + 3, NOT the root-only 1
         assert out["design"]["sketches"] == 3      # 2 + 1 + 0, NOT the root-only 2
@@ -545,7 +539,7 @@ class TestDesignWideCounts:
         # No sub-components: design-wide == root-only, so the common single-part case is unchanged.
         root = FakeRoot(top_occs=[FakeOcc("A:1")], all_count=1, bodies=4, sketches=5)
         des = FakeDesign(root, timeline=[FakeTL(0)])
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         out = _payload(wo.handler())
         assert out["design"]["bodies"] == 4 and out["design"]["sketches"] == 5
 
@@ -556,7 +550,7 @@ class TestCam:
     def test_no_cam(self):
         root = FakeRoot(top_occs=[FakeOcc("A:1")])
         des = FakeDesign(root, timeline=[FakeTL(0)])
-        _install(active_product=des, doc=FakeDoc(design=des, cam=None))
+        _install(active_product=des, doc=_doc(design=des, cam=None))
         out = _payload(wo.handler())
         assert out["has_cam"] is False and "cam" not in out
 
@@ -569,7 +563,7 @@ class TestCam:
         cam = FakeCAM(setups, machining_times)
         root = FakeRoot(top_occs=[FakeOcc("A:1")])
         des = FakeDesign(root, timeline=[FakeTL(0)])
-        _install(active_product=des, doc=FakeDoc(design=des, cam=cam))
+        _install(active_product=des, doc=_doc(design=des, cam=cam))
         monkeypatch.setattr(wo._cam_common, "get_cam", lambda: (cam, None))
         return _payload(wo.handler())
 
@@ -911,7 +905,7 @@ class TestCam:
         cam = FakeCAM([type("S", (), {"allOperations": _ShortCollection([FakeOp(True)])})()])
         root = FakeRoot(top_occs=[FakeOcc("A:1")])
         des = FakeDesign(root, timeline=[FakeTL(0)])
-        _install(active_product=des, doc=FakeDoc(design=des, cam=cam))
+        _install(active_product=des, doc=_doc(design=des, cam=cam))
         monkeypatch.setattr(wo._cam_common, "get_cam", lambda: (cam, None))
         out = _payload(wo.handler())
         assert out["cam"]["total_operations"] == 1
@@ -930,7 +924,7 @@ class TestCam:
         cam = FakeCAM([type("S", (), {"allOperations": _NoCount()})()])
         root = FakeRoot(top_occs=[FakeOcc("A:1")])
         des = FakeDesign(root, timeline=[FakeTL(0)])
-        _install(active_product=des, doc=FakeDoc(design=des, cam=cam))
+        _install(active_product=des, doc=_doc(design=des, cam=cam))
         monkeypatch.setattr(wo._cam_common, "get_cam", lambda: (cam, None))
         out = _payload(wo.handler())
         assert out["cam"]["setups_with_unreadable_operation_count"] == 1
@@ -957,7 +951,7 @@ class TestCam:
         cam = FakeCAM([type("S", (), {"allOperations": _ShortCollection([broken])})()])
         root = FakeRoot(top_occs=[FakeOcc("A:1")])
         des = FakeDesign(root, timeline=[FakeTL(0)])
-        _install(active_product=des, doc=FakeDoc(design=des, cam=cam))
+        _install(active_product=des, doc=_doc(design=des, cam=cam))
         monkeypatch.setattr(wo._cam_common, "get_cam", lambda: (cam, None))
         out = _payload(wo.handler())
         assert out["cam"]["errored_operations"] == 1 and out["cam"]["operations_unread"] == 3
@@ -984,7 +978,7 @@ class TestCam:
         cam = FakeCAM([type("S", (), {"allOperations": _ShortCollection([stale])})()])
         root = FakeRoot(top_occs=[FakeOcc("A:1")])
         des = FakeDesign(root, timeline=[FakeTL(0)])
-        _install(active_product=des, doc=FakeDoc(design=des, cam=cam))
+        _install(active_product=des, doc=_doc(design=des, cam=cam))
         monkeypatch.setattr(wo._cam_common, "get_cam", lambda: (cam, None))
         pointer = _payload(wo.handler())["pointers"]["cam"]
         assert "1 operation(s) need generating." in pointer and "incomplete" in pointer
@@ -996,7 +990,7 @@ class TestExternalReferences:
     def _design_with_refs(self, refs):
         root = FakeRoot(top_occs=[FakeOcc("A:1")])
         des = FakeDesign(root, timeline=[FakeTL(0)])
-        doc = FakeDoc(design=des, refs=refs)
+        doc = _doc(design=des, refs=refs)
         _install(active_product=des, doc=doc)
         return des
 
@@ -1011,7 +1005,7 @@ class TestExternalReferences:
         assert "fix_references" not in out["pointers"]
 
     def test_references_all_current_is_healthy(self):
-        self._design_with_refs([FakeRef("PartA"), FakeRef("PartB")])
+        self._design_with_refs([_ref("PartA"), _ref("PartB")])
         out = _payload(wo.handler())
         assert out["references"]["referenced_documents"] == 2
         assert out["references"]["out_of_date"] == []
@@ -1019,7 +1013,7 @@ class TestExternalReferences:
         assert "fix_references" not in out["pointers"]
 
     def test_out_of_date_reference_is_flagged_for_attention(self):
-        self._design_with_refs([FakeRef("Fresh"), FakeRef("StalePart", out_of_date=True)])
+        self._design_with_refs([_ref("Fresh"), _ref("StalePart", out_of_date=True)])
         out = _payload(wo.handler())
         assert out["references"]["out_of_date"] == ["StalePart"]
         assert out["health"]["out_of_date_references"] == ["StalePart"]
@@ -1035,7 +1029,7 @@ class TestExternalReferences:
     def test_a_healthy_design_publishes_no_unresolved_marker(self):
         # the 0-broken boundary: the list is empty, is_healthy stays true, and the note keeps its
         # clean verdict - no unresolved wording appears on a document that has none.
-        self._design_with_refs([FakeRef("PartA")])
+        self._design_with_refs([_ref("PartA")])
         out = _payload(wo.handler())
         assert out["health"]["unresolved_references"] == []
         assert out["health"]["is_healthy"] is True
@@ -1049,7 +1043,7 @@ class TestExternalReferences:
         container = FakeOcc("Op1 Workholding Container:1", broken_children=[BrokenOcc("45740")])
         root = FakeRoot(top_occs=[container], walk_raises=True)
         des = FakeDesign(root, timeline=[FakeTL(0)])
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         out = _payload(wo.handler())
         h = out["health"]
         assert h["is_healthy"] is False
@@ -1065,7 +1059,7 @@ class TestExternalReferences:
         # must not send the agent after one.
         container = FakeOcc("Op1 Workholding Container:1", broken_children=[BrokenOcc("45740")])
         des = FakeDesign(FakeRoot(top_occs=[container], walk_raises=True), timeline=[FakeTL(0)])
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         note = _payload(wo.handler())["note"]
         assert "doc_update_xref" not in note        # cannot refresh a reference with no DocumentReference
         assert "switch" not in note.lower()          # no hub advice is buildable
@@ -1076,7 +1070,7 @@ class TestExternalReferences:
         container = FakeOcc("Op1:1", broken_children=[BrokenOcc("45740")])
         des = FakeDesign(FakeRoot(top_occs=[container, FakeOcc("Stock:1")], walk_raises=True),
                          timeline=[FakeTL(0)])
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         out = _payload(wo.handler())
         assert out["design"]["occurrences_walk"] == "recursed"
         assert out["design"]["total_occurrences"] == 3      # 2 readable + the unresolved one
@@ -1087,7 +1081,7 @@ class TestExternalReferences:
         root = FakeRoot(walk_raises=True)
         root.occurrences = _RaisingWalk()
         des = FakeDesign(root, timeline=[FakeTL(0)])
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         out = _payload(wo.handler())
         assert out["design"]["total_occurrences"] is None
         assert out["design"]["occurrences_walk"] == "unreadable"
@@ -1098,7 +1092,7 @@ class TestExternalReferences:
         # exactly how it stayed invisible.
         des = FakeDesign(FakeRoot(top_occs=[BrokenOcc("45740"), FakeOcc("Stock:1")],
                                   walk_raises=True), timeline=[FakeTL(0)])
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         rows = {r["name"]: r for r in _payload(wo.handler())["browser_digest"]}
         assert rows["45740"]["unresolved"] is True
         assert "bodies" not in rows["45740"]           # nothing readable is claimed about it
@@ -1107,7 +1101,7 @@ class TestExternalReferences:
     def test_a_container_row_counts_its_unresolved_descendants(self):
         container = FakeOcc("Op1:1", children=2, broken_children=[BrokenOcc("45740")])
         des = FakeDesign(FakeRoot(top_occs=[container], walk_raises=True), timeline=[FakeTL(0)])
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         row = _payload(wo.handler())["browser_digest"][0]
         assert row["children"] == 2                  # childOccurrences, which DROPS the broken one
         assert row["unresolved_descendants"] == 1     # so the subtree count is published beside it
@@ -1115,15 +1109,15 @@ class TestExternalReferences:
     def test_the_digest_names_its_own_depth_rather_than_overstating_is_xref(self):
         # is_xref reads false on every row of a document whose references sit deeper; the note says
         # which depth the flag describes instead of leaving the agent to conclude "no references".
-        self._design_with_refs([FakeRef("PartA")])
+        self._design_with_refs([_ref("PartA")])
         note = _payload(wo.handler())["note"]
         assert "browser_digest is DEPTH-1" in note
         assert "referenced_documents" in note and "reference_link_count" in note
 
     def test_ood_reported_even_without_an_active_design(self):
         # a non-Design doc (e.g. a drawing) that still has stale xrefs must surface them
-        doc = FakeDoc(name="Drawing1", design=None, cam=None,
-                      refs=[FakeRef("StaleXref", out_of_date=True)])
+        doc = _doc(name="Drawing1", design=None, cam=None,
+                      refs=[_ref("StaleXref", out_of_date=True)])
         _install(active_product=None, doc=doc, design_for_cast=None)
         out = _payload(wo.handler())
         assert out["has_design"] is False
@@ -1137,7 +1131,7 @@ class TestPointers:
     def test_small_design_points_to_whole_tree(self):
         root = FakeRoot(top_occs=[FakeOcc("A:1")], all_count=3, bodies=5)
         des = FakeDesign(root, timeline=[FakeTL(0)])
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         p = _payload(wo.handler())["pointers"]
         assert "whole assembly in one call" in p["assembly_structure"]
         assert "find_geometry" in p["geometry"]
@@ -1146,7 +1140,7 @@ class TestPointers:
         # > _BIG_OCCURRENCES occurrences -> the pointer must say to scope to a component, not dump all
         root = FakeRoot(top_occs=[FakeOcc("A:1")], all_count=wo._BIG_OCCURRENCES + 5)
         des = FakeDesign(root, timeline=[FakeTL(0)])
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         out = _payload(wo.handler())
         assert "scope to a component" in out["pointers"]["assembly_structure"]
         assert "LARGE" in out["note"]
@@ -1154,14 +1148,14 @@ class TestPointers:
     def test_many_bodies_steers_geometry_to_target(self):
         root = FakeRoot(top_occs=[FakeOcc("A:1")], all_count=3, bodies=wo._BIG_BODIES + 1)
         des = FakeDesign(root, timeline=[FakeTL(0)])
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         p = _payload(wo.handler())["pointers"]
         assert "always scope by target" in p["geometry"]
 
     def test_broken_health_adds_fix_pointer(self):
         root = FakeRoot(top_occs=[FakeOcc("A:1")], joints=[FakeJoint("J", 2)])
         des = FakeDesign(root, timeline=[FakeTL(2)])
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         p = _payload(wo.handler())["pointers"]
         assert "fix_health" in p and "design_recompute" in p["fix_health"]
 
@@ -1169,7 +1163,7 @@ class TestPointers:
         # no joints, nothing grounded -> no kinematics pointer (don't suggest probing an empty thing)
         root = FakeRoot(top_occs=[FakeOcc("A:1", grounded=False)], joints=[])
         des = FakeDesign(root, timeline=[FakeTL(0)])
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         p = _payload(wo.handler())["pointers"]
         assert "kinematics" not in p
 
@@ -1180,9 +1174,10 @@ class TestDataModel:
     def test_saved_doc_reports_full_location_and_urn(self):
         root = FakeRoot(top_occs=[FakeOcc("A:1")], all_count=1)
         des = FakeDesign(root, timeline=[FakeTL(0)])
-        df = FakeDataFile(urn="urn:adsk:lineage:xyz", version=4, latest=5,
-                          folder="Rovers", project="MCP Test Project", project_id="a.999", hub="Test Hub")
-        _install(active_product=des, doc=FakeDoc(design=des, data_file=df))
+        df = _data_file(urn="urn:adsk:lineage:xyz", version=4, latest=5,
+                        folder="Rovers", project="MCP Test Project", project_id="a.999",
+                        hub="Test Hub")
+        _install(active_product=des, doc=_doc(design=des, data_file=df))
         dm = _payload(wo.handler())["document"]["data_model"]
         assert dm["saved_to_cloud"] is True
         assert dm["document_id"] == "urn:adsk:lineage:xyz"
@@ -1198,7 +1193,7 @@ class TestDataModel:
         # instead - it must NOT promise the numbers merely lag by a few seconds.
         root = FakeRoot(top_occs=[FakeOcc("A:1")], all_count=1)
         des = FakeDesign(root, timeline=[FakeTL(0)])
-        _install(active_product=des, doc=FakeDoc(design=des, data_file=FakeDataFile(version=3, latest=2)))
+        _install(active_product=des, doc=_doc(design=des, data_file=_data_file(version=3, latest=2)))
         dm = _payload(wo.handler())["document"]["data_model"]
         note = dm["version_lag_note"]
         assert dm["version_number"] == 3 and dm["latest_version_number"] == 2
@@ -1209,14 +1204,14 @@ class TestDataModel:
     def test_unsaved_doc_has_no_version_note_to_warn_about(self):
         root = FakeRoot(top_occs=[FakeOcc("A:1")], all_count=1)
         des = FakeDesign(root, timeline=[FakeTL(0)])
-        _install(active_product=des, doc=FakeDoc(design=des, data_file=None))
+        _install(active_product=des, doc=_doc(design=des, data_file=None))
         dm = _payload(wo.handler())["document"]["data_model"]
         assert "version_lag_note" not in dm
 
     def test_unsaved_doc_has_no_urn_and_note_warns(self):
         root = FakeRoot(top_occs=[FakeOcc("A:1")], all_count=1)
         des = FakeDesign(root, timeline=[FakeTL(0)])
-        _install(active_product=des, doc=FakeDoc(design=des, data_file=None))  # never saved
+        _install(active_product=des, doc=_doc(design=des, data_file=None))  # never saved
         out = _payload(wo.handler())
         dm = out["document"]["data_model"]
         assert dm["saved_to_cloud"] is False
@@ -1225,8 +1220,8 @@ class TestDataModel:
 
     def test_data_model_present_even_without_a_design(self):
         # a drawing (no Design) that IS saved still reports its data-model location
-        df = FakeDataFile(project="Badass Pen", folder="Drawings")
-        doc = FakeDoc(name="Sheet1", design=None, cam=None, data_file=df)
+        df = _data_file(project="Badass Pen", folder="Drawings")
+        doc = _doc(name="Sheet1", design=None, cam=None, data_file=df)
         _install(active_product=None, doc=doc, design_for_cast=None)
         dm = _payload(wo.handler())["document"]["data_model"]
         assert dm["saved_to_cloud"] is True
@@ -1240,7 +1235,7 @@ class TestBbox:
         # 0..5 cm box, units mm -> size 50 mm, center 25 mm (convert cm->mm = x10)
         root = FakeRoot(top_occs=[FakeOcc("A:1")], all_count=1, bbox=((0, 0, 0), (5, 5, 5)))
         des = FakeDesign(root, timeline=[FakeTL(0)], units="mm")
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         bb = _payload(wo.handler())["design"]["overall_bbox"]
         assert bb["units"] == "mm"
         assert bb["size"] == {"x": 50.0, "y": 50.0, "z": 50.0}
@@ -1249,7 +1244,7 @@ class TestBbox:
     def test_bbox_none_when_no_geometry(self):
         root = FakeRoot(top_occs=[], all_count=0, bbox=None)   # empty/sketch-only design
         des = FakeDesign(root, timeline=[FakeTL(0)])
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         assert _payload(wo.handler())["design"]["overall_bbox"] is None
 
     def test_a_failed_conversion_reports_null_not_raw_centimetres(self):
@@ -1261,7 +1256,7 @@ class TestBbox:
         def _boom(value, from_u, to_u):
             raise RuntimeError("units manager unavailable")
         des.unitsManager.convert = _boom
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         bb = _payload(wo.handler())["design"]["overall_bbox"]
         assert bb["units"] == "mm"
         assert bb["size"] == {"x": None, "y": None, "z": None}
@@ -1281,7 +1276,7 @@ class TestBbox:
         root = FakeRoot(top_occs=[FakeOcc("A:1")], all_count=1, bbox=((0, 0, 0), (5, 5, 5)))
         root.boundingBox.maxPoint = _NoZ()
         des = FakeDesign(root, timeline=[FakeTL(0)], units="mm")
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         bb = _payload(wo.handler())["design"]["overall_bbox"]
         assert bb["size"] == {"x": 50.0, "y": 50.0, "z": None}
         assert bb["center"]["z"] is None and bb["center"]["x"] == 25.0
@@ -1292,7 +1287,7 @@ class TestViewState:
     def test_orthographic_camera(self):
         root = FakeRoot(top_occs=[FakeOcc("A:1")])
         des = FakeDesign(root, timeline=[FakeTL(0)])
-        _install(active_product=des, doc=FakeDoc(design=des),
+        _install(active_product=des, doc=_doc(design=des),
                  camera=Camera(camera_type=adsk.core.CameraTypes.OrthographicCameraType,
                                eye=(10, 0, 0), target=(0, 0, 0)))
         v = _payload(wo.handler())["view"]
@@ -1303,7 +1298,7 @@ class TestViewState:
     def test_perspective_camera(self):
         root = FakeRoot(top_occs=[FakeOcc("A:1")])
         des = FakeDesign(root, timeline=[FakeTL(0)])
-        _install(active_product=des, doc=FakeDoc(design=des),
+        _install(active_product=des, doc=_doc(design=des),
                  camera=Camera(camera_type=adsk.core.CameraTypes.PerspectiveCameraType))
         assert _payload(wo.handler())["view"]["projection"] == "perspective"
 
@@ -1321,7 +1316,7 @@ class TestViewState:
         camera = Camera(camera_type=adsk.core.CameraTypes.OrthographicCameraType,
                         eye=(10, 0, 0), target=(1, 2, 3))
         camera.eye = _BadPt()
-        _install(active_product=des, doc=FakeDoc(design=des), camera=camera)
+        _install(active_product=des, doc=_doc(design=des), camera=camera)
         v = _payload(wo.handler())["view"]
         assert v["eye"] is None
         assert v["target"] == {"x": 1.0, "y": 2.0, "z": 3.0}     # the readable point still reports
@@ -1331,7 +1326,7 @@ class TestSelectionEcho:
     def test_no_selection_is_empty(self):
         root = FakeRoot(top_occs=[FakeOcc("A:1")])
         des = FakeDesign(root, timeline=[FakeTL(0)])
-        _install(active_product=des, doc=FakeDoc(design=des), selection=())
+        _install(active_product=des, doc=_doc(design=des), selection=())
         out = _payload(wo.handler())
         assert out["selection"] == {"count": 0, "selected": []}
         assert "selection" not in out["pointers"]      # no pointer when nothing selected
@@ -1340,7 +1335,7 @@ class TestSelectionEcho:
         body = type("BRepBody", (), {"name": "Body1"})()
         root = FakeRoot(top_occs=[FakeOcc("A:1")])
         des = FakeDesign(root, timeline=[FakeTL(0)])
-        _install(active_product=des, doc=FakeDoc(design=des), selection=[body])
+        _install(active_product=des, doc=_doc(design=des), selection=[body])
         out = _payload(wo.handler())
         assert out["selection"]["count"] == 1
         rec = out["selection"]["selected"][0]
@@ -1355,7 +1350,7 @@ class TestSelectionEcho:
         })()
         root = FakeRoot(top_occs=[FakeOcc("A:1")])
         des = FakeDesign(root, timeline=[FakeTL(0)])
-        _install(active_product=des, doc=FakeDoc(design=des), selection=[face])
+        _install(active_product=des, doc=_doc(design=des), selection=[face])
         rec = _payload(wo.handler())["selection"]["selected"][0]
         assert rec["kind"] == "face" and rec["body"] == "Plate"
         assert rec["occurrence"] == "Sub:1+Plate:1"
@@ -1373,14 +1368,14 @@ class TestRelationHealthInFirstCall:
         # Measured: a failed assembly constraint left this read healthy while only a deeper
         # include=['relations'] slice named it - the orientation read folds relation health in.
         des = self._design_with_constraint(health=2)
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         h = _payload(wo.handler())["health"]
         assert h["is_healthy"] is False
         assert h["broken_relations"] == ["Constraint 1"]
 
     def test_healthy_constraint_leaves_the_rollup_alone(self):
         des = self._design_with_constraint(health=0)
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         h = _payload(wo.handler())["health"]
         assert h["is_healthy"] is True and h["broken_relations"] == []
 
@@ -1389,7 +1384,7 @@ class TestRelationHealthInFirstCall:
         # otherwise the one fault in the design reads "No compute errors ..." beside is_healthy
         # false, with nothing naming the tool that repairs it.
         des = self._design_with_constraint(health=2)
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         out = _payload(wo.handler())
         assert out["health"]["is_healthy"] is False
         assert "No compute errors" not in out["note"]
@@ -1399,7 +1394,7 @@ class TestRelationHealthInFirstCall:
 
     def test_a_healthy_design_keeps_the_clean_verdict_and_no_relation_pointer(self):
         des = self._design_with_constraint(health=0)
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         out = _payload(wo.handler())
         assert "No compute errors" in out["note"]
         assert "fix_relations" not in out["pointers"]
@@ -1421,7 +1416,7 @@ class TestHealthReadOffTheTimelineItem:
         # tl healthState 1 = WARNING - the exact state a live as-built joint reported after its
         # geometry body was deleted, and the state the joint object itself cannot answer.
         des = self._design(as_built=[FakeTimelineHealthOnly("ArmSpin", tl_health=1)])
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         h = _payload(wo.handler())["health"]
         assert h["broken_joints"] == ["ArmSpin"]
         assert h["is_healthy"] is False
@@ -1431,14 +1426,14 @@ class TestHealthReadOffTheTimelineItem:
     def test_as_built_joint_errored_on_its_timeline_item_is_named(self):
         # the other failing state (2 = ERROR); both sides of the warning/error pair must count.
         des = self._design(as_built=[FakeTimelineHealthOnly("ArmSpin", tl_health=2)])
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         assert _payload(wo.handler())["health"]["broken_joints"] == ["ArmSpin"]
 
     def test_as_built_joint_healthy_on_its_timeline_item_is_not_named_or_unknown(self):
         # healthState 0 = HEALTHY: the boundary just below the failing pair. Counted healthy, so
         # neither broken nor withheld.
         des = self._design(as_built=[FakeTimelineHealthOnly("ArmSpin", tl_health=0)])
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         h = _payload(wo.handler())["health"]
         assert h["broken_joints"] == [] and h["is_healthy"] is True
         assert "joints_health_unknown" not in h
@@ -1448,14 +1443,14 @@ class TestHealthReadOffTheTimelineItem:
         # and is deliberately not flagged - so it must not land in the withheld count either, which
         # is what separates 'parked on purpose' from 'could not be read'.
         des = self._design(as_built=[FakeTimelineHealthOnly("Parked REVERSED", tl_health=3)])
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         h = _payload(wo.handler())["health"]
         assert h["broken_joints"] == [] and h["is_healthy"] is True
         assert "joints_health_unknown" not in h
 
     def test_joint_no_source_answers_is_counted_unknown_not_broken_and_not_healthy(self):
         des = self._design(as_built=[FakeNoHealthAnywhere("Mystery")])
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         out = _payload(wo.handler())
         h = out["health"]
         assert h["joints_health_unknown"] == 1
@@ -1468,13 +1463,13 @@ class TestHealthReadOffTheTimelineItem:
         # the plain Joint path is untouched: its own healthState answers and the timeline item is
         # never needed.
         des = self._design(joints=[FakeJoint("Good", 0), FakeJoint("PistonSlide", 2)])
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         h = _payload(wo.handler())["health"]
         assert h["broken_joints"] == ["PistonSlide"] and "joints_health_unknown" not in h
 
     def test_rigid_group_broken_on_its_timeline_item_is_named(self):
         des = self._design(relations=[FakeTimelineHealthOnly("Rigid Group 1", tl_health=2)])
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         out = _payload(wo.handler())
         assert out["health"]["broken_relations"] == ["Rigid Group 1"]
         assert out["health"]["is_healthy"] is False
@@ -1482,14 +1477,14 @@ class TestHealthReadOffTheTimelineItem:
 
     def test_healthy_rigid_group_is_neither_broken_nor_unknown(self):
         des = self._design(relations=[FakeTimelineHealthOnly("Rigid Group 1", tl_health=0)])
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         h = _payload(wo.handler())["health"]
         assert h["broken_relations"] == [] and h["is_healthy"] is True
         assert "relations_health_unknown" not in h
 
     def test_relation_no_source_answers_is_counted_unknown_not_broken(self):
         des = self._design(relations=[FakeNoHealthAnywhere("Rigid Group 1")])
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         out = _payload(wo.handler())
         assert out["health"]["relations_health_unknown"] == 1
         assert out["health"]["broken_relations"] == []
@@ -1499,7 +1494,7 @@ class TestHealthReadOffTheTimelineItem:
     def test_both_withheld_counts_are_reported_together(self):
         des = self._design(as_built=[FakeNoHealthAnywhere("Mystery")],
                            relations=[FakeNoHealthAnywhere("Rigid Group 1")])
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         out = _payload(wo.handler())
         h = out["health"]
         assert h["joints_health_unknown"] == 1 and h["relations_health_unknown"] == 1
@@ -1527,7 +1522,7 @@ class TestCapabilityBlock:
 
     def test_every_sentinel_reads_true_when_generation_is_allowed(self, monkeypatch):
         des = self._small_design()
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         monkeypatch.setattr(wo._cam_common, "_create_strategy", strategy_factory(self._all(True)))
         og = _payload(wo.handler())["machining_capabilities"]["observed_generation"]
         assert og == {name: True for name in wo._CAPABILITY_SENTINELS}
@@ -1536,7 +1531,7 @@ class TestCapabilityBlock:
         # false is an OBSERVED answer (the base license declines it), distinct from an unread probe's
         # null - so a blocked strategy must publish False, never fold into the unknown case.
         des = self._small_design()
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         monkeypatch.setattr(wo._cam_common, "_create_strategy", strategy_factory(self._all(False)))
         og = _payload(wo.handler())["machining_capabilities"]["observed_generation"]
         assert all(v is False for v in og.values())
@@ -1546,7 +1541,7 @@ class TestCapabilityBlock:
         # createFromString RAISES '3 : Unknown strategy' for a renamed sentinel; the probe must
         # degrade it to null and the orient must still return ok, with the readable sentinels intact.
         des = self._small_design()
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         table = self._all(True)
         table.pop("probe_geometry")
         monkeypatch.setattr(wo._cam_common, "_create_strategy", strategy_factory(table))
@@ -1560,7 +1555,7 @@ class TestCapabilityBlock:
         # the strategy built but isGenerationAllowed itself would not read: unknown, never a confident
         # False that an agent would read as 'this capability is blocked'.
         des = self._small_design()
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         table = self._all(True)
         table["swarf"] = None
         monkeypatch.setattr(wo._cam_common, "_create_strategy", strategy_factory(table))
@@ -1570,7 +1565,7 @@ class TestCapabilityBlock:
 
     def test_the_block_keys_are_exactly_the_sentinels(self, monkeypatch):
         des = self._small_design()
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         monkeypatch.setattr(wo._cam_common, "_create_strategy", strategy_factory(self._all(True)))
         og = _payload(wo.handler())["machining_capabilities"]["observed_generation"]
         assert set(og) == set(wo._CAPABILITY_SENTINELS)
@@ -1578,7 +1573,7 @@ class TestCapabilityBlock:
 
     def test_the_note_cites_the_flag_and_asserts_no_license_tier(self, monkeypatch):
         des = self._small_design()
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         monkeypatch.setattr(wo._cam_common, "_create_strategy", strategy_factory(self._all(True)))
         note = _payload(wo.handler())["machining_capabilities"]["note"]
         assert "isGenerationAllowed" in note                       # cited to the read that backs it
@@ -1595,7 +1590,7 @@ class TestCapabilityBlock:
         # tool that 404s. A NON-empty registry without cam_get is that server; the empty registry
         # (this test context, patched non-empty here) keeps the pointer via the escape hatch.
         des = self._small_design()
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         monkeypatch.setattr(wo._cam_common, "_create_strategy", strategy_factory(self._all(True)))
         monkeypatch.setattr(wo.registry, "get_tools", lambda: {"workspace_orient": object()})
         monkeypatch.setattr(wo.registry, "has_tool", lambda name: name == "workspace_orient")
@@ -1606,7 +1601,7 @@ class TestCapabilityBlock:
     def test_the_block_rides_a_non_design_document_too(self, monkeypatch):
         # createFromString needs no document/CAM, so the capability is ambient even on a drawing doc
         # where has_design is false - the whole point of a document-INDEPENDENT signal.
-        doc = FakeDoc(name="Drawing1", design=None, cam=None)
+        doc = _doc(name="Drawing1", design=None, cam=None)
         _install(active_product=None, doc=doc, design_for_cast=None)
         monkeypatch.setattr(wo._cam_common, "_create_strategy", strategy_factory(self._all(True)))
         out = _payload(wo.handler())
@@ -1632,6 +1627,6 @@ class TestCapabilityBlock:
         # read, and a second copy is how the two answer differently about one strategy.
         monkeypatch.setattr(wo._cam_common, "strategy_generation_allowed", lambda name: name == "swarf")
         des = self._small_design()
-        _install(active_product=des, doc=FakeDoc(design=des))
+        _install(active_product=des, doc=_doc(design=des))
         og = _payload(wo.handler())["machining_capabilities"]["observed_generation"]
         assert og["swarf"] is True and og["probe_geometry"] is False

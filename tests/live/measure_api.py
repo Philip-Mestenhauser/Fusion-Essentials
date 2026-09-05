@@ -2198,6 +2198,57 @@ ROWS = [
 """,
     },
     {
+        "id": "shape-dump-data-cloud-collections",
+        "claim": "The cloud COLLECTION types dump from the same READ-ONLY, bounded look as shape-dump-data-world: DataFiles and DataFolders off the active project's root folder, DataProjects and DataHubs off app.data - at most the root folder plus its FIRST subfolder are opened and only item(0) of each is touched, no recursive walk. All four carry asArray, and so does the parentReferences of the one DataFile reached (parentReferences answers a DataFiles). DataFileFuture is dumped from the class object under the class-dir-equals-instance-dir-minus-'this' reading, re-measured in this row on the live DataProjects, and carries both uploadState and dataFile. Data.activeHub carries a SETTER function, so 'no public setter' is not what stops a programmatic hub switch. MEASURED BY HAND and deliberately NOT re-measured by any row: assigning it LANDS - data_switch_hub reported switched:true both ways between 'Mechio' and 'Philip Mestenhauser' on 2705.1.4 - and the switch CLOSES every open document, which would destroy the sweep's own scratch",
+        "encoded_in": ("tests/conftest.py FakeData, FakeDataFolder, FakeDataFile and the _CloudArray "
+                       "collection fakes (_CloudProjects among them); data_delete_file.py's "
+                       "parentReferences.asArray() read"),
+        "body": """
+    data = app.data
+    proj = data.activeProject
+    folder = proj.rootFolder
+    dfile = None
+    source = "no file in the root or its first subfolder"
+    if folder.dataFiles.count:
+        dfile = folder.dataFiles.item(0)
+        source = "the root folder's first file"
+    elif folder.dataFolders.count and folder.dataFolders.item(0).dataFiles.count:
+        dfile = folder.dataFolders.item(0).dataFiles.item(0)
+        source = "the first subfolder's first file"
+    live = [("DataFiles", folder.dataFiles), ("DataFolders", folder.dataFolders),
+            ("DataProjects", data.dataProjects), ("DataHubs", data.dataHubs)]
+    wrong = [lbl + "=" + type(o).__name__ for lbl, o in live if type(o).__name__ != lbl]
+    counts = [dump_shape(lbl, o) for lbl, o in live]
+    counts.append(dump_shape("DataFileFuture", adsk.core.DataFileFuture))
+    no_as_array = [lbl for lbl, o in live if not hasattr(o, "asArray")]
+    # parentReferences is the read data_delete_file's destructive path fails CLOSED on, so the
+    # collection it answers is asked for asArray HERE rather than assumed from the sibling four.
+    # None means no DataFile was reachable to ask: the gate below wants True, so an unmeasurable
+    # project FAILS the row instead of passing it vacuously.
+    parents = hasattr(dfile.parentReferences, "asArray") if dfile is not None else None
+    ctl = set(n for n in dir(adsk.core.DataProjects) if not n.startswith("_"))
+    class_ok = ctl == set(n for n in dir(data.dataProjects) if not n.startswith("_")) - set(["this"])
+    fut = set(n for n in dir(adsk.core.DataFileFuture) if not n.startswith("_"))
+    hub = adsk.core.Data.__dict__.get("activeHub")
+    hub_settable = getattr(hub, "fset", None) is not None
+    emit(len(counts) == 5 and all(c > 0 for c in counts) and not wrong and not no_as_array
+         and parents is True and class_ok and hub_settable
+         and "uploadState" in fut and "dataFile" in fut,
+         "shape-dump-data-cloud-collections: " + str(len(counts)) + " types, min attrs "
+         + str(min(counts)) + " (project '" + proj.name + "' root holds "
+         + str(folder.dataFiles.count) + " files and " + str(folder.dataFolders.count)
+         + " folders; DataFile from " + source + "), no asArray: "
+         + (", ".join(no_as_array) or "none") + ", parentReferences.asArray="
+         + (repr(parents) if parents is not None else
+            "UNMEASURED - no DataFile reachable in project '" + proj.name + "'")
+         + ", class dir == instance dir minus 'this': " + str(class_ok)
+         + ", DataFileFuture carries uploadState+dataFile: "
+         + str("uploadState" in fut and "dataFile" in fut)
+         + ", Data.activeHub setter present: " + str(hub_settable)
+         + ", mislabelled " + (", ".join(wrong) or "none"))
+""",
+    },
+    {
         "id": "brepedge-evaluator-tangent-follows-curve-not-edge",
         "claim": ("BRepEdge.evaluator.getTangent, taken at the parameter of startVertex.geometry, "
                   "returns a vector ANTI-parallel to (endVertex - startVertex) exactly when "
@@ -5425,26 +5476,42 @@ ROWS = [
         "claim": ("Occurrence.activate() answers True and the design then reads activeOccurrence = "
                   "that occurrence with isRootComponentActive False; Design.activateRootComponent() "
                   "answers True and the design reads activeOccurrence None with "
-                  "isRootComponentActive True. Occurrence carries NO deactivate member - activate() "
-                  "and isActive are its whole activation surface"),
+                  "isRootComponentActive True. It answers True when the root is ALREADY active too, "
+                  "leaving activeOccurrence None - the call is idempotent, so a restore-to-root can "
+                  "be made unconditionally and its ANSWER never separates 'went back' from 'was "
+                  "already there'; only the activeOccurrence read-back does. Occurrence carries NO "
+                  "deactivate member - activate() and isActive are its whole activation surface. "
+                  "MEASURED BY HAND on a cloud DERIVE rig and deliberately NOT re-measured here "
+                  "(the rig needs two saved cloud files and three source versions): a DERIVED "
+                  "occurrence behaves identically on all three legs, so a False or raising answer "
+                  "could not be forced in any state driven"),
         "encoded_in": ("design_activate_component.py's return-to-root read-back "
-                       "(isRootComponentActive / activeOccurrence); tests/unit/"
+                       "(isRootComponentActive / activeOccurrence); doc_insert_derive.py's "
+                       "unconditional restore-to-root and the activeOccurrence read-back it "
+                       "publishes; tests/unit/"
                        "test_design_activate_component.py's design knobs for both reads"),
+        "facts_on_pass": {"behavior.activate_root_component_true_when_already_root": True},
         "body": """
     tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
     try:
         des = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
         occ = des.rootComponent.occurrences.addNewComponent(adsk.core.Matrix3D.create())
         start = (des.isRootComponentActive, des.activeOccurrence)
+        # The ALREADY-ROOT leg: a fresh design is already at the root, so this call has nothing to
+        # do and its answer is the one a restore fallback would branch on.
+        already = des.activateRootComponent()
+        idle = (des.isRootComponentActive, des.activeOccurrence)
         went = occ.activate()
         on_child, child_root = des.activeOccurrence, des.isRootComponentActive
         came = des.activateRootComponent()
         back, back_root = des.activeOccurrence, des.isRootComponentActive
-        emit(start == (True, None) and went is True
+        emit(start == (True, None) and already is True and idle == (True, None) and went is True
              and on_child is not None and on_child.fullPathName == occ.fullPathName
              and child_root is False and came is True
              and back is None and back_root is True and not hasattr(occ, "deactivate"),
              "design-activate-root-reads-back: start=" + repr(start)
+             + "; already-root activateRootComponent() -> " + repr(already)
+             + " leaves (isRootComponentActive, activeOccurrence)=" + repr(idle)
              + "; occ.activate() -> " + repr(went) + " activeOccurrence="
              + repr(on_child.fullPathName if on_child else None)
              + " isRootComponentActive=" + repr(child_root)
@@ -5454,6 +5521,108 @@ ROWS = [
              + "; Occurrence.deactivate present=" + repr(hasattr(occ, "deactivate")))
     finally:
         tmp.close(False)
+""",
+    },
+    {
+        "id": "derive-reference-version-setter-present",
+        "claim": ("DocumentReference exposes a SETTABLE version (its descriptor carries an fset) and "
+                  "a getter-only isOutOfDate, beside getLatestVersion and dataFile. MEASURED BY HAND "
+                  "on a cloud rig and deliberately NOT re-measured by any row (it needs two saved "
+                  "cloud files, three source versions and a close/reopen to go stale): on a "
+                  "DeriveFeature's DocumentReference that is genuinely out of date - isOutOfDate "
+                  "True, dataFile.versionNumber 1, latestVersionNumber 3 - BOTH refresh routes "
+                  "REFUSE with the same catchable RuntimeError '2 : InternalValidationError : res', "
+                  "the version ASSIGNMENT and getLatestVersion() alike; reading version or "
+                  "referencedDocument on that same reference raises the catchable "
+                  "'2 : InternalValidationError : doc', while isOutOfDate, dataFile.* and "
+                  "parentDocument all read. After every attempt isOutOfDate is still True and the "
+                  "derived component still holds the FIRST version's single body, so no refresh "
+                  "landed and none silently half-landed"),
+        "encoded_in": ("tests/conftest.py FakeDocumentReference (version setter, setter_raises, "
+                       "latest_raises); doc_update_xref.py _refresh_one"),
+        "body": """
+    DR = adsk.core.DocumentReference
+    n = dump_shape("DocumentReference", DR)
+    names = set(x for x in dir(DR) if not x.startswith("_"))
+    ver_set = getattr(DR.__dict__.get("version"), "fset", None) is not None
+    ood_set = getattr(DR.__dict__.get("isOutOfDate"), "fset", None) is not None
+    emit(n > 0 and ver_set and not ood_set
+         and "getLatestVersion" in names and "dataFile" in names,
+         "derive-reference-version-setter-present: DocumentReference dumps " + str(n)
+         + " attrs; version setter present=" + str(ver_set)
+         + " isOutOfDate setter present=" + str(ood_set)
+         + " getLatestVersion present=" + str("getLatestVersion" in names)
+         + " dataFile present=" + str("dataFile" in names))
+""",
+    },
+    {
+        "id": "dxf-sketch-options-carries-units-unread",
+        "claim": ("createDXFSketchExportOptions(path, sketch) answers a DXFSketchExportOptions whose "
+                  "dir() LISTS 'units' beside the three content flags - so an attribute check cannot "
+                  "guard the read that dxf-sketch-options-units-read-is-fatal measures, and only "
+                  "never taking that read does. This row builds exactly that row's rig and stops at "
+                  "the listing without reading units, so a regression in the rig - a design that "
+                  "does not cast, a sketch that does not add, a factory that does not answer - "
+                  "reddens HERE instead of silently turning its sibling's abort into a false PASS"),
+        "encoded_in": ("design_export.py's _write_dxf (which sets the three content flags and never "
+                       "reads units); tests/unit/test_design_export.py's DXF options fake"),
+        "body": """
+    import os, tempfile
+    root = des.rootComponent
+    sk = root.sketches.add(root.xYConstructionPlane)
+    sk.sketchCurves.sketchLines.addByTwoPoints(
+        adsk.core.Point3D.create(0.0, 0.0, 0.0), adsk.core.Point3D.create(1.0, 1.0, 0.0))
+    opts = des.exportManager.createDXFSketchExportOptions(
+        os.path.join(tempfile.gettempdir(), "unused_measure_dxf_units.dxf"), sk)
+    n = dump_shape("DXFSketchExportOptions", opts)
+    names = set(x for x in dir(opts) if not x.startswith("_"))
+    flags = [f for f in ("isConstructionExported", "isPointsExported",
+                         "isProjectedGeometryExported") if f not in names]
+    emit(opts is not None and n > 0 and sk.sketchCurves.count == 1
+         and "units" in names and not flags,
+         "dxf-sketch-options-carries-units-unread: options type="
+         + type(opts).__name__ + " dumps " + str(n) + " attrs from a "
+         + str(sk.sketchCurves.count) + "-curve sketch; 'units' listed="
+         + str("units" in names) + " (NOT read here); missing content flags: "
+         + (", ".join(flags) or "none"))
+""",
+    },
+    {
+        "id": "dxf-sketch-options-units-read-is-fatal",
+        "claim": ("Reading DXFSketchExportOptions.units raises '3 : Distance unit is not supported "
+                  "by DXF. Please select a different unit' UNCATCHABLY: the raise escapes try/except "
+                  "- neither the except body nor any later line runs - and kills the whole "
+                  "Python.Run invocation, so this row can only PASS by aborting and BOTH of its "
+                  "emit() legs are FAILs. Because ANY abort passes it, the rig it shares with "
+                  "dxf-sketch-options-carries-units-unread is gated over there: that row builds the "
+                  "same sketch and options and stops at the listing, so a rig regression reddens it "
+                  "rather than passing this one for the wrong reason. 'units' IS in dir(options), "
+                  "so an attribute check is no guard; only never taking the read is. MEASURED BY "
+                  "HAND on the same script and "
+                  "deliberately NOT re-measured here: the abort DOES roll back the enclosing "
+                  "transaction - a sketch added to a design that existed BEFORE the script is gone "
+                  "afterwards - while a document the SAME script created with documents.add "
+                  "survives, keeping its sketch and its timeline entry"),
+        "encoded_in": ("design_export.py's no-dxf_units comment and _write_dxf (which never reads "
+                       "units); tests/unit/test_design_export.py's DXF options fake"),
+        "expect": "raise_or_abort",
+        "facts_on_pass": {"behavior.dxf_sketch_options_units_read_raises": True},
+        "body": """
+    import os, tempfile
+    root = des.rootComponent
+    sk = root.sketches.add(root.xYConstructionPlane)
+    sk.sketchCurves.sketchLines.addByTwoPoints(
+        adsk.core.Point3D.create(0.0, 0.0, 0.0), adsk.core.Point3D.create(1.0, 1.0, 0.0))
+    # Nothing is exported: the options object only records the filename, and the row dies at the
+    # units read below, so this path is never written.
+    opts = des.exportManager.createDXFSketchExportOptions(
+        os.path.join(tempfile.gettempdir(), "unused_measure_dxf_units.dxf"), sk)
+    try:
+        u = opts.units
+        emit(False, "dxf-sketch-options-units-read-is-fatal: answered " + repr(u) + " with no raise")
+    except Exception as e:
+        emit(False, "dxf-sketch-options-units-read-is-fatal: raised CATCHABLY "
+             + type(e).__name__ + ": " + str(e)[:60])
 """,
     },
     {

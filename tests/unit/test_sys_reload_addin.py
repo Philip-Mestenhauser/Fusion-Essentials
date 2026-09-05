@@ -11,7 +11,7 @@ import types
 
 import pytest
 
-from conftest import load_tool
+from conftest import FakeApplication, load_tool
 
 ra = load_tool("sys_reload_addin")
 
@@ -36,10 +36,24 @@ def _install_event(monkeypatch):
     monkeypatch.setattr(ra, "_install_error", "")
 
 
+class _LoggingApp(FakeApplication):
+    """The session with a capturing log() - the channel a deferred reload reports through - and any
+    further members a test hands it (registerCustomEvent)."""
+
+    def __init__(self, lines, **members):
+        FakeApplication.__init__(self)
+        self._lines = lines
+        for name, value in members.items():
+            setattr(self, name, value)
+
+    def log(self, text):
+        self._lines.append(text)
+
+
 def _fake_app(monkeypatch, **members):
     """ra.app with a capturing log(); returns the list of logged lines."""
     lines = []
-    monkeypatch.setattr(ra, "app", types.SimpleNamespace(log=lines.append, **members))
+    monkeypatch.setattr(ra, "app", _LoggingApp(lines, **members))
     return lines
 
 

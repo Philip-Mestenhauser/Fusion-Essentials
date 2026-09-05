@@ -11,7 +11,7 @@ import types
 
 import pytest
 
-from conftest import load_tool
+from conftest import FakeApplication, load_tool
 
 get = load_tool("sys_get_preferences")          # load first: the setter imports this module
 setp = load_tool("sys_set_preferences")
@@ -109,6 +109,19 @@ def _make_prefs(values=None, raises=None, frozen=None, clamp=None, products=("De
     return ns
 
 
+class _MutePreferencesApp(FakeApplication):
+    """A session whose app.preferences read RAISES - the read that will not answer, which is not
+    the same state as a preferences object holding nothing."""
+
+    @property
+    def preferences(self):
+        raise RuntimeError("the application preferences are unavailable")
+
+    @preferences.setter
+    def preferences(self, value):
+        pass
+
+
 @pytest.fixture(autouse=True)
 def no_mock_enum_families(monkeypatch):
     """The mocked adsk resolves EVERY enum family name to a child Mock, and dir() on a Mock yields
@@ -149,7 +162,7 @@ def prefs(monkeypatch):
         "units_defaults": {"defaultUnitSystem": 1},
     })
     for mod in (get, setp):
-        monkeypatch.setattr(mod, "app", types.SimpleNamespace(preferences=p))
+        monkeypatch.setattr(mod, "app", FakeApplication(preferences=p))
     return p
 
 
@@ -232,13 +245,13 @@ class TestIncludeSlices:
 
     def test_every_product_item_is_published(self, monkeypatch):
         p = _make_prefs(products=("Design", "CAM"))
-        monkeypatch.setattr(get, "app", types.SimpleNamespace(preferences=p))
+        monkeypatch.setattr(get, "app", FakeApplication(preferences=p))
         out = _payload(get.handler(include=["units_defaults"]))["preferences"]["units_defaults"]
         assert set(out) == {"Design", "CAM"}
 
     def test_an_unreadable_nested_member_is_named_by_its_full_path(self, monkeypatch):
         p = _make_prefs(raises={"products": ("isJointPreviewAnimated",)})
-        monkeypatch.setattr(get, "app", types.SimpleNamespace(preferences=p))
+        monkeypatch.setattr(get, "app", FakeApplication(preferences=p))
         out = _payload(get.handler(include=["products"]))
         assert out["unreadable"] == ["products.Design.isJointPreviewAnimated"]
 
@@ -246,7 +259,7 @@ class TestIncludeSlices:
 class TestHonestReads:
     def test_unreadable_member_reports_null_and_is_counted(self, monkeypatch):
         p = _make_prefs(raises={"graphics": ("autoThrottleEffects", "isLimitEffectsDuringNavigation")})
-        monkeypatch.setattr(get, "app", types.SimpleNamespace(preferences=p))
+        monkeypatch.setattr(get, "app", FakeApplication(preferences=p))
         out = _payload(get.handler(include=["graphics"]))
         rec = out["preferences"]["graphics"]["autoThrottleEffects"]
         assert rec["value"] is None and rec["unreadable"] is True
@@ -260,7 +273,7 @@ class TestHonestReads:
         # the census exists to prevent.
         p = _make_prefs()
         del p.gridPreferences._v["isLayoutGridLockEnabled"]
-        monkeypatch.setattr(get, "app", types.SimpleNamespace(preferences=p))
+        monkeypatch.setattr(get, "app", FakeApplication(preferences=p))
         out = _payload(get.handler(include=["grid"]))
         rec = out["preferences"]["grid"]["isLayoutGridLockEnabled"]
         assert rec["value"] is None
@@ -273,7 +286,7 @@ class TestHonestReads:
         # failed, so it is unreadable. A presence read that answered "absent" for it - however it is
         # spelled - would publish a platform member as a bad table row.
         p = _make_prefs(raises={"grid": ("isLayoutGridLockEnabled",)})
-        monkeypatch.setattr(get, "app", types.SimpleNamespace(preferences=p))
+        monkeypatch.setattr(get, "app", FakeApplication(preferences=p))
         out = _payload(get.handler(include=["grid"]))
         rec = out["preferences"]["grid"]["isLayoutGridLockEnabled"]
         assert rec["unreadable"] is True and "unknown_member" not in rec
@@ -281,7 +294,7 @@ class TestHonestReads:
 
     def test_a_member_that_reads_none_is_not_reported_unreadable(self, monkeypatch):
         p = _make_prefs(values={"material": {"appearanceOverride": None}})
-        monkeypatch.setattr(get, "app", types.SimpleNamespace(preferences=p))
+        monkeypatch.setattr(get, "app", FakeApplication(preferences=p))
         rec = _payload(get.handler(include=["material"]))["preferences"]["material"]["appearanceOverride"]
         assert rec["value"] is None and "unreadable" not in rec
 
@@ -297,7 +310,7 @@ class TestHonestReads:
         class Material:
             name = ""
         p = _make_prefs(values={"material": {"defaultMaterial": Material()}})
-        monkeypatch.setattr(get, "app", types.SimpleNamespace(preferences=p))
+        monkeypatch.setattr(get, "app", FakeApplication(preferences=p))
         rec = _payload(get.handler(include=["material"]))["preferences"]["material"]["defaultMaterial"]
         assert rec["value"] == "Material" and rec["non_scalar"] is True
 
@@ -306,7 +319,7 @@ class TestHonestReads:
         # JSON-encoded in one call, so that one member would raise and take every other member's
         # reading down with it. It is published by name and flagged instead.
         p = _make_prefs(values={"display": {"generalPrecision": types.SimpleNamespace(name="High")}})
-        monkeypatch.setattr(get, "app", types.SimpleNamespace(preferences=p))
+        monkeypatch.setattr(get, "app", FakeApplication(preferences=p))
         out = _payload(get.handler(include=["display"]))["preferences"]["display"]
         assert out["generalPrecision"] == {"value": "High", "tier": get.TIER_WRITABLE,
                                            "non_scalar": True}
@@ -319,7 +332,7 @@ class TestHonestReads:
         # scalar guard fixes one layer up.
         p = _make_prefs(products=("Design", "CAM"))
         p.productPreferences._items[1]._v["name"] = types.SimpleNamespace(name="CAM")
-        monkeypatch.setattr(get, "app", types.SimpleNamespace(preferences=p))
+        monkeypatch.setattr(get, "app", FakeApplication(preferences=p))
         out = _payload(get.handler(include=["products"]))["preferences"]["products"]
         assert set(out) == {"Design"}
 
@@ -327,7 +340,7 @@ class TestHonestReads:
         class Precision:
             pass
         p = _make_prefs(values={"display": {"generalPrecision": Precision()}})
-        monkeypatch.setattr(get, "app", types.SimpleNamespace(preferences=p))
+        monkeypatch.setattr(get, "app", FakeApplication(preferences=p))
         rec = _payload(get.handler(include=["display"]))["preferences"]["display"]["generalPrecision"]
         assert rec["value"] == "Precision" and rec["non_scalar"] is True
 
@@ -336,7 +349,7 @@ class TestHonestReads:
         class Material:
             pass
         p = _make_prefs(values={"material": {"defaultMaterial": Material()}})
-        monkeypatch.setattr(get, "app", types.SimpleNamespace(preferences=p))
+        monkeypatch.setattr(get, "app", FakeApplication(preferences=p))
         rec = _payload(get.handler(include=["material"]))["preferences"]["material"]["defaultMaterial"]
         assert rec["value"] == "Material" and rec["non_scalar"] is True
 
@@ -345,7 +358,7 @@ class TestHonestReads:
         assert rec["value"] == 3 and "non_scalar" not in rec
 
     def test_no_active_preferences_is_an_error(self, monkeypatch):
-        monkeypatch.setattr(get, "app", types.SimpleNamespace())
+        monkeypatch.setattr(get, "app", _MutePreferencesApp())
         assert get.handler()["isError"] is True
 
 
@@ -357,7 +370,7 @@ class TestEnumDecoding:
 
     def test_unknown_enum_int_degrades_to_the_bare_int(self, monkeypatch):
         p = _make_prefs(values={"general": {"defaultModelingOrientation": 77}})
-        monkeypatch.setattr(get, "app", types.SimpleNamespace(preferences=p))
+        monkeypatch.setattr(get, "app", FakeApplication(preferences=p))
         _wire_enum(monkeypatch, "general", "defaultModelingOrientation")
         rec = _payload(get.handler())["preferences"]["general"]["defaultModelingOrientation"]
         assert rec["value"] == 77 and "enum" not in rec
@@ -415,21 +428,21 @@ class TestWriteProtocol:
 
     def test_write_is_refused_when_the_current_value_cannot_be_read(self, monkeypatch):
         p = _make_prefs(raises={"graphics": ("autoThrottleEffects",)})
-        monkeypatch.setattr(setp, "app", types.SimpleNamespace(preferences=p))
+        monkeypatch.setattr(setp, "app", FakeApplication(preferences=p))
         msg = _message(setp.handler(member="graphics.autoThrottleEffects", value=True))
         assert "autoThrottleEffects" in msg and "not written" in msg
 
     def test_a_silent_noop_setter_is_an_error(self, monkeypatch):
         p = _make_prefs(values={"display": {"generalPrecision": 3}},
                         frozen={"display": ("generalPrecision",)})
-        monkeypatch.setattr(setp, "app", types.SimpleNamespace(preferences=p))
+        monkeypatch.setattr(setp, "app", FakeApplication(preferences=p))
         msg = _message(setp.handler(member="display.generalPrecision", value=4))
         assert "did not take" in msg and "3" in msg and "4" in msg
 
     def test_a_clamped_value_is_an_error_naming_what_landed(self, monkeypatch):
         p = _make_prefs(values={"display": {"generalPrecision": 3}},
                         clamp={"display": {"generalPrecision": 8}})
-        monkeypatch.setattr(setp, "app", types.SimpleNamespace(preferences=p))
+        monkeypatch.setattr(setp, "app", FakeApplication(preferences=p))
         msg = _message(setp.handler(member="display.generalPrecision", value=99))
         assert "8" in msg and "99" in msg and "3" in msg
         # observed values only - the tool saw a value, not a mechanism
@@ -437,7 +450,7 @@ class TestWriteProtocol:
 
     def test_a_raising_setter_is_an_error(self, monkeypatch):
         p = _make_prefs(raises={"grid": ("isLayoutGridLockEnabled",)})
-        monkeypatch.setattr(setp, "app", types.SimpleNamespace(preferences=p))
+        monkeypatch.setattr(setp, "app", FakeApplication(preferences=p))
         assert setp.handler(member="grid.isLayoutGridLockEnabled", value=True)["isError"] is True
 
 
@@ -491,7 +504,7 @@ class TestNonFiniteValues:
     def float_member(self, monkeypatch):
         """A member whose CURRENT value reads as a float, so the write takes the float branch."""
         p = _make_prefs(values={"graphics": {"hiddenEdgeDimming": 0.5}})
-        monkeypatch.setattr(setp, "app", types.SimpleNamespace(preferences=p))
+        monkeypatch.setattr(setp, "app", FakeApplication(preferences=p))
         return p
 
     @pytest.mark.parametrize("value,named", [(float("nan"), "nan"), (float("inf"), "inf"),
@@ -523,7 +536,7 @@ class TestFloatMinimum:
     @pytest.fixture
     def dimming(self, monkeypatch):
         p = _make_prefs(values={"graphics": {"hiddenEdgeDimming": 0.5}})
-        monkeypatch.setattr(setp, "app", types.SimpleNamespace(preferences=p))
+        monkeypatch.setattr(setp, "app", FakeApplication(preferences=p))
         _wire_minimum(monkeypatch, "graphics", "hiddenEdgeDimming", 1.0)
         return p
 
@@ -539,7 +552,7 @@ class TestFloatMinimum:
 
     def test_a_float_member_without_a_minimum_is_unbounded(self, monkeypatch):
         p = _make_prefs(values={"graphics": {"hiddenEdgeDimming": 0.5}})
-        monkeypatch.setattr(setp, "app", types.SimpleNamespace(preferences=p))
+        monkeypatch.setattr(setp, "app", FakeApplication(preferences=p))
         assert _payload(setp.handler(member="graphics.hiddenEdgeDimming", value=-4.0))["now"] == -4.0
 
 

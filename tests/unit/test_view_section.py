@@ -13,24 +13,32 @@ without touching a camera.
 
 import json
 
-from conftest import Camera, FakePoint, FakeVector3D, Viewport, load_tool, make_bbox
+from conftest import (
+    Camera,
+    FakeApplication,
+    FakeOccurrence,
+    FakePoint,
+    FakeVector3D,
+    MakeComp,
+    MakeDesign,
+    Viewport,
+    load_tool,
+    make_bbox,
+)
 
 sv = load_tool("view_section")
 
 
 # ── fakes ───────────────────────────────────────────────────────────────────
 #
-# Points and bounding boxes come from conftest's shared fakes (FakePoint / make_bbox); only the
-# section-analysis object graph below is local.
+# The session, design, component and occurrence come from conftest's shared fakes; only the
+# section-analysis object graph below is local, SectionAnalysis carrying no shape dump.
 
-class FakeOcc:
-    def __init__(self, name, bbox=None, full_path=None):
-        self.name = name
-        self.fullPathName = full_path or name
-        self.boundingBox = bbox
-        # A real Occurrence always answers `component`; a read that RAISES is the
-        # unresolved-external-reference signal the shared occurrence census filters on.
-        self.component = type("C", (), {"name": name.split(":")[0]})()
+def _occ(name, bbox=None, full_path=None):
+    """One occurrence the 'through' path measures: the shared Occurrence fake placing a component
+    of the same base name, with its own bounding box."""
+    return FakeOccurrence(path=full_path or name, component=MakeComp(name=name.split(":")[0]),
+                          bounding_box=bbox)
 
 
 class FakeSectionInput:
@@ -87,42 +95,36 @@ class FakeSectionAnalyses:
         return sec
 
 
-class FakeRoot:
-    """Exposes the origin construction planes by attribute name + occurrences."""
+class _OriginPlaneRoot(MakeComp):
+    """The root component plus the three origin construction planes a plane alias resolves to;
+    MakeComp does not carry them."""
+
     def __init__(self, occurrences=()):
+        MakeComp.__init__(self, name="Root", occurrences=occurrences)
         self.xYConstructionPlane = "PLANE_XY"
         self.xZConstructionPlane = "PLANE_XZ"
         self.yZConstructionPlane = "PLANE_YZ"
-        self.allOccurrences = list(occurrences)
 
 
 class FakeAnalyses:
+    """design.analyses, holding sectionAnalyses. Bespoke: Analyses has no shape dump, so there is
+    no shared fake to stand for it."""
     def __init__(self, sections):
         self.sectionAnalyses = sections
 
 
-class FakeDesign:
-    def __init__(self, root, sections):
-        self.rootComponent = root
-        self.analyses = FakeAnalyses(sections)
-
-
-class FakeApp:
-    def __init__(self, design):
-        self._design = design
-        self.activeProduct = design
-        # _aim_at_cut reads eye/target (for distance) and writes eye/upVector/isFitView.
-        self.activeViewport = Viewport(camera=Camera(eye=(10, 0, 0), up=None))
-
-
 def _install(occurrences=(), existing_sections=()):
     sections = FakeSectionAnalyses(existing_sections)
-    root = FakeRoot(occurrences)
-    design = FakeDesign(root, sections)
-    sv.app = FakeApp(design)
+    root = _OriginPlaneRoot(occurrences)
+    design = MakeDesign(comp=root)
+    design.analyses = FakeAnalyses(sections)
+    sv.app = FakeApplication(
+        active_product=design,
+        # _aim_at_cut reads eye/target (for distance) and writes eye/upVector/isFitView.
+        active_viewport=Viewport(camera=Camera(eye=(10, 0, 0), up=None)))
     sv._common.app = sv.app
     import adsk.fusion
-    adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
+    adsk.fusion.Design.cast = lambda x: x if isinstance(x, MakeDesign) else None
     # the bare-plane path uses PlaneRef, which resolves via _common.design()/target_component()
     # (the app-reference seam) — point them at the fake root so an origin alias resolves.
     sv._inputs._common.design = lambda: design
@@ -144,7 +146,7 @@ class TestGuards:
         assert res["isError"] is True and "Unknown action" in res["message"]
 
     def test_no_design(self):
-        sv.app = FakeApp(None)
+        sv.app = FakeApplication(active_product=None)
         sv._common.app = sv.app
         import adsk.fusion
         adsk.fusion.Design.cast = lambda x: None
@@ -158,7 +160,7 @@ class TestGuards:
         assert "Provide 'plane'" in res["message"]
 
     def test_through_unknown_occurrence(self):
-        _install(occurrences=[FakeOcc("Vise")])
+        _install(occurrences=[_occ("Vise")])
         res = sv.handler(action="cut", through="Nonexistent")
         assert res["isError"] is True
         assert "no occurrence matching" in res["message"].lower()
@@ -255,36 +257,38 @@ class TestSubComponentContextRefusal:
 
 class TestThroughCenter:
     def test_xy_uses_z_center(self):
-        # bbox z spans 2..4 cm -> center cz = 3 cm; xy normal is Z.
-        occ = FakeOcc("Part", bbox=make_bbox((0, 0, 2), (6, 8, 4)))
+        # bbox z spans 2..4 cm -> center cz = 3 cm; xy normal is Z. The x and y centers (5 and 4)
+        # differ from it and from each other, so only the Z read lands on 3.
+        occ = _occ("Part", bbox=make_bbox((0, 0, 2), (10, 8, 4)))
         sections = _install(occurrences=[occ])
         _payload(sv.handler(action="cut", through="Part", plane="xy", auto_view=False))
         assert sections.last_input.distance_cm == 3.0
 
     def test_front_uses_y_center(self):
-        # y spans 1..5 -> cy = 3; front/xz normal is Y.
-        occ = FakeOcc("Part", bbox=make_bbox((0, 1, 0), (6, 5, 4)))
+        # y spans 1..5 -> cy = 3; front/xz normal is Y. x centers on 4 and z on 2, so 3 can only
+        # have come from the Y read.
+        occ = _occ("Part", bbox=make_bbox((0, 1, 0), (8, 5, 4)))
         sections = _install(occurrences=[occ])
         _payload(sv.handler(action="cut", through="Part", plane="front", auto_view=False))
         assert sections.last_input.distance_cm == 3.0
 
     def test_through_adds_explicit_offset_on_top_of_center(self):
         # cy = 3 cm, plus 20 mm (=2 cm) offset -> 5 cm.
-        occ = FakeOcc("Part", bbox=make_bbox((0, 1, 0), (6, 5, 4)))
+        occ = _occ("Part", bbox=make_bbox((0, 1, 0), (8, 5, 4)))
         sections = _install(occurrences=[occ])
         _payload(sv.handler(action="cut", through="Part", plane="front",
                             offset=20.0, auto_view=False))
         assert sections.last_input.distance_cm == 5.0
 
     def test_through_defaults_to_xz_when_no_plane(self):
-        occ = FakeOcc("Part", bbox=make_bbox((0, 1, 0), (6, 5, 4)))
+        occ = _occ("Part", bbox=make_bbox((0, 1, 0), (6, 5, 4)))
         sections = _install(occurrences=[occ])
         out = _payload(sv.handler(action="cut", through="Part", auto_view=False))
         assert sections.last_input.entity == "PLANE_XZ"
         assert "xz plane" in out["where"]
 
     def test_through_substring_match(self):
-        occ = FakeOcc("Carrier Body:1", bbox=make_bbox((0, 0, 0), (2, 2, 2)))
+        occ = _occ("Carrier Body:1", bbox=make_bbox((0, 0, 0), (2, 2, 2)))
         sections = _install(occurrences=[occ])
         out = _payload(sv.handler(action="cut", through="carrier", plane="xy", auto_view=False))
         assert "Carrier Body:1" in out["where"]

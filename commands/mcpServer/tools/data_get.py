@@ -126,8 +126,8 @@ def handler(project: str = "", project_id: str = "", folder: str = "", recursive
         if e:
             return e
         out["scope"] = "hubs"
-        out["note"] = ("All hubs (is_active flags the current one). Switch from the Fusion data panel - "
-                       "Data.activeHub is read-only in the API. Then pass project=<name> to list files.")
+        out["note"] = ("All hubs (is_active flags the current one). Switch with data_switch_hub - it "
+                       "CLOSES every open document. Then pass project=<name> to list files.")
         return ok(out)
 
     from . import _data_read as data_read

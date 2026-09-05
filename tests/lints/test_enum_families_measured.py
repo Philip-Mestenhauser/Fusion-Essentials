@@ -105,7 +105,14 @@ _UNCONSUMED_OK = {
 # addition awaiting the next live regen (a fully-PASSING py -3 tests/live/measure_api.py rewrites
 # BEHAVIOR and empties this table). Shrink-only; the staleness check below fails the moment the
 # regen lands the key, so an entry cannot outlive its excuse.
-_PENDING_REGEN = {}
+_PENDING_REGEN = {
+    "activate_root_component_true_when_already_root": (
+        "design-activate-root-reads-back emits this flag; BEHAVIOR carries it after the next full "
+        "republish"),
+    "dxf_sketch_options_units_read_raises": (
+        "dxf-sketch-options-units-read-is-fatal aborts by design, so facts_on_pass is the only "
+        "channel its answer has; BEHAVIOR carries it after the next full republish"),
+}
 
 
 def _uncarried_emitted_keys(emitted, carried, pending):

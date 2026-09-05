@@ -1887,12 +1887,16 @@ class MakeDesign:
     `activate_lies`); Occurrence carries no deactivate(), so this is the only way back to root.
     `root_active_reads` forces `isRootComponentActive` to one answer whatever `activeOccurrence`
     holds - a DECLARED worst case, since live the two are one state, and the only shape in which a
-    caller checking just one of the pair can be caught."""
+    caller checking just one of the pair can be caught.
+
+    `appearances` is the document's own appearance assets, set only when asked: a design whose
+    appearance collection does not read at all is its own tested state, and no shared Appearances
+    fake carries the ordinary answer."""
     def __init__(self, comp=None, tokens=None, all_components=None, parent_document=None,
                  design_type=None, active_edit_object=None, timeline=None, user_parameters=None,
                  all_parameters=None, compute_raises=None, active_occurrence=None,
                  root_activate_ok=True, root_activate_lies=False, root_active_reads=None,
-                 snapshots=None):
+                 snapshots=None, appearances=None):
         self._compute_raises = compute_raises
         self._computes = 0
         self.rootComponent = comp if comp is not None else MakeComp()
@@ -1906,6 +1910,8 @@ class MakeDesign:
         # proved True. Set when given, since no shared Snapshots fake carries the ordinary answer.
         if snapshots is not None:
             self.snapshots = snapshots
+        if appearances is not None:
+            self.appearances = appearances
         if parent_document is not None:
             self.parentDocument = parent_document
         if design_type is not None:
@@ -2490,9 +2496,25 @@ class FakeSelections:
 
 @fusion_fake(live_type="UserInterface", facts=("shape-dump-document-world",))
 class FakeUserInterface:
-    """app.userInterface as the selection reads reach it: its activeSelections."""
-    def __init__(self, selections=None):
+    """app.userInterface as the selection and workspace reads reach it: its activeSelections, the
+    activeSelectionChanged event a pick listener attaches to, and the workspace walk.
+
+    `selection_changed`, `workspaces` and `active_workspace` are set only when given: no shape dump
+    covers Workspace or the event object, so the stand-ins for those come from the test that needs
+    them, and a UI answering neither read stays a testable state. `active_workspace=None` is the
+    DIFFERENT state where the read answers "no workspace is active"."""
+
+    _UNSET = object()
+
+    def __init__(self, selections=None, selection_changed=None, workspaces=_UNSET,
+                 active_workspace=_UNSET):
         self.activeSelections = FakeSelections() if selections is None else selections
+        if selection_changed is not None:
+            self.activeSelectionChanged = selection_changed
+        if workspaces is not FakeUserInterface._UNSET:
+            self.workspaces = _NamedCollection(workspaces)
+        if active_workspace is not FakeUserInterface._UNSET:
+            self.activeWorkspace = active_workspace
 
 
 @fusion_fake(live_type="Products", facts=("shape-dump-document-world",))
@@ -2645,8 +2667,8 @@ class FakeDocuments:
 class FakeData:
     """app.data: the active hub/project a cloud read starts from, the hubs walk, the project list
     that dataProjects.add mints into, and findFileById/findFolderById - each answering what is
-    registered under that id, None otherwise. activeHub is a PROPERTY so a scenario subclass can
-    take the assignment and refuse to change, which is what a getter-only member does; every
+    registered under that id, None otherwise. activeHub is a PROPERTY whose assignment lands (the
+    measured default) and which a scenario subclass can take and refuse to change; every
     assignment is recorded in _hub_sets whether or not it lands."""
     def __init__(self, active_project=None, projects=(), active_hub=None, files_by_id=None,
                  hubs=(), folders_by_id=None):
@@ -2678,10 +2700,13 @@ class FakeData:
 @fusion_fake(live_type="Application", facts=("shape-dump-document-world",))
 class FakeApplication:
     """The session seam a tool reads through: activeDocument and the documents walk, the
-    activeProduct a design comes off, app.data and app.userInterface. `import_manager` is set only
-    when a test supplies one, ImportManager carrying no shape dump to build a shared stand-in from."""
+    activeProduct a design comes off, app.data and app.userInterface. `import_manager`,
+    `active_viewport`, `version` and `preferences` are set only when a test supplies one -
+    ImportManager and Preferences carry no shape dump to build a shared stand-in from, and a session
+    whose viewport, build number or preferences do not read is its own tested state."""
     def __init__(self, active_document=None, documents=None, active_product=None, data=None,
-                 user_interface=None, import_manager=None):
+                 user_interface=None, import_manager=None, active_viewport=None, version=None,
+                 preferences=None):
         self.activeDocument = active_document
         self.documents = FakeDocuments() if documents is None else documents
         self.activeProduct = active_product
@@ -2689,27 +2714,46 @@ class FakeApplication:
         self.userInterface = FakeUserInterface() if user_interface is None else user_interface
         if import_manager is not None:
             self.importManager = import_manager
+        if active_viewport is not None:
+            self.activeViewport = active_viewport
+        if version is not None:
+            self.version = version
+        if preferences is not None:
+            self.preferences = preferences
 
 
-@fusion_fake(live_type="DocumentReference", facts=("shape-dump-document-world",))
+_REFRESH_REFUSED = "2 : InternalValidationError : res"
+
+
+@fusion_fake(live_type="DocumentReference",
+             facts=("shape-dump-document-world", "derive-reference-version-setter-present"))
 class FakeDocumentReference:
-    """One Document.documentReferences entry: the source dataFile, the version it holds (settable -
-    a derive link is refreshed by assigning it), isOutOfDate, and getLatestVersion(). A refresh that
-    answers True moves the version to the file's latest and clears isOutOfDate.
+    """One Document.documentReferences entry: the source dataFile, the version it holds (settable),
+    isOutOfDate, and getLatestVersion().
 
-    Three refusing states, like FakeSetup's activate_lies: `stays_out_of_date` is the platform LIE -
-    the refresh answers True while isOutOfDate stays True - `latest_raises` is the message
-    getLatestVersion throws with, which a DeriveFeature's reference does, so the derive path has to
-    advance through the version setter instead, and `setter_raises` is that setter refusing too."""
+    MEASURED on a genuinely STALE DeriveFeature reference: both refresh routes refuse with
+    RuntimeError(_REFRESH_REFUSED) - the version ASSIGNMENT and getLatestVersion() alike - while
+    isOutOfDate and dataFile.* keep reading. So a reference built out_of_date REFUSES by default,
+    and naming any other refresh outcome below declares a state instead of that measurement.
+
+    `refresh_lands` is the refresh that takes (version moves to the file's latest, isOutOfDate
+    clears) - DECLARED, not measured, and the only reference measured at all was a derive link's.
+    `stays_out_of_date` is the platform LIE, the refresh answering True while isOutOfDate stays
+    True; `refresh_ok` False is getLatestVersion refusing out loud; `latest_raises`/`setter_raises`
+    carry a message of the caller's own."""
     def __init__(self, data_file=None, version=1, out_of_date=False, refresh_ok=True,
-                 stays_out_of_date=False, latest_raises=None, setter_raises=None):
+                 stays_out_of_date=False, latest_raises=None, setter_raises=None,
+                 refresh_lands=False):
         self.dataFile = data_file
         self._version = version
         self.isOutOfDate = out_of_date
         self._refresh_ok = refresh_ok
         self._stays_out_of_date = stays_out_of_date
-        self._latest_raises = latest_raises
-        self._setter_raises = setter_raises
+        declared = bool(refresh_lands or stays_out_of_date or not refresh_ok
+                        or latest_raises or setter_raises)
+        refuses = bool(out_of_date) and not declared
+        self._latest_raises = latest_raises or (_REFRESH_REFUSED if refuses else None)
+        self._setter_raises = setter_raises or (_REFRESH_REFUSED if refuses else None)
 
     @property
     def version(self):
@@ -2717,10 +2761,10 @@ class FakeDocumentReference:
 
     @version.setter
     def version(self, value):
-        # Declared, not measured: staleness is recomputed on assignment so doc_update_xref's
-        # post-refresh re-read has a state to read; no measurement row covers the live setter.
         if self._setter_raises:
             raise RuntimeError(self._setter_raises)
+        # Declared, not measured: on the measured reference the assignment never lands, so the
+        # staleness this recomputes is a state only an opted-in test sees.
         self._version = value
         self.isOutOfDate = value != getattr(self.dataFile, "latestVersionNumber", None)
 
@@ -3013,6 +3057,33 @@ class FakeUserParameters:
                                   expression=expression if isinstance(expression, str) else "")
         self._parameters.append(param)
         return param
+
+
+@fusion_fake(live_type="ModelParameter", facts=("shape-dump-assembly-world-2",))
+class FakeModelParameter:
+    """One MODEL parameter as a parameter row reads it: the name/expression/value/unit/comment and
+    the isFavorite flag every Parameter carries, plus the two members a model parameter answers and
+    a user parameter has no equivalent of - `createdBy`, the entity that made it, and `role`, the
+    slot it fills on that entity.
+
+    `owner` None is a DECLARED state, not a measured one: the createdBy read DECLINES, which is the
+    only shape in which this parameter's row publishes no owner keys at all."""
+    def __init__(self, name="d195", owner=None, role="Distance", expression="5 mm",
+                 value=0.5, unit="mm", comment="", favorite=False):
+        self.name = name
+        self.expression = expression
+        self.value = value
+        self.unit = unit
+        self.comment = comment
+        self.isFavorite = favorite
+        self.role = role
+        self._owner = owner
+
+    @property
+    def createdBy(self):
+        if self._owner is None:
+            raise RuntimeError("the maker of this parameter is unavailable")
+        return self._owner
 
 
 # ── joint motion world ────────────────────────────────────────────────────

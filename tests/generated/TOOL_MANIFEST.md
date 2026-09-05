@@ -233,7 +233,7 @@ PRODUCES:
 | · | `data_get` | Read the CLOUD data model (Autodesk/Fusion Team) by scope |
 | · | `data_get_upload_status` | Poll a data_upload_file upload for its ACTUAL state - never guess from re-listing data_get |
 | ✎ | `data_move_file` | Move ONE cloud file into another EXISTING folder of its own project |
-| ✎ | `data_switch_hub` | Attempt to SWITCH the active Autodesk data hub (to LIST hubs, use data_get(include=['hubs'])) |
+| ✎ | `data_switch_hub` | SWITCH the active Autodesk data hub (to LIST hubs, use data_get(include=['hubs'])) |
 | ✎ | `data_upload_file` | Upload a local CAD file into a project, optionally into a nested 'folder' path (e.g |
 
 ### drawing

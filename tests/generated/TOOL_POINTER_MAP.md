@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 187  |  **description breadcrumbs:** 394  |  **note/error breadcrumbs:** 468
+**Tools:** 187  |  **description breadcrumbs:** 394  |  **note/error breadcrumbs:** 469
   |  **guidance smells flagged:** 4
 ## Blindspots to engineer
 
@@ -777,7 +777,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Active hub + its projects. Pass project=<name|id> to list its FILES (add 'folder' to scope, or include=['folders'] for the tree); 'file'=<name|URN> reads ONE file's full record. include=['hubs'] li...
 - One file's record: metadata, version state and LINK state. Dates are UNIX epoch seconds with the UTC ISO string beside each. 'file_extension' is unreliable for a non-CAD upload - the file NAME carr...
 - Files in the project (each with its lineage URN + openable fusionWebURL). 'folder'=<path> scopes to one folder; include=['folders'] shows the folder tree instead; 'file'=<name|URN> reads ONE file's...
-- All hubs (is_active flags the current one). Switch from the Fusion data panel - Data.activeHub is read-only in the API. Then pass project=<name> to list files.
+- All hubs (is_active flags the current one). Switch with data_switch_hub - it CLOSES every open document. Then pass project=<name> to list files.
 - Folder tree of the project. Pass a 'folder' path + drop include=['folders'] to list that folder's FILES. (Cloud read - see 'truncated'.)
 - does not apply to the 'file' scope (it reads one file's record in full). Drop 'file' to use include, or drop include.
 
@@ -816,10 +816,10 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - '. Use: list, switch.
 - Data not available (not signed in?).
 - Provide 'hub' - the name or id of the hub to switch to (see action='list').
-- . Switch hubs from the Fusion data panel (the hub dropdown), then retry the workflow. The hub list above is still accurate for choosing the target.
+- . Switch hubs from the Fusion data panel (the hub dropdown), then retry.
 - Could not switch to hub '
-- ': Fusion's API exposes Data.activeHub as read-only (no public setter), so a programmatic hub switch isn't supported in this build
-- (the assignment was accepted but the active hub did not change)
+- ): the re-read after the assignment shows the active hub as
+- - the assignment raised:
 - Active hub switched. This CLOSES documents open before the switch (Fusion reloads the data context). Re-list projects with data_get, and re-resolve any URNs - they are hub-scoped. Reopen the docume...
 - ' is already the active hub - nothing to do.
 

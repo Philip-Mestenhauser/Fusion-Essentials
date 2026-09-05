@@ -14,7 +14,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import load_tool
+from conftest import (
+    FakeApplication,
+    FakeDataFile,
+    FakeDocuments,
+    FakeFusionDocument,
+    load_tool,
+)
 
 wg = load_tool("_write_guard")
 
@@ -301,38 +307,44 @@ class TestNameCollisionRefusal:
         assert out["created"] is True
 
 
-class _FakeDataFile:
-    def __init__(self, urn):
-        self.id = urn
+def _FakeDoc(name=None, urn=None, name_raises=False, datafile_raises=False):
+    """One open document: the shared FusionDocument fake, carrying a DataFile only when `urn` names
+    one. `name_raises`/`datafile_raises` pick the scenario subclass whose one read declines."""
+    cls = (_MuteNameDocument if name_raises else
+           _MuteDataFileDocument if datafile_raises else FakeFusionDocument)
+    return cls(name=name, data_file=FakeDataFile(file_id=urn) if urn else None)
 
 
-class _FakeDoc:
-    """One open document. name/dataFile reads can be made to raise (a doc mid-load/mid-close does)."""
-
-    def __init__(self, name=None, urn=None, name_raises=False, datafile_raises=False):
-        self._name = name
-        self._urn = urn
-        self._name_raises = name_raises
-        self._datafile_raises = datafile_raises
+class _MuteNameDocument(FakeFusionDocument):
+    """A document whose NAME read raises while its dataFile still answers - a document mid-load or
+    mid-close. Declared, not measured: the closed-wrapper row covers a name that raises on a document
+    that is GONE, and this one is still in the session's walk."""
 
     @property
     def name(self):
-        if self._name_raises:
-            raise RuntimeError("name unreadable")
-        return self._name
+        raise RuntimeError("name unreadable")
+
+
+class _MuteDataFileDocument(FakeFusionDocument):
+    """The other half of the pair: the dataFile read raises while the name still answers, so an
+    identity degrades to name-only rather than going blank."""
 
     @property
     def dataFile(self):
-        if self._datafile_raises:
-            raise RuntimeError("dataFile unreadable")
-        return _FakeDataFile(self._urn) if self._urn else None
+        raise RuntimeError("dataFile unreadable")
+
+    @dataFile.setter
+    def dataFile(self, value):
+        self._data_file = value
 
 
-class _FakeDocs:
-    """The session's open-documents collection; item(i) can raise for chosen indices."""
+class _HoledDocuments(FakeDocuments):
+    """The session walk with holes: `broken_indices` are the slots whose item() raises (a document
+    mid-close) and `count_raises` the length that will not read at all. Declared states - what the
+    guard has to walk around instead of dropping the session."""
 
-    def __init__(self, docs, count_raises=False, broken_indices=()):
-        self._docs = docs
+    def __init__(self, documents=(), count_raises=False, broken_indices=()):
+        FakeDocuments.__init__(self, documents)
         self._count_raises = count_raises
         self._broken = set(broken_indices)
 
@@ -340,26 +352,34 @@ class _FakeDocs:
     def count(self):
         if self._count_raises:
             raise RuntimeError("count unreadable")
-        return len(self._docs)
+        return FakeDocuments.count.fget(self)
 
     def item(self, i):
         if i in self._broken:
             raise RuntimeError("item unreadable")
-        return self._docs[i]
+        return FakeDocuments.item(self, i)
 
 
-class _FakeApp:
+class _SessionApp(FakeApplication):
+    """The session seam with its two reads made to decline: `active_raises` makes activeDocument
+    throw and `docs_raises` app.documents. `docs` is taken AS GIVEN, so a session answering no
+    documents collection at all (None) stays expressible. Declared states, not measured ones."""
+
     def __init__(self, active=None, docs=None, active_raises=False, docs_raises=False):
-        self._active = active
-        self._docs = docs
         self._active_raises = active_raises
         self._docs_raises = docs_raises
+        FakeApplication.__init__(self, active_document=active)
+        self._docs = docs
 
     @property
     def activeDocument(self):
         if self._active_raises:
             raise RuntimeError("activeDocument unreadable")
-        return self._active
+        return self._active_doc
+
+    @activeDocument.setter
+    def activeDocument(self, value):
+        self._active_doc = value
 
     @property
     def documents(self):
@@ -367,13 +387,17 @@ class _FakeApp:
             raise RuntimeError("documents unreadable")
         return self._docs
 
+    @documents.setter
+    def documents(self, value):
+        self._docs = value
+
 
 @pytest.fixture
 def live_app(monkeypatch):
-    """Install a fake adsk Application onto the guard's app seam, exercising the REAL
+    """Install an Application onto the guard's app seam, exercising the REAL
     _active_identity/_open_documents reads (the earlier classes stub those seams instead)."""
     def _install(active=None, docs=None, **kw):
-        app = _FakeApp(active=active, docs=docs, **kw)
+        app = _SessionApp(active=active, docs=docs, **kw)
         monkeypatch.setattr(wg, "app", app)
         monkeypatch.setattr(wg, "_active_identity", _REAL_ACTIVE_IDENTITY)
         monkeypatch.setattr(wg, "_open_documents", _REAL_OPEN_DOCUMENTS)
@@ -436,7 +460,7 @@ class TestOpenDocumentsSessionWalk:
 
     def test_collision_refusal_lists_live_candidates(self, live_app):
         active = _FakeDoc("Bracket", "urn:lineage:abc")
-        live_app(active=active, docs=_FakeDocs([active, _FakeDoc("Bracket", None)]))
+        live_app(active=active, docs=_HoledDocuments([active, _FakeDoc("Bracket", None)]))
         called = {"n": 0}
         res = wg.wrap(lambda **kw: called.update(n=1) or _ok({}))(expect_document="Bracket")
         assert called["n"] == 0 and res["isError"] is True
@@ -451,7 +475,7 @@ class TestOpenDocumentsSessionWalk:
         # collision still refuses.
         active = _FakeDoc("Bracket", "urn:lineage:abc")
         twin = _FakeDoc("Bracket", None)
-        live_app(active=active, docs=_FakeDocs([active, _FakeDoc("X", "urn:x"), twin],
+        live_app(active=active, docs=_HoledDocuments([active, _FakeDoc("X", "urn:x"), twin],
                                                broken_indices=(1,)))
         res = wg.wrap(lambda **kw: _ok({}))(expect_document="Bracket")
         assert res["isError"] is True
@@ -466,7 +490,7 @@ class TestOpenDocumentsSessionWalk:
         # index addresses nothing doc_activate/doc_close would accept, so offering it would be a
         # false address, and no name, so it can never become a collision candidate.
         active = _FakeDoc("Bracket", "urn:a")
-        live_app(active=active, docs=_FakeDocs([active, _FakeDoc("Other", "urn:o")],
+        live_app(active=active, docs=_HoledDocuments([active, _FakeDoc("Other", "urn:o")],
                                                broken_indices=(1,)))
         rows = wg._open_documents()
         assert len(rows) == 2
@@ -476,27 +500,27 @@ class TestOpenDocumentsSessionWalk:
     def test_a_slot_answering_no_document_is_published_the_same_way(self, live_app):
         # item(i) can ANSWER None rather than raise (a stale proxy); both are the same hole.
         active = _FakeDoc("Bracket", "urn:a")
-        live_app(active=active, docs=_FakeDocs([active, None]))
+        live_app(active=active, docs=_HoledDocuments([active, None]))
         assert wg._open_documents()[1] == {"name": None, "readable": False}
 
     def test_a_published_hole_never_becomes_a_name_collision_candidate(self, live_app):
         # publishing the hole must not invent an ambiguity: the row names nothing, so the one
         # readable 'Bracket' is still session-unique and the write proceeds.
         active = _FakeDoc("Bracket", "urn:a")
-        live_app(active=active, docs=_FakeDocs([active, _FakeDoc("Bracket", None)],
+        live_app(active=active, docs=_HoledDocuments([active, _FakeDoc("Bracket", None)],
                                                broken_indices=(1,)))
         out = _decode(wg.wrap(lambda **kw: _ok({"created": True}))(expect_document="Bracket"))
         assert out["created"] is True
 
     def test_doc_with_unreadable_name_does_not_count_toward_collision(self, live_app):
         active = _FakeDoc("Bracket", "urn:lineage:abc")
-        live_app(active=active, docs=_FakeDocs([active, _FakeDoc("Bracket", "urn:z", name_raises=True)]))
+        live_app(active=active, docs=_HoledDocuments([active, _FakeDoc("Bracket", "urn:z", name_raises=True)]))
         out = _decode(wg.wrap(lambda **kw: _ok({"created": True}))(expect_document="Bracket"))
         assert out["created"] is True                        # unreadable name != "Bracket" - unique
 
     def test_candidate_with_unreadable_datafile_is_listed_by_open_index(self, live_app):
         active = _FakeDoc("Bracket", "urn:lineage:abc")
-        live_app(active=active, docs=_FakeDocs([active, _FakeDoc("Bracket", "urn:z", datafile_raises=True)]))
+        live_app(active=active, docs=_HoledDocuments([active, _FakeDoc("Bracket", "urn:z", datafile_raises=True)]))
         res = wg.wrap(lambda **kw: _ok({}))(expect_document="Bracket")
         payload = _decode(res)
         assert payload["blocked_by"] == ["ambiguous_document_name"]
@@ -505,7 +529,7 @@ class TestOpenDocumentsSessionWalk:
 
     def test_walk_marks_exactly_the_active_row(self, live_app):
         active = _FakeDoc("Bracket", "urn:a")
-        live_app(active=active, docs=_FakeDocs([_FakeDoc("Other", "urn:o"), active]))
+        live_app(active=active, docs=_HoledDocuments([_FakeDoc("Other", "urn:o"), active]))
         rows = wg._open_documents()
         assert [r["is_active"] for r in rows] == [False, True]
         assert [r["open_index"] for r in rows] == [0, 1]
@@ -522,7 +546,7 @@ class TestOpenDocumentsSessionWalk:
 
     def test_unreadable_count_degrades_to_the_name_pass(self, live_app):
         live_app(active=_FakeDoc("Bracket", "urn:a"),
-                 docs=_FakeDocs([_FakeDoc("Bracket", "urn:a")], count_raises=True))
+                 docs=_HoledDocuments([_FakeDoc("Bracket", "urn:a")], count_raises=True))
         out = _decode(wg.wrap(lambda **kw: _ok({"created": True}))(expect_document="Bracket"))
         assert out["created"] is True
 
@@ -670,7 +694,7 @@ class _DocHandle:
         self._opened = opened
         # A never-saved document answers dataFile None (measured - it does not raise); only a saved
         # one hands back a DataFile, and an EMPTY id models one whose id will not read.
-        self.dataFile = _FakeDataFile(opened.urn) if opened.urn is not None else None
+        self.dataFile = FakeDataFile(file_id=opened.urn) if opened.urn is not None else None
 
     @property
     def isValid(self):
@@ -788,7 +812,7 @@ class TestDocumentKey:
         assert len(wg._UNSAVED_DOC_KEYS) == 2
 
     def test_no_readable_document_is_not_a_key(self, monkeypatch):
-        monkeypatch.setattr(wg, "app", _FakeApp(active_raises=True))
+        monkeypatch.setattr(wg, "app", _SessionApp(active_raises=True))
         assert wg.document_key() is None
         assert wg._UNSAVED_DOC_KEYS == []                  # and it mints nothing to hand out
 

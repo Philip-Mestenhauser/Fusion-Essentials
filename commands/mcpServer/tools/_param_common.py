@@ -46,7 +46,6 @@ def _param_summary(p, units_manager=None) -> dict:
     "expression": safe(lambda: p.expression),
     "unit": unit,
     "comment": safe(lambda: p.comment),
-    # None when the parameter kind carries no favorite flag (model parameters).
     "favorite": safe(lambda: p.isFavorite),
     "value": None,
     }

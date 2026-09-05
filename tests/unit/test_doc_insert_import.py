@@ -96,8 +96,9 @@ _WORKSPACE_NAMES = {"CAMEnvironment": "Manufacture", "FusionSolidEnvironment": "
 
 
 class _FakeUI(FakeUserInterface):
-    """The workspace half of userInterface, which the shared fake does not carry (Workspace has no
-    live shape dump). ``activate`` is what Workspace.activate() answers: True switches, 'lies'
+    """The shared UserInterface fake plus the two workspace reads it leaves to a test: the
+    workspaces.itemById lookup an id-addressed switch goes through, and a read-capped
+    activeWorkspace. ``activate`` is what Workspace.activate() answers: True switches, 'lies'
     answers true without switching, False declines, an Exception is raised. ``reads`` caps the
     activeWorkspace property reads that succeed - one workspace read costs two (id and name)."""
 

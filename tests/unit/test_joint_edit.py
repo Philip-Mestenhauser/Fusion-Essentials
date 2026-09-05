@@ -43,8 +43,7 @@ _EXPRESSION_UNITS = {"mm": 0.1, "cm": 1.0, "in": 2.54, "deg": math.pi / 180.0}
 
 class FakeModelParameter:
     """Matches Joint.offset / Joint.angle - a ModelParameter whose `expression` is settable in
-    display units and whose `value` reads back in DATABASE units (cm / radians). Bespoke: there is
-    no ModelParameter SHAPES dump to sweep a shared fake against."""
+    display units and whose `value` reads back in DATABASE units (cm / radians)."""
     def __init__(self):
         self._expression = None
         self.value = None

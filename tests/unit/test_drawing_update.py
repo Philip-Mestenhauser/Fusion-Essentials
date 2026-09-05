@@ -15,13 +15,12 @@ import types
 import pytest
 
 import adsk  # the mock package conftest installed at import time
-from conftest import load_tool
+from conftest import FakeDocumentReference, load_tool
 
 
-class FakeRef:
-    def __init__(self, is_out_of_date, version):
-        self.isOutOfDate = is_out_of_date
-        self.version = version
+def _ref(is_out_of_date, version):
+    """One documentReferences entry: the stale flag the gate walks and the version each row reports."""
+    return FakeDocumentReference(out_of_date=is_out_of_date, version=version)
 
 
 class FakeRefs:
@@ -147,7 +146,7 @@ def _payload(res):
 
 class TestHappyPath:
     def test_stale_reference_is_refreshed_and_version_advances(self, install):
-        doc = install(FakeDrawingDoc(before=[FakeRef(True, 1)], after=[FakeRef(False, 2)]))
+        doc = install(FakeDrawingDoc(before=[_ref(True, 1)], after=[_ref(False, 2)]))
         out = _payload(du.handler())
         assert out["updated"] is True
         assert out["stale_references_before"] == 1
@@ -157,14 +156,14 @@ class TestHappyPath:
 
     def test_gates_on_references_not_the_lying_isuptodate(self, install):
         # isUpToDate is True (the live lie) while the reference IS stale - the refresh must still run.
-        doc = install(FakeDrawingDoc(before=[FakeRef(True, 3)], after=[FakeRef(False, 4)]))
+        doc = install(FakeDrawingDoc(before=[_ref(True, 3)], after=[_ref(False, 4)]))
         assert doc.isUpToDate is True
         out = _payload(du.handler())
         assert out["updated"] is True
         assert doc.update_calls == 1
 
     def test_declared_returns_are_present(self, install):
-        install(FakeDrawingDoc(before=[FakeRef(True, 1)], after=[FakeRef(False, 2)]))
+        install(FakeDrawingDoc(before=[_ref(True, 1)], after=[_ref(False, 2)]))
         out = _payload(du.handler())
         for spec in du.RETURNS:
             assert spec.assert_present(out) == "", spec.assert_present(out)
@@ -172,7 +171,7 @@ class TestHappyPath:
 
 class TestNoOp:
     def test_current_references_do_not_refresh(self, install):
-        doc = install(FakeDrawingDoc(before=[FakeRef(False, 2)]))
+        doc = install(FakeDrawingDoc(before=[_ref(False, 2)]))
         out = _payload(du.handler())
         assert out["updated"] is False
         assert out["stale_references_before"] == 0
@@ -191,7 +190,7 @@ class TestReferenceIndexAlignment:
         # reference that cannot be read holds its slot as a null row - dropping it would slide the
         # third reference's version under the second one's index, and claiming False for its
         # staleness would coerce an unknown into a verdict.
-        install(FakeDrawingDoc(before=[FakeRef(False, 1), FakeRef(False, 2), FakeRef(False, 3)],
+        install(FakeDrawingDoc(before=[_ref(False, 1), _ref(False, 2), _ref(False, 3)],
                                unreadable_at=1))
         out = _payload(du.handler())
         assert [r["index"] for r in out["references"]] == [0, 1, 2]
@@ -202,7 +201,7 @@ class TestReferenceIndexAlignment:
         # a failed READ is not evidence of staleness - but it is not evidence of freshness either:
         # the refresh is driven by the readable ones, and the payload must not claim verified
         # up-to-date over the hole.
-        doc = install(FakeDrawingDoc(before=[FakeRef(False, 1), FakeRef(False, 2)], unreadable_at=1))
+        doc = install(FakeDrawingDoc(before=[_ref(False, 1), _ref(False, 2)], unreadable_at=1))
         out = _payload(du.handler())
         assert out["stale_references_before"] == 0 and doc.update_calls == 0
         assert out["unread_references"] == 1
@@ -214,7 +213,7 @@ class TestHonestyGate:
     def test_still_stale_after_refresh_is_an_error(self, install, settle):
         # updateAllReferences ran but a reference is STILL stale - the ReferencesFresh postcondition on
         # the Item converts the handler's ok into an error (the handler no longer gates this itself).
-        doc = install(FakeDrawingDoc(before=[FakeRef(True, 1)], after=[FakeRef(True, 1)]))
+        doc = install(FakeDrawingDoc(before=[_ref(True, 1)], after=[_ref(True, 1)]))
         wrapped = kernel.wrap(du.handler, [kernel.ReferencesFresh()])
         res = wrapped()
         assert res["isError"] is True
@@ -222,7 +221,7 @@ class TestHonestyGate:
         assert doc.update_calls == 1
 
     def test_kernel_confirms_a_clean_refresh(self, install):
-        install(FakeDrawingDoc(before=[FakeRef(True, 1)], after=[FakeRef(False, 2)]))
+        install(FakeDrawingDoc(before=[_ref(True, 1)], after=[_ref(False, 2)]))
         out = _payload(kernel.wrap(du.handler, [kernel.ReferencesFresh()])())
         assert out["updated"] is True
         assert out["stale_references_after"] == 0
@@ -236,13 +235,13 @@ class TestHonestyGate:
         assert posts and any(p.name == "references_fresh" for p in posts)
 
     def test_update_exception_is_reported(self, install):
-        install(FakeDrawingDoc(before=[FakeRef(True, 1)], raise_exc=RuntimeError("refresh boom")))
+        install(FakeDrawingDoc(before=[_ref(True, 1)], raise_exc=RuntimeError("refresh boom")))
         res = du.handler()
         assert res["isError"] is True
         assert "refresh boom" in res["message"]
 
     def test_unreadable_references_refuse_to_refresh_blind(self, install):
-        doc = install(FakeDrawingDoc(before=[FakeRef(True, 1)], refs_unreadable=True))
+        doc = install(FakeDrawingDoc(before=[_ref(True, 1)], refs_unreadable=True))
         res = du.handler()
         assert res["isError"] is True
         assert "could not be read" in res["message"].lower()
@@ -257,7 +256,7 @@ class TestReferenceSettleRace:
         _clock, pumps = settle
         # settle_reads=2: the handler's own immediate re-read and the wait's FIRST sample both still
         # see stale rows; the sample after one pump reads clean.
-        doc = install(FakeDrawingDoc(before=[FakeRef(True, 1)], after=[FakeRef(False, 2)],
+        doc = install(FakeDrawingDoc(before=[_ref(True, 1)], after=[_ref(False, 2)],
                                      settle_reads=2))
         out = _payload(kernel.wrap(du.handler, [kernel.ReferencesFresh()])())
         assert out["stale_references_after"] == 0     # settled - not failed on the first sample
@@ -268,7 +267,7 @@ class TestReferenceSettleRace:
         assert out["references"][0]["is_out_of_date"] is True
 
     def test_a_reference_that_never_freshens_still_errors_with_the_settle_fact(self, install, settle):
-        doc = install(FakeDrawingDoc(before=[FakeRef(True, 1)], after=[FakeRef(True, 1)]))
+        doc = install(FakeDrawingDoc(before=[_ref(True, 1)], after=[_ref(True, 1)]))
         res = kernel.wrap(du.handler, [kernel.ReferencesFresh()])()
         assert res["isError"] is True
         assert "still out of date" in res["message"].lower()
@@ -277,7 +276,7 @@ class TestReferenceSettleRace:
 
     def test_the_settle_wait_is_clock_bounded(self, install, settle):
         clock, pumps = settle
-        install(FakeDrawingDoc(before=[FakeRef(True, 1)], after=[FakeRef(True, 1)]))
+        install(FakeDrawingDoc(before=[_ref(True, 1)], after=[_ref(True, 1)]))
         assert kernel.wrap(du.handler, [kernel.ReferencesFresh()])()["isError"] is True
         # samples at 0.00 0.25 0.50 0.75 1.00, then the bound stops it - never an open-ended poll
         assert clock.now == 1.0

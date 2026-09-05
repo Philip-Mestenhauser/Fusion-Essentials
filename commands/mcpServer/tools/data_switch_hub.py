@@ -2,8 +2,8 @@
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
 """MCP building block: list the user's Autodesk data hubs (action='list') and SWITCH the active one
-(action='switch', hub=<name|id>). The switch is best-effort - Data.activeHub is getter-only, so the
-assignment is verified by re-reading it, and a switch that takes closes every open document."""
+(action='switch', hub=<name|id>). The assignment is verified by re-reading activeHub, and a switch
+that takes closes every open document."""
 
 import adsk.core
 
@@ -77,8 +77,8 @@ def handler(action: str = "list", hub: str = "") -> dict:
         "note": f"'{tname}' is already the active hub - nothing to do.",
         })
 
-    # Data.activeHub is GETTER-ONLY, so the assignment below may raise OR silently no-op: it is
-    # attempted, then the active hub's id is re-read to verify it became the target.
+    # An assignment that returns is not an assignment that landed, so the active hub is re-read and
+    # the switch is judged by that read alone.
     assign_error = None
     try:
         data.activeHub = th
@@ -88,13 +88,12 @@ def handler(action: str = "list", hub: str = "") -> dict:
     new_active = safe(lambda: data.activeHub)
     new_id = safe(lambda: new_active.id) if new_active else None
     if new_id != tid:
+        now = (safe(lambda: new_active.name) or new_id) if new_active else None
         return error(
-            f"Could not switch to hub '{tname}': Fusion's API exposes Data.activeHub as read-only "
-            "(no public setter), so a programmatic hub switch isn't supported in this build"
-            + (f" (assignment raised: {assign_error})" if assign_error else
-        " (the assignment was accepted but the active hub did not change)")
-            + ". Switch hubs from the Fusion data panel (the hub dropdown), then retry the workflow. "
-            "The hub list above is still accurate for choosing the target.")
+            f"Could not switch to hub '{tname}' ({tid}): the re-read after the assignment shows the "
+            f"active hub as {now!r}, not the target"
+            + (f" - the assignment raised: {assign_error}" if assign_error else "")
+            + ". Switch hubs from the Fusion data panel (the hub dropdown), then retry.")
 
     return ok({
         "switched": True,
@@ -107,10 +106,9 @@ def handler(action: str = "list", hub: str = "") -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Attempt to SWITCH the active Autodesk data hub (to LIST hubs, use data_get(include=['hubs'])). "
-    "Fusion exposes Data.activeHub getter-only, so the switch is best-effort: it verifies the hub "
-    "actually changed and errors honestly if not - switch from the Fusion data panel instead. A "
-    "switch that DOES take effect CLOSES open documents and URNs are hub-scoped, so save first and "
+    "SWITCH the active Autodesk data hub (to LIST hubs, use data_get(include=['hubs'])). The "
+    "assignment is verified by re-reading the active hub, and errors if the re-read does not show "
+    "the target. A switch CLOSES every open document and URNs are hub-scoped, so save first and "
     "re-resolve projects/URNs with data_get."
 )
 
@@ -126,7 +124,7 @@ item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
     verification=Verification(
         kind="inline",
-        evidence_test="tests/unit/test_data_switch_hub.py::TestSwitchGetterOnly"
+        evidence_test="tests/unit/test_data_switch_hub.py::TestTheReReadDecides"
                       "::test_silent_noop_setter_reports_honest_error_not_false_success"))
 
 

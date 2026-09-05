@@ -11,40 +11,35 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import Viewport, load_tool
+from conftest import FakeApplication, MakeComp, MakeDesign, Viewport, load_tool
 
 gs = load_tool("view_screenshot")
 
 
 class FakeOcc:
+    """One occurrence in the isolation walk. Bespoke: its settable isLightBulbOn - the bulb the
+    whole helper is about - is not on the shared FakeOccurrence, so there is nothing to migrate onto;
+    the component it places IS the shared Component fake.
+
+    A real Occurrence always answers `component`; one whose read RAISES is an unresolved external
+    reference, which the shared census keeps out of this walk."""
+
     def __init__(self, name, on=True):
         self.name = name
         self.fullPathName = name
         self.isLightBulbOn = on
-        # A real Occurrence always answers `component`; one whose read RAISES is an unresolved
-        # external reference, which the shared census keeps out of the isolation walk.
-        self.component = SimpleNamespace(name=name.split(":")[0])
-
-
-class FakeRoot:
-    def __init__(self, occs):
-        self.allOccurrences = occs
-
-
-class FakeDesign:
-    def __init__(self, occs):
-        self.rootComponent = FakeRoot(occs)
+        self.component = MakeComp(name=name.split(":")[0])
 
 
 def _install(occs):
-    design = FakeDesign(occs)
-    app = type("A", (), {"activeProduct": design})()
+    design = MakeDesign(comp=MakeComp(name="Root", all_occurrences=occs))
+    app = FakeApplication(active_product=design)
     gs.app = app
     # The occurrence resolver runs through the shared OccurrenceRef kind, which reads _common.design()
     # -> _common.app. Point that at the same fake app so resolution and the isolate logic agree.
     gs._inputs._common.app = app
     import adsk.fusion
-    adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
+    adsk.fusion.Design.cast = lambda x: x if isinstance(x, MakeDesign) else None
     return design
 
 

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import load_tool, error_message, _NamedCollection
+from conftest import load_tool, error_message, MakeComp, _NamedCollection
 
 pg = load_tool("pmi_get")
 
@@ -47,7 +47,7 @@ def _gv(raw, tol=None):
 
 @pytest.fixture
 def two_notes(monkeypatch):
-    comp = SimpleNamespace(name="Root")
+    comp = MakeComp("Root")
     anns = [_ann("Note1"), _ann("Hole Note1", suffix="PMIHoleThreadNote", text="QTY",
                  quantity=2, isThrough=True, isThreaded=False,
                  diameter=SimpleNamespace(hasValue=True, value=0.6))]
@@ -77,7 +77,7 @@ class TestDefaultSlice:
         assert "out_of_date" not in rec and "suppressed" not in rec and "warning" not in rec
 
     def test_out_of_date_and_warning_surface(self, monkeypatch):
-        comp = SimpleNamespace(name="Root")
+        comp = MakeComp("Root")
         bad = _ann("Note9", out_of_date=True, warning="reference lost")
         monkeypatch.setattr(pg._common, "design", lambda: object())
         monkeypatch.setattr(pg._pmi, "walk_annotations",
@@ -123,7 +123,7 @@ class TestHoleValueUnits:
 
     @pytest.fixture
     def csink(self, monkeypatch):
-        comp = SimpleNamespace(name="Root")
+        comp = MakeComp("Root")
         ann = _ann("Hole Note1", suffix="PMIHoleThreadNote", text="QTY",
                    countersinkAngle=_gv(math.radians(90), _tol(math.radians(1))),
                    diameter=_gv(0.6, _tol(0.05)))
@@ -322,7 +322,7 @@ class TestDetailBuildersReadRealMembers:
 class TestHoleFlagReads:
     def test_an_unreadable_is_hole_omits_the_key_instead_of_claiming_true(self, monkeypatch):
         # A default of True publishes "this callout annotates a hole" as though it were measured.
-        comp = SimpleNamespace(name="Root")
+        comp = MakeComp("Root")
         ann = _ann("Hole Note1", suffix="PMIHoleThreadNote")
         monkeypatch.setattr(pg._common, "design", lambda: object())
         monkeypatch.setattr(pg._pmi, "walk_annotations",
@@ -331,7 +331,7 @@ class TestHoleFlagReads:
         assert "is_hole" not in rec
 
     def test_a_readable_is_hole_false_is_published(self, monkeypatch):
-        comp = SimpleNamespace(name="Root")
+        comp = MakeComp("Root")
         ann = _ann("Hole Note1", suffix="PMIHoleThreadNote", isHoleAnnotation=False)
         monkeypatch.setattr(pg._common, "design", lambda: object())
         monkeypatch.setattr(pg._pmi, "walk_annotations",
@@ -363,7 +363,7 @@ class TestRowCap:
         assert pg._row_cap(3) == 3
 
     def test_an_over_cap_request_is_not_refused_end_to_end(self, monkeypatch):
-        comp = SimpleNamespace(name="Root")
+        comp = MakeComp("Root")
         anns = [_ann(f"N{i}") for i in range(3)]
         monkeypatch.setattr(pg._common, "design", lambda: object())
         monkeypatch.setattr(pg._pmi, "walk_annotations",
@@ -374,7 +374,7 @@ class TestRowCap:
 
 class TestBoundsAndGuards:
     def test_truncates_at_max_results_but_counts_all(self, monkeypatch):
-        comp = SimpleNamespace(name="Root")
+        comp = MakeComp("Root")
         anns = [_ann(f"N{i}") for i in range(5)]
         monkeypatch.setattr(pg._common, "design", lambda: object())
         monkeypatch.setattr(pg._pmi, "walk_annotations",
@@ -468,7 +468,7 @@ class TestWalkHolesArePublished:
     published beside them, so a partial design is never handed over as the whole one."""
 
     def _rig(self, monkeypatch, holes):
-        comp = SimpleNamespace(name="Root")
+        comp = MakeComp("Root")
         anns = [_ann("N1"), _ann("N2")]
 
         def walk(d, stats=None):

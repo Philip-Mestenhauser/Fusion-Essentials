@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import load_tool, error_message
+from conftest import load_tool, error_message, MakeComp
 
 pe = load_tool("pmi_edit")
 
@@ -98,7 +98,7 @@ def _install_suppressed(rig, item, hits_after):
 @pytest.fixture
 def rig(monkeypatch):
     ann = _FakeAnn()
-    comp = SimpleNamespace(name="Root")
+    comp = MakeComp("Root")
     monkeypatch.setattr(pe._common, "design", lambda: object())
     monkeypatch.setattr(pe._pmi, "find_annotation", lambda d, n, c="": (ann, comp, None))
     monkeypatch.setattr(pe._pmi, "segments_markup", lambda a: "NEW")

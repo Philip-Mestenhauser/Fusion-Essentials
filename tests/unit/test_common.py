@@ -11,8 +11,8 @@ from types import SimpleNamespace
 import pytest
 
 import live_api_facts
-from conftest import (BRepBody, MakeComp, body_proxy, entity_proxy, load_tool, make_occurrence,
-                      make_source_document)
+from conftest import (BRepBody, MakeComp, _NamedCollection, body_proxy, entity_proxy, load_tool,
+                      make_occurrence, make_source_document)
 
 common = load_tool("_common")
 
@@ -187,24 +187,9 @@ class TestPtxyz:
         assert common.ptxyz(self._Pt(1.0, 2.0, True), 10.0) is None
 
 
-class _Coll:
-    def __init__(self, items):
-        self._items = list(items)
-    @property
-    def count(self):
-        return len(self._items)
-    def item(self, i):
-        return self._items[i] if 0 <= i < len(self._items) else None
-    def itemByName(self, name):
-        for it in self._items:
-            if it.name == name:
-                return it
-        return None
-
-
 class TestResultBodies:
     def _feature(self, bodies):
-        return type("F", (), {"bodies": _Coll(bodies)})()
+        return type("F", (), {"bodies": _NamedCollection(bodies)})()
 
     def test_empty_feature_bodies(self):
         assert common.result_bodies(self._feature([])) == []
@@ -311,24 +296,24 @@ class TestBodyFacts:
 class TestTargetSketch:
     def test_named_sketch_found(self):
         sk = type("Sk", (), {"name": "S1"})()
-        comp = type("C", (), {"sketches": _Coll([sk])})()
+        comp = type("C", (), {"sketches": _NamedCollection([sk])})()
         sketch, requested = common.target_sketch(comp, "S1")
         assert sketch is sk and requested == "S1"
 
     def test_named_sketch_not_found(self):
-        comp = type("C", (), {"sketches": _Coll([])})()
+        comp = type("C", (), {"sketches": _NamedCollection([])})()
         sketch, requested = common.target_sketch(comp, "Nope")
         assert sketch is None and requested == "Nope"
 
     def test_no_name_returns_most_recent(self):
         sk0 = type("Sk", (), {"name": "S0"})()
         sk1 = type("Sk", (), {"name": "S1"})()
-        comp = type("C", (), {"sketches": _Coll([sk0, sk1])})()
+        comp = type("C", (), {"sketches": _NamedCollection([sk0, sk1])})()
         sketch, requested = common.target_sketch(comp, "")
         assert sketch is sk1 and requested == ""
 
     def test_no_name_no_sketches_is_none(self):
-        comp = type("C", (), {"sketches": _Coll([])})()
+        comp = type("C", (), {"sketches": _NamedCollection([])})()
         sketch, requested = common.target_sketch(comp, "")
         assert sketch is None and requested == ""
 
@@ -343,7 +328,7 @@ def _comp_with_sketches(name, sketch_names=()):
     # bring their own 'Frame'), and the token is the only thing that tells them apart: a fake without
     # one makes same_component fall back to the name and report those two as ONE component.
     sks = [type("Sk", (), {"name": n})() for n in sketch_names]
-    return type("C", (), {"name": name, "sketches": _Coll(sks),
+    return type("C", (), {"name": name, "sketches": _NamedCollection(sks),
                           "entityToken": f"comp-{name}-{next(_comp_serial)}"})()
 
 
@@ -355,7 +340,7 @@ def _design_with(root, subs, active=None, occurrences=()):
     if occurrences:
         root.allOccurrences = list(occurrences)
     return type("D", (), {"rootComponent": root, "activeComponent": active or root,
-                          "allComponents": _Coll([root] + list(subs))})()
+                          "allComponents": _NamedCollection([root] + list(subs))})()
 
 
 def _placement(path, comp):
@@ -636,7 +621,7 @@ class TestFindSketch:
         root = _comp_with_sketches("Root", ["Base"])
         other = _comp_with_sketches("Elsewhere", ["Unrelated"])
         d = type("D", (), {"rootComponent": root, "activeComponent": root,
-                           "allComponents": _Coll([other])})()
+                           "allComponents": _NamedCollection([other])})()
         hits = common.find_sketches_by_name(d, "Base")
         assert len(hits) == 1 and hits[0][0] is root.sketches.item(0)
 
@@ -901,7 +886,7 @@ def _xref_twin(name, sketch_names, token=_XREF_TOKEN):
     misbehaves. What the collision IS, and where it was read, is recorded in
     _common.component_placements - this fixture models it and claims no measurement of its own."""
     sks = [type("Sk", (), {"name": n})() for n in sketch_names]
-    return type("C", (), {"name": name, "sketches": _Coll(sks), "entityToken": token})()
+    return type("C", (), {"name": name, "sketches": _NamedCollection(sks), "entityToken": token})()
 
 
 def _design_with_occs(root, subs, occs):
@@ -1097,7 +1082,7 @@ class TestFindSketchIn:
 
     def test_a_component_whose_name_will_not_read_is_not_given_one(self):
         root = _comp_with_sketches("Root", ["Sketch2"])
-        blind = type("C", (), {"sketches": _Coll([]), "entityToken": "blind",
+        blind = type("C", (), {"sketches": _NamedCollection([]), "entityToken": "blind",
                                "name": property(lambda self: (_ for _ in ()).throw(
                                    RuntimeError("no name")))})()
         sk, err = common.find_sketch_in(_design_with(root, []), "Nope", blind, "whatever")
@@ -1176,7 +1161,7 @@ class TestAllSketchNames:
     def test_a_repeated_name_whose_owner_will_not_read_stays_bare(self):
         # Nothing measured to qualify with - the honest form is the bare name, not "S (None)".
         class _NamelessComp:
-            sketches = _Coll([type("Sk", (), {"name": "S"})()])
+            sketches = _NamedCollection([type("Sk", (), {"name": "S"})()])
 
             @property
             def name(self):
@@ -1195,15 +1180,15 @@ class TestAllSketchNames:
 class TestResolveEntityRef:
     class _Curves:
         def __init__(self, lines=(), arcs=(), circles=()):
-            self.sketchLines = _Coll(list(lines))
-            self.sketchArcs = _Coll(list(arcs))
-            self.sketchCircles = _Coll(list(circles))
+            self.sketchLines = _NamedCollection(list(lines))
+            self.sketchArcs = _NamedCollection(list(arcs))
+            self.sketchCircles = _NamedCollection(list(circles))
 
     def _sketch(self):
         line = type("Line", (), {"name": "L0"})()
         return type("Sk", (), {
             "sketchCurves": self._Curves(lines=[line]),
-            "sketchPoints": _Coll([type("Pt", (), {"name": "P0"})()]),
+            "sketchPoints": _NamedCollection([type("Pt", (), {"name": "P0"})()]),
         })()
 
     def test_resolves_line_by_index(self):
@@ -1797,7 +1782,7 @@ class TestComponentContains:
         del outer.allOccurrences
         good = _PlainOcc("Bolt:1")
         good.component.entityToken = "TOKEN:Bolt"
-        outer.occurrences = _OccColl([_BrokenOcc("45740"), good])
+        outer.occurrences = _NamedCollection([_BrokenOcc("45740"), good])
         walk = common.component_walk(outer)
         assert walk.method == "recursed" and walk.complete is True and len(walk.broken) == 1
         assert common.component_contains(outer, _root(name="X", token="TOKEN:X")) is None
@@ -1818,7 +1803,7 @@ class TestComponentContains:
         child = _PlainOcc("Mid:1")
         child.component.entityToken = "TOKEN:Mid"
         child.childOccurrences = _RaisingColl()
-        outer.occurrences = _OccColl([child])
+        outer.occurrences = _NamedCollection([child])
         assert common.component_contains(outer, _root(name="X", token="TOKEN:X")) is None
 
     def test_none_contains_UNKNOWN(self):
@@ -1836,37 +1821,15 @@ _PATH_INVALID = "2 : InternalValidationError : path.valid()"
 _WALK_RAISE = "2 : InternalValidationError : occ"
 
 
-class _OccColl:
-    """The count/item collection protocol, also directly iterable (allOccurrences is list()ed)."""
-    def __init__(self, items):
-        self._i = list(items)
-
-    @property
-    def count(self):
-        return len(self._i)
-
-    def item(self, i):
-        return self._i[i]
-
-    def __iter__(self):
-        return iter(self._i)
-
-
-class _RaisingColl:
+def _RaisingColl():
     """A collection whose COUNT itself raises - unreadable, which is not the same as empty."""
-    @property
-    def count(self):
-        raise RuntimeError(_WALK_RAISE)
-
-    def item(self, i):
-        raise RuntimeError(_WALK_RAISE)
-
-    def __iter__(self):
-        raise RuntimeError(_WALK_RAISE)
+    return _NamedCollection(raises=_WALK_RAISE)
 
 
 class _BrokenOcc:
-    """The measured specimen - an occurrence whose source project is archived. Only `name` reads,
+    """The measured specimen - an occurrence whose source project is archived. Bespoke: the isValid
+    and isLightBulbOn reads the tests below hold to True are not on the shared FakeOccurrence, so
+    there is nothing to migrate them onto. Only `name` reads,
     and it is the only identity a caller can publish. Every other signal a walk might gate on LIES:
     isReferencedComponent reads False where a LIVE xref reads True; documentReference raises the
     SAME "not referencing an external component" text an ordinary local occurrence gives, so it
@@ -1905,7 +1868,8 @@ class _BrokenOcc:
 class _PlainOcc:
     """An ORDINARY LOCAL occurrence - the trap. isReferencedComponent is False and
     documentReference raises the same text the broken one gives, so only occ.component tells them
-    apart."""
+    apart. Bespoke: a test below REASSIGNS childOccurrences to break one subtree mid-walk, and the
+    shared FakeOccurrence answers that read through a getter with no setter."""
     def __init__(self, name, children=(), broken_children=()):
         self.name = name
         self.fullPathName = name
@@ -1913,9 +1877,9 @@ class _PlainOcc:
         # component.occurrences is the SUPERSET: it holds the unresolved child too.
         self.component = types.SimpleNamespace(
             name=name.split(":")[0],
-            occurrences=_OccColl(list(broken_children) + list(children)))
+            occurrences=_NamedCollection(list(broken_children) + list(children)))
         # childOccurrences DROPS an unresolved child - its assembly path is invalid.
-        self.childOccurrences = _OccColl(children)
+        self.childOccurrences = _NamedCollection(children)
 
     @property
     def documentReference(self):
@@ -1927,7 +1891,7 @@ def _walk_design(top=(), broken_top=(), fast=None):
     root.occurrences holds the component-local superset."""
     class _Root:
         name = "Root"
-        occurrences = _OccColl(list(broken_top) + list(top))
+        occurrences = _NamedCollection(list(broken_top) + list(top))
 
         @property
         def allOccurrences(self):
@@ -2073,7 +2037,7 @@ class TestOccurrenceWalk:
     def test_component_walk_runs_over_ANY_component_subtree(self):
         class _Sub:
             name = "Sub"
-            occurrences = _OccColl([_PlainOcc("Bolt:1")])
+            occurrences = _NamedCollection([_PlainOcc("Bolt:1")])
 
             @property
             def allOccurrences(self):
@@ -2117,7 +2081,7 @@ class TestRootBodyAdvisory:
 def _comp_with_meshes(name, mesh_names=(), meshes=None):
     """A component whose meshBodies collection holds the named meshes. `meshes` overrides the
     collection outright (a raiser / a collection yielding None) for the degradation tests."""
-    coll = _Coll([type("M", (), {"name": n})() for n in mesh_names]) if meshes is None else meshes
+    coll = _NamedCollection([type("M", (), {"name": n})() for n in mesh_names]) if meshes is None else meshes
     return type("C", (), {"name": name, "meshBodies": coll})()
 
 
@@ -2151,7 +2115,7 @@ class TestAllMeshes:
         assert [m.name for _c, m in pairs] == ["ScanMesh"]
 
     def test_a_none_item_is_skipped(self):
-        root = _comp_with_meshes("Root", meshes=_Coll([None, type("M", (), {"name": "Real"})()]))
+        root = _comp_with_meshes("Root", meshes=_NamedCollection([None, type("M", (), {"name": "Real"})()]))
         assert [m.name for _c, m in common.all_meshes(_design_with(root, []))] == ["Real"]
 
     def test_no_meshes_anywhere_is_empty(self):
@@ -2335,7 +2299,7 @@ def _row(name, health, token=None):
 
 
 def _timeline(*rows):
-    return type("D", (), {"timeline": _Coll(rows)})()
+    return type("D", (), {"timeline": _NamedCollection(rows)})()
 
 
 class TestTimelineHealth:

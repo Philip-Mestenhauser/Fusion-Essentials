@@ -32,6 +32,8 @@ _MODE_GUARD = _inputs.ModeGuard(
 
 _ERROR_HEALTH = 2  # adsk.fusion.FeatureHealthStates.ErrorFeatureHealthState (see _common.timeline_health)
 
+_UNREAD = object()      # an activeOccurrence read that RAISED - distinct from one that reads None
+
 
 def _as_names(raw):
     """A clean list of names from a JSON array or a comma-separated string; [] when empty."""
@@ -327,6 +329,7 @@ def handler(document_id: str = "", into_component: str = "",
     # deriveFeatures collection built the input: without activation a derive "into" a non-active
     # component lands as a ROOT sibling. So nesting = activate the target, add, restore.
     prev_active = safe(lambda: design.activeComponent.name)
+    active_after = _UNREAD
     if into_occ is not None:
         if not safe(lambda: into_occ.activate(), False):
             return error(f"Could not activate '{into_component}' to receive the derive "
@@ -338,11 +341,11 @@ def handler(document_id: str = "", into_component: str = "",
             return error(f"Derive failed: {e}.")
     finally:
         if into_occ is not None:
-            # ANY falsy answer takes the fallback: a False return and a raise are handled identically
-            # because the negative is unforceable live (both measured attempts - a normal call and a
-            # background-document call - returned True), so the two cannot be told apart in practice.
-            if not safe(lambda: design.activateRootComponent(), False):
-                safe(lambda: into_occ.deactivate())
+            # activateRootComponent() answers True even when the root is ALREADY active, so its
+            # answer cannot separate "came back" from "was already there" - only the
+            # activeOccurrence read-back can, and that is what the payload reports.
+            safe(lambda: design.activateRootComponent())
+            active_after = safe(lambda: design.activeOccurrence, _UNREAD)
     if not feature:
         return error(_common.no_feature_error(design, "Derive",
                                               "(deriveFeatures.add returned nothing.)"))
@@ -446,11 +449,24 @@ def handler(document_id: str = "", into_component: str = "",
         result["excluded"] = ", ".join(excl_comp_names + excl_body_names)
     if param_warning:
         result["parameter_warning"] = param_warning
-    if into_occ is not None and prev_active and prev_active != (safe(lambda: root.name) or ""):
-        result["edit_target_note"] = (f"the active edit target was '{prev_active}' before this "
-                                      "call and is now ROOT (nesting requires activating the "
-                                      "target; restoration returns to root). Re-activate with "
-                                      "design_activate_component if needed.")
+    if into_occ is not None:
+        if active_after is not _UNREAD:
+            result["active_occurrence_after"] = (
+                None if active_after is None
+                else safe(lambda: active_after.fullPathName) or safe(lambda: active_after.name)
+                or "(unnamed occurrence)")
+        if active_after is not None:
+            reads = ("activeOccurrence did not read" if active_after is _UNREAD
+                     else f"activeOccurrence reads {result['active_occurrence_after']!r}")
+            result["root_restore_note"] = (
+                f"nesting activated {comp_desc} and the restore to root ran, but {reads} - the "
+                "return to ROOT is not confirmed. Set the edit target with "
+                "design_activate_component(occurrence='root').")
+        elif prev_active and prev_active != (safe(lambda: root.name) or ""):
+            result["edit_target_note"] = (f"the active edit target was '{prev_active}' before this "
+                                          "call and reads ROOT now (nesting activates the target, "
+                                          "then returns to root). Re-activate with "
+                                          "design_activate_component if needed.")
     return ok(result)
 
 

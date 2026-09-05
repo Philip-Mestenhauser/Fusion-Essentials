@@ -17,7 +17,7 @@ import pytest
 
 import adsk  # the mock package conftest installed at import time
 import live_api_facts
-from conftest import load_tool
+from conftest import FakeDataFile, FakeFusionDocument, MakeDesign, load_tool
 
 
 # ── a complete fake adsk.drawing (this file's needs) ─────────────────────────
@@ -219,33 +219,22 @@ def _fake_drawing_namespace(monkeypatch):
     monkeypatch.setitem(sys.modules, "adsk.drawing", _DRAWING)
 
 
-# ── design / document fakes ──────────────────────────────────────────────────
+# ── the design and the cloud file behind it ──────────────────────────────────
 
-class FakeDataFile:
-    def __init__(self, name="Widget v1", file_id="urn:adsk.wipprod:dm.lineage:WIDGET", ext="f2d"):
-        self.name = name
-        self.id = file_id
-        self.versionId = file_id + "?version=1"
-        self.fileExtension = ext
-
-
-class FakeSrcDoc:
-    def __init__(self, datafile):
-        self.dataFile = datafile
-
-
-class FakeDesign:
-    def __init__(self, doc):
-        self.parentDocument = doc
+def _datafile(name="Widget v1", file_id="urn:adsk.wipprod:dm.lineage:WIDGET", ext="f2d"):
+    """One cloud file at this file's defaults - the id/versionId/extension a created drawing is
+    published from."""
+    return FakeDataFile(name=name, file_id=file_id, version_id=file_id + "?version=1",
+                        extension=ext)
 
 
 def _install(*, datafile=True, result_df="default", raise_on_input=False, raise_on_create=False):
-    src_df = FakeDataFile() if datafile else None
-    design = FakeDesign(FakeSrcDoc(src_df))
+    src_df = _datafile() if datafile else None
+    design = MakeDesign(parent_document=FakeFusionDocument(data_file=src_df))
     dc._common.design = lambda: design
 
     if result_df == "default":
-        result_df = FakeDataFile("Widget Drawing v1")
+        result_df = _datafile("Widget Drawing v1")
     dm = FakeDM(result_df, raise_on_input=raise_on_input, raise_on_create=raise_on_create)
     FakeDrawingManager._instance = dm
 
@@ -325,7 +314,7 @@ class TestGuards:
 
     def test_missing_file_id_on_created_drawing_errors(self):
         # A created drawing whose file_id can't be read can't be located for export.
-        df = FakeDataFile("Widget Drawing v1")
+        df = _datafile("Widget Drawing v1")
         df.id = None
         _install(result_df=df)
         res = dc.handler()
@@ -592,7 +581,7 @@ class TestEnumFamilyResolution:
     def test_an_absent_base_document_family_fails_a_template_create(self, monkeypatch):
         _, dm = _install()
         monkeypatch.setattr(dc, "_resolve_data_file",
-                            lambda raw: (FakeDataFile("Shop Template"), raw, [raw]))
+                            lambda raw: (_datafile("Shop Template"), raw, [raw]))
         monkeypatch.delattr(_DRAWING, "BaseDocumentTypes")
         res = dc.handler(template_file="urn:x")
         assert res["isError"] is True
@@ -689,7 +678,7 @@ class TestCreationMode:
 
     def test_manual_with_a_resolved_template_uses_manual_mode(self, monkeypatch):
         _, dm = _install()
-        template_df = FakeDataFile("Smart Template", file_id="urn:adsk.wipprod:dm.lineage:TPL")
+        template_df = _datafile("Smart Template", file_id="urn:adsk.wipprod:dm.lineage:TPL")
         monkeypatch.setattr(dc, "_resolve_data_file", lambda raw: (template_df, raw, [raw]))
         out = _payload(dc.handler(creation_mode="manual", template_file="urn:x"))
         assert dm.mode == live_api_facts.ENUMS["drawing.DrawingCreationModes"]["ManualDrawingCreationMode"]
@@ -699,7 +688,7 @@ class TestCreationMode:
     def test_manual_note_states_the_template_gate(self, monkeypatch):
         _, dm = _install()
         monkeypatch.setattr(dc, "_resolve_data_file",
-                            lambda raw: (FakeDataFile("Smart Template"), raw, [raw]))
+                            lambda raw: (_datafile("Smart Template"), raw, [raw]))
         out = _payload(dc.handler(creation_mode="manual", template_file="urn:x"))
         assert "view placeholder" in out["note"]
 
@@ -817,7 +806,7 @@ class TestTemplateFile:
     # leak into later tests; monkeypatch undoes itself automatically.
     def test_template_file_resolves_and_sets_base_document_type(self, monkeypatch):
         _, dm = _install()
-        template_df = FakeDataFile("Shop Template", file_id="urn:adsk.wipprod:dm.lineage:TEMPLATE")
+        template_df = _datafile("Shop Template", file_id="urn:adsk.wipprod:dm.lineage:TEMPLATE")
         monkeypatch.setattr(dc, "_resolve_data_file", lambda raw: (template_df, raw, [raw]))
         out = _payload(dc.handler(template_file="urn:adsk.wipprod:dm.lineage:TEMPLATE"))
         assert dm.input_obj.baseDocumentType == "TEMPLATE"

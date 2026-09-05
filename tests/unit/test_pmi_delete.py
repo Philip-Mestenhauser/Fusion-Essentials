@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import load_tool, error_message
+from conftest import load_tool, error_message, MakeComp
 
 pd = load_tool("pmi_delete")
 
@@ -41,7 +41,7 @@ class _DeadHandle(_FakeAnn):
 @pytest.fixture
 def rig(monkeypatch):
     ann = _FakeAnn()
-    comp = SimpleNamespace(name="Root")
+    comp = MakeComp("Root")
     # holes = (components_unreadable, items_unreadable) the post-delete re-walk reports; (0, 0) is
     # a COMPLETE walk, the only shape in which zero hits proves the annotation is gone.
     state = SimpleNamespace(ann=ann, comp=comp, monkeypatch=monkeypatch, holes=(0, 0))

@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import Camera, FakePoint, Viewport, load_tool
+from conftest import Camera, FakeApplication, FakePoint, Viewport, load_tool
 
 cv = load_tool("view_screenshot_multi")
 
@@ -89,7 +89,7 @@ def rig(monkeypatch):
     failures, restore the camera); the orient/capture mechanics are pinned in
     test__view_common.py, so they are stubbed here per the router-test idiom."""
     vp = _viewport()
-    monkeypatch.setattr(cv, "app", SimpleNamespace(activeViewport=vp))
+    monkeypatch.setattr(cv, "app", FakeApplication(active_viewport=vp))
     applied, captures = [], []
 
     def fake_apply(viewport, name):
@@ -289,7 +289,7 @@ def rig_real_orient(monkeypatch):
     construction is redirected to plain fakes so the camera math runs on real floats."""
     import adsk.core
     vp = _viewport()
-    monkeypatch.setattr(cv, "app", SimpleNamespace(activeViewport=vp))
+    monkeypatch.setattr(cv, "app", FakeApplication(active_viewport=vp))
     monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: FakePoint(x, y, z))
     monkeypatch.setattr(adsk.core.Vector3D, "create", lambda x, y, z: (x, y, z))
     cam_types = []

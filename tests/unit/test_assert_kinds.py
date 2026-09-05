@@ -16,7 +16,14 @@ import types
 
 import pytest
 
-from conftest import load_tool
+from conftest import (
+    FakeApplication,
+    FakeDocumentReference,
+    FakeFusionDocument,
+    FakeTimeline,
+    FakeTimelineObject,
+    load_tool,
+)
 
 kernel = load_tool("_assert")
 
@@ -158,7 +165,7 @@ class TestWrapContract:
 
 class TestVersionAdvanced:
     def _app(self, modified):
-        return types.SimpleNamespace(activeDocument=types.SimpleNamespace(isModified=modified))
+        return FakeApplication(active_document=FakeFusionDocument(is_modified=modified))
 
     def test_false_success_still_modified_bites(self, monkeypatch):
         monkeypatch.setattr(kernel, "app", self._app(True))
@@ -180,21 +187,26 @@ class TestVersionAdvanced:
 
     def test_an_unreadable_modified_flag_is_disclosed_not_silently_passed(self, monkeypatch):
         # the gate could not run; the payload must SAY so rather than look like a confirmed save
-        class _Doc:
+        class _Doc(FakeFusionDocument):
+            """The dirty flag that will not read - a declared state, no measurement row carries it."""
+
             @property
             def isModified(self):
                 raise RuntimeError("the document is gone")
 
-        monkeypatch.setattr(kernel, "app", types.SimpleNamespace(activeDocument=_Doc()))
+            @isModified.setter
+            def isModified(self, value):
+                pass
+
+        monkeypatch.setattr(kernel, "app", FakeApplication(active_document=_Doc()))
         out = _payload(kernel.wrap(lambda **kw: _ok({"saved": True}), [kernel.VersionAdvanced()])())
         assert out["version_confirmed"] is False
 
 
 class TestReferencesFresh:
     def _app(self, flags):
-        refs = [types.SimpleNamespace(isOutOfDate=f) for f in flags]
-        coll = types.SimpleNamespace(count=len(refs), item=lambda i: refs[i])
-        return types.SimpleNamespace(activeDocument=types.SimpleNamespace(documentReferences=coll))
+        refs = [FakeDocumentReference(out_of_date=f) for f in flags]
+        return FakeApplication(active_document=FakeFusionDocument(references=refs))
 
     def test_surviving_stale_reference_bites(self, monkeypatch):
         monkeypatch.setattr(kernel, "app", self._app([False, True]))
@@ -212,12 +224,18 @@ class TestReferencesFresh:
         assert out["stale_references_after"] == 0
 
     def test_an_unreadable_reference_walk_is_disclosed_not_silently_passed(self, monkeypatch):
-        class _Doc:
+        class _Doc(FakeFusionDocument):
+            """The reference walk that will not answer - not the same state as no references."""
+
             @property
             def documentReferences(self):
                 raise RuntimeError("references unavailable")
 
-        monkeypatch.setattr(kernel, "app", types.SimpleNamespace(activeDocument=_Doc()))
+            @documentReferences.setter
+            def documentReferences(self, value):
+                pass
+
+        monkeypatch.setattr(kernel, "app", FakeApplication(active_document=_Doc()))
         monkeypatch.setattr(kernel, "_REFERENCE_SETTLE_S", 0.0)
         out = _payload(kernel.wrap(lambda **kw: _ok({"updated": True}), [kernel.ReferencesFresh()])())
         assert out["references_confirmed"] is False
@@ -279,23 +297,9 @@ class TestDeliverablesExist:
         assert out["deliverables_verified"] == 1
 
 
-class _FakeTimelineItem:
-    def __init__(self, name, health, msg=""):
-        self.name = name
-        self.healthState = health
-        self.errorOrWarningMessage = msg
-
-
-class _FakeTimeline:
-    def __init__(self, items=None):
-        self.items = list(items or [])
-
-    @property
-    def count(self):
-        return len(self.items)
-
-    def item(self, i):
-        return self.items[i]
+def _tl_item(name, health, msg=""):
+    """One timeline entry at an explicit health state - the pair every compute verdict reads."""
+    return FakeTimelineObject(name=name, health=health, message=msg)
 
 
 class TestFeatureHealthy:
@@ -305,22 +309,22 @@ class TestFeatureHealthy:
         return p
 
     def test_healthy_added_feature_confirms_with_count(self, monkeypatch):
-        tl = _FakeTimeline([_FakeTimelineItem("Extrude1", 0)])
+        tl = FakeTimeline([_tl_item("Extrude1", 0)])
         p = self._wire(monkeypatch, tl)
 
         def handler(**kw):
-            tl.items.append(_FakeTimelineItem("Extrude2", 0))
+            tl._items.append(_tl_item("Extrude2", 0))
             return _ok({"extruded": True})
 
         out = _payload(kernel.wrap(handler, [p])())
         assert out["features_verified"] == 1
 
     def test_compute_failed_feature_bites_with_name_and_message(self, monkeypatch):
-        tl = _FakeTimeline()
+        tl = FakeTimeline()
         p = self._wire(monkeypatch, tl)
 
         def handler(**kw):
-            tl.items.append(_FakeTimelineItem("Fillet1", 2, "radius too large for the geometry"))
+            tl._items.append(_tl_item("Fillet1", 2, "radius too large for the geometry"))
             return _ok({"filleted": True})
 
         res = kernel.wrap(handler, [p])()
@@ -356,11 +360,11 @@ class TestFeatureHealthy:
         sentence = ("Can't resolve some component positions because there are conflicts with "
                     "assembly relationships in the design.\n\nInspect existing assembly relationships.")
         blob = ("Compute FailedChildJ".join([sentence] * 4))
-        tl = _FakeTimeline()
+        tl = FakeTimeline()
         p = self._wire(monkeypatch, tl)
 
         def handler(**kw):
-            tl.items.append(_FakeTimelineItem("ChildJ", 1, blob))
+            tl._items.append(_tl_item("ChildJ", 1, blob))
             return _ok({"created": True})
 
         out = _payload(kernel.wrap(handler, [p])())
@@ -373,11 +377,11 @@ class TestFeatureHealthy:
                              "existing assembly relationships.")
 
     def test_compute_warning_is_evidence_not_failure(self, monkeypatch):
-        tl = _FakeTimeline()
+        tl = FakeTimeline()
         p = self._wire(monkeypatch, tl)
 
         def handler(**kw):
-            tl.items.append(_FakeTimelineItem("Hole1", 1, "hole extends outside the body"))
+            tl._items.append(_tl_item("Hole1", 1, "hole extends outside the body"))
             return _ok({"holed": True})
 
         out = _payload(kernel.wrap(handler, [p])())
@@ -385,18 +389,18 @@ class TestFeatureHealthy:
         assert out["feature_warnings"] == ["Hole1: hole extends outside the body"]
 
     def test_only_items_added_by_the_call_are_gated(self, monkeypatch):
-        tl = _FakeTimeline([_FakeTimelineItem("OldBroken", 2, "an old unrelated break")])
+        tl = FakeTimeline([_tl_item("OldBroken", 2, "an old unrelated break")])
         p = self._wire(monkeypatch, tl)
 
         def handler(**kw):
-            tl.items.append(_FakeTimelineItem("Combine1", 0))
+            tl._items.append(_tl_item("Combine1", 0))
             return _ok({"combined": True})
 
         out = _payload(kernel.wrap(handler, [p])())
         assert out["features_verified"] == 1    # a break present before the call is not gated here
 
     def test_no_new_timeline_items_skips_silently(self, monkeypatch):
-        tl = _FakeTimeline([_FakeTimelineItem("Old1", 0)])
+        tl = FakeTimeline([_tl_item("Old1", 0)])
         p = self._wire(monkeypatch, tl)
         out = _payload(kernel.wrap(lambda **kw: _ok({"done": True}), [p])())
         assert "features_verified" not in out   # nothing added -> nothing gated
@@ -411,7 +415,7 @@ class TestFeatureHealthy:
         assert "features_verified" not in out
 
     def test_an_unreadable_timeline_count_is_disclosed(self, monkeypatch):
-        class _PoisonCount(_FakeTimeline):
+        class _PoisonCount(FakeTimeline):
             @property
             def count(self):
                 raise RuntimeError("timeline unavailable inside a base-feature scope")
@@ -589,9 +593,9 @@ class TestComputeFailureReaders:
         assert out == "x" * kernel._MESSAGE_LIMIT + " ..."
 
     def test_classifier_labels_error_warning_and_healthy(self):
-        assert kernel.compute_failure(_FakeTimelineItem("F", 2, "bad")) == ("error", "bad")
-        assert kernel.compute_failure(_FakeTimelineItem("F", 1, "iffy")) == ("warning", "iffy")
-        assert kernel.compute_failure(_FakeTimelineItem("F", 0, "")) is None
+        assert kernel.compute_failure(_tl_item("F", 2, "bad")) == ("error", "bad")
+        assert kernel.compute_failure(_tl_item("F", 1, "iffy")) == ("warning", "iffy")
+        assert kernel.compute_failure(_tl_item("F", 0, "")) is None
 
     def test_an_unreadable_state_is_no_verdict(self):
         # A health state that will not read is not a failure AND not a pass - the caller decides.
@@ -615,8 +619,8 @@ class TestComputeFailureReaders:
         class _Absent:
             """The measured AsBuiltJoint shape: no healthState attribute at all."""
 
-        assert kernel.health_state_read(_FakeTimelineItem("F", 0, "")) is True
-        assert kernel.health_state_read(_FakeTimelineItem("F", 2, "bad")) is True
+        assert kernel.health_state_read(_tl_item("F", 0, "")) is True
+        assert kernel.health_state_read(_tl_item("F", 2, "bad")) is True
         assert kernel.health_state_read(_Blind()) is False
         assert kernel.health_state_read(_Absent()) is False
         assert kernel.health_state_read(None) is False
@@ -636,7 +640,7 @@ class TestComputeState:
             ent.healthState = own_health
             ent.errorOrWarningMessage = own_msg
         if tl_health is not None:
-            ent.timelineObject = _FakeTimelineItem("E", tl_health, tl_msg)
+            ent.timelineObject = _tl_item("E", tl_health, tl_msg)
         return ent
 
     def test_a_failed_entity_answers_broken_and_hands_back_the_failure(self):
@@ -918,16 +922,20 @@ class TestFileLanded:
         assert "file_path" in res["message"]
 
 
-class _PoisonHealthyItem:
+class _PoisonHealthyItem(FakeTimelineObject):
     """A HEALTHY item whose errorOrWarningMessage getter RAISES - measured on a fresh
     AssemblyConstraint (and a caught adsk error has rollback risk in some contexts), which is
     why the walk reads the message only inside the unhealthy branches."""
     def __init__(self, name):
-        self.name = name
-        self.healthState = 0
+        FakeTimelineObject.__init__(self, name=name, health=0)
+
     @property
     def errorOrWarningMessage(self):
         raise RuntimeError("InternalValidationError on a healthy item")
+
+    @errorOrWarningMessage.setter
+    def errorOrWarningMessage(self, value):
+        pass
 
 
 class TestCheckInputKeys:
@@ -972,24 +980,24 @@ class TestCheckInputKeys:
 
 class TestPoisonGetterOnHealthyItems:
     def test_healthy_walk_never_reads_the_message_getter(self, monkeypatch):
-        tl = _FakeTimeline([_PoisonHealthyItem("Constraint1")])
+        tl = FakeTimeline([_PoisonHealthyItem("Constraint1")])
         p = kernel.FeatureHealthy()
         monkeypatch.setattr(p, "_timeline", lambda: tl)
 
         def handler(**kw):
-            tl.items.append(_PoisonHealthyItem("Constraint2"))
+            tl._items.append(_PoisonHealthyItem("Constraint2"))
             return _ok({"done": True})
 
         out = _payload(kernel.wrap(handler, [p])())
         assert out["features_verified"] == 1        # a raise here would have failed the wrap
 
     def test_unhealthy_item_still_gets_its_message_read(self, monkeypatch):
-        tl = _FakeTimeline()
+        tl = FakeTimeline()
         p = kernel.FeatureHealthy()
         monkeypatch.setattr(p, "_timeline", lambda: tl)
 
         def handler(**kw):
-            tl.items.append(_FakeTimelineItem("Broken1", 2, "No target body"))
+            tl._items.append(_tl_item("Broken1", 2, "No target body"))
             return _ok({"done": True})
 
         res = kernel.wrap(handler, [p])()

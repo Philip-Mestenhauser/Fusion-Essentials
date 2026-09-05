@@ -12,6 +12,9 @@ from conftest import (
     BRepBody,
     BRepFace,
     FakePoint,
+    FakeSelection,
+    FakeSelections,
+    FakeUserInterface,
     FakeVector3D,
     Plane,
     load_tool,
@@ -25,32 +28,9 @@ def _payload(result):
 
 
 def _fake_ui(entities=()):
-    """activeSelections (clear/count/item) - the surface the read touches."""
-    class _Sel:
-        def __init__(self, e):
-            self.entity = e
-            self.point = FakePoint(0, 0, 0)
-
-    class _Sels:
-        def __init__(self, es):
-            self._es = [_Sel(e) for e in es]
-
-        @property
-        def count(self):
-            return len(self._es)
-
-        def item(self, i):
-            return self._es[i]
-
-        def clear(self):
-            self._es = []
-            return True
-
-    class _UI:
-        def __init__(self, es):
-            self.activeSelections = _Sels(es)
-
-    return _UI(list(entities))
+    """A UserInterface whose activeSelections holds one picked entity per argument."""
+    picks = [FakeSelection(entity=e, point=FakePoint(0, 0, 0)) for e in entities]
+    return FakeUserInterface(FakeSelections(picks))
 
 
 # ── handler 'require' mismatch flagging ────────────────────────────────────

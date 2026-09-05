@@ -1,11 +1,10 @@
 """Unit tests for ``data_switch_hub.py`` - list Autodesk data hubs and switch the active one.
 
-Switching hubs is a real need (templates/parts live on different TeamHubs). The Fusion API exposes
-app.data.dataHubs (reliable) but Data.activeHub is GETTER-ONLY, so 'switch' is best-effort: it
-attempts the assignment, verifies the active hub actually changed, and returns an honest error if
-not. Covers: list (with is_active flag), switch by name + by id when the setter works, the
-unknown-hub guard, the already-active no-op, the close-docs warning, AND the getter-only reality
-(silent-noop + raising setters must yield an honest error, never a false switched:True).
+Switching hubs is a real need (templates/parts live on different TeamHubs). The assignment to
+Data.activeHub LANDS live, so the landing setter is the default here and 'switch' is judged by the
+re-read of the active hub that follows it. Covers: list (with is_active flag), switch by name + by
+id, the unknown-hub guard, the already-active no-op, the close-docs warning, AND the refusal an
+assignment the re-read does not confirm must produce - never a false switched:True.
 """
 
 import json
@@ -119,39 +118,42 @@ class TestSwitch:
         assert res["isError"] is True and "action" in res["message"]
 
 
-# ── the getter-only reality ─────────────────────────────────────────────────────────────────────
+# ── the re-read decides ──────────────────────────────────────────────────────────────────────────
 #
-# Data.activeHub is documented GETTER-ONLY. On a real Fusion the assignment either raises or silently
-# no-ops, so the active hub never actually changes. The tool must NOT report switched:True in that
-# case - it must verify the change and, if it didn't take, return an honest, actionable error. These
-# simulate both getter-only shapes.
+# The assignment LANDS live, so a hub that never becomes active is a DECLARED state - and the one
+# the verify-by-re-reading shape exists for: switched:True may only be reported when the re-read
+# shows the target, whether the assignment returned quietly or raised.
 
-class _IgnoresTheAssignment(FakeData):
-    """A Data whose activeHub assignment is accepted and changes nothing - the silent no-op shape."""
+class _NeverBecomesActive(FakeData):
+    """A Data recording the activeHub assignment and leaving the active hub unchanged; `raises`
+    makes the assignment throw after recording it. DECLARED, not measured."""
 
-    @FakeData.activeHub.setter
-    def activeHub(self, hub):
-        self._hub_sets.append(hub)
-
-
-class _RefusesTheAssignment(FakeData):
-    """A Data whose activeHub assignment RAISES - the read-only-property shape."""
+    def __init__(self, *args, raises=None, **kw):
+        super().__init__(*args, **kw)
+        self._raises = raises
 
     @FakeData.activeHub.setter
     def activeHub(self, hub):
         self._hub_sets.append(hub)
-        raise RuntimeError("property 'activeHub' of 'Data' object has no setter")
+        if self._raises:
+            raise RuntimeError(self._raises)
 
 
-class TestSwitchGetterOnly:
+class TestTheReReadDecides:
     def test_silent_noop_setter_reports_honest_error_not_false_success(self, cloud):
-        cloud(active_idx=0, data_cls=_IgnoresTheAssignment)
+        cloud(active_idx=0, data_cls=_NeverBecomesActive)
         res = dh.handler(action="switch", hub="Contoso Machining")
         assert res["isError"] is True, "must NOT claim switched:True when the hub never changed"
-        assert "read-only" in res["message"] and "data panel" in res["message"]
+        # both hubs named: the target asked for, and what the re-read actually showed
+        assert "'Contoso Machining'" in res["message"] and "'Acme Robotics'" in res["message"]
+        assert "data panel" in res["message"]
+        # and no CAUSE for the miss - the tool read no such thing
+        assert "read-only" not in res["message"]
 
-    def test_raising_setter_reports_honest_error(self, cloud):
-        cloud(active_idx=0, data_cls=_RefusesTheAssignment)
+    def test_a_raising_assignment_reports_the_raise_beside_the_re_read(self, cloud):
+        cloud(active_idx=0,
+              data_cls=lambda **kw: _NeverBecomesActive(raises="hub is offline", **kw))
         res = dh.handler(action="switch", hub="Contoso Machining")
         assert res["isError"] is True
-        assert "read-only" in res["message"]
+        assert "the assignment raised: hub is offline" in res["message"]
+        assert "'Acme Robotics'" in res["message"]

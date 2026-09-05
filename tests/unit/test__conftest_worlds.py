@@ -50,13 +50,28 @@ class TestDocumentWorld:
         assert data_file.versionNumber == 4 and app.activeDocument.isModified is False
 
     def test_a_refreshed_reference_lands_the_sources_latest_version(self):
+        # refresh_lands is the DECLARED landing case: a stale reference refuses by default.
         source = FakeDataFile("Sub", version=2, latest_version=5)
-        ref = FakeDocumentReference(data_file=source, version=2, out_of_date=True)
+        ref = FakeDocumentReference(data_file=source, version=2, out_of_date=True,
+                                    refresh_lands=True)
         assert ref.getLatestVersion() is True
         assert ref.version == 5 and ref.isOutOfDate is False
 
-    def test_the_two_refusing_refresh_states_are_reachable(self):
-        # The platform lie a refresh must re-check for, and the raise a derive link answers with.
+    def test_a_stale_reference_refuses_both_refresh_routes_by_default(self):
+        # The MEASURED derive-link state: both routes raise the same message and nothing moves,
+        # while isOutOfDate and dataFile.* keep reading.
+        source = FakeDataFile("Sub", version=1, latest_version=5)
+        ref = FakeDocumentReference(data_file=source, version=1, out_of_date=True)
+        with pytest.raises(RuntimeError, match="InternalValidationError : res"):
+            ref.getLatestVersion()
+        with pytest.raises(RuntimeError, match="InternalValidationError : res"):
+            ref.version = 5
+        assert ref.version == 1 and ref.isOutOfDate is True
+        assert ref.dataFile.latestVersionNumber == 5
+
+    def test_the_declared_refusing_refresh_states_are_reachable(self):
+        # The platform lie a refresh must re-check for, and a raise of the caller's own on either
+        # route - each replacing the measured refusal.
         source = FakeDataFile("Sub", version=2, latest_version=5)
         lying = FakeDocumentReference(data_file=source, out_of_date=True, stays_out_of_date=True)
         assert lying.getLatestVersion() is True and lying.isOutOfDate is True

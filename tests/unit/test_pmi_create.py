@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import load_tool, error_message, BRepFace, BRepEdge
+from conftest import load_tool, error_message, BRepEdge, BRepFace, MakeComp, MakeDesign
 
 pc = load_tool("pmi_create")
 
@@ -57,10 +57,9 @@ def rig(monkeypatch):
     notes = _FakeNotes(ann)
     hole_ann = _FakeAnn(name="Hole Note1", suffix="PMIHoleThreadNote", text="QTY")
     hole_notes = _FakeNotes(hole_ann)
-    comp = SimpleNamespace(name="Root",
-                           pmiAnnotations=SimpleNamespace(leaderLineNotes=notes,
-                                                          holeThreadNotes=hole_notes))
-    design = SimpleNamespace(rootComponent=comp)
+    comp = MakeComp("Root")
+    comp.pmiAnnotations = SimpleNamespace(leaderLineNotes=notes, holeThreadNotes=hole_notes)
+    design = MakeDesign(comp=comp)
     monkeypatch.setattr(pc._common, "design", lambda: design)
     monkeypatch.setattr(pc._pmi, "segments_markup", lambda a: None)
 

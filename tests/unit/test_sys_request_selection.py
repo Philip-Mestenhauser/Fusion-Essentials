@@ -17,10 +17,17 @@ import pytest
 from conftest import (
     BRepBody,
     BRepFace,
+    FakeOccurrence,
     FakePoint,
+    FakeSelection,
+    FakeSelections,
+    FakeUserInterface,
     FakeVector3D,
+    MakeComp,
+    MakeDesign,
     Plane,
     load_tool,
+    make_sketch,
 )
 
 sel = load_tool("sys_request_selection")
@@ -31,53 +38,30 @@ def _payload(result):
     return json.loads(result["content"][0]["text"])
 
 
-# ── shared fakes for the sys_request_selection orchestration tests ──────────────────────────────
-# Nested classes matching the selection tools' pre-existing _fake_ui_with pattern. The ratchet lint
-# walks nested classes too; these stay outside its count because their names are not fake-shaped.
+class _ChangedEvent:
+    """ui.activeSelectionChanged: the attach/detach pair a pick listener is registered through, and
+    the roster every detach is checked against. Bespoke: the event object carries no shape dump, so
+    there is no shared fake to stand for it."""
+
+    def __init__(self):
+        self.handlers = []
+
+    def add(self, h):
+        self.handlers.append(h)
+        return True
+
+    def remove(self, h):
+        if h in self.handlers:
+            self.handlers.remove(h)
+            return True
+        return False
+
 
 def _fake_ui(entities=()):
-    """activeSelections (clear/count/item) + activeSelectionChanged (add/remove) - the surface
-    _begin_request/_PickHandler touch."""
-    class _Sel:
-        def __init__(self, e):
-            self.entity = e
-            self.point = FakePoint(0, 0, 0)
-
-    class _Sels:
-        def __init__(self, es):
-            self._es = [_Sel(e) for e in es]
-
-        @property
-        def count(self):
-            return len(self._es)
-
-        def item(self, i):
-            return self._es[i]
-
-        def clear(self):
-            self._es = []
-            return True
-
-    class _ChangedEvent:
-        def __init__(self):
-            self.handlers = []
-
-        def add(self, h):
-            self.handlers.append(h)
-            return True
-
-        def remove(self, h):
-            if h in self.handlers:
-                self.handlers.remove(h)
-                return True
-            return False
-
-    class _UI:
-        def __init__(self, es):
-            self.activeSelections = _Sels(es)
-            self.activeSelectionChanged = _ChangedEvent()
-
-    return _UI(list(entities))
+    """A UserInterface holding one pick per entity plus the activeSelectionChanged event
+    _begin_request/_PickHandler attach to."""
+    picks = [FakeSelection(entity=e, point=FakePoint(0, 0, 0)) for e in entities]
+    return FakeUserInterface(FakeSelections(picks), selection_changed=_ChangedEvent())
 
 
 def _install_fake_task_manager(monkeypatch, run_immediately=True):
@@ -133,17 +117,15 @@ def _register_hold(ui, pending=True):
 
 
 def _fake_pickable_design(bodies=1, sketches=0, occs=0):
-    """A design SimpleNamespace just deep enough for _pickable_counts: rootComponent carrying
-    bRepBodies/sketches/allOccurrences counts, no allComponents attribute (so the shared
-    _common.all_components walk falls back to [root] - the same shape the real walk degrades to)."""
-    c = lambda n: types.SimpleNamespace(count=n)
-    # allOccurrences is ENUMERATED by the shared census, not merely counted, and each row answers
-    # `component` as a real Occurrence does - one that raises is an unresolved reference.
-    occ_rows = [types.SimpleNamespace(component=types.SimpleNamespace(name=f"C{i}"),
-                                      fullPathName=f"C{i}:1") for i in range(occs)]
-    root = types.SimpleNamespace(bRepBodies=c(bodies), sketches=c(sketches),
-                                 allOccurrences=occ_rows)
-    return types.SimpleNamespace(rootComponent=root)
+    """A design just deep enough for _pickable_counts: the root's bodies and sketches, plus the
+    occurrences the shared census ENUMERATES (each answering `component` as a real Occurrence
+    does - one that raises is an unresolved reference)."""
+    occ_rows = [FakeOccurrence(path=f"C{i}:1", component=MakeComp(name=f"C{i}"))
+                for i in range(occs)]
+    root = MakeComp(bodies=[f"B{i}" for i in range(bodies)],
+                    sketches=[make_sketch(name=f"Sketch{i}") for i in range(sketches)],
+                    occurrences=occ_rows)
+    return MakeDesign(comp=root)
 
 
 @pytest.fixture(autouse=True)
@@ -174,7 +156,7 @@ class TestOnSelectionChanged:
         monkeypatch.setattr(sel, "_ui", lambda: ui)
         box, done = _register_hold(ui)
 
-        picked = types.SimpleNamespace(entity=face, point=FakePoint(1, 1, 1))
+        picked = FakeSelection(entity=face, point=FakePoint(1, 1, 1))
         sel._on_selection_changed(types.SimpleNamespace(currentSelection=[picked]), box, done)
 
         assert done.is_set()
@@ -294,7 +276,7 @@ class TestRequestSelectionCompletedPick:
             callback(data)   # runs _begin_request "on the main thread": registers the pick listener
             handler = sel._pending["handler"]
             assert handler is not None, "expected a pick listener while nothing is selected yet"
-            picked = types.SimpleNamespace(entity=face, point=FakePoint(3, 3, 3))
+            picked = FakeSelection(entity=face, point=FakePoint(3, 3, 3))
             handler.notify(types.SimpleNamespace(currentSelection=[picked]))
             return "fake-task"
 
@@ -353,7 +335,7 @@ class TestRequestSelectionExpiryWindow:
                 # the cancel marshal: the user clicked just after the wait gave up, and the pick
                 # is captured before the listener is detached
                 sel._pending["handler"].notify(types.SimpleNamespace(currentSelection=[
-                    types.SimpleNamespace(entity=face, point=FakePoint(9, 9, 9))]))
+                    FakeSelection(entity=face, point=FakePoint(9, 9, 9))]))
             callback(data)
             return "fake-task"
 
@@ -408,7 +390,7 @@ class TestOrphanPickListener:
         face = BRepFace(Plane(FakeVector3D(0, 0, 1)), centroid=FakePoint(1, 1, 1), entity_token="TOK1")
 
         orphan_box["handler"].notify(types.SimpleNamespace(currentSelection=[
-            types.SimpleNamespace(entity=face, point=FakePoint(1, 1, 1))]))
+            FakeSelection(entity=face, point=FakePoint(1, 1, 1))]))
 
         assert orphan_box["handler"] not in ui.activeSelectionChanged.handlers   # detached itself
         assert ui.activeSelectionChanged.handlers == [current_box["handler"]]    # and only itself

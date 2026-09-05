@@ -1,7 +1,8 @@
 """Unit tests for ``doc_update_xref.py`` - refresh out-of-date external references.
 
 Pins: no-refs early-out, matched/skipped/error paths, and that getLatestVersion
-raises rather than being swallowed when the call fails.
+raises rather than being swallowed when the call fails. A STALE reference refuses both refresh
+routes by default (the measured derive-link state), so a row whose refresh lands says refreshes=True.
 """
 
 import json
@@ -21,16 +22,20 @@ def _payload(result):
 
 
 def FakeRef(name, is_out_of_date=True, version=1, latest_returns=True, latest_raises=None,
-            stays_stale=False, latest_version=None, setter_raises=None, file_id=None):
+            stays_stale=False, latest_version=None, setter_raises=None, file_id=None,
+            refreshes=False):
     """One reference row, driving BOTH refresh paths doc_update_xref uses: getLatestVersion()
     (occurrence xrefs) and the 'version' property SETTER (derive links - getLatestVersion() raises
-    live for those). `file_id` is the source DataFile's LINEAGE id, what says two rows point at one
-    file; the default None models the id that will not read."""
+    live for those). A STALE reference REFUSES both routes by default (measured on a derive link),
+    so `refreshes` is how a row whose refresh LANDS opts in. `file_id` is the source DataFile's
+    LINEAGE id, what says two rows point at one file; the default None models the id that will not
+    read."""
     source = FakeDataFile(name, file_id=file_id, version=version,
                           latest_version=version + 1 if latest_version is None else latest_version)
     return FakeDocumentReference(data_file=source, version=version, out_of_date=is_out_of_date,
                                  refresh_ok=latest_returns, stays_out_of_date=stays_stale,
-                                 latest_raises=latest_raises, setter_raises=setter_raises)
+                                 latest_raises=latest_raises, setter_raises=setter_raises,
+                                 refresh_lands=refreshes)
 
 
 class FakeDeriveFeat:
@@ -91,7 +96,7 @@ class TestGuards:
 
 class TestUpdateBehavior:
     def test_updates_out_of_date_refs(self, _install):
-        ref = FakeRef("PartA", is_out_of_date=True, version=2, latest_returns=True)
+        ref = FakeRef("PartA", is_out_of_date=True, version=2, refreshes=True)
         _install([ref])
         out = _payload(xr.handler())
         assert out["updated_count"] == 1
@@ -135,7 +140,7 @@ class TestUpdateBehavior:
             xr.handler()
 
     def test_name_filter_updates_only_matching(self, _install):
-        r1 = FakeRef("Alpha", is_out_of_date=True)
+        r1 = FakeRef("Alpha", is_out_of_date=True, refreshes=True)
         r2 = FakeRef("Beta", is_out_of_date=True)
         _install([r1, r2])
         out = _payload(xr.handler(name="Alpha"))
@@ -150,15 +155,15 @@ class TestNameFilterIdentity:
     DIFFERENT files is refused instead of refreshing both."""
 
     def test_match_is_case_insensitive(self, _install):
-        _install([FakeRef("PartA", is_out_of_date=True, file_id="urn:a")])
+        _install([FakeRef("PartA", is_out_of_date=True, file_id="urn:a", refreshes=True)])
         out = _payload(xr.handler(name="parta"))
         assert out["updated_count"] == 1
         assert out["updated"][0]["name"] == "PartA"
 
     def test_every_row_of_one_file_refreshes_together(self, _install):
         # an occurrence xref and a derive off the SAME source document: one file, two rows.
-        xref = FakeRef("Src", is_out_of_date=True, file_id="urn:one")
-        dref = FakeRef("Src", is_out_of_date=True, file_id="urn:one")
+        xref = FakeRef("Src", is_out_of_date=True, file_id="urn:one", refreshes=True)
+        dref = FakeRef("Src", is_out_of_date=True, file_id="urn:one", refreshes=True)
         _install(refs=[xref], derive_feats=[FakeDeriveFeat("Derive1", dref)])
         out = _payload(xr.handler(name="Src"))
         assert out["updated_count"] == 2
@@ -187,7 +192,7 @@ class TestNameFilterIdentity:
 
     def test_a_single_matched_file_still_refreshes(self, _install):
         # the other side of the boundary: 1 distinct file, however many rows point at it.
-        _install([FakeRef("Bolt", is_out_of_date=True, file_id="urn:a"),
+        _install([FakeRef("Bolt", is_out_of_date=True, file_id="urn:a", refreshes=True),
                   FakeRef("Nut", is_out_of_date=True, file_id="urn:b")])
         out = _payload(xr.handler(name="Bolt"))
         assert out["updated_count"] == 1
@@ -207,7 +212,7 @@ class TestDeriveReferences:
         # InternalValidationError (it works fine for an occurrence's) - the derive path must advance
         # via the 'version' property setter instead. latest_raises would blow up this test if the
         # derive path ever called getLatestVersion() again.
-        dref = FakeRef("DeriveSrc", is_out_of_date=True, version=1,
+        dref = FakeRef("DeriveSrc", is_out_of_date=True, version=1, refreshes=True,
                        latest_raises="InternalValidationError: derive path must not call this")
         _install(refs=[], derive_feats=[FakeDeriveFeat("Derive1", dref)])
         out = _payload(xr.handler())
@@ -218,7 +223,7 @@ class TestDeriveReferences:
     def test_stale_derive_is_enumerated_and_refreshed(self, _install):
         # Document.documentReferences is EMPTY here (no occurrence xrefs) - only the derive walk
         # (component.features.deriveFeatures) can find this reference.
-        dref = FakeRef("DeriveSrc", is_out_of_date=True, version=1, latest_returns=True)
+        dref = FakeRef("DeriveSrc", is_out_of_date=True, version=1, refreshes=True)
         _install(refs=[], derive_feats=[FakeDeriveFeat("Derive1", dref)])
         out = _payload(xr.handler())
         assert out["updated_count"] == 1
@@ -226,12 +231,10 @@ class TestDeriveReferences:
         assert out["updated"][0]["kind"] == "derive"
 
     def test_setter_failure_is_reported_honestly_not_swallowed(self, _install):
-        # Confirmed LIVE: the version setter can ALSO raise for a whole-design derive
-        # (InternalValidationError) - this must surface as an honest, actionable per-reference error
-        # (never a false "updated"), and must not crash the whole call with a bare stack trace.
-        dref = FakeRef("DeriveSrc", is_out_of_date=True, version=1,
-                       setter_raises="2 : InternalValidationError : res")
-        _install(refs=[], derive_feats=[FakeDeriveFeat("Derive1", dref)])
+        # MEASURED on a stale derive link, and this fake's DEFAULT: the version setter refuses just
+        # as getLatestVersion does. The refusal must surface as an honest, actionable per-reference
+        # error (never a false "updated") and must not crash the call with a bare stack trace.
+        _install(refs=[], derive_feats=[FakeDeriveFeat("Derive1", FakeRef("DeriveSrc", version=1))])
         res = xr.handler()
         assert res["isError"] is True
         assert "DeriveSrc" in res["message"]
@@ -260,8 +263,8 @@ class TestDeriveReferences:
         assert out["updated_count"] == 0
 
     def test_both_kinds_refreshed_together_and_counted(self, _install):
-        xref = FakeRef("PartA", is_out_of_date=True, latest_returns=True)
-        dref = FakeRef("DeriveSrc", is_out_of_date=True, latest_returns=True)
+        xref = FakeRef("PartA", is_out_of_date=True, refreshes=True)
+        dref = FakeRef("DeriveSrc", is_out_of_date=True, refreshes=True)
         _install(refs=[xref], derive_feats=[FakeDeriveFeat("Derive1", dref)])
         out = _payload(xr.handler())
         assert out["updated_count"] == 2
@@ -271,7 +274,7 @@ class TestDeriveReferences:
 
     def test_name_filter_matches_a_derive_by_its_source_name(self, _install):
         xref = FakeRef("PartA", is_out_of_date=True)
-        dref = FakeRef("DeriveSrc", is_out_of_date=True, latest_returns=True)
+        dref = FakeRef("DeriveSrc", is_out_of_date=True, refreshes=True)
         _install(refs=[xref], derive_feats=[FakeDeriveFeat("Derive1", dref)])
         out = _payload(xr.handler(name="DeriveSrc"))
         assert out["updated_count"] == 1
@@ -281,7 +284,7 @@ class TestDeriveReferences:
         # THE live-confirmed gap this fix closes: on a cold reopen, Document.documentReferences can
         # read count=0 (the derive's link isn't resolved in-session) even though a genuinely stale
         # derive exists - the derive walk must find it regardless of documentReferences' state.
-        dref = FakeRef("DeriveSrc", is_out_of_date=True, version=2, latest_returns=True)
+        dref = FakeRef("DeriveSrc", is_out_of_date=True, version=2, refreshes=True)
         _install(refs=[], derive_feats=[FakeDeriveFeat("Derive1", dref)])
         out = _payload(xr.handler())
         assert out["total_references"] == 1
