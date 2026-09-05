@@ -10,7 +10,7 @@ URL), so it gets thorough coverage. No live Fusion needed.
 The encoded URN below is real: base64url(urn:adsk.wipprod:dm.lineage:abc123XYZ).
 """
 
-from conftest import load_tool
+from conftest import FakeApplication, FakeDataFile, FakeFusionDocument, load_tool
 
 od = load_tool("doc_open")
 
@@ -93,13 +93,11 @@ class TestCamTemplateGuard:
 
     def test_normal_open_requires_force_api_open(self, monkeypatch):
         # A non-CAM doc opens normally — but ONLY when the caller declares force_api_open=true.
-        class FakeDoc:
-            name = "Plain"
-        fake = FakeDoc()
+        opened = FakeFusionDocument(name="Plain")
         monkeypatch.setattr(od, "_resolve_data_file",
-                            lambda raw: (type("DF", (), {"isConfiguredDesign": False, "name": "Plain"})(), raw, [raw]))
-        monkeypatch.setattr(od, "_open_document", lambda d: (fake, "openUsingContext", None))
-        od.app = type("A", (), {"activeDocument": fake})()
+                            lambda raw: (FakeDataFile("Plain"), raw, [raw]))
+        monkeypatch.setattr(od, "_open_document", lambda d: (opened, "openUsingContext", None))
+        monkeypatch.setattr(od, "app", FakeApplication(active_document=opened))
         res = od.handler(file_id="urn:plain", force_api_open=True)
         payload = json.loads(res["content"][0]["text"])
         assert payload["opened"] is True
@@ -144,13 +142,13 @@ class TestAsyncLoadHandoff:
     reads active carries none."""
 
     def _open(self, monkeypatch, active):
-        opened = type("FakeDoc", (), {"name": "Plain"})()
+        opened = FakeFusionDocument(name="Plain")
+        elsewhere = FakeFusionDocument(name="Other")
         monkeypatch.setattr(od, "_resolve_data_file",
-                            lambda raw: (type("DF", (), {"isConfiguredDesign": False,
-                                                         "name": "Plain"})(), raw, [raw]))
+                            lambda raw: (FakeDataFile("Plain"), raw, [raw]))
         monkeypatch.setattr(od, "_open_document", lambda d: (opened, "openUsingContext", None))
         monkeypatch.setattr(od, "app",
-                            type("A", (), {"activeDocument": opened if active else object()})())
+                            FakeApplication(active_document=opened if active else elsewhere))
         res = od.handler(file_id="urn:plain", force_api_open=True)
         assert res["isError"] is False, res
         return json.loads(res["content"][0]["text"])

@@ -9,11 +9,10 @@ exercised through the SAME FileLanded postcondition the Item declares.
 
 import json
 import os
-import types
 
 import pytest
 
-from conftest import error_message, load_tool
+from conftest import FakeDataFile, FakeDataFolder, FakeDataProject, error_message, load_tool
 
 ddf = load_tool("data_download_file")
 kernel = load_tool("_assert")
@@ -24,25 +23,29 @@ def _payload(result):
     return json.loads(result["content"][0]["text"])
 
 
-def _ns(**kw):
-    return types.SimpleNamespace(**kw)
+class _DownloadableFile(FakeDataFile):
+    """A cloud file whose download() writes `writes` at the path it is handed (None writes nothing,
+    the platform's silent-failure shape) and answers `returns`. Each (path, handler) pair it is
+    called with lands in _calls."""
+
+    def __init__(self, *args, writes=None, returns=True, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._writes, self._returns = writes, returns
+        self._calls = []
+
+    def download(self, path, handler):
+        self._calls.append((path, handler))
+        if self._writes is not None:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(self._writes)
+        return self._returns
 
 
 def _cloud_file(name="probe_note.txt", file_extension="sql", writes=None, returns=True):
-    """A DataFile stand-in. `writes` is the text download() puts on disk (None = write nothing,
-    the platform's silent-failure shape); `returns` is what download() answers."""
-    calls = []
-
-    def download(path, handler):
-        calls.append((path, handler))
-        if writes is not None:
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.write(writes)
-        return returns
-
-    return _ns(name=name, fileExtension=file_extension, download=download, calls=calls,
-               parentProject=_ns(name="MCP Test Project"),
-               parentFolder=_ns(name="Docs", isRoot=False, parentFolder=None))
+    """The file under download, in a 'Docs' folder of a named project."""
+    return _DownloadableFile(name, extension=file_extension, writes=writes, returns=returns,
+                             parent_folder=FakeDataFolder("Docs"),
+                             parent_project=FakeDataProject("MCP Test Project"))
 
 
 @pytest.fixture
@@ -101,7 +104,7 @@ class TestPathHandling:
         df = _cloud_file(writes="hello")
         resolves(df)
         out = _payload(ddf.handler(file="urn:lin:AAA", destination_folder=str(tmp_path)))
-        assert df.calls == [(str(tmp_path / "probe_note.txt"), None)]   # handler=None = synchronous
+        assert df._calls == [(str(tmp_path / "probe_note.txt"), None)]   # handler=None = synchronous
         assert out["file_path"] == str(tmp_path / "probe_note.txt")
 
     def test_file_name_overrides_the_local_name(self, resolves, tmp_path):
@@ -122,7 +125,7 @@ class TestPathHandling:
         resolves(df)
         msg = error_message(ddf.handler(file="urn:lin:AAA"))
         assert "Provide 'destination_folder'" in msg and "LOCAL folder" in msg
-        assert df.calls == []            # refused before the transfer, never into the process cwd
+        assert df._calls == []            # refused before the transfer, never into the process cwd
 
     def test_an_unreadable_cloud_name_asks_for_file_name_instead_of_guessing(self, resolves,
                                                                              tmp_path):
@@ -132,7 +135,7 @@ class TestPathHandling:
         resolves(df)
         msg = error_message(ddf.handler(file="urn:lin:AAA", destination_folder=str(tmp_path)))
         assert "pass 'file_name'" in msg
-        assert df.calls == []
+        assert df._calls == []
 
     def test_an_unnamed_file_downloads_under_the_file_name_given(self, resolves, tmp_path):
         # the guard above is about the MISSING pair, not about an unreadable name alone.
@@ -153,7 +156,7 @@ class TestPathHandling:
         monkeypatch.setattr(ddf.os, "makedirs", refuse)
         msg = error_message(ddf.handler(file="urn:lin:AAA", destination_folder=dest))
         assert f"Could not create destination folder '{dest}'" in msg and "permission denied" in msg
-        assert df.calls == []
+        assert df._calls == []
 
     def test_a_missing_destination_folder_is_created(self, resolves, tmp_path):
         df = _cloud_file(writes="hello")
@@ -172,7 +175,7 @@ class TestStaleFileTrap:
         msg = error_message(ddf.handler(file="urn:lin:AAA", destination_folder=str(tmp_path)))
         assert "overwrite=true" in msg
         assert target.read_text(encoding="utf-8") == "previous"     # untouched
-        assert df.calls == []                                       # and never downloaded
+        assert df._calls == []                                       # and never downloaded
 
     def test_overwrite_removes_the_stale_file_first_so_the_gate_is_real(self, resolves, tmp_path):
         # download() writes NOTHING here. With the stale file removed up front, the landed gate has
@@ -200,7 +203,7 @@ class TestStaleFileTrap:
         msg = error_message(ddf.handler(file="urn:lin:AAA", destination_folder=str(tmp_path),
                                         overwrite=True))
         assert f"Could not replace the existing '{target}'" in msg and "file is locked" in msg
-        assert df.calls == []
+        assert df._calls == []
         assert target.read_text(encoding="utf-8") == "previous"
 
     def test_overwrite_replaces_the_content(self, resolves, tmp_path):

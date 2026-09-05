@@ -11,7 +11,7 @@ CURRENT state and returns.
 import json
 from types import SimpleNamespace
 
-from conftest import load_tool
+from conftest import FakeDataFile, load_tool
 
 dc = load_tool("_data_common")
 sut = load_tool("data_get_upload_status")
@@ -23,13 +23,15 @@ def _payload(result):
 
 
 def _future(upload_state, df=None):
+    """A DataFileFuture stand-in: the uploadState the poll reads and the dataFile it carries only
+    once the transfer has finished."""
     return SimpleNamespace(uploadState=upload_state, dataFile=df)
 
 
 def _datafile(name="p.step", fid="urn:file:1", version_id="urn:file:1?version=2",
               version_number=2, web_url="https://a360.co/x", is_complete=True):
-    return SimpleNamespace(name=name, id=fid, versionId=version_id, versionNumber=version_number,
-                           fusionWebURL=web_url, isComplete=is_complete)
+    return FakeDataFile(name, file_id=fid, version_id=version_id, version=version_number,
+                        web_url=web_url, is_complete=is_complete)
 
 
 def _entry(future, source_file="p.step", project="Proj", folder="Imports/STEP", started_at=0.0):

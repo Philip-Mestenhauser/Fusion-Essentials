@@ -11,9 +11,14 @@ world and not component-local.
 
 import json
 
+import adsk.core
+
 from conftest import MeshBody, load_tool, _NamedCollection
 
 fg = load_tool("find_geometry")
+
+_SURFACES = adsk.core.SurfaceTypes
+_CURVES = adsk.core.Curve3DTypes
 
 
 # ── fakes mimicking adsk BRep faces/edges ───────────────────────────────────
@@ -25,7 +30,7 @@ class _Pt:
 
 class _CylGeo:
     def __init__(self, r, axis=(1, 0, 0)):
-        self.surfaceType = "CYL"
+        self.surfaceType = _SURFACES.CylinderSurfaceType
         self.radius = r
         self.axis = _Pt(*axis)
 
@@ -34,7 +39,7 @@ class _PlaneGeo:
     """A planar face's surface. With `origin`, it also carries the adsk.core.Plane frame
     find_geometry casts to (origin + uDirection/vDirection/normal); without, those reads fail and
     the record's 'frame' must degrade to null."""
-    surfaceType = "PLANE"
+    surfaceType = _SURFACES.PlaneSurfaceType
 
     def __init__(self, origin=None, u=None, v=None, normal=None):
         if origin is not None:
@@ -59,7 +64,7 @@ class _Eval:
 
 class _LineGeo:
     def __init__(self, start, end):
-        self.curveType = "LINE"
+        self.curveType = _CURVES.Line3DCurveType
         self.startPoint = _Pt(*start)
         self.endPoint = _Pt(*end)
 
@@ -157,30 +162,13 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def _enum_sentinels(monkeypatch):
-    # SurfaceTypes/Curve3DTypes live on the SHARED adsk mock that other test modules' tools also
-    # read - monkeypatch scopes the string sentinels to this file so they restore after each test.
-    import adsk.core
-    st = adsk.core.SurfaceTypes
-    monkeypatch.setattr(st, "CylinderSurfaceType", "CYL", raising=False)
-    monkeypatch.setattr(st, "PlaneSurfaceType", "PLANE", raising=False)
-    monkeypatch.setattr(st, "ConeSurfaceType", "CONE", raising=False)
-    monkeypatch.setattr(st, "SphereSurfaceType", "SPHERE", raising=False)
-    monkeypatch.setattr(st, "TorusSurfaceType", "TORUS", raising=False)
-    ct = adsk.core.Curve3DTypes
-    monkeypatch.setattr(ct, "Circle3DCurveType", "CIRCLE", raising=False)
-    monkeypatch.setattr(ct, "Line3DCurveType", "LINE", raising=False)
-    monkeypatch.setattr(ct, "Arc3DCurveType", "ARC", raising=False)
-
-
-@pytest.fixture(autouse=True)
 def _plane_cast(monkeypatch):
-    """adsk.core.Plane.cast(surface) hands back a PLANE surface and None for anything else. The
+    """adsk.core.Plane.cast(surface) hands back a planar surface and None for anything else. The
     stock mock's cast returns a truthy child Mock, which would present a cylinder as a plane."""
-    import adsk.core
-    monkeypatch.setattr(adsk.core.Plane, "cast",
-                        lambda g: g if getattr(g, "surfaceType", None) == "PLANE" else None,
-                        raising=False)
+    monkeypatch.setattr(
+        adsk.core.Plane, "cast",
+        lambda g: g if getattr(g, "surfaceType", None) == _SURFACES.PlaneSurfaceType else None,
+        raising=False)
 
 
 def _install(occs, root_bodies=(), all_occs=None, meshes=(), active=None):

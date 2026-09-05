@@ -444,7 +444,6 @@ def _install_bbox_target(monkeypatch, body):
                         staticmethod(lambda x, y, z: SimpleNamespace(x=x, y=y, z=z)))
     monkeypatch.setattr(adsk.fusion.JointGeometry, "createByCurve",
                         staticmethod(lambda curve, kp: SimpleNamespace(curve=curve, kp=kp)))
-    monkeypatch.setattr(adsk.fusion.JointKeyPointTypes, "StartKeyPoint", 0, raising=False)
 
 
 class TestBboxCenterGeometry:
@@ -478,6 +477,16 @@ class TestBboxCenterGeometry:
         start, end = store[0]
         assert (end.x - start.x, end.y - start.y, end.z - start.z) == (0.0, 0.0, -1.0)
 
+    def test_the_geometry_takes_the_lines_start_keypoint(self, monkeypatch):
+        # MiddleKeyPoint would anchor the origin at the orientation line's midpoint instead of the
+        # bbox center the anchor just computed.
+        body = _body((0, 0, 0), (10, 20, 30))
+        _install_bbox_target(monkeypatch, body)
+        g, _desc, err = _call(anchor="bbox_center", comp=_cap_comp([]),
+                              bbox_target="BODYH", orient_axis="z")
+        assert err is None
+        assert g.kp == adsk.fusion.JointKeyPointTypes.StartKeyPoint
+
 
 # ── orient_axis from a PLANAR-FACE handle: AxisRef now sources a direction from a face ───────────
 # Once AxisRef accepts a planar-face handle (returning its NORMAL as a ('world', vec) direction),
@@ -505,7 +514,6 @@ def _install_face_orient(monkeypatch, body, face, tokens=None):
                         staticmethod(lambda x, y, z: SimpleNamespace(x=x, y=y, z=z)))
     monkeypatch.setattr(adsk.fusion.JointGeometry, "createByCurve",
                         staticmethod(lambda curve, kp: SimpleNamespace(curve=curve, kp=kp)))
-    monkeypatch.setattr(adsk.fusion.JointKeyPointTypes, "StartKeyPoint", 0, raising=False)
 
 
 class TestOrientAxisFromFace:
@@ -614,7 +622,6 @@ def _install_bbox_handler(monkeypatch, origin_cm, bbox=((0, 0, 0), (10, 20, 30))
                         staticmethod(lambda x, y, z: SimpleNamespace(x=x, y=y, z=z)))
     monkeypatch.setattr(adsk.fusion.JointGeometry, "createByCurve",
                         staticmethod(lambda curve, kp: SimpleNamespace(curve=curve, kp=kp)))
-    monkeypatch.setattr(adsk.fusion.JointKeyPointTypes, "StartKeyPoint", 0, raising=False)
     return jo_obj
 
 

@@ -3,46 +3,22 @@
 import adsk.fusion
 import pytest
 
-from conftest import (BRepBody, MakeComp, MakeDesign, MeshBody, _MeshBodies, _NamedCollection,
-                      install, load_tool, make_occurrence, payload)
+from conftest import (BRepBody, FakeExportManager, MakeComp, MakeDesign, MeshBody, _ExportOptions,
+                      _MeshBodies, _NamedCollection, install, load_tool, make_occurrence, payload)
 
 mx = load_tool("mesh_export")
 
-
-class FakeExportOptions:
-    """An export-options object that supports attribute set/get (so the tool's setattr for
-    meshRefinement works, the way the real ExportOptions objects do)."""
-    def __init__(self, kind, geom, path):
-        self.kind = kind
-        self.geom = geom
-        self.path = path
-        self.meshRefinement = None
+# The unitType an STL options object holds when it is NOT the one asked for - anything that is no
+# DistanceUnits member reads back as "the write never landed".
+_FOREIGN_UNIT = "FACTORY_DEFAULT"
 
 
-class _NoRefineOptions(FakeExportOptions):
-    """Export options that DROP the meshRefinement write: the read-back never equals the enum, so
-    _apply_refinement returns None - the density never landed. The dropped set is the only condition
-    modelled; which builds/formats behave this way is not asserted."""
-
-    def __setattr__(self, k, v):
-        if k == "meshRefinement":
-            return
-        object.__setattr__(self, k, v)
-
-
-class _NoUnitOptions(FakeExportOptions):
-    """STL options that DROP the unitType write and keep the factory value: the set is accepted
-    silently and the read-back still answers something else, so _apply_stl_units returns None - the
-    unit never landed. The dropped set is the only condition modelled."""
-
-    def __init__(self, kind, geom, path):
-        super().__init__(kind, geom, path)
-        object.__setattr__(self, "unitType", "FACTORY_DEFAULT")
-
-    def __setattr__(self, k, v):
-        if k == "unitType":
-            return
-        object.__setattr__(self, k, v)
+def _record(des, kind, geom, path, **kw):
+    """Build the shared options bag (this file's factories call in (geometry, path) order) and put it
+    on the export manager's walk - what every create*Options factory here does."""
+    rec = _ExportOptions(kind, path, geom, **kw)
+    des.exportManager._calls.append(rec)
+    return rec
 
 
 def _refine_member(key):
@@ -59,55 +35,17 @@ def _options_holding(des, attr, value, factory_name, kind, drop_write=True):
     options object reads unitType 0 and MillimeterDistanceUnits IS 0, and reads meshRefinement 1
     and MeshRefinementMedium IS 1 - so the property answers the requested value whether the
     assignment took or never happened."""
-    class _Opts(FakeExportOptions):
-        def __init__(self, k, geom, path):
-            super().__init__(k, geom, path)
-            object.__setattr__(self, attr, value)
-
-        def __setattr__(self, k, v):
-            if k == attr and drop_write:
-                return
-            object.__setattr__(self, k, v)
-
     def _opt(geom, path):
-        rec = _Opts(kind, geom, path)
-        des.exportManager.calls.append(rec)
-        return rec
+        return _record(des, kind, geom, path, seeded={attr: value},
+                       drops=(attr,) if drop_write else ())
     setattr(des.exportManager, factory_name, _opt)
-    return _Opts
+    return _opt
 
 
-class FakeExportManager:
-    """Records which create*Options ran + the geometry, and that execute ran (writing a fake file)."""
-    def __init__(self):
-        self.calls = []
-        self.executed = None
-        self._last_path = None
-
-    def _opt(self, kind, geom, path):
-        rec = FakeExportOptions(kind, geom, path)
-        self.calls.append(rec)
-        self._last_path = path
-        return rec
-
-    def createOBJExportOptions(self, geom, path):
-        return self._opt("obj", geom, path)
-
-    def createC3MFExportOptions(self, geom, path):
-        return self._opt("3mf", geom, path)
-
-    def createSTLExportOptions(self, geom, path):
-        return self._opt("stl", geom, path)
-
-    def execute(self, opts):
-        self.executed = opts
-        # REALISTIC live divergence: execute() always returns True, but only writes a file when
-        # the geometry is a BRep body / component / occurrence. A BARE MeshBody geometry writes NOTHING
-        # (the file is a no-op) even though the return is truthy.
-        if not isinstance(opts.geom, MeshBody):
-            with open(opts.path, "w") as fh:
-                fh.write("fake-mesh")
-        return True
+def _writes_a_file(opts):
+    """REALISTIC live divergence: execute() answers True whatever it wrote, but only a BRep body /
+    component / occurrence geometry lands a file - a BARE MeshBody writes nothing."""
+    return not isinstance(opts.geom, MeshBody)
 
 
 @pytest.fixture(autouse=True)
@@ -126,7 +64,7 @@ def _wire(comp, all_comps=None, handles=None):
     """mesh_export wired onto a design rooted at `comp` and carrying a FakeExportManager - both
     design seams patched, `handles` the entityToken map a target resolves through."""
     design = MakeDesign(comp=comp, tokens=handles, all_components=all_comps)
-    design.exportManager = FakeExportManager()
+    design.exportManager = FakeExportManager(writes=_writes_a_file)
     return install(mx, design)
 
 
@@ -146,25 +84,25 @@ class TestExportFormatDispatch:
         des = _wire(comp)
         out = payload(mx.handler(format="obj", file_path=str(tmp_path / "p.obj")))
         assert out["exported"] is True
-        assert des.exportManager.calls[-1].kind == "obj"
-        assert des.exportManager.executed is not None
+        assert des.exportManager._calls[-1].kind == "obj"
+        assert des.exportManager._executed is not None
         assert out["file_exists"] is True and out["size_bytes"] > 0
 
     def test_3mf_uses_c3mf_options(self, tmp_path):
         des = _wire(_comp("Root", bodies=[BRepBody("Body1")]))
         out = payload(mx.handler(format="3mf", file_path=str(tmp_path / "p.3mf")))
-        assert des.exportManager.calls[-1].kind == "3mf"
+        assert des.exportManager._calls[-1].kind == "3mf"
         assert out["format"] == "3mf"
 
     def test_stl_uses_stl_options(self, tmp_path):
         des = _wire(_comp("Root", bodies=[BRepBody("Body1")]))
         payload(mx.handler(format="stl", file_path=str(tmp_path / "p.stl")))
-        assert des.exportManager.calls[-1].kind == "stl"
+        assert des.exportManager._calls[-1].kind == "stl"
 
     def test_default_format_is_3mf(self, tmp_path):
         des = _wire(_comp("Root", bodies=[BRepBody("Body1")]))
         out = payload(mx.handler(file_path=str(tmp_path / "p")))
-        assert des.exportManager.calls[-1].kind == "3mf"
+        assert des.exportManager._calls[-1].kind == "3mf"
         assert out["file_path"].lower().endswith(".3mf")   # extension auto-appended
 
     def test_bad_format_rejected_by_choice(self, tmp_path):
@@ -180,14 +118,14 @@ class TestExportTarget:
         des = _wire(comp)
         out = payload(mx.handler(format="obj", file_path=str(tmp_path / "p.obj")))
         # whole-design export passes the ROOT COMPONENT as the geometry
-        assert des.exportManager.calls[-1].geom is comp
+        assert des.exportManager._calls[-1].geom is comp
         assert "design" in out["target"].lower() or "root" in out["target"].lower()
 
     def test_body_by_name(self, tmp_path):
         comp = _comp("Root", bodies=[BRepBody("Widget")])
         des = _wire(comp)
         out = payload(mx.handler(format="obj", target="Widget", file_path=str(tmp_path / "p.obj")))
-        assert des.exportManager.calls[-1].geom.name == "Widget"
+        assert des.exportManager._calls[-1].geom.name == "Widget"
         assert "Widget" in out["target"]
 
     def test_mesh_body_by_handle_redirects_to_its_component(self, tmp_path):
@@ -200,7 +138,7 @@ class TestExportTarget:
         des = _wire(comp, handles={"H": m})
         out = payload(mx.handler(format="3mf", target="H", file_path=str(tmp_path / "p.3mf")))
         # the COMPONENT was exported, not the bare mesh — and a file actually landed
-        assert des.exportManager.calls[-1].geom is comp
+        assert des.exportManager._calls[-1].geom is comp
         assert out["redirected_from_mesh"] is True
         assert out["file_exists"] is True and out["size_bytes"] > 0
         assert "mesh" in out["note"].lower()
@@ -215,7 +153,7 @@ class TestExportTarget:
         des = _wire(comp)
         out = payload(mx.handler(format="3mf", target="ScanByName",
                                          file_path=str(tmp_path / "p.3mf")))
-        assert des.exportManager.calls[-1].geom is comp
+        assert des.exportManager._calls[-1].geom is comp
         assert out["redirected_from_mesh"] is True
         assert out["file_exists"] is True
 
@@ -229,7 +167,7 @@ class TestExportTarget:
         des = _wire(comp, handles={"H": m})
         out = payload(mx.handler(format="stl", target="H",
                                          file_path=str(tmp_path / "p.stl")))
-        assert des.exportManager.calls[-1].geom is comp
+        assert des.exportManager._calls[-1].geom is comp
         note = out["note"]
         assert "EVERY body" in note and "BRep" in note and "tessellated" in note, note
         assert "occurrences below it" in note, note
@@ -326,7 +264,7 @@ class TestExportTarget:
         des = _wire(root, all_comps=[root, sub])
         out = payload(mx.handler(format="obj", target="SubPart",
                                          file_path=str(tmp_path / "p.obj")))
-        assert des.exportManager.calls[-1].geom is sub
+        assert des.exportManager._calls[-1].geom is sub
         assert "component" in out["target"].lower() and "SubPart" in out["target"]
 
     def test_single_body_component_name_exports_its_body(self, tmp_path):
@@ -338,7 +276,7 @@ class TestExportTarget:
         des = _wire(root, all_comps=[root, sub])
         out = payload(mx.handler(format="obj", target="SubPart",
                                          file_path=str(tmp_path / "p.obj")))
-        assert des.exportManager.calls[-1].geom is inner
+        assert des.exportManager._calls[-1].geom is inner
         assert "body" in out["target"].lower() and "Inner" in out["target"]
 
     def test_duplicate_component_name_refused_not_exported(self, tmp_path):
@@ -356,7 +294,7 @@ class TestExportTarget:
         assert "occurrence name/fullPathName" in res["message"]
         assert "find_geometry" in res["message"]
         assert "rename" not in res["message"].lower()
-        assert des.exportManager.calls == []              # nothing was exported
+        assert des.exportManager._calls == []              # nothing was exported
 
     def test_occurrence_by_name_target(self, tmp_path):
         # a name that is neither a body nor a component resolves via the allOccurrences scan
@@ -365,7 +303,7 @@ class TestExportTarget:
         des = _wire(comp)
         out = payload(mx.handler(format="obj", target="Arm:1",
                                          file_path=str(tmp_path / "p.obj")))
-        assert des.exportManager.calls[-1].geom is occ
+        assert des.exportManager._calls[-1].geom is occ
         assert "occurrence" in out["target"].lower() and "Arm:1" in out["target"]
 
     def test_occurrence_by_full_path_target(self, tmp_path):
@@ -374,7 +312,7 @@ class TestExportTarget:
         des = _wire(comp)
         out = payload(mx.handler(format="obj", target="Root+Sub+Arm:1",
                                          file_path=str(tmp_path / "p.obj")))
-        assert des.exportManager.calls[-1].geom is occ
+        assert des.exportManager._calls[-1].geom is occ
         assert "occurrence" in out["target"].lower()
 
     def test_a_name_two_instances_share_is_refused_with_their_paths(self, tmp_path):
@@ -390,7 +328,7 @@ class TestExportTarget:
         assert res["isError"] is True
         assert "2 occurrences" in res["message"]
         assert "SubA:1+Bolt:1" in res["message"] and "SubB:1+Bolt:1" in res["message"]
-        assert des.exportManager.executed is None          # no file was written for either
+        assert des.exportManager._executed is None          # no file was written for either
 
     def test_the_full_path_still_picks_one_of_the_shared_names(self, tmp_path):
         # The refusal's own remedy has to work: the fullPathName resolves the instance it names.
@@ -400,7 +338,7 @@ class TestExportTarget:
         des = _wire(comp)
         out = payload(mx.handler(format="obj", target="SubB:1+Bolt:1",
                                          file_path=str(tmp_path / "p.obj")))
-        assert des.exportManager.calls[-1].geom is b       # the named instance, not the first hit
+        assert des.exportManager._calls[-1].geom is b       # the named instance, not the first hit
         assert out["exported"] is True
 
     def test_missing_named_target_errors(self, tmp_path):
@@ -417,12 +355,11 @@ class TestExportTarget:
 class TestExportRefinement:
 
     def _no_refine_export(self, des, tmp_path, refinement="high"):
-        """Export through options that DROP the meshRefinement write (see _NoRefineOptions), so
-        _apply_refinement returns None - the density never landed."""
+        """Export through options that DROP the meshRefinement write, so _apply_refinement returns
+        None - the density never landed. The dropped set is the only condition modelled; which
+        builds/formats behave this way is not asserted."""
         def _stl_opt(geom, path):
-            rec = _NoRefineOptions("stl", geom, path)
-            des.exportManager.calls.append(rec)
-            return rec
+            return _record(des, "stl", geom, path, drops=("meshRefinement",))
         des.exportManager.createSTLExportOptions = _stl_opt
         return payload(mx.handler(format="stl", refinement=refinement,
                                           file_path=str(tmp_path / "p.stl")))
@@ -438,7 +375,7 @@ class TestExportRefinement:
         out = payload(mx.handler(format="obj", refinement="high",
                                          file_path=str(tmp_path / "p.obj")))
         # the options object carried the high refinement enum
-        assert des.exportManager.calls[-1].meshRefinement == _refine_member("high")
+        assert des.exportManager._calls[-1].meshRefinement == _refine_member("high")
         # it LANDED, so applied and requested agree
         assert out["refinement"] == "high"
         assert out["refinement_requested"] == "high"
@@ -453,7 +390,7 @@ class TestExportRefinement:
         # so 'refinement' is null - only the REQUEST is echoed, under its own key.
         des = _wire(_comp("Root", bodies=[BRepBody("Body1")]))
         out = self._no_refine_export(des, tmp_path)
-        assert getattr(des.exportManager.calls[-1], "meshRefinement", None) is None
+        assert getattr(des.exportManager._calls[-1], "meshRefinement", None) is None
         assert out["refinement"] is None
         assert out["refinement_requested"] == "high"
 
@@ -507,7 +444,7 @@ class TestExportRefinement:
         out = payload(mx.handler(format="obj", refinement="high",
                                          file_path=str(tmp_path / "p.obj")))
         assert out["refinement"] == "high"
-        assert des.exportManager.calls[-1].meshRefinement == _refine_member("high")
+        assert des.exportManager._calls[-1].meshRefinement == _refine_member("high")
         assert "UNVERIFIED" not in out["note"]
 
     def test_a_dropped_refinement_write_is_caught_where_the_read_back_can_see_it(self, tmp_path):
@@ -544,15 +481,17 @@ class TestExportStlUnits:
     for - the unit mesh_insert defaults to - and publishes the unit the options object read back
     either way."""
 
-    def _stl_options_class(self, des, cls, only_for=None):
-        """Point the STL options factory at 'cls' (for the named occurrences only, when given)."""
+    def _stl_dropping_the_unit(self, des, only_for=None):
+        """Point the STL options factory at options that DROP the unitType write over a FOREIGN
+        factory value (for the named occurrences only, when given): the set is accepted silently and
+        the read-back still answers something else, so _apply_stl_units returns None."""
         names = set(only_for or ())
 
         def _stl_opt(geom, path):
-            use = cls if (not names or getattr(geom, "name", "") in names) else FakeExportOptions
-            rec = use("stl", geom, path)
-            des.exportManager.calls.append(rec)
-            return rec
+            if names and getattr(geom, "name", "") not in names:
+                return _record(des, "stl", geom, path)
+            return _record(des, "stl", geom, path, drops=("unitType",),
+                           seeded={"unitType": _FOREIGN_UNIT})
         des.exportManager.createSTLExportOptions = _stl_opt
 
     def _stl_options_holding(self, des, unit_member, drop_write=True):
@@ -568,7 +507,7 @@ class TestExportStlUnits:
         assert f"Default {advertised}." in mx._EXPORT_UNITS.schema()["description"]
         des = _wire(_comp("Root", bodies=[BRepBody("Body1")]))
         out = payload(mx.handler(format="stl", file_path=str(tmp_path / "p.stl")))
-        assert des.exportManager.calls[-1].unitType is getattr(
+        assert des.exportManager._calls[-1].unitType is getattr(
             mx.adsk.fusion.DistanceUnits, mx._export.STL_UNIT_MEMBERS[advertised])
         assert out["options_applied"]["stl_units"] == advertised
         assert out["options_requested"]["stl_units"] == advertised
@@ -579,7 +518,7 @@ class TestExportStlUnits:
         # export/import round trip that asks for nothing carries an unrelated export's.
         des = _wire(_comp("Root", bodies=[BRepBody("Body1")]))
         out = payload(mx.handler(format="stl", file_path=str(tmp_path / "p.stl")))
-        assert des.exportManager.calls[-1].unitType is mx.adsk.fusion.DistanceUnits.MillimeterDistanceUnits
+        assert des.exportManager._calls[-1].unitType is mx.adsk.fusion.DistanceUnits.MillimeterDistanceUnits
         assert out["options_applied"]["stl_units"] == "mm"
         assert out["options_requested"]["stl_units"] == "mm"
 
@@ -601,7 +540,7 @@ class TestExportStlUnits:
         des = _wire(_comp("Root", bodies=[BRepBody("Body1")]))
         out = payload(mx.handler(format="stl", stl_units="in",
                                          file_path=str(tmp_path / "p.stl")))
-        assert des.exportManager.calls[-1].unitType is mx.adsk.fusion.DistanceUnits.InchDistanceUnits
+        assert des.exportManager._calls[-1].unitType is mx.adsk.fusion.DistanceUnits.InchDistanceUnits
         assert out["options_applied"]["stl_units"] == "in"
         assert out["options_requested"]["stl_units"] == "in"
 
@@ -618,7 +557,7 @@ class TestExportStlUnits:
         res = mx.handler(format="stl", stl_units="parsecs",
                                 file_path=str(tmp_path / "p.stl"))
         assert res["isError"] is True and "stl_units" in res["message"]
-        assert des.exportManager.calls == []               # nothing was exported
+        assert des.exportManager._calls == []               # nothing was exported
 
     def test_obj_reports_no_unit(self, tmp_path):
         # STL is the only format this tool bakes a unit into, so an OBJ export must not publish a
@@ -636,7 +575,7 @@ class TestExportStlUnits:
         res = mx.handler(format="obj", stl_units="mm", file_path=str(tmp_path / "p.obj"))
         assert res["isError"] is True
         assert "'mm'" in res["message"] and "format=obj" in res["message"]
-        assert des.exportManager.calls == []               # nothing was written
+        assert des.exportManager._calls == []               # nothing was written
 
     def test_the_schema_declares_the_scope_the_handler_refuses_outside(self, tmp_path):
         # The description and the guard are one promise: a description that dropped 'format=stl
@@ -657,7 +596,7 @@ class TestExportStlUnits:
         # The request must never masquerade as the effect: the options object kept its own value, so
         # 'options_applied' is null and only 'options_requested' echoes what was asked for.
         des = _wire(_comp("Root", bodies=[BRepBody("Body1")]))
-        self._stl_options_class(des, _NoUnitOptions)
+        self._stl_dropping_the_unit(des)
         out = payload(mx.handler(format="stl", file_path=str(tmp_path / "p.stl")))
         assert out["options_applied"]["stl_units"] is None
         assert out["options_requested"]["stl_units"] == "mm"
@@ -669,7 +608,7 @@ class TestExportStlUnits:
         # WHY the set did not stick, and which unit the writer then used, are not readable here - so
         # the sentence must not name inches, a format, or a missing property as the reason.
         des = _wire(_comp("Root", bodies=[BRepBody("Body1")]))
-        self._stl_options_class(des, _NoUnitOptions)
+        self._stl_dropping_the_unit(des)
         note = payload(mx.handler(format="stl",
                                           file_path=str(tmp_path / "p.stl")))["note"].lower()
         for guess in ("inch", "factory default", "does not support", "carries no unittype"):
@@ -747,7 +686,7 @@ class TestExportStlUnits:
         des = _wire(_comp("Root", bodies=[BRepBody("Body1")]))
         monkeypatch.setattr(mx._export, "stl_unit_enum", lambda key: None)
         out = payload(mx.handler(format="stl", file_path=str(tmp_path / "p.stl")))
-        assert not hasattr(des.exportManager.calls[-1], "unitType")
+        assert not hasattr(des.exportManager._calls[-1], "unitType")
         assert out["options_applied"]["stl_units"] is None
         assert "did NOT land" in out["note"]
 
@@ -761,7 +700,7 @@ class TestExportStlUnits:
                                                                  {"stl_units": True}]
         assert out["options_requested"] == {"stl_units": "cm"}
         assert all(c.unitType is mx.adsk.fusion.DistanceUnits.CentimeterDistanceUnits
-                   for c in des.exportManager.calls)
+                   for c in des.exportManager._calls)
         assert "did NOT land" not in out["note"]
         assert "read back units 'cm'" in out["note"]       # the split note names it too
 
@@ -769,7 +708,7 @@ class TestExportStlUnits:
         # the MIXED case: one file's options kept the unit and one did not, so the per-file key
         # differs between them and the note names the count rather than all files.
         des = _wire(_comp("Root", occurrences=[make_occurrence("A:1"), make_occurrence("B:1")]))
-        self._stl_options_class(des, _NoUnitOptions, only_for=["B:1"])
+        self._stl_dropping_the_unit(des, only_for=["B:1"])
         out = payload(mx.handler(format="stl", file_path=str(tmp_path),
                                          split_by_component=True))
         by_occ = {f["occurrence"]: f["options_applied"]["stl_units"] for f in out["files"]}
@@ -792,15 +731,13 @@ class TestExportStlUnits:
 class TestExportSplitByComponent:
 
     def _split_dropping_refinement_for(self, des, drop_for=()):
-        """Point the STL options factory at _NoRefineOptions for the named occurrences only, so a
-        split export can have some files land the refinement and some not."""
+        """Drop the meshRefinement write for the named occurrences only, so a split export can have
+        some files land the refinement and some not."""
         drop = set(drop_for)
 
         def _stl_opt(geom, path):
-            cls = _NoRefineOptions if getattr(geom, "name", "") in drop else FakeExportOptions
-            rec = cls("stl", geom, path)
-            des.exportManager.calls.append(rec)
-            return rec
+            dropped = ("meshRefinement",) if getattr(geom, "name", "") in drop else ()
+            return _record(des, "stl", geom, path, drops=dropped)
         des.exportManager.createSTLExportOptions = _stl_opt
 
     def test_one_file_per_occurrence(self, tmp_path):
@@ -809,7 +746,7 @@ class TestExportSplitByComponent:
         out = payload(mx.handler(format="stl", file_path=str(tmp_path), split_by_component=True))
         assert out["split_by_component"] is True
         assert out["file_count"] == 2
-        geoms = [c.geom.name for c in des.exportManager.calls]
+        geoms = [c.geom.name for c in des.exportManager._calls]
         assert set(geoms) == {"Body:1", "Wheels:1"}
 
     def test_filenames_sanitized(self, tmp_path):
@@ -836,7 +773,7 @@ class TestExportSplitByComponent:
         assert res["isError"] is True
         assert "'target' ('Wheels:1')" in res["message"]
         assert "split_by_component" in res["message"]
-        assert des.exportManager.calls == []                 # nothing built, nothing written
+        assert des.exportManager._calls == []                 # nothing built, nothing written
         assert list(tmp_path.iterdir()) == []
 
     def test_an_omitted_target_still_splits(self, tmp_path):
@@ -904,7 +841,7 @@ class TestExportSplitByComponent:
                                          split_by_component=True))
         assert out["refinement_requested"] == "low"
         assert [f["refinement"] for f in out["files"]] == ["low", "low"]
-        assert all(c.meshRefinement == _refine_member("low") for c in des.exportManager.calls)
+        assert all(c.meshRefinement == _refine_member("low") for c in des.exportManager._calls)
 
     def test_a_split_reports_a_density_the_options_already_read_as_landed(self, tmp_path):
         # split mode carries the same per-knob interpretation as the single-target path: every
@@ -971,22 +908,11 @@ class TestExportNoteBudget:
         requested unit and drop it (it lands unverifiably) - every clause rides at once."""
         drop = set(no_unit)
 
-        class _Opts(FakeExportOptions):
-            def __init__(self, k, geom, path):
-                super().__init__(k, geom, path)
-                object.__setattr__(self, "unitType",
-                                   "FACTORY_DEFAULT" if getattr(geom, "name", "") in drop
-                                   else mx.adsk.fusion.DistanceUnits.MillimeterDistanceUnits)
-
-            def __setattr__(self, k, v):
-                if k in ("meshRefinement", "unitType"):
-                    return
-                object.__setattr__(self, k, v)
-
         def _opt(geom, path):
-            rec = _Opts("stl", geom, path)
-            des.exportManager.calls.append(rec)
-            return rec
+            unit = (_FOREIGN_UNIT if getattr(geom, "name", "") in drop
+                    else mx.adsk.fusion.DistanceUnits.MillimeterDistanceUnits)
+            return _record(des, "stl", geom, path, drops=("meshRefinement", "unitType"),
+                           seeded={"unitType": unit})
         des.exportManager.createSTLExportOptions = _opt
 
     def test_the_worst_composed_single_target_note_fits_the_wire_budget(self, tmp_path):

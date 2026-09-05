@@ -5,52 +5,36 @@ error), and the inline verify (healthState / documentReference.isOutOfDate / isD
 
 The cloud URN resolution is covered by test_doc_insert_occurrence.py (the shared _resolve_data_file);
 here it is monkeypatched so these tests stay offline. Occurrence resolution (into_component) goes
-through the real _inputs.OccurrenceRef kind against a fake design (dual seam patched). SOURCE-side
-fakes are built with SimpleNamespace + conftest's shared _NamedCollection so no new Fake* class is
-added (the bespoke-fake ratchet); the destination fakes are the existing ones in this file.
+through the real _inputs.OccurrenceRef kind against a fake design (dual seam patched). Every type
+carrying a live shape dump uses its shared conftest fake; the DeriveFeature family has none, so it
+keeps the bespoke doubles below.
 """
 
 import json
-import types
 
-from conftest import load_tool, _NamedCollection
+from conftest import (BRepBody, FakeApplication, FakeDataFile, FakeDocumentReference, FakeDocuments,
+                      FakeFeatures, FakeFusionDocument, FakeOccurrence, FakeProducts,
+                      FakeUserParameter, FakeUserParameters, MakeComp, MakeDesign,
+                      _NamedCollection, load_tool, make_occurrence)
 
 io = load_tool("doc_insert_derive")
 
 
 # ── destination-side fakes ───────────────────────────────────────────────────────────────────────
 
-class FakeDataFile:
-    def __init__(self, id_="urn:adsk.wipprod:dm.lineage:src", name="SourcePart", version=3):
-        self.id = id_
-        self.name = name
-        self.versionNumber = version
+def FakeBody(name, is_derived=True):
+    """One body a derive landed - isDerived is the flag the read-back verifies."""
+    return BRepBody(name, is_derived=is_derived)
 
 
-class FakeDocRef:
-    def __init__(self, is_out_of_date=False):
-        self.isOutOfDate = is_out_of_date
-
-
-class FakeBody:
-    def __init__(self, name, is_derived=True):
-        self.name = name
-        self.isDerived = is_derived
-
-
-class FakeBodyCollection:
-    def __init__(self, bodies):
-        self._bodies = list(bodies)
-
-    @property
-    def count(self):
-        return len(self._bodies)
-
-    def item(self, i):
-        return self._bodies[i]
+def FakeBodyCollection(bodies):
+    return _NamedCollection(list(bodies))
 
 
 class FakeDeriveFeature:
+    """The landed DeriveFeature: its health pair, the bodies it brought in, whether it is parametric
+    and the documentReference a freshness read goes through. DeriveFeature carries no live shape
+    dump, so it has no shared fake."""
     def __init__(self, name="Derive1", health=0, message="", bodies=(), is_parametric=True,
                  out_of_date=False):
         self.name = name
@@ -58,10 +42,11 @@ class FakeDeriveFeature:
         self.errorOrWarningMessage = message
         self.bodies = FakeBodyCollection(bodies)
         self.isParametric = is_parametric
-        self.documentReference = FakeDocRef(out_of_date)
+        self.documentReference = FakeDocumentReference(out_of_date=out_of_date)
 
 
 class FakeDeriveFeatureInput:
+    """The DeriveFeatureInput the handler populates - no live shape dump, so no shared fake."""
     def __init__(self):
         self.sourceEntities = None
         self.excludedEntities = None
@@ -111,107 +96,64 @@ class FakeDeriveFeatures:
         return feat
 
 
-class FakeFeatures:
-    def __init__(self, derive_features):
-        self.deriveFeatures = derive_features
-
-
-class FakeOcc:
+def FakeOcc(name, is_derived=True, token=None, body_count=0, children=()):
     """A destination occurrence. body_count + children back _subtree_body_count; isDerived + token
     back the new-derived-occurrence diff."""
-
-    def __init__(self, name, is_derived=True, token=None, body_count=0, children=()):
-        self.name = name
-        self.isDerived = is_derived
-        self.entityToken = token if token is not None else f"tok-{id(self)}"
-        self.bRepBodies = FakeBodyCollection([FakeBody(f"{name}_b{i}") for i in range(body_count)])
-        self.childOccurrences = FakeOccurrences(children)
+    occ = make_occurrence(path=name, derived=is_derived,
+                          entity_token=token if token is not None else f"tok-{name}-{id(children)}",
+                          bodies=[FakeBody(f"{name}_b{i}") for i in range(body_count)],
+                          children=children)
+    return occ
 
 
-class FakeOccurrences:
-    def __init__(self, items):
-        self._items = list(items)   # comp.occurrences._items - tests mutate this to simulate add()
-
-    @property
-    def count(self):
-        return len(self._items)
-
-    def item(self, i):
-        return self._items[i]
+def FakeOccurrences(items):
+    # tests mutate ._items to simulate an occurrence landing during the derive
+    return _NamedCollection(list(items))
 
 
-class FakeComp:
-    # entityToken, because _common.same_component compares on it: the landing net that catches a
-    # derive surfacing at ROOT instead of nested is skipped (and disclosed) when the target cannot
-    # be told from the root. A test that wants that state deletes the attribute.
-    def __init__(self, name="Root", derive_features=None, occurrences=(), token=None):
-        self.name = name
-        self.entityToken = token if token is not None else f"TOKEN:{name}"
-        self.features = FakeFeatures(derive_features if derive_features is not None else FakeDeriveFeatures())
-        self.occurrences = FakeOccurrences(occurrences)
+def FakeComp(name="Root", derive_features=None, occurrences=(), token=None):
+    """The destination component. entityToken, because _common.same_component compares on it: the
+    landing net that catches a derive surfacing at ROOT instead of nested is skipped (and disclosed)
+    when the target cannot be told from the root. A test that wants that state deletes it."""
+    comp = MakeComp(name, entity_token=token if token is not None else f"TOKEN:{name}")
+    features = FakeFeatures()
+    features.deriveFeatures = (derive_features if derive_features is not None
+                               else FakeDeriveFeatures())
+    comp.features = features
+    comp.occurrences = FakeOccurrences(occurrences)
+    return comp
 
 
-class FakeUserParameters:
-    def __init__(self, count=0):
-        self._count = count
-
-    @property
-    def count(self):
-        return self._count
+def _params(count):
+    """A parameter collection of `count` entries - only the count is read here."""
+    return FakeUserParameters([FakeUserParameter(f"p{i}") for i in range(count)])
 
 
-class FakeDesign:
+def _grow_params(params, count):
+    """Resize a parameter collection - what a derive that imported parameters leaves behind."""
+    params._parameters = [FakeUserParameter(f"p{i}") for i in range(count)]
+
+
+def FakeDesign(root_comp, design_type=1, user_param_count=0, all_param_count=None):
     """The DESTINATION design (what _common.design() returns). designType: 1 = parametric, 0 = direct.
-    No allComponents/computeAll surface: design_wide_counts falls back to the root (0 bodies) and
-    computeAll is swallowed by safe() - the landed body DELTA is asserted live, not here.
-
     all_param_count=None leaves the design with NO allParameters collection, so the design-level
     model-parameter count reads as UNKNOWN rather than zero."""
-
-    def __init__(self, root_comp, design_type=1, user_param_count=0, all_param_count=None):
-        self.rootComponent = root_comp
-        self.designType = design_type
-        self.userParameters = FakeUserParameters(user_param_count)
-        if all_param_count is not None:
-            self.allParameters = FakeUserParameters(all_param_count)
-
-
-class FakeProducts:
-    def __init__(self, design):
-        self._design = design
-
-    def itemByProductType(self, kind):
-        return self._design if kind == 'DesignProductType' else None
+    return MakeDesign(comp=root_comp, design_type=design_type,
+                      user_parameters=_params(user_param_count),
+                      all_parameters=None if all_param_count is None else _params(all_param_count))
 
 
 _NO_DEFAULT = object()
 
 
-class FakeSourceDoc:
-    def __init__(self, name="Source", data_file=None, design=_NO_DEFAULT):
-        self.name = name
-        self.dataFile = data_file
-        self.products = FakeProducts(_make_source() if design is _NO_DEFAULT else design)
+def FakeSourceDoc(name="Source", data_file=None, design=_NO_DEFAULT):
+    """The open SOURCE document a derive reads its design through."""
+    return FakeFusionDocument(
+        name=name, data_file=data_file,
+        products=FakeProducts(design=_make_source() if design is _NO_DEFAULT else design))
 
 
-class FakeDocuments:
-    def __init__(self, open_docs=()):
-        self._open_docs = list(open_docs)
-
-    @property
-    def count(self):
-        return len(self._open_docs)
-
-    def item(self, i):
-        return self._open_docs[i]
-
-
-class FakeApp:
-    def __init__(self, documents):
-        self.documents = documents
-
-
-# ── source-side builders (SimpleNamespace + the shared _NamedCollection - no new Fake* class) ──────
+# ── source-side builders ─────────────────────────────────────────────────────────────────────────
 
 def _src_comp(name, bodies=(), token=None):
     """A SOURCE component: name + bRepBodies/meshBodies collections (count/item).
@@ -219,26 +161,20 @@ def _src_comp(name, bodies=(), token=None):
     The entityToken is what _common.same_component compares on - the root derives as ITSELF while
     any other component derives through its occurrences, and the handler refuses rather than pick
     between those two on an identity that did not read. `token=None` is that unreadable state."""
-    return types.SimpleNamespace(
-        name=name, entityToken=token if token is not None else f"TOKEN:{name}",
-        bRepBodies=_NamedCollection([types.SimpleNamespace(name=b) for b in bodies]),
-        meshBodies=_NamedCollection([]))
+    return MakeComp(name, bodies=list(bodies), mesh_bodies=[],
+                    entity_token=token if token is not None else f"TOKEN:{name}")
 
 
 def _src_occ(name):
-    """A SOURCE occurrence - opaque; the handler just forwards it into sourceEntities."""
-    return types.SimpleNamespace(name=name)
+    """A SOURCE occurrence - the handler just forwards it into sourceEntities."""
+    return make_occurrence(path=name)
 
 
 def _make_source(components=(), occ_by_comp=None, root_name="SrcRoot"):
     """A SOURCE design: rootComponent (with allOccurrencesByComponent) + allComponents (root + subs)."""
-    occ_by_comp = dict(occ_by_comp or {})
-    root = types.SimpleNamespace(name=root_name, entityToken=f"TOKEN:{root_name}",
-                                 bRepBodies=_NamedCollection([]), meshBodies=_NamedCollection([]))
-    root.allOccurrencesByComponent = lambda c: _NamedCollection(
-        list(occ_by_comp.get(getattr(c, "name", None), [])))
-    return types.SimpleNamespace(rootComponent=root,
-                                 allComponents=_NamedCollection([root] + list(components)))
+    root = MakeComp(root_name, mesh_bodies=[], entity_token=f"TOKEN:{root_name}",
+                    occurrences_by_component=dict(occ_by_comp or {}))
+    return MakeDesign(comp=root, all_components=[root] + list(components))
 
 
 def _install(monkeypatch, *, design_type=1, user_param_count=0, occurrences=(),
@@ -252,11 +188,12 @@ def _install(monkeypatch, *, design_type=1, user_param_count=0, occurrences=(),
                         all_param_count=all_param_count)
     monkeypatch.setattr(io._common, "design", lambda: design)
     monkeypatch.setattr(io._inputs._common, "design", lambda: design)
-    df = data_file or FakeDataFile()
+    df = data_file if data_file is not None else FakeDataFile(
+        "SourcePart", file_id="urn:adsk.wipprod:dm.lineage:src", version=3)
     src = _make_source() if source_design is _NO_DEFAULT else source_design
     source_doc = FakeSourceDoc(data_file=df, design=src)
-    docs = FakeDocuments(open_docs=[source_doc] if source_open else [])
-    monkeypatch.setattr(io, "app", FakeApp(docs))
+    docs = FakeDocuments([source_doc] if source_open else [])
+    monkeypatch.setattr(io, "app", FakeApplication(documents=docs))
     monkeypatch.setattr(io, "_resolve_data_file", lambda raw: (df, df.id, [raw]))
     return design, comp, docs, df, derive_features, source_doc
 
@@ -410,21 +347,21 @@ class TestCollectSourceEntities:
         # guarded because it can fail. Here the rootComponent wrapper's name will not read: a NAME
         # compare then misses the root and sends the whole design down the occurrence branch, where
         # the root has none. The shared entityToken is what settles it.
-        named_root = types.SimpleNamespace(name="Assembly", entityToken="tok-root",
-                                           bRepBodies=_NamedCollection([]),
-                                           meshBodies=_NamedCollection([]))
+        named_root = _src_comp("Assembly", token="tok-root")
 
-        class _UnreadableName:
-            entityToken = "tok-root"
-
+        class _UnreadableName(MakeComp):
+            """The root wrapper whose display name will not read - the same component, addressed
+            through a read that declines."""
             @property
             def name(self):
                 raise RuntimeError("3 : cloud read failed")
 
-        src = types.SimpleNamespace(
-            rootComponent=_UnreadableName(),
-            allComponents=_NamedCollection([named_root, _src_comp("Sub")]))
-        src.rootComponent.allOccurrencesByComponent = lambda c: _NamedCollection([])
+            @name.setter
+            def name(self, value):
+                pass
+
+        unreadable = _UnreadableName("Assembly", mesh_bodies=[], entity_token="tok-root")
+        src = MakeDesign(comp=unreadable, all_components=[named_root, _src_comp("Sub")])
         ents, labels, err = io._collect_source_entities(src, ["Assembly"], [])
         assert err is None
         assert ents == [named_root]                    # the whole design, not a no-occurrence error
@@ -545,13 +482,14 @@ class TestAddFailures:
 
     def test_missing_derive_features_collection_errors(self, monkeypatch):
         comp = FakeComp()
-        comp.features = FakeFeatures(None)
+        comp.features.deriveFeatures = None      # this build's Features carries no derive collection
         design = FakeDesign(comp)
         monkeypatch.setattr(io._common, "design", lambda: design)
         monkeypatch.setattr(io._inputs._common, "design", lambda: design)
-        df = FakeDataFile()
+        df = FakeDataFile("SourcePart", file_id="urn:adsk.wipprod:dm.lineage:src")
         source_doc = FakeSourceDoc(data_file=df, design=_make_source())
-        monkeypatch.setattr(io, "app", FakeApp(FakeDocuments(open_docs=[source_doc])))
+        monkeypatch.setattr(io, "app",
+                            FakeApplication(documents=FakeDocuments([source_doc])))
         monkeypatch.setattr(io, "_resolve_data_file", lambda raw: (df, raw, [raw]))
         res = io.handler(document_id="urn:x")
         assert res["isError"] is True and "deriveFeatures" in res["message"]
@@ -602,7 +540,7 @@ class TestParameterVerify:
         # over design.allParameters - not over the derived component, which holds only its own.
         design, comp, docs, df, dfs, _ = _install(monkeypatch, user_param_count=4,
                                                   all_param_count=9)
-        dfs.on_add = lambda: setattr(design.allParameters, "_count", 29)
+        dfs.on_add = lambda: _grow_params(design.allParameters, 29)
         out = _payload(io.handler(document_id="urn:x"))
         assert out["parameters_imported"] == 0        # the userParameters delta saw none...
         assert out["model_parameters_added"] == 20    # ...while 20 model parameters landed
@@ -628,7 +566,7 @@ class TestParameterVerify:
 
     def test_reports_imported_count_honestly(self, monkeypatch):
         design, comp, docs, df, dfs, _ = _install(monkeypatch, user_param_count=2)
-        dfs.on_add = lambda: setattr(design.userParameters, "_count", 5)
+        dfs.on_add = lambda: _grow_params(design.userParameters, 5)
         out = _payload(io.handler(document_id="urn:x"))
         assert out["parameters_imported"] == 3
         assert "parameter_warning" not in out
@@ -653,26 +591,24 @@ class TestIntoComponent:
 
     def _nested_setup(self, monkeypatch, *, occ_activates=True, chassis_derive=None,
                       root_restore=True):
-        """A design with a Chassis:1 occurrence targetable by into_component. The occ records
-        activate()/deactivate() calls (the platform routes a derive into the ACTIVE component, so
-        nesting activates the target first); the design records the root-restore. root_restore is
-        what activateRootComponent answers - True, False, or 'raise' for one that throws."""
+        """A design with a Chassis:1 occurrence targetable by into_component. The occ counts its
+        activate() calls (the platform routes a derive into the ACTIVE component, so nesting
+        activates the target first); the design records the root-restore. root_restore is what
+        activateRootComponent answers - True, False, or 'raise' for one that throws."""
         chassis_derive = chassis_derive or FakeDeriveFeatures()
         chassis_comp = FakeComp("Chassis", derive_features=chassis_derive)
-        calls = {"activated": 0, "root_restored": 0, "deactivated": 0}
-        occ = type("Occ", (), {
-            "name": "Chassis:1", "fullPathName": "Chassis:1", "component": chassis_comp,
-            "activate": lambda self=None: calls.__setitem__("activated", calls["activated"] + 1)
-                        or occ_activates,
-            "deactivate": lambda self=None: calls.__setitem__("deactivated",
-                                                              calls["deactivated"] + 1) or True,
-        })()
+        calls = {"activated": 0, "root_restored": 0}
+
+        class _ActivatableOcc(FakeOccurrence):
+            """The into_component target, counting the activate() that precedes the derive."""
+            def activate(self):
+                calls["activated"] += 1
+                return occ_activates
+
+        occ = _ActivatableOcc("Chassis:1", chassis_comp)
         root_comp = FakeComp("Root")
+        root_comp.allOccurrences = [occ]
         design = FakeDesign(root_comp)
-        design.rootComponent = type("Root", (), {
-            "name": "Root", "entityToken": "TOKEN:Root",
-            "allOccurrences": [occ], "occurrences": root_comp.occurrences,
-        })()
 
         def _restore_root():
             calls["root_restored"] += 1
@@ -682,9 +618,10 @@ class TestIntoComponent:
         design.activateRootComponent = _restore_root
         monkeypatch.setattr(io._common, "design", lambda: design)
         monkeypatch.setattr(io._inputs._common, "design", lambda: design)
-        df = FakeDataFile()
+        df = FakeDataFile("SourcePart", file_id="urn:adsk.wipprod:dm.lineage:src")
         source_doc = FakeSourceDoc(data_file=df, design=_make_source())
-        monkeypatch.setattr(io, "app", FakeApp(FakeDocuments(open_docs=[source_doc])))
+        monkeypatch.setattr(io, "app",
+                            FakeApplication(documents=FakeDocuments([source_doc])))
         monkeypatch.setattr(io, "_resolve_data_file", lambda raw: (df, raw, [raw]))
         return design, chassis_comp, chassis_derive, calls
 
@@ -696,24 +633,22 @@ class TestIntoComponent:
         assert calls["activated"] == 1       # nesting = activate the target before add()
         assert calls["root_restored"] == 1   # ...and restore the root edit target after
 
-    def test_a_successful_root_restore_leaves_the_occurrence_activated_alone(self, monkeypatch):
-        # The restore took, so there is nothing to fall back to: deactivating on top of it would
-        # leave the edit target somewhere neither the tool nor the caller asked for.
-        _design, _chassis, _derive, calls = self._nested_setup(monkeypatch)
-        _payload(io.handler(document_id="urn:x", into_component="Chassis:1"))
-        assert calls["root_restored"] == 1 and calls["deactivated"] == 0
+    def test_a_FALSE_root_restore_still_reports_the_derive(self, monkeypatch):
+        # A False return means the restore did NOT take. The restore is attempted either way, and
+        # the derive that already landed is still reported - a restore that did not take is not a
+        # reason to withhold the feature the caller asked for.
+        _design, _chassis, derive, calls = self._nested_setup(monkeypatch, root_restore=False)
+        out = _payload(io.handler(document_id="urn:x", into_component="Chassis:1"))
+        assert "Chassis" in out["into_component"] and derive.created is not None
+        assert calls["root_restored"] == 1
 
-    def test_a_FALSE_root_restore_falls_back_to_deactivating_the_occurrence(self, monkeypatch):
-        # A False return means the restore did NOT take - the same outcome as a raise, and it must
-        # take the same fallback, or the derive leaves Chassis:1 as the active edit target.
-        _design, _chassis, _derive, calls = self._nested_setup(monkeypatch, root_restore=False)
-        _payload(io.handler(document_id="urn:x", into_component="Chassis:1"))
-        assert calls["root_restored"] == 1 and calls["deactivated"] == 1
-
-    def test_a_RAISING_root_restore_falls_back_to_deactivating_the_occurrence(self, monkeypatch):
-        _design, _chassis, _derive, calls = self._nested_setup(monkeypatch, root_restore="raise")
-        _payload(io.handler(document_id="urn:x", into_component="Chassis:1"))
-        assert calls["root_restored"] == 1 and calls["deactivated"] == 1
+    def test_a_RAISING_root_restore_does_not_sink_the_call(self, monkeypatch):
+        # The restore runs in a finally, so a raise there would escape the handler and turn a
+        # landed derive into an exception - the same outcome a False return must not cause either.
+        _design, _chassis, derive, calls = self._nested_setup(monkeypatch, root_restore="raise")
+        out = _payload(io.handler(document_id="urn:x", into_component="Chassis:1"))
+        assert "Chassis" in out["into_component"] and derive.created is not None
+        assert calls["root_restored"] == 1
 
     def test_activation_failure_refuses_before_deriving(self, monkeypatch):
         design, chassis, chassis_derive, calls = self._nested_setup(monkeypatch,
@@ -784,7 +719,7 @@ class TestPayloadContract:
         assert "last SAVED cloud version" in io.TOOL_DESCRIPTION
 
     def test_document_metadata_reported(self, monkeypatch):
-        df = FakeDataFile(id_="urn:adsk.wipprod:dm.lineage:abc", name="Gimbal", version=7)
+        df = FakeDataFile("Gimbal", file_id="urn:adsk.wipprod:dm.lineage:abc", version=7)
         _install(monkeypatch, data_file=df)
         out = _payload(io.handler(document_id="whatever-resolves"))
         assert out["document_id"] == df.id

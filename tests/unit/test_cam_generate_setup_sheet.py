@@ -17,6 +17,8 @@ from conftest import FakeSetup, load_tool, make_cam
 
 gs = load_tool("cam_generate_setup_sheet")
 
+_FORMATS = adsk.cam.SetupSheetFormats
+
 # The SHIPPED bound, read before any test shortens it.
 _PUMP_SECONDS_SHIPPED = gs._PUMP_SECONDS
 
@@ -65,8 +67,6 @@ def rig(monkeypatch, tmp_path):
         monkeypatch.setattr(gs, "resolve_cam_node", fake_resolve)
         monkeypatch.setattr(adsk, "doEvents", pump, raising=False)
         monkeypatch.setattr(gs.time, "sleep", lambda s: None)
-        monkeypatch.setattr(adsk.cam.SetupSheetFormats, "HTMLFormat", "HTML_ENUM", raising=False)
-        monkeypatch.setattr(adsk.cam.SetupSheetFormats, "ExcelFormat", "EXCEL_ENUM", raising=False)
         return {"cam": cam, "setup": setup}
     return _make
 
@@ -104,8 +104,13 @@ class TestRouting:
     def test_excel_maps_to_the_excel_enum(self, rig, tmp_path):
         r = rig(sheet_name="Untitled.xlsx")
         out = _payload(gs.handler(format="excel", output_folder=str(tmp_path)))
-        assert r["cam"].calls[0][2] == "EXCEL_ENUM"
+        assert r["cam"].calls[0][2] == _FORMATS.ExcelFormat
         assert out["format"] == "excel" and out["file_path"].endswith(".xlsx")
+
+    def test_the_default_format_maps_to_the_html_enum(self, rig, tmp_path):
+        r = rig()
+        _payload(gs.handler(output_folder=str(tmp_path)))
+        assert r["cam"].calls[0][2] == _FORMATS.HTMLFormat
 
     def test_an_unknown_scope_is_refused_before_generating(self, rig, tmp_path):
         r = rig()

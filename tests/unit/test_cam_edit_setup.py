@@ -19,6 +19,7 @@ from conftest import (FakeCAMParameter, FakeCAMParameters, FakeMachine, FakeSetu
 ces = load_tool("cam_edit_setup")
 
 _STOCK_MODES = _api_facts.ENUMS["cam.SetupStockModes"]
+_LOCATIONS = ces.adsk.cam.LibraryLocations
 
 
 # ── the setup under edit: parameters + body collections ─────────────────────
@@ -562,10 +563,12 @@ def _machine(vendor, model, description=None):
 
 
 def _machine_lib(machines, f360=()):
-    """Fake MachineLibrary: a Local pool + a Fusion360 pool behind createQuery."""
+    """Fake MachineLibrary: a Local pool + a Fusion360 pool behind createQuery, each keyed on the
+    measured LibraryLocations member the resolver must pass."""
     local_pool, f360_pool = list(machines), list(f360)
     def create_query(loc, vendor, model):
-        pool = local_pool if loc == "LOCAL" else (f360_pool if loc == "F360" else [])
+        pool = (local_pool if loc == _LOCATIONS.LocalLibraryLocation
+                else (f360_pool if loc == _LOCATIONS.Fusion360LibraryLocation else []))
         matched = [m for m in pool
                    if (not vendor or (m.vendor or "").lower() == vendor.lower())
                    and (not model or (m.model or "").lower().startswith(model.lower()))]
@@ -577,8 +580,6 @@ def _install_machine_lib(monkeypatch, machines, f360=()):
     lib = _machine_lib(machines, f360)
     holder = SimpleNamespace(libraryManager=SimpleNamespace(machineLibrary=lib))
     monkeypatch.setattr(ces.adsk.cam.CAMManager, "get", staticmethod(lambda: holder), raising=False)
-    monkeypatch.setattr(ces.adsk.cam.LibraryLocations, "LocalLibraryLocation", "LOCAL", raising=False)
-    monkeypatch.setattr(ces.adsk.cam.LibraryLocations, "Fusion360LibraryLocation", "F360", raising=False)
     return lib
 
 

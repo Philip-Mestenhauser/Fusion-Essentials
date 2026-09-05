@@ -9,11 +9,10 @@ cloud logic + caps are covered by their tests and by live validation.
 
 import json
 import re
-from types import SimpleNamespace
 
 import pytest
 
-from conftest import load_tool, error_message, stub_tool_module
+from conftest import FakeDataFolder, error_message, load_tool, stub_tool_module
 
 dge = load_tool("data_get")
 # The real folder walk the router hands its depth to. Loaded here, before any test stubs
@@ -208,9 +207,7 @@ class TestFileScope:
 def _folder(name, children=()):
     """One cloud folder. Enumerating dataFolders is the round-trip the walk is budgeted on, so the
     children are only ever reachable through it."""
-    kids = list(children)
-    return SimpleNamespace(name=name, id=f"id:{name}",
-                           dataFolders=SimpleNamespace(asArray=lambda: list(kids)))
+    return FakeDataFolder(name, folder_id=f"id:{name}", folders=list(children))
 
 
 def _folder_chain(depth):

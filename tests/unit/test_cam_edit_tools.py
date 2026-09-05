@@ -16,10 +16,13 @@ import json
 import re
 from types import SimpleNamespace
 
+import adsk.cam
 import pytest
 
 from conftest import (FakeCAMParameter, FakeCAMParameters, FakeOperation, FakeTool,
                       _NamedCollection, load_tool)
+
+_LOCATIONS = adsk.cam.LibraryLocations
 
 ct = load_tool("cam_edit_tools")
 cp = load_tool("_cam_presets")          # the preset helpers cam_edit_tools' preset paths run through
@@ -1109,8 +1112,9 @@ class _CreateLibs:
         self.imported = []
         self._loads_back = loads_back     # False = the created url re-reads to nothing (the lie)
     def urlByLocation(self, loc):
-        return _URL_C({"Local": "toollibraryroot://Local", "Cloud": "cloud://",
-                       "Hub": "hub://"}[loc])
+        return _URL_C({_LOCATIONS.LocalLibraryLocation: "toollibraryroot://Local",
+                       _LOCATIONS.CloudLibraryLocation: "cloud://",
+                       _LOCATIONS.HubLibraryLocation: "hub://"}[loc])
     def childFolderURLs(self, url):
         return [_URL_C("hub://Team")] if url.toString() == "hub://" else []
     def importToolLibrary(self, lib, dest, name):
@@ -1132,17 +1136,10 @@ class _URL_C:
 def _install_create(monkeypatch, src_count=3):
     libs = _CreateLibs()
     monkeypatch.setattr(ct, "_tool_libraries", lambda: libs)
-    # friendly scope -> the fake's urlByLocation key
     monkeypatch.setattr(ct, "_empty_library", _NewLib)
     src = _SrcLib([_Tool("A"), _Tool("B"), _Tool("C")][:src_count])
     monkeypatch.setattr(ct, "_source_tool", lambda url, idx: (src.item(idx), None) if 0 <= idx < src.count
                         else (None, "tool_index %d out of range" % idx))
-    # map LibraryLocations attr lookups: the tool does getattr(LibraryLocations, 'LocalLibraryLocation')
-    # then libs.urlByLocation(that) — our fake's urlByLocation expects friendly names, so shim it.
-    import adsk.cam as _c
-    monkeypatch.setattr(_c.LibraryLocations, "LocalLibraryLocation", "Local")
-    monkeypatch.setattr(_c.LibraryLocations, "CloudLibraryLocation", "Cloud")
-    monkeypatch.setattr(_c.LibraryLocations, "HubLibraryLocation", "Hub")
     return libs
 
 

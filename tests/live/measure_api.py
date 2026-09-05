@@ -2054,6 +2054,118 @@ ROWS = [
 """,
     },
     {
+        "id": "shape-dump-assembly-world-2",
+        "claim": "A scratch assembly of six single-box components - the first two overlapping by half a box - yields the assembly types the joint/assembly test doubles stand for: a planar-face JointGeometry through JointOrigins.createInput/add gives JointOriginInput, JointOrigin and JointOrigins; asBuiltJoints.createInput(occ, occ, None)/add gives AsBuiltJointInput, AsBuiltJoint, AsBuiltJoints and a RigidJointMotion off the joint; joints.createInput gives JointInput; contactSets.add over the overlapping pair gives ContactSet and ContactSets; createInterferenceInput/analyzeInterference over that pair gives InterferenceInput, InterferenceResults and InterferenceResult; assemblyConstraints.createInput, one geometricRelationships.add between two planar faces, and add gives AssemblyConstraintInput, AssemblyConstraint and AssemblyConstraints; a revolute joint driven to rotationValue 0.5 sets snapshots.hasPendingSnapshot True and snapshots.add then gives Snapshot and Snapshots; the extrude's extentDefinition.distance is a ModelParameter; timelineGroups.add(0, 1) gives TimelineGroup and TimelineGroups. Every one of the 22 dumps is non-empty and answers the type its label names. There is no InterferenceBody type in adsk.fusion or adsk.core - the row reads that absence, and reads that InterferenceResult.interferenceBody answers BRepBody",
+        "encoded_in": "tests/live_api_facts.py SHAPES - the measured surface a shared fake for any of these assembly/joint types is swept against by test_fake_shapes_exist.py; today the types are carried by per-file fakes in test_assembly_get.py, test_assembly_inspect_interference.py, test_assembly_capture_position.py, test_joint_create_as_built.py and test_design_edit_timeline.py",
+        "body": """
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        d = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        root = d.rootComponent
+
+        def placed(dx, name):
+            m = adsk.core.Matrix3D.create()
+            m.translation = adsk.core.Vector3D.create(dx, 0.0, 0.0)
+            occ = root.occurrences.addNewComponent(m)
+            c = occ.component
+            c.name = name
+            sk = c.sketches.add(c.xYConstructionPlane)
+            sk.sketchCurves.sketchLines.addTwoPointRectangle(
+                adsk.core.Point3D.create(0.0, 0.0, 0.0), adsk.core.Point3D.create(1.0, 1.0, 0.0))
+            ext = c.features.extrudeFeatures.addSimple(
+                sk.profiles.item(0), adsk.core.ValueInput.createByReal(1.0),
+                adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+            return occ, c, ext
+
+        def planar_face(body):
+            for i in range(body.faces.count):
+                f = body.faces.item(i)
+                if type(f.geometry).__name__ == "Plane":
+                    return f
+            return None
+
+        def origin_geometry(occ):
+            return adsk.fusion.JointGeometry.createByPoint(
+                occ.component.originConstructionPoint.createForAssemblyContext(occ))
+
+        one, comp_one, ext_one = placed(0.0, "ShapeA")
+        two = placed(0.5, "ShapeB")[0]
+        three = placed(4.0, "ShapeC")[0]
+        four = placed(6.0, "ShapeD")[0]
+        five = placed(8.0, "ShapeE")[0]
+        six = placed(10.0, "ShapeF")[0]
+
+        jgeo = adsk.fusion.JointGeometry.createByPlanarFace(
+            planar_face(comp_one.bRepBodies.item(0)), None,
+            adsk.fusion.JointKeyPointTypes.CenterKeyPoint)
+        jo_input = comp_one.jointOrigins.createInput(jgeo)
+        jo = comp_one.jointOrigins.add(jo_input)
+
+        # An as-built joint with NO geometry is the rigid one, so its jointMotion is the
+        # RigidJointMotion dumped below.
+        ab_input = root.asBuiltJoints.createInput(one, two, None)
+        ab = root.asBuiltJoints.add(ab_input)
+        j_input = root.joints.createInput(origin_geometry(one), origin_geometry(two))
+
+        cset = d.contactSets.add([one, two])
+        coll = adsk.core.ObjectCollection.create()
+        coll.add(one)
+        coll.add(two)
+        i_input = d.createInterferenceInput(coll)
+        i_results = d.analyzeInterference(i_input)
+        i_result = i_results.item(0)
+        volume_body = type(i_result.interferenceBody).__name__
+        no_body_type = not (hasattr(adsk.fusion, "InterferenceBody")
+                            or hasattr(adsk.core, "InterferenceBody"))
+
+        c_input = root.assemblyConstraints.createInput()
+        c_input.geometricRelationships.add(
+            planar_face(three.bRepBodies.item(0)), planar_face(four.bRepBodies.item(0)),
+            False, adsk.core.ValueInput.createByReal(0.0))
+        constraint = root.assemblyConstraints.add(c_input)
+
+        # snapshots.add() raises without a pending position, so the drive comes first and the
+        # flag is read (not assumed) before the capture.
+        rev_input = root.joints.createInput(origin_geometry(five), origin_geometry(six))
+        rev_input.setAsRevoluteJointMotion(adsk.fusion.JointDirections.ZAxisJointDirection)
+        rev = root.joints.add(rev_input)
+        rev.jointMotion.rotationValue = 0.5
+        pending = d.snapshots.hasPendingSnapshot
+        snap = d.snapshots.add()
+
+        group = d.timeline.timelineGroups.add(0, 1)
+        live = [("Snapshots", d.snapshots), ("Snapshot", snap),
+                ("AsBuiltJoints", root.asBuiltJoints), ("AsBuiltJoint", ab),
+                ("AsBuiltJointInput", ab_input), ("JointInput", j_input),
+                ("JointOrigins", comp_one.jointOrigins), ("JointOrigin", jo),
+                ("JointOriginInput", jo_input), ("JointGeometry", jgeo),
+                ("AssemblyConstraints", root.assemblyConstraints),
+                ("AssemblyConstraint", constraint), ("AssemblyConstraintInput", c_input),
+                ("ContactSets", d.contactSets), ("ContactSet", cset),
+                ("InterferenceInput", i_input), ("InterferenceResults", i_results),
+                ("InterferenceResult", i_result), ("RigidJointMotion", ab.jointMotion),
+                ("ModelParameter", ext_one.extentDefinition.distance),
+                ("TimelineGroups", d.timeline.timelineGroups), ("TimelineGroup", group)]
+        wrong = [lbl + "=" + type(o).__name__ for lbl, o in live if type(o).__name__ != lbl]
+        counts = [dump_shape(lbl, o) for lbl, o in live]
+        emit(len(counts) == 22 and all(c > 0 for c in counts) and not wrong
+             and pending is True and volume_body == "BRepBody" and no_body_type,
+             "shape-dump-assembly-world-2: " + str(len(counts)) + " types, min attrs "
+             + str(min(counts)) + ", " + str(root.occurrences.count) + " components carrying "
+             + str(root.asBuiltJoints.count) + " as-built joint, "
+             + str(comp_one.jointOrigins.count) + " joint origin, "
+             + str(root.assemblyConstraints.count) + " assembly constraint, "
+             + str(d.contactSets.count) + " contact set, " + str(i_results.count)
+             + " interference pair whose volume answers " + volume_body
+             + " (adsk carries no InterferenceBody type: " + str(no_body_type) + "), "
+             + str(d.snapshots.count) + " captured position after the revolute drive set "
+             "has_pending " + str(pending) + ", " + str(d.timeline.timelineGroups.count)
+             + " timeline group, mislabelled " + (", ".join(wrong) or "none"))
+    finally:
+        tmp.close(False)
+""",
+    },
+    {
         "id": "shape-dump-data-world",
         "claim": "The cloud data model dumps three types from a READ-ONLY, bounded look: app.data.activeProject is a DataProject, its rootFolder a DataFolder, and the DataFile dumped is the root folder's first file - or, when the root holds no file, the first file of the root's FIRST subfolder. At most those two folders are opened and only item(0) of each is touched: no recursive walk, which has been measured killing the add-in. When neither folder holds a file, DataFile is dumped from the class object under the same class-dir-equals-instance-dir-minus-'this' reading, taken here on DataFolder; the detail names which of the three sources supplied it",
         "encoded_in": "tests/conftest.py - the shared fakes DEGRANDFATHER-B step 3 writes for these types",

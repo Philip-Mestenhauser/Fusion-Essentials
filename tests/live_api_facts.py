@@ -570,6 +570,37 @@ SHAPES = {
         "supportedProductTypes", "this", "thisown", "token", "unregisterCustomEvent", "userId",
         "userInterface", "userName", "vectorAngleTolerance", "version",
     ],
+    "AsBuiltJoint": [
+        "assemblyContext", "attributes", "cast", "classType", "createForAssemblyContext", "deleteMe",
+        "entityToken", "geometry", "isLightBulbOn", "isSuppressed", "isValid", "isVisible",
+        "jointMotion", "motionLinks", "name", "nativeObject", "objectType", "occurrenceOne",
+        "occurrenceTwo", "parentComponent", "setAsBallJointMotion", "setAsCylindricalJointMotion", "setAsPinSlotJointMotion", "setAsPlanarJointMotion",
+        "setAsRevoluteJointMotion", "setAsRigidJointMotion", "setAsSliderJointMotion", "this", "thisown", "timelineObject",
+        "transform",
+    ],
+    "AsBuiltJointInput": [
+        "cast", "classType", "geometry", "isValid", "jointMotion", "objectType",
+        "occurrenceOne", "occurrenceTwo", "setAsBallJointMotion", "setAsCylindricalJointMotion", "setAsPinSlotJointMotion", "setAsPlanarJointMotion",
+        "setAsRevoluteJointMotion", "setAsRigidJointMotion", "setAsSliderJointMotion", "this", "thisown",
+    ],
+    "AsBuiltJoints": [
+        "add", "cast", "classType", "count", "createInput", "isValid",
+        "item", "itemByName", "objectType", "this", "thisown",
+    ],
+    "AssemblyConstraint": [
+        "assemblyContext", "attributes", "cast", "classType", "createForAssemblyContext", "deleteMe",
+        "entityToken", "errorOrWarningMessage", "geometricRelationships", "healthState", "isLightBulbOn", "isSuppressed",
+        "isValid", "isVisible", "name", "nativeObject", "objectType", "parentComponent",
+        "this", "thisown", "timelineObject",
+    ],
+    "AssemblyConstraintInput": [
+        "cast", "classType", "geometricRelationships", "isValid", "objectType", "this",
+        "thisown",
+    ],
+    "AssemblyConstraints": [
+        "add", "cast", "classType", "count", "createInput", "isValid",
+        "item", "itemByName", "objectType", "this", "thisown",
+    ],
     "BRepBodies": [
         "add", "cast", "classType", "count", "isValid", "item",
         "itemByName", "objectType", "this", "thisown",
@@ -682,6 +713,14 @@ SHAPES = {
         "getData", "halfAngle", "isValid", "objectType", "origin", "radius",
         "set", "surfaceType", "this", "thisown", "transformBy",
     ],
+    "ContactSet": [
+        "cast", "classType", "deleteMe", "isSuppressed", "isValid", "name",
+        "objectType", "occurencesAndBodies", "this", "thisown",
+    ],
+    "ContactSets": [
+        "add", "cast", "classType", "count", "isValid", "item",
+        "itemByName", "objectType", "this", "thisown",
+    ],
     "Cylinder": [
         "axis", "cast", "classType", "copy", "create", "evaluator",
         "getData", "isValid", "objectType", "origin", "radius", "set",
@@ -783,6 +822,18 @@ SHAPES = {
         "saveAs", "saveDataVersion", "saveMilestone", "this", "thisown", "updateAllReferences",
         "version",
     ],
+    "InterferenceInput": [
+        "areCoincidentFacesIncluded", "cast", "classType", "entities", "isValid", "objectType",
+        "this", "thisown",
+    ],
+    "InterferenceResult": [
+        "cast", "classType", "entityOne", "entityTwo", "interferenceBody", "isCreateBody",
+        "isValid", "objectType", "this", "thisown",
+    ],
+    "InterferenceResults": [
+        "cast", "classType", "count", "createBodies", "isValid", "item",
+        "objectType", "this", "thisown",
+    ],
     "Joint": [
         "angle", "assemblyContext", "attributes", "cast", "classType", "createForAssemblyContext",
         "deleteMe", "entityToken", "errorOrWarningMessage", "geometricRelationships", "geometryOneTransform", "geometryOrOriginOne",
@@ -791,6 +842,37 @@ SHAPES = {
         "nativeObject", "objectType", "occurrenceOne", "occurrenceTwo", "offset", "offsetX",
         "offsetY", "parentComponent", "setAsBallJointMotion", "setAsCylindricalJointMotion", "setAsPinSlotJointMotion", "setAsPlanarJointMotion",
         "setAsRevoluteJointMotion", "setAsRigidJointMotion", "setAsSliderJointMotion", "this", "thisown", "timelineObject",
+    ],
+    "JointGeometry": [
+        "cast", "classType", "createByBetweenTwoPlanes", "createByCurve", "createByCylinderOrConeFace", "createByNonPlanarFace",
+        "createByPlanarFace", "createByPoint", "createByProfile", "createBySphereFace", "createBySplineFace", "createByTangentFaceEdge",
+        "createByTorusFace", "createByTwoEdgeIntersection", "entityOne", "entityTwo", "geometryType", "isValid",
+        "keyPointType", "objectType", "origin", "planeOne", "planeTwo", "primaryAxisVector",
+        "secondaryAxisVector", "tangentFaceParamOne", "tangentFaceParamTwo", "tangentFaceType", "thirdAxisVector", "this",
+        "thisown",
+    ],
+    "JointInput": [
+        "angle", "cast", "classType", "geometryOrOriginOne", "geometryOrOriginTwo", "isFlipped",
+        "isValid", "jointMotion", "objectType", "offset", "setAsBallJointMotion", "setAsCylindricalJointMotion",
+        "setAsPinSlotJointMotion", "setAsPlanarJointMotion", "setAsRevoluteJointMotion", "setAsRigidJointMotion", "setAsSliderJointMotion", "this",
+        "thisown",
+    ],
+    "JointOrigin": [
+        "angle", "assemblyContext", "attributes", "cast", "classType", "createForAssemblyContext",
+        "deleteMe", "entityToken", "geometry", "isFlipped", "isLightBulbOn", "isValid",
+        "name", "nativeObject", "objectType", "offsetX", "offsetY", "offsetZ",
+        "parentComponent", "primaryAxisVector", "secondaryAxisVector", "thirdAxisVector", "this", "thisown",
+        "timelineObject", "transform", "xAxisEntity", "zAxisEntity",
+    ],
+    "JointOriginInput": [
+        "angle", "cast", "classType", "geometry", "globalOrientParamOne", "globalOrientParamTwo",
+        "isFlipped", "isValid", "objectType", "offsetX", "offsetY", "offsetZ",
+        "primaryAxisVector", "secondaryAxisVector", "thirdAxisVector", "this", "thisown", "xAxisEntity",
+        "zAxisEntity",
+    ],
+    "JointOrigins": [
+        "add", "cast", "classType", "count", "createInput", "isValid",
+        "item", "itemByName", "objectType", "this", "thisown",
     ],
     "Joints": [
         "add", "addInferredJoint", "cast", "classType", "count", "createInferredJointInput",
@@ -823,6 +905,12 @@ SHAPES = {
         "isSelectable", "isValid", "isVisible", "material", "mesh", "moveToComponent",
         "name", "nativeObject", "objectType", "opacity", "orientedMinimumBoundingBox", "parentComponent",
         "silhouette", "textureMapControl", "this", "thisown", "visibleOpacity", "volume",
+    ],
+    "ModelParameter": [
+        "attributes", "cast", "classType", "comment", "component", "createdBy",
+        "deleteMe", "dependencyParameters", "dependentParameters", "entityToken", "expression", "isDeletable",
+        "isFavorite", "isValid", "modelParameters", "name", "objectType", "role",
+        "textValue", "this", "thisown", "unit", "value", "valueType",
     ],
     "MotionLink": [
         "assemblyContext", "attributes", "cast", "classType", "createForAssemblyContext", "deleteMe",
@@ -921,6 +1009,10 @@ SHAPES = {
         "add", "cast", "classType", "count", "isValid", "item",
         "itemByName", "objectType", "this", "thisown",
     ],
+    "RigidJointMotion": [
+        "cast", "classType", "isValid", "jointType", "objectType", "this",
+        "thisown",
+    ],
     "Selection": [
         "cast", "classType", "entity", "isValid", "objectType", "point",
         "this", "thisown",
@@ -991,10 +1083,29 @@ SHAPES = {
         "cast", "classType", "customSlideDirectionEntity", "isValid", "jointType", "objectType",
         "slideDirection", "slideDirectionVector", "slideLimits", "slideValue", "this", "thisown",
     ],
+    "Snapshot": [
+        "cast", "classType", "deleteMe", "isValid", "name", "objectType",
+        "this", "thisown", "timelineObject",
+    ],
+    "Snapshots": [
+        "add", "cast", "classType", "count", "hasPendingSnapshot", "isValid",
+        "item", "objectType", "revertPendingSnapshot", "this", "thisown",
+    ],
     "Timeline": [
         "cast", "classType", "count", "deleteAllAfterMarker", "isValid", "item",
         "markerPosition", "moveToBeginning", "moveToEnd", "moveToPreviousStep", "movetoNextStep", "objectType",
         "parentDesign", "play", "this", "thisown", "timelineGroups",
+    ],
+    "TimelineGroup": [
+        "canReorder", "cast", "classType", "count", "deleteMe", "deleteObject",
+        "entity", "errorOrWarningMessage", "healthState", "index", "isCollapsed", "isDeletable",
+        "isGroup", "isRolledBack", "isSuppressed", "isValid", "item", "name",
+        "objectType", "parentGroup", "parentTimeline", "reorder", "rollTo", "this",
+        "thisown",
+    ],
+    "TimelineGroups": [
+        "add", "cast", "classType", "count", "isValid", "item",
+        "itemByName", "objectType", "this", "thisown",
     ],
     "TimelineObject": [
         "canReorder", "cast", "classType", "deleteObject", "entity", "errorOrWarningMessage",

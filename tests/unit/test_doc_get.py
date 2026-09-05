@@ -6,9 +6,12 @@ no-active-doc guard. The adsk Document fakes capture the read so a regression to
 """
 
 import json
-from types import SimpleNamespace
 
-from conftest import load_tool, error_message
+import pytest
+
+from conftest import (FakeApplication, FakeDataFile, FakeDocumentReference, FakeDocuments,
+                      FakeFeatures, FakeFusionDocument, FakeOccurrence, MakeComp, MakeDesign,
+                      _NamedCollection, error_message, load_tool, make_occurrence)
 
 dg = load_tool("doc_get")
 # The consumers of what this read publishes: 'open:N' is resolved in _doc_common, so the addresses
@@ -23,51 +26,46 @@ def _payload(result):
     return json.loads(result["content"][0]["text"])
 
 
-class _DataFile:
-    def __init__(self, urn="urn:lineage:abc", vnum=3, latest=3):
-        self.id = urn
-        self.versionId = "urn:version:xyz"
-        self.versionNumber = vnum
-        self.latestVersionNumber = latest
-        self.fusionWebURL = "https://fusion.example/x"
+def _DataFile(urn="urn:lineage:abc", vnum=3, latest=3):
+    """The active document's cloud file: the lineage urn, the version pair a freshness read
+    compares, and the web URL the payload republishes."""
+    return FakeDataFile("Bracket", file_id=urn, version=vnum, latest_version=latest,
+                        version_id="urn:version:xyz", web_url="https://fusion.example/x")
 
 
-class _Doc:
-    def __init__(self, name, saved=True, modified=False, visible=True, data_file=None):
-        self.name = name
-        self.isSaved = saved
-        self.isModified = modified
-        self.isVisible = visible
-        self.version = "2.0.21"
-        self.dataFile = data_file
+def _Doc(name, saved=True, modified=False, data_file=None):
+    return FakeFusionDocument(name=name, is_saved=saved, is_modified=modified,
+                              version="2.0.21", data_file=data_file)
 
 
-class _Docs:
+class _Docs(FakeDocuments):
     """item_raises_at models a stale collection slot: item(i) raises while count still includes it.
     One index, or a set of them - a session can hold more than one such slot."""
-    def __init__(self, docs, item_raises_at=None):
-        self._d = docs
+    def __init__(self, documents=(), item_raises_at=None):
+        super().__init__(documents)
         self._raises_at = item_raises_at
-    @property
-    def count(self): return len(self._d)
+
     def item(self, i):
         at = self._raises_at
         if i == at or (isinstance(at, (set, list, tuple)) and i in at):
             raise RuntimeError("4 : An API Object refers to a deleted Object")
-        return self._d[i]
+        return super().item(i)
 
 
-def _install(active=None, open_docs=None):
-    """Point dg.app at a fake Application with the given active doc + open-docs list."""
-    open_docs = open_docs if open_docs is not None else ([active] if active else [])
-    class _App:
-        activeDocument = active
-        documents = _Docs(open_docs) if open_docs is not None else None
-    dg.app = _App()
+@pytest.fixture(autouse=True)
+def _install(monkeypatch):
+    """Point dg.app at an Application with the given active doc + open-docs list."""
+    def _wire(active=None, open_docs=None, item_raises_at=None):
+        docs = open_docs if open_docs is not None else ([active] if active else [])
+        app = FakeApplication(active_document=active,
+                              documents=_Docs(docs, item_raises_at=item_raises_at))
+        monkeypatch.setattr(dg, "app", app)
+        return app
+    return _wire
 
 
 class TestActiveIdentity:
-    def test_saved_doc_surfaces_urn_and_state(self):
+    def test_saved_doc_surfaces_urn_and_state(self, _install):
         d = _Doc("Bracket", data_file=_DataFile(urn="urn:lineage:abc", vnum=3))
         _install(d)
         out = _payload(dg.handler())
@@ -77,7 +75,7 @@ class TestActiveIdentity:
         assert out["active"]["has_data_file"] is True
         assert "saved and unmodified" in out["active"]["save_state"]
 
-    def test_unsaved_doc_has_no_urn(self):
+    def test_unsaved_doc_has_no_urn(self, _install):
         d = _Doc("Untitled", saved=False, data_file=None)
         _install(d)
         out = _payload(dg.handler())
@@ -85,14 +83,14 @@ class TestActiveIdentity:
         assert out["active"]["has_data_file"] is False
         assert "never saved" in out["active"]["save_state"]
 
-    def test_modified_doc_flags_stale_urn(self):
+    def test_modified_doc_flags_stale_urn(self, _install):
         d = _Doc("WIP", modified=True, data_file=_DataFile(vnum=5))
         _install(d)
         out = _payload(dg.handler())
         assert "unsaved changes" in out["active"]["save_state"]
         assert "5" in out["active"]["save_state"]
 
-    def test_isSaved_false_but_datafile_present_does_not_contradict(self):
+    def test_isSaved_false_but_datafile_present_does_not_contradict(self, _install):
         # Platform contradiction (observed live): doc.isSaved can read False on a doc that carries a real URN, version 1,
         # and is unmodified. is_saved must derive from the DataFile (True here), the save_state must
         # read 'saved and unmodified', and the open-doc list must NOT flag it never_saved.
@@ -105,17 +103,14 @@ class TestActiveIdentity:
         # and no 'never_saved' exception on a doc that plainly has a data file
         assert out["summary"]["exceptions"] == []
 
-    def test_the_active_block_reads_datafile_once(self):
+    def test_the_active_block_reads_datafile_once(self, _install):
         # every doc.dataFile access is a cloud round-trip on the main thread - the active block must
         # resolve it ONCE and reuse it for the URN/version fields, not re-fetch per field. With no
         # other open docs, the active doc's dataFile is read exactly once across the whole handler.
-        class _CountingDoc:
+        class _CountingDoc(FakeFusionDocument):
+            """Counts every dataFile fetch - each is a cloud round-trip on the main thread."""
             def __init__(self, data_file):
-                self.name = "Bracket"
-                self.isSaved = True
-                self.isModified = False
-                self.isVisible = True
-                self.version = "2.0"
+                super().__init__(name="Bracket", is_saved=True, is_modified=False, version="2.0")
                 self._df = data_file
                 self.datafile_reads = 0
 
@@ -124,13 +119,17 @@ class TestActiveIdentity:
                 self.datafile_reads += 1
                 return self._df
 
+            @dataFile.setter
+            def dataFile(self, value):
+                self._df = value
+
         d = _CountingDoc(_DataFile(urn="urn:x", vnum=2, latest=2))
         _install(active=d, open_docs=[])          # active not in the open list -> isolate the read
         out = _payload(dg.handler())
         assert out["active"]["document_id"] == "urn:x"     # the URN field still populated
         assert d.datafile_reads == 1                        # ... from a single dataFile fetch
 
-    def test_active_block_carries_the_version_lag_sentence(self):
+    def test_active_block_carries_the_version_lag_sentence(self, _install):
         # ONE sentence covers both lagging surfaces (this block's version_number/latest + xref_tree's
         # current/latest) and names version_id / version_confirmed as authoritative.
         d = _Doc("Bracket", data_file=_DataFile(vnum=2, latest=2))
@@ -139,7 +138,7 @@ class TestActiveIdentity:
         assert "version_id" in note and "version_confirmed" in note
         assert "xref_tree" in note and "LAG" in note
 
-    def test_unsaved_active_block_has_no_version_lag_sentence(self):
+    def test_unsaved_active_block_has_no_version_lag_sentence(self, _install):
         # no DataFile -> no version fields -> no lag to warn about
         d = _Doc("Untitled", saved=False, data_file=None)
         _install(d)
@@ -147,7 +146,7 @@ class TestActiveIdentity:
 
 
 class TestOpenList:
-    def test_terse_healthy_doc_collapses(self):
+    def test_terse_healthy_doc_collapses(self, _install):
         active = _Doc("A", data_file=_DataFile())
         other = _Doc("B", data_file=_DataFile())          # healthy, not active
         _install(active, [active, other])
@@ -160,7 +159,7 @@ class TestOpenList:
         assert rows["A"]["is_active"] is True
         assert rows["A"]["open_index"] == 0
 
-    def test_open_index_on_every_row_addresses_unsaved_twins(self):
+    def test_open_index_on_every_row_addresses_unsaved_twins(self, _install):
         # open_index is the STABLE session address doc_activate/doc_close accept as 'open:N' - the only
         # handle for an UNSAVED doc that shares a name ('Untitled') and has no URN.
         u1 = _Doc("Untitled", saved=False, data_file=None)
@@ -169,7 +168,7 @@ class TestOpenList:
         rows = _payload(dg.handler())["open_documents"]
         assert [r["open_index"] for r in rows] == [0, 1]
 
-    def test_a_doc_whose_item_read_raises_is_a_null_row_offering_no_index(self):
+    def test_a_doc_whose_item_read_raises_is_a_null_row_offering_no_index(self, _install):
         # documents.item(i) raising (a stale proxy) leaves the slot answering NO document: the row is
         # published so the listing counts what the session holds, it claims nothing about the dead
         # slot's save state, and it carries NO open_index - the index at that position is the one
@@ -187,7 +186,7 @@ class TestOpenList:
         assert out["summary"]["open_count"] == 3
         assert [e["name"] for e in out["summary"]["exceptions"]] == ["C"]
 
-    def test_summary_leads_with_unsaved_exceptions(self):
+    def test_summary_leads_with_unsaved_exceptions(self, _install):
         # the summary names the docs with unsaved work (what close-all would lose) before the
         # full list. Healthy docs are NOT exceptions.
         active = _Doc("Main", data_file=_DataFile())
@@ -203,7 +202,7 @@ class TestOpenList:
         assert names["Untitled"]["unsaved"] == ["never_saved"]
         assert names["WIP"]["unsaved"] == ["modified"]
 
-    def test_modified_dependency_doc_keeps_its_flag(self):
+    def test_modified_dependency_doc_keeps_its_flag(self, _install):
         active = _Doc("Main", data_file=_DataFile())
         dep = _Doc("Ref", modified=True, data_file=_DataFile())
         _install(active, [active, dep])
@@ -220,11 +219,10 @@ class TestASlotThatAnsweredNoDocument:
     session here, since an address is only an offer if the tool it names accepts it."""
 
     def _session(self, monkeypatch, docs, raises_at):
-        class _App:
-            activeDocument = docs[0]
-            documents = _Docs(docs, item_raises_at=raises_at)
+        app = FakeApplication(active_document=docs[0],
+                              documents=_Docs(docs, item_raises_at=raises_at))
         for mod in (dg, dk, da, dcl):
-            monkeypatch.setattr(mod, "app", _App())
+            monkeypatch.setattr(mod, "app", app)
 
     def _three(self, monkeypatch):
         """A readable document, a slot that answers nothing, and an unsaved document behind it."""
@@ -287,14 +285,14 @@ class TestASlotThatAnsweredNoDocument:
 
 
 class TestGuards:
-    def test_no_active_document_errors(self):
+    def test_no_active_document_errors(self, _install):
         _install(active=None, open_docs=[])
         res = dg.handler()
         assert "no active document" in error_message(res).lower()
 
 
 class TestCaps:
-    def test_under_cap_untruncated_and_unchanged(self):
+    def test_under_cap_untruncated_and_unchanged(self, _install):
         active = _Doc("Main", data_file=_DataFile())
         others = [_Doc(f"D{i}", data_file=_DataFile()) for i in range(5)]
         _install(active, [active] + others)
@@ -303,7 +301,7 @@ class TestCaps:
         assert len(out["open_documents"]) == 6
         assert out["open_count"] == 6
 
-    def test_at_cap_truncates_and_flags(self):
+    def test_at_cap_truncates_and_flags(self, _install):
         active = _Doc("Main", data_file=_DataFile())
         others = [_Doc(f"D{i}", data_file=_DataFile()) for i in range(60)]
         _install(active, [active] + others)
@@ -313,7 +311,7 @@ class TestCaps:
         # the full count is still honest, even though the array is capped
         assert out["open_count"] == 61
 
-    def test_unsaved_exceptions_computed_over_the_full_list_even_when_capped(self):
+    def test_unsaved_exceptions_computed_over_the_full_list_even_when_capped(self, _install):
         # a doc with unsaved work beyond the cap must still show up in 'summary.exceptions'.
         active = _Doc("Main", data_file=_DataFile())
         clean = [_Doc(f"D{i}", data_file=_DataFile()) for i in range(60)]
@@ -327,20 +325,25 @@ class TestCaps:
 
 # ── (A) versions slice ────────────────────────────────────────────────────────
 
-class _Ver:
-    def __init__(self, num, vid=None, date=1_700_000_000, desc="", is_milestone=False):
-        self.versionNumber = num
-        self.versionId = vid or f"urn:v:{num}"
-        self.dateCreated = date
-        self.description = desc
-        self.isMilestone = is_milestone
+def _Ver(num, vid=None, date=1_700_000_000, desc="", is_milestone=False):
+    """One older version of the file - itself a DataFile, addressed by its number/id."""
+    return FakeDataFile(f"Bracket v{num}", version=num, version_id=vid or f"urn:v:{num}",
+                        date_created=date, description=desc, is_milestone=is_milestone)
 
 
-class _VerColl:
-    def __init__(self, vers): self._v = vers
+class _NoNumber(FakeDataFile):
+    """A version row whose versionNumber will not read - a hole in the history, never a row to drop
+    silently."""
+    def __init__(self, version_id):
+        super().__init__("Bracket", version_id=version_id)
+
     @property
-    def count(self): return len(self._v)
-    def item(self, i): return self._v[i]
+    def versionNumber(self, _install):
+        raise RuntimeError("3 : cloud read failed")
+
+    @versionNumber.setter
+    def versionNumber(self, value):
+        pass
 
 
 class _MStone:
@@ -364,19 +367,15 @@ class _MStones:
         return self._i[i]
 
 
-class _DFileVers(_Ver):
+def _DFileVers(open_num, latest, others, desc="open", is_milestone=False, milestones=None):
     """A DataFile that is itself the tip version and carries df.versions for the older ones."""
-    def __init__(self, open_num, latest, others, desc="open", is_milestone=False, milestones=None):
-        super().__init__(open_num, desc=desc, is_milestone=is_milestone)
-        self.latestVersionNumber = latest
-        self.id = "urn:lineage"
-        self.versions = _VerColl(others)
-        if milestones is not None:
-            self.milestones = milestones
+    return FakeDataFile("Bracket", file_id="urn:lineage", version=open_num, latest_version=latest,
+                        version_id=f"urn:v:{open_num}", description=desc,
+                        is_milestone=is_milestone, versions=others, milestones=milestones)
 
 
 class TestVersions:
-    def test_newest_first_and_capped(self):
+    def test_newest_first_and_capped(self, _install):
         # versions given out of order; the slice sorts them newest-first and caps the list.
         df = _DFileVers(open_num=3, latest=5, others=[_Ver(1), _Ver(4), _Ver(2), _Ver(5)])
         _install(_Doc("Bracket", data_file=df))
@@ -386,7 +385,7 @@ class TestVersions:
         assert out["truncated"] is True
         assert out["version_count"] == 5          # 1,2,3(open),4,5 - df merged + deduped
 
-    def test_flags_latest_and_open_version(self):
+    def test_flags_latest_and_open_version(self, _install):
         df = _DFileVers(open_num=3, latest=5, others=[_Ver(5, desc="tip"), _Ver(4)])
         _install(_Doc("Bracket", data_file=df))
         rows = {r["version_number"]: r for r in dg._slice_versions()["versions"]}
@@ -394,7 +393,7 @@ class TestVersions:
         assert rows[3]["is_open_in_session"] is True
         assert rows[5]["date_utc"] is not None    # epoch -> ISO string
 
-    def test_unsaved_document_has_no_history(self):
+    def test_unsaved_document_has_no_history(self, _install):
         _install(_Doc("Untitled", saved=False, data_file=None))
         out = dg._slice_versions()
         assert out["available"] is False
@@ -406,25 +405,17 @@ class TestVersionHistoryCompleteness:
     list is authoritative ONLY on a full walk: without these markers an unreadable df.versions
     reads as version_count=1 with truncated=false - a lineage that looks COMPLETE."""
 
-    class _BlindVersions:
-        """A versions collection whose count read RAISES (a cloud read that failed)."""
-        @property
-        def count(self):
-            raise RuntimeError("versions unavailable")
-
-        def item(self, i):
-            raise AssertionError("must not be reached")
-
-    def test_a_full_read_is_marked_complete(self):
+    def test_a_full_read_is_marked_complete(self, _install):
         df = _DFileVers(open_num=2, latest=2, others=[_Ver(1)])
         _install(_Doc("Bracket", data_file=df))
         out = dg._slice_versions()
         assert out["history_readable"] is True and out["history_complete"] is True
         assert out["unreadable_count"] == 0
 
-    def test_unreadable_versions_collection_is_not_a_complete_history(self):
-        df = _DFileVers(open_num=3, latest=9, others=[])
-        df.versions = self._BlindVersions()
+    def test_unreadable_versions_collection_is_not_a_complete_history(self, _install):
+        # the versions collection whose count read RAISES - a cloud read that failed
+        df = FakeDataFile("Bracket", file_id="urn:lineage", version=3, latest_version=9,
+                          versions_raise="versions unavailable")
         _install(_Doc("Bracket", data_file=df))
         out = dg._slice_versions()
         assert out["version_count"] == 1            # only the open version could be read
@@ -432,19 +423,15 @@ class TestVersionHistoryCompleteness:
         # the note names the marker that separates a whole lineage from a short one
         assert "only history_complete=true" in out["note"]
 
-    def test_a_version_that_will_not_read_is_counted_not_silently_dropped(self):
+    def test_a_version_that_will_not_read_is_counted_not_silently_dropped(self, _install):
         # a row skipped without a marker shortens the history while the payload still reads whole.
-        class _NoNumber:
-            versionId = "urn:v:?"
-            dateCreated = 1_700_000_000
-            description = ""
-        df = _DFileVers(open_num=2, latest=2, others=[_Ver(1), _NoNumber()])
+        df = _DFileVers(open_num=2, latest=2, others=[_Ver(1), _NoNumber("urn:v:?")])
         _install(_Doc("Bracket", data_file=df))
         out = dg._slice_versions()
         assert out["unreadable_count"] == 1
         assert out["history_readable"] is True and out["history_complete"] is False
 
-    def test_a_duplicate_of_the_open_version_is_not_counted_unreadable(self):
+    def test_a_duplicate_of_the_open_version_is_not_counted_unreadable(self, _install):
         # the boundary between "already seen" and "could not be read": df is added first, so its
         # own row arriving again through df.versions is a de-dup, not a hole.
         df = _DFileVers(open_num=2, latest=2, others=[_Ver(2), _Ver(1)])
@@ -453,7 +440,7 @@ class TestVersionHistoryCompleteness:
         assert out["version_count"] == 2 and out["unreadable_count"] == 0
         assert out["history_complete"] is True
 
-    def test_a_capped_list_is_readable_but_not_complete(self):
+    def test_a_capped_list_is_readable_but_not_complete(self, _install):
         df = _DFileVers(open_num=3, latest=3, others=[_Ver(1), _Ver(2)])
         _install(_Doc("Bracket", data_file=df))
         out = dg._slice_versions(versions_max=2)
@@ -462,7 +449,7 @@ class TestVersionHistoryCompleteness:
 
 
 class TestVersionMilestones:
-    def test_milestone_row_carries_flag_and_name(self):
+    def test_milestone_row_carries_flag_and_name(self, _install):
         # the NAME lives only in the Milestones collection - the row is matched to it by version.
         v4 = _Ver(4, is_milestone=True)
         df = _DFileVers(open_num=3, latest=4, others=[v4, _Ver(2)],
@@ -477,16 +464,10 @@ class TestVersionMilestones:
         assert out["milestone_count"] == 1
         assert out["milestone_names_readable"] is True
 
-    def test_flag_that_cannot_be_read_at_all_is_null_not_false(self):
+    def test_flag_that_cannot_be_read_at_all_is_null_not_false(self, _install):
         # a version whose isMilestone cannot be read, with the collection unreadable too: nothing is
         # known about this row, so it is null and counted as unreadable - never as 'not a milestone'.
-        class _NoFlagVer:
-            def __init__(self, num):
-                self.versionNumber = num
-                self.versionId = f"urn:v:{num}"
-                self.dateCreated = 1_700_000_000
-                self.description = ""
-        df = _DFileVers(open_num=1, latest=2, others=[_NoFlagVer(2)],
+        df = _DFileVers(open_num=1, latest=2, others=[_Ver(2, is_milestone=None)],
                         milestones=_MStones(unreadable=True))
         _install(_Doc("Bracket", data_file=df))
         out = dg._slice_versions()
@@ -497,7 +478,7 @@ class TestVersionMilestones:
         assert out["milestone_unreadable_count"] == 1
         assert out["milestone_names_readable"] is False
 
-    def test_flag_false_while_the_collection_names_it_resolves_to_milestone(self):
+    def test_flag_false_while_the_collection_names_it_resolves_to_milestone(self, _install):
         # The defensive precedence, not a measured window: in both measured runs the collection and
         # the flag and the collection arrive together after a doc_save_milestone, so neither
         # source is known to lead. Where the collection DOES list a version whose own flag still
@@ -514,7 +495,7 @@ class TestVersionMilestones:
         assert out["milestone_count"] == 1
         assert "flag_lagging" in out["note"]
 
-    def test_the_note_says_the_metadata_lags_and_that_unknown_is_not_absence(self):
+    def test_the_note_says_the_metadata_lags_and_that_unknown_is_not_absence(self, _install):
         # the two halves a caller acts on: metadata LAGS the save (so re-read), and an unreadable
         # milestone signal is UNKNOWN - never evidence that a version is not a milestone.
         df = _DFileVers(open_num=1, latest=1, others=[], milestones=_MStones([]))
@@ -523,7 +504,7 @@ class TestVersionMilestones:
         assert "LAGS" in note and "re-read" in note
         assert "UNKNOWN" in note and "never 'not a milestone'" in note
 
-    def test_milestone_walk_is_bounded_by_the_row_cap(self):
+    def test_milestone_walk_is_bounded_by_the_row_cap(self, _install):
         # each entry's .version hop is a cloud read - the walk may not outrun the cap that bounds
         # the published rows, and a walk that stopped short says so.
         vers = [_Ver(i, is_milestone=True) for i in range(1, 6)]
@@ -534,7 +515,7 @@ class TestVersionMilestones:
         assert stones.reads == 2                       # not all 5 milestones were hopped
         assert out["milestone_walk_truncated"] is True
 
-    def test_milestone_count_covers_every_known_row_not_just_the_capped_ones(self):
+    def test_milestone_count_covers_every_known_row_not_just_the_capped_ones(self, _install):
         # the cap limits the published list, not the rollup - version_count and milestone_count
         # must describe the SAME set of known versions.
         v1, v2 = _Ver(1, is_milestone=True), _Ver(2, is_milestone=True)
@@ -550,105 +531,67 @@ class TestVersionMilestones:
 
 # ── (B) xref_tree slice ───────────────────────────────────────────────────────
 
-class _OccList:
-    def __init__(self, items): self._i = items
-    @property
-    def count(self): return len(self._i)
-    def item(self, i): return self._i[i]
+def _DRef(source, current, latest, ood):
+    """One xref link: the source file it points at, the version it holds and the latest one."""
+    return FakeDocumentReference(data_file=FakeDataFile(source, latest_version=latest),
+                                 version=current, out_of_date=ood)
 
 
-class _DF2:
-    def __init__(self, name, latest): self.name = name; self.latestVersionNumber = latest
-
-
-class _DRef:
-    def __init__(self, source, current, latest, ood):
-        self.dataFile = _DF2(source, latest)
-        self.version = current
-        self.isOutOfDate = ood
-
-
-class _Comp:
+def _Comp(name, comp_local=None):
     """The component behind an occurrence. `occurrences` is the COMPONENT-LOCAL collection - the one
     place an occurrence with an unresolved reference is visible, since childOccurrences drops it."""
-    def __init__(self, name, comp_local=None):
-        self.name = name
-        self.occurrences = _OccList(comp_local or [])
+    return MakeComp(name, occurrences=list(comp_local or []))
 
 
-class _Occ:
-    def __init__(self, path, is_ref=False, dref=None, children=None, comp_local=None):
-        self.fullPathName = path
-        self.isReferencedComponent = is_ref
-        self.documentReference = dref
-        self.childOccurrences = _OccList(children or [])
-        self.name = path.split("+")[-1]
-        # A real Occurrence ALWAYS answers .component; one that raises is the unresolved-reference
-        # signal (_BrokenOcc below). Its component-local collection defaults to the assembly-context
-        # children, which is what a design with no unresolved reference looks like.
-        self.component = _Comp(self.name.split(":")[0],
-                               comp_local if comp_local is not None else (children or []))
+def _Occ(path, is_ref=False, dref=None, children=None, comp_local=None):
+    # A real Occurrence ALWAYS answers .component; one that raises is the unresolved-reference
+    # signal (_BrokenOcc below). Its component-local collection defaults to the assembly-context
+    # children, which is what a design with no unresolved reference looks like.
+    name = path.split("+")[-1]
+    return make_occurrence(
+        path=path, referenced=is_ref, document_reference=dref, children=list(children or []),
+        component=_Comp(name.split(":")[0],
+                        comp_local if comp_local is not None else (children or [])))
 
 
-class _BrokenOcc:
+# The message each read on an occurrence whose referenced component will not load throws with.
+_BROKEN_OCC_RAISE = ("3 : The occurrence's referenced component is unavailable (broken or missing "
+                     "external reference).")
+_BROKEN_PATH_RAISE = "2 : InternalValidationError : path.valid()"
+
+
+def _BrokenOcc(name):
     """An occurrence whose referenced component will not load: reading `component` RAISES, which is
     the ONLY reliable signal - isReferencedComponent reads False and documentReference raises the
     same text an ordinary local occurrence gives (both measured on a live specimen)."""
-    RAISE_TEXT = ("3 : The occurrence's referenced component is unavailable (broken or missing "
-                  "external reference).")
-
-    def __init__(self, name):
-        self.name = name
-        self.isReferencedComponent = False
-
-    @property
-    def component(self):
-        raise RuntimeError(self.RAISE_TEXT)
-
-    @property
-    def fullPathName(self):
-        raise RuntimeError("2 : InternalValidationError : path.valid()")
-
-    @property
-    def childOccurrences(self):
-        raise RuntimeError("2 : InternalValidationError : path.valid()")
-
-    @property
-    def documentReference(self):
-        raise RuntimeError("3 : Occurrence is not referencing an external component")
-
-
-class _DeriveFeatColl:
-    def __init__(self, items): self._i = items
-    @property
-    def count(self): return len(self._i)
-    def item(self, i): return self._i[i]
+    return make_occurrence(path=name, referenced=False, raises_on={
+        "component": _BROKEN_OCC_RAISE,
+        "fullPathName": _BROKEN_PATH_RAISE,
+        "childOccurrences": _BROKEN_PATH_RAISE,
+        "documentReference": "3 : Occurrence is not referencing an external component"})
 
 
 class _DeriveFeat:
+    """A DeriveFeature and the link it holds. DeriveFeature carries no live shape dump, so it has
+    no shared fake."""
     def __init__(self, name, dref=None):
         self.name = name
         self.documentReference = dref
 
 
-class _Features:
-    def __init__(self, derive_feats): self.deriveFeatures = _DeriveFeatColl(derive_feats)
-
-
-class _Root:
-    def __init__(self, occs, name="Root", derive_feats=None):
-        self.occurrences = _OccList(occs)
-        self.name = name
-        self.component = _Comp(name, occs)
-        self.features = _Features(derive_feats or [])   # empty by default - most tests don't derive
-
-
-class _Des:
-    def __init__(self, root): self.rootComponent = root
+def _Root(occs, name="Root", derive_feats=None):
+    """The root component of the walked design: its occurrences, and the deriveFeatures collection
+    the derive arm reads (empty by default - most tests here do not derive)."""
+    root = MakeComp(name, occurrences=list(occs))
+    root.component = _Comp(name, occs)
+    features = FakeFeatures()
+    features.deriveFeatures = _NamedCollection(list(derive_feats or []))
+    root.features = features
+    return root
 
 
 def _use_design(monkeypatch, root):
-    monkeypatch.setattr(dg, "design", lambda: _Des(root))
+    monkeypatch.setattr(dg, "design", lambda: MakeDesign(comp=root))
 
 
 class TestXrefTree:
@@ -731,7 +674,7 @@ class TestXrefTreeUnresolved:
         row = out["references"][0]
         assert row["kind"] == "unresolved" and row["readable"] is False
         assert "45740" in row["path"]
-        assert _BrokenOcc.RAISE_TEXT in row["warning"]
+        assert _BROKEN_OCC_RAISE in row["warning"]
         assert "out_of_date" not in row and "source_document" not in row
 
     def test_a_child_that_only_the_component_local_collection_holds_is_found(self, monkeypatch):
@@ -786,22 +729,17 @@ class TestXrefTreeUnresolved:
         assert "referenced_documents" in out["note"]
 
 
-class _SpyOcc:
+class _SpyOcc(FakeOccurrence):
     """An occurrence that counts every read of its component - the evidence for whether the walk
     reached it at all, which a row count alone cannot show."""
     def __init__(self, path):
-        self.fullPathName = path
-        self.name = path.split("+")[-1]
-        self.isReferencedComponent = False
-        self.documentReference = None
-        self.childOccurrences = _OccList([])
+        super().__init__(path=path, component=_Comp(path.split("+")[-1].split(":")[0], []))
         self.reads = 0
-        self._comp = _Comp(self.name.split(":")[0], [])
 
     @property
     def component(self):
         self.reads += 1
-        return self._comp
+        return self._component
 
 
 class TestXrefTreeWalkGuards:
@@ -816,15 +754,17 @@ class TestXrefTreeWalkGuards:
         assert "all_current" not in out          # no verdict is formed at all
 
     def test_a_design_with_no_root_component_is_unavailable(self, monkeypatch):
-        monkeypatch.setattr(dg, "design", lambda: SimpleNamespace(rootComponent=None))
+        rootless = MakeDesign()
+        rootless.rootComponent = None      # the walk has nothing to start from
+        monkeypatch.setattr(dg, "design", lambda: rootless)
         out = dg._slice_xref_tree()
         assert out["available"] is False
         assert "no root component" in out["note"]
 
     def test_an_unreadable_child_collection_stops_that_branch_without_a_crash(self, monkeypatch):
         # childOccurrences reading None is a branch NOT walked; the rest of the tree still reports.
-        sub = _Occ("Sub:1", is_ref=False)
-        sub.childOccurrences = None
+        sub = make_occurrence(path="Sub:1", component=_Comp("Sub", []),
+                              raises_on={"childOccurrences": "3 : cloud read failed"})
         keeper = _Occ("A:1", is_ref=True, dref=_DRef("A", 1, 1, False))
         _use_design(monkeypatch, _Root([sub, keeper]))
         out = dg._slice_xref_tree()
@@ -900,11 +840,8 @@ class TestXrefTreeDerive:
     def test_component_without_features_attribute_no_crash(self, monkeypatch):
         # a component exposing no .features at all (not just an empty deriveFeatures) must not crash
         # the walk - every attribute access in the derive walk is guarded by safe().
-        class _BareRoot:
-            def __init__(self, occs):
-                self.occurrences = _OccList(occs)
-                self.name = "Root"
-        _use_design(monkeypatch, _BareRoot([]))
+        bare = MakeComp("Root")                  # a component carrying no features collection
+        _use_design(monkeypatch, bare)
         out = dg._slice_xref_tree()
         assert out["reference_link_count"] == 0
         assert out["all_current"] is True
@@ -942,34 +879,23 @@ class TestXrefTreeDerive:
 
 # ── (C) used_in slice (where-used / reverse references) ───────────────────────
 
-class _Parent:
+def _Parent(name="P", urn="urn:p", ext="f3d", vnum=2, latest=3):
     """A parent DataFile - a document that REFERENCES the active one (drawing / assembly)."""
-    def __init__(self, name="P", urn="urn:p", ext="f3d", vnum=2, latest=3):
-        self.name = name
-        self.id = urn
-        self.fileExtension = ext
-        self.versionNumber = vnum
-        self.latestVersionNumber = latest
-        self.fusionWebURL = "https://fusion.example/p"
+    return FakeDataFile(name, file_id=urn, extension=ext, version=vnum, latest_version=latest,
+                        web_url="https://fusion.example/p")
 
 
-class _Parents:
-    """A DataFiles collection (parentReferences); item(i) may return None for an unreadable slot."""
-    def __init__(self, items): self._i = items
-    @property
-    def count(self): return len(self._i)
-    def item(self, i): return self._i[i]
-
-
-class _DFileParents:
-    """A DataFile carrying its incoming (parent) references for the used_in slice."""
-    def __init__(self, parents, has=True):
-        self.hasParentReferences = has
-        self.parentReferences = _Parents(parents)
+def _DFileParents(parents, has=True):
+    """A DataFile carrying its incoming (parent) references for the used_in slice. A parent slot
+    holding None is the reference that could not be resolved."""
+    df = FakeDataFile("Bracket", file_id="urn:lineage", parent_refs=parents)
+    if not has:
+        df._parent_refs = []
+    return df
 
 
 class TestUsedIn:
-    def test_drawing_reference_appears_and_is_typed(self):
+    def test_drawing_reference_appears_and_is_typed(self, _install):
         # the prove-it bite: a drawing made from this design shows up in used_in, typed 'drawing'.
         drawing = _Parent(name="Bracket Drawing", urn="urn:draw", ext="f2d", vnum=1, latest=1)
         _install(_Doc("Bracket", data_file=_DFileParents([drawing])))
@@ -983,14 +909,14 @@ class TestUsedIn:
         assert r["document_id"] == "urn:draw"
         assert out["by_type"] == {"drawing": 1}
 
-    def test_mixed_parents_rolled_up_by_type(self):
+    def test_mixed_parents_rolled_up_by_type(self, _install):
         parents = [_Parent(name="Asm", ext="f3d"), _Parent(name="Dwg", ext="f2d")]
         _install(_Doc("Part", data_file=_DFileParents(parents)))
         out = dg._slice_used_in()
         assert out["by_type"] == {"design": 1, "drawing": 1}
         assert out["parent_count"] == 2
 
-    def test_no_references_is_empty_not_error(self):
+    def test_no_references_is_empty_not_error(self, _install):
         # a design nothing uses -> empty list, query_complete True, NOT an error.
         _install(_Doc("Lonely", data_file=_DFileParents([], has=False)))
         out = dg._slice_used_in()
@@ -1000,7 +926,7 @@ class TestUsedIn:
         assert out["query_complete"] is True
         assert out["has_parent_references"] is False
 
-    def test_cap_truncates_and_blocks_query_complete(self):
+    def test_cap_truncates_and_blocks_query_complete(self, _install):
         parents = [_Parent(name=f"P{i}") for i in range(5)]
         _install(_Doc("Hub", data_file=_DFileParents(parents)))
         out = dg._slice_used_in(used_in_max=2)
@@ -1009,7 +935,7 @@ class TestUsedIn:
         assert out["parent_count"] == 5          # the true total stays honest
         assert out["query_complete"] is False    # a capped walk is partial knowledge
 
-    def test_unreadable_parent_does_not_read_as_none(self):
+    def test_unreadable_parent_does_not_read_as_none(self, _install):
         # a parent slot that can't be resolved must be flagged, not silently dropped - so a
         # short/empty list is never mistaken for 'nothing uses this'.
         good = _Parent(name="Asm")
@@ -1018,19 +944,16 @@ class TestUsedIn:
         assert out["unreadable_count"] == 1
         assert out["query_complete"] is False
 
-    def test_unsaved_document_has_no_where_used(self):
+    def test_unsaved_document_has_no_where_used(self, _install):
         _install(_Doc("Untitled", saved=False, data_file=None))
         out = dg._slice_used_in()
         assert out["available"] is False
         assert "never saved" in out["note"].lower()
 
-    def test_query_failure_is_unknown_not_empty(self):
+    def test_query_failure_is_unknown_not_empty(self, _install):
         # parentReferences unreadable -> the relationship is UNKNOWN; must not imply nothing uses this.
-        class _DFNoQuery:
-            hasParentReferences = None
-            @property
-            def parentReferences(self): raise RuntimeError("cloud read failed")
-        _install(_Doc("Part", data_file=_DFNoQuery()))
+        blind = FakeDataFile("Part", file_id="urn:lineage", parent_refs_raise="property")
+        _install(_Doc("Part", data_file=blind))
         out = dg._slice_used_in()
         assert out["available"] is True
         assert out["query_complete"] is False
@@ -1040,7 +963,7 @@ class TestUsedIn:
 # ── router composition ────────────────────────────────────────────────────────
 
 class TestSliceRouter:
-    def test_default_projection_omits_cloud_slices_but_advertises_them(self):
+    def test_default_projection_omits_cloud_slices_but_advertises_them(self, _install):
         _install(_Doc("A", data_file=_DataFile()))
         out = _payload(dg.handler())
         assert "versions" not in out and "xref_tree" not in out and "used_in" not in out
@@ -1048,7 +971,7 @@ class TestSliceRouter:
         assert "include=['xref_tree']" in out["note"]
         assert "include=['used_in']" in out["note"]
 
-    def test_include_adds_only_the_requested_slice(self, monkeypatch):
+    def test_include_adds_only_the_requested_slice(self, monkeypatch, _install):
         _install(_Doc("A", data_file=_DataFile()))
         monkeypatch.setattr(dg, "_slice_versions", lambda versions_max=25: {"marker": "V"})
         monkeypatch.setattr(dg, "_slice_xref_tree", lambda xref_max=50, max_depth=None: {"marker": "X"})
@@ -1057,21 +980,21 @@ class TestSliceRouter:
         assert out["versions"] == {"marker": "V"}
         assert "xref_tree" not in out and "used_in" not in out
 
-    def test_a_slice_only_read_omits_the_session_projection(self, monkeypatch):
+    def test_a_slice_only_read_omits_the_session_projection(self, monkeypatch, _install):
         # the cloud slice is what was asked for; re-sending the active record and the open-document
         # list beside it pays for the session read on every version/xref call.
         _install(_Doc("A", data_file=_DataFile()))
         monkeypatch.setattr(dg, "_slice_versions", lambda versions_max=25: {"marker": "V"})
         assert _payload(dg.handler(include=["versions"])) == {"versions": {"marker": "V"}}
 
-    def test_default_beside_a_slice_keeps_the_projection(self, monkeypatch):
+    def test_default_beside_a_slice_keeps_the_projection(self, monkeypatch, _install):
         _install(_Doc("A", data_file=_DataFile()))
         monkeypatch.setattr(dg, "_slice_versions", lambda versions_max=25: {"marker": "V"})
         out = _payload(dg.handler(include=["default", "versions"]))
         assert out["active"]["name"] == "A" and out["versions"] == {"marker": "V"}
         assert out["document_id"] == "urn:lineage:abc" and "note" in out
 
-    def test_a_slice_only_read_does_not_walk_the_open_documents(self, monkeypatch):
+    def test_a_slice_only_read_does_not_walk_the_open_documents(self, monkeypatch, _install):
         # the walk is the projection's cost (one DataFile read per open document), so a slice-only
         # read must skip it, not build the rows and drop them.
         _install(_Doc("A", data_file=_DataFile()))
@@ -1083,7 +1006,7 @@ class TestSliceRouter:
         dg.handler(include=["versions"])
         assert calls == []
 
-    def test_the_active_record_is_read_once_for_the_guard_and_the_payload(self, monkeypatch):
+    def test_the_active_record_is_read_once_for_the_guard_and_the_payload(self, monkeypatch, _install):
         # the guard and the published record must be the SAME read: the record carries a cloud
         # DataFile fetch, so a second one can answer differently from the one that was checked.
         _install(_Doc("A", data_file=_DataFile()))
@@ -1093,13 +1016,13 @@ class TestSliceRouter:
         out = _payload(dg.handler())
         assert len(calls) == 1 and out["active"]["name"] == "A"
 
-    def test_the_no_active_document_guard_still_fires_on_a_slice_read(self):
+    def test_the_no_active_document_guard_still_fires_on_a_slice_read(self, _install):
         # the slices each answer for the ACTIVE document, so with none open the read is refused by
         # name rather than answered with a slice's own "never saved to the cloud".
         _install(None)
         assert "no active document" in error_message(dg.handler(include=["versions"])).lower()
 
-    def test_include_used_in_adds_where_used_slice(self, monkeypatch):
+    def test_include_used_in_adds_where_used_slice(self, monkeypatch, _install):
         _install(_Doc("A", data_file=_DataFile()))
         monkeypatch.setattr(dg, "_slice_used_in", lambda used_in_max=50: {"marker": "U"})
         out = _payload(dg.handler(include=["used_in"]))

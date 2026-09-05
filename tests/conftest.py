@@ -591,8 +591,11 @@ class BRepBody:
     itself RAISE - the state a solid/surface verdict has to publish as null rather than guess."""
     def __init__(self, name="Body", bbox=None, volume=0.0, is_solid=True, entity_token=None,
                  light_bulb=True, hidden_by_ancestor=False, vertices=(), parent_component=None,
-                 face_count=0, faces=(), area=None, mesh_manager=None, solid_readable=True):
+                 face_count=0, faces=(), area=None, mesh_manager=None, solid_readable=True,
+                 is_derived=False):
         self.name = name
+        # A body a derive brought in answers True here; every ordinary one answers False.
+        self.isDerived = is_derived
         self.parentComponent = parent_component
         self.nativeObject = None
         self.assemblyContext = None
@@ -1967,10 +1970,10 @@ def make_source_document(urn):
     document: it carries no dataFile at all, so the chain stops one hop short.
 
     Hand a DIFFERENT urn to each component standing for a different source document; hand the SAME
-    one to components of a single document. The two hops are attribute bags here; the mapped fakes
-    for them are FakeFusionDocument and FakeDataFile below."""
-    return MakeDesign(parent_document=types.SimpleNamespace(
-        dataFile=(types.SimpleNamespace(id=urn) if urn is not None else None)))
+    one to components of a single document. The two hops are FakeFusionDocument and FakeDataFile
+    (defined below), so the chain a tool walks is the shared document world's."""
+    return MakeDesign(parent_document=FakeFusionDocument(
+        data_file=(FakeDataFile(file_id=urn) if urn is not None else None)))
 
 
 @fusion_fake(factory_for="MakeDesign")
@@ -2046,7 +2049,8 @@ class FakeOccurrence:
                  assembly_context=None, ground_to_parent=None, children=(), raises_on=None,
                  is_active=False, activate_ok=True, activate_lies=False, transform=None,
                  joints=None, grounded=None, bodies=None, bounding_box=None, entity_token=None,
-                 ground_set_ok=True, ground_lies=False, referenced=None):
+                 ground_set_ok=True, ground_lies=False, referenced=None, delete_ok=True,
+                 derived=False, document_reference=None):
         self._path = path
         self._component = component
         self._raises = raises
@@ -2070,11 +2074,26 @@ class FakeOccurrence:
         self._joints = _NamedCollection(list(joints or ()))
         self._bodies = _NamedCollection(list(bodies or ()))
         self._referenced = False if referenced is None else referenced
+        # An instance a derive created answers True here; every ordinary one answers False, so this
+        # is the plain live answer rather than a member set only when a test asks.
+        self._derived = bool(derived)
+        # The xref link this instance places its component through, None where it places a local
+        # one; `raises_on` is how the read that DECLINES is modelled, as for every other read here.
+        self._document_reference = document_reference
         # Set only when asked: every live occurrence has a token, but two DISTINCT ones can share it
         # (document-local), so a test that cares about identity chooses the token.
         if entity_token is not None:
             self.entityToken = entity_token
         self.name = path.split("+")[-1]
+        self._delete_ok = delete_ok
+        self._deleted = False
+
+    def deleteMe(self):
+        # A delete the platform REFUSES answers False and leaves the instance placed, which is the
+        # only state a caller re-reading the tree can tell from a delete that landed.
+        if self._delete_ok:
+            self._deleted = True
+        return self._delete_ok
 
     def _read(self, prop, value):
         if self._raises:
@@ -2134,6 +2153,22 @@ class FakeOccurrence:
         self._referenced = value
 
     @property
+    def isDerived(self):
+        return self._read("isDerived", self._derived)
+
+    @isDerived.setter
+    def isDerived(self, value):
+        self._derived = value
+
+    @property
+    def documentReference(self):
+        return self._read("documentReference", self._document_reference)
+
+    @documentReference.setter
+    def documentReference(self, value):
+        self._document_reference = value
+
+    @property
     def transform(self):
         return self._read("transform", self._transform)
 
@@ -2185,17 +2220,20 @@ class FakeOccurrence:
 def make_occurrence(path="Comp:1", component=None, raises=None, transform2=None,
                     assembly_context=None, ground_to_parent=None, children=(), raises_on=None,
                     transform=None, joints=None, grounded=None, bodies=None, bounding_box=None,
-                    entity_token=None, referenced=None):
+                    entity_token=None, referenced=None, delete_ok=True, derived=False,
+                    document_reference=None):
     """An occurrence placing `component` at assembly path `path`, with the placement matrix
     ``transform2`` and the occurrence ``assembly_context`` that places it, the ground-to-parent lock
     ``ground_to_parent`` and the nested ``children`` a census descends into. Pass ``raises`` to model
     an unresolved external reference, where every read but ``name`` throws that message, or
-    ``raises_on`` = {property: message} for the row where only that one read declines."""
+    ``raises_on`` = {property: message} for the row where only that one read declines;
+    ``delete_ok`` False is the deleteMe the platform refuses."""
     return FakeOccurrence(path, component, raises, transform2, assembly_context,
                           ground_to_parent, children, raises_on, transform=transform,
                           joints=joints, grounded=grounded, bodies=bodies,
                           bounding_box=bounding_box, entity_token=entity_token,
-                          referenced=referenced)
+                          referenced=referenced, delete_ok=delete_ok, derived=derived,
+                          document_reference=document_reference)
 
 
 def make_sketch_curve(token="curve0", length=1.0, is_closed=None):
@@ -2490,10 +2528,15 @@ class FakeFusionDocument:
     read off, and the save/saveAs/saveMilestone/close/activate writes, each answering the bool its
     caller gates on. `closed=True` is the measured closed wrapper: isValid reads False and a name
     read RAISES; close() puts a live one into that state. `save_versions=False` is the declared
-    state of a save that answers True and versions nothing - no measurement row carries it."""
+    state of a save that answers True and versions nothing - no measurement row carries it - so the
+    version number does not move and the document stays MODIFIED, which is the only read that
+    separates it from a save that landed. `save_raises` is the message a refusing save THROWS with,
+    which a caller must surface rather than swallow into a false ok."""
     def __init__(self, name="Untitled", design=None, data_file=None, is_saved=False,
-                 is_modified=True, is_active=True, version=None, references=(), products=None,
-                 save_ok=True, close_ok=True, activate_ok=True, save_versions=True, closed=False):
+                 is_modified=True, is_active=True, is_visible=True,
+                 version=None, references=(), products=None,
+                 save_ok=True, close_ok=True, activate_ok=True, save_versions=True, closed=False,
+                 save_raises=None):
         self._name = name
         self._closed = closed
         self.design = design
@@ -2501,13 +2544,16 @@ class FakeFusionDocument:
         self.isSaved = is_saved
         self.isModified = is_modified
         self.isActive = is_active
+        self.isVisible = is_visible
         self.version = version
         self.documentReferences = _NamedCollection(list(references))
         self.products = FakeProducts(design=design) if products is None else products
         self._save_ok, self._close_ok, self._activate_ok = save_ok, close_ok, activate_ok
         self._save_versions = save_versions
+        self._save_raises = save_raises
         self._saves = []
         self._closes = []
+        self._activates = 0
 
     @property
     def name(self):
@@ -2525,10 +2571,14 @@ class FakeFusionDocument:
 
     def _record_save(self, kind, args):
         self._saves.append((kind, args))
+        if self._save_raises:
+            raise RuntimeError(self._save_raises)
         if not self._save_ok:
             return False
+        if not self._save_versions:
+            return True
         held = getattr(self.dataFile, "versionNumber", None)
-        if self._save_versions and isinstance(held, int):
+        if isinstance(held, int):
             self.dataFile.versionNumber = held + 1
         self.isModified = False
         self.isSaved = True
@@ -2550,6 +2600,9 @@ class FakeFusionDocument:
         return self._close_ok
 
     def activate(self):
+        # counted as well as flagged: isActive alone cannot tell a document that was ASKED to come
+        # forward from one that was already there.
+        self._activates += 1
         if self._activate_ok:
             self.isActive = True
         return self._activate_ok
@@ -2590,30 +2643,52 @@ class FakeDocuments:
 
 @fusion_fake(live_type="Data", facts=("shape-dump-document-world", "shape-dump-data-world"))
 class FakeData:
-    """app.data: the active hub/project a cloud read starts from, the project list, and
-    findFileById - which answers the file registered under that id, None otherwise."""
-    def __init__(self, active_project=None, projects=(), active_hub=None, files_by_id=None):
+    """app.data: the active hub/project a cloud read starts from, the hubs walk, the project list
+    that dataProjects.add mints into, and findFileById/findFolderById - each answering what is
+    registered under that id, None otherwise. activeHub is a PROPERTY so a scenario subclass can
+    take the assignment and refuse to change, which is what a getter-only member does; every
+    assignment is recorded in _hub_sets whether or not it lands."""
+    def __init__(self, active_project=None, projects=(), active_hub=None, files_by_id=None,
+                 hubs=(), folders_by_id=None):
         self.activeProject = active_project
-        self.activeHub = active_hub
+        self._active_hub = active_hub
+        self._hub_sets = []
         listed = list(projects) or ([active_project] if active_project is not None else [])
-        self.dataProjects = _NamedCollection(listed)
+        self.dataProjects = _CloudProjects(listed)
+        self.dataHubs = _NamedCollection(list(hubs))
         self._files = dict(files_by_id or {})
+        self._folders = dict(folders_by_id or {})
+
+    @property
+    def activeHub(self):
+        return self._active_hub
+
+    @activeHub.setter
+    def activeHub(self, hub):
+        self._hub_sets.append(hub)
+        self._active_hub = hub
 
     def findFileById(self, file_id):
         return self._files.get(file_id)
+
+    def findFolderById(self, folder_id):
+        return self._folders.get(folder_id)
 
 
 @fusion_fake(live_type="Application", facts=("shape-dump-document-world",))
 class FakeApplication:
     """The session seam a tool reads through: activeDocument and the documents walk, the
-    activeProduct a design comes off, app.data and app.userInterface."""
+    activeProduct a design comes off, app.data and app.userInterface. `import_manager` is set only
+    when a test supplies one, ImportManager carrying no shape dump to build a shared stand-in from."""
     def __init__(self, active_document=None, documents=None, active_product=None, data=None,
-                 user_interface=None):
+                 user_interface=None, import_manager=None):
         self.activeDocument = active_document
         self.documents = FakeDocuments() if documents is None else documents
         self.activeProduct = active_product
         self.data = FakeData() if data is None else data
         self.userInterface = FakeUserInterface() if user_interface is None else user_interface
+        if import_manager is not None:
+            self.importManager = import_manager
 
 
 @fusion_fake(live_type="DocumentReference", facts=("shape-dump-document-world",))
@@ -2622,18 +2697,32 @@ class FakeDocumentReference:
     a derive link is refreshed by assigning it), isOutOfDate, and getLatestVersion(). A refresh that
     answers True moves the version to the file's latest and clears isOutOfDate.
 
-    Two refusing states, like FakeSetup's activate_lies: `stays_out_of_date` is the platform LIE -
-    the refresh answers True while isOutOfDate stays True - and `latest_raises` is the message
+    Three refusing states, like FakeSetup's activate_lies: `stays_out_of_date` is the platform LIE -
+    the refresh answers True while isOutOfDate stays True - `latest_raises` is the message
     getLatestVersion throws with, which a DeriveFeature's reference does, so the derive path has to
-    advance through the version setter instead."""
+    advance through the version setter instead, and `setter_raises` is that setter refusing too."""
     def __init__(self, data_file=None, version=1, out_of_date=False, refresh_ok=True,
-                 stays_out_of_date=False, latest_raises=None):
+                 stays_out_of_date=False, latest_raises=None, setter_raises=None):
         self.dataFile = data_file
-        self.version = version
+        self._version = version
         self.isOutOfDate = out_of_date
         self._refresh_ok = refresh_ok
         self._stays_out_of_date = stays_out_of_date
         self._latest_raises = latest_raises
+        self._setter_raises = setter_raises
+
+    @property
+    def version(self):
+        return self._version
+
+    @version.setter
+    def version(self, value):
+        # Declared, not measured: staleness is recomputed on assignment so doc_update_xref's
+        # post-refresh re-read has a state to read; no measurement row covers the live setter.
+        if self._setter_raises:
+            raise RuntimeError(self._setter_raises)
+        self._version = value
+        self.isOutOfDate = value != getattr(self.dataFile, "latestVersionNumber", None)
 
     def getLatestVersion(self):
         if self._latest_raises:
@@ -2641,7 +2730,7 @@ class FakeDocumentReference:
         if not self._refresh_ok:
             return False
         latest = getattr(self.dataFile, "latestVersionNumber", None)
-        self.version = latest if isinstance(latest, int) else self.version
+        self._version = latest if isinstance(latest, int) else self._version
         self.isOutOfDate = bool(self._stays_out_of_date)
         return True
 
@@ -3524,27 +3613,168 @@ def make_cam_parameters(*rows):
 
 # ── data world ────────────────────────────────────────────────────────────
 
+class _CloudArray(_NamedCollection):
+    """A cloud collection as the data walks read it: the counted/item/itemByName walk plus the
+    asArray() bulk fetch every dataFiles/dataFolders/dataProjects enumeration goes through."""
+
+    def asArray(self):
+        return list(self)
+
+
+class _CloudFolders(_CloudArray):
+    """A folder's dataFolders: the walk plus add(name), which creates the child IN the folder, so
+    the re-list a create verifies through sees it."""
+
+    def __init__(self, folder, items, raises=None):
+        super().__init__(items, raises=raises)
+        self._folder = folder
+
+    def add(self, name):
+        return self._folder._add_folder(name)
+
+
+class _CloudProjects(_CloudArray):
+    """A hub's dataProjects: the walk plus add(name, purpose, contributors), which mints a project
+    into the walk and answers it. The arguments land in _added."""
+
+    def __init__(self, items=(), raises=None):
+        super().__init__(items, raises=raises)
+        self._added = []
+
+    def add(self, name, purpose="", contributors=""):
+        self._added.append((name, purpose, contributors))
+        project = FakeDataProject(name=name, project_id="newid:" + name)
+        self._items.append(project)
+        return project
+
+
 @fusion_fake(live_type="DataFile", facts=("shape-dump-data-world",))
 class FakeDataFile:
     """One cloud file: the name/id/versionId identity a resolve keys on, its versionNumber beside
-    latestVersionNumber (the pair a freshness read compares), where it lives, and the move/deleteMe
-    writes, each answering the bool its caller gates on and only then changing what a read-back
-    sees. `file_id` is the LINEAGE urn, unset unless a test supplies one."""
+    latestVersionNumber (the pair a freshness read compares), where it lives, the parent-reference
+    pair a delete's orphan guard reads, and the move/deleteMe writes, each answering the bool its
+    caller gates on and only then changing what a read-back sees. `file_id` is the LINEAGE urn,
+    unset unless a test supplies one. `parent_refs_raise` is the reference read that will not
+    answer: 'flag' fails at hasParentReferences, 'property' at the parentReferences read itself, and
+    'array' one step later, when the collection it handed back is ENUMERATED.
+    `latest_raises` is the tip number that will not read at all - the state a version report has to
+    publish as unreadable rather than diagnose. `versions` are the OLDER files a restore picks from
+    (`versions_raise` the cloud read of them that will not answer at all) and
+    promote() answers the bool its caller gates on; `is_milestone=None` is the mark flag that will
+    not read, and `milestones` is set only when a test supplies the collection, a file that answers
+    no milestone read being its own tested state.
+
+    `child_refs` are the files this one references (`child_refs_raise` is the flag answering True
+    over an enumeration that then throws), copy() lands a NEW file carrying the SOURCE name in the
+    target folder - it takes no name, which is why a rename follows it - `copy_ok=False` is the copy
+    that answers nothing, and `rename_ok=False` the file whose name assignment RAISES."""
     def __init__(self, name="Part", file_id=None, version=1, latest_version=None, extension="f3d",
                  parent_folder=None, parent_project=None, version_id=None, is_complete=True,
-                 move_ok=True, delete_ok=True):
-        self.name = name
+                 move_ok=True, delete_ok=True, web_url=None, parent_refs=(),
+                 parent_refs_raise=None, latest_raises=False, versions=(), versions_raise=None,
+                 promote_ok=True, promote_raises=None, is_milestone=False, milestones=None,
+                 child_refs=(),
+                 child_refs_raise=False, copy_ok=True, rename_ok=True,
+                 date_created=1_700_000_000, description=""):
+        self._rename_ok = rename_ok
+        self._name = name
+        self._child_refs = list(child_refs)
+        self._child_refs_raise = child_refs_raise
+        self._copy_ok = copy_ok
+        self.dateCreated = date_created
+        self.description = description
         self.id = file_id
         self.versionNumber = version
-        self.latestVersionNumber = version if latest_version is None else latest_version
+        self._latest_version = version if latest_version is None else latest_version
+        self._latest_raises = latest_raises
+        self._is_milestone = is_milestone
+        if milestones is not None:
+            self.milestones = milestones
+        self._versions = list(versions)
+        self._versions_raise = versions_raise
+        self._promote_ok, self._promote_raises = promote_ok, promote_raises
+        self._promotes = 0
         self.versionId = version_id
         self.fileExtension = extension
+        self.fusionWebURL = web_url
         self.parentFolder = parent_folder
         self.parentProject = parent_project
         self.isComplete = is_complete
         self._move_ok, self._delete_ok = move_ok, delete_ok
+        self._parent_refs = list(parent_refs)
+        self._parent_refs_raise = parent_refs_raise
         self._moves = []
         self._deleted = False
+
+    @property
+    def name(self):
+        return self._name
+
+    @name.setter
+    def name(self, value):
+        if not self._rename_ok:
+            raise RuntimeError("3 : name is read-only on this file")
+        self._name = value
+
+    @property
+    def latestVersionNumber(self):
+        if self._latest_raises:
+            raise RuntimeError("2 : InternalValidationError")
+        return self._latest_version
+
+    @latestVersionNumber.setter
+    def latestVersionNumber(self, value):
+        self._latest_version = value
+
+    @property
+    def isMilestone(self):
+        # None is the flag that will NOT read - a distinct state from False, which a caller has to
+        # report as unreadable rather than as a mark that is absent.
+        if self._is_milestone is None:
+            raise RuntimeError("3 : cloud read failed")
+        return self._is_milestone
+
+    @property
+    def versions(self):
+        return _CloudArray(self._versions, raises=self._versions_raise)
+
+    def promote(self):
+        self._promotes += 1
+        if self._promote_raises:
+            raise RuntimeError(self._promote_raises)
+        return self._promote_ok
+
+    @property
+    def hasChildReferences(self):
+        return True if self._child_refs_raise else bool(self._child_refs)
+
+    @property
+    def childReferences(self):
+        return _CloudArray(self._child_refs,
+                           raises="3 : cloud read failed" if self._child_refs_raise else None)
+
+    def copy(self, target_folder):
+        if not self._copy_ok:
+            return None
+        made = FakeDataFile(self._name, file_id="urn:adsk.file:copy", rename_ok=self._rename_ok,
+                            parent_folder=target_folder,
+                            parent_project=getattr(target_folder, "parentProject", None))
+        target_folder._files.append(made)
+        return made
+
+    @property
+    def hasParentReferences(self):
+        if self._parent_refs_raise == "flag":
+            raise RuntimeError("3 : cloud read failed")
+        return True if self._parent_refs_raise == "array" else bool(self._parent_refs)
+
+    @property
+    def parentReferences(self):
+        if self._parent_refs_raise == "property":
+            raise RuntimeError("3 : cloud read failed")
+        return _CloudArray(self._parent_refs,
+                           raises=("3 : cloud read failed"
+                                   if self._parent_refs_raise == "array" else None))
 
     def move(self, folder):
         self._moves.append(folder)
@@ -3561,28 +3791,54 @@ class FakeDataFile:
 @fusion_fake(live_type="DataFolder", facts=("shape-dump-data-world",))
 class FakeDataFolder:
     """One folder of the cloud tree: its name/id, the dataFiles and dataFolders a bounded walk
-    reads, the parent pair a path is rebuilt from, isRoot, and deleteMe answering the bool its
-    caller gates on. A child whose own deleteMe() SUCCEEDED is gone from both walks, so a delete
-    read-back sees what live sees; one that refused stays."""
+    reads, the parent pair a path is rebuilt from, isRoot, uploadFile answering the future a poll
+    handle is minted from, and deleteMe answering the bool its caller gates on. A child whose own
+    deleteMe() SUCCEEDED is gone from both walks, so a delete read-back sees what live sees; one
+    that refused stays. `files_raise`/`folders_raise` are the enumeration that will not answer at
+    all - a HOLE in a walk, which is not the same answer as an empty folder. A folder created
+    through dataFolders.add inherits the upload pair, so a mkdir -p destination behaves like the
+    root it was made under."""
     def __init__(self, name="Root", folder_id=None, files=(), folders=(), parent_folder=None,
-                 parent_project=None, is_root=False, delete_ok=True):
+                 parent_project=None, is_root=False, delete_ok=True, files_raise=None,
+                 folders_raise=None, upload_future=None, upload_raises=None):
         self.name = name
         self.id = folder_id
-        self._files = list(files)
+        self._files = [f if hasattr(f, "name") else FakeDataFile(f) for f in files]
         self._folders = list(folders)
         self.parentFolder = parent_folder
         self.parentProject = parent_project
         self.isRoot = is_root
         self._delete_ok = delete_ok
+        self._files_raise, self._folders_raise = files_raise, folders_raise
+        self._upload_future, self._upload_raises = upload_future, upload_raises
+        self._uploads = []
         self._deleted = False
+        for child in self._files + self._folders:
+            child.parentFolder = self
 
     @property
     def dataFiles(self):
-        return _NamedCollection([f for f in self._files if not getattr(f, "_deleted", False)])
+        return _CloudArray([f for f in self._files if not getattr(f, "_deleted", False)],
+                           raises=self._files_raise)
 
     @property
     def dataFolders(self):
-        return _NamedCollection([f for f in self._folders if not getattr(f, "_deleted", False)])
+        return _CloudFolders(self, [f for f in self._folders if not getattr(f, "_deleted", False)],
+                             raises=self._folders_raise)
+
+    def _add_folder(self, name):
+        child = FakeDataFolder(name, folder_id="fid:" + name, parent_folder=self,
+                               parent_project=self.parentProject,
+                               upload_future=self._upload_future,
+                               upload_raises=self._upload_raises)
+        self._folders.append(child)
+        return child
+
+    def uploadFile(self, path):
+        if self._upload_raises:
+            raise RuntimeError(self._upload_raises)
+        self._uploads.append(path)
+        return self._upload_future
 
     def deleteMe(self):
         if self._delete_ok:
@@ -3600,15 +3856,131 @@ class FakeDataProject:
                            else root_folder)
 
 
+def _stamp_project(folder, project):
+    """Stamp `project` on a folder and everything under it - the parentProject hop a file's
+    location is published from."""
+    folder.parentProject = project
+    for child in list(folder._files) + list(folder._folders):
+        child.parentProject = project
+        if isinstance(child, FakeDataFolder):
+            _stamp_project(child, project)
+
+
 @fusion_fake(factory_for="FakeDataProject")
 def make_data_tree(name="Project", files=(), folders=()):
-    """A project whose ROOT folder holds `files` (names or FakeDataFile objects) and `folders`, each
-    back-linked to the root and the project - the two hops a file's location is published from."""
-    contents = [f if hasattr(f, "name") else FakeDataFile(f) for f in files]
-    root = FakeDataFolder("Root", files=contents, folders=list(folders), is_root=True)
+    """A project whose ROOT folder holds `files` (names or FakeDataFile objects) and `folders` with
+    their own nested contents, everything under it back-linked to its folder and to the project -
+    the two hops a file's location is published from."""
+    root = FakeDataFolder("Root", files=files, folders=list(folders), is_root=True)
     project = FakeDataProject(name=name, root_folder=root)
-    root.parentProject = project
-    for item in contents + list(folders):
-        item.parentFolder = root
-        item.parentProject = project
+    _stamp_project(root, project)
     return project
+
+
+# ── export world ──────────────────────────────────────────────────────────
+
+# Reading DXFSketchExportOptions.units aborts the live transaction, so the knob is modelled as
+# unreadable: a regression that touches it - even through safe() - goes red in a test run.
+_DXF_UNITS_READ = "3 : Distance unit is not supported by DXF"
+
+
+@fusion_fake(scenario_double="a bag for the *ExportOptions family (STL/STEP/OBJ/DXFSketch/...), no "
+                             "member of which is a SHAPES dump: it publishes nothing of its own - "
+                             "every attribute on one is what its factory seeded or what the tool "
+                             "under test assigned - so it has no live surface to sweep")
+class _ExportOptions:
+    """One created options object: the kind/path/geometry its factory recorded, plus free attribute
+    get/set (also by subscript) for the knobs a tool writes and reads back. `drops` names the
+    properties whose assignment is SWALLOWED - the read-back keeps answering whatever `seeded` put
+    there, which is the one state a read-back check can catch - and `raises_on` maps a property to
+    the message its READ throws with. A knob no test names is ABSENT, never a made-up default."""
+    def __init__(self, kind, path, geom=None, drops=(), seeded=None, raises_on=None):
+        object.__setattr__(self, "_drops", set(drops))
+        object.__setattr__(self, "_raises_on", dict(raises_on or {}))
+        for name, value in dict(seeded or {}).items():
+            object.__setattr__(self, name, value)
+        self.kind = kind
+        self.path = path
+        self.geom = geom
+
+    def __getattr__(self, k):
+        # runs only for an attribute nothing set, so an unreadable knob stays unreadable however the
+        # code under test reaches it.
+        message = (self.__dict__.get("_raises_on") or {}).get(k)
+        if message:
+            raise RuntimeError(message)
+        raise AttributeError(k)
+
+    def __setattr__(self, k, v):
+        if k in self.__dict__.get("_drops", ()):
+            return
+        object.__setattr__(self, k, v)
+
+    def __getitem__(self, k):
+        return getattr(self, k)
+
+    def __setitem__(self, k, v):
+        setattr(self, k, v)
+
+
+@fusion_fake(live_type="ExportManager",
+             facts=("shape-dump-document-world", "export-arg-orders",
+                    "fusion-archive-execute-bool-vs-landed-file"))
+class FakeExportManager:
+    """design.exportManager: one create*ExportOptions factory per format, and the execute() every
+    write goes through. The MEASURED arg orders differ by format - STL/3MF/OBJ take (geometry,
+    path), the rest (path, geometry) - and each factory records its options bag on the private
+    _calls walk before handing it back. `options_class` swaps that bag for a scenario subclass, the
+    way an options object that drops a write is reached.
+
+    execute() writes a stub file at the options' path unless `writes(opts)` answers False, then
+    answers `execute_ok`: the bool and the file are separate knobs because a FALSE execute() over a
+    landed file is measured, so the disk is the verdict and the bool is not."""
+    def __init__(self, options_class=None, execute_ok=True, writes=None):
+        self._options_class = _ExportOptions if options_class is None else options_class
+        self._execute_ok = execute_ok
+        self._writes = writes
+        self._calls = []
+        self._executed = None
+
+    def _opt(self, kind, path, geom, **kw):
+        rec = self._options_class(kind, path, geom, **kw)
+        self._calls.append(rec)
+        return rec
+
+    def createSTEPExportOptions(self, path, geom=None):
+        return self._opt("step", path, geom)
+
+    def createIGESExportOptions(self, path, geom=None):
+        return self._opt("iges", path, geom)
+
+    def createSATExportOptions(self, path, geom=None):
+        return self._opt("sat", path, geom)
+
+    def createSMTExportOptions(self, path, geom=None):
+        return self._opt("smt", path, geom)
+
+    def createUSDExportOptions(self, path, geom=None):
+        return self._opt("usd", path, geom)
+
+    def createFusionArchiveExportOptions(self, path, geom=None):
+        return self._opt("f3d", path, geom)
+
+    def createSTLExportOptions(self, geom, path):
+        return self._opt("stl", path, geom)
+
+    def createC3MFExportOptions(self, geom, path):
+        return self._opt("3mf", path, geom)
+
+    def createOBJExportOptions(self, geom, path):
+        return self._opt("obj", path, geom)
+
+    def createDXFSketchExportOptions(self, path, sketch):
+        return self._opt("dxf", path, sketch, raises_on={"units": _DXF_UNITS_READ})
+
+    def execute(self, opts):
+        self._executed = opts
+        if self._writes is None or self._writes(opts):
+            with open(opts.path, "w") as fh:
+                fh.write("export-stub")
+        return self._execute_ok

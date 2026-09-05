@@ -9,8 +9,9 @@ import types
 import pytest
 
 import adsk.fusion
-from conftest import (BRepBody, MakeComp, _NamedCollection, error_message, load_tool, make_design,
-                      payload)
+from conftest import (BRepBody, FakeApplication, FakeFusionDocument, FakeProducts,
+                      FakeUserInterface, MakeComp, _NamedCollection, error_message, load_tool,
+                      make_design, make_occurrence, payload)
 
 mod = load_tool("doc_insert_import")
 
@@ -60,9 +61,7 @@ def _fake_manager(created=(), dxf_results=(), fail=None, options=_ABSENT, new_do
 
 def _new_doc(design, name="Imported v1"):
     """A Document whose Design product is ``design`` - what importToNewDocument returns."""
-    products = types.SimpleNamespace(
-        itemByProductType=lambda kind: design if kind == "DesignProductType" else None)
-    return types.SimpleNamespace(name=name, products=products)
+    return FakeFusionDocument(name=name, products=FakeProducts(design=design))
 
 
 @pytest.fixture
@@ -82,8 +81,7 @@ def wire(monkeypatch):
     def _wire(design=None, ui=None, **manager_kwargs):
         design = make_design() if design is None else design
         manager, calls = _fake_manager(**manager_kwargs)
-        monkeypatch.setattr(mod, "app", types.SimpleNamespace(importManager=manager,
-                                                              userInterface=ui))
+        monkeypatch.setattr(mod, "app", FakeApplication(import_manager=manager, user_interface=ui))
         monkeypatch.setattr(mod._common, "design", lambda: design)
         monkeypatch.setattr(mod._inputs._common, "design", lambda: design)
         return design, manager, calls
@@ -97,12 +95,14 @@ def _sketch(name="Sketch1", curves=()):
 _WORKSPACE_NAMES = {"CAMEnvironment": "Manufacture", "FusionSolidEnvironment": "Design"}
 
 
-class _FakeUI:
-    """A stand-in userInterface. ``activate`` is what Workspace.activate() answers: True switches,
-    'lies' answers true without switching, False declines, an Exception is raised. ``reads`` caps
-    the activeWorkspace property reads that succeed - one workspace read costs two (id and name)."""
+class _FakeUI(FakeUserInterface):
+    """The workspace half of userInterface, which the shared fake does not carry (Workspace has no
+    live shape dump). ``activate`` is what Workspace.activate() answers: True switches, 'lies'
+    answers true without switching, False declines, an Exception is raised. ``reads`` caps the
+    activeWorkspace property reads that succeed - one workspace read costs two (id and name)."""
 
     def __init__(self, active="CAMEnvironment", activate=True, reads=None):
+        super().__init__()
         self._active = active
         self._activate = activate
         self._reads = reads
@@ -136,8 +136,8 @@ class _FakeUI:
 
 
 def _occurrence(name="Part:1", component=None):
-    return types.SimpleNamespace(name=name, fullPathName=name,
-                                 component=component if component is not None else MakeComp(name))
+    return make_occurrence(path=name,
+                           component=component if component is not None else MakeComp(name))
 
 
 class TestFormatResolution:
@@ -288,8 +288,7 @@ class TestSolidImport:
         assert calls["targets"] == []
 
     def test_an_occurrence_with_no_component_is_refused_before_importing(self, wire, cad):
-        occ = _occurrence("Bracket:1")
-        occ.component = None
+        occ = make_occurrence(path="Bracket:1", component=None)
         design = make_design(occurrences=[occ])
         _design, _mgr, calls = wire(design=design, created=[BRepBody("Imported")])
         msg = error_message(mod.handler(file_path=cad("part.step"), into_component="Bracket:1"))

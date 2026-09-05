@@ -4,12 +4,14 @@
 """The shared world fakes, each driven through the seam a tool reads it through."""
 
 import math
+import os
 
 import pytest
 
 import live_api_facts as _api_facts
 from conftest import (FakeApplication, FakeBaseFeature, FakeBaseFeatures, FakeCAMParameter,
-                      FakeDataFile, FakeDataFolder,
+                      FakeDataFile, FakeDataFolder, FakeExportManager, FakeFusionDocument,
+                      _ExportOptions,
                       FakeDocumentReference, FakeFeature, FakeFeatures, FakeJoint, FakeJoints,
                       FakeMachine, FakeMatrix3D,
                       FakeMotionLink, FakeMotionLinks, FakePoint, FakeRigidGroup, FakeRigidGroups,
@@ -63,7 +65,30 @@ class TestDocumentWorld:
         with pytest.raises(RuntimeError, match="InternalValidationError"):
             derive.getLatestVersion()
         derive.version = source.latestVersionNumber
-        assert derive.version == 5
+        assert derive.version == 5 and derive.isOutOfDate is False
+        # ...and that setter can refuse too, which is the third state.
+        stubborn = FakeDocumentReference(data_file=source, version=1, out_of_date=True,
+                                         setter_raises="2 : InternalValidationError")
+        with pytest.raises(RuntimeError, match="InternalValidationError"):
+            stubborn.version = 5
+        assert stubborn.version == 1 and stubborn.isOutOfDate is True
+
+    def test_a_save_that_versions_nothing_answers_true_and_leaves_the_document_modified(self):
+        # The false success: the bool says nothing, so isModified is the read that catches it.
+        data_file = FakeDataFile("Bracket", version=3)
+        doc = FakeFusionDocument(name="Bracket", data_file=data_file, save_versions=False)
+        assert doc.save("checkpoint") is True
+        assert doc.isModified is True and data_file.versionNumber == 3
+        assert doc._saves == [("save", ("checkpoint",))]
+
+    def test_a_refused_activate_is_still_counted_and_leaves_the_document_in_the_background(self):
+        # The count is what says the switch was ASKED for: isActive alone reads the same on a
+        # document that was already forward and on one nothing ever called activate() on.
+        already = FakeFusionDocument(name="A")
+        stuck = FakeFusionDocument(name="B", is_active=False, activate_ok=False)
+        assert stuck.activate() is False
+        assert stuck.isActive is False and stuck._activates == 1
+        assert already.isActive is True and already._activates == 0
 
     def test_a_document_added_to_the_walk_is_the_one_handed_back(self):
         app = FakeApplication()
@@ -284,12 +309,75 @@ class TestDataWorld:
         assert root.dataFiles.itemByName("Stuck").deleteMe() is False
         assert root.dataFiles.itemByName("Stuck") is not None
 
+    def test_a_copy_lands_in_the_target_folder_under_the_SOURCE_name(self):
+        # DataFile.copy takes no name, which is why a rename follows it - a fake that applied the
+        # requested name here would hide the second call the rename disclosure exists for.
+        project = make_data_tree(files=[FakeDataFile("Template", file_id="urn:src")])
+        target = FakeDataFolder("Archive")
+        made = project.rootFolder.dataFiles.itemByName("Template").copy(target)
+        assert made.name == "Template" and made.id == "urn:adsk.file:copy"
+        assert target.dataFiles.itemByName("Template") is made
+
+    def test_a_file_that_refuses_a_rename_raises_on_the_assignment(self):
+        stubborn = FakeDataFile("Template", rename_ok=False)
+        with pytest.raises(RuntimeError, match="read-only"):
+            stubborn.name = "Renamed"
+        assert stubborn.name == "Template"
+        assert FakeDataFile("Template", copy_ok=False).copy(FakeDataFolder("Archive")) is None
+
     def test_a_move_that_the_platform_refuses_leaves_the_file_where_it_was(self):
         project = make_data_tree(files=[FakeDataFile("Part v1", move_ok=False)])
         root = project.rootFolder
         part = root.dataFiles.item(0)
         assert part.move(FakeDataFolder("Archive")) is False
         assert part.parentFolder is root
+
+
+class TestExportWorld:
+    def test_the_two_factory_arg_orders_record_the_same_pair(self, tmp_path):
+        # STL takes (geometry, path) and STEP (path, geometry) - a fake that got one of the two
+        # backwards would record the path as the geometry and every dispatch test would still pass.
+        em = FakeExportManager()
+        em.createSTEPExportOptions(str(tmp_path / "a.step"), "GEOM")
+        em.createSTLExportOptions("GEOM", str(tmp_path / "a.stl"))
+        assert [c.kind for c in em._calls] == ["step", "stl"]
+        assert all(c.geom == "GEOM" and c.path.startswith(str(tmp_path)) for c in em._calls)
+
+    def test_an_execute_that_answers_false_still_lands_the_file(self, tmp_path):
+        # The bool and the disk are separate: a FALSE execute() over a landed file is measured, so a
+        # fake tying the two together would hide the shape the tool's landed check exists for.
+        path = str(tmp_path / "part.f3d")
+        em = FakeExportManager(execute_ok=False)
+        opts = em.createFusionArchiveExportOptions(path, "GEOM")
+        assert em.execute(opts) is False
+        assert em._executed is opts
+        with open(path) as fh:
+            assert fh.read()
+
+    def test_an_execute_that_answers_true_can_write_nothing(self, tmp_path):
+        path = str(tmp_path / "scan.stl")
+        em = FakeExportManager(writes=lambda opts: False)
+        assert em.execute(em.createSTLExportOptions("MESH", path)) is True
+        assert not os.path.exists(path)
+
+    def test_a_dropped_write_leaves_the_seeded_value_the_read_back_answers(self):
+        opts = _ExportOptions("stl", "p.stl", drops=("unitType",), seeded={"unitType": "FACTORY"})
+        opts.unitType = "INCHES"
+        assert opts.unitType == "FACTORY"
+        opts.isBinaryFormat = True
+        assert opts.isBinaryFormat is True
+
+    def test_a_knob_no_test_named_is_absent_rather_than_defaulted(self):
+        opts = _ExportOptions("step", "p.step")
+        assert not hasattr(opts, "meshRefinement")
+        with pytest.raises(AttributeError):
+            opts["meshRefinement"]
+        assert opts["kind"] == "step"
+
+    def test_the_dxf_sketch_options_units_read_raises_rather_than_answering(self):
+        opts = FakeExportManager().createDXFSketchExportOptions("p.dxf", "SKETCH")
+        with pytest.raises(RuntimeError, match="not supported by DXF"):
+            opts.units
 
 
 class TestPlacementMatrix:

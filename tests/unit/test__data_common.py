@@ -1,4 +1,4 @@
-"""Unit tests for ``dm.py`` - the cloud data-model path and reference substrate.
+"""Unit tests for ``_data_common.py`` - the cloud data-model path and reference substrate.
 
 These resolve user-supplied folder paths ("Parts/Fixtures/Vises") against the data
 hierarchy. Bugs here send files to the wrong folder silently, so the boundaries (empty
@@ -9,34 +9,16 @@ refusal when a NAME matches several files. No live Fusion needed.
 
 import pytest
 
-from conftest import load_tool
+from conftest import (FakeApplication, FakeData, FakeDataFile, FakeDataFolder, FakeDataProject,
+                      load_tool)
 
 dm = load_tool("_data_common")
 
 
-# ── fakes mimicking the DataFolder tree ────────────────────────────────────
-
-class FakeFolder:
-    def __init__(self, name, parent=None, is_root=False):
-        self.name = name
-        self.parentFolder = parent
-        self.isRoot = is_root
-        self._children = []
-
-    def add(self, name):
-        child = FakeFolder(name, parent=self)
-        self._children.append(child)
-        return child
-
-    # data_management walks children via folder.dataFolders.asArray()
-    @property
-    def dataFolders(self):
-        outer = self
-
-        class _DF:
-            def asArray(self_inner):
-                return list(outer._children)
-        return _DF()
+def _file(name, urn):
+    """One cloud file carrying the fields the name walk collects off it."""
+    return FakeDataFile(name, file_id=urn, version_id=urn + "?version=1", extension="txt",
+                        web_url="https://x/" + urn)
 
 
 # ── _split_path: tolerant segmentation ─────────────────────────────────────
@@ -63,9 +45,8 @@ class TestSplitPath:
 
 class TestResolveFolderPath:
     def _tree(self):
-        root = FakeFolder("Root", is_root=True)
-        parts = root.add("Parts")
-        parts.add("Fixtures")
+        root = FakeDataFolder("Root", is_root=True)
+        root.dataFolders.add("Parts").dataFolders.add("Fixtures")
         return root
 
     def test_empty_segments_resolves_to_root(self):
@@ -97,15 +78,13 @@ class TestResolveFolderPath:
 
 class TestFolderPathString:
     def test_builds_slash_path_excluding_root(self):
-        root = FakeFolder("Root", is_root=True)
-        parts = root.add("Parts")
-        fixtures = parts.add("Fixtures")
+        root = FakeDataFolder("Root", is_root=True)
+        fixtures = root.dataFolders.add("Parts").dataFolders.add("Fixtures")
         assert dm._folder_path_string(fixtures) == "Parts/Fixtures"
 
     def test_immediate_child_of_root(self):
-        root = FakeFolder("Root", is_root=True)
-        parts = root.add("Parts")
-        assert dm._folder_path_string(parts) == "Parts"
+        root = FakeDataFolder("Root", is_root=True)
+        assert dm._folder_path_string(root.dataFolders.add("Parts")) == "Parts"
 
 
 class TestAgentDescription:
@@ -121,108 +100,19 @@ class TestAgentDescription:
         assert dm._agent_description(None) == "[AI agent]"
 
 
-class FakeProjFolder:
-    """A DataFolder that supports add() (folders) and uploadFile()."""
-    def __init__(self, name, parent=None, is_root=False):
-        self.name = name
-        self.parentFolder = parent
-        self.isRoot = is_root
-        self._children = []
-        self._files = []
-        self.uploaded = []
-
-    def _add_child(self, name):
-        child = FakeProjFolder(name, parent=self)
-        self._children.append(child)
-        return child
-
-    @property
-    def id(self):
-        return "fid:" + self.name
-
-    @property
-    def dataFolders(self):
-        outer = self
-        class _DF:
-            @property
-            def count(self_inner):
-                return len(outer._children)
-            def asArray(self_inner):
-                return list(outer._children)
-            def add(self_inner, name):           # Fusion: DataFolder.dataFolders.add(name)
-                return outer._add_child(name)
-        return _DF()
-
-    @property
-    def dataFiles(self):
-        outer = self
-        class _Df:
-            @property
-            def count(self_inner):
-                return len(outer._files)
-            def asArray(self_inner):
-                return list(outer._files)
-        return _Df()
-
-    def uploadFile(self, path):
-        self.uploaded.append(path)
-        return _next_future
-
-
-class FakeProj:
-    def __init__(self, name, pid, root):
-        self.name = name
-        self.id = pid
-        self.rootFolder = root
-
-
-class FakeProjects:
-    def __init__(self, projects):
-        self._p = list(projects)
-        self.added = []
-    def asArray(self):
-        return list(self._p)
-    def add(self, name, purpose, contributors):
-        p = FakeProj(name, "newid:" + name, FakeProjFolder("Root", is_root=True))
-        self._p.append(p)
-        self.added.append((name, purpose, contributors))
-        return p
-
-
-_next_future = None
-
-
 # ── resolve_file_reference: ONE file, by URN or by name-in-a-project ────────
 #
 # The reference every file-scoped data tool resolves through (data_get(file=...),
 # data_download_file, data_move_file). A file NAME is not unique across a project's folders, so the
 # behaviour that matters is the REFUSAL: several matches must return the candidates, never the first.
 
-def _file_stub(name, urn):
-    import types
-    return types.SimpleNamespace(name=name, id=urn, versionId=urn + "?version=1",
-                                 fileExtension="txt", versionNumber=1, fusionWebURL="https://x/" + urn)
-
-
-def _folder_with_files(name, files=(), subs=(), is_root=False):
-    folder = FakeProjFolder(name, is_root=is_root)
-    folder._files = list(files)
-    for s in subs:
-        folder._children.append(s)
-        s.parentFolder = folder
-    return folder
-
-
 @pytest.fixture
 def cloud(monkeypatch):
     """Install a project tree plus the URN lookup the resolver finishes through."""
     def _use(root, files_by_urn=None):
-        import types
-        proj = FakeProj("MCP Test Project", "proj-1", root)
-        table = dict(files_by_urn or {})
-        data = types.SimpleNamespace(dataProjects=FakeProjects([proj]),
-                                     findFileById=lambda urn: table.get(urn))
-        monkeypatch.setattr(dm, "app", types.SimpleNamespace(data=data))
+        proj = FakeDataProject("MCP Test Project", project_id="proj-1", root_folder=root)
+        data = FakeData(projects=[proj], files_by_id=files_by_urn)
+        monkeypatch.setattr(dm, "app", FakeApplication(data=data))
         return proj
     return _use
 
@@ -241,12 +131,12 @@ class TestNameExtension:
 
 class TestResolveFileReference:
     def _one_deep_tree(self):
-        docs = _folder_with_files("Docs", files=[_file_stub("probe_note.txt", "urn:lin:AAA")])
-        parts = _folder_with_files("Parts", files=[_file_stub("Vise", "urn:lin:BBB")])
-        return _folder_with_files("Root", subs=[docs, parts], is_root=True)
+        docs = FakeDataFolder("Docs", files=[_file("probe_note.txt", "urn:lin:AAA")])
+        parts = FakeDataFolder("Parts", files=[_file("Vise", "urn:lin:BBB")])
+        return FakeDataFolder("Root", folders=[docs, parts], is_root=True)
 
     def test_a_urn_resolves_without_a_project(self, cloud):
-        df = _file_stub("probe_note.txt", "urn:lin:AAA")
+        df = _file("probe_note.txt", "urn:lin:AAA")
         cloud(self._one_deep_tree(), {"urn:lin:AAA": df})
         got, meta, err = dm.resolve_file_reference("urn:lin:AAA")
         assert err is None and got is df
@@ -263,7 +153,7 @@ class TestResolveFileReference:
         assert got is None and "'project'" in err
 
     def test_a_unique_name_resolves_and_reports_its_folder(self, cloud):
-        df = _file_stub("probe_note.txt", "urn:lin:AAA")
+        df = _file("probe_note.txt", "urn:lin:AAA")
         cloud(self._one_deep_tree(), {"urn:lin:AAA": df})
         got, meta, err = dm.resolve_file_reference(
             "probe_note.txt", project="MCP Test Project")
@@ -271,7 +161,7 @@ class TestResolveFileReference:
         assert meta["matched_by"] == "name" and meta["folder_path"] == "Docs"
 
     def test_the_match_is_case_insensitive(self, cloud):
-        df = _file_stub("probe_note.txt", "urn:lin:AAA")
+        df = _file("probe_note.txt", "urn:lin:AAA")
         cloud(self._one_deep_tree(), {"urn:lin:AAA": df})
         got, _meta, err = dm.resolve_file_reference(
             "PROBE_NOTE.TXT", project="MCP Test Project")
@@ -279,16 +169,16 @@ class TestResolveFileReference:
 
     def test_a_partial_name_never_matches(self, cloud):
         # 'note' must not grab 'probe_note.txt' - a substring resolver picks the wrong file silently.
-        cloud(self._one_deep_tree(), {"urn:lin:AAA": _file_stub("probe_note.txt", "urn:lin:AAA")})
+        cloud(self._one_deep_tree(), {"urn:lin:AAA": _file("probe_note.txt", "urn:lin:AAA")})
         got, _meta, err = dm.resolve_file_reference("note", project="MCP Test Project")
         assert got is None and "No file named 'note'" in err
         assert "probe_note.txt" in err                    # what IS there
 
     def test_a_name_in_two_folders_is_refused_with_both_candidates(self, cloud):
-        docs = _folder_with_files("Docs", files=[_file_stub("notes.txt", "urn:lin:AAA")])
-        parts = _folder_with_files("Parts", files=[_file_stub("notes.txt", "urn:lin:BBB")])
-        root = _folder_with_files("Root", subs=[docs, parts], is_root=True)
-        cloud(root, {"urn:lin:AAA": _file_stub("notes.txt", "urn:lin:AAA")})
+        docs = FakeDataFolder("Docs", files=[_file("notes.txt", "urn:lin:AAA")])
+        parts = FakeDataFolder("Parts", files=[_file("notes.txt", "urn:lin:BBB")])
+        root = FakeDataFolder("Root", folders=[docs, parts], is_root=True)
+        cloud(root, {"urn:lin:AAA": _file("notes.txt", "urn:lin:AAA")})
         got, _meta, err = dm.resolve_file_reference("notes.txt", project="MCP Test Project")
         assert got is None                                # never the first hit
         assert "names 2 files" in err
@@ -296,10 +186,10 @@ class TestResolveFileReference:
         assert "Docs" in err and "Parts" in err
 
     def test_a_folder_scope_disambiguates_the_same_name(self, cloud):
-        wanted = _file_stub("notes.txt", "urn:lin:BBB")
-        docs = _folder_with_files("Docs", files=[_file_stub("notes.txt", "urn:lin:AAA")])
-        parts = _folder_with_files("Parts", files=[wanted])
-        root = _folder_with_files("Root", subs=[docs, parts], is_root=True)
+        wanted = _file("notes.txt", "urn:lin:BBB")
+        docs = FakeDataFolder("Docs", files=[_file("notes.txt", "urn:lin:AAA")])
+        parts = FakeDataFolder("Parts", files=[wanted])
+        root = FakeDataFolder("Root", folders=[docs, parts], is_root=True)
         cloud(root, {"urn:lin:BBB": wanted})
         got, meta, err = dm.resolve_file_reference(
             "notes.txt", project="MCP Test Project", folder="Parts")
@@ -316,16 +206,9 @@ class TestResolveFileReference:
     def test_a_scope_folder_whose_siblings_will_not_read_says_unknown_not_missing(self, cloud):
         # the folder list never opened, so 'Nope' may well be there - a bare "missing segment"
         # states a verdict this walk never reached.
-        root = _folder_with_files("Root", is_root=True)
-        cloud(root, {})
-        monkey = type(root).dataFolders
-        try:
-            type(root).dataFolders = property(lambda self: (_ for _ in ()).throw(
-                RuntimeError("cloud read failed")))
-            got, _meta, err = dm.resolve_file_reference(
-                "notes.txt", project="MCP Test Project", folder="Nope")
-        finally:
-            type(root).dataFolders = monkey
+        cloud(FakeDataFolder("Root", is_root=True, folders_raise="cloud read failed"), {})
+        got, _meta, err = dm.resolve_file_reference(
+            "notes.txt", project="MCP Test Project", folder="Nope")
         assert got is None
         assert "could not be READ" in err and "unknown" in err
 
@@ -338,9 +221,9 @@ class TestResolveFileReference:
         # Uniqueness is only proven over what was actually walked - a capped listing never compared
         # the rest, so the caller is told instead of being left to assume.
         import mcpServer.tools._data_read as data_read
-        df = _file_stub("probe_note.txt", "urn:lin:AAA")
-        docs = _folder_with_files("Docs", files=[df, _file_stub("other.txt", "urn:lin:BBB")])
-        cloud(_folder_with_files("Root", subs=[docs], is_root=True), {"urn:lin:AAA": df})
+        df = _file("probe_note.txt", "urn:lin:AAA")
+        docs = FakeDataFolder("Docs", files=[df, _file("other.txt", "urn:lin:BBB")])
+        cloud(FakeDataFolder("Root", folders=[docs], is_root=True), {"urn:lin:AAA": df})
         monkeypatch.setattr(data_read, "_MAX_FILES", 1)
         got, meta, err = dm.resolve_file_reference(
             "probe_note.txt", project="MCP Test Project")
@@ -348,7 +231,7 @@ class TestResolveFileReference:
         assert meta["scope_truncated"] is True
 
     def test_a_complete_listing_is_not_flagged(self, cloud):
-        df = _file_stub("probe_note.txt", "urn:lin:AAA")
+        df = _file("probe_note.txt", "urn:lin:AAA")
         cloud(self._one_deep_tree(), {"urn:lin:AAA": df})
         _got, meta, _err = dm.resolve_file_reference(
             "probe_note.txt", project="MCP Test Project")
@@ -366,11 +249,11 @@ class TestIdentifierVsName:
     sending one down the URN route loses the name search it needed (and the names in the miss)."""
 
     def _tree_with(self, name, urn):
-        docs = _folder_with_files("Docs", files=[_file_stub(name, urn)])
-        return _folder_with_files("Root", subs=[docs], is_root=True)
+        docs = FakeDataFolder("Docs", files=[_file(name, urn)])
+        return FakeDataFolder("Root", folders=[docs], is_root=True)
 
     def test_a_name_beginning_with_http_is_still_a_name(self, cloud):
-        df = _file_stub("httpd-mount.f3d", "urn:lin:AAA")
+        df = _file("httpd-mount.f3d", "urn:lin:AAA")
         cloud(self._tree_with("httpd-mount.f3d", "urn:lin:AAA"), {"urn:lin:AAA": df})
         got, meta, err = dm.resolve_file_reference(
             "httpd-mount.f3d", project="MCP Test Project")
@@ -378,7 +261,7 @@ class TestIdentifierVsName:
         assert meta["matched_by"] == "name"
 
     def test_a_name_carrying_a_scheme_separator_is_still_a_name(self, cloud):
-        df = _file_stub("rev2://draft.f3d", "urn:lin:BBB")
+        df = _file("rev2://draft.f3d", "urn:lin:BBB")
         cloud(self._tree_with("rev2://draft.f3d", "urn:lin:BBB"), {"urn:lin:BBB": df})
         got, meta, err = dm.resolve_file_reference(
             "rev2://draft.f3d", project="MCP Test Project")
@@ -402,34 +285,26 @@ class TestIdentifierVsName:
         assert got is None and "No cloud file resolves from" in err
 
 
-class _DeadFilesFolder(FakeProjFolder):
-    """A folder whose dataFiles enumeration RAISES - a permission-blocked or mid-sync folder. Its
-    SUBFOLDERS still read, so only its own files go missing."""
-
-    @property
-    def dataFiles(self):
-        raise RuntimeError("3 : folder could not be enumerated")
-
-
-class _DeadSubfoldersFolder(FakeProjFolder):
-    """A folder whose dataFolders enumeration raises: the ENTIRE subtree beneath it is unsearched,
-    which is the larger hole of the two."""
-
-    @property
-    def dataFolders(self):
-        raise RuntimeError("3 : subfolders could not be enumerated")
-
-
 class TestResolveFileReferenceWithUnreadableFolders:
     """A folder that would not enumerate is a HOLE in the search space, not an empty folder. The
     same walk that lists files is what resolves a name, so a swallowed failure turns "I did not
     look there" into "it is not there" - and turns an ambiguity into a confident unique match. Every
     answer built on a partial walk has to say so."""
 
-    def _tree_with_a_dead_folder(self, dead_cls=_DeadFilesFolder):
-        docs = _folder_with_files("Docs", files=[_file_stub("probe_note.txt", "urn:lin:AAA")])
-        dead = dead_cls("Archive")
-        return _folder_with_files("Root", subs=[docs, dead], is_root=True)
+    def _dead_files_folder(self, name="Archive"):
+        """A folder whose dataFiles enumeration RAISES - a permission-blocked or mid-sync folder.
+        Its SUBFOLDERS still read, so only its own files go missing."""
+        return FakeDataFolder(name, files_raise="3 : folder could not be enumerated")
+
+    def _dead_subfolders_folder(self, name="Archive"):
+        """A folder whose dataFolders enumeration raises: the ENTIRE subtree beneath it is
+        unsearched, which is the larger hole of the two."""
+        return FakeDataFolder(name, folders_raise="3 : subfolders could not be enumerated")
+
+    def _tree_with_a_dead_folder(self, dead=None):
+        docs = FakeDataFolder("Docs", files=[_file("probe_note.txt", "urn:lin:AAA")])
+        dead = self._dead_files_folder() if dead is None else dead
+        return FakeDataFolder("Root", folders=[docs, dead], is_root=True)
 
     def test_a_miss_says_a_folder_went_unsearched(self, cloud):
         cloud(self._tree_with_a_dead_folder(), {})
@@ -444,10 +319,10 @@ class TestResolveFileReferenceWithUnreadableFolders:
     def test_an_ambiguity_refusal_carries_the_same_caveat(self, cloud):
         # Two hits already refuse; the caveat still matters because a THIRD could be in the hole,
         # so the candidate list the caller picks from may be incomplete.
-        docs = _folder_with_files("Docs", files=[_file_stub("notes.txt", "urn:lin:AAA")])
-        parts = _folder_with_files("Parts", files=[_file_stub("notes.txt", "urn:lin:BBB")])
-        dead = _DeadFilesFolder("Archive")
-        root = _folder_with_files("Root", subs=[docs, parts, dead], is_root=True)
+        docs = FakeDataFolder("Docs", files=[_file("notes.txt", "urn:lin:AAA")])
+        parts = FakeDataFolder("Parts", files=[_file("notes.txt", "urn:lin:BBB")])
+        root = FakeDataFolder("Root", folders=[docs, parts, self._dead_files_folder()],
+                              is_root=True)
         cloud(root, {})
         got, _meta, err = dm.resolve_file_reference(
             "notes.txt", project="MCP Test Project")
@@ -458,7 +333,7 @@ class TestResolveFileReferenceWithUnreadableFolders:
     def test_a_unique_match_carries_the_hole_count_in_its_meta(self, cloud):
         # The dangerous case: exactly one hit, so nothing LOOKS wrong - but the second file of that
         # name could be sitting in the folder that never opened. The count travels with the result.
-        df = _file_stub("probe_note.txt", "urn:lin:AAA")
+        df = _file("probe_note.txt", "urn:lin:AAA")
         cloud(self._tree_with_a_dead_folder(), {"urn:lin:AAA": df})
         got, meta, err = dm.resolve_file_reference(
             "probe_note.txt", project="MCP Test Project")
@@ -466,10 +341,9 @@ class TestResolveFileReferenceWithUnreadableFolders:
         assert meta["folders_unreadable"] == 1
 
     def test_a_fully_readable_project_reports_no_hole(self, cloud):
-        docs = _folder_with_files("Docs", files=[_file_stub("probe_note.txt", "urn:lin:AAA")])
-        root = _folder_with_files("Root", subs=[docs], is_root=True)
-        df = _file_stub("probe_note.txt", "urn:lin:AAA")
-        cloud(root, {"urn:lin:AAA": df})
+        docs = FakeDataFolder("Docs", files=[_file("probe_note.txt", "urn:lin:AAA")])
+        df = _file("probe_note.txt", "urn:lin:AAA")
+        cloud(FakeDataFolder("Root", folders=[docs], is_root=True), {"urn:lin:AAA": df})
         got, meta, err = dm.resolve_file_reference(
             "probe_note.txt", project="MCP Test Project")
         assert err is None and got is df
@@ -478,7 +352,7 @@ class TestResolveFileReferenceWithUnreadableFolders:
     def test_an_unreadable_SUBFOLDER_list_is_recorded_too(self, cloud):
         # The bigger hole: the folder's own files read fine, but its whole SUBTREE is unreachable.
         # Recording only the dataFiles failure would report this walk as complete.
-        cloud(self._tree_with_a_dead_folder(_DeadSubfoldersFolder), {})
+        cloud(self._tree_with_a_dead_folder(self._dead_subfolders_folder()), {})
         got, _meta, err = dm.resolve_file_reference(
             "ghost.txt", project="MCP Test Project")
         assert got is None
@@ -490,9 +364,8 @@ class TestResolveFileReferenceWithUnreadableFolders:
         # caller learns the true size of what was skipped.
         import mcpServer.tools._data_read as data_read
         cap = data_read._MAX_UNREAD_NAMED
-        dead = [_DeadFilesFolder("Dead%02d" % i) for i in range(cap + 1)]
-        root = _folder_with_files("Root", subs=dead, is_root=True)
-        cloud(root, {})
+        dead = [self._dead_files_folder("Dead%02d" % i) for i in range(cap + 1)]
+        cloud(FakeDataFolder("Root", folders=dead, is_root=True), {})
         got, _meta, err = dm.resolve_file_reference(
             "ghost.txt", project="MCP Test Project")
         assert got is None

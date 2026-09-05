@@ -3,8 +3,9 @@
 
 """Lint: a MEASURED adsk enum member is never hand-assigned in a unit test - it comes seeded.
 
-A line under tests/unit that installs a live_api_facts.ENUMS member by attribute, dict key, kwarg or
-a setattr loop over the member names fails; conftest seeds those onto the mock adsk modules.
+A line under tests/unit that installs a live_api_facts.ENUMS member by attribute, dict key, kwarg,
+a setattr loop over the member names, or a direct setattr/monkeypatch.setattr of one member fails;
+conftest seeds those onto the mock adsk modules.
 _ALLOWLIST files are exempt."""
 
 import ast
@@ -39,11 +40,16 @@ def _is_setattr(func):
 
 
 def _setattr_seeded_linenos(path):
-    """Lines where a for-loop over a literal tuple/list of measured member NAMES drives a setattr -
-    the bulk re-seed that installs a whole family at once. The member name sits in the loop's
-    iterable, beside neither an `=` nor a `:`, so the three patterns above cannot see it."""
+    """Lines where a setattr installs a measured member: a for-loop over a literal tuple/list of
+    member NAMES re-seeding a whole family at once, and the single site handing one quoted member
+    name straight to setattr/monkeypatch.setattr. The name sits beside neither an `=` nor a `:` in
+    either shape, so the three patterns above cannot see it."""
     hits = set()
     for node in ast.walk(_corpus.tree(path)):
+        if isinstance(node, ast.Call) and _is_setattr(node.func) and len(node.args) >= 2:
+            named = node.args[1]
+            if isinstance(named, ast.Constant) and named.value in _MEMBER_SET:
+                hits.add(named.lineno)
         if not (isinstance(node, ast.For) and isinstance(node.iter, (ast.Tuple, ast.List))):
             continue
         if any(isinstance(n, ast.Call) and _is_setattr(n.func)

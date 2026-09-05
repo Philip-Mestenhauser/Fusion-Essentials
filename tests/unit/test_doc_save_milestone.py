@@ -9,7 +9,8 @@ milestone that landed, never as one that did not.
 
 import json
 
-from conftest import load_tool, error_message
+from conftest import (FakeApplication, FakeData, FakeDataFile, FakeFusionDocument, error_message,
+                      load_tool)
 
 dsm = load_tool("doc_save_milestone")
 
@@ -20,6 +21,7 @@ def _payload(result):
 
 
 class _Milestone:
+    """One Milestones entry. Milestone carries no live SHAPES dump, so it has no shared fake."""
     def __init__(self, name): self.name = name
 
 
@@ -45,64 +47,52 @@ class _Milestones:
         raise RuntimeError("3 : invalid argument name")
 
 
-class _FreshFile:
+def _FreshFile(latest, is_milestone=True, names=("MS",), unreadable=False):
     """A DataFile as returned by findFileById AFTER the save - the only trustworthy read."""
-    def __init__(self, latest, is_milestone=True, names=("MS",), unreadable=False):
-        self.latestVersionNumber = latest
-        self.isMilestone = is_milestone
-        self.milestones = _Milestones(names, unreadable=unreadable)
+    return FakeDataFile("Bracket", version=latest, is_milestone=is_milestone,
+                        milestones=_Milestones(names, unreadable=unreadable))
 
 
-class _StaleFile:
+def _StaleFile(lineage="urn:lineage", vnum=1, latest=1):
     """The handle held across the save. Measured to keep its PRE-save values: the version never
     advances and isMilestone stays False even after the milestone lands."""
-    def __init__(self, lineage="urn:lineage", vnum=1, latest=1):
-        self.id = lineage
-        self.versionNumber = vnum
-        self.latestVersionNumber = latest
-        self.isMilestone = False
-        self.milestones = _Milestones(unreadable=True)
+    return FakeDataFile("Bracket", file_id=lineage, version=vnum, latest_version=latest,
+                        is_milestone=False, milestones=_Milestones(unreadable=True))
 
 
-class _Doc:
-    def __init__(self, df, modified=True, result=True, raises=False, name="Bracket"):
-        self.name = name
-        self.dataFile = df
-        self.isModified = modified
-        self._result = result
-        self._raises = raises
-        self.calls = []
-
-    def saveMilestone(self, milestone_name, version_description):
-        self.calls.append((milestone_name, version_description))
-        if self._raises:
-            raise RuntimeError("cloud refused")
-        return self._result
+def _Doc(df, modified=True, result=True, raises=False, name="Bracket"):
+    return FakeFusionDocument(name=name, data_file=df, is_saved=True, is_modified=modified,
+                              save_ok=result, save_raises="cloud refused" if raises else None)
 
 
-class _Data:
-    """findFileById. A list of files serves one per call (the last repeats), so the cloud's
-    'not visible yet, then visible' sequence can be modelled."""
+class _ForkingMilestone(FakeFusionDocument):
+    """A saveMilestone that lands the document on a NEW lineage urn, restarting its versions at 1 -
+    what the first save after a configured-design conversion does."""
+    def saveMilestone(self, name, description=""):
+        did = super().saveMilestone(name, description)
+        self.dataFile = _StaleFile(lineage="urn:new", vnum=1, latest=1)
+        return did
+
+
+class _ServesInSequence(FakeData):
+    """app.data whose findFileById serves ONE file per call (the last repeats), so the cloud's
+    'not visible yet, then visible' sequence can be driven; the lineages asked for are recorded."""
     def __init__(self, fresh):
+        super().__init__()
         self._seq = list(fresh) if isinstance(fresh, (list, tuple)) else [fresh]
-        self.calls = 0
+        self._calls = 0
+        self._queried = []
 
     def findFileById(self, lineage):
-        self.calls += 1
-        self.queried = getattr(self, "queried", []) + [lineage]
-        return self._seq[min(self.calls - 1, len(self._seq) - 1)]
-
-
-class _App:
-    def __init__(self, doc, fresh):
-        self.activeDocument = doc
-        self.data = _Data(fresh)
+        self._calls += 1
+        self._queried.append(lineage)
+        return self._seq[min(self._calls - 1, len(self._seq) - 1)]
 
 
 def _use(monkeypatch, doc, fresh, deadline=0.0):
     """Point the tool at a fake app. deadline=0 makes the version pump take a single attempt;
     raise it (with sleep 0) to exercise the retry loop without waiting."""
-    app = _App(doc, fresh)
+    app = FakeApplication(active_document=doc, data=_ServesInSequence(fresh))
     monkeypatch.setattr(dsm, "app", app)
     monkeypatch.setattr(dsm, "_VERSION_DEADLINE_S", deadline)
     monkeypatch.setattr(dsm, "_POLL_SLEEP", 0)
@@ -126,7 +116,7 @@ class TestHappyPath:
         doc = _Doc(_StaleFile())
         _use(monkeypatch, doc, _FreshFile(latest=2))
         out = _payload(dsm.handler(milestone_name="MS", description="ready"))
-        assert doc.calls == [("MS", "[AI agent] ready")]      # the marker reaches the API call
+        assert doc._saves == [("milestone", ("MS", "[AI agent] ready"))]   # the marker reaches the call
         assert out["description"] == "[AI agent] ready"
 
     def test_confirmation_never_reads_the_handle_the_save_was_issued_on(self, monkeypatch):
@@ -147,7 +137,7 @@ class TestHappyPath:
         landed = _FreshFile(latest=2, is_milestone=True, names=("MS",))
         app = _use(monkeypatch, doc, [not_yet, landed], deadline=5.0)
         out = _payload(dsm.handler(milestone_name="MS"))
-        assert app.data.calls >= 2                  # the first fetch did NOT show the new tip
+        assert app.data._calls >= 2                  # the first fetch did NOT show the new tip
         assert out["cloud_tip_advanced"] is True
         assert out["latest_version_after"] == 2
 
@@ -168,10 +158,8 @@ class TestPendingReportsWhatWasObserved:
         assert "doc_get include=['versions']" in out["note"]
 
     def test_unreadable_flag_is_named_as_unreadable_not_as_false(self, monkeypatch):
-        class _NoFlag:
-            latestVersionNumber = 2
-            milestones = _Milestones(("MS",))
-        _use(monkeypatch, _Doc(_StaleFile()), _NoFlag())
+        _use(monkeypatch, _Doc(_StaleFile()),
+             _FreshFile(latest=2, is_milestone=None, names=("MS",)))   # the flag will not read
         note = _payload(dsm.handler(milestone_name="MS"))["note"]
         assert "could not be read" in note and "reads FALSE" not in note
 
@@ -217,19 +205,11 @@ class TestVersionNeverAdvanced:
         # With no PRE-save number there is no comparison to wait on: the confirming read runs once,
         # so the payload may claim neither a duration it did not spend nor a non-advancement it
         # never observed.
-        class _NoTipBefore:
-            id = "urn:lineage"
-            versionNumber = 1
-
-            @property
-            def latestVersionNumber(self):
-                raise RuntimeError("2 : InternalValidationError")
-
-        doc = _Doc(_NoTipBefore())
+        doc = _Doc(FakeDataFile("Bracket", file_id="urn:lineage", version=1, latest_raises=True))
         app = _use(monkeypatch, doc, _FreshFile(latest=7, is_milestone=True, names=("MS",)),
                    deadline=5.0)
         out = _payload(dsm.handler(milestone_name="MS"))
-        assert app.data.calls == 1                  # nothing to settle against - no fake wait
+        assert app.data._calls == 1                  # nothing to settle against - no fake wait
         assert out["latest_version_before"] is None
         assert out["latest_version_after"] == 7     # what WAS read is still reported
         assert out["cloud_tip_advanced"] is False and out["pending"] is True
@@ -245,7 +225,7 @@ class TestVersionNeverAdvanced:
         app = _use(monkeypatch, doc, _FreshFile(latest=3, is_milestone=False, names=()),
                    deadline=0.02)
         out = _payload(dsm.handler(milestone_name="MS"))
-        assert app.data.calls >= 2                  # it retried rather than single-shotting
+        assert app.data._calls >= 2                  # it retried rather than single-shotting
         assert out["latest_version_after"] == 3     # the LAST reading, not a dropped one
         assert out["cloud_tip_advanced"] is False
         assert "versioned nothing" in out["note"]
@@ -260,7 +240,7 @@ class TestHonesty:
         msg = error_message(res)
         assert "no unsaved changes" in msg
         assert "only creates a NEW milestone version" in msg   # the tool's limit, not a platform claim
-        assert doc.calls == []                                 # the API was never called
+        assert doc._saves == []                                 # the API was never called
 
     def test_false_return_is_an_error_not_a_false_ok(self, monkeypatch):
         doc = _Doc(_StaleFile(), result=False)
@@ -279,7 +259,7 @@ class TestGuards:
         doc = _Doc(_StaleFile())
         _use(monkeypatch, doc, _FreshFile(latest=2))
         assert "milestone_name" in error_message(dsm.handler(milestone_name="   "))
-        assert doc.calls == []
+        assert doc._saves == []
 
     def test_never_saved_document_points_at_doc_save_as(self, monkeypatch):
         doc = _Doc(None)
@@ -296,17 +276,13 @@ class TestLineageFork:
         # The first save after a configured-design conversion moves the document to a NEW lineage
         # URN whose versions restart at 1 - confirming against the superseded URN watches a stream this
         # save never advances, so the check must re-anchor on the lineage the doc holds NOW.
-        doc = _Doc(_StaleFile(lineage="urn:old", vnum=3, latest=3))
-        def fork(name, desc):
-            doc.calls.append((name, desc))
-            doc.dataFile = _StaleFile(lineage="urn:new", vnum=1, latest=1)
-            return True
-        doc.saveMilestone = fork
+        doc = _ForkingMilestone(name="Bracket", is_saved=True,
+                                data_file=_StaleFile(lineage="urn:old", vnum=3, latest=3))
         app = _use(monkeypatch, doc, _FreshFile(latest=1, is_milestone=False, names=()))
         out = _payload(dsm.handler(milestone_name="MS"))
         assert out["lineage_changed"] == {"from": "urn:old", "to": "urn:new"}
         assert out["document_id"] == "urn:new"
-        assert app.data.queried == ["urn:new"]
+        assert app.data._queried == ["urn:new"]
         # NOT confirmed: the pre-save number belongs to the abandoned stream, so no comparison ran.
         # A tip number coming back on the new lineage is a reading, not a confirmation.
         assert out["cloud_tip_advanced"] is False
@@ -319,16 +295,11 @@ class TestLineageFork:
         # The pre-save number belongs to the ABANDONED stream, so it is no baseline for the new
         # lineage: the confirming read runs once, and the payload may claim neither a duration it
         # did not spend nor a non-advancement it measured against the wrong stream.
-        doc = _Doc(_StaleFile(lineage="urn:old", vnum=3, latest=3))
-
-        def fork(name, desc):
-            doc.calls.append((name, desc))
-            doc.dataFile = _StaleFile(lineage="urn:new", vnum=1, latest=1)
-            return True
-        doc.saveMilestone = fork
+        doc = _ForkingMilestone(name="Bracket", is_saved=True,
+                                data_file=_StaleFile(lineage="urn:old", vnum=3, latest=3))
         app = _use(monkeypatch, doc, None, deadline=5.0)   # findFileById answers nothing
         out = _payload(dsm.handler(milestone_name="MS"))
-        assert app.data.calls == 1                  # no baseline to settle against - no fake wait
+        assert app.data._calls == 1                  # no baseline to settle against - no fake wait
         assert out["lineage_changed"] == {"from": "urn:old", "to": "urn:new"}
         assert out["cloud_tip_advanced"] is False and out["pending"] is True
         note = out["note"]

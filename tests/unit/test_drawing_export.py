@@ -36,7 +36,9 @@ def _ignoring_opts(path):
                                      "useLineWeights": True, "sheetRange": "", "openPDF": False})()
 
 
-class FakeExportManager:
+class FakeDrawingExportManager:
+    """drawing.exportManager - a DrawingExportManager, whose PDF/DXF/DWG factories are its own and
+    not the fusion ExportManager's, so the shared FakeExportManager does not stand for it."""
     def __init__(self):
         self.opts = None
         self.factory_used = None
@@ -114,7 +116,7 @@ def install(monkeypatch):
     cast goes through - and monkeypatch owns it, so the patch is undone with the test rather than
     left for the next one."""
     def _install(*, active_doc="drawing"):
-        em = FakeExportManager()
+        em = FakeDrawingExportManager()
         if active_doc == "drawing":
             active_doc = FakeDrawingDoc(em)
         elif active_doc == "notdrawing":
